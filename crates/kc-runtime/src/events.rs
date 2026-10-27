@@ -126,13 +126,23 @@ mod tests {
     fn sequence_and_timestamp_increase_monotonically() {
         let inner = test_inner();
         let mut rx = inner.events.subscribe();
-        let a = inner.emit(Some("s_1"), Some("r_1"), None, Event::RunCancelled {
-            run_id: "r_1".into(),
-        });
-        let b = inner.emit(Some("s_1"), Some("r_1"), Some("a_1"), Event::Notice {
-            level: "info".into(),
-            message: "hi".into(),
-        });
+        let a = inner.emit(
+            Some("s_1"),
+            Some("r_1"),
+            None,
+            Event::RunCancelled {
+                run_id: "r_1".into(),
+            },
+        );
+        let b = inner.emit(
+            Some("s_1"),
+            Some("r_1"),
+            Some("a_1"),
+            Event::Notice {
+                level: "info".into(),
+                message: "hi".into(),
+            },
+        );
         assert!(b.seq > a.seq);
         assert!(b.ts_ms >= a.ts_ms);
         assert_eq!(a.session_id.as_deref(), Some("s_1"));
@@ -145,10 +155,15 @@ mod tests {
     #[test]
     fn emitting_without_subscribers_is_not_an_error() {
         let inner = test_inner();
-        let env = inner.emit(None, None, None, Event::Notice {
-            level: "info".into(),
-            message: "nobody listening".into(),
-        });
+        let env = inner.emit(
+            None,
+            None,
+            None,
+            Event::Notice {
+                level: "info".into(),
+                message: "nobody listening".into(),
+            },
+        );
         assert_eq!(env.seq, 1);
     }
 }

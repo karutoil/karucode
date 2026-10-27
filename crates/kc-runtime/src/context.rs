@@ -171,7 +171,11 @@ mod tests {
     fn tool_output_is_truncated_to_the_byte_budget() {
         let big = "x".repeat(4000);
         let out = fit(
-            vec![Message::system("sys"), Message::user("u"), tool_msg("c1", &big)],
+            vec![
+                Message::system("sys"),
+                Message::user("u"),
+                tool_msg("c1", &big),
+            ],
             1_000_000,
             500,
         );
@@ -184,7 +188,9 @@ mod tests {
     fn trimming_keeps_system_and_last_user_turn() {
         let mut msgs = vec![Message::system("SYSTEM PROMPT")];
         for i in 0..20 {
-            msgs.push(Message::user(format!("old user {i} with some padding text")));
+            msgs.push(Message::user(format!(
+                "old user {i} with some padding text"
+            )));
             msgs.push(call_msg(&format!("c{i}")));
             msgs.push(tool_msg(&format!("c{i}"), &"y".repeat(500)));
             msgs.push(Message::assistant("ok", vec![]));
@@ -247,10 +253,7 @@ mod tests {
 
     #[test]
     fn unbudgeted_system_prompt_is_never_dropped_even_if_huge() {
-        let msgs = vec![
-            Message::system("s".repeat(5000)),
-            Message::user("hello"),
-        ];
+        let msgs = vec![Message::system("s".repeat(5000)), Message::user("hello")];
         let out = fit(msgs, 100, 100_000);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].role, Role::System);

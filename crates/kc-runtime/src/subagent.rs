@@ -21,12 +21,15 @@ use crate::approvals::RuntimeApprovalGate;
 use crate::events::now_ms;
 use crate::RuntimeInner;
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use kc_core::error::Result;
 use kc_core::events::Event;
 use kc_core::ids::AgentId;
 use kc_core::message::Message;
 use kc_core::store::{AgentRecord, AgentStatus, NewMessage, RunStatus};
-use kc_core::tool::{truncate_output, Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOutcome, ToolRegistry, ToolSpec};
+use kc_core::tool::{
+    truncate_output, Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOutcome, ToolRegistry, ToolSpec,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -330,7 +333,8 @@ async fn run_subagent(
     }
 
     // --- nested loop ----------------------------------------------------------
-    let child_tools = child_tool_registry(inner, cfg.allow_recursive && child_depth < cfg.max_depth);
+    let child_tools =
+        child_tool_registry(inner, cfg.allow_recursive && child_depth < cfg.max_depth);
     let gate: Arc<dyn kc_core::tool::ApprovalGate> = Arc::new(RuntimeApprovalGate::new(
         Arc::clone(inner),
         session_id.clone(),
@@ -373,13 +377,19 @@ async fn run_subagent(
         run_state: Some(Arc::clone(&child_state)),
     };
 
-    let outcome = match tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        crate::agent::run_loop(Arc::clone(inner), spec),
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
+    let guarded = std::panic::AssertUnwindSafe(crate::agent::run_loop(Arc::clone(inner), spec))
+        .catch_unwind();
+    let outcome = match tokio::time::timeout(Duration::from_secs(timeout_secs), guarded).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(payload)) => LoopOutcome {
+            status: RunStatus::Failed,
+            error: Some(format!(
+                "subagent panicked: {}",
+                crate::agent::panic_message(payload.as_ref())
+            )),
+            text: String::new(),
+            iterations: child_state.iterations.load(Ordering::Relaxed),
+        },
         Err(_) => {
             child_cancel.cancel();
             LoopOutcome {

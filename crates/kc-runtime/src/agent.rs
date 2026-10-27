@@ -13,8 +13,8 @@
 use crate::approvals::RuntimeApprovalGate;
 use crate::context;
 use crate::events::EmitCtx;
-use crate::{RunState, RuntimeInner, Runtime, RunHandle, HISTORY_LIMIT};
-use futures_util::StreamExt;
+use crate::{RunHandle, RunState, Runtime, RuntimeInner, HISTORY_LIMIT};
+use futures_util::{FutureExt, StreamExt};
 use kc_core::approval::ApprovalKind;
 use kc_core::config::{Limits, ModelConfig};
 use kc_core::error::{Error, Result};
@@ -165,21 +165,64 @@ pub(crate) async fn start_run(
     let spawned_state = Arc::clone(&state);
     let spawned_key = key.clone();
     tokio::spawn(async move {
-        let outcome =
-            run_top_level(Arc::clone(&spawned_inner), Arc::clone(&spawned_state), prompt, history).await;
-        if let Err(e) = outcome {
-            // `run_top_level` persists and emits every failure path; this is the
-            // last-resort report for an error thrown by the teardown itself.
-            tracing::error!(run = %spawned_state.run_id.0, error = %e, "run teardown failed");
-            spawned_inner.emit(
-                Some(&spawned_state.session_id.0),
-                Some(&spawned_state.run_id.0),
-                None,
-                Event::Error {
-                    message: e.to_string(),
-                    kind: Some(e.code().into()),
-                },
-            );
+        // A panic in a tool or provider must not leak the run: catch it here so
+        // the row becomes `failed` and the session accepts work again.
+        let outcome = std::panic::AssertUnwindSafe(run_top_level(
+            Arc::clone(&spawned_inner),
+            Arc::clone(&spawned_state),
+            prompt,
+            history,
+            model,
+        ))
+        .catch_unwind()
+        .await;
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                // `run_top_level` persists and emits every failure path; this is
+                // the last-resort report for an error thrown by the teardown.
+                tracing::error!(run = %spawned_state.run_id.0, error = %e, "run teardown failed");
+                spawned_inner.emit(
+                    Some(&spawned_state.session_id.0),
+                    Some(&spawned_state.run_id.0),
+                    None,
+                    Event::Error {
+                        message: e.to_string(),
+                        kind: Some(e.code().into()),
+                    },
+                );
+            }
+            Err(payload) => {
+                let message = format!("the run panicked: {}", panic_message(payload.as_ref()));
+                tracing::error!(run = %spawned_state.run_id.0, message = %message, "run panicked");
+                if let Err(e) = spawned_inner
+                    .deps
+                    .store
+                    .finish_run(&spawned_state.run_id.0, RunStatus::Failed, Some(&message))
+                    .await
+                {
+                    tracing::warn!(run = %spawned_state.run_id.0, error = %e, "could not record the panicked run");
+                }
+                spawned_inner.emit(
+                    Some(&spawned_state.session_id.0),
+                    Some(&spawned_state.run_id.0),
+                    None,
+                    Event::Error {
+                        message: message.clone(),
+                        kind: Some("internal".into()),
+                    },
+                );
+                spawned_inner.emit(
+                    Some(&spawned_state.session_id.0),
+                    Some(&spawned_state.run_id.0),
+                    None,
+                    Event::RunFinished {
+                        run_id: spawned_state.run_id.0.clone(),
+                        status: RunStatus::Failed.as_str().to_string(),
+                        error: Some(message),
+                    },
+                );
+            }
         }
         spawned_inner
             .runs
@@ -203,12 +246,7 @@ async fn begin_run(
 ) -> Result<Vec<Message>> {
     let store = &inner.deps.store;
     store
-        .create_run(
-            &state.run_id.0,
-            &state.session_id.0,
-            &model.model,
-            prompt,
-        )
+        .create_run(&state.run_id.0, &state.session_id.0, &model.model, prompt)
         .await?;
 
     let user = Message::user(prompt);
@@ -237,9 +275,9 @@ pub(crate) async fn run_top_level(
     state: Arc<RunState>,
     prompt: String,
     history: Vec<Message>,
+    model: ModelConfig,
 ) -> Result<()> {
     let settings = inner.deps.settings.clone();
-    let model = settings.model().await;
     let limits = settings.limits().await;
     let policy = settings.approval_policy().await;
     let tools = inner.tool_view();
@@ -289,11 +327,7 @@ pub(crate) async fn run_top_level(
     if let Err(e) = inner
         .deps
         .store
-        .finish_run(
-            &state.run_id.0,
-            outcome.status,
-            outcome.error.as_deref(),
-        )
+        .finish_run(&state.run_id.0, outcome.status, outcome.error.as_deref())
         .await
     {
         ctx.error(
@@ -305,7 +339,11 @@ pub(crate) async fn run_top_level(
     inner
         .deps
         .hooks
-        .on_run_end(&state.session_id.0, &state.run_id.0, outcome.status.as_str())
+        .on_run_end(
+            &state.session_id.0,
+            &state.run_id.0,
+            outcome.status.as_str(),
+        )
         .await;
 
     if outcome.status == RunStatus::Cancelled {
@@ -345,7 +383,11 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
                 format!("stopped after {iterations} iterations (limits.max_iterations)")
             };
             ctx.notice("warn", message.clone());
-            let error = if spec.is_subagent { Some(message) } else { None };
+            let error = if spec.is_subagent {
+                Some(message)
+            } else {
+                None
+            };
             return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
         }
         if Instant::now() >= spec.deadline {
@@ -361,7 +403,11 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
                 )
             };
             ctx.notice("warn", message.clone());
-            let error = if spec.is_subagent { Some(message) } else { None };
+            let error = if spec.is_subagent {
+                Some(message)
+            } else {
+                None
+            };
             return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
         }
 
@@ -369,7 +415,9 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
         if let Some(state) = &spec.run_state {
             state.iterations.store(iterations, Ordering::Relaxed);
         }
-        ctx.emit(Event::IterationStarted { iteration: iterations });
+        ctx.emit(Event::IterationStarted {
+            iteration: iterations,
+        });
         if spec.is_subagent {
             if let Some(agent_id) = &spec.agent_id {
                 ctx.emit(Event::AgentProgress {
@@ -384,7 +432,10 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
         let extra = inner
             .deps
             .hooks
-            .before_prompt(&spec.session_id.0, &inner.deps.workspace.root().to_string_lossy())
+            .before_prompt(
+                &spec.session_id.0,
+                &inner.deps.workspace.root().to_string_lossy(),
+            )
             .await;
         let tool_specs = spec.tools.specs();
         let system = kc_core::prompt::system_prompt(
@@ -432,12 +483,7 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
             Err(e) => {
                 let message = format!("could not start the provider: {e}");
                 ctx.error("provider", message.clone());
-                return LoopOutcome::new(
-                    RunStatus::Failed,
-                    Some(message),
-                    last_text,
-                    iterations,
-                );
+                return LoopOutcome::new(RunStatus::Failed, Some(message), last_text, iterations);
             }
         };
         let stream = match provider.stream_chat(request, spec.cancel.clone()).await {
@@ -445,12 +491,7 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
             Err(e) => {
                 let message = format!("provider request failed: {e}");
                 ctx.error("provider", message.clone());
-                return LoopOutcome::new(
-                    RunStatus::Failed,
-                    Some(message),
-                    last_text,
-                    iterations,
-                );
+                return LoopOutcome::new(RunStatus::Failed, Some(message), last_text, iterations);
             }
         };
 
@@ -485,7 +526,11 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
                     )
                 };
                 ctx.notice("warn", message.clone());
-                let error = if spec.is_subagent { Some(message) } else { None };
+                let error = if spec.is_subagent {
+                    Some(message)
+                } else {
+                    None
+                };
                 return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
             }
             StreamEnd::Failed(message) => {
@@ -493,18 +538,21 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
                     persist_assistant_text(&inner, &spec, &ctx, &text).await;
                 }
                 ctx.error("provider", message.clone());
-                return LoopOutcome::new(
-                    RunStatus::Failed,
-                    Some(message),
-                    last_text,
-                    iterations,
-                );
+                return LoopOutcome::new(RunStatus::Failed, Some(message), last_text, iterations);
             }
         }
 
         // --- persist the assistant turn ---------------------------------------
         let assistant = Message::assistant(text, calls.clone());
-        if let Err(e) = persist(&inner, &spec.session_id, &spec.run_id, spec.agent_id.as_ref(), &assistant).await {
+        if let Err(e) = persist(
+            &inner,
+            &spec.session_id,
+            &spec.run_id,
+            spec.agent_id.as_ref(),
+            &assistant,
+        )
+        .await
+        {
             let message = format!("could not persist the assistant message: {e}");
             ctx.error("store", message.clone());
             return LoopOutcome::new(RunStatus::Failed, Some(message), last_text, iterations);
@@ -679,7 +727,17 @@ async fn run_one_tool(
                 name: call.name.clone(),
                 arguments,
             };
-            tool.invoke(request, tool_ctx).await
+            match std::panic::AssertUnwindSafe(tool.invoke(request, tool_ctx))
+                .catch_unwind()
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(payload) => kc_core::tool::ToolOutcome::err(format!(
+                    "tool `{}` panicked: {}",
+                    call.name,
+                    panic_message(payload.as_ref())
+                )),
+            }
         }
     };
 
@@ -755,7 +813,7 @@ async fn consume(
                     Ok(ProviderChunk::Usage { input_tokens, output_tokens }) => {
                         ctx.emit(Event::Usage { input_tokens, output_tokens });
                     }
-                    Ok(ProviderChunk::Finish { .. }) => {}
+                    Ok(ProviderChunk::Finish { .. }) => break,
                     Ok(ProviderChunk::Error { message, retryable }) => {
                         let suffix = if retryable { " (retryable)" } else { "" };
                         end = StreamEnd::Failed(format!("provider stream error: {message}{suffix}"));
@@ -771,6 +829,25 @@ async fn consume(
     }
 
     (text, accumulator.finish(), end)
+}
+
+/// Best-effort text for a caught panic payload.
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    // `&Box<dyn Any + Send>` coerces to `&dyn Any` pointing at the box itself;
+    // unwrap that (and any further nesting) instead of giving up.
+    if let Some(inner) = payload.downcast_ref::<Box<dyn std::any::Any + Send>>() {
+        return panic_message(&**inner);
+    }
+    if let Some(inner) = payload.downcast_ref::<Box<dyn std::any::Any + Send + Sync>>() {
+        return panic_message(&**inner);
+    }
+    "unknown panic".to_string()
 }
 
 /// Map a tool class to the approval kind a tool would ask for. Exposed for

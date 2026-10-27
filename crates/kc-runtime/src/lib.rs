@@ -14,7 +14,7 @@
 //! supplies, so polling `Runtime::tools()` is always the authoritative set to
 //! show to the model. [`Runtime::builtin_tool_names`] lists them.
 
-use kc_core::error::{Error, Result};
+use kc_core::error::Result;
 use kc_core::events::EventEnvelope;
 use kc_core::hooks::Hooks;
 use kc_core::ids::{AgentId, RunId, SessionId};
@@ -195,6 +195,20 @@ impl Runtime {
         registry
     }
 
+    /// Stamp with the runtime seq/ts, attach context and publish one event.
+    ///
+    /// Used by the server for session lifecycle events (created/renamed/deleted)
+    /// so the SSE sequence stays monotonic across runtime and server events.
+    pub fn emit(
+        &self,
+        session_id: Option<&str>,
+        run_id: Option<&str>,
+        agent_id: Option<&str>,
+        event: kc_core::events::Event,
+    ) -> EventEnvelope {
+        self.inner.emit(session_id, run_id, agent_id, event)
+    }
+
     /// Number of events published since process start.
     pub fn events_emitted(&self) -> u64 {
         self.inner.events_emitted.load(Ordering::Relaxed)
@@ -258,6 +272,8 @@ impl Runtime {
         cancelled
     }
 
+    /// Every in-flight loop: user runs (`agent_id: None`) and nested subagent
+    /// loops (`agent_id: Some`), sorted by session and run id.
     pub fn active_runs(&self) -> Vec<ActiveRun> {
         let runs = self.inner.runs.lock().expect("runs lock");
         let mut out: Vec<ActiveRun> = runs
@@ -270,10 +286,16 @@ impl Runtime {
                 iterations: state.iterations.load(Ordering::Relaxed),
             })
             .collect();
-        out.sort_by(|a, b| (a.session_id.as_str(), a.run_id.as_str()).cmp(&(b.session_id.as_str(), b.run_id.as_str())));
+        out.sort_by(|a, b| {
+            (a.session_id.as_str(), a.run_id.as_str())
+                .cmp(&(b.session_id.as_str(), b.run_id.as_str()))
+        });
         out
     }
 
+    /// True while a run for this session is registered and has not been
+    /// cancelled. Cancelled-but-unwinding runs still block a new `submit`, which
+    /// is why `submit` does its own check on the run map.
     pub fn is_running(&self, session_id: &str) -> bool {
         let runs = self.inner.runs.lock().expect("runs lock");
         runs.values()
@@ -314,10 +336,4 @@ impl RuntimeInner {
     pub(crate) fn tool_view(&self) -> Arc<ToolRegistry> {
         self.tools.read().expect("tools lock").clone()
     }
-}
-
-#[allow(dead_code)]
-fn _assert_error_is_send_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<Error>();
 }

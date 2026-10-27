@@ -23,7 +23,9 @@ use kc_core::store::{
     AgentRecord, ApprovalRecord, ClaimRecord, NewMessage, RunRecord, RunStatus, Session,
     SessionSummary, Store, StoredMessage,
 };
-use kc_core::tool::{Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOutcome, ToolRegistry, ToolSpec};
+use kc_core::tool::{
+    Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOutcome, ToolRegistry, ToolSpec,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -226,7 +228,13 @@ impl Store for FakeStore {
             .collect())
     }
 
-    async fn create_run(&self, id: &str, session_id: &str, model: &str, prompt: &str) -> Result<()> {
+    async fn create_run(
+        &self,
+        id: &str,
+        session_id: &str,
+        model: &str,
+        prompt: &str,
+    ) -> Result<()> {
         self.db().runs.push(RunRecord {
             id: id.to_string(),
             session_id: session_id.to_string(),
@@ -430,6 +438,8 @@ pub(crate) enum Script {
     Hang(Vec<ProviderChunk>),
     /// Fail the request itself.
     Fail(String),
+    /// Panic inside `stream_chat` (exercises the runtime's panic guard).
+    Panic(String),
 }
 
 impl Script {
@@ -490,6 +500,7 @@ impl Provider for ScriptedProvider {
                 "scripted provider has no script left for this call".into(),
             )),
             Some(Script::Fail(message)) => Err(Error::Provider(message)),
+            Some(Script::Panic(message)) => panic!("scripted provider panic: {message}"),
             Some(Script::Chunks(chunks)) => Ok(Box::pin(futures_util::stream::iter(
                 chunks.into_iter().map(Ok),
             ))),
@@ -696,6 +707,35 @@ impl Tool for ApprovalTool {
         } else {
             ToolOutcome::err(format!("not allowed:{}", decision.as_str()))
         }
+    }
+}
+
+/// Panics on every invocation (exercises the tool panic guard).
+pub(crate) struct PanicTool {
+    pub name: String,
+}
+
+impl PanicTool {
+    pub(crate) fn boxed(name: &str) -> Arc<dyn Tool> {
+        Arc::new(Self {
+            name: name.to_string(),
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for PanicTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Always panics.".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            origin: kc_core::tool::ToolOrigin::Builtin,
+        }
+    }
+
+    async fn invoke(&self, _request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+        panic!("this tool is broken on purpose")
     }
 }
 

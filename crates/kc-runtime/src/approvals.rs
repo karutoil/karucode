@@ -109,7 +109,10 @@ pub fn approval_target(kind: &ApprovalKind, payload: &serde_json::Value, fallbac
         ApprovalKind::FileWrite | ApprovalKind::FileEdit | ApprovalKind::DeleteFile => {
             pick(&["path", "file"]).or_else(|| Some(fallback.to_string()))
         }
-        ApprovalKind::Plugin | ApprovalKind::Mcp | ApprovalKind::NetworkTool | ApprovalKind::Other => {
+        ApprovalKind::Plugin
+        | ApprovalKind::Mcp
+        | ApprovalKind::NetworkTool
+        | ApprovalKind::Other => {
             pick(&["tool", "name", "url"]).or_else(|| Some(fallback.to_string()))
         }
     };
@@ -133,7 +136,12 @@ impl RuntimeInner {
             .insert(session_key(session_id, kind, target));
     }
 
-    pub(crate) fn has_session_allow(&self, session_id: &str, kind: &ApprovalKind, target: &str) -> bool {
+    pub(crate) fn has_session_allow(
+        &self,
+        session_id: &str,
+        kind: &ApprovalKind,
+        target: &str,
+    ) -> bool {
         self.session_allow
             .lock()
             .expect("session allow lock")
@@ -410,7 +418,11 @@ mod tests {
             "cargo test"
         );
         assert_eq!(
-            approval_target(&ApprovalKind::ShellCommand, &serde_json::json!({}), "Run tests"),
+            approval_target(
+                &ApprovalKind::ShellCommand,
+                &serde_json::json!({}),
+                "Run tests"
+            ),
             "Run tests"
         );
         assert_eq!(
@@ -431,15 +443,27 @@ mod tests {
             auto_approve_paths: vec!["src/".into()],
         };
         assert_eq!(
-            auto_decision(&view, &ApprovalKind::ShellCommand, &serde_json::json!({"command": "cargo test --all"})),
+            auto_decision(
+                &view,
+                &ApprovalKind::ShellCommand,
+                &serde_json::json!({"command": "cargo test --all"})
+            ),
             AutoDecision::Allow
         );
         assert_eq!(
-            auto_decision(&view, &ApprovalKind::ShellCommand, &serde_json::json!({"command": "rm -rf /"})),
+            auto_decision(
+                &view,
+                &ApprovalKind::ShellCommand,
+                &serde_json::json!({"command": "rm -rf /"})
+            ),
             AutoDecision::Ask
         );
         assert_eq!(
-            auto_decision(&view, &ApprovalKind::FileWrite, &serde_json::json!({"path": "src/lib.rs"})),
+            auto_decision(
+                &view,
+                &ApprovalKind::FileWrite,
+                &serde_json::json!({"path": "src/lib.rs"})
+            ),
             AutoDecision::Allow
         );
 
@@ -449,7 +473,11 @@ mod tests {
             auto_approve_paths: vec![],
         };
         assert_eq!(
-            auto_decision(&read_only, &ApprovalKind::ShellCommand, &serde_json::json!({"command": "ls"})),
+            auto_decision(
+                &read_only,
+                &ApprovalKind::ShellCommand,
+                &serde_json::json!({"command": "ls"})
+            ),
             AutoDecision::Deny
         );
     }
