@@ -1,0 +1,673 @@
+//! Test harness: a real router, a real SQLite store and the real runtime, with
+//! a scripted provider factory and one approval-requesting tool. No network.
+//!
+//! Everything is exercised through `tower::ServiceExt::oneshot` so the tests
+//! drive exactly the same middlewares and handlers as production.
+
+#![allow(dead_code)]
+
+use async_trait::async_trait;
+use axum::body::{Body, Bytes};
+use axum::http::{HeaderMap, Method, Request, StatusCode};
+use axum::Router;
+use futures_util::StreamExt;
+use kc_core::config::{Config, McpServerConfig, ModelConfig, PluginConfig};
+use kc_core::hooks::NoHooks;
+use kc_core::paths::Workspace;
+use kc_core::provider::{ChatRequest, Provider, ProviderChunk, ProviderFactory, ProviderStream};
+use kc_core::store::Store;
+use kc_core::tool::{Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOutcome, ToolSpec};
+use kc_core::Error;
+use kc_core::Result;
+use kc_mcp::McpManager;
+use kc_plugin_host::PluginHost;
+use kc_runtime::{Runtime, RuntimeDeps};
+use kc_server::app::build_router;
+use kc_server::settings::SettingsHandle;
+use kc_server::state::{base_tool_registry, AppState, AppStateDeps};
+use kc_store::SqliteStore;
+use serde_json::{json, Value};
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::Mutex as AsyncMutex;
+use tower::ServiceExt;
+
+// ---------------------------------------------------------------------------
+// Scripted provider
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum Script {
+    /// Stream these text chunks, then usage + finish.
+    Text(Vec<String>),
+    /// One tool call, then finish with `tool_calls`.
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    /// Fail before the stream starts.
+    Fail(String),
+    /// Stream one chunk and then never finish (keeps a run active).
+    Hang,
+}
+
+pub fn text(value: &str) -> Script {
+    Script::Text(vec![value.to_string()])
+}
+
+pub fn tool_call(name: &str, arguments: &str) -> Script {
+    Script::ToolCall {
+        id: format!("call_{name}"),
+        name: name.to_string(),
+        arguments: arguments.to_string(),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ModelsMode {
+    Ok(Vec<String>),
+    Fail(String),
+}
+
+struct FactoryInner {
+    scripts: Mutex<VecDeque<Script>>,
+    models: Mutex<ModelsMode>,
+}
+
+pub struct ScriptedFactory {
+    inner: Arc<FactoryInner>,
+}
+
+impl ScriptedFactory {
+    pub fn new(scripts: Vec<Script>, models: ModelsMode) -> Self {
+        Self {
+            inner: Arc::new(FactoryInner {
+                scripts: Mutex::new(scripts.into()),
+                models: Mutex::new(models),
+            }),
+        }
+    }
+
+    pub fn push(&self, script: Script) {
+        self.inner.scripts.lock().unwrap().push_back(script);
+    }
+
+    fn next_script(&self) -> Script {
+        self.inner
+            .scripts
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| text("ok"))
+    }
+}
+
+struct ScriptedProvider {
+    inner: Arc<FactoryInner>,
+}
+
+#[async_trait]
+impl ProviderFactory for ScriptedFactory {
+    async fn build(&self, _config: &ModelConfig) -> Result<Arc<dyn Provider>> {
+        Ok(Arc::new(ScriptedProvider {
+            inner: Arc::clone(&self.inner),
+        }))
+    }
+
+    fn supported(&self) -> Vec<String> {
+        vec!["openai_compatible".into()]
+    }
+}
+
+#[async_trait]
+impl Provider for ScriptedProvider {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+
+    async fn stream_chat(
+        &self,
+        _request: ChatRequest,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ProviderStream> {
+        let script = self
+            .inner
+            .scripts
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| text("ok"));
+        match script {
+            Script::Text(chunks) => {
+                let mut items: Vec<Result<ProviderChunk>> = chunks
+                    .into_iter()
+                    .map(|delta| Ok(ProviderChunk::Text(delta)))
+                    .collect();
+                items.push(Ok(ProviderChunk::Usage {
+                    input_tokens: 3,
+                    output_tokens: 5,
+                }));
+                items.push(Ok(ProviderChunk::Finish {
+                    reason: "stop".into(),
+                }));
+                Ok(Box::pin(futures_util::stream::iter(items)))
+            }
+            Script::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                let items: Vec<Result<ProviderChunk>> = vec![
+                    Ok(ProviderChunk::ToolCallDelta {
+                        index: 0,
+                        id: Some(id),
+                        name: Some(name),
+                        arguments_delta: Some(arguments),
+                    }),
+                    Ok(ProviderChunk::Finish {
+                        reason: "tool_calls".into(),
+                    }),
+                ];
+                Ok(Box::pin(futures_util::stream::iter(items)))
+            }
+            Script::Fail(message) => Err(Error::Provider(message)),
+            Script::Hang => Ok(Box::pin(
+                futures_util::stream::iter(vec![Ok(ProviderChunk::Text("working...".into()))])
+                    .chain(futures_util::stream::pending()),
+            )),
+        }
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        match self.inner.models.lock().unwrap().clone() {
+            ModelsMode::Ok(models) => Ok(models),
+            ModelsMode::Fail(message) => Err(Error::Provider(message)),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A tool that asks for approval
+// ---------------------------------------------------------------------------
+
+pub struct ApprovalTool;
+
+#[async_trait]
+impl Tool for ApprovalTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "needs_approval".into(),
+            description: "Asks for shell-command approval and reports the answer.".into(),
+            parameters: json!({"type": "object", "properties": {}}),
+            origin: kc_core::tool::ToolOrigin::Builtin,
+        }
+    }
+
+    fn class(&self) -> ToolClass {
+        ToolClass::Shell
+    }
+
+    async fn invoke(&self, _request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        let decision = ctx
+            .approvals
+            .ask(
+                kc_core::approval::ApprovalKind::ShellCommand,
+                "Run a command",
+                "echo hi",
+                json!({"command": "echo hi"}),
+            )
+            .await;
+        if decision.is_allowed() {
+            ToolOutcome::ok(format!("approved: {}", decision.as_str()))
+        } else {
+            ToolOutcome::err(format!("denied: {}", decision.as_str()))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------------
+
+pub struct HarnessBuilder {
+    scripts: Vec<Script>,
+    models: ModelsMode,
+    auth_token: Option<String>,
+    lock_settings: bool,
+    web_dir: Option<PathBuf>,
+    extra_tools: Vec<Arc<dyn Tool>>,
+    plugin_configs: Vec<PluginConfig>,
+    mcp_configs: Vec<McpServerConfig>,
+}
+
+impl HarnessBuilder {
+    pub fn new(scripts: Vec<Script>) -> Self {
+        Self {
+            scripts,
+            models: ModelsMode::Ok(vec!["test-model".into()]),
+            auth_token: None,
+            lock_settings: false,
+            web_dir: None,
+            extra_tools: Vec::new(),
+            plugin_configs: Vec::new(),
+            mcp_configs: Vec::new(),
+        }
+    }
+
+    pub fn models(mut self, models: ModelsMode) -> Self {
+        self.models = models;
+        self
+    }
+
+    pub fn auth_token(mut self, token: &str) -> Self {
+        self.auth_token = Some(token.to_string());
+        self
+    }
+
+    pub fn lock_settings(mut self) -> Self {
+        self.lock_settings = true;
+        self
+    }
+
+    pub fn web_dir(mut self, dir: PathBuf) -> Self {
+        self.web_dir = Some(dir);
+        self
+    }
+
+    pub fn tool(mut self, tool: Arc<dyn Tool>) -> Self {
+        self.extra_tools.push(tool);
+        self
+    }
+
+    pub fn plugin(mut self, config: PluginConfig) -> Self {
+        self.plugin_configs.push(config);
+        self
+    }
+
+    pub fn mcp(mut self, config: McpServerConfig) -> Self {
+        self.mcp_configs.push(config);
+        self
+    }
+
+    pub async fn build(self) -> Harness {
+        let root = std::env::temp_dir().join(format!(
+            "kc-server-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let workspace_dir = root.join("workspace");
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+
+        let web_dir = self.web_dir;
+        let db_path = data_dir.join("karucode.db");
+        let config = Config {
+            host: "127.0.0.1".into(),
+            workspace_root: workspace_dir.clone(),
+            data_dir: data_dir.clone(),
+            auth_token: self.auth_token,
+            lock_settings: self.lock_settings,
+            web_dir: web_dir.clone(),
+            model: ModelConfig {
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "test-model".into(),
+                api_key: None,
+                ..ModelConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let store = Arc::new(SqliteStore::open(&db_path).await.expect("store"));
+        let settings = SettingsHandle::new(config.clone(), store.clone())
+            .await
+            .expect("settings");
+        let factory = Arc::new(ScriptedFactory::new(self.scripts, self.models));
+        let workspace = Arc::new(Workspace::new(&workspace_dir).expect("workspace"));
+
+        // Mirrors the bootstrap: externals start concurrently and a broken one
+        // is isolated as a failed diagnostic.
+        let mut plugin_host = PluginHost::discover(&self.plugin_configs, &data_dir);
+        let mut mcp_manager = McpManager::new(&self.mcp_configs);
+        tokio::join!(plugin_host.start_all(), mcp_manager.connect_all());
+        let plugins = Arc::new(AsyncMutex::new(plugin_host));
+        let mcp = Arc::new(AsyncMutex::new(mcp_manager));
+
+        let mut builtin_tools = kc_tools::builtin_tools();
+        builtin_tools.extend(self.extra_tools);
+        let tools = base_tool_registry(builtin_tools.clone(), Vec::new(), Vec::new());
+
+        let runtime = Runtime::new(RuntimeDeps {
+            store: store.clone(),
+            providers: factory.clone(),
+            tools,
+            settings: settings.clone(),
+            hooks: Arc::new(NoHooks),
+            workspace: workspace.clone(),
+        });
+        runtime.recover().await.expect("recover");
+
+        let state = AppState::new(AppStateDeps {
+            settings,
+            store,
+            runtime,
+            providers: factory.clone(),
+            workspace,
+            plugins,
+            mcp,
+            builtin_tools,
+            web_dir,
+            db_path,
+        });
+        state.reload_tools().await;
+        let router = build_router(state.clone());
+
+        Harness {
+            router,
+            state,
+            factory,
+            root,
+            workspace_dir,
+        }
+    }
+}
+
+pub struct Harness {
+    pub router: Router,
+    pub state: AppState,
+    pub factory: Arc<ScriptedFactory>,
+    pub root: PathBuf,
+    pub workspace_dir: PathBuf,
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        // Best effort: on Unix an open SQLite file can be unlinked safely.
+        std::fs::remove_dir_all(&self.root).ok();
+    }
+}
+
+pub struct TestResponse {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    pub body: Bytes,
+}
+
+impl TestResponse {
+    pub fn json(&self) -> Value {
+        if self.body.is_empty() {
+            return Value::Null;
+        }
+        serde_json::from_slice(&self.body).unwrap_or_else(|e| {
+            panic!(
+                "response was not JSON ({e}): {}",
+                String::from_utf8_lossy(&self.body)
+            )
+        })
+    }
+
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    pub fn error_code(&self) -> String {
+        self.json()["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+}
+
+fn is_mutating(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::POST | Method::PATCH | Method::PUT | Method::DELETE
+    )
+}
+
+impl Harness {
+    pub fn workspace_path(&self) -> &std::path::Path {
+        &self.workspace_dir
+    }
+
+    /// Send a request with the CSRF header added automatically for mutations.
+    pub async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> TestResponse {
+        self.send_with(method, path, body, headers, true).await
+    }
+
+    pub async fn send_with(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+        add_csrf: bool,
+    ) -> TestResponse {
+        let mut builder = Request::builder().method(method.clone()).uri(path);
+        let mut has_host = false;
+        let mut has_client = false;
+        let mut has_content_type = false;
+        for (key, value) in headers {
+            let key_lower = key.to_ascii_lowercase();
+            if key_lower == "host" {
+                has_host = true;
+            }
+            if key_lower == "x-karucode-client" {
+                has_client = true;
+            }
+            if key_lower == "content-type" {
+                has_content_type = true;
+            }
+            builder = builder.header(*key, *value);
+        }
+        if !has_host {
+            builder = builder.header("host", "127.0.0.1:8787");
+        }
+        if is_mutating(&method) && add_csrf && !has_client {
+            builder = builder.header("x-karucode-client", "web");
+        }
+        if body.is_some() && !has_content_type {
+            builder = builder.header("content-type", "application/json");
+        }
+        builder = builder.header("accept", "application/json");
+
+        let body = match body {
+            Some(value) => Body::from(serde_json::to_vec(&value).expect("serialize body")),
+            None => Body::empty(),
+        };
+        let request = builder.body(body).expect("request");
+        let response = self
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("router call");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+            .await
+            .expect("read body");
+        TestResponse {
+            status,
+            headers,
+            body,
+        }
+    }
+
+    pub async fn get(&self, path: &str) -> TestResponse {
+        self.send(Method::GET, path, None, &[]).await
+    }
+
+    pub async fn get_with(&self, path: &str, headers: &[(&str, &str)]) -> TestResponse {
+        self.send(Method::GET, path, None, headers).await
+    }
+
+    pub async fn post(&self, path: &str, body: Value) -> TestResponse {
+        self.send(Method::POST, path, Some(body), &[]).await
+    }
+
+    pub async fn patch(&self, path: &str, body: Value) -> TestResponse {
+        self.send(Method::PATCH, path, Some(body), &[]).await
+    }
+
+    pub async fn delete(&self, path: &str) -> TestResponse {
+        self.send(Method::DELETE, path, None, &[]).await
+    }
+
+    pub async fn create_session(&self, title: Option<&str>) -> String {
+        let body = match title {
+            Some(title) => json!({ "title": title }),
+            None => json!({}),
+        };
+        let response = self.post("/api/sessions", body).await;
+        assert_eq!(response.status, StatusCode::OK, "body: {}", response.text());
+        response.json()["id"]
+            .as_str()
+            .expect("session id")
+            .to_string()
+    }
+
+    /// Open an SSE stream. The response body is returned unpolled.
+    pub async fn open_events(
+        &self,
+        query: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Body) {
+        let path = format!("/api/events{query}");
+        let mut builder = Request::builder().method(Method::GET).uri(path);
+        builder = builder.header("host", "127.0.0.1:8787");
+        builder = builder.header("accept", "text/event-stream");
+        for (key, value) in headers {
+            builder = builder.header(*key, *value);
+        }
+        let request = builder.body(Body::empty()).expect("sse request");
+        let response = self.router.clone().oneshot(request).await.expect("sse");
+        let status = response.status();
+        let headers = response.headers().clone();
+        (status, headers, response.into_body())
+    }
+
+    /// Poll `GET /api/approvals` until one pending approval exists.
+    pub async fn wait_for_approval(&self, session_id: &str) -> Value {
+        for _ in 0..300 {
+            let response = self
+                .get(&format!("/api/approvals?session={session_id}"))
+                .await;
+            assert_eq!(response.status, StatusCode::OK);
+            let approvals = response.json()["approvals"].clone();
+            if let Some(first) = approvals.as_array().and_then(|list| list.first()) {
+                return first.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no pending approval appeared for {session_id}");
+    }
+
+    /// Poll the session detail until it reports no active run.
+    pub async fn wait_until_idle(&self, session_id: &str) {
+        for _ in 0..300 {
+            let response = self.get(&format!("/api/sessions/{session_id}")).await;
+            assert_eq!(response.status, StatusCode::OK);
+            if response.json()["running"] == json!(false) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("session {session_id} never went idle");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSE helpers
+// ---------------------------------------------------------------------------
+
+/// Parse complete `data:` blocks out of `buffer`, keeping the incomplete tail.
+pub fn drain_sse(buffer: &mut String) -> Vec<Value> {
+    let mut events = Vec::new();
+    while let Some(boundary) = buffer.find("\n\n") {
+        let block = buffer[..boundary].to_string();
+        buffer.drain(..boundary + 2);
+        let data: String = block
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(|line| line.trim_start())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if data.is_empty() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(&data) {
+            events.push(value);
+        }
+    }
+    events
+}
+
+/// Collect events until one has `type == until` (bounded by 5s).
+pub async fn collect_events_until(body: Body, until: &str) -> Vec<Value> {
+    use futures_util::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut buffer = String::new();
+    let mut events = Vec::new();
+    let deadline = tokio::time::sleep(Duration::from_secs(5));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => {
+                panic!("timed out waiting for SSE `{until}`; received: {events:?}");
+            }
+            chunk = stream.next() => {
+                match chunk {
+                    Some(Ok(bytes)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        events.extend(drain_sse(&mut buffer));
+                        if events.iter().any(|event| event["type"] == until) {
+                            return events;
+                        }
+                    }
+                    Some(Err(e)) => panic!("SSE stream error: {e}"),
+                    None => panic!("SSE stream ended before `{until}`; received: {events:?}"),
+                }
+            }
+        }
+    }
+}
+
+/// Read whatever arrives within `window` (keepalives produce no `data:` events).
+pub async fn events_within(body: Body, window: Duration) -> Vec<Value> {
+    use futures_util::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut buffer = String::new();
+    let mut events = Vec::new();
+    let deadline = tokio::time::sleep(window);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            chunk = stream.next() => {
+                match chunk {
+                    Some(Ok(bytes)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        events.extend(drain_sse(&mut buffer));
+                    }
+                    Some(Err(_)) | None => break,
+                }
+            }
+        }
+    }
+    events
+}
+
+/// Convenience for tests that need the concrete store trait object.
+pub fn store_of(harness: &Harness) -> Arc<dyn Store> {
+    harness.state.store()
+}

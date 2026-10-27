@@ -1,0 +1,75 @@
+# karucode configuration example.
+#
+# Copy to ~/.config/karucode/config.toml (or point KARUCODE_CONFIG at it).
+# Precedence: UI/DB overrides > environment variables > this file > defaults.
+# Set KARUCODE_LOCK_SETTINGS=1 to ignore UI/DB overrides (env becomes truth).
+
+host = "127.0.0.1"          # remote binds require auth_token
+port = 8787
+workspace = "/home/me/project"
+data_dir = "/home/me/.local/share/karucode"
+# auth_token = "at-least-16-characters"
+log_level = "info"
+
+[model]
+provider = "openai_compatible"
+# Any OpenAI-compatible gateway works (LiteLLM, vLLM, Ollama /v1, OpenRouter, ...).
+base_url = "http://127.0.0.1:4000/v1"
+model = "gpt-4o-mini"
+# Prefer KARUCODE_API_KEY / OPENAI_API_KEY in the environment over this file.
+# api_key = "sk-..."
+temperature = 0.2
+# max_tokens = 4096
+request_timeout_secs = 300
+parallel_tool_calls = true
+
+# [model.extra_headers]
+# "X-Gateway-Project" = "karucode"
+
+[limits]
+max_iterations = 32
+max_run_secs = 1800
+max_tool_output_bytes = 24000
+max_command_output_bytes = 32000
+command_timeout_secs = 120
+max_command_timeout_secs = 600
+max_file_read_bytes = 200000
+search_max_results = 200
+context_max_chars = 240000
+max_tool_calls_per_turn = 8
+
+[approvals]
+# ask | ask_commands | auto | read_only
+mode = "ask"
+# Prefixes that never prompt in ask modes.
+allow_commands = ["rg", "git status", "cargo test", "cargo check"]
+# Workspace-relative prefixes that may be written without prompting in ask mode.
+auto_approve_paths = []
+timeout_secs = 300
+
+[subagents]
+max_concurrent = 3
+max_iterations = 16
+allow_recursive = false
+max_depth = 1
+timeout_secs = 900
+
+# Out-of-process plugins (JSON-RPC over stdio).
+# [[plugins]]
+# name = "example-hello"
+# command = ["example-hello"]
+# enabled = true
+# permissions = ["files.read"]
+
+# [[mcp_servers]]
+# name = "filesystem"
+# transport = "stdio"
+# command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/me/project"]
+# require_approval = true
+
+# [[mcp_servers]]
+# name = "remote"
+# transport = "http"
+# url = "http://127.0.0.1:3001/mcp"
+# [mcp_servers.headers]
+# Authorization = "Bearer ..."

@@ -481,6 +481,9 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
         let provider = match inner.deps.providers.build(&spec.model).await {
             Ok(provider) => provider,
             Err(e) => {
+                if spec.cancel.is_cancelled() {
+                    return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
+                }
                 let message = format!("could not start the provider: {e}");
                 ctx.error("provider", message.clone());
                 return LoopOutcome::new(RunStatus::Failed, Some(message), last_text, iterations);
@@ -489,6 +492,12 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
         let stream = match provider.stream_chat(request, spec.cancel.clone()).await {
             Ok(stream) => stream,
             Err(e) => {
+                // A cancel that lands before the request completes is still a
+                // cancellation, not a provider failure.
+                if spec.cancel.is_cancelled() {
+                    ctx.notice("info", "run cancelled");
+                    return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
+                }
                 let message = format!("provider request failed: {e}");
                 ctx.error("provider", message.clone());
                 return LoopOutcome::new(RunStatus::Failed, Some(message), last_text, iterations);
@@ -534,6 +543,13 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
                 return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
             }
             StreamEnd::Failed(message) => {
+                if spec.cancel.is_cancelled() {
+                    if !text.is_empty() {
+                        persist_assistant_text(&inner, &spec, &ctx, &text).await;
+                    }
+                    ctx.notice("info", "run cancelled");
+                    return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
+                }
                 if !text.is_empty() {
                     persist_assistant_text(&inner, &spec, &ctx, &text).await;
                 }
@@ -820,6 +836,10 @@ async fn consume(
                         break;
                     }
                     Err(e) => {
+                        if cancel.is_cancelled() {
+                            end = StreamEnd::Cancelled;
+                            break;
+                        }
                         end = StreamEnd::Failed(format!("provider stream failed: {e}"));
                         break;
                     }
