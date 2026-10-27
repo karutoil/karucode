@@ -226,7 +226,19 @@ def main():
         print(f"binary not found: {binary} (use --build)", file=sys.stderr)
         return 2
 
-    plugin_bin = ROOT / "target/debug/example-hello"
+    plugin_bin = next(
+        (
+            candidate
+            for candidate in (
+                ROOT / "target/debug/example-hello",
+                ROOT / "target/release/example-hello",
+            )
+            if candidate.exists()
+        ),
+        None,
+    )
+    if plugin_bin is None:
+        SKIP.append("plugin checks: no example-hello binary (cargo build -p example-hello)")
     tmp = Path(tempfile.mkdtemp(prefix="kc-e2e-"))
     try:
         workspace = tmp / "ws"
@@ -250,7 +262,7 @@ def main():
         )
         wait_http(f"http://127.0.0.1:{mock_port}/health", timeout=15)
 
-        config = build_config(tmp, plugin_bin if plugin_bin.exists() else None)
+        config = build_config(tmp, plugin_bin)
         port = free_port()
         env = os.environ.copy()
         env.update(
@@ -481,24 +493,28 @@ def main():
         )[-1])
 
         print("\n== plugins / MCP tools ==", flush=True)
-        out = client.ok("POST", f"/api/sessions/{sid}/messages", {"content": "[tool:plugin] say hello"}, expect=202)
-        prun = out["run_id"]
-        # Plugin tools are external code: the approval policy must gate them.
-        ap = events.wait(
-            lambda e: e.get("type") == "approval_requested" and e.get("run_id") == prun,
-            timeout=20, label="plugin approval",
-        )
-        check("plugin tool requires approval", lambda: (
-            _assert(ap["approval"]["kind"] == "plugin", ap["approval"]),
-            ap["approval"]["title"][:40],
-        )[-1])
-        client.ok("POST", f"/api/approvals/{ap['approval']['id']}", {"decision": "allow_session"})
-        events.wait(lambda e: e.get("type") == "run_finished" and e.get("run_id") == prun, timeout=60, label="plugin run")
-        check("plugin tool is callable", lambda: (
-            _assert(any(e.get("name") == "plugin__example-hello__hello" and e.get("ok") for e in events.for_run(prun, "tool_call_finished")),
-                    [e.get("name") for e in events.for_run(prun, "tool_call_finished")]),
-            "plugin tool ok",
-        )[-1])
+        if plugin_bin is None:
+            print("  SKIP  plugin checks (no example-hello binary)", flush=True)
+        else:
+            out = client.ok("POST", f"/api/sessions/{sid}/messages", {"content": "[tool:plugin] say hello"}, expect=202)
+            prun = out["run_id"]
+            # Plugin tools are external code: the approval policy must gate them.
+            ap = events.wait(
+                lambda e: e.get("type") == "approval_requested" and e.get("run_id") == prun,
+                timeout=20, label="plugin approval",
+            )
+            check("plugin tool requires approval", lambda: (
+                _assert(ap["approval"]["kind"] == "plugin", ap["approval"]),
+                ap["approval"]["title"][:40],
+            )[-1])
+            client.ok("POST", f"/api/approvals/{ap['approval']['id']}", {"decision": "allow_session"})
+            events.wait(lambda e: e.get("type") == "run_finished" and e.get("run_id") == prun, timeout=60, label="plugin run")
+            check("plugin tool is callable", lambda: (
+                _assert(any(e.get("name") == "plugin__example-hello__hello" and e.get("ok")
+                            for e in events.for_run(prun, "tool_call_finished")),
+                        [e.get("name") for e in events.for_run(prun, "tool_call_finished")]),
+                "plugin tool ok",
+            )[-1])
 
         out = client.ok("POST", f"/api/sessions/{sid}/messages", {"content": "[tool:mcp] echo"}, expect=202)
         mrun = out["run_id"]
@@ -513,14 +529,17 @@ def main():
         client.ok("POST", f"/api/approvals/{ap['approval']['id']}", {"decision": "allow_session"})
         events.wait(lambda e: e.get("type") == "run_finished" and e.get("run_id") == mrun, timeout=60, label="mcp run")
         check("MCP tool is callable and namespaced", lambda: (
-            _assert(any(e.get("name") == "mcp__mock__echo" and e.get("ok") for e in events.for_run(mrun, "tool_call_finished")),
+            _assert(any(e.get("name") == "mcp__mock__echo" and e.get("ok")
+                        for e in events.for_run(mrun, "tool_call_finished")),
                     [e.get("name") for e in events.for_run(mrun, "tool_call_finished")]),
             "mcp tool ok",
         )[-1])
 
-        # read_only mode must deny mutating external tools without prompting.
+        # read_only mode must deny external tools without prompting, whether or
+        # not the tool opts out of the prompt.
+        target = "[tool:plugin] say hello" if plugin_bin else "[tool:mcp] echo"
         client.ok("PATCH", "/api/config", {"approvals": {"mode": "read_only"}})
-        out = client.ok("POST", f"/api/sessions/{sid}/messages", {"content": "[tool:plugin] say hello"}, expect=202)
+        out = client.ok("POST", f"/api/sessions/{sid}/messages", {"content": target}, expect=202)
         rrun = out["run_id"]
         events.wait(lambda e: e.get("type") == "run_finished" and e.get("run_id") == rrun, timeout=60, label="read_only run")
         check("read_only mode denies external tools", lambda: (

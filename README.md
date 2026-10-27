@@ -256,8 +256,9 @@ python3 scripts/bench.py --build     # startup, idle RSS, peak RSS under load
 ```
 
 See [reports/bench.md](reports/bench.md) for the latest numbers and the exact
-methodology/host. No memory target is promised: measurements for this machine are
-in that report.
+methodology/host, and [docs/REPORT.md](docs/REPORT.md) for the full verification
+record (including what was checked in a real browser). No memory target is
+promised: measurements for this machine are in that report.
 
 ### Repository layout
 

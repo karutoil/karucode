@@ -329,7 +329,7 @@ Reserved values: `files.read`, `files.write`, `shell`, `network`,
 A manifest can therefore never grant itself a permission the operator did not
 configure. Manifest permissions that the config does not grant are kept out of
 the effective set, and the ignored names are reported in `GET /api/plugins` (in
-the plugin's `error` field, with status still `ready`) and logged at warn level.
+the plugin's `error` field, with status still `ready`) and logged at debug level.
 
 Enforcement happens **at the tool-exposure layer**: a tool whose declared class
 needs a permission that is not in the effective set is **not exposed** at all
