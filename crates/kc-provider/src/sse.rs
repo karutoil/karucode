@@ -20,16 +20,43 @@ impl SseParser {
     pub fn push(&mut self, chunk: &str) -> Vec<SseEvent> {
         self.buffer.push_str(chunk);
         let mut out = Vec::new();
-        loop {
-            let Some(idx) = self.buffer.find("\n\n") else {
-                break;
-            };
-            let block: String = self.buffer.drain(..idx + 2).collect();
+        while let Some(end) = find_event_end(&self.buffer) {
+            let block: String = self.buffer.drain(..end).collect();
             if let Some(event) = parse_block(&block) {
                 out.push(event);
             }
         }
         out
+    }
+
+    /// Bytes held back because no event terminator has been seen yet. Callers
+    /// use this to bound memory when an upstream never terminates an event.
+    pub fn buffered_len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Flush a trailing event that was not terminated by a blank line before the
+    /// stream ended. Servers commonly omit the final `\n\n`.
+    pub fn finish(&mut self) -> Option<SseEvent> {
+        if self.buffer.trim().is_empty() {
+            self.buffer.clear();
+            return None;
+        }
+        let block = std::mem::take(&mut self.buffer);
+        parse_block(&block)
+    }
+}
+
+/// Length of the buffer up to and including the first event terminator. Both
+/// `\n\n` and `\r\n\r\n` are accepted; the latter contains no `\n\n`.
+fn find_event_end(buffer: &str) -> Option<usize> {
+    let lf = buffer.find("\n\n").map(|idx| idx + 2);
+    let crlf = buffer.find("\r\n\r\n").map(|idx| idx + 4);
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
     }
 }
 
@@ -75,5 +102,22 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].event.as_deref(), Some("message"));
         assert_eq!(evs[0].data, "a\nb");
+    }
+
+    #[test]
+    fn finish_returns_unterminated_tail() {
+        let mut p = SseParser::new();
+        assert!(p.push("data: [DONE]").is_empty());
+        assert_eq!(p.buffered_len(), 12);
+        assert_eq!(p.finish().unwrap().data, "[DONE]");
+        assert_eq!(p.buffered_len(), 0);
+        assert!(p.finish().is_none());
+    }
+
+    #[test]
+    fn comment_only_blocks_are_ignored() {
+        let mut p = SseParser::new();
+        assert!(p.push(": keepalive\n\n").is_empty());
+        assert!(p.buffered_len() == 0);
     }
 }
