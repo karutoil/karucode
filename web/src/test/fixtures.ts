@@ -205,6 +205,7 @@ export function resetAppState(): void {
   store.resolvingApprovals.value = {};
   store.stopping.value = false;
   store.composerFocusTick.value = 0;
+  store.sentMessageTick.value = 0;
   store.resetToastTimers();
 }
 

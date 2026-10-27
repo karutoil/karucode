@@ -88,6 +88,8 @@ export const resolvingApprovals = signal<Record<string, boolean>>({});
 export const stopping = signal(false);
 export const clock = signal(Date.now());
 export const composerFocusTick = signal(0);
+/** Bumped when the user sends a message, so the transcript re-pins to the newest content. */
+export const sentMessageTick = signal(0);
 export const streamEpoch = signal(0);
 
 let toastSequence = 0;

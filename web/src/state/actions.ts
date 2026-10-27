@@ -399,6 +399,8 @@ export async function sendChatMessage(content: string): Promise<boolean> {
     runError: null,
     iteration: 0,
   };
+  // The reader wants to see the answer, so the transcript re-pins to the bottom.
+  store.sentMessageTick.value += 1;
 
   try {
     const result = await api.sendMessage(sessionId, trimmed);

@@ -1,12 +1,12 @@
 import type { JSX } from 'preact';
-import { useEffect, useRef } from 'preact/hooks';
 import { formatCount } from '../lib/format';
+import { useStickyBottom } from '../lib/stickyBottom';
 import * as actions from '../state/actions';
 import { totalUsage } from '../state/selectors';
 import * as store from '../state/store';
 import { ChatTranscript } from './ChatTranscript';
 import { Composer } from './Composer';
-import { AlertIcon, PanelIcon, RefreshIcon, SidebarIcon } from './icons';
+import { AlertIcon, ChevronDownIcon, PanelIcon, RefreshIcon, SidebarIcon } from './icons';
 
 function ProviderBanner(): JSX.Element | null {
   if (store.providerConfigured.value) return null;
@@ -206,8 +206,6 @@ export function ChatView(): JSX.Element {
   const session = store.activeSession.value;
   const currentId = store.currentSessionId.value;
   const chat = store.chat.value;
-  const scroller = useRef<HTMLDivElement>(null);
-  const previousSession = useRef<string | null>(null);
 
   const lastItem = chat.items[chat.items.length - 1];
   let tailSize = 0;
@@ -215,14 +213,11 @@ export function ChatView(): JSX.Element {
   else if (lastItem?.kind === 'command') tailSize = lastItem.stdout.length + lastItem.stderr.length;
   else if (lastItem?.kind === 'tool') tailSize = lastItem.output.length;
 
-  useEffect(() => {
-    const element = scroller.current;
-    if (!element) return;
-    const sessionChanged = previousSession.current !== chat.sessionId;
-    previousSession.current = chat.sessionId;
-    const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 180;
-    if (sessionChanged || nearBottom) element.scrollTop = element.scrollHeight;
-  }, [chat.sessionId, chat.items.length, tailSize]);
+  const scroller = useStickyBottom({
+    sessionKey: chat.sessionId,
+    contentKey: `${chat.items.length}:${tailSize}`,
+    sentMessageTick: store.sentMessageTick.value,
+  });
 
   const showLoading = store.chatLoading.value && currentId !== null;
   const hasItems = chat.items.length > 0;
@@ -232,52 +227,66 @@ export function ChatView(): JSX.Element {
   return (
     <main class="chat-main" id="chat-main" aria-label="Conversation" tabIndex={-1}>
       <SessionHeader />
-      <div class="chat-scroll" ref={scroller}>
-        <div class="chat-inner">
-          <ConnectionBanner />
-          <ProviderBanner />
+      <div class="chat-body">
+        {scroller.showJump ? (
+          <button type="button" class="jump-latest" onClick={scroller.jumpToLatest}>
+            <ChevronDownIcon size={14} />
+            Jump to latest
+          </button>
+        ) : null}
+        <div
+          class="chat-scroll"
+          ref={scroller.scrollRef}
+          tabIndex={0}
+          role="region"
+          aria-label="Transcript"
+        >
+          <div class="chat-inner">
+            <ConnectionBanner />
+            <ProviderBanner />
 
-          {showLoading ? <ChatSkeleton /> : null}
+            {showLoading ? <ChatSkeleton /> : null}
 
-          {!showLoading && store.chatError.value ? (
-            <div class="run-error-banner" role="alert">
-              <div class="run-error-head">
-                <span class="run-error-kicker">
-                  <AlertIcon size={14} /> Could not load this session
-                </span>
+            {!showLoading && store.chatError.value ? (
+              <div class="run-error-banner" role="alert">
+                <div class="run-error-head">
+                  <span class="run-error-kicker">
+                    <AlertIcon size={14} /> Could not load this session
+                  </span>
+                </div>
+                <p class="run-error-message">{store.chatError.value}</p>
+                <button
+                  type="button"
+                  class="button button-small"
+                  onClick={() => currentId && void actions.openSession(currentId, { silent: false, force: true })}
+                >
+                  <RefreshIcon size={13} /> Retry
+                </button>
               </div>
-              <p class="run-error-message">{store.chatError.value}</p>
-              <button
-                type="button"
-                class="button button-small"
-                onClick={() => currentId && void actions.openSession(currentId, { silent: false, force: true })}
-              >
-                <RefreshIcon size={13} /> Retry
-              </button>
-            </div>
-          ) : null}
+            ) : null}
 
-          {!showLoading && !store.chatError.value ? (
-            currentId === null ? (
-              <NoSessionState />
-            ) : hasItems ? (
-              <ChatTranscript
-                items={chat.items}
-                resolvingApprovals={store.resolvingApprovals.value}
-                onApprovalDecision={(id, decision) => void actions.resolveApproval(id, decision)}
-              />
-            ) : (
-              <EmptySessionState />
-            )
-          ) : null}
+            {!showLoading && !store.chatError.value ? (
+              currentId === null ? (
+                <NoSessionState />
+              ) : hasItems ? (
+                <ChatTranscript
+                  items={chat.items}
+                  resolvingApprovals={store.resolvingApprovals.value}
+                  onApprovalDecision={(id, decision) => void actions.resolveApproval(id, decision)}
+                />
+              ) : (
+                <EmptySessionState />
+              )
+            ) : null}
 
-          <RunErrorBanner />
+            <RunErrorBanner />
 
-          {session && hasItems && workspace ? (
-            <p class="transcript-foot">
-              Working in <span title={workspace}>{workspace}</span>
-            </p>
-          ) : null}
+            {session && hasItems && workspace ? (
+              <p class="transcript-foot">
+                Working in <span title={workspace}>{workspace}</span>
+              </p>
+            ) : null}
+          </div>
         </div>
       </div>
 

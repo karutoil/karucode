@@ -1510,3 +1510,127 @@ impl support::Harness {
         }
     }
 }
+
+#[tokio::test]
+async fn first_message_titles_an_untitled_session() {
+    let h = HarnessBuilder::new(vec![text("ok")]).build().await;
+    let id = h.create_session(None).await;
+    assert_eq!(
+        h.get(&format!("/api/sessions/{id}")).await.json()["session"]["title"],
+        "New session"
+    );
+
+    let started = h
+        .post(
+            &format!("/api/sessions/{id}/messages"),
+            json!({ "content": "  Fix   the\n\nlogin\tbug  " }),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::ACCEPTED);
+
+    // The title is persisted before the run starts, so it is already visible.
+    let detail = h.get(&format!("/api/sessions/{id}")).await.json();
+    assert_eq!(detail["session"]["title"], "Fix the login bug");
+    let list = h.get("/api/sessions").await.json();
+    let session = list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"] == id)
+        .expect("session in list");
+    assert_eq!(session["title"], "Fix the login bug");
+
+    h.wait_until_idle(&id).await;
+}
+
+#[tokio::test]
+async fn second_message_keeps_the_derived_title() {
+    let h = HarnessBuilder::new(vec![text("one"), text("two")])
+        .build()
+        .await;
+    let id = h.create_session(None).await;
+
+    let first = h
+        .post(
+            &format!("/api/sessions/{id}/messages"),
+            json!({ "content": "first prompt about parsing" }),
+        )
+        .await;
+    assert_eq!(first.status, StatusCode::ACCEPTED);
+    h.wait_until_idle(&id).await;
+    let title = h.get(&format!("/api/sessions/{id}")).await.json()["session"]["title"].clone();
+    assert_eq!(title, "first prompt about parsing");
+
+    let second = h
+        .post(
+            &format!("/api/sessions/{id}/messages"),
+            json!({ "content": "second prompt that must not retitle anything" }),
+        )
+        .await;
+    assert_eq!(second.status, StatusCode::ACCEPTED);
+    h.wait_until_idle(&id).await;
+    assert_eq!(
+        h.get(&format!("/api/sessions/{id}")).await.json()["session"]["title"],
+        title
+    );
+}
+
+#[tokio::test]
+async fn an_explicitly_renamed_session_keeps_its_title() {
+    let h = HarnessBuilder::new(vec![text("ok")]).build().await;
+    let id = h.create_session(None).await;
+
+    let renamed = h
+        .patch(
+            &format!("/api/sessions/{id}"),
+            json!({ "title": "Release checklist" }),
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK);
+
+    let started = h
+        .post(
+            &format!("/api/sessions/{id}/messages"),
+            json!({ "content": "a prompt that would otherwise become the title" }),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::ACCEPTED);
+
+    assert_eq!(
+        h.get(&format!("/api/sessions/{id}")).await.json()["session"]["title"],
+        "Release checklist"
+    );
+    h.wait_until_idle(&id).await;
+}
+
+#[tokio::test]
+async fn an_auto_title_is_announced_on_the_event_stream() {
+    let h = HarnessBuilder::new(vec![text("ok")]).build().await;
+    let id = h.create_session(None).await;
+    let (status, _, body) = h.open_events(&format!("?session={id}"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let started = h
+        .post(
+            &format!("/api/sessions/{id}/messages"),
+            json!({ "content": "Investigate the flaky migration test" }),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::ACCEPTED);
+
+    let events = collect_events_until(body, "session_renamed").await;
+    let renamed = events
+        .iter()
+        .find(|event| event["type"] == "session_renamed")
+        .expect("session_renamed event");
+    assert_eq!(renamed["session_id"], id);
+    assert_eq!(renamed["title"], "Investigate the flaky migration test");
+    // The rename is emitted before the run starts.
+    assert!(
+        !event_types(&events).contains(&"run_started"),
+        "session_renamed must precede run_started: {:?}",
+        event_types(&events)
+    );
+
+    h.wait_until_idle(&id).await;
+}
