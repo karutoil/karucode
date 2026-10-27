@@ -1,6 +1,6 @@
 # karucode performance report
 
-Generated: 2026-10-27 16:34:24
+Generated: 2026-10-27 17:32:16
 Host: Linux 6.12.113+deb13-amd64, AMD Ryzen 7 3700X 8-Core Processor, 31.3 GiB RAM, 16 CPUs
 Toolchain: rustc 1.96.0 (ac68faa20 2026-05-25)
 Binary: target/release/karucode (strip + LTO thin)
@@ -16,10 +16,9 @@ starts 3 concurrent agent runs and samples RSS every 50ms until they finish.
 
 | run | startup ms | idle RSS MiB | peak RSS (3 runs) MiB | 3 runs wall ms | binary MiB |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 10.1 | 9.8 | 12.2 | 158.9 | 10.52 |
-| 2 | 5.8 | 10.0 | 12.2 | 158.5 | 10.52 |
-| 3 | 5.7 | 10.1 | 12.4 | 158.0 | 10.52 |
-| **avg** | **7.2** | **10.0** | **12.3** | **158.5** | **10.5** |
+| 1 | 10.1 | 10.3 | 12.4 | 158.2 | 10.48 |
+| 2 | 5.7 | 10.0 | 12.4 | 159.7 | 10.48 |
+| **avg** | **7.9** | **10.2** | **12.4** | **158.9** | **10.5** |
 
 These numbers are specific to the host above and to the mock provider:
 RSS during a real run also depends on the provider TLS stack and response sizes.
