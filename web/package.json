@@ -1,0 +1,32 @@
+{
+  "name": "karucode-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "karucode web workspace (Preact + Vite)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "preview": "vite preview",
+    "preview:api": "echo \"Run the Rust server with KARUCODE_WEB_DIR=$PWD/dist on :8787, then open http://127.0.0.1:8787\""
+  },
+  "dependencies": {
+    "@preact/signals": "^2.0.1",
+    "dompurify": "^3.2.4",
+    "highlight.js": "^11.11.1",
+    "markdown-it": "^14.1.0",
+    "preact": "^10.26.4"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.1",
+    "@testing-library/preact": "^3.2.4",
+    "@types/markdown-it": "^14.1.2",
+    "jsdom": "^26.0.0",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.1",
+    "vitest": "^3.0.8"
+  }
+}

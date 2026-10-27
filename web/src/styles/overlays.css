@@ -1,0 +1,426 @@
+/* ---------- modal shell ---------- */
+
+.dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 5, 6, 0.66);
+}
+
+.dialog {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 48px);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+  animation: dialog-in 150ms ease-out;
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+  padding: 13px 12px 13px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dialog-title {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.dialog-confirm {
+  width: min(460px, calc(100vw - 32px));
+}
+
+.confirm-body {
+  padding: 16px 18px 18px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.confirm-body strong {
+  color: var(--text);
+  font-weight: 560;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+/* ---------- command palette ---------- */
+
+.dialog-palette {
+  align-self: start;
+  width: min(580px, calc(100vw - 32px));
+  margin-top: 12vh;
+  max-height: min(70vh, 620px);
+}
+
+.palette-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 0 0 auto;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-faint);
+}
+
+.palette-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.palette-input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.palette-input:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.palette-input::placeholder {
+  color: var(--text-faint);
+}
+
+.palette-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.palette-option {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.palette-option.is-active {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.palette-group {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 9.5px;
+  font-weight: 560;
+  letter-spacing: 0.07em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.palette-label {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-hint {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-empty {
+  padding: 18px 14px;
+  color: var(--text-faint);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.palette-footer {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.palette-footer span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* ---------- side sheet (settings) ---------- */
+
+.dialog-sheet {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 100vw);
+  height: 100dvh;
+  max-height: none;
+  border: 0;
+  border-left: 1px solid var(--border-strong);
+  border-radius: 0;
+  animation: slide-in-right 170ms ease-out;
+}
+
+.dialog-sheet .dialog-header {
+  padding: 16px 16px 16px 22px;
+}
+
+.dialog-sheet .dialog-title {
+  font-family: var(--font-ui);
+  font-size: 15px;
+  font-weight: 560;
+  letter-spacing: 0;
+}
+
+/* ---------- file viewer ---------- */
+
+.dialog-file {
+  width: min(1040px, calc(100vw - 48px));
+  height: min(84vh, 900px);
+}
+
+.dialog-file .dialog-header {
+  padding: 11px 12px 11px 16px;
+}
+
+.dialog-file .dialog-title {
+  font-size: 12px;
+}
+
+.dialog-file .file-viewer {
+  min-height: 0;
+}
+
+/* ---------- toasts ---------- */
+
+.toast-region {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 130;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(340px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 10px 10px 13px;
+  border: 1px solid var(--border-strong);
+  border-left: 2px solid var(--text-faint);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+  pointer-events: auto;
+  animation: dialog-in 140ms ease-out;
+}
+
+.toast-error {
+  border-left-color: var(--danger);
+  background: #171313;
+  color: #dcb0b0;
+}
+
+.toast-success {
+  border-left-color: var(--ok);
+}
+
+.toast-info {
+  border-left-color: var(--accent);
+}
+
+.toast-message {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.toast-close {
+  width: 22px;
+  height: 22px;
+  margin-top: -1px;
+}
+
+/* ---------- full-screen states (auth / boot error) ---------- */
+
+.full-screen-state {
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+  padding: 24px;
+  background: var(--bg-sunken);
+}
+
+.state-card {
+  width: min(500px, 100%);
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.state-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 20px 0 10px;
+  color: var(--text);
+  font-size: 19px;
+  font-weight: 560;
+}
+
+.state-body {
+  color: var(--text-muted);
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+.state-body code,
+.state-footnote code {
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
+.state-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 9px 11px;
+  border: 1px solid rgba(209, 105, 105, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(209, 105, 105, 0.07);
+  color: #dcb0b0;
+  font-size: 12.5px;
+}
+
+.state-error svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 22px;
+}
+
+.auth-form .button {
+  align-self: flex-start;
+  margin-top: 6px;
+}
+
+.state-footnote {
+  margin-top: 20px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.state-card > .button {
+  margin-top: 18px;
+}
+
+/* ---------- responsive overlays ---------- */
+
+@media (max-width: 640px) {
+  .dialog-layer {
+    padding: 0;
+  }
+
+  .dialog:not(.dialog-sheet) {
+    width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .dialog-palette {
+    align-self: center;
+    margin-top: 0;
+    height: auto;
+    max-height: 82dvh;
+  }
+
+  .palette-option {
+    grid-template-columns: 1fr auto;
+  }
+
+  .palette-group {
+    display: none;
+  }
+
+  .toast-region {
+    top: calc(64px + env(safe-area-inset-top, 0px));
+    right: 12px;
+    bottom: auto;
+    left: 12px;
+    width: auto;
+    max-height: 46vh;
+    overflow-y: auto;
+  }
+
+  .dialog-confirm {
+    width: calc(100vw - 28px);
+    height: auto;
+  }
+}

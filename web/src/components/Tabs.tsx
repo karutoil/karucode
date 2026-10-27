@@ -1,0 +1,84 @@
+import { useId } from 'preact/hooks';
+import type { JSX } from 'preact';
+
+export interface TabItem<T extends string> {
+  id: T;
+  label: string;
+  count?: number;
+}
+
+export interface TabsProps<T extends string> {
+  items: readonly TabItem<T>[];
+  active: T;
+  onChange: (id: T) => void;
+  label: string;
+  idPrefix?: string;
+}
+
+/** Keyboard-operable tablist (automatic activation, Home/End support). */
+export function Tabs<T extends string>({ items, active, onChange, label, idPrefix }: TabsProps<T>): JSX.Element {
+  const generated = useId();
+  const prefix = idPrefix ?? generated;
+  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
+    const index = items.findIndex((item) => item.id === active);
+    if (index === -1) return;
+    let next = index;
+    if (event.key === 'ArrowRight') next = (index + 1) % items.length;
+    else if (event.key === 'ArrowLeft') next = (index - 1 + items.length) % items.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = items.length - 1;
+    else return;
+    event.preventDefault();
+    const target = items[next];
+    if (!target) return;
+    onChange(target.id);
+    const tab = document.getElementById(`${prefix}-tab-${target.id}`);
+    tab?.focus();
+  };
+
+  return (
+    <div class="tabs" role="tablist" aria-label={label} onKeyDown={onKeyDown}>
+      {items.map((item) => {
+        const selected = item.id === active;
+        return (
+          <button
+            key={item.id}
+            id={`${prefix}-tab-${item.id}`}
+            type="button"
+            role="tab"
+            class={`tab${selected ? ' is-active' : ''}`}
+            aria-selected={selected}
+            aria-controls={selected ? `${prefix}-panel-${item.id}` : undefined}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onChange(item.id)}
+          >
+            <span>{item.label}</span>
+            {item.count !== undefined && item.count > 0 ? <span class="tab-count">{item.count}</span> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export interface TabPanelProps {
+  id: string;
+  idPrefix: string;
+  active: boolean;
+  children: JSX.Element | JSX.Element[] | null;
+}
+
+export function TabPanel({ id, idPrefix, active, children }: TabPanelProps): JSX.Element | null {
+  if (!active) return null;
+  return (
+    <div
+      id={`${idPrefix}-panel-${id}`}
+      class="tab-panel"
+      role="tabpanel"
+      aria-labelledby={`${idPrefix}-tab-${id}`}
+      tabIndex={0}
+    >
+      {children}
+    </div>
+  );
+}
