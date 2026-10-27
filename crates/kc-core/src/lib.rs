@@ -25,4 +25,6 @@ pub use ids::{AgentId, ApprovalId, RunId, SessionId};
 pub use message::{Message, Role, ToolCall};
 pub use paths::Workspace;
 pub use settings::Settings;
-pub use tool::{Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOrigin, ToolOutcome, ToolRegistry, ToolSpec};
+pub use tool::{
+    Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOrigin, ToolOutcome, ToolRegistry, ToolSpec,
+};

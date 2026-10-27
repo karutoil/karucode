@@ -13,7 +13,14 @@ pub fn system_prompt(
 ) -> String {
     let tool_list = tools
         .iter()
-        .map(|t| format!("- `{}`: {} ({})", t.name, first_sentence(&t.description), t.origin.label()))
+        .map(|t| {
+            format!(
+                "- `{}`: {} ({})",
+                t.name,
+                first_sentence(&t.description),
+                t.origin.label()
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -26,7 +33,10 @@ pub fn system_prompt(
     let extra_block = if extra.is_empty() {
         String::new()
     } else {
-        format!("\nAdditional context provided by plugins:\n{}\n", extra.join("\n"))
+        format!(
+            "\nAdditional context provided by plugins:\n{}\n",
+            extra.join("\n")
+        )
     };
 
     format!(
@@ -60,7 +70,11 @@ Available tools:
         iters = limits.max_iterations,
         run_secs = limits.max_run_secs,
         extra_block = extra_block,
-        tool_list = if tool_list.is_empty() { "(none)".to_string() } else { tool_list },
+        tool_list = if tool_list.is_empty() {
+            "(none)".to_string()
+        } else {
+            tool_list
+        },
     )
 }
 

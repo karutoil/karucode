@@ -6,17 +6,48 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    SessionCreated { session_id: String, title: String },
-    SessionRenamed { session_id: String, title: String },
-    SessionDeleted { session_id: String },
-    RunStarted { run_id: String, prompt: String },
-    RunFinished { run_id: String, status: String, #[serde(default)] error: Option<String> },
-    RunCancelled { run_id: String },
-    IterationStarted { iteration: u32 },
-    TextDelta { delta: String },
-    ReasoningDelta { delta: String },
-    Usage { input_tokens: u32, output_tokens: u32 },
-    ToolCallStarted { call_id: String, name: String, arguments: serde_json::Value },
+    SessionCreated {
+        session_id: String,
+        title: String,
+    },
+    SessionRenamed {
+        session_id: String,
+        title: String,
+    },
+    SessionDeleted {
+        session_id: String,
+    },
+    RunStarted {
+        run_id: String,
+        prompt: String,
+    },
+    RunFinished {
+        run_id: String,
+        status: String,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    RunCancelled {
+        run_id: String,
+    },
+    IterationStarted {
+        iteration: u32,
+    },
+    TextDelta {
+        delta: String,
+    },
+    ReasoningDelta {
+        delta: String,
+    },
+    Usage {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
+    ToolCallStarted {
+        call_id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
     ToolCallFinished {
         call_id: String,
         name: String,
@@ -25,11 +56,29 @@ pub enum Event {
         truncated: bool,
         duration_ms: u64,
     },
-    CommandStarted { call_id: String, command: String, cwd: String },
-    CommandOutput { call_id: String, stream: String, chunk: String },
-    CommandFinished { call_id: String, exit_code: Option<i32>, duration_ms: u64, truncated: bool },
-    ApprovalRequested { approval: ApprovalRequest },
-    ApprovalResolved { approval_id: String, decision: ApprovalDecision },
+    CommandStarted {
+        call_id: String,
+        command: String,
+        cwd: String,
+    },
+    CommandOutput {
+        call_id: String,
+        stream: String,
+        chunk: String,
+    },
+    CommandFinished {
+        call_id: String,
+        exit_code: Option<i32>,
+        duration_ms: u64,
+        truncated: bool,
+    },
+    ApprovalRequested {
+        approval: ApprovalRequest,
+    },
+    ApprovalResolved {
+        approval_id: String,
+        decision: ApprovalDecision,
+    },
     AgentSpawned {
         agent_id: String,
         name: String,
@@ -38,7 +87,11 @@ pub enum Event {
         model: String,
         parent_run_id: String,
     },
-    AgentProgress { agent_id: String, iterations: u32, note: String },
+    AgentProgress {
+        agent_id: String,
+        iterations: u32,
+        note: String,
+    },
     AgentFinished {
         agent_id: String,
         status: String,
@@ -46,8 +99,15 @@ pub enum Event {
         #[serde(default)]
         error: Option<String>,
     },
-    Notice { level: String, message: String },
-    Error { message: String, #[serde(default)] kind: Option<String> },
+    Notice {
+        level: String,
+        message: String,
+    },
+    Error {
+        message: String,
+        #[serde(default)]
+        kind: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

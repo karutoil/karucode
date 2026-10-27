@@ -368,14 +368,14 @@ impl SqliteStore {
             let current: i64 = conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .map_err(|e| db_err("read user_version", e))?;
-            if current >= SCHEMA_VERSION {
-                return Ok(());
-            }
             if current > SCHEMA_VERSION {
                 // Database written by a newer build: refuse rather than corrupt it.
                 return Err(Error::Store(format!(
                     "database schema v{current} is newer than supported v{SCHEMA_VERSION}"
                 )));
+            }
+            if current == SCHEMA_VERSION {
+                return Ok(());
             }
             for version in (current + 1)..=SCHEMA_VERSION {
                 let tx = conn
@@ -1894,6 +1894,26 @@ mod tests {
             }
         }
         assert_eq!(store.list_sessions().await.expect("sessions").len(), 20);
+    }
+
+    #[tokio::test]
+    async fn newer_schema_is_refused_instead_of_silently_accepted() {
+        let dir = std::env::temp_dir().join(format!(
+            "karucode-store-test-newer-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("karucode.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.pragma_update(None, "user_version", 99i64).unwrap();
+        }
+        match SqliteStore::open(&path).await {
+            Err(Error::Store(message)) => assert!(message.contains("newer"), "{message}"),
+            Err(other) => panic!("expected Store error, got {other}"),
+            Ok(_) => panic!("a database from a newer build must be refused"),
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[tokio::test]

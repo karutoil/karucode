@@ -14,9 +14,14 @@ const ERROR_EXCERPT_CHARS: usize = 480;
 
 /// Map a transport-level failure. Timeouts become [`Error::Timeout`]; everything
 /// else becomes a provider error naming the URL (never the credentials).
-pub(crate) fn map_reqwest_error(url: &str, err: &reqwest::Error, timeout: Duration) -> Error {
+pub(crate) fn map_reqwest_error(
+    url: &str,
+    err: &reqwest::Error,
+    timeout: Duration,
+    secrets: &[String],
+) -> Error {
     let detail = err.to_string();
-    let detail = redact(&detail, &[]);
+    let detail = redact(&detail, secrets);
     if err.is_timeout() {
         return Error::Timeout(format!(
             "provider at {url} did not respond within {}s: {detail}",
@@ -134,6 +139,13 @@ pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
         }
         // `Authorization: Bearer <key>` echoes must not survive either.
         if let Some(token) = secret.strip_prefix("Bearer ").map(str::trim) {
+            if !token.is_empty() && out.contains(token) {
+                out = out.replace(token, "[redacted]");
+            }
+        }
+        // A bare `Bearer <token>` header value is stored without the prefix by
+        // some callers; scrub the token part as well.
+        if let Some(token) = secret.strip_prefix("bearer ").map(str::trim) {
             if !token.is_empty() && out.contains(token) {
                 out = out.replace(token, "[redacted]");
             }

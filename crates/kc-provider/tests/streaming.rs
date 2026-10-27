@@ -298,10 +298,12 @@ async fn stream_without_done_terminator_still_finishes() {
     let (stream, _cancel) = start(model_config(&server), chat_request()).await;
     let chunks = collect(stream).await;
     assert_eq!(texts(&chunks), "partial");
+    // No finish_reason arrived: report `eof` so the runtime can warn that the
+    // answer may be incomplete, rather than claiming a clean stop.
     assert_eq!(
         chunks.last(),
         Some(&ProviderChunk::Finish {
-            reason: "stop".into()
+            reason: "eof".into()
         })
     );
 }
@@ -464,4 +466,47 @@ async fn json_body_instead_of_sse_is_a_clear_error() {
     let text = err.to_string();
     assert!(text.contains("stream: true"), "{text}");
     assert!(text.contains("application/json"), "{text}");
+}
+
+#[tokio::test]
+async fn object_form_tool_arguments_are_not_dropped() {
+    // Some gateways send `arguments` as an object instead of a JSON string.
+    let body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_o\",",
+        "\"function\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.txt\"}}}]}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, body).await }).await;
+    let (stream, _cancel) = start(model_config(&server), chat_request()).await;
+    let chunks = collect(stream).await;
+    let delta = chunks
+        .iter()
+        .find_map(|chunk| match chunk {
+            ProviderChunk::ToolCallDelta { arguments_delta, .. } => arguments_delta.clone(),
+            _ => None,
+        })
+        .expect("tool call delta");
+    let parsed: serde_json::Value = serde_json::from_str(&delta).expect("valid json arguments");
+    assert_eq!(parsed["path"], serde_json::json!("a.txt"));
+}
+
+#[tokio::test]
+async fn connect_error_redacts_the_api_key() {
+    // Point at a closed port; the URL and message must not contain the key.
+    let config = ModelConfig {
+        api_key: Some("sk-connect-secret".into()),
+        base_url: "http://127.0.0.1:1/v1".into(),
+        model: "mock-model".into(),
+        request_timeout_secs: 2,
+        ..ModelConfig::default()
+    };
+    let provider = kc_provider::OpenAiProvider::new(config).unwrap();
+    let err = provider
+        .stream_chat(chat_request(), tokio_util::sync::CancellationToken::new())
+        .await
+        .err()
+        .expect("connect must fail");
+    let text = err.to_string();
+    assert!(!text.contains("sk-connect-secret"), "{text}");
 }

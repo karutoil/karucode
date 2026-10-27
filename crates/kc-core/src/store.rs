@@ -1,6 +1,6 @@
 use crate::error::Result;
-use crate::message::ToolCall;
 use crate::message::Message;
+use crate::message::ToolCall;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -240,9 +240,15 @@ pub trait Store: Send + Sync {
 
     async fn append_message(&self, message: &NewMessage) -> Result<i64>;
     async fn list_messages(&self, session_id: &str, limit: usize) -> Result<Vec<StoredMessage>>;
-    async fn list_messages_after(&self, session_id: &str, after_id: i64, limit: usize) -> Result<Vec<StoredMessage>>;
+    async fn list_messages_after(
+        &self,
+        session_id: &str,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>>;
 
-    async fn create_run(&self, id: &str, session_id: &str, model: &str, prompt: &str) -> Result<()>;
+    async fn create_run(&self, id: &str, session_id: &str, model: &str, prompt: &str)
+        -> Result<()>;
     async fn finish_run(&self, run_id: &str, status: RunStatus, error: Option<&str>) -> Result<()>;
     async fn mark_interrupted_runs(&self) -> Result<usize>;
     async fn list_runs(&self, session_id: &str, limit: usize) -> Result<Vec<RunRecord>>;
@@ -254,7 +260,8 @@ pub trait Store: Send + Sync {
     async fn create_approval(&self, record: &ApprovalRecord) -> Result<()>;
     async fn resolve_approval(&self, id: &str, decision: &str) -> Result<()>;
     async fn expire_pending_approvals(&self, run_id: &str, reason: &str) -> Result<usize>;
-    async fn list_pending_approvals(&self, session_id: Option<&str>) -> Result<Vec<ApprovalRecord>>;
+    async fn list_pending_approvals(&self, session_id: Option<&str>)
+        -> Result<Vec<ApprovalRecord>>;
 
     async fn get_setting(&self, key: &str) -> Result<Option<String>>;
     async fn set_setting(&self, key: &str, value: &str) -> Result<()>;

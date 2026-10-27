@@ -111,7 +111,7 @@ impl Provider for OpenAiProvider {
                         timeout.as_secs()
                     )));
                 }
-                Ok(Err(err)) => return Err(errors::map_reqwest_error(&url, &err, timeout)),
+                Ok(Err(err)) => return Err(errors::map_reqwest_error(&url, &err, timeout, &secrets)),
                 Ok(Ok(response)) => response,
             },
         };
@@ -170,7 +170,7 @@ impl Provider for OpenAiProvider {
                     timeout.as_secs()
                 )));
             }
-            Ok(Err(err)) => return Err(errors::map_reqwest_error(&url, &err, timeout)),
+            Ok(Err(err)) => return Err(errors::map_reqwest_error(&url, &err, timeout, &secrets)),
             Ok(Ok(response)) => response,
         };
         if !response.status().is_success() {
@@ -183,7 +183,7 @@ impl Provider for OpenAiProvider {
             )
             .await);
         }
-        let body = read_limited(response, &url, MODELS_BODY_LIMIT, timeout).await?;
+        let body = read_limited(response, &url, MODELS_BODY_LIMIT, timeout, &secrets).await?;
         let value: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
             Error::Provider(format!(
                 "provider at {url} returned an unreadable model list: {e}"
@@ -202,6 +202,7 @@ async fn read_limited(
     url: &str,
     limit: usize,
     timeout: Duration,
+    secrets: &[String],
 ) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     while buf.len() < limit {
@@ -212,7 +213,7 @@ async fn read_limited(
             }
             Ok(None) => break,
             Err(err) => {
-                return Err(errors::map_reqwest_error(url, &err, timeout));
+                return Err(errors::map_reqwest_error(url, &err, timeout, secrets));
             }
         }
     }

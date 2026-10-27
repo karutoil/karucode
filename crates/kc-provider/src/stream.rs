@@ -99,9 +99,12 @@ impl StreamState {
                     }));
                 }
                 if !self.saw_finish {
+                    // The stream ended without an explicit finish_reason. Report
+                    // that honestly instead of claiming a clean stop; the runtime
+                    // turns `eof` into a "may be incomplete" notice.
                     self.saw_finish = true;
                     return Some(Ok(ProviderChunk::Finish {
-                        reason: "stop".into(),
+                        reason: "eof".into(),
                     }));
                 }
                 return None;
@@ -124,7 +127,12 @@ impl StreamState {
                     }
                     Some(Err(err)) => {
                         self.finished = true;
-                        return Some(Err(map_reqwest_error(&self.url, &err, self.timeout)));
+                        return Some(Err(map_reqwest_error(
+                            &self.url,
+                            &err,
+                            self.timeout,
+                            &self.secrets,
+                        )));
                     }
                     Some(Ok(bytes)) => self.feed(&bytes),
                 },
@@ -257,7 +265,9 @@ impl StreamState {
                         .and_then(|f| f.get("name"))
                         .and_then(Value::as_str)
                         .and_then(non_empty);
-                    let arguments = function.and_then(|f| delta_text(f.get("arguments")));
+                    let arguments = function
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(argument_text);
                     if id.is_none() && name.is_none() && arguments.is_none() {
                         continue;
                     }
@@ -312,6 +322,17 @@ fn text_of(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+/// Tool-call arguments: normally a JSON *string* that streams in fragments, but
+/// some gateways send a ready-made object/array. Serialise those so the call is
+/// not silently executed with empty arguments.
+fn argument_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Null => None,
+        other => Some(other.to_string()),
     }
 }
 

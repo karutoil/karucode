@@ -197,16 +197,36 @@ pub struct Limits {
     pub max_tool_calls_per_turn: usize,
 }
 
-fn d_iterations() -> u32 { 32 }
-fn d_run_secs() -> u64 { 1800 }
-fn d_tool_output() -> usize { 24_000 }
-fn d_cmd_output() -> usize { 32_000 }
-fn d_cmd_timeout() -> u64 { 120 }
-fn d_cmd_timeout_max() -> u64 { 600 }
-fn d_file_read() -> usize { 200_000 }
-fn d_search() -> usize { 200 }
-fn d_context_chars() -> usize { 240_000 }
-fn d_parallel_calls() -> usize { 8 }
+fn d_iterations() -> u32 {
+    32
+}
+fn d_run_secs() -> u64 {
+    1800
+}
+fn d_tool_output() -> usize {
+    24_000
+}
+fn d_cmd_output() -> usize {
+    32_000
+}
+fn d_cmd_timeout() -> u64 {
+    120
+}
+fn d_cmd_timeout_max() -> u64 {
+    600
+}
+fn d_file_read() -> usize {
+    200_000
+}
+fn d_search() -> usize {
+    200
+}
+fn d_context_chars() -> usize {
+    240_000
+}
+fn d_parallel_calls() -> usize {
+    8
+}
 
 impl Default for Limits {
     fn default() -> Self {
@@ -240,10 +260,18 @@ pub struct SubagentConfig {
     pub timeout_secs: u64,
 }
 
-fn d_sub_concurrency() -> usize { 3 }
-fn d_sub_iterations() -> u32 { 16 }
-fn d_sub_depth() -> u8 { 1 }
-fn d_sub_timeout() -> u64 { 900 }
+fn d_sub_concurrency() -> usize {
+    3
+}
+fn d_sub_iterations() -> u32 {
+    16
+}
+fn d_sub_depth() -> u8 {
+    1
+}
+fn d_sub_timeout() -> u64 {
+    900
+}
 
 impl Default for SubagentConfig {
     fn default() -> Self {
@@ -275,7 +303,9 @@ pub struct PluginConfig {
     pub settings: BTreeMap<String, serde_json::Value>,
 }
 
-fn d_true() -> bool { true }
+fn d_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpServerConfig {
@@ -298,7 +328,9 @@ pub struct McpServerConfig {
     pub require_approval: bool,
 }
 
-fn d_stdio() -> String { "stdio".into() }
+fn d_stdio() -> String {
+    "stdio".into()
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConfigFile {
@@ -329,7 +361,6 @@ pub struct ConfigFile {
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -423,47 +454,109 @@ impl Config {
             ..Config::default()
         };
 
-        if let Some(v) = file.host { cfg.host = v; }
-        if let Some(v) = file.port { cfg.port = v; }
-        if let Some(v) = file.workspace { cfg.workspace_root = v; }
-        if let Some(v) = file.data_dir { cfg.data_dir = v; }
-        if let Some(v) = file.auth_token { cfg.auth_token = Some(v); }
-        if let Some(v) = file.lock_settings { cfg.lock_settings = v; }
-        if let Some(v) = file.log_level { cfg.log_level = v; }
-        if let Some(v) = file.model { cfg.model = v; }
-        if let Some(v) = file.limits { cfg.limits = v; }
-        if let Some(v) = file.approvals { cfg.approvals = v; }
-        if let Some(v) = file.subagents { cfg.subagents = v; }
-        if !file.plugins.is_empty() { cfg.plugins = file.plugins; }
-        if !file.mcp_servers.is_empty() { cfg.mcp_servers = file.mcp_servers; }
+        if let Some(v) = file.host {
+            cfg.host = v;
+        }
+        if let Some(v) = file.port {
+            cfg.port = v;
+        }
+        if let Some(v) = file.workspace {
+            cfg.workspace_root = v;
+        }
+        if let Some(v) = file.data_dir {
+            cfg.data_dir = v;
+        }
+        if let Some(v) = file.auth_token {
+            cfg.auth_token = Some(v);
+        }
+        if let Some(v) = file.lock_settings {
+            cfg.lock_settings = v;
+        }
+        if let Some(v) = file.log_level {
+            cfg.log_level = v;
+        }
+        if let Some(v) = file.model {
+            cfg.model = v;
+        }
+        if let Some(v) = file.limits {
+            cfg.limits = v;
+        }
+        if let Some(v) = file.approvals {
+            cfg.approvals = v;
+        }
+        if let Some(v) = file.subagents {
+            cfg.subagents = v;
+        }
+        if !file.plugins.is_empty() {
+            cfg.plugins = file.plugins;
+        }
+        if !file.mcp_servers.is_empty() {
+            cfg.mcp_servers = file.mcp_servers;
+        }
 
         // Environment overrides.
-        if let Some(v) = env_str("KARUCODE_HOST") { cfg.host = v; }
-        if let Some(v) = env_parse("KARUCODE_PORT") { cfg.port = v; }
-        if let Some(v) = env_str("KARUCODE_WORKSPACE") { cfg.workspace_root = PathBuf::from(v); }
-        if let Some(v) = env_str("KARUCODE_DATA_DIR") { cfg.data_dir = PathBuf::from(v); }
-        if let Some(v) = env_str("KARUCODE_AUTH_TOKEN") { cfg.auth_token = Some(v); }
-        if let Some(v) = env_parse("KARUCODE_LOCK_SETTINGS") { cfg.lock_settings = v; }
-        if let Some(v) = env_str("KARUCODE_LOG").or_else(|| env_str("RUST_LOG")) { cfg.log_level = v; }
-        if let Some(v) = env_str("KARUCODE_WEB_DIR") { cfg.web_dir = Some(PathBuf::from(v)); }
+        if let Some(v) = env_str("KARUCODE_HOST") {
+            cfg.host = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_PORT") {
+            cfg.port = v;
+        }
+        if let Some(v) = env_str("KARUCODE_WORKSPACE") {
+            cfg.workspace_root = PathBuf::from(v);
+        }
+        if let Some(v) = env_str("KARUCODE_DATA_DIR") {
+            cfg.data_dir = PathBuf::from(v);
+        }
+        if let Some(v) = env_str("KARUCODE_AUTH_TOKEN") {
+            cfg.auth_token = Some(v);
+        }
+        if let Some(v) = env_parse("KARUCODE_LOCK_SETTINGS") {
+            cfg.lock_settings = v;
+        }
+        if let Some(v) = env_str("KARUCODE_LOG").or_else(|| env_str("RUST_LOG")) {
+            cfg.log_level = v;
+        }
+        if let Some(v) = env_str("KARUCODE_WEB_DIR") {
+            cfg.web_dir = Some(PathBuf::from(v));
+        }
 
-        if let Some(v) = env_str("KARUCODE_MODEL") { cfg.model.model = v; }
+        if let Some(v) = env_str("KARUCODE_MODEL") {
+            cfg.model.model = v;
+        }
         if let Some(v) = env_str("KARUCODE_BASE_URL").or_else(|| env_str("OPENAI_BASE_URL")) {
             cfg.model.base_url = v;
         }
         if let Some(v) = env_str("KARUCODE_API_KEY").or_else(|| env_str("OPENAI_API_KEY")) {
             cfg.model.api_key = Some(v);
         }
-        if let Some(v) = env_parse("KARUCODE_TEMPERATURE") { cfg.model.temperature = v; }
-        if let Some(v) = env_parse("KARUCODE_MAX_TOKENS") { cfg.model.max_tokens = Some(v); }
-        if let Some(v) = env_parse("KARUCODE_REQUEST_TIMEOUT_SECS") { cfg.model.request_timeout_secs = v; }
+        if let Some(v) = env_parse("KARUCODE_TEMPERATURE") {
+            cfg.model.temperature = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_MAX_TOKENS") {
+            cfg.model.max_tokens = Some(v);
+        }
+        if let Some(v) = env_parse("KARUCODE_REQUEST_TIMEOUT_SECS") {
+            cfg.model.request_timeout_secs = v;
+        }
 
-        if let Some(v) = env_parse("KARUCODE_MAX_ITERATIONS") { cfg.limits.max_iterations = v; }
-        if let Some(v) = env_parse("KARUCODE_MAX_RUN_SECS") { cfg.limits.max_run_secs = v; }
-        if let Some(v) = env_parse("KARUCODE_MAX_TOOL_OUTPUT_BYTES") { cfg.limits.max_tool_output_bytes = v; }
-        if let Some(v) = env_parse("KARUCODE_COMMAND_TIMEOUT_SECS") { cfg.limits.command_timeout_secs = v; }
-        if let Some(v) = env_parse("KARUCODE_MAX_FILE_READ_BYTES") { cfg.limits.max_file_read_bytes = v; }
-        if let Some(v) = env_parse("KARUCODE_CONTEXT_MAX_CHARS") { cfg.limits.context_max_chars = v; }
+        if let Some(v) = env_parse("KARUCODE_MAX_ITERATIONS") {
+            cfg.limits.max_iterations = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_MAX_RUN_SECS") {
+            cfg.limits.max_run_secs = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_MAX_TOOL_OUTPUT_BYTES") {
+            cfg.limits.max_tool_output_bytes = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_COMMAND_TIMEOUT_SECS") {
+            cfg.limits.command_timeout_secs = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_MAX_FILE_READ_BYTES") {
+            cfg.limits.max_file_read_bytes = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_CONTEXT_MAX_CHARS") {
+            cfg.limits.context_max_chars = v;
+        }
 
         if let Some(v) = env_str("KARUCODE_APPROVAL_MODE") {
             cfg.approvals.mode = ApprovalMode::parse(&v).ok_or_else(|| {
@@ -473,13 +566,25 @@ impl Config {
             })?;
         }
         if let Some(v) = env_str("KARUCODE_ALLOW_COMMANDS") {
-            cfg.approvals.allow_commands = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            cfg.approvals.allow_commands = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
-        if let Some(v) = env_parse("KARUCODE_APPROVAL_TIMEOUT_SECS") { cfg.approvals.timeout_secs = v; }
+        if let Some(v) = env_parse("KARUCODE_APPROVAL_TIMEOUT_SECS") {
+            cfg.approvals.timeout_secs = v;
+        }
 
-        if let Some(v) = env_parse("KARUCODE_SUBAGENT_CONCURRENCY") { cfg.subagents.max_concurrent = v; }
-        if let Some(v) = env_parse("KARUCODE_SUBAGENT_MAX_ITERATIONS") { cfg.subagents.max_iterations = v; }
-        if let Some(v) = env_parse("KARUCODE_ALLOW_RECURSIVE_SUBAGENTS") { cfg.subagents.allow_recursive = v; }
+        if let Some(v) = env_parse("KARUCODE_SUBAGENT_CONCURRENCY") {
+            cfg.subagents.max_concurrent = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_SUBAGENT_MAX_ITERATIONS") {
+            cfg.subagents.max_iterations = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_ALLOW_RECURSIVE_SUBAGENTS") {
+            cfg.subagents.allow_recursive = v;
+        }
 
         // Validate.
         if cfg.port == 0 {
@@ -488,12 +593,21 @@ impl Config {
         if cfg.model.base_url.trim().is_empty() {
             return Err(Error::Config("model.base_url may not be empty".into()));
         }
-        if cfg.auth_token.as_deref().map(|t| t.len() < 16).unwrap_or(false) {
+        if cfg
+            .auth_token
+            .as_deref()
+            .map(|t| t.len() < 16)
+            .unwrap_or(false)
+        {
             return Err(Error::Config(
                 "auth token must be at least 16 characters".into(),
             ));
         }
-        if cfg.host != "127.0.0.1" && cfg.host != "localhost" && cfg.host != "::1" && cfg.auth_token.is_none() {
+        if cfg.host != "127.0.0.1"
+            && cfg.host != "localhost"
+            && cfg.host != "::1"
+            && cfg.auth_token.is_none()
+        {
             return Err(Error::Config(format!(
                 "refusing to bind {host} without KARUCODE_AUTH_TOKEN: remote access requires authentication",
                 host = cfg.host
@@ -544,7 +658,10 @@ mod tests {
     #[test]
     fn approval_mode_parses() {
         assert_eq!(ApprovalMode::parse("AUTO"), Some(ApprovalMode::Auto));
-        assert_eq!(ApprovalMode::parse("ask_commands"), Some(ApprovalMode::AskCommands));
+        assert_eq!(
+            ApprovalMode::parse("ask_commands"),
+            Some(ApprovalMode::AskCommands)
+        );
         assert_eq!(ApprovalMode::parse("nonsense"), None);
     }
 

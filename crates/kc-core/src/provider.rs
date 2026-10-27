@@ -82,7 +82,13 @@ pub struct ToolCallAccumulator {
 }
 
 impl ToolCallAccumulator {
-    pub fn apply(&mut self, index: usize, id: Option<String>, name: Option<String>, args: Option<String>) {
+    pub fn apply(
+        &mut self,
+        index: usize,
+        id: Option<String>,
+        name: Option<String>,
+        args: Option<String>,
+    ) {
         while self.calls.len() <= index {
             self.calls.push(ToolCall::default());
         }
@@ -130,9 +136,19 @@ mod tests {
     #[test]
     fn accumulator_merges_split_tool_call_deltas() {
         let mut acc = ToolCallAccumulator::default();
-        acc.apply(0, Some("call_1".into()), Some("read_file".into()), Some("{\"pa".into()));
+        acc.apply(
+            0,
+            Some("call_1".into()),
+            Some("read_file".into()),
+            Some("{\"pa".into()),
+        );
         acc.apply(0, None, None, Some("th\":\"a.txt\"}".into()));
-        acc.apply(1, Some("call_2".into()), Some("list_dir".into()), Some("{}".into()));
+        acc.apply(
+            1,
+            Some("call_2".into()),
+            Some("list_dir".into()),
+            Some("{}".into()),
+        );
         let calls = acc.finish();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].arguments, "{\"path\":\"a.txt\"}");

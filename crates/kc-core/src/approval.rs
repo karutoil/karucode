@@ -40,7 +40,10 @@ pub enum ApprovalDecision {
 
 impl ApprovalDecision {
     pub fn is_allowed(&self) -> bool {
-        matches!(self, ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession)
+        matches!(
+            self,
+            ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession
+        )
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -153,7 +156,10 @@ mod tests {
     #[test]
     fn ask_commands_allows_workspace_writes() {
         let v = view(ApprovalMode::AskCommands, &[]);
-        assert_eq!(v.for_write(std::path::Path::new("/w/a.txt")), AutoDecision::Allow);
+        assert_eq!(
+            v.for_write(std::path::Path::new("/w/a.txt")),
+            AutoDecision::Allow
+        );
         assert_eq!(v.for_shell("ls"), AutoDecision::Ask);
     }
 }

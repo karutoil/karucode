@@ -72,9 +72,20 @@ def api(url: str, method: str = "GET", body=None, timeout=30, headers=None):
     req.add_header("X-Karucode-Client", "web")
     for k, v in (headers or {}).items():
         req.add_header(k, v)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        raw = r.read()
-        return json.loads(raw) if raw else {}
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+            status = r.status
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"{method} {url} -> {e.code}: {e.read()[:400]!r}") from e
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"{method} {url} -> {status}, non-JSON body: {raw[:400]!r}"
+        ) from e
 
 
 def start_server(workspace: Path, data_dir: Path, port: int, base_url: str, extra_env=None):
@@ -135,11 +146,11 @@ def run_bench(runs: int) -> list[dict]:
                 time.sleep(3)
                 idle_rss = rss_kb(server.pid)
 
-                sessions = [api(url, "POST", {"title": f"bench {n}"}) for n in range(3)]
+                sessions = [api(f"{url}/api/sessions", "POST", {"title": f"bench {n}"}) for n in range(3)]
                 t0 = time.perf_counter()
                 run_ids = []
                 for s in sessions:
-                    out = api(url, "POST", f"/api/sessions/{s['id']}/messages", {"content": "[tool:read_file] bench task"})
+                    out = api(f"{url}/api/sessions/{s['id']}/messages", "POST", {"content": "[tool:read_file] bench task"})
                     run_ids.append(out["run_id"])
 
                 peak = idle_rss
@@ -149,7 +160,7 @@ def run_bench(runs: int) -> list[dict]:
                     peak = max(peak, rss_kb(server.pid))
                     active = False
                     for s in sessions:
-                        detail = api(url, f"/api/sessions/{s['id']}")
+                        detail = api(f"{url}/api/sessions/{s['id']}")
                         if any(r["status"] == "running" for r in detail["runs"]):
                             active = True
                     time.sleep(0.05)
