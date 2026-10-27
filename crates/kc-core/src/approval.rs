@@ -1,6 +1,5 @@
 use crate::config::ApprovalMode;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -82,8 +81,6 @@ impl ApprovalPolicyView {
                     .any(|p| !p.is_empty() && cmd.starts_with(p.as_str()))
                 {
                     AutoDecision::Allow
-                } else if self.mode == ApprovalMode::AskCommands {
-                    AutoDecision::Ask
                 } else {
                     AutoDecision::Ask
                 }
@@ -91,7 +88,7 @@ impl ApprovalPolicyView {
         }
     }
 
-    pub fn for_write(&self, path: &PathBuf) -> AutoDecision {
+    pub fn for_write(&self, path: &std::path::Path) -> AutoDecision {
         match self.mode {
             ApprovalMode::Auto => AutoDecision::Allow,
             ApprovalMode::ReadOnly => AutoDecision::Deny,
@@ -136,7 +133,7 @@ mod tests {
     fn read_only_denies_mutations_and_shell() {
         let v = view(ApprovalMode::ReadOnly, &[]);
         assert_eq!(v.for_shell("rm -rf /"), AutoDecision::Deny);
-        assert_eq!(v.for_write(&PathBuf::from("a")), AutoDecision::Deny);
+        assert_eq!(v.for_write(std::path::Path::new("a")), AutoDecision::Deny);
     }
 
     #[test]
@@ -156,7 +153,7 @@ mod tests {
     #[test]
     fn ask_commands_allows_workspace_writes() {
         let v = view(ApprovalMode::AskCommands, &[]);
-        assert_eq!(v.for_write(&PathBuf::from("/w/a.txt")), AutoDecision::Allow);
+        assert_eq!(v.for_write(std::path::Path::new("/w/a.txt")), AutoDecision::Allow);
         assert_eq!(v.for_shell("ls"), AutoDecision::Ask);
     }
 }

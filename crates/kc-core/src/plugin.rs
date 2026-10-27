@@ -71,7 +71,7 @@ impl PluginError {
 /// Messages sent from the plugin to the core.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-enum InboundRaw {
+pub enum InboundRaw {
     Response {
         id: u64,
         #[serde(default)]
@@ -87,6 +87,7 @@ enum InboundRaw {
 }
 
 impl InboundRaw {
+    /// Parse one inbound frame from the plugin process.
     pub fn parse(value: serde_json::Value) -> Result<Self, serde_json::Error> {
         serde_json::from_value(value)
     }

@@ -14,10 +14,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
     /// Ask for shell commands and mutating tools (default).
+    #[default]
     Ask,
     /// Ask only for shell commands; file writes inside the workspace are allowed.
     AskCommands,
@@ -25,12 +26,6 @@ pub enum ApprovalMode {
     Auto,
     /// Only read-only tools are permitted; mutations and shell are denied.
     ReadOnly,
-}
-
-impl Default for ApprovalMode {
-    fn default() -> Self {
-        ApprovalMode::Ask
-    }
 }
 
 impl ApprovalMode {
@@ -305,7 +300,7 @@ pub struct McpServerConfig {
 
 fn d_stdio() -> String { "stdio".into() }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConfigFile {
     #[serde(default)]
     pub host: Option<String>,
@@ -335,25 +330,6 @@ pub struct ConfigFile {
     pub mcp_servers: Vec<McpServerConfig>,
 }
 
-impl Default for ConfigFile {
-    fn default() -> Self {
-        Self {
-            host: None,
-            port: None,
-            workspace: None,
-            data_dir: None,
-            auth_token: None,
-            lock_settings: None,
-            log_level: None,
-            model: None,
-            limits: None,
-            approvals: None,
-            subagents: None,
-            plugins: Vec::new(),
-            mcp_servers: Vec::new(),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -442,8 +418,10 @@ impl Config {
     }
 
     fn from_parts(file: ConfigFile, config_path: Option<PathBuf>) -> Result<Self> {
-        let mut cfg = Config::default();
-        cfg.config_path = config_path;
+        let mut cfg = Config {
+            config_path,
+            ..Config::default()
+        };
 
         if let Some(v) = file.host { cfg.host = v; }
         if let Some(v) = file.port { cfg.port = v; }
@@ -547,14 +525,16 @@ mod tests {
         assert!(l.command_timeout_secs > 0);
         assert!(l.max_tool_output_bytes > 0);
         let s = SubagentConfig::default();
-        assert_eq!(s.allow_recursive, false);
+        assert!(!s.allow_recursive);
         assert!(s.max_concurrent >= 1);
     }
 
     #[test]
     fn model_public_view_hides_api_key() {
-        let mut m = ModelConfig::default();
-        m.api_key = Some("sk-super-secret".into());
+        let m = ModelConfig {
+            api_key: Some("sk-super-secret".into()),
+            ..ModelConfig::default()
+        };
         let v = m.public_view();
         let text = v.to_string();
         assert!(!text.contains("sk-super-secret"));
@@ -570,11 +550,15 @@ mod tests {
 
     #[test]
     fn remote_bind_without_token_is_rejected() {
-        let mut file = ConfigFile::default();
-        file.host = Some("0.0.0.0".into());
+        let file = ConfigFile {
+            host: Some("0.0.0.0".into()),
+            ..ConfigFile::default()
+        };
         // Can't set env safely in parallel tests; exercise validation directly.
-        let mut cfg = Config::default();
-        cfg.host = "0.0.0.0".into();
+        let cfg = Config {
+            host: "0.0.0.0".into(),
+            ..Config::default()
+        };
         assert!(cfg.auth_token.is_none());
         // from_parts applies the same rule via env; emulate it:
         let err = (|| -> Result<()> {
