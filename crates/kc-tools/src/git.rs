@@ -25,13 +25,36 @@ pub struct DiffReport {
     pub empty: bool,
 }
 
+/// Config overrides passed before the subcommand so a cloned repository cannot
+/// make a read-only inspection run code from its own config:
+///
+/// * `core.fsmonitor=false` disables the fsmonitor hook (`git status` runs it);
+/// * `diff.external=` disables `GIT_EXTERNAL_DIFF`/`diff.external` (`git diff`
+///   would otherwise exec it);
+/// * `core.pager=cat` defeats a repo-configured pager.
+const SAFE_CONFIG: [&str; 6] = [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "diff.external=",
+    "-c",
+    "core.pager=cat",
+];
+
 async fn git(dir: &Path, args: &[String]) -> Result<GitRun> {
     let output = tokio::process::Command::new("git")
+        .args(SAFE_CONFIG)
         .args(args)
         .current_dir(dir)
         .env("LC_ALL", "C")
-        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PAGER", "cat")
+        // An empty value explicitly disables an external diff driver.
+        .env("GIT_EXTERNAL_DIFF", "")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // Inherited git variables would point the command at another repository.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
         .stdin(std::process::Stdio::null())
         .output()
         .await
@@ -154,7 +177,14 @@ pub async fn diff(
     staged: bool,
     base: Option<&str>,
 ) -> Result<DiffReport> {
-    let mut args: Vec<String> = vec!["diff".to_string()];
+    // `--no-ext-diff` covers external diff *drivers* selected through
+    // `.gitattributes` (`diff.<driver>.command`), which `diff.external=` alone
+    // does not disable. `--no-textconv` does the same for `diff.<driver>.textconv`:
+    // both are repository-controlled commands that `git diff` would execute.
+    let mut args: Vec<String> = ["diff", "--no-ext-diff", "--no-textconv"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     if staged {
         args.push("--staged".to_string());
     }
@@ -245,7 +275,186 @@ pub async fn diff(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_branch;
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("kc-tools-git-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) -> std::process::Output {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("LC_ALL", "C")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("the git-tool tests need `git` on PATH");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    }
+
+    fn marker_script(dir: &Path, name: &str, marker: &Path) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// A repository whose own config runs unmarked scripts on `status`/`diff`.
+    fn trapped_repo(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let dir = temp_dir(tag);
+        git_in(&dir, &["init", "-q", "."]);
+        let fs_marker = dir.join("FSMONITOR_MARKER");
+        let diff_marker = dir.join("DIFF_MARKER");
+        let fs_hook = marker_script(&dir, "fsmonitor.sh", &fs_marker);
+        let diff_hook = marker_script(&dir, "diff.sh", &diff_marker);
+        git_in(
+            &dir,
+            &["config", "core.fsmonitor", fs_hook.to_str().unwrap()],
+        );
+        git_in(
+            &dir,
+            &["config", "diff.external", diff_hook.to_str().unwrap()],
+        );
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git_in(&dir, &["add", "a.txt"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        (dir, fs_marker, diff_marker)
+    }
+
+    #[tokio::test]
+    async fn status_and_diff_never_execute_repository_configured_hooks() {
+        let (dir, fs_marker, diff_marker) = trapped_repo("config-hooks");
+
+        // Control: without the hardening the repository really does execute
+        // both hooks; otherwise the assertions below would prove nothing.
+        Command::new("git")
+            .args(["status", "--porcelain=v1"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            fs_marker.exists(),
+            "control: `git status` should run core.fsmonitor"
+        );
+        std::fs::remove_file(&fs_marker).ok();
+        Command::new("git")
+            .args(["diff"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            diff_marker.exists(),
+            "control: `git diff` should run diff.external"
+        );
+        std::fs::remove_file(&fs_marker).ok();
+        std::fs::remove_file(&diff_marker).ok();
+
+        let ws = Workspace::new(&dir).unwrap();
+        let report = status(&ws, None).await.unwrap();
+        assert!(report.is_repo, "{}", report.text);
+        assert!(
+            !fs_marker.exists(),
+            "`git status` executed a repository-configured core.fsmonitor"
+        );
+        assert!(!diff_marker.exists());
+
+        let patch = diff(&ws, None, false, None).await.unwrap();
+        assert!(!patch.empty, "{}", patch.text);
+        assert!(
+            !fs_marker.exists(),
+            "`git diff` executed a repository-configured core.fsmonitor"
+        );
+        assert!(
+            !diff_marker.exists(),
+            "`git diff` executed a repository-configured diff.external"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn diff_ignores_attributes_selected_external_drivers_and_textconv() {
+        let dir = temp_dir("attribute-drivers");
+        git_in(&dir, &["init", "-q", "."]);
+        let ext_marker = dir.join("EXT_MARKER");
+        let conv_marker = dir.join("TEXTCONV_MARKER");
+        let ext = marker_script(&dir, "ext.sh", &ext_marker);
+        let conv = marker_script(&dir, "conv.sh", &conv_marker);
+        std::fs::write(dir.join(".gitattributes"), "*.txt diff=evil\n").unwrap();
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git_in(&dir, &["add", "a.txt"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+
+        // Control: an external driver from .gitattributes + repo config runs.
+        git_in(
+            &dir,
+            &["config", "diff.evil.command", ext.to_str().unwrap()],
+        );
+        Command::new("git")
+            .args(["diff"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            ext_marker.exists(),
+            "control: `git diff` should run diff.evil.command"
+        );
+        git_in(&dir, &["config", "--unset", "diff.evil.command"]);
+        std::fs::remove_file(&ext_marker).ok();
+
+        // Control: a textconv driver executes too.
+        git_in(
+            &dir,
+            &["config", "diff.evil.textconv", conv.to_str().unwrap()],
+        );
+        Command::new("git")
+            .args(["diff"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            conv_marker.exists(),
+            "control: `git diff` should run diff.evil.textconv"
+        );
+        git_in(&dir, &["config", "--unset", "diff.evil.textconv"]);
+        std::fs::remove_file(&ext_marker).ok();
+        std::fs::remove_file(&conv_marker).ok();
+
+        // Hardened: both drivers are still configured, but neither may run.
+        git_in(
+            &dir,
+            &["config", "diff.evil.command", ext.to_str().unwrap()],
+        );
+        git_in(
+            &dir,
+            &["config", "diff.evil.textconv", conv.to_str().unwrap()],
+        );
+        let ws = Workspace::new(&dir).unwrap();
+        let patch = diff(&ws, None, false, None).await.unwrap();
+        assert!(!patch.empty, "{}", patch.text);
+        assert!(
+            !ext_marker.exists(),
+            "`git diff` ran an external diff driver"
+        );
+        assert!(!conv_marker.exists(), "`git diff` ran a textconv driver");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn branch_header_is_parsed() {

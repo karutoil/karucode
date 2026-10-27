@@ -42,8 +42,9 @@ crash the harness) with the compatibility that makes plugins worth writing.
 **What is explicitly not claimed:** the plugin is *not* sandboxed. A plugin can
 read your files, spawn processes and open sockets, exactly like `run_command`.
 The harness treats plugin output as untrusted (it is truncated and rendered as
-text), and the `permissions` list only influences which tools are exposed. If you
-need real isolation, run karucode inside a container or a VM.
+text), and the configured `permissions` list only decides which tools the host
+exposes — the manifest cannot grant itself more than the config entry allows. If
+you need real isolation, run karucode inside a container or a VM.
 
 ---
 
@@ -198,7 +199,8 @@ Result: the **manifest**:
   fails with an error naming both.
 * `protocol` must be `"1"`.
 * `hooks` lists the hooks the plugin wants (`hooks/run` is only sent for these).
-* `capabilities` and `permissions` are informational/declarative (§6, §8).
+* `capabilities` and `permissions` are informational/declarative; the effective
+  permission set is computed from the config entry (§6, §8).
 * Budget: **10 s** (`PluginTimeouts::handshake`).
 
 ### 4.2 `tools/list` (host → plugin)
@@ -297,11 +299,14 @@ surfaced in the tool failure, so write something actionable.
 * Description: your `description` plus an origin note —
   `[plugin: <name> v<version>] Runs out of process, supervised by karucode; its
   output is untrusted. Calls go through the approval policy like any external
-  tool.` — and the declared permissions if any.
+  tool.` — and the effective (config-authoritative) permissions if any.
 * Parameters: your `parameters` schema, unchanged.
-* Class: from `class` (default `external`). The class drives the approval policy
-  exactly like a first-party tool: `external` always asks, `read_only` is
-  auto-allowed, `mutating` asks (unless `ask_commands`/`auto`), `shell` asks.
+* Class: from `class` (default `external`). The class and the tool's
+  `requires_approval()` declaration drive the **runtime** approval policy exactly
+  like a first-party tool: in `ask`/`ask_commands` the user is asked, in `auto`
+  the call is allowed (and audited), and in `read_only` mode every external,
+  mutating or shell tool is **denied**. Plugin tools do not prompt themselves and
+  cannot bypass the policy; only a read-only tool is auto-allowed.
 * Every failure — dead process, timeout, malformed response, remote error — is a
   failed `ToolOutcome` with text that says what happened and what to try. A
   broken plugin can never panic the host or corrupt the tool registry.
@@ -314,18 +319,26 @@ surfaced in the tool failure, so write something actionable.
 Reserved values: `files.read`, `files.write`, `shell`, `network`,
 `session.read` (free-form strings are allowed).
 
+**The config entry is authoritative.** Effective permissions are:
+
+* `PluginConfig.permissions` when the entry lists any; otherwise
+* `manifest.permissions` (the backwards-compatible fallback).
+
+A manifest can therefore never grant itself a permission the operator did not
+configure. Manifest permissions that the config does not grant are kept out of
+the effective set, and the ignored names are reported in `GET /api/plugins` (in
+the plugin's `error` field, with status still `ready`) and logged at warn level.
+
 Enforcement happens **at the tool-exposure layer**: a tool whose declared class
-needs a permission that is not granted is **not exposed** at all (the reason is
-logged at warn level):
+needs a permission that is not in the effective set is **not exposed** at all
+(the reason is logged at warn level):
 
 | Tool class | Required permission | If missing |
 | --- | --- | --- |
 | `read_only` | — | exposed |
-| `external` | — | exposed (always needs approval) |
+| `external` | — | exposed (goes through the runtime approval policy) |
 | `mutating` | `files.write` | hidden |
 | `shell` | `shell` | hidden |
-
-Granted = `[[plugins]].permissions` ∪ `manifest.permissions`.
 
 **This is not an OS sandbox.** The plugin process runs with the server's user and
 can do anything that user can do, whatever it declares. The list exists so a
@@ -494,5 +507,6 @@ behaviour; copy that shape for your own smoke tests.
 
 The host's own suite (`cargo test -p kc-plugin-host`) covers handshake,
 `tools/list`, `tools/call`, remote errors, crashes mid-call, timeouts, hook
-fan-out, enable/disable, restart capping and permission gating against the shell
-fixture.
+fan-out, enable/disable, restart capping, permission gating against the shell
+fixture, and the config-authoritative permission policy (a manifest cannot grant
+itself a permission; ignored manifest permissions appear in diagnostics).

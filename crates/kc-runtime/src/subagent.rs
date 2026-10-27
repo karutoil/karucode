@@ -288,29 +288,22 @@ async fn run_subagent(
     // --- claims ---------------------------------------------------------------
     let mut warnings: Vec<String> = Vec::new();
     if !owned_paths.is_empty() {
-        if let Err(e) = store
+        // `claim_paths` records the claims and returns the *overlapping* claims
+        // held by other agents (already normalised and ancestor-aware), so use
+        // that result directly instead of re-deriving conflicts here.
+        match store
             .claim_paths(&session_id.0, &agent_id.0, &owned_paths, "write")
             .await
         {
-            warnings.push(format!("could not record path claims: {e}"));
-        }
-        match store.list_claims(&session_id.0).await {
-            Ok(claims) => {
-                for claim in claims {
-                    if claim.agent_id == agent_id.0 {
-                        continue;
-                    }
-                    for path in &owned_paths {
-                        if claim.path == *path {
-                            warnings.push(format!(
-                                "path `{path}` is also claimed by agent {}",
-                                claim.agent_id
-                            ));
-                        }
-                    }
+            Ok(conflicts) => {
+                for claim in conflicts {
+                    warnings.push(format!(
+                        "path `{}` is also claimed by agent {}",
+                        claim.path, claim.agent_id
+                    ));
                 }
             }
-            Err(e) => warnings.push(format!("could not list existing claims: {e}")),
+            Err(e) => warnings.push(format!("could not record path claims: {e}")),
         }
     }
 
@@ -323,8 +316,20 @@ async fn run_subagent(
     );
     task_message.agent_id = Some(agent_id.0.clone());
     if let Err(e) = store.append_message(&task_message).await {
+        // Claims were recorded before the task message; release them on this
+        // early return instead of leaking them for the rest of the session.
+        let release_note = match store.release_claims(&agent_id.0).await {
+            Ok(()) => None,
+            Err(release) => {
+                tracing::warn!(agent = %agent_id.0, error = %release, "could not release path claims");
+                Some(format!(" (releasing path claims also failed: {release})"))
+            }
+        };
         record.status = AgentStatus::Failed.as_str().to_string();
-        record.error = Some(format!("could not persist the subagent task: {e}"));
+        record.error = Some(format!(
+            "could not persist the subagent task: {e}{}",
+            release_note.unwrap_or_default()
+        ));
         record.updated_at = now_ms();
         record.finished_at = Some(now_ms());
         if store.upsert_agent(&record).await.is_ok() {

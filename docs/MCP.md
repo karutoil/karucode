@@ -39,6 +39,9 @@ The whole connect+handshake runs under a **15 s** cap
 
 * Command + args come from `command = [...]`; extra environment from `env = {}`.
 * stdout is the protocol; servers must log to stderr.
+* A protocol line is capped at **8 MiB**. A longer line means the server is not
+  speaking the protocol: the in-flight request fails with an explicit protocol
+  error and the connection is closed instead of buffering an unbounded line.
 * The child is killed on shutdown and on drop; a dead child fails all in-flight
   requests with the exit status.
 
@@ -54,6 +57,10 @@ The whole connect+handshake runs under a **15 s** cap
   (`data:` lines; `event:`/`id:`/`retry:`/comment lines are ignored). For SSE the
   client reads until the response with the matching id arrives, so servers that
   keep the stream open still work.
+* Response bodies are capped at **8 MiB**, and one SSE request may carry at most
+  **8 MiB** of stream data. Exceeding either limit is an explicit error (the
+  response is rejected, not truncated), so a hostile or broken server cannot make
+  the client buffer an unbounded body.
 * Non-2xx answers become failures that include the status and a short excerpt of
   the server's own body — never request headers.
 
@@ -70,7 +77,7 @@ name = "filesystem"
 transport = "stdio"
 command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/me/project"]
 enabled = true
-require_approval = true              # accepted; MCP tools always ask (see §4)
+require_approval = true              # false = exempt from the prompt (see §4)
 
 [mcp_servers.env]
 FASTMCP_LOG_LEVEL = "ERROR"
@@ -104,7 +111,7 @@ Fields:
 | `env` | `{}` | Extra environment for a stdio child. |
 | `headers` | `{}` | Extra HTTP headers (auth). Never logged. |
 | `enabled` | `true` | `false` keeps the server `disconnected` and unconnected. |
-| `require_approval` | `true` | Accepted for compatibility. Every MCP tool is class `External`, so the approval policy decides; the field does not weaken that. |
+| `require_approval` | `true` | `true` asks through the runtime approval policy; `false` exempts this server's tools from the prompt. It does not change the tool class (`External`), so `read_only` mode still denies the call. |
 
 ---
 
@@ -127,16 +134,22 @@ Fields:
 
 ## 4. Approval behaviour
 
-MCP tools are `ToolClass::External`. They therefore take **exactly the same
-approval path as first-party external tools**:
+MCP tools are `ToolClass::External`, and the runtime (not the tool) resolves the
+approval before the call leaves the process. Exactly the same path as first-party
+external and plugin tools:
 
 * `approvals.mode = "ask"` / `"ask_commands"` → the user is asked before the call
-  leaves the process;
+  leaves the process, unless the server is configured with
+  `require_approval = false`;
 * `"auto"` → allowed without a prompt (still audited in the event log);
-* `"read_only"` → denied: only read-only tools are permitted.
+* `"read_only"` → **denied** for external/mutating/shell tools, regardless of
+  `require_approval`. Only read-only tools are permitted, so a mutating MCP tool
+  cannot be called in this mode.
 
-The tool does not ask on its own; the runtime resolves the approval from the tool
-class, so MCP and plugins cannot bypass the policy.
+The tool does not ask on its own and cannot bypass the policy: it only reports
+its class and its `requires_approval()` declaration. `require_approval = false`
+is an explicit opt-out of the *prompt* for one configured server, chosen by the
+operator — it is not something the server itself can set.
 
 ---
 
@@ -243,6 +256,10 @@ sh + python3) and a canned HTTP/1.1 server built on `tokio::net::TcpListener`:
 * stdio handshake, `tools/list`, `tools/call`, `isError`, JSON-RPC errors;
 * connect timeout and failure isolation (good + missing + hanging servers);
 * per-call timeout and cancellation;
+* oversized HTTP bodies and SSE streams are rejected at the 8 MiB caps;
+* an oversized stdio protocol line is a prompt protocol error, not a hang;
+* `require_approval` is exposed through `Tool::requires_approval()` while the
+  class stays `External`;
 * HTTP handshake, session-id propagation, `Accept` header, JSON and SSE bodies;
 * HTTP 401 reporting without leaking configured headers;
 * stdio + HTTP servers coexisting in one manager.

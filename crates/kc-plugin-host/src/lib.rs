@@ -16,11 +16,12 @@
 //!
 //! Isolation is *process* isolation, not a sandbox: a plugin runs with the
 //! server's OS permissions. The declarative `permissions` list is a guard at the
-//! tool-exposure layer only.
+//! tool-exposure layer only, and the configured permissions are authoritative:
+//! a manifest cannot grant itself more than the config entry allows.
 
 use async_trait::async_trait;
 use kc_core::config::PluginConfig;
-use kc_core::plugin::{hooks, PluginDiagnostics, PluginStatus};
+use kc_core::plugin::{hooks, PluginDiagnostics, PluginManifest, PluginStatus};
 use kc_core::tool::{Tool, ToolClass};
 use serde::Deserialize;
 use serde_json::Value;
@@ -202,12 +203,16 @@ impl PluginHost {
                 .as_ref()
                 .map(|m| m.version.clone())
                 .unwrap_or_else(|| "unknown".into());
-            let mut granted: Vec<String> = slot.config.permissions.clone();
-            if let Some(m) = &manifest {
-                granted.extend(m.permissions.iter().cloned());
+            // The config entry is authoritative: a manifest cannot grant itself
+            // a permission the operator did not configure.
+            let (granted, ignored) = effective_permissions(&slot.config, manifest.as_ref());
+            if !ignored.is_empty() {
+                debug!(
+                    plugin = %slot.config.name,
+                    ignored = %ignored.join(", "),
+                    "ignoring plugin permissions that the config does not grant"
+                );
             }
-            granted.sort();
-            granted.dedup();
             for def in shared.tool_defs() {
                 let class = parse_class(def.class.as_deref());
                 if let Some(needed) = required_permission(class) {
@@ -410,8 +415,8 @@ impl PluginHost {
 }
 
 fn slot_diagnostics(slot: &PluginSlot) -> PluginDiagnostics {
-    if let Some(err) = &slot.setup_error {
-        return PluginDiagnostics {
+    let mut diagnostics = match &slot.setup_error {
+        Some(err) => PluginDiagnostics {
             name: slot.config.name.clone(),
             status: PluginStatus::Failed,
             manifest: None,
@@ -419,20 +424,72 @@ fn slot_diagnostics(slot: &PluginSlot) -> PluginDiagnostics {
             error: Some(err.clone()),
             pid: None,
             restart_count: 0,
-        };
-    }
-    match &slot.shared {
-        Some(shared) => shared.diagnostics(),
-        None => PluginDiagnostics {
-            name: slot.config.name.clone(),
-            status: PluginStatus::Failed,
-            manifest: None,
-            tools: Vec::new(),
-            error: Some("plugin has no runtime state".into()),
-            pid: None,
-            restart_count: 0,
         },
+        None => match &slot.shared {
+            Some(shared) => shared.diagnostics(),
+            None => PluginDiagnostics {
+                name: slot.config.name.clone(),
+                status: PluginStatus::Failed,
+                manifest: None,
+                tools: Vec::new(),
+                error: Some("plugin has no runtime state".into()),
+                pid: None,
+                restart_count: 0,
+            },
+        },
+    };
+    // Manifest permissions the operator did not configure are ignored; say so
+    // instead of letting the manifest decide what the diagnostics report.
+    if let Some(manifest) = diagnostics.manifest.as_ref() {
+        let (_, ignored) = effective_permissions(&slot.config, Some(manifest));
+        if !ignored.is_empty() {
+            let warning = format!(
+                "ignored permissions declared by the plugin manifest but not granted by the \
+                 config entry (the config is authoritative): {}",
+                ignored.join(", ")
+            );
+            warn!(plugin = %slot.config.name, "{warning}");
+            diagnostics.error = Some(match diagnostics.error.take() {
+                Some(existing) => format!("{existing}; {warning}"),
+                None => warning,
+            });
+        }
     }
+    diagnostics
+}
+
+/// The permissions the host actually honours.
+///
+/// `PluginConfig.permissions` is authoritative when it is non-empty; otherwise
+/// the manifest's declaration is used (backwards compatible). The second value
+/// lists manifest permissions that were ignored because the config did not
+/// grant them.
+pub(crate) fn effective_permissions(
+    config: &PluginConfig,
+    manifest: Option<&PluginManifest>,
+) -> (Vec<String>, Vec<String>) {
+    let manifest_permissions = manifest.map(|m| dedup_permissions(&m.permissions));
+    if config.permissions.is_empty() {
+        return (manifest_permissions.unwrap_or_default(), Vec::new());
+    }
+    let configured = dedup_permissions(&config.permissions);
+    let ignored = manifest_permissions
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| !configured.contains(p))
+        .collect();
+    (configured, ignored)
+}
+
+fn dedup_permissions(permissions: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = permissions
+        .iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn class_label(class: ToolClass) -> &'static str {

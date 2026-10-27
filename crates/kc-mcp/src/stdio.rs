@@ -108,10 +108,30 @@ impl Inner {
             st.out = None;
             st.kill = None;
             st.pid = None;
-            st.error = Some(message.clone());
+            // Keep a more specific earlier error (e.g. a protocol violation)
+            // instead of replacing it with the generic exit message.
+            if st.error.is_none() {
+                st.error = Some(message.clone());
+            }
         }
         self.pending.fail_all(&message);
         debug!(server = %self.name, "MCP stdio server finished: {detail}");
+    }
+
+    /// The server broke the framing contract (e.g. an over-long line). Fail
+    /// everything in flight with that protocol error and stop the child: a
+    /// server that cannot frame JSON-RPC is not usable.
+    fn fail_protocol(&self, message: String) {
+        let kill = {
+            let mut st = self.lock();
+            st.out = None;
+            st.error = Some(message.clone());
+            st.kill.take()
+        };
+        self.pending.fail_all(&message);
+        if let Some(tx) = kill {
+            let _ = tx.send(());
+        }
     }
 }
 
@@ -233,7 +253,18 @@ impl Transport for StdioTransport {
                 let result =
                     pump_lines(stdout, MAX_PROTOCOL_LINE, |line| inner.handle_line(line)).await;
                 if let Err(e) = result {
-                    warn!(server = %inner.name, "reading MCP stdout stopped: {e}");
+                    let message = if e.kind() == std::io::ErrorKind::InvalidData {
+                        format!(
+                            "MCP server `{}` sent a protocol line larger than the {} byte limit; \
+                             the connection was closed because the server is not speaking the \
+                             protocol",
+                            inner.name, MAX_PROTOCOL_LINE
+                        )
+                    } else {
+                        format!("reading MCP server `{}` stdout failed: {e}", inner.name)
+                    };
+                    warn!(server = %inner.name, "{message}");
+                    inner.fail_protocol(message);
                 }
             });
         }
@@ -340,16 +371,23 @@ where
 {
     let mut pending: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];
+    // Offset up to which `pending` has already been searched for a newline, so a
+    // long line is scanned once instead of once per read (quadratic).
+    let mut searched: usize = 0;
     loop {
         let read = reader.read(&mut chunk).await?;
         if read == 0 {
             break;
         }
         pending.extend_from_slice(&chunk[..read]);
-        while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = pending.drain(..=pos).collect();
+        while let Some(rel) = pending[searched..].iter().position(|b| *b == b'\n') {
+            let end = searched + rel + 1;
+            let line: Vec<u8> = pending.drain(..end).collect();
             on_line(String::from_utf8_lossy(&line).trim_end_matches(['\n', '\r']));
+            // The remaining bytes were not searched yet.
+            searched = 0;
         }
+        searched = pending.len();
         if pending.len() > max_line {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,

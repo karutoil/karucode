@@ -1394,6 +1394,92 @@ async fn git_endpoints_do_not_run_repository_helpers() {
     );
 }
 
+#[tokio::test]
+async fn only_supported_model_providers_can_be_saved() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+
+    // The UI selector is driven by this additive list.
+    let config = h.get("/api/config").await.json();
+    assert_eq!(config["available_providers"], json!(["openai_compatible"]));
+    assert_eq!(config["model"]["provider"], "openai_compatible");
+
+    let unknown = h
+        .patch(
+            "/api/config",
+            json!({ "model": { "provider": "anthropic" } }),
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+    assert_eq!(unknown.error_code(), "bad_request");
+    let message = unknown.json()["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(message.contains("model.provider"), "{message}");
+    assert!(message.contains("openai_compatible"), "{message}");
+    // The lie was not persisted.
+    assert_eq!(
+        h.get("/api/config").await.json()["model"]["provider"],
+        "openai_compatible"
+    );
+
+    // A supported id is accepted (and stored trimmed).
+    let accepted = h
+        .patch(
+            "/api/config",
+            json!({ "model": { "provider": " openai_compatible " } }),
+        )
+        .await;
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.text());
+    assert_eq!(accepted.json()["model"]["provider"], "openai_compatible");
+}
+
+#[tokio::test]
+async fn a_corrupt_persisted_row_cannot_prevent_startup() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let configured_base_url = h.state.settings().snapshot().model.base_url;
+    assert_eq!(configured_base_url, "http://127.0.0.1:9/v1");
+
+    // Simulate an older build (or a hand-edited database) leaving a value that
+    // today's validation rejects, plus one row that is still fine.
+    let store = h.state.store();
+    store
+        .set_setting("model.base_url", "ftp://not-a-url")
+        .await
+        .unwrap();
+    store
+        .set_setting("limits.max_iterations", "99999")
+        .await
+        .unwrap();
+    store
+        .set_setting("limits.search_max_results", "7")
+        .await
+        .unwrap();
+
+    // A fresh handle over the same database is exactly what a restart does: it
+    // must succeed and fall back to the file/env value for the bad keys.
+    let restarted = kc_server::SettingsHandle::new(h.state.settings().snapshot(), store.clone())
+        .await
+        .expect("a persisted row must never prevent startup");
+    let config = restarted.snapshot();
+    assert_eq!(
+        config.model.base_url, configured_base_url,
+        "the file/env base_url must stay in force"
+    );
+    assert_eq!(config.limits.max_iterations, 32, "invalid row ignored");
+    assert_eq!(config.limits.search_max_results, 7, "valid row applied");
+    // (The skip is logged at WARN with the key; `apply_rows_resilient`'s unit
+    // test covers the policy itself, this covers the startup path.)
+
+    // The operational (file/env) layer is still validated loudly.
+    let mut broken = restarted.snapshot();
+    broken.model.base_url = "ftp://still-not-an-url".into();
+    assert!(
+        kc_server::SettingsHandle::new(broken, store).await.is_err(),
+        "a bad file/env value must abort startup"
+    );
+}
+
 impl support::Harness {
     async fn send_raw_body(
         &self,
@@ -1423,4 +1509,4 @@ impl support::Harness {
             body,
         }
     }
-}
+

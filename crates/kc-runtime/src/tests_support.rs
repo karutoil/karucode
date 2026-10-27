@@ -38,6 +38,33 @@ fn now_ms() -> i64 {
     crate::events::now_ms()
 }
 
+/// Same normalisation the SQLite store applies to claimed paths.
+fn normalize_claim_path(raw: &str) -> String {
+    let mut p = raw.trim();
+    while let Some(rest) = p.strip_prefix("./") {
+        p = rest;
+    }
+    let mut p = p.trim_end_matches('/');
+    if p == "." {
+        p = "";
+    }
+    p.to_string()
+}
+
+/// Identical paths or ancestor/descendant relationships overlap.
+fn claim_paths_overlap(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let a_under_b = a
+        .strip_prefix(b)
+        .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1);
+    let b_under_a = b
+        .strip_prefix(a)
+        .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1);
+    a_under_b || b_under_a
+}
+
 // ---------------------------------------------------------------------------
 // FakeStore
 // ---------------------------------------------------------------------------
@@ -57,6 +84,9 @@ struct Db {
 pub(crate) struct FakeStore {
     db: Mutex<Db>,
     fail_appends: std::sync::atomic::AtomicBool,
+    /// Fail `append_message` for content containing this needle (one failure
+    /// mode for exercising a single failed tool-result persist).
+    fail_append_content: Mutex<Option<String>>,
 }
 
 impl Default for FakeStore {
@@ -70,12 +100,22 @@ impl FakeStore {
         Self {
             db: Mutex::new(Db::default()),
             fail_appends: std::sync::atomic::AtomicBool::new(false),
+            fail_append_content: Mutex::new(None),
         }
     }
 
     /// Make the next `append_message` calls fail, to exercise storage errors.
     pub(crate) fn fail_appends(&self, fail: bool) {
         self.fail_appends.store(fail, Ordering::SeqCst);
+    }
+
+    /// Fail only appends whose content contains `needle`.
+    pub(crate) fn fail_appends_containing(&self, needle: &str) {
+        *self.fail_append_content.lock().expect("fake store lock") = Some(needle.to_string());
+    }
+
+    pub(crate) fn stop_failing_appends(&self) {
+        *self.fail_append_content.lock().expect("fake store lock") = None;
     }
 
     fn db(&self) -> std::sync::MutexGuard<'_, Db> {
@@ -178,6 +218,16 @@ impl Store for FakeStore {
     async fn append_message(&self, message: &NewMessage) -> Result<i64> {
         if self.fail_appends.load(Ordering::SeqCst) {
             return Err(Error::Store("disk is full".into()));
+        }
+        if let Some(needle) = self
+            .fail_append_content
+            .lock()
+            .expect("fake store lock")
+            .as_ref()
+        {
+            if message.content.contains(needle.as_str()) {
+                return Err(Error::Store("disk is full".into()));
+            }
         }
         let mut db = self.db();
         db.next_message_id += 1;
@@ -394,20 +444,38 @@ impl Store for FakeStore {
         paths: &[String],
         mode: &str,
     ) -> Result<Vec<ClaimRecord>> {
+        // Mirror the SQLite store: normalise paths, insert-or-replace this
+        // agent's claims, and return other agents' overlapping claims.
+        let paths: Vec<String> = paths
+            .iter()
+            .map(|p| normalize_claim_path(p))
+            .filter(|p| !p.is_empty())
+            .collect();
         let mut db = self.db();
-        let mut created = Vec::new();
-        for path in paths {
-            let claim = ClaimRecord {
+        for path in &paths {
+            db.claims.retain(|c| {
+                !(c.session_id == session_id && c.agent_id == agent_id && c.path == *path)
+            });
+            db.claims.push(ClaimRecord {
                 path: path.clone(),
                 session_id: session_id.to_string(),
                 agent_id: agent_id.to_string(),
                 mode: mode.to_string(),
                 created_at: now_ms(),
-            };
-            db.claims.push(claim.clone());
-            created.push(claim);
+            });
         }
-        Ok(created)
+        let conflicts: Vec<ClaimRecord> = db
+            .claims
+            .iter()
+            .filter(|claim| claim.session_id == session_id && claim.agent_id != agent_id)
+            .filter(|claim| {
+                paths
+                    .iter()
+                    .any(|path| claim_paths_overlap(path, &claim.path))
+            })
+            .cloned()
+            .collect();
+        Ok(conflicts)
     }
 
     async fn list_claims(&self, session_id: &str) -> Result<Vec<ClaimRecord>> {

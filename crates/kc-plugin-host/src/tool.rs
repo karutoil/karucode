@@ -80,9 +80,10 @@ impl PluginTool {
              untrusted. Calls go through the approval policy like any external tool.",
             self.shared.name, self.plugin_version
         ));
-        let perms = self.shared.config().permissions;
+        let (perms, _) =
+            crate::effective_permissions(&self.shared.config(), self.shared.manifest().as_ref());
         if !perms.is_empty() {
-            out.push_str(&format!(" Declared permissions: {}.", perms.join(", ")));
+            out.push_str(&format!(" Effective permissions: {}.", perms.join(", ")));
         }
         out
     }

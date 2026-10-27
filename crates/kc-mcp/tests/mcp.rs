@@ -747,3 +747,172 @@ async fn http_and_stdio_servers_coexist_and_failed_http_servers_do_not_block() {
 fn documented_call_timeout_is_two_minutes() {
     assert_eq!(MCP_CALL_TIMEOUT, Duration::from_secs(120));
 }
+
+// ---------------------------------------------------------------------------
+// Resource limits (unbounded reads are a DoS)
+// ---------------------------------------------------------------------------
+
+/// The documented cap for one HTTP body / SSE stream / stdio line.
+const EIGHT_MIB: usize = 8 * 1024 * 1024;
+
+#[tokio::test]
+async fn http_oversized_json_body_is_rejected_with_a_clear_error() {
+    let handler: Handler = Arc::new(|_request: &HttpRequest| {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"pad": "y".repeat(EIGHT_MIB + 1024)},
+        })
+        .to_string();
+        (
+            200,
+            vec![("content-type".into(), "application/json".into())],
+            body,
+        )
+    });
+    let server = CannedHttp::start(handler).await;
+    let mut manager = McpManager::new(&[http_config("huge", server.url("/mcp"), BTreeMap::new())]);
+    manager.set_timeouts(McpTimeouts {
+        connect: Duration::from_secs(5),
+        call: Duration::from_secs(5),
+    });
+    manager.connect_all().await;
+
+    let statuses = manager.statuses();
+    assert_eq!(statuses[0].status, "failed");
+    let error = statuses[0].error.clone().unwrap_or_default();
+    assert!(error.contains("larger than"), "{error}");
+    assert!(error.contains(&EIGHT_MIB.to_string()), "{error}");
+    assert!(manager.tools().is_empty());
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn http_oversized_sse_stream_is_rejected_with_a_clear_error() {
+    let handler: Handler = Arc::new(|_request: &HttpRequest| {
+        let body = format!("event: message\ndata: {}\n\n", "y".repeat(EIGHT_MIB + 1024));
+        (
+            200,
+            vec![("content-type".into(), "text/event-stream".into())],
+            body,
+        )
+    });
+    let server = CannedHttp::start(handler).await;
+    let mut manager =
+        McpManager::new(&[http_config("huge-sse", server.url("/mcp"), BTreeMap::new())]);
+    manager.set_timeouts(McpTimeouts {
+        connect: Duration::from_secs(5),
+        call: Duration::from_secs(5),
+    });
+    manager.connect_all().await;
+
+    let statuses = manager.statuses();
+    assert_eq!(statuses[0].status, "failed");
+    let error = statuses[0].error.clone().unwrap_or_default();
+    assert!(error.contains("SSE stream"), "{error}");
+    assert!(error.contains("larger than"), "{error}");
+    assert!(error.contains(&EIGHT_MIB.to_string()), "{error}");
+    manager.shutdown().await;
+}
+
+/// A stdio server whose `tools/call` answer is a single over-long line without
+/// a newline. The host must fail the call with a protocol error instead of
+/// buffering the line forever or waiting for the call timeout.
+const OVERSIZED_LINE_SERVER: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "serverInfo": {"name": "huge", "version": "0"}}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [
+            {"name": "boom", "description": "Floods its stdout.",
+             "inputSchema": {"type": "object", "properties": {}}}]}})
+    elif method == "tools/call":
+        sys.stdout.write("y" * (8 * 1024 * 1024 + 4096))
+        sys.stdout.flush()
+"#;
+
+#[tokio::test]
+async fn stdio_oversized_line_is_a_prompt_protocol_error() {
+    let dir = temp_dir("stdio-oversized");
+    let script = dir.join("oversized_server.py");
+    std::fs::write(&script, OVERSIZED_LINE_SERVER).unwrap();
+    let mut config = stdio_server("huge");
+    config.command = vec!["python3".to_string(), script.to_string_lossy().into_owned()];
+
+    let mut manager = McpManager::new(&[config]);
+    manager.set_timeouts(McpTimeouts {
+        connect: Duration::from_secs(5),
+        call: Duration::from_secs(5),
+    });
+    manager.connect_all().await;
+    assert_eq!(
+        manager.statuses()[0].status,
+        "connected",
+        "{:?}",
+        manager.statuses()[0].error
+    );
+
+    let started = Instant::now();
+    let out = call_tool(find(&manager.tools(), "mcp__huge__boom"), &dir, json!({})).await;
+    assert!(!out.ok, "{}", out.content);
+    assert!(
+        out.content.contains("larger than"),
+        "expected the line cap to fire, got: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains(&EIGHT_MIB.to_string()),
+        "{}",
+        out.content
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "an oversized line must fail fast, not hit the call timeout (took {:?})",
+        started.elapsed()
+    );
+
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn require_approval_false_exempts_the_server_but_keeps_the_external_class() {
+    let dir = temp_dir("require-approval");
+    let mut exempt = stdio_server("exempt");
+    exempt.require_approval = false;
+    let strict = stdio_server("strict");
+
+    let mut manager = McpManager::new(&[exempt, strict]);
+    manager.connect_all().await;
+    let tools = manager.tools();
+
+    let exempt_tool = find(&tools, "mcp__exempt__echo");
+    assert!(
+        !exempt_tool.requires_approval(),
+        "require_approval = false must exempt the server"
+    );
+    // The exemption must not reclassify the tool: read_only mode still denies it.
+    assert_eq!(exempt_tool.class(), ToolClass::External);
+
+    let strict_tool = find(&tools, "mcp__strict__echo");
+    assert!(
+        strict_tool.requires_approval(),
+        "the default (require_approval = true) must still ask"
+    );
+    assert_eq!(strict_tool.class(), ToolClass::External);
+
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}

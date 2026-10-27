@@ -23,6 +23,15 @@ use tracing::debug;
 const SESSION_HEADER: &str = "Mcp-Session-Id";
 const ACCEPT: &str = "application/json, text/event-stream";
 
+/// Hard cap for one HTTP response body (JSON or SSE). A hostile or broken
+/// server must not be able to make the client buffer an unbounded body.
+pub(crate) const MAX_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// Hard cap for the total SSE payload read while waiting for one response.
+pub(crate) const MAX_SSE_BYTES: usize = 8 * 1024 * 1024;
+/// Non-2xx bodies are only used as a short diagnostic (truncated to 300 chars),
+/// so they are read with a much smaller cap than a successful response.
+const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+
 pub(crate) struct HttpTransport {
     name: String,
     url: String,
@@ -122,7 +131,10 @@ impl Transport for HttpTransport {
             }
             let status = response.status();
             if !status.is_success() {
-                let text = response.text().await.unwrap_or_default();
+                let text = read_body_capped(response, MAX_ERROR_BODY_BYTES, &self.name)
+                    .await
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_default();
                 return Err(McpError::Http {
                     status: status.as_u16(),
                     body: truncate(text.trim(), 300),
@@ -137,12 +149,8 @@ impl Transport for HttpTransport {
             if is_sse {
                 read_sse(response, id, &self.name).await
             } else {
-                let text = response.text().await.map_err(|e| {
-                    McpError::Transport(format!(
-                        "reading the response of MCP server `{}` failed: {e}",
-                        self.name
-                    ))
-                })?;
+                let bytes = read_body_capped(response, MAX_HTTP_BODY_BYTES, &self.name).await?;
+                let text = String::from_utf8_lossy(&bytes);
                 let value: Value = serde_json::from_str(&text)
                     .map_err(|e| McpError::Protocol(format!("invalid JSON body: {e}")))?;
                 pick_response(value, id)
@@ -165,7 +173,10 @@ impl Transport for HttpTransport {
         }
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let text = response.text().await.unwrap_or_default();
+            let text = read_body_capped(response, MAX_ERROR_BODY_BYTES, &self.name)
+                .await
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
             return Err(McpError::Http {
                 status,
                 body: truncate(text.trim(), 300),
@@ -188,17 +199,66 @@ impl Transport for HttpTransport {
     }
 }
 
+/// Read a response body, refusing to buffer more than `max` bytes.
+///
+/// The `Content-Length` header is checked first so an honest oversized response
+/// is rejected without reading it; chunked/streamed bodies are counted as they
+/// arrive. Exceeding the cap is a protocol error, not a silent truncation: a
+/// truncated JSON/SSE payload cannot be parsed and the server would look broken.
+async fn read_body_capped(
+    response: reqwest::Response,
+    max: usize,
+    name: &str,
+) -> Result<Vec<u8>, McpError> {
+    if let Some(len) = response.content_length() {
+        if len > max as u64 {
+            return Err(too_large(name, max, "a response body"));
+        }
+    }
+    let mut stream = response.bytes_stream();
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            McpError::Transport(format!(
+                "reading the response of MCP server `{name}` failed: {e}"
+            ))
+        })?;
+        if body.len().saturating_add(chunk.len()) > max {
+            return Err(too_large(name, max, "a response body"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn too_large(name: &str, max: usize, what: &str) -> McpError {
+    McpError::Protocol(format!(
+        "MCP server `{name}` sent {what} larger than the {max} byte limit; the response was \
+         rejected without buffering it"
+    ))
+}
+
 /// Read an SSE response until the JSON-RPC response for `id` arrives.
 async fn read_sse(response: reqwest::Response, id: u64, name: &str) -> Result<Value, McpError> {
+    if let Some(len) = response.content_length() {
+        if len > MAX_SSE_BYTES as u64 {
+            return Err(too_large(name, MAX_SSE_BYTES, "an SSE stream"));
+        }
+    }
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
     let mut data_lines: Vec<String> = Vec::new();
+    let mut total: usize = 0;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| {
             McpError::Transport(format!(
                 "reading the SSE body of MCP server `{name}` failed: {e}"
             ))
         })?;
+        total = total.saturating_add(chunk.len());
+        if total > MAX_SSE_BYTES {
+            return Err(too_large(name, MAX_SSE_BYTES, "an SSE stream"));
+        }
         buffer.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(pos) = buffer.find('\n') {
             let line: String = buffer.drain(..=pos).collect();
@@ -304,5 +364,15 @@ mod tests {
     fn truncate_keeps_char_boundaries() {
         assert_eq!(truncate("héllo", 3), "hé...");
         assert_eq!(truncate("abc", 10), "abc");
+    }
+
+    #[test]
+    fn body_caps_are_eight_mebibytes_and_errors_are_explicit() {
+        assert_eq!(MAX_HTTP_BODY_BYTES, 8 * 1024 * 1024);
+        assert_eq!(MAX_SSE_BYTES, 8 * 1024 * 1024);
+        let message = too_large("demo", MAX_SSE_BYTES, "an SSE stream").describe();
+        assert!(message.contains("larger than"), "{message}");
+        assert!(message.contains("8388608"), "{message}");
+        assert!(message.contains("rejected"), "{message}");
     }
 }

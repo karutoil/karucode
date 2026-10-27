@@ -166,18 +166,29 @@ impl std::fmt::Debug for SettingsHandle {
 impl SettingsHandle {
     /// Create the handle and layer persisted rows over the file/env config.
     ///
-    /// Invalid *individual* rows are ignored with a warning (so a hand-edited
-    /// database cannot brick startup); an unreadable settings table is a hard
-    /// error because silently running on stale defaults would be worse.
-    pub async fn new(mut config: Config, store: Arc<dyn Store>) -> Result<Arc<Self>> {
+    /// Failure policy, by layer:
+    ///
+    /// * the **file + environment** layer is validated first and a bad value
+    ///   aborts startup — that is operational configuration and a torn value is
+    ///   worth failing loudly for;
+    /// * each **persisted row** is then applied on its own and kept only if the
+    ///   resulting config is still valid. A stale or hand-edited row (an old
+    ///   `model.base_url`, a limit that is out of range, a value written by a
+    ///   previous build) is warned about and ignored, so it can never prevent
+    ///   the server from starting: the file/env value for that key stays live;
+    /// * an unreadable settings table is a hard error, because silently running
+    ///   on stale defaults would be worse.
+    pub async fn new(config: Config, store: Arc<dyn Store>) -> Result<Arc<Self>> {
+        // Layer 3/2 (file, environment) and the CLI overrides on top of it.
+        validate_settings(&config)?;
+        let mut config = config;
         if !config.lock_settings {
             let rows = store
                 .all_settings()
                 .await
                 .map_err(|e| Error::Store(format!("could not read persisted settings: {e}")))?;
-            apply_rows(&mut config, &rows);
+            apply_rows_resilient(&mut config, &rows);
         }
-        validate_settings(&config)?;
         Ok(Arc::new(Self {
             config: RwLock::new(config),
             store,
@@ -357,7 +368,12 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
             config.model.api_key = Some(String::new());
         }
         if let Some(provider) = &model.provider {
-            config.model.provider = provider.clone();
+            // Store the canonical (trimmed) id: it was checked against the
+            // factory's `supported()` list at the HTTP boundary.
+            let trimmed = provider.trim();
+            if !trimmed.is_empty() {
+                config.model.provider = trimmed.to_string();
+            }
         }
         if let Some(base_url) = &model.base_url {
             config.model.base_url = base_url.clone();
@@ -487,6 +503,12 @@ fn clean_list(field: &str, list: &[String]) -> Result<Vec<String>> {
 /// so a patch can never produce a config that startup validation would reject.
 pub fn validate_settings(config: &Config) -> Result<()> {
     validate_model(&config.model)?;
+    // An unknown provider in the file or environment would otherwise start a
+    // server that silently speaks a different wire format than configured.
+    check_provider_id(
+        &config.model.provider,
+        &kc_core::provider::ProviderFactory::supported(&kc_provider::ProviderFactoryImpl),
+    )?;
     validate_limits(&config.limits)?;
     validate_approvals(&config.approvals)?;
     validate_subagents(&config.subagents)
@@ -731,6 +753,28 @@ fn validate_subagents(subagents: &SubagentConfig) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Persistence rows
 // ---------------------------------------------------------------------------
+
+/// Apply persisted rows one at a time, keeping each row only when the whole
+/// config stays valid. A row that fails validation is warned about (naming the
+/// key) and skipped, so its previous — file/env — value survives.
+///
+/// Validation runs per row, not once at the end, precisely so that one bad row
+/// cannot take the process down; the aggregate cannot be invalid either, because
+/// the starting config is validated and every accepted row keeps it valid.
+fn apply_rows_resilient(config: &mut Config, rows: &[(String, String)]) {
+    for row in rows {
+        let previous = config.clone();
+        apply_rows(config, std::slice::from_ref(row));
+        if let Err(error) = validate_settings(config) {
+            warn!(
+                key = row.0.as_str(),
+                %error,
+                "ignoring a persisted settings row that is no longer valid; keeping the configured value"
+            );
+            *config = previous;
+        }
+    }
+}
 
 fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
     let mut rows = BTreeMap::new();
@@ -1030,6 +1074,28 @@ pub fn update_error(error: Error) -> ApiError {
     ApiError::from(error)
 }
 
+/// Reject a provider id that the running factory cannot build.
+///
+/// The set of ids belongs to the factory ([`kc_core::provider::ProviderFactory::supported`]),
+/// not to this module, so the check is exposed for the HTTP boundary: without it
+/// `model.provider` would accept anything and the UI selector could claim a
+/// backend that does not exist. The id is compared trimmed, so a copy-pasted
+/// value with surrounding spaces is accepted (it is stored trimmed by the
+/// caller) but never a different spelling.
+pub fn check_provider_id(provider: &str, supported: &[String]) -> Result<()> {
+    let trimmed = provider.trim();
+    if trimmed.is_empty() {
+        return Err(Error::BadRequest("model.provider may not be empty".into()));
+    }
+    if supported.iter().any(|id| id == trimmed) {
+        return Ok(());
+    }
+    Err(Error::BadRequest(format!(
+        "model.provider must be one of {} (got `{trimmed}`)",
+        supported.join(", ")
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1120,6 +1186,65 @@ mod tests {
             "limits.max_tool_calls_per_turn" => cfg.limits.max_tool_calls_per_turn = value as usize,
             other => panic!("unknown limit {other}"),
         }
+    }
+
+    #[test]
+    fn only_supported_provider_ids_are_accepted() {
+        let supported = vec!["openai_compatible".to_string()];
+        assert!(check_provider_id("openai_compatible", &supported).is_ok());
+        assert!(check_provider_id("  openai_compatible  ", &supported).is_ok());
+
+        let err = check_provider_id("anthropic", &supported)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("model.provider"), "{err}");
+        assert!(err.contains("openai_compatible"), "{err}");
+
+        assert!(check_provider_id("", &supported).is_err());
+        assert!(check_provider_id("OpenAI_Compatible", &supported).is_err());
+        // A factory that can build more than one provider lists them all.
+        let more = vec!["openai_compatible".to_string(), "echo".to_string()];
+        assert!(check_provider_id("echo", &more).is_ok());
+        let err = check_provider_id("nope", &more).unwrap_err().to_string();
+        assert!(err.contains("openai_compatible, echo"), "{err}");
+    }
+
+    #[test]
+    fn invalid_persisted_rows_are_skipped_individually() {
+        let mut cfg = Config::default();
+        let base_url = cfg.model.base_url.clone();
+        apply_rows_resilient(
+            &mut cfg,
+            &[
+                // Out-of-range limit and a bogus URL: both must be ignored ...
+                ("limits.max_iterations".into(), "99999".into()),
+                ("model.base_url".into(), "ftp://nope".into()),
+                // ... while a valid row still applies.
+                ("model.temperature".into(), "0.5".into()),
+                ("limits.search_max_results".into(), "7".into()),
+            ],
+        );
+        assert_eq!(cfg.limits.max_iterations, 32, "invalid row ignored");
+        assert_eq!(cfg.model.base_url, base_url, "invalid row ignored");
+        assert!((cfg.model.temperature - 0.5).abs() < f32::EPSILON);
+        assert_eq!(cfg.limits.search_max_results, 7);
+        // The result is a config `SettingsHandle::update` would also accept.
+        assert!(validate_settings(&cfg).is_ok());
+    }
+
+    #[test]
+    fn unparsable_persisted_rows_are_ignored() {
+        let mut cfg = Config::default();
+        apply_rows_resilient(
+            &mut cfg,
+            &[
+                ("model.temperature".into(), "hot".into()),
+                ("approvals.mode".into(), "whatever".into()),
+                ("some.future.key".into(), "x".into()),
+            ],
+        );
+        assert_eq!(cfg.model.temperature, 0.2);
+        assert_eq!(cfg.approvals.mode, ApprovalMode::Ask);
     }
 
     #[test]
@@ -1327,5 +1452,34 @@ mod tests {
         let text = serde_json::to_string(&cfg.model.public_view()).unwrap();
         assert!(!text.contains("sk-super-secret"));
         assert!(text.contains("\"api_key_set\":true"));
+    }
+}
+
+#[cfg(test)]
+mod provider_startup_tests {
+    use super::*;
+
+    fn config_with_provider(provider: &str) -> Config {
+        Config {
+            model: ModelConfig {
+                provider: provider.into(),
+                ..ModelConfig::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn startup_refuses_an_unknown_provider_from_the_file_or_env() {
+        let message = validate_settings(&config_with_provider("anthropic_native"))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("anthropic_native"), "{message}");
+        assert!(message.contains("openai_compatible"), "{message}");
+    }
+
+    #[test]
+    fn startup_accepts_the_implemented_provider() {
+        assert!(validate_settings(&config_with_provider("openai_compatible")).is_ok());
     }
 }

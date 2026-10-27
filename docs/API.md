@@ -13,10 +13,18 @@ Codes: `bad_request`, `not_found`, `permission_denied`, `unauthorized`, `config`
 
 * Default bind is `127.0.0.1`, no auth.
 * If `KARUCODE_AUTH_TOKEN` is set, every request needs `Authorization: Bearer <token>`
-  (the SSE stream uses `fetch`, so headers work).
+  (the SSE stream uses `fetch`, so headers work). `GET /api/events` additionally
+  accepts `?token=<token>`, because some stream clients cannot set headers; the
+  token then appears in the URL, so prefer the header when you can.
 * Every state-changing request (POST/PATCH/PUT/DELETE) must send
   `X-Karucode-Client: web`. Requests with an `Origin` header must have an origin
-  matching the `Host` header. This blocks simple cross-site form posts.
+  whose authority matches the `Host` header (case-insensitive; values containing
+  whitespace or control characters are rejected). This blocks simple cross-site
+  form posts and DNS-rebinding-style cross-origin writes.
+* While bound to loopback **without** a token, the request `Host` must be
+  `127.0.0.1`, `localhost` or `[::1]` (any port), plus anything listed in
+  `KARUCODE_ALLOWED_HOSTS` (`host`, `host:port`, or `*.example.com`). This is what
+  defeats DNS rebinding; anything else is `403 permission_denied`.
 
 ## Health / config
 
@@ -26,6 +34,8 @@ Codes: `bad_request`, `not_found`, `permission_denied`, `unauthorized`, `config`
   "workspace": "/home/me/project", "auth_required": false,
   "provider_configured": true, "db": "ok" }
 ```
+`status` is `"ok"` when the database probe passes and `"degraded"` otherwise
+(the endpoint still returns 200 so a supervisor can see the reason).
 
 `GET /api/config`
 ```json
@@ -50,6 +60,7 @@ Codes: `bad_request`, `not_found`, `permission_denied`, `unauthorized`, `config`
   "mcp_servers": [ { "name": "fs", "transport": "stdio", "status": "connected",
                      "tools": ["mcp__fs__read"], "error": null } ],
   "settings_locked": false,
+  "available_providers": ["openai_compatible"],
   "version": "0.1.0"
 }
 ```
@@ -62,8 +73,13 @@ Codes: `bad_request`, `not_found`, `permission_denied`, `unauthorized`, `config`
   "limits": { "max_iterations": 40 } }
 ```
 
-* `model.api_key` is write-only. Send the literal value `null` plus
-  `"clear_api_key": true` to erase it. It is never returned.
+* `model.api_key` is write-only. Send `"clear_api_key": true` to erase it (the
+  cleared state is persisted, so it also shadows `KARUCODE_API_KEY` from then on).
+  It is never returned.
+* Values are range-checked; out-of-range numbers are `400 bad_request` naming the
+  field and its bounds rather than being silently clamped.
+* `model.provider` must be one of `available_providers` (today only
+  `openai_compatible`); an unknown id is refused instead of silently falling back.
 * Response `403 permission_denied` when `settings_locked` is true.
 
 `POST /api/provider/test` — probes the configured endpoint (`GET /models`, falling
@@ -75,6 +91,8 @@ back to a 1-token chat). Returns `{ "ok": bool, "models": [..], "error": null,
 { "uptime_secs": 42, "rss_kb": 38211, "sessions": 3, "active_runs": 1,
   "events_emitted": 512, "db_path": "/home/me/.local/share/karucode/karucode.db" }
 ```
+`rss_kb` is read from `/proc/self/status` and is `0` on platforms without it.
+`events_emitted` is the number of events published on the shared sequence.
 
 ## Sessions
 
@@ -97,6 +115,13 @@ back to a 1-token chat). Returns `{ "ok": bool, "models": [..], "error": null,
   "agents": [AgentRecord], "approvals": [ApprovalRecord],
   "claims": [ClaimRecord], "running": false }
 ```
+`approvals` contains **pending** approvals only; resolved and expired decisions are
+not exposed by any endpoint yet. `messages` is the most recent page (newest 400,
+returned in chronological order).
+
+When the model asks for more tool calls than `limits.max_tool_calls_per_turn` in
+one turn, the extra calls are not executed: each one gets a `tool` message
+`[skipped: per-turn tool call limit reached …]` and a `notice` event is emitted.
 
 `PATCH /api/sessions/:id` `{ "title": "..." }` → `Session`  
 `DELETE /api/sessions/:id` → `{ "deleted": true }`
@@ -104,9 +129,12 @@ back to a 1-token chat). Returns `{ "ok": bool, "models": [..], "error": null,
 `POST /api/sessions/:id/messages` `{ "content": "..." }`
 → `202 { "run_id": "r_...", "session_id": "s_..." }`
 Starts a run in the background; progress arrives on the event stream.
-Returns `409` if a run is already active for that session.
+Returns `409` with `code: "bad_request"` if a run is already active for that
+session (the HTTP status carries the conflict, the code stays in the documented
+set).
 
-`POST /api/sessions/:id/cancel` → `{ "cancelled": true }`
+`POST /api/sessions/:id/cancel` → `{ "cancelled": true }` — `false` when no run is
+active (already finished or never started).
 
 ### Shapes
 
@@ -187,6 +215,10 @@ Returns `409` if a run is already active for that session.
 
 ## Plugins and MCP
 
+`PATCH /api/config` and `GET /api/config` both return `plugins`/`mcp_servers` from
+the **live** host and manager, not from startup config, so status changes are
+visible immediately.
+
 `GET /api/plugins` → `{ "plugins": [PluginDiagnostics] }`
 ```json
 { "name": "example-hello", "status": "ready|disabled|starting|failed|stopped",
@@ -229,7 +261,7 @@ are flattened alongside `type`.
 | `text_delta` | `delta` |
 | `reasoning_delta` | `delta` |
 | `usage` | `input_tokens`, `output_tokens` |
-| `tool_call_started` | `call_id`, `name`, `arguments` (object) |
+| `tool_call_started` | `call_id`, `name`, `arguments` (object; a **string** containing the raw text when the model emitted invalid JSON) |
 | `tool_call_finished` | `call_id`, `name`, `ok`, `output`, `truncated`, `duration_ms` |
 | `command_started` | `call_id`, `command`, `cwd` |
 | `command_output` | `call_id`, `stream` (`stdout`/`stderr`), `chunk` |

@@ -148,6 +148,48 @@ fn disabled_plugins_are_disabled_and_not_started() {
 }
 
 #[test]
+fn effective_permissions_are_config_authoritative() {
+    let manifest = PluginManifest {
+        name: "x".into(),
+        version: "1".into(),
+        permissions: vec!["files.read".into(), "shell".into(), "shell".into()],
+        ..Default::default()
+    };
+    let mut c = cfg("x");
+
+    // No configured permissions: the manifest is the fallback.
+    let (granted, ignored) = effective_permissions(&c, Some(&manifest));
+    assert_eq!(granted, vec!["files.read".to_string(), "shell".to_string()]);
+    assert!(ignored.is_empty());
+
+    // Configured permissions win; manifest extras are reported as ignored.
+    c.permissions = vec!["files.read".into()];
+    let (granted, ignored) = effective_permissions(&c, Some(&manifest));
+    assert_eq!(granted, vec!["files.read".to_string()]);
+    assert_eq!(ignored, vec!["shell".to_string()]);
+
+    c.permissions = vec!["shell".into(), "shell".into()];
+    let (granted, ignored) = effective_permissions(&c, Some(&manifest));
+    assert_eq!(granted, vec!["shell".to_string()]);
+    assert_eq!(ignored, vec!["files.read".to_string()]);
+
+    // The config may grant more than the manifest declared, and may do so
+    // before any manifest has been received.
+    c.permissions = vec!["network".into()];
+    assert_eq!(
+        effective_permissions(&c, None),
+        (vec!["network".to_string()], Vec::new())
+    );
+    assert_eq!(
+        effective_permissions(&c, Some(&manifest)),
+        (
+            vec!["network".to_string()],
+            vec!["files.read".to_string(), "shell".to_string()]
+        )
+    );
+}
+
+#[test]
 fn value_to_text_handles_the_documented_shapes() {
     assert_eq!(value_to_text(&serde_json::json!("hi")).unwrap(), "hi");
     assert_eq!(

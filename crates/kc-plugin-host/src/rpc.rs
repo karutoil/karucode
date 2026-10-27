@@ -884,16 +884,22 @@ where
 {
     let mut pending: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];
+    // Only scan bytes that were appended since the last newline search; a long
+    // line would otherwise be rescanned on every read (quadratic).
+    let mut searched: usize = 0;
     loop {
         let read = reader.read(&mut chunk).await?;
         if read == 0 {
             break;
         }
         pending.extend_from_slice(&chunk[..read]);
-        while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = pending.drain(..=pos).collect();
+        while let Some(rel) = pending[searched..].iter().position(|b| *b == b'\n') {
+            let end = searched + rel + 1;
+            let line: Vec<u8> = pending.drain(..end).collect();
             on_line(String::from_utf8_lossy(&line).trim_end_matches(['\n', '\r']));
+            searched = 0;
         }
+        searched = pending.len();
         if pending.len() > max_line {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,

@@ -18,7 +18,7 @@ use kc_core::error::Error;
 use kc_core::events::{Event, EventEnvelope};
 use kc_core::hooks::NoHooks;
 use kc_core::ids::{AgentId, RunId, SessionId};
-use kc_core::message::Role;
+use kc_core::message::{Role, ToolCall};
 use kc_core::paths::Workspace;
 use kc_core::provider::ProviderChunk;
 use kc_core::store::{AgentRecord, ApprovalRecord, RunStatus, Store};
@@ -111,6 +111,30 @@ fn tool_finished(events: &[EventEnvelope]) -> Vec<(String, bool, String, bool)> 
             _ => None,
         })
         .collect()
+}
+
+/// Assert no `tool` message starts an exchange: every tool result must follow
+/// the assistant tool_call it answers (or another result of the same turn).
+fn assert_no_orphan_tool_messages(messages: &[kc_core::message::Message]) {
+    for (i, message) in messages.iter().enumerate() {
+        if message.role != Role::Tool {
+            continue;
+        }
+        let id = message
+            .tool_call_id
+            .as_deref()
+            .unwrap_or_else(|| panic!("tool message without a tool_call_id at {i}"));
+        let attached = i > 0
+            && match messages[i - 1].role {
+                Role::Tool => true,
+                Role::Assistant => messages[i - 1].tool_calls.iter().any(|call| call.id == id),
+                _ => false,
+            };
+        assert!(
+            attached,
+            "orphan tool message at index {i} (id {id}): {message:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -484,9 +508,58 @@ async fn approval_timeout_expires_the_request() {
 
     let records = h.store.approvals();
     assert_eq!(records[0].status, "expired");
+    assert_eq!(
+        h.runtime.shared().approvals.pending_count(),
+        0,
+        "the waiter entry must be removed on timeout"
+    );
+    assert!(h
+        .store
+        .list_pending_approvals(Some(h.session()))
+        .await
+        .unwrap()
+        .is_empty());
     let messages = h.session_messages().await;
     let tool_message = messages.iter().find(|m| m.role == "tool").unwrap();
     assert!(tool_message.content.contains("not allowed:expired"));
+}
+
+#[tokio::test]
+async fn cancelling_while_an_approval_is_pending_releases_the_waiter() {
+    let policy = ApprovalPolicy {
+        mode: ApprovalMode::Ask,
+        timeout_secs: 30,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "run", "{}")]),
+        Script::text("unused"),
+    ])
+    .tool(ApprovalTool::shell("run", "cargo test"))
+    .settings(FakeSettings::default().with_policy(policy))
+    .build()
+    .await;
+
+    h.submit("wait for approval").await;
+    let (_event, _seen) = wait_for_kind(&mut h, "approval_requested").await;
+    assert_eq!(h.runtime.shared().approvals.pending_count(), 1);
+
+    h.runtime.shutdown().await;
+    assert_eq!(
+        h.runtime.shared().approvals.pending_count(),
+        0,
+        "shutdown must release every parked approval waiter"
+    );
+    assert!(h
+        .store
+        .list_pending_approvals(Some(h.session()))
+        .await
+        .unwrap()
+        .is_empty());
+
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "cancelled");
+    assert!(h.wait_idle().await.is_empty());
 }
 
 #[tokio::test]
@@ -965,6 +1038,75 @@ async fn provider_error_chunk_keeps_the_partial_assistant_text() {
 }
 
 #[tokio::test]
+async fn finish_reason_length_is_reported_and_not_success() {
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![
+        ProviderChunk::Text("half an answer".into()),
+        ProviderChunk::Finish {
+            reason: "length".into(),
+        },
+    ])])
+    .build()
+    .await;
+
+    let events = h.run_to_finish("write a very long answer").await;
+    assert_eq!(
+        finished_status(&events),
+        "limit_reached",
+        "a truncated answer must not be reported as success"
+    );
+    let notice = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::Notice { level, message }
+                if level == "warn" && message.contains("max_tokens") =>
+            {
+                Some(message.clone())
+            }
+            _ => None,
+        })
+        .expect("a warn notice about max_tokens");
+    assert!(
+        notice.contains("incomplete") && notice.contains("truncated"),
+        "notice must mark the text as incomplete/truncated: {notice}"
+    );
+    assert_eq!(count(&events, "error"), 0, "length is not a provider error");
+
+    let messages = h.session_messages().await;
+    assert!(messages
+        .iter()
+        .any(|m| m.role == "assistant" && m.content == "half an answer"));
+}
+
+#[tokio::test]
+async fn a_stream_that_ends_without_a_finish_reason_fails_visibly() {
+    // No Finish chunk: the provider closed the stream without saying why.
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![ProviderChunk::Text(
+        "partial".into(),
+    )])])
+    .build()
+    .await;
+
+    let events = h.run_to_finish("answer").await;
+    assert_eq!(finished_status(&events), "failed");
+    let error = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("an explicit provider error");
+    assert!(
+        error.contains("finish_reason"),
+        "unexpected error message: {error}"
+    );
+
+    let messages = h.session_messages().await;
+    assert!(messages
+        .iter()
+        .any(|m| m.role == "assistant" && m.content == "partial"));
+}
+
+#[tokio::test]
 async fn second_submit_for_the_same_session_is_rejected() {
     let mut h = HarnessBuilder::new(vec![
         Script::Hang(vec![ProviderChunk::Text("busy".into())]),
@@ -1167,6 +1309,131 @@ async fn old_history_is_trimmed_but_system_and_last_user_survive() {
     assert!(!sent.iter().any(|m| m.content.contains("old question")));
     let body: usize = sent.iter().skip(1).map(|m| m.content.chars().count()).sum();
     assert!(body <= 600, "droppable content over budget: {body}");
+}
+
+// ---------------------------------------------------------------------------
+// transcript repair (B1: slice boundary, B2: failed tool-result persist)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn history_window_starting_with_an_orphan_tool_result_is_repaired() {
+    let mut h = HarnessBuilder::new(vec![Script::text("ok")]).build().await;
+
+    // Seed exactly one window's worth of rows so that, once `begin_run` appends
+    // the new prompt, the 400-message window starts at the tool result whose
+    // assistant tool_call fell outside the window.
+    let mut assistant = crate::tests_support::new_message(h.session(), "assistant", "");
+    assistant.run_id = Some("r_old".into());
+    assistant.tool_calls = vec![ToolCall {
+        id: "call_old".into(),
+        name: "echo".into(),
+        arguments: "{}".into(),
+    }];
+    h.store.append_message(&assistant).await.unwrap();
+
+    let mut result = crate::tests_support::new_message(h.session(), "tool", "old result");
+    result.tool_call_id = Some("call_old".into());
+    result.name = Some("echo".into());
+    h.store.append_message(&result).await.unwrap();
+
+    for i in 0..(crate::HISTORY_LIMIT - 2) {
+        let filler = crate::tests_support::new_message(h.session(), "user", &format!("filler {i}"));
+        h.store.append_message(&filler).await.unwrap();
+    }
+
+    let events = h.run_to_finish("the current question").await;
+    assert_eq!(finished_status(&events), "completed");
+
+    let requests = h.factory.requests();
+    let sent = &requests[0].messages;
+    assert_eq!(sent[0].role, Role::System);
+    assert_no_orphan_tool_messages(sent);
+    assert!(
+        !sent.iter().any(|m| m.role == Role::Tool),
+        "the orphan result must be dropped from the request: {sent:?}"
+    );
+    assert_eq!(sent.last().unwrap().role, Role::User);
+    assert_eq!(sent.last().unwrap().content, "the current question");
+}
+
+#[tokio::test]
+async fn a_failed_tool_result_persist_is_repaired_before_the_next_request() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "echo", "{}")]),
+        Script::text("recovered"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .build()
+    .await;
+
+    // Fail only the tool result (its content is `echoed:…`); the assistant turn
+    // with the tool call is already persisted when the run fails.
+    h.store.fail_appends_containing("echoed:");
+    let events = h.run_to_finish("use the tool").await;
+    assert_eq!(finished_status(&events), "failed");
+    let stored = h.store.messages();
+    assert!(
+        stored
+            .iter()
+            .any(|m| m.role == "assistant" && !m.tool_calls.is_empty()),
+        "assistant tool call must be on disk"
+    );
+    assert!(!stored.iter().any(|m| m.role == "tool"));
+
+    h.store.stop_failing_appends();
+    let events = h.run_to_finish("try again").await;
+    assert_eq!(finished_status(&events), "completed");
+
+    let requests = h.factory.requests();
+    assert_eq!(requests.len(), 2);
+    let sent = &requests[1].messages;
+    assert_no_orphan_tool_messages(sent);
+    let repaired = sent
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .expect("synthesized tool result in the request");
+    assert!(
+        repaired.content.contains("tool result missing"),
+        "unexpected repair text: {}",
+        repaired.content
+    );
+
+    // The repair is persisted, so a restart does not resurrect the broken
+    // transcript — and it is idempotent: exactly one synthesized row.
+    assert_eq!(
+        h.store
+            .messages()
+            .iter()
+            .filter(|m| m.role == "tool" && m.content.contains("tool result missing"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn recover_repairs_an_interrupted_tool_exchange() {
+    let h = HarnessBuilder::new(vec![Script::text("unused")])
+        .build()
+        .await;
+
+    let mut assistant = crate::tests_support::new_message(h.session(), "assistant", "");
+    assistant.run_id = Some("r_old".into());
+    assistant.tool_calls = vec![ToolCall {
+        id: "call_crashed".into(),
+        name: "shell".into(),
+        arguments: "{}".into(),
+    }];
+    h.store.append_message(&assistant).await.unwrap();
+
+    let report = h.runtime.recover().await.expect("recover");
+    assert_eq!(report.interrupted_runs, 0);
+    let stored = h.store.messages();
+    assert!(
+        stored
+            .iter()
+            .any(|m| m.role == "tool" && m.content.contains("tool result missing")),
+        "recover must persist the synthesized result: {stored:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1397,27 +1664,21 @@ async fn subagent_model_override_is_used_for_the_child_request() {
 #[tokio::test]
 async fn conflicting_path_claims_are_surfaced_as_warnings() {
     let mut h = HarnessBuilder::new(vec![
-        spawn_call("first task", Some(&["src/shared.rs"]), false),
-        spawn_call("second task", Some(&["src/shared.rs"]), false),
+        spawn_call("first task", Some(&["src"]), false),
         Script::text("first summary"),
-        Script::text("second summary"),
         Script::text("parent done"),
     ])
     .build()
     .await;
 
-    // Pre-existing claim owned by somebody else.
+    // Pre-existing claim owned by somebody else, in a subdirectory of the path
+    // the subagent will claim. `claim_paths` reports the overlap.
     h.store
-        .claim_paths(
-            h.session(),
-            "a_other",
-            &["src/shared.rs".to_string()],
-            "write",
-        )
+        .claim_paths(h.session(), "a_other", &["src/lib.rs".to_string()], "write")
         .await
         .unwrap();
 
-    let events = h.run_to_finish("two agents").await;
+    let events = h.run_to_finish("one agent").await;
     assert_eq!(finished_status(&events), "completed");
     let warnings: Vec<String> = events
         .iter()
@@ -1432,7 +1693,46 @@ async fn conflicting_path_claims_are_surfaced_as_warnings() {
         "expected claim warnings: {:?}",
         kinds(&events)
     );
-    assert!(warnings[0].contains("a_other"));
+    assert!(warnings[0].contains("a_other"), "{}", warnings[0]);
+    assert!(
+        warnings[0].contains("src/lib.rs"),
+        "the returned overlapping claim path must be named: {}",
+        warnings[0]
+    );
+}
+
+#[tokio::test]
+async fn claims_are_released_when_the_subagent_task_cannot_be_persisted() {
+    let mut h = HarnessBuilder::new(vec![
+        spawn_call("child task", Some(&["src/lib.rs"]), false),
+        Script::text("parent done"),
+    ])
+    .build()
+    .await;
+
+    // The subagent's task message is persisted after its claims are recorded;
+    // fail exactly that append.
+    h.store.fail_appends_containing("child task");
+    let events = h.run_to_finish("go").await;
+    assert_eq!(finished_status(&events), "completed");
+
+    assert!(
+        h.store.claims().is_empty(),
+        "claims leaked after the early return: {:?}",
+        h.store.claims()
+    );
+    let agents = h.store.agents();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].status, "failed");
+    assert!(
+        agents[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("could not persist the subagent task"),
+        "{:?}",
+        agents[0].error
+    );
 }
 
 #[tokio::test]
@@ -2000,4 +2300,39 @@ fn panic_payloads_are_rendered_readably() {
     assert_eq!(crate::agent::panic_message(&*payload), "boom 1");
     let payload = std::panic::catch_unwind(|| panic!("plain")).unwrap_err();
     assert_eq!(crate::agent::panic_message(&*payload), "plain");
+}
+
+#[tokio::test]
+async fn read_only_denies_external_tools_even_without_approval() {
+    // `require_approval = false` may skip a prompt; it must not widen read_only
+    // mode, which is a hard policy denial.
+    let tool = Arc::new(ExternalTool::mcp("mcp_write", "fs").with_require_approval(false));
+    let invocations = tool.invocations();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "mcp_write", "{}")]),
+        Script::text("after denial"),
+    ])
+    .tool(tool)
+    .settings(FakeSettings::default().with_policy(ApprovalPolicy {
+        mode: ApprovalMode::ReadOnly,
+        ..Default::default()
+    }))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("write something").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(count(&events, "approval_requested"), 0);
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "side effect happened in read_only mode"
+    );
+    let finished = tool_finished(&events);
+    assert!(!finished[0].1);
+    assert!(
+        finished[0].2.contains("denied by policy: read_only mode"),
+        "{}",
+        finished[0].2
+    );
 }

@@ -33,6 +33,7 @@ pub mod agent;
 pub mod approvals;
 pub mod context;
 pub mod events;
+pub(crate) mod history;
 pub mod subagent;
 
 #[cfg(test)]
@@ -228,6 +229,13 @@ impl Runtime {
         let interrupted_runs = store.mark_interrupted_runs().await?;
         let interrupted_agents = store.mark_interrupted_agents().await?;
 
+        // A crash can leave an assistant turn whose tool result was never
+        // persisted. Repair every session's transcript before serving requests,
+        // so the first run after a restart does not replay an invalid exchange.
+        for session in store.list_sessions().await? {
+            history::repair_history(store, &session.id, HISTORY_LIMIT).await?;
+        }
+
         let pending = store.list_pending_approvals(None).await?;
         let mut run_ids: Vec<String> = Vec::new();
         for approval in &pending {
@@ -320,6 +328,9 @@ impl Runtime {
                 state.cancel.cancel();
             }
         }
+        // Wake gates parked on an approval: their cancel token will also fire,
+        // but this makes the unwinding immediate and releases every waiter.
+        self.inner.approvals.cancel_all();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline {
             let empty = self.inner.runs.lock().map(|r| r.is_empty()).unwrap_or(true);

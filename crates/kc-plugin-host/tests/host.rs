@@ -569,3 +569,102 @@ async fn hooks_handle_stays_live_across_enable_and_disable() {
     assert!(hooks.before_prompt("s_1", "/w").await.is_empty());
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Inline plugin whose manifest requests more permissions than the operator
+/// configures for it.
+const GREEDY_PLUGIN: &str = r#"
+import json, sys
+
+MANIFEST = {"name": "greedy", "version": "0.1.0", "protocol": "1",
+            "capabilities": ["tools"],
+            "permissions": ["files.read", "shell", "network"], "hooks": []}
+TOOLS = [
+    {"name": "deploy", "description": "Shell-class tool.",
+     "parameters": {"type": "object", "properties": {}}, "class": "shell"},
+    {"name": "peek", "description": "Read-only tool.",
+     "parameters": {"type": "object", "properties": {}}, "class": "read_only"},
+]
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": MANIFEST})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}})
+    elif method == "tools/call":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"ok": True, "content": "done"}})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": rid, "result": None})
+        break
+    elif rid is not None:
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "unknown"}})
+"#;
+
+fn greedy_config(name: &str, dir: &std::path::Path, permissions: Vec<String>) -> PluginConfig {
+    let script = dir.join("greedy_plugin.py");
+    if !script.exists() {
+        std::fs::write(&script, GREEDY_PLUGIN).unwrap();
+    }
+    PluginConfig {
+        name: name.to_string(),
+        enabled: true,
+        command: vec!["python3".to_string(), script.to_string_lossy().into_owned()],
+        env: BTreeMap::new(),
+        permissions,
+        settings: BTreeMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn configured_permissions_are_authoritative_over_the_manifest() {
+    let dir = temp_dir("config-permissions");
+
+    // Config grants only `files.read`; the manifest's `shell`/`network` are
+    // ignored, so the shell-class tool is not exposed and diagnostics say why.
+    let config = greedy_config("greedy", &dir, vec!["files.read".into()]);
+    let mut host = PluginHost::discover(&[config], &dir);
+    host.start_all().await;
+    let diags = host.diagnostics_for("greedy").unwrap();
+    assert_eq!(diags.status, PluginStatus::Ready, "{:?}", diags.error);
+    let warning = diags.error.clone().unwrap_or_default();
+    assert!(warning.contains("ignored"), "{warning}");
+    assert!(warning.contains("shell"), "{warning}");
+    assert!(warning.contains("network"), "{warning}");
+    let names: Vec<String> = host.tools().iter().map(|t| t.spec().name).collect();
+    assert!(
+        !names.contains(&"plugin__greedy__deploy".to_string()),
+        "manifest permissions must not override the config: {names:?}"
+    );
+    assert!(names.contains(&"plugin__greedy__peek".to_string()));
+    host.shutdown().await;
+
+    // No configured permissions: the manifest declaration is the documented
+    // fallback, so the shell-class tool is exposed again.
+    let config = greedy_config("greedy", &dir, Vec::new());
+    let mut host = PluginHost::discover(&[config], &dir);
+    host.start_all().await;
+    assert!(
+        host.diagnostics_for("greedy").unwrap().error.is_none(),
+        "nothing is ignored when the manifest is the fallback"
+    );
+    let names: Vec<String> = host.tools().iter().map(|t| t.spec().name).collect();
+    assert!(names.contains(&"plugin__greedy__deploy".to_string()));
+    host.shutdown().await;
+
+    // The config can also grant more than the manifest declared.
+    let config = greedy_config("greedy", &dir, vec!["shell".into()]);
+    let mut host = PluginHost::discover(&[config], &dir);
+    host.start_all().await;
+    let names: Vec<String> = host.tools().iter().map(|t| t.spec().name).collect();
+    assert!(names.contains(&"plugin__greedy__deploy".to_string()));
+    host.shutdown().await;
+
+    std::fs::remove_dir_all(&dir).ok();
+}

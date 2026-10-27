@@ -240,6 +240,12 @@ impl AppState {
             mcp.statuses().iter().map(mcp_summary).collect()
         };
         if let Some(object) = payload.as_object_mut() {
+            // The ids `PATCH /api/config` accepts for `model.provider`; the UI
+            // selector is driven by this list instead of hard-coding them.
+            object.insert(
+                "available_providers".into(),
+                json!(self.inner.providers.supported()),
+            );
             object.insert("plugins".into(), json!(plugins));
             object.insert("mcp_servers".into(), json!(mcp_servers));
         }

@@ -287,6 +287,7 @@ impl McpManager {
                     transport: Arc::clone(&transport),
                     state: Arc::clone(&slot.state),
                     budget: self.timeouts.call(),
+                    require_approval: slot.config.require_approval,
                 }));
             }
         }
@@ -491,6 +492,9 @@ struct McpTool {
     transport: Arc<dyn Transport>,
     state: Arc<ServerState>,
     budget: Duration,
+    /// `McpServerConfig.require_approval`: `false` exempts the server's tools
+    /// from the runtime-level approval prompt (the class stays `External`).
+    require_approval: bool,
 }
 
 impl McpTool {
@@ -544,6 +548,12 @@ impl Tool for McpTool {
     fn class(&self) -> ToolClass {
         // Same path as any other external tool: the server asks for approval.
         ToolClass::External
+    }
+
+    fn requires_approval(&self) -> bool {
+        // Configured exemption (default `true`). The class stays `External`, so
+        // read_only mode still denies the call; this only skips the prompt.
+        self.require_approval
     }
 
     async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {

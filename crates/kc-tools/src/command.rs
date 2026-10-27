@@ -262,7 +262,7 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
 
     let stopped_early = timed_out || cancelled;
     let status = if stopped_early {
-        terminate_group(&mut child, pid).await
+        terminate_group(&mut child, pid, exit_status).await
     } else {
         exit_status
     };
@@ -319,22 +319,122 @@ fn signal_group(pid: u32, signal: i32) {
 
 /// SIGTERM the group, wait up to [`KILL_GRACE`], then SIGKILL. Returns the exit
 /// status when it could be collected.
+///
+/// Signalling a process group by pid is only safe while the leader has not been
+/// reaped: once it has, the kernel may reuse that pid for an unrelated process
+/// (group), and `kill(-pid)` would hit innocent processes. So the group is only
+/// signalled after `try_wait()` confirms the leader is still running, and never
+/// again once it has been reaped.
 async fn terminate_group(
     child: &mut tokio::process::Child,
     pid: u32,
+    reaped: Option<std::process::ExitStatus>,
 ) -> Option<std::process::ExitStatus> {
+    if let Some(status) = reaped {
+        return Some(status);
+    }
+    match child.try_wait() {
+        Ok(Some(status)) => return Some(status),
+        Ok(None) => {}
+        // The state is unknown; never risk signalling a reused pid.
+        Err(_) => return None,
+    }
+
     signal_group(pid, libc::SIGTERM);
-    let status = match tokio::time::timeout(KILL_GRACE, child.wait()).await {
-        Ok(Ok(status)) => Some(status),
-        _ => None,
-    };
-    // Sweep any survivors (grandchildren) even if the leader already exited.
-    signal_group(pid, libc::SIGKILL);
-    if status.is_some() {
-        return status;
+    if let Ok(Ok(status)) = tokio::time::timeout(KILL_GRACE, child.wait()).await {
+        return Some(status);
+    }
+
+    // Escalate only if the leader is still unreaped; a reaped leader means the
+    // pid may already belong to somebody else and must not be signalled.
+    match child.try_wait() {
+        Ok(Some(status)) => return Some(status),
+        Ok(None) => signal_group(pid, libc::SIGKILL),
+        Err(_) => return None,
     }
     match tokio::time::timeout(KILL_GRACE, child.wait()).await {
         Ok(Ok(status)) => Some(status),
-        _ => None,
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    async fn spawn_own_group(script: &str) -> (tokio::process::Child, u32) {
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        unsafe {
+            cmd.as_std_mut().pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().expect("spawn /bin/sh");
+        let pid = child.id().expect("child pid");
+        (child, pid)
+    }
+
+    #[tokio::test]
+    async fn an_already_reaped_child_is_never_signalled() {
+        let (mut child, pid) = spawn_own_group("exit 0").await;
+        let status = child.wait().await.unwrap();
+        assert_eq!(status.code(), Some(0));
+
+        // The leader is reaped: cleanup must not signal the (possibly reused) pid
+        // and must return the status it was given.
+        let cleaned = terminate_group(&mut child, pid, Some(status)).await;
+        assert_eq!(cleaned.and_then(|s| s.code()), Some(0));
+        assert!(cleaned.is_none() || cleaned.unwrap().signal().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_quickly_exiting_child_is_reaped_without_a_stray_kill() {
+        let (mut child, pid) = spawn_own_group("exit 3").await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // No exit status was collected by the caller, but the child has already
+        // exited: cleanup must reap it instead of signalling its group.
+        let cleaned = terminate_group(&mut child, pid, None).await;
+        let status = cleaned.expect("the exited child must be reaped");
+        assert_eq!(status.code(), Some(3));
+        assert!(
+            status.signal().is_none(),
+            "the child must not have been killed, got {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_running_group_is_terminated_and_reaped() {
+        let (mut child, pid) = spawn_own_group("sleep 30").await;
+        let started = Instant::now();
+        let cleaned = terminate_group(&mut child, pid, None).await;
+        assert!(
+            started.elapsed() < KILL_GRACE + Duration::from_secs(1),
+            "termination must be prompt, took {:?}",
+            started.elapsed()
+        );
+        let status = cleaned.expect("the killed child must be reaped");
+        assert!(status.signal().is_some(), "expected a signal exit");
+    }
+
+    #[test]
+    fn bounded_output_keeps_head_and_tail() {
+        let mut out = BoundedOutput::new(64);
+        out.push(b"abcdefghij");
+        out.push(&[b'x'; 200]);
+        let finished = out.finish();
+        assert!(finished.truncated);
+        assert!(finished.text.contains("bytes omitted"));
+        assert!(finished.text.starts_with("abcdefghij"));
     }
 }

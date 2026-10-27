@@ -64,6 +64,15 @@ impl ApprovalRegistry {
         }
     }
 
+    /// Drop a waiter without delivering a decision.
+    ///
+    /// Used on gate exit paths where the request already knows the outcome
+    /// (timeout, cancellation, store failure); leaving the sender behind would
+    /// leak an entry for the rest of the process lifetime.
+    pub fn discard(&self, id: &str) {
+        self.pending.lock().expect("approvals lock").remove(id);
+    }
+
     /// Fail every waiter with `Expired`.
     pub fn cancel_all(&self) {
         let mut guard = self.pending.lock().expect("approvals lock");
@@ -444,8 +453,22 @@ impl ApprovalGate for RuntimeApprovalGate {
             }
             answer = receiver => answer.ok(),
         };
+        // Whatever woke us up, this id must no longer be registered: `resolve`
+        // already removed it, and the timeout/cancel/store-failure paths did
+        // not. `discard` is a no-op when the entry is already gone.
+        self.inner.approvals.discard(&approval_id);
 
         match decision {
+            Some(ApprovalDecision::Expired) => {
+                // e.g. `ApprovalRegistry::cancel_all` during shutdown: nobody
+                // updated the store row, so close it here as well.
+                self.expire("approval expired").await;
+                ctx.emit(Event::ApprovalResolved {
+                    approval_id,
+                    decision: ApprovalDecision::Expired,
+                });
+                ApprovalDecision::Expired
+            }
             Some(decision) => {
                 // Resolved by the UI: nothing left to expire for this id.
                 self.scope.forget(&approval_id);

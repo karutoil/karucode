@@ -13,6 +13,7 @@
 use crate::approvals::{ApprovalScope, RuntimeApprovalGate};
 use crate::context;
 use crate::events::EmitCtx;
+use crate::history::repair_history;
 use crate::{RunHandle, RunState, Runtime, RuntimeInner, HISTORY_LIMIT};
 use futures_util::{FutureExt, StreamExt};
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView};
@@ -20,7 +21,7 @@ use kc_core::config::{ApprovalMode, Limits, ModelConfig};
 use kc_core::error::{Error, Result};
 use kc_core::events::Event;
 use kc_core::ids::{AgentId, RunId, SessionId};
-use kc_core::message::{Message, Role, ToolCall};
+use kc_core::message::{Message, ToolCall};
 use kc_core::provider::{ChatRequest, ProviderChunk, ProviderStream};
 use kc_core::store::{NewMessage, RunStatus};
 use kc_core::tool::{
@@ -33,7 +34,8 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-/// Name of the runtime's built-in delegate tool.
+/// Prefix of the placeholder tool result written when a call is skipped (per-turn
+/// cap or cancellation) but the assistant message already carries the call.
 pub(crate) const SKIPPED_PREFIX: &str = "[skipped: ";
 
 /// Everything one loop needs. Built by [`start_run`] for a session run and by
@@ -259,16 +261,10 @@ async fn begin_run(
     persist(inner, &state.session_id, &state.run_id, None, &user).await?;
     store.touch_session(&state.session_id.0).await?;
 
-    let stored = store
-        .list_messages(&state.session_id.0, HISTORY_LIMIT)
-        .await?;
-    let mut history: Vec<Message> = stored
-        .into_iter()
-        // Subagent transcripts share the session but must never leak into the
-        // parent conversation; stored system prompts are rebuilt per iteration.
-        .filter(|m| m.agent_id.is_none() && m.role != Role::System.as_str())
-        .map(|m| m.to_message())
-        .collect();
+    // The new user message is already persisted; repair the whole window now so
+    // a slice boundary or an earlier interrupted tool call cannot make the
+    // request invalid for the provider.
+    let mut history = repair_history(store, &state.session_id.0, HISTORY_LIMIT).await?;
     if history.is_empty() {
         history.push(user);
     }
@@ -536,14 +532,24 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
             }
         };
 
-        let (text, calls, end) = consume(&ctx, &spec.cancel, spec.deadline, stream).await;
+        let (text, calls, end, finish_reason) =
+            consume(&ctx, &spec.cancel, spec.deadline, stream).await;
 
         if !text.is_empty() {
             last_text = text.clone();
         }
 
+        let mut hit_token_limit = false;
         match end {
-            StreamEnd::Complete => {}
+            StreamEnd::Complete => {
+                if finish_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.eq_ignore_ascii_case("length"))
+                {
+                    hit_token_limit = true;
+                    ctx.notice("warn", TOKEN_LIMIT_NOTICE);
+                }
+            }
             StreamEnd::Cancelled => {
                 if !text.is_empty() {
                     persist_assistant_text(&inner, &spec, &ctx, &text).await;
@@ -608,6 +614,17 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
         history.push(assistant);
 
         if calls.is_empty() {
+            if hit_token_limit {
+                // Do not report a truncated answer as a success: the turn ended
+                // because the model ran out of output budget, not because it
+                // finished answering.
+                let error = if spec.is_subagent {
+                    Some(TOKEN_LIMIT_NOTICE.to_string())
+                } else {
+                    None
+                };
+                return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
+            }
             return LoopOutcome::new(RunStatus::Completed, None, last_text, iterations);
         }
 
@@ -743,21 +760,34 @@ async fn gate_external_tool(
     if origin == ToolOrigin::Builtin {
         return None;
     }
-    // `requires_approval` is the tool's declaration (default: every class except
-    // ReadOnly). A read-only external tool needs no prompt.
-    if !tool.requires_approval() {
-        return None;
-    }
-
     let policy = inner.deps.settings.approval_policy().await;
     let view = ApprovalPolicyView {
         mode: policy.mode.clone(),
         allow_commands: policy.allow_commands.clone(),
         auto_approve_paths: policy.auto_approve_paths.clone(),
     };
+
+    // `read_only` is a hard policy, not a prompt: it denies every external tool
+    // that is not declared read-only, even one whose server set
+    // `require_approval = false`. That flag can skip a prompt; it cannot widen
+    // what the policy allows.
+    if view.mode == ApprovalMode::ReadOnly && tool.class() != kc_core::tool::ToolClass::ReadOnly {
+        return Some(ToolOutcome::err(format!(
+            "denied by policy: read_only mode does not allow `{}` ({:?} tool from {})",
+            call.name,
+            tool.class(),
+            origin.label()
+        )));
+    }
+
+    // `requires_approval` is the tool's declaration (default: every class except
+    // ReadOnly). A read-only external tool needs no prompt.
+    if !tool.requires_approval() {
+        return None;
+    }
+
     match view.mode {
-        ApprovalMode::Auto => None,
-        ApprovalMode::ReadOnly => Some(ToolOutcome::err("denied by policy: read_only mode")),
+        ApprovalMode::Auto | ApprovalMode::ReadOnly => None,
         ApprovalMode::Ask | ApprovalMode::AskCommands => {
             let kind = match &origin {
                 ToolOrigin::Mcp { .. } => ApprovalKind::Mcp,
@@ -921,16 +951,21 @@ async fn run_one_tool(
     Ok(message)
 }
 
+/// Notice emitted when the model stopped because it hit its output budget.
+pub(crate) const TOKEN_LIMIT_NOTICE: &str =
+    "response hit the model's max_tokens limit; the answer may be incomplete and its final text is truncated";
+
 /// Consume the provider stream, emitting deltas live.
 async fn consume(
     ctx: &EmitCtx,
     cancel: &CancellationToken,
     deadline: Instant,
     mut stream: ProviderStream,
-) -> (String, Vec<ToolCall>, StreamEnd) {
+) -> (String, Vec<ToolCall>, StreamEnd, Option<String>) {
     let mut text = String::new();
     let mut accumulator = kc_core::provider::ToolCallAccumulator::default();
     let mut end = StreamEnd::Complete;
+    let mut finish_reason: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -963,7 +998,10 @@ async fn consume(
                     Ok(ProviderChunk::Usage { input_tokens, output_tokens }) => {
                         ctx.emit(Event::Usage { input_tokens, output_tokens });
                     }
-                    Ok(ProviderChunk::Finish { .. }) => break,
+                    Ok(ProviderChunk::Finish { reason }) => {
+                        finish_reason = Some(reason);
+                        break;
+                    }
                     Ok(ProviderChunk::Error { message, retryable }) => {
                         let suffix = if retryable { " (retryable)" } else { "" };
                         end = StreamEnd::Failed(format!("provider stream error: {message}{suffix}"));
@@ -982,7 +1020,15 @@ async fn consume(
         }
     }
 
-    (text, accumulator.finish(), end)
+    // A clean EOF without any finish_reason is not success: the stream was cut
+    // before the provider told us why it stopped.
+    if matches!(end, StreamEnd::Complete) && finish_reason.is_none() {
+        end = StreamEnd::Failed(
+            "provider stream ended without a finish_reason; the response is incomplete".into(),
+        );
+    }
+
+    (text, accumulator.finish(), end, finish_reason)
 }
 
 /// Best-effort text for a caught panic payload.

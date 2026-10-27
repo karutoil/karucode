@@ -32,6 +32,15 @@ pub async fn patch_config(State(state): State<AppState>, body: Bytes) -> ApiResu
         ));
     }
     let patch: ConfigPatch = parse_body(&body)?;
+    // `model.provider` is validated against the ids the running factory can
+    // actually build, so the settings selector cannot save a provider that would
+    // only fail later (or, worse, be silently accepted and ignored).
+    if let Some(model) = &patch.model {
+        if let Some(provider) = &model.provider {
+            crate::settings::check_provider_id(provider, &state.providers().supported())
+                .map_err(ApiError::from)?;
+        }
+    }
     state
         .settings()
         .update(&patch)
