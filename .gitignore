@@ -7,5 +7,6 @@ web/dist/
 .data/
 .env
 .env.local
-reports/
+# generated evidence is committed
+exports/
 .cache/
