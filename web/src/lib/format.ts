@@ -19,7 +19,10 @@ export function relativeTime(timestamp: number, now: number = Date.now()): strin
 
 export function formatDuration(ms: number | null): string {
   if (ms === null || !Number.isFinite(ms)) return '';
-  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
+  // Sub-millisecond work (a small file read) reads as "0ms", which looks like a
+  // broken timer; say "<1ms" instead.
+  if (Math.round(ms) < 1) return '<1ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
   const seconds = ms / 1000;
   if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
   const minutes = Math.floor(seconds / 60);
