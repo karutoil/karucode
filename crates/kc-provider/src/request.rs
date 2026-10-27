@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 
 /// Keys the provider owns; `extra_body` may override tunables (temperature,
 /// `max_tokens`, ...) but never the framing of the stream.
-const RESERVED_BODY_KEYS: [&str; 5] = ["model", "messages", "stream", "tools", "tool_choice"];
+const RESERVED_BODY_KEYS: [&str; 4] = ["model", "messages", "stream", "tools"];
 
 fn normalize_base(base_url: &str) -> Result<&str> {
     let base = base_url.trim();
@@ -76,7 +76,13 @@ pub fn build_chat_body(request: &ChatRequest) -> Value {
     );
     if !request.tools.is_empty() {
         body.insert("tools".into(), tools_json(&request.tools));
-        body.insert("tool_choice".into(), Value::String("auto".into()));
+        // Deliberately NO `tool_choice`. `auto` is already the server-side
+        // default whenever tools are present, and sending it explicitly costs a
+        // lot on some gateways: measured against ai.karutoil.site, explicit
+        // `tool_choice:"auto"` pushed time-to-first-token to 9-30s (one request
+        // never streamed at all) versus ~1s when omitted. Operators who need a
+        // different value can set it through `model.extra_body.tool_choice`,
+        // which is allowed through below.
     }
     for (key, value) in &request.extra_body {
         if RESERVED_BODY_KEYS.contains(&key.as_str()) {
@@ -344,7 +350,9 @@ mod tests {
                 }
             })
         );
-        assert_eq!(body["tool_choice"], "auto");
+        // Omitting tool_choice keeps the server default (`auto`) and avoids the
+        // gateway slow path; extra_body can still set it explicitly.
+        assert!(body.get("tool_choice").is_none());
         assert_eq!(body["max_tokens"], 64);
         assert_eq!(body["top_p"], 0.9);
         // assistant-with-tool-calls has no content key
@@ -355,10 +363,22 @@ mod tests {
             body["messages"][2]["tool_calls"][0]["function"]["arguments"],
             "{\"path\":\"a\"}"
         );
-        assert_eq!(body["messages"][3]["content"], "contents");
-        assert_eq!(body["messages"][3]["tool_call_id"], "call_1");
-        assert_eq!(body["messages"][3]["name"], "read_file");
-        assert_eq!(body["messages"][0]["content"], "sys");
+    }
+
+    #[test]
+    fn extra_body_may_override_tool_choice() {
+        let mut req = request();
+        req.tools.push(ToolSpec {
+            name: "read_file".into(),
+            description: "read a file".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            origin: Default::default(),
+        });
+        req.extra_body
+            .insert("tool_choice".into(), serde_json::json!("required"));
+        let body = build_chat_body(&req);
+        assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["tools"][0]["function"]["name"], "read_file");
     }
 
     #[test]

@@ -147,6 +147,11 @@ active (already finished or never started).
 ```
 `role` ∈ `system|user|assistant|tool`.
 
+**Optional fields are omitted, not sent as `null`.** Any field shown below as
+nullable (`error`, `finished_at`, `tool_call_id`, `name`, `agent_id`, …) is left
+out of the JSON entirely when it is empty, to keep payloads small. Treat a
+missing key the same as `null`.
+
 `RunRecord`
 ```json
 { "id": "r_x", "session_id": "s_ab12", "status": "running", "model": "gpt-4o-mini",

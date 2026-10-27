@@ -249,6 +249,21 @@ sessions, streaming, tool execution, approvals (allow + deny), cancellation,
 subagents, plugin and MCP tools, path confinement, CSRF, settings redaction, UI
 serving and restart/interrupted-state recovery. Results land in `reports/e2e.json`.
 
+Against a **real** endpoint (slow, non-deterministic, costs tokens — this is the
+gate for a given deployment rather than for the harness):
+
+```bash
+# copies endpoint/model/key from your existing karucode database, runs its own
+# server instance so your sessions are untouched
+python3 scripts/e2e_real.py --workspace /tmp/scratch-project
+```
+
+It checks the provider probe, real streaming, real tool selection, a multi-step
+"run the tests → fix the bug → prove they pass" task (asserting the workspace
+really ends up green), history continuity, cancellation, subagent delegation and
+restart persistence. Pass `--config file.toml` instead of `--db` to use explicit
+settings.
+
 Performance:
 
 ```bash
@@ -275,7 +290,7 @@ promised: measurements for this machine are in that report.
 | `web/` | Preact + Vite frontend |
 | `plugins/example-hello` | working example plugin |
 | `docs/` | API, architecture, plugins, MCP, security |
-| `scripts/` | mock provider, e2e smoke test, benchmark |
+| `scripts/` | mock provider, deterministic e2e gate, real-provider e2e gate, benchmark |
 
 Architecture details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). HTTP contract:
 [docs/API.md](docs/API.md).

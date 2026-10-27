@@ -114,7 +114,9 @@ async fn request_body_and_headers_match_the_wire_contract() {
     assert_eq!(body["parallel_tool_calls"], false);
     assert!(body.get("max_tokens").is_none(), "{body}");
     assert!(body.get("top_p").is_none(), "{body}");
-    assert_eq!(body["tool_choice"], "auto");
+    // `tool_choice` is intentionally omitted: it defaults to `auto` server-side,
+    // and sending it explicitly costs 9-30s of extra latency on some gateways.
+    assert!(body.get("tool_choice").is_none(), "{body}");
     assert_eq!(
         body["tools"][0],
         serde_json::json!({

@@ -146,14 +146,73 @@ HTTPS provider will be higher (TLS buffers, larger responses) — the mock keeps
 every response small. These numbers say the idle footprint and startup are small;
 they do not promise a figure for someone else's workload.
 
+## 5b. Verification against a real provider
+
+The mock proves the harness; it cannot prove a specific gateway. A second, opt-in
+gate (`scripts/e2e_real.py`) therefore runs the same flows against a live
+OpenAI-compatible endpoint. It boots its own server instance from a snapshot of
+the configured settings (so no key is pasted anywhere) and asserts things the
+mock cannot: real model output, real tool selection, and the workspace actually
+ending up fixed.
+
+Run against `https://ai.karutoil.site/v1` with `surplus/deepseek-v4.1-flash-1017`
+(non-deterministic, costs tokens): **8/8 checks passed**.
+
+| check | measured result |
+| --- | --- |
+| provider probe (`/models` + chat) | 203 ms, 501 models |
+| text response | 13 deltas, 191 chars, 1.3 s |
+| real tool call | model chose `list_dir` ×2 then `read_file` |
+| multi-step coding task | 8.6 s: ran `node --test`, edited `src/math.js`, re-ran to 5/5 green, diff = 1 line |
+| history continuity | correctly recalled "I changed `src/math.js`… the `add` function subtracted" |
+| cancellation | cancelled in <1 s, session immediately reusable |
+| subagent delegation | 1 agent completed, 2 iterations, summary relayed |
+| restart persistence | 32 messages and the agent record survived |
+
+Additional real-model checks done by hand (+ = passed):
+
+* **Reasoning streams.** The gateway emits `reasoning_content`; a hard puzzle
+  produced 12 `reasoning_delta` events plus 25 `text_delta` events, which the UI
+  renders in the collapsible "Thinking" block.
+* **Per-subagent model override.** Parent on deepseek, child explicitly on
+  `a6api/gpt-5.3-codex`; `AgentRecord.model` recorded the override and the child
+  completed in 2 iterations.
+* **Crash recovery.** `kill -9` mid-`run_command`: on restart the run is
+  `interrupted` and the session still works. The model's next answer even flagged
+  that its earlier tool call never returned — the synthesized "tool result
+  missing" row from `history::repair_history` doing its job.
+* **Full UI flow in Chromium** against the real model: send → live streamed
+  reasoning and text → shell approval → `exit 0` output in-chat → file-edit
+  approval showing the exact `-`/`+` diff → "Allow for session" honoured for
+  later commands → final answer with a copyable DIFF block and a verification
+  section. Files on disk were verified independently (`git diff`, `node --test`
+  5/5 green).
+
+### The defect this found
+
+Our request builder sent `"tool_choice": "auto"` whenever tools were present.
+Measured against this gateway with unique prompts, that single redundant field
+pushed time-to-first-token from **~1 s to 9–30 s** (one request produced no data
+at all), for two different models. Omitting it — `auto` is already the server
+default — restored streaming: the same agent turn went from one blob after 32.7 s
+to 11 deltas starting at 1.45 s. Fixed in `kc-provider/src/request.rs`, guarded by
+tests, with `model.extra_body.tool_choice` still available for operators who need
+an explicit value.
+
+Two smaller things the live run surfaced: the sessions rail showed every session
+as "New session" (now auto-titled from the first message), and the chat view could
+stop following the stream when content reflowed without a new delta (now
+sticky-bottom with a "Jump to latest" affordance).
+
 ## 6. Known gaps
 
-* **No real-provider run.** No endpoint or credentials were available, so every
-  model interaction in this report used the local mock. `scripts/mock_openai.py`
-  reproduces the wire format faithfully (split tool-call deltas, usage chunks,
-  `[DONE]`, errors), and `POST /api/provider/test` was exercised against it, but
-  nothing here proves behaviour against a specific vendor gateway. Pointing
-  `KARUCODE_BASE_URL` at a gateway is the first thing to do with real credentials.
+* **Provider-specific behaviour.** Everything above now includes a live gateway,
+  but only one: `ai.karutoil.site` (a multi-model proxy). Behaviour verified there
+  — `reasoning_content` streaming, the `tool_choice` latency trap, 30 s
+  heartbeat-then-burst responses under some conditions — may differ on LiteLLM,
+  vLLM, Ollama or a vendor's own API. The deterministic mock remains the
+  regression gate for the harness itself; `scripts/e2e_real.py` is the gate for a
+  given deployment.
 * **Shell is not sandboxed**, by design and documented prominently. Approvals are
   a gate, not isolation.
 * **No per-subagent worktree.** `owned_paths` warns about overlap; it does not
