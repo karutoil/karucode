@@ -7,6 +7,11 @@
 //! Constraints for these read-only endpoints (no approval is involved):
 //! * `git` is spawned directly with an argv array (never a shell);
 //! * `current_dir` is the canonical workspace root;
+//! * repository-local configuration may not execute anything: `core.fsmonitor`
+//!   (runs on `status`) and `diff.external` (runs on `diff`) are overridden with
+//!   `-c`, `GIT_EXTERNAL_DIFF`/`GIT_PAGER` are pinned, `--no-ext-diff` is passed
+//!   to `diff`, and any inherited `GIT_DIR`/`GIT_WORK_TREE` is dropped, so a
+//!   cloned repository cannot turn a read-only panel into code execution;
 //! * the whole call (spawn + read + wait) is bounded by a 10s timeout and
 //!   `kill_on_drop`;
 //! * stdout/stderr are drained but kept in memory only up to fixed caps;
@@ -37,6 +42,25 @@ struct GitOutput {
     stdout: String,
     stderr: String,
 }
+
+/// Global `-c` overrides prepended to every invocation.
+///
+/// * `core.fsmonitor=false` — otherwise `git status` executes a command taken
+///   from the repository's own `.git/config`.
+/// * `diff.external=` — belt and braces for `git diff`; on its own an *empty*
+///   value is parsed as a (failing) command, which is why [`run_git`] callers
+///   that diff also pass `--no-ext-diff` (see [`diff`]), the flag that really
+///   disables external drivers.
+/// * `core.pager=cat` — the server has no terminal, and a repo-local pager would
+///   be another command to spawn.
+const GIT_HARDENING_ARGS: [&str; 6] = [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "diff.external=",
+    "-c",
+    "core.pager=cat",
+];
 
 pub async fn status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let root = state.workspace().root().to_path_buf();
@@ -99,7 +123,7 @@ pub async fn diff(
     let requested_path = query_str(&query, "path");
     let workspace = state.workspace().clone();
 
-    let mut args: Vec<String> = vec!["diff".into()];
+    let mut args: Vec<String> = vec!["diff".into(), "--no-ext-diff".into()];
     if staged {
         args.push("--staged".into());
     }
@@ -168,12 +192,22 @@ fn validate_ref(base: &str) -> ApiResult<()> {
 async fn run_git(root: &Path, args: &[&str]) -> Result<GitOutput, ApiError> {
     let mut command = tokio::process::Command::new("git");
     command
+        // Repository-local config must not run code on a read-only endpoint.
+        .args(GIT_HARDENING_ARGS)
         .args(args)
         // Canonical workspace root; no shell, no `cd`.
         .current_dir(root)
         // Never prompt or page; the server has no terminal.
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_PAGER", "cat")
+        // An inherited external diff driver would bypass `core.pager`/`-c`.
+        .env("GIT_EXTERNAL_DIFF", "")
+        // Read-only endpoints must not take `index.lock` or refresh the index.
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        // An inherited GIT_DIR/GIT_WORK_TREE points git at a different
+        // repository than the workspace the UI is showing.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

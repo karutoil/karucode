@@ -997,6 +997,403 @@ async fn invalid_json_and_bad_bodies_are_clear() {
     assert_eq!(missing.status, StatusCode::BAD_REQUEST);
 }
 
+// ---------------------------------------------------------------------------
+// DNS-rebinding (`Host` allowlist) and settings bounds
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rebound_host_with_matching_origin_is_rejected() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+
+    // The reproduced attack: a rebound attacker domain agrees with itself in
+    // both `Host` and `Origin`, so an Origin==Host comparison alone accepts it.
+    let rebound = h
+        .send(
+            Method::PATCH,
+            "/api/config",
+            Some(json!({ "approvals": { "mode": "auto" } })),
+            &[("host", "evil.example"), ("origin", "http://evil.example")],
+        )
+        .await;
+    assert_eq!(rebound.status, StatusCode::FORBIDDEN);
+    assert_eq!(rebound.error_code(), "permission_denied");
+    let message = rebound.json()["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    for expected in ["127.0.0.1", "localhost", "::1", "KARUCODE_ALLOWED_HOSTS"] {
+        assert!(
+            message.contains(expected),
+            "the 403 must name the allowed hosts, got: {message}"
+        );
+    }
+
+    // Nothing was written: approval mode is still the default.
+    let config = h.get("/api/config").await.json();
+    assert_eq!(config["approvals"]["mode"], "ask");
+
+    // Reads are guarded too: a rebound page must not read the config.
+    let read = h.get_with("/api/config", &[("host", "evil.example")]).await;
+    assert_eq!(read.status, StatusCode::FORBIDDEN);
+    assert_eq!(read.error_code(), "permission_denied");
+
+    // Loopback-looking-but-not-loopback names and foreign names are rejected.
+    for host in [
+        "127.0.0.1.evil.example",
+        "localhost.evil.example",
+        "evil.example:8787",
+        "0.0.0.0:8787",
+    ] {
+        let response = h.get_with("/api/health", &[("host", host)]).await;
+        assert_eq!(response.status, StatusCode::FORBIDDEN, "host {host}");
+        assert_eq!(response.error_code(), "permission_denied", "host {host}");
+    }
+}
+
+#[tokio::test]
+async fn loopback_hosts_are_served_without_a_token() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+
+    for host in [
+        "127.0.0.1:8787",
+        "127.0.0.1",
+        "localhost:8787",
+        "LOCALHOST:8787",
+        "[::1]:8787",
+        "::1",
+    ] {
+        let response = h.get_with("/api/health", &[("host", host)]).await;
+        assert_eq!(response.status, StatusCode::OK, "host {host}");
+        assert_eq!(response.json()["status"], "ok");
+    }
+
+    // A mutation from a loopback page still needs the CSRF header and a matching
+    // origin, and now passes the Host check.
+    let patched = h
+        .send(
+            Method::PATCH,
+            "/api/config",
+            Some(json!({ "limits": { "max_iterations": 40 } })),
+            &[
+                ("host", "127.0.0.1:8787"),
+                ("origin", "http://127.0.0.1:8787"),
+            ],
+        )
+        .await;
+    assert_eq!(patched.status, StatusCode::OK, "{}", patched.text());
+    assert_eq!(patched.json()["limits"]["max_iterations"], 40);
+}
+
+#[tokio::test]
+async fn allowed_hosts_env_permits_a_configured_proxy_host() {
+    // The bootstrap reads KARUCODE_ALLOWED_HOSTS once at startup; the window in
+    // which this test mutates the process environment is therefore tiny. Other
+    // tests in the binary use loopback hosts, which stay allowed either way.
+    std::env::set_var(
+        kc_server::host::ALLOWED_HOSTS_ENV,
+        "karucode.internal.test, *.proxy.test:8443",
+    );
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    std::env::remove_var(kc_server::host::ALLOWED_HOSTS_ENV);
+
+    for host in ["karucode.internal.test", "karucode.internal.test:9443"] {
+        let response = h.get_with("/api/health", &[("host", host)]).await;
+        assert_eq!(response.status, StatusCode::OK, "host {host}");
+    }
+    let subdomain = h
+        .get_with("/api/health", &[("host", "app.proxy.test:8443")])
+        .await;
+    assert_eq!(subdomain.status, StatusCode::OK);
+
+    // The wildcard does not imply the apex, and ports must match when given.
+    for host in [
+        "proxy.test:8443",
+        "app.proxy.test:9443",
+        "evil.example",
+        "karucode.internal.test.evil.example",
+    ] {
+        let response = h.get_with("/api/health", &[("host", host)]).await;
+        assert_eq!(response.status, StatusCode::FORBIDDEN, "host {host}");
+    }
+}
+
+#[tokio::test]
+async fn a_bearer_token_disables_the_host_restriction() {
+    let token = "0123456789abcdef0123456789abcdef";
+    let h = HarnessBuilder::new(Vec::new())
+        .auth_token(token)
+        .build()
+        .await;
+    let auth = format!("Bearer {token}");
+
+    // Without the token the request stops at authentication, not at the guard.
+    let unauthenticated = h
+        .get_with("/api/health", &[("host", "karucode.example.com:8787")])
+        .await;
+    assert_eq!(unauthenticated.status, StatusCode::UNAUTHORIZED);
+
+    // With it, any Host is served as long as Origin matches (reverse proxies are
+    // free to rewrite Host; the token is the credential).
+    let patched = h
+        .send(
+            Method::PATCH,
+            "/api/config",
+            Some(json!({ "limits": { "max_iterations": 41 } })),
+            &[
+                ("host", "karucode.example.com:8787"),
+                ("origin", "http://karucode.example.com:8787"),
+                ("authorization", auth.as_str()),
+            ],
+        )
+        .await;
+    assert_eq!(patched.status, StatusCode::OK, "{}", patched.text());
+
+    // A mismatched Origin is still refused with a token configured.
+    let cross_origin = h
+        .send(
+            Method::PATCH,
+            "/api/config",
+            Some(json!({ "limits": { "max_iterations": 42 } })),
+            &[
+                ("host", "karucode.example.com:8787"),
+                ("origin", "http://evil.example"),
+                ("authorization", auth.as_str()),
+            ],
+        )
+        .await;
+    assert_eq!(cross_origin.status, StatusCode::FORBIDDEN);
+    assert_eq!(cross_origin.error_code(), "permission_denied");
+}
+
+#[tokio::test]
+async fn out_of_range_settings_are_rejected_with_the_bounds() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+
+    let cases: [(&str, Value); 14] = [
+        (
+            "limits.max_file_read_bytes",
+            json!({ "limits": { "max_file_read_bytes": 4_000_000_000u64 } }),
+        ),
+        (
+            "limits.max_tool_output_bytes",
+            json!({ "limits": { "max_tool_output_bytes": 100_000_000 } }),
+        ),
+        (
+            "limits.max_command_output_bytes",
+            json!({ "limits": { "max_command_output_bytes": 255 } }),
+        ),
+        (
+            "limits.context_max_chars",
+            json!({ "limits": { "context_max_chars": 9_999 } }),
+        ),
+        (
+            "limits.max_iterations",
+            json!({ "limits": { "max_iterations": 501 } }),
+        ),
+        (
+            "limits.max_run_secs",
+            json!({ "limits": { "max_run_secs": 9 } }),
+        ),
+        (
+            "limits.command_timeout_secs",
+            json!({ "limits": { "command_timeout_secs": 0 } }),
+        ),
+        (
+            "limits.max_command_timeout_secs",
+            json!({ "limits": { "max_command_timeout_secs": 3_601 } }),
+        ),
+        (
+            "limits.search_max_results",
+            json!({ "limits": { "search_max_results": 2_001 } }),
+        ),
+        (
+            "limits.max_tool_calls_per_turn",
+            json!({ "limits": { "max_tool_calls_per_turn": 33 } }),
+        ),
+        (
+            "subagents.max_concurrent",
+            json!({ "subagents": { "max_concurrent": 17 } }),
+        ),
+        (
+            "subagents.max_iterations",
+            json!({ "subagents": { "max_iterations": 101 } }),
+        ),
+        (
+            "subagents.max_depth",
+            json!({ "subagents": { "max_depth": 5 } }),
+        ),
+        (
+            "model.temperature",
+            json!({ "model": { "temperature": 2.5 } }),
+        ),
+    ];
+    for (field, patch) in cases {
+        let response = h.patch("/api/config", patch.clone()).await;
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "patch {patch} should be rejected"
+        );
+        assert_eq!(response.error_code(), "bad_request");
+        let message = response.json()["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            message.contains(field),
+            "the 400 for {patch} must name {field}, got: {message}"
+        );
+        assert!(
+            message.contains("between"),
+            "the 400 for {patch} must state the bounds, got: {message}"
+        );
+    }
+
+    // Rejections are no-ops: the OOM-enabling value never took effect.
+    let config = h.get("/api/config").await.json();
+    assert_eq!(config["limits"]["max_file_read_bytes"], 200_000);
+    assert_eq!(config["limits"]["max_iterations"], 32);
+    assert_eq!(config["subagents"]["max_depth"], 1);
+
+    // The bounds themselves are inclusive.
+    let boundary = h
+        .patch(
+            "/api/config",
+            json!({
+                "model": { "temperature": 2.0 },
+                "limits": {
+                    "max_file_read_bytes": 5_000_000,
+                    "max_tool_output_bytes": 1_000_000,
+                    "max_command_output_bytes": 1_000_000,
+                    "context_max_chars": 10_000,
+                    "max_iterations": 500,
+                    "max_run_secs": 86_400,
+                    "command_timeout_secs": 3_600,
+                    "max_command_timeout_secs": 3_600,
+                    "search_max_results": 2_000,
+                    "max_tool_calls_per_turn": 32
+                },
+                "subagents": { "max_concurrent": 16, "max_iterations": 100, "max_depth": 0 }
+            }),
+        )
+        .await;
+    assert_eq!(boundary.status, StatusCode::OK, "{}", boundary.text());
+    let body = boundary.json();
+    assert_eq!(body["limits"]["max_file_read_bytes"], 5_000_000);
+    assert_eq!(body["subagents"]["max_depth"], 0);
+}
+
+/// Write an executable marker script (used to prove git helpers do not run).
+#[cfg(unix)]
+fn write_marker_script(path: &std::path::Path, marker: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display());
+    std::fs::write(path, script).expect("write marker script");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod marker script");
+}
+
+#[cfg(unix)]
+fn git_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PAGER", "cat")
+        .output()
+        .expect("run git")
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn git_endpoints_do_not_run_repository_helpers() {
+    let git_available = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+    if !git_available {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let ws = h.workspace_path().to_path_buf();
+    let fsmonitor_marker = ws.join("fsmonitor-ran");
+    let diff_marker = ws.join("diffexternal-ran");
+    let fsmonitor_script = ws.join("fsmonitor.sh");
+    let diff_script = ws.join("external-diff.sh");
+    write_marker_script(&fsmonitor_script, &fsmonitor_marker);
+    write_marker_script(&diff_script, &diff_marker);
+
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["add", "tracked.txt"],
+        vec!["commit", "-q", "-m", "init"],
+    ] {
+        if args[0] == "add" {
+            std::fs::write(ws.join("tracked.txt"), "one\n").unwrap();
+        }
+        let output = git_in(&ws, &args);
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for (key, value) in [
+        ("core.fsmonitor", fsmonitor_script.display().to_string()),
+        ("diff.external", diff_script.display().to_string()),
+    ] {
+        let output = git_in(&ws, &["config", key, &value]);
+        assert!(output.status.success(), "git config {key} failed");
+    }
+    // An unstaged modification so `git diff` actually has to produce a patch.
+    std::fs::write(ws.join("tracked.txt"), "one\ntwo\n").unwrap();
+
+    // Sanity: without the hardening these helpers really would run. This is
+    // informational (hook invocation differs between git versions); the
+    // assertions below are the guarantee.
+    let _ = git_in(&ws, &["status", "--porcelain"]);
+    let _ = git_in(&ws, &["diff"]);
+    let fixture_live = fsmonitor_marker.exists() || diff_marker.exists();
+    for marker in [&fsmonitor_marker, &diff_marker] {
+        std::fs::remove_file(marker).ok();
+    }
+    if !fixture_live {
+        eprintln!(
+            "note: this git build did not invoke the configured helpers; the \
+             'must not run' assertions below are still the guarantee"
+        );
+    }
+
+    let status = h.get("/api/git/status").await;
+    assert_eq!(status.status, StatusCode::OK);
+    let status = status.json();
+    assert_eq!(status["is_repo"], true);
+    assert_eq!(status["branch"], "main");
+    assert!(
+        !fsmonitor_marker.exists(),
+        "`core.fsmonitor` must not be executed by /api/git/status"
+    );
+
+    let diff = h.get("/api/git/diff").await;
+    assert_eq!(diff.status, StatusCode::OK, "{}", diff.text());
+    let diff = diff.json();
+    assert!(
+        diff["diff"].as_str().unwrap_or_default().contains("+two"),
+        "the hardened diff must still produce a patch: {diff}"
+    );
+    assert!(
+        !diff_marker.exists(),
+        "`diff.external` must not be executed by /api/git/diff"
+    );
+}
+
 impl support::Harness {
     async fn send_raw_body(
         &self,

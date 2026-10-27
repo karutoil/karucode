@@ -64,10 +64,16 @@ Options:
 
 Environment: KARUCODE_CONFIG, KARUCODE_HOST, KARUCODE_PORT, KARUCODE_WORKSPACE,
 KARUCODE_DATA_DIR, KARUCODE_AUTH_TOKEN, KARUCODE_LOCK_SETTINGS, KARUCODE_LOG,
-KARUCODE_API_KEY, KARUCODE_BASE_URL, KARUCODE_MODEL, KARUCODE_WEB_DIR.
+KARUCODE_API_KEY, KARUCODE_BASE_URL, KARUCODE_MODEL, KARUCODE_WEB_DIR,
+KARUCODE_ALLOWED_HOSTS.
 
 The server binds 127.0.0.1 by default. Binding a non-loopback address requires
-KARUCODE_AUTH_TOKEN (at least 16 characters)."
+KARUCODE_AUTH_TOKEN (at least 16 characters).
+
+When the server is bound to a loopback address and no KARUCODE_AUTH_TOKEN is
+configured, requests are only served for Host 127.0.0.1, localhost or [::1]
+(DNS-rebinding defence). KARUCODE_ALLOWED_HOSTS adds reverse-proxy names as a
+comma-separated list; entries are host, host:port or *.example.com."
     }
 
     /// Parse `args` (without the program name). `--help`/`--version` are
@@ -244,8 +250,20 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         builtin_tools,
         web_dir: config.web_dir.clone(),
         db_path: db_path.clone(),
+        bind_host: config.host.clone(),
+        allowed_hosts: std::env::var(crate::host::ALLOWED_HOSTS_ENV).ok(),
     });
     state.reload_tools().await;
+
+    // Log the allowlist when it actually gates requests, so an operator who
+    // reaches the server through a proxy sees the 403 reason in the log.
+    if state.enforce_host_allowlist() {
+        tracing::info!(
+            allowed_hosts = state.host_allowlist().description(),
+            "loopback bind without a token: only allowlisted Host headers are served \
+             (extend with KARUCODE_ALLOWED_HOSTS)"
+        );
+    }
 
     // Bind after the wiring so the startup summary can report real tool/plugin
     // counts, but stop any child processes if the port is taken.

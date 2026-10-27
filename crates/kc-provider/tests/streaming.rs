@@ -483,7 +483,9 @@ async fn object_form_tool_arguments_are_not_dropped() {
     let delta = chunks
         .iter()
         .find_map(|chunk| match chunk {
-            ProviderChunk::ToolCallDelta { arguments_delta, .. } => arguments_delta.clone(),
+            ProviderChunk::ToolCallDelta {
+                arguments_delta, ..
+            } => arguments_delta.clone(),
             _ => None,
         })
         .expect("tool call delta");

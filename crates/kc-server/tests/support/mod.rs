@@ -241,6 +241,9 @@ pub struct HarnessBuilder {
     extra_tools: Vec<Arc<dyn Tool>>,
     plugin_configs: Vec<PluginConfig>,
     mcp_configs: Vec<McpServerConfig>,
+    bind_host: String,
+    /// `None` = read `KARUCODE_ALLOWED_HOSTS` like the bootstrap does.
+    allowed_hosts: Option<Option<String>>,
 }
 
 impl HarnessBuilder {
@@ -254,6 +257,8 @@ impl HarnessBuilder {
             extra_tools: Vec::new(),
             plugin_configs: Vec::new(),
             mcp_configs: Vec::new(),
+            bind_host: "127.0.0.1".into(),
+            allowed_hosts: None,
         }
     }
 
@@ -292,6 +297,19 @@ impl HarnessBuilder {
         self
     }
 
+    /// Bind address the fake process reports (`KARUCODE_HOST`).
+    pub fn bind_host(mut self, host: &str) -> Self {
+        self.bind_host = host.to_string();
+        self
+    }
+
+    /// Explicit `KARUCODE_ALLOWED_HOSTS` value, bypassing the process
+    /// environment (which is shared by every test in the binary).
+    pub fn allowed_hosts(mut self, raw: &str) -> Self {
+        self.allowed_hosts = Some(Some(raw.to_string()));
+        self
+    }
+
     pub async fn build(self) -> Harness {
         let root = std::env::temp_dir().join(format!(
             "kc-server-test-{}-{}",
@@ -305,8 +323,11 @@ impl HarnessBuilder {
 
         let web_dir = self.web_dir;
         let db_path = data_dir.join("karucode.db");
+        let allowed_hosts = self
+            .allowed_hosts
+            .unwrap_or_else(|| std::env::var(kc_server::host::ALLOWED_HOSTS_ENV).ok());
         let config = Config {
-            host: "127.0.0.1".into(),
+            host: self.bind_host.clone(),
             workspace_root: workspace_dir.clone(),
             data_dir: data_dir.clone(),
             auth_token: self.auth_token,
@@ -361,6 +382,8 @@ impl HarnessBuilder {
             builtin_tools,
             web_dir,
             db_path,
+            bind_host: self.bind_host,
+            allowed_hosts,
         });
         state.reload_tools().await;
         let router = build_router(state.clone());

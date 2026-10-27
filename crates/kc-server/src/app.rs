@@ -1,9 +1,15 @@
-//! Router construction and the security middlewares (auth, CSRF, headers).
+//! Router construction and the security middlewares (auth, host guard, CSRF,
+//! headers).
 //!
-//! Layer order (outermost first): security headers -> bearer auth -> CSRF ->
-//! API/static routes. That way even a 401/403 carries `nosniff` and the CSP.
+//! Layer order (outermost first): security headers -> bearer auth -> host guard
+//! -> CSRF -> API/static routes. That way even a 401/403 carries `nosniff` and
+//! the CSP.
+//!
+//! The host guard runs for *every* method (a rebound page can read `GET
+//! /api/config` too) and is the DNS-rebinding defence described in [`crate::host`].
 
 use crate::error::ApiError;
+use crate::host::{self, display_host};
 use crate::routes;
 use crate::state::AppState;
 use axum::body::Body;
@@ -27,6 +33,10 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             csrf_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            host_guard_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -84,6 +94,52 @@ fn authorized(request: &Request<Body>, expected: &str) -> bool {
     false
 }
 
+/// DNS-rebinding guard: when the process is unauthenticated and bound to
+/// loopback, a request may only name an allowlisted `Host`. See [`crate::host`]
+/// for the rules and `KARUCODE_ALLOWED_HOSTS`.
+async fn host_guard_middleware(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if !state.enforce_host_allowlist() {
+        return next.run(request).await;
+    }
+    let allowlist = state.host_allowlist();
+    // HTTP/1.1 and HTTP/2 put the authority in different places; both are
+    // attacker-controlled, so both are validated identically.
+    let from_header = request.headers().get(header::HOST).map(|value| {
+        value
+            .to_str()
+            .map_err(|_| "rejected Host header: it is not valid ASCII".to_string())
+    });
+    let authority = match from_header {
+        Some(Ok(value)) => value.to_string(),
+        Some(Err(message)) => return ApiError::forbidden(message).into_response(),
+        None => match request.uri().authority() {
+            Some(authority) => authority.to_string(),
+            None => {
+                return ApiError::forbidden(format!(
+                    "rejected request without a Host header: this server is bound to a loopback \
+                     address without KARUCODE_AUTH_TOKEN, so it only accepts Host {}",
+                    allowlist.description()
+                ))
+                .into_response()
+            }
+        },
+    };
+    match allowlist.check(&authority) {
+        Ok(()) => next.run(request).await,
+        Err(message) => {
+            tracing::warn!(
+                host = %display_host(&authority),
+                "rejected request for a Host that is not allowlisted"
+            );
+            ApiError::forbidden(message).into_response()
+        }
+    }
+}
+
 /// CSRF defence for cookie-less browsers: mutations need our custom header and a
 /// same-host `Origin` when one is present.
 async fn csrf_middleware(
@@ -111,17 +167,27 @@ async fn csrf_middleware(
         .into_response();
     }
 
-    if let Some(origin) = request
-        .headers()
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-    {
+    // A malformed Origin is rejected, never treated as "no Origin": values with
+    // whitespace/control characters and non-absolute URLs cannot be compared.
+    if let Some(origin) = request.headers().get(header::ORIGIN) {
+        let Ok(origin) = origin.to_str() else {
+            return ApiError::forbidden(
+                "cross-origin request rejected: the Origin header is not valid ASCII",
+            )
+            .into_response();
+        };
         let host = request
             .headers()
             .get(header::HOST)
             .and_then(|value| value.to_str().ok())
+            .or_else(|| {
+                request
+                    .uri()
+                    .authority()
+                    .map(|authority| authority.as_str())
+            })
             .unwrap_or_default();
-        if !origin_matches_host(origin, host) {
+        if !host::origin_matches_host(origin, host) {
             return ApiError::forbidden(
                 "cross-origin request rejected: the Origin header does not match the Host header",
             )
@@ -130,16 +196,6 @@ async fn csrf_middleware(
     }
 
     next.run(request).await
-}
-
-fn origin_matches_host(origin: &str, host: &str) -> bool {
-    let Some((_, rest)) = origin.split_once("://") else {
-        return false;
-    };
-    let origin_host = rest.split('/').next().unwrap_or_default();
-    !origin_host.is_empty()
-        && !host.trim().is_empty()
-        && origin_host.trim().eq_ignore_ascii_case(host.trim())
 }
 
 /// Headers applied to every response, including errors. No `Access-Control-*`
@@ -253,18 +309,6 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"abcd"));
-    }
-
-    #[test]
-    fn origin_host_comparison() {
-        assert!(origin_matches_host(
-            "http://127.0.0.1:8787",
-            "127.0.0.1:8787"
-        ));
-        assert!(origin_matches_host("https://Example.COM", "example.com"));
-        assert!(!origin_matches_host("http://evil.com", "127.0.0.1:8787"));
-        assert!(!origin_matches_host("null", "127.0.0.1:8787"));
-        assert!(!origin_matches_host("http://", "127.0.0.1"));
     }
 
     #[test]

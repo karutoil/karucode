@@ -21,12 +21,23 @@ request needs `Authorization: Bearer <token>`; the SSE endpoint additionally
 accepts `?token=` because streams are harder to authenticate from some clients.
 Without a token, anyone who can reach the port can use the agent.
 
-**Browser-origin attacks (CSRF).** Any state-changing request (POST/PATCH/DELETE)
-must include `X-Karucode-Client: web`. A request that carries an `Origin` header
-must have an origin whose host matches the `Host` header. Simple cross-site form
-submissions and most cross-origin `fetch` calls are rejected with 403. This is
-necessary because the API is reachable from `http://127.0.0.1:<port>` and a
-malicious page in your browser can attempt requests to that origin.
+**Browser-origin attacks (CSRF) and DNS rebinding.** Any state-changing request
+(POST/PATCH/DELETE) must include `X-Karucode-Client: web`. A request that carries
+an `Origin` header must have an origin whose authority matches the `Host` header
+(case-insensitive; values containing whitespace or control characters are
+rejected outright). Simple cross-site form submissions and most cross-origin
+`fetch` calls are rejected with 403. This is necessary because the API is
+reachable from `http://127.0.0.1:<port>` and a malicious page in your browser can
+attempt requests to that origin.
+
+Comparing `Origin` with `Host` does not stop **DNS rebinding** (`evil.example`
+re-pointed at `127.0.0.1` sends a matching `Origin` *and* `Host`), so when the
+server is bound to a loopback address and no `KARUCODE_AUTH_TOKEN` is configured
+it additionally serves only `Host: 127.0.0.1`, `localhost` or `[::1]` (any port),
+plus whatever `KARUCODE_ALLOWED_HOSTS` lists for a reverse proxy
+(`host`, `host:port`, or `*.example.com` for subdomains). Anything else is a
+`403 permission_denied` naming the accepted hosts. With a token configured the
+`Host` check is skipped, because the token is the credential.
 
 **File tool confinement.** `read_file`, `list_dir`, `search_files`, `write_file`,
 `edit_file` and the workspace explorer resolve paths through `kc_core::Workspace`:

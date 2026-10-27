@@ -133,6 +133,28 @@ every key. The important ones:
 | `KARUCODE_ALLOW_RECURSIVE_SUBAGENTS` | `false` | allow nested delegation |
 | `KARUCODE_LOG` | `info` | tracing filter |
 
+| `KARUCODE_ALLOWED_HOSTS` | empty | extra `Host` names accepted by the loopback-only guard (see below) |
+
+### Loopback, the `Host` allowlist and reverse proxies
+
+When the server is bound to a loopback address **and** no `KARUCODE_AUTH_TOKEN`
+is set, requests are only served for `Host: 127.0.0.1`, `localhost` or `[::1]`
+(any port). This is the DNS-rebinding defence: a rebound attacker domain sends a
+matching `Origin` *and* `Host`, so comparing the two is not enough.
+
+`KARUCODE_ALLOWED_HOSTS` extends the list for reverse proxies, comma separated:
+
+```bash
+# exact host (any port), exact host:port, or any subdomain of a domain
+KARUCODE_ALLOWED_HOSTS="karucode.example.com,karucode.example.com:8443,*.internal.example"
+```
+
+`*.example.com` matches `a.example.com` and `a.b.example.com` but **not** the
+bare `example.com` — list it separately. A request with any other `Host` gets
+`403 permission_denied` naming the accepted hosts. With a token configured the
+`Host` check is skipped (the `Origin == Host` rule remains), so remote
+access over a proxy needs `KARUCODE_AUTH_TOKEN`, not this variable.
+
 ### Gateways
 
 Anything that speaks the OpenAI chat-completions API with streaming tool calls:

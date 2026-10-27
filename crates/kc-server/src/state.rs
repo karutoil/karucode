@@ -3,6 +3,7 @@
 //!
 //! [`AppState`] is a cheap `Arc` clone so axum can hand it to every handler.
 
+use crate::host::HostAllowlist;
 use crate::settings::SettingsHandle;
 use crate::static_ui::WebAssets;
 use async_trait::async_trait;
@@ -85,6 +86,12 @@ pub struct AppStateDeps {
     pub builtin_tools: Vec<Arc<dyn Tool>>,
     pub web_dir: Option<PathBuf>,
     pub db_path: PathBuf,
+    /// The address the server bound (`--host` / `KARUCODE_HOST`). Together with
+    /// the (live) auth token this decides whether the `Host` allowlist applies.
+    pub bind_host: String,
+    /// Raw `KARUCODE_ALLOWED_HOSTS` value; `None` when unset. Parsed once here so
+    /// a malformed entry cannot be re-interpreted later.
+    pub allowed_hosts: Option<String>,
 }
 
 pub struct AppStateInner {
@@ -98,6 +105,8 @@ pub struct AppStateInner {
     pub builtin_tools: Vec<Arc<dyn Tool>>,
     pub web: WebAssets,
     pub db_path: PathBuf,
+    /// DNS-rebinding `Host` allowlist (see [`crate::host`]).
+    pub host_allowlist: HostAllowlist,
     pub started: Instant,
     /// Cancelled on SIGINT/SIGTERM so SSE streams end and the server can stop.
     pub shutdown: CancellationToken,
@@ -122,6 +131,7 @@ impl AppState {
                 builtin_tools: deps.builtin_tools,
                 web: WebAssets::new(deps.web_dir),
                 db_path: deps.db_path,
+                host_allowlist: HostAllowlist::new(&deps.bind_host, deps.allowed_hosts.as_deref()),
                 started: Instant::now(),
                 shutdown: CancellationToken::new(),
             }),
@@ -170,6 +180,19 @@ impl AppState {
 
     pub fn auth_token(&self) -> Option<String> {
         self.inner.settings.auth_token().filter(|t| !t.is_empty())
+    }
+
+    /// The parsed `Host` allowlist (loopback bind + `KARUCODE_ALLOWED_HOSTS`).
+    pub fn host_allowlist(&self) -> &HostAllowlist {
+        &self.inner.host_allowlist
+    }
+
+    /// True when a request must present an allowlisted `Host` header:
+    /// loopback bind **and** no bearer token. A rebound page never has the token,
+    /// so with a token configured the `Origin == Host` CSRF rule is enough and
+    /// reverse proxies are free to rewrite `Host`.
+    pub fn enforce_host_allowlist(&self) -> bool {
+        self.inner.host_allowlist.bind_is_loopback() && self.auth_token().is_none()
     }
 
     pub fn started(&self) -> Instant {

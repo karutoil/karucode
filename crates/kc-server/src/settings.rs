@@ -623,10 +623,46 @@ fn validate_authority(authority: &str, url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Inclusive numeric bounds for every tunable the UI may change. A PATCH that
+/// leaves a value outside its range is rejected with `400 bad_request` naming
+/// the field and the bounds — never silently clamped, because a silent clamp
+/// hides the mistake from the operator. The upper bounds are the resource
+/// limits themselves: `limits.max_file_read_bytes = 4_000_000_000` would make a
+/// single read allocate gigabytes and OOM the process.
+const LIMITS_BOUNDS: &[(&str, u64, u64)] = &[
+    ("limits.max_file_read_bytes", 1, 5_000_000),
+    ("limits.max_tool_output_bytes", 256, 1_000_000),
+    ("limits.max_command_output_bytes", 256, 1_000_000),
+    ("limits.context_max_chars", 10_000, 4_000_000),
+    ("limits.max_iterations", 1, 500),
+    ("limits.max_run_secs", 10, 86_400),
+    ("limits.command_timeout_secs", 1, 3_600),
+    ("limits.max_command_timeout_secs", 1, 3_600),
+    ("limits.search_max_results", 1, 2_000),
+    ("limits.max_tool_calls_per_turn", 1, 32),
+];
+
+const SUBAGENT_BOUNDS: &[(&str, u64, u64)] = &[
+    ("subagents.max_concurrent", 1, 16),
+    ("subagents.max_iterations", 1, 100),
+    ("subagents.max_depth", 0, 4),
+];
+
+fn check_bounds(name: &str, value: u64, min: u64, max: u64) -> Result<()> {
+    if value < min || value > max {
+        return Err(Error::BadRequest(format!(
+            "{name} must be between {min} and {max} (got {value})"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_limits(limits: &Limits) -> Result<()> {
-    let positive = [
-        ("limits.max_iterations", u64::from(limits.max_iterations)),
-        ("limits.max_run_secs", limits.max_run_secs),
+    let values: [(&str, u64); 10] = [
+        (
+            "limits.max_file_read_bytes",
+            limits.max_file_read_bytes as u64,
+        ),
         (
             "limits.max_tool_output_bytes",
             limits.max_tool_output_bytes as u64,
@@ -635,29 +671,26 @@ fn validate_limits(limits: &Limits) -> Result<()> {
             "limits.max_command_output_bytes",
             limits.max_command_output_bytes as u64,
         ),
+        ("limits.context_max_chars", limits.context_max_chars as u64),
+        ("limits.max_iterations", u64::from(limits.max_iterations)),
+        ("limits.max_run_secs", limits.max_run_secs),
         ("limits.command_timeout_secs", limits.command_timeout_secs),
         (
             "limits.max_command_timeout_secs",
             limits.max_command_timeout_secs,
         ),
         (
-            "limits.max_file_read_bytes",
-            limits.max_file_read_bytes as u64,
-        ),
-        (
             "limits.search_max_results",
             limits.search_max_results as u64,
         ),
-        ("limits.context_max_chars", limits.context_max_chars as u64),
         (
             "limits.max_tool_calls_per_turn",
             limits.max_tool_calls_per_turn as u64,
         ),
     ];
-    for (name, value) in positive {
-        if value == 0 {
-            return Err(Error::BadRequest(format!("{name} must be at least 1")));
-        }
+    for ((name, value), (expected, min, max)) in values.iter().zip(LIMITS_BOUNDS) {
+        debug_assert_eq!(*name, *expected, "bounds table and values disagree");
+        check_bounds(name, *value, *min, *max)?;
     }
     Ok(())
 }
@@ -674,24 +707,22 @@ fn validate_approvals(policy: &ApprovalPolicy) -> Result<()> {
 }
 
 fn validate_subagents(subagents: &SubagentConfig) -> Result<()> {
-    if subagents.max_concurrent == 0 {
-        return Err(Error::BadRequest(
-            "subagents.max_concurrent must be at least 1".into(),
-        ));
-    }
-    if subagents.max_iterations == 0 {
-        return Err(Error::BadRequest(
-            "subagents.max_iterations must be at least 1".into(),
-        ));
+    // `max_depth = 0` is meaningful: it forbids delegation entirely.
+    let values: [(&str, u64); 3] = [
+        ("subagents.max_concurrent", subagents.max_concurrent as u64),
+        (
+            "subagents.max_iterations",
+            u64::from(subagents.max_iterations),
+        ),
+        ("subagents.max_depth", u64::from(subagents.max_depth)),
+    ];
+    for ((name, value), (expected, min, max)) in values.iter().zip(SUBAGENT_BOUNDS) {
+        debug_assert_eq!(*name, *expected, "bounds table and values disagree");
+        check_bounds(name, *value, *min, *max)?;
     }
     if subagents.timeout_secs == 0 {
         return Err(Error::BadRequest(
             "subagents.timeout_secs must be at least 1".into(),
-        ));
-    }
-    if subagents.max_depth > 4 {
-        return Err(Error::BadRequest(
-            "subagents.max_depth must be at most 4".into(),
         ));
     }
     Ok(())
@@ -1008,6 +1039,86 @@ mod tests {
         Config {
             lock_settings: true,
             ..Config::default()
+        }
+    }
+
+    #[test]
+    fn every_limit_is_bounded_and_names_the_field() {
+        // (mutation, expected field name in the error)
+        let cases: Vec<(&str, u64, u64)> = vec![
+            ("limits.max_file_read_bytes", 0, 5_000_001),
+            ("limits.max_tool_output_bytes", 255, 1_000_001),
+            ("limits.max_command_output_bytes", 255, 1_000_001),
+            ("limits.context_max_chars", 9_999, 4_000_001),
+            ("limits.max_iterations", 0, 501),
+            ("limits.max_run_secs", 9, 86_401),
+            ("limits.command_timeout_secs", 0, 3_601),
+            ("limits.max_command_timeout_secs", 0, 3_601),
+            ("limits.search_max_results", 0, 2_001),
+            ("limits.max_tool_calls_per_turn", 0, 33),
+        ];
+        for (field, low, high) in cases {
+            for value in [low, high] {
+                let mut cfg = Config::default();
+                set_limit(&mut cfg, field, value);
+                let error = validate_settings(&cfg).unwrap_err().to_string();
+                assert!(
+                    error.contains(field),
+                    "{field}={value} should be rejected naming the field, got: {error}"
+                );
+                assert!(
+                    error.contains("must be between"),
+                    "{field}={value} should describe the bounds, got: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn subagent_bounds_are_enforced_and_depth_zero_is_allowed() {
+        let cases: Vec<(&str, u64)> = vec![
+            ("subagents.max_concurrent", 0),
+            ("subagents.max_concurrent", 17),
+            ("subagents.max_iterations", 0),
+            ("subagents.max_iterations", 101),
+            ("subagents.max_depth", 5),
+        ];
+        for (field, value) in cases {
+            let mut cfg = Config::default();
+            match field {
+                "subagents.max_concurrent" => cfg.subagents.max_concurrent = value as usize,
+                "subagents.max_iterations" => cfg.subagents.max_iterations = value as u32,
+                _ => cfg.subagents.max_depth = value as u8,
+            }
+            let error = validate_settings(&cfg).unwrap_err().to_string();
+            assert!(error.contains(field), "{field}={value}: {error}");
+        }
+
+        let mut cfg = Config::default();
+        cfg.subagents.max_depth = 0;
+        assert!(validate_settings(&cfg).is_ok(), "max_depth = 0 is valid");
+    }
+
+    #[test]
+    fn default_settings_satisfy_the_bounds() {
+        assert!(validate_settings(&Config::default()).is_ok());
+    }
+
+    fn set_limit(cfg: &mut Config, field: &str, value: u64) {
+        match field {
+            "limits.max_file_read_bytes" => cfg.limits.max_file_read_bytes = value as usize,
+            "limits.max_tool_output_bytes" => cfg.limits.max_tool_output_bytes = value as usize,
+            "limits.max_command_output_bytes" => {
+                cfg.limits.max_command_output_bytes = value as usize
+            }
+            "limits.context_max_chars" => cfg.limits.context_max_chars = value as usize,
+            "limits.max_iterations" => cfg.limits.max_iterations = value as u32,
+            "limits.max_run_secs" => cfg.limits.max_run_secs = value,
+            "limits.command_timeout_secs" => cfg.limits.command_timeout_secs = value,
+            "limits.max_command_timeout_secs" => cfg.limits.max_command_timeout_secs = value,
+            "limits.search_max_results" => cfg.limits.search_max_results = value as usize,
+            "limits.max_tool_calls_per_turn" => cfg.limits.max_tool_calls_per_turn = value as usize,
+            other => panic!("unknown limit {other}"),
         }
     }
 

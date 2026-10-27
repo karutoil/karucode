@@ -15,11 +15,13 @@
 //! ```
 //!
 //! `Router::new().nest("/api", routes::api_router()).fallback(static_ui::serve_spa)`
-//! with three layers, outermost first: security headers, bearer auth, CSRF.
+//! with four layers, outermost first: security headers, bearer auth, the
+//! `Host` guard (DNS rebinding, see [`host`]) and CSRF.
 
 pub mod app;
 pub mod bootstrap;
 pub mod error;
+pub mod host;
 pub mod routes;
 pub mod settings;
 pub mod state;
@@ -27,6 +29,7 @@ pub mod static_ui;
 
 pub use app::build_router;
 pub use bootstrap::{Cli, CliAction};
+pub use host::HostAllowlist;
 pub use settings::{ConfigPatch, SettingsHandle};
 pub use state::{AppState, AppStateDeps};
 
