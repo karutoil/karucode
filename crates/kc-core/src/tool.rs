@@ -31,8 +31,12 @@ pub enum ToolClass {
 pub enum ToolOrigin {
     #[default]
     Builtin,
-    Plugin { name: String },
-    Mcp { server: String },
+    Plugin {
+        name: String,
+    },
+    Mcp {
+        server: String,
+    },
 }
 
 impl ToolOrigin {
@@ -214,6 +218,17 @@ pub trait Tool: Send + Sync {
 
     fn class(&self) -> ToolClass {
         ToolClass::ReadOnly
+    }
+
+    /// Whether the runtime must collect an approval before invoking this tool.
+    ///
+    /// Built-in mutating/shell tools gate *themselves* (they can show the exact
+    /// command or file diff), so the runtime only consults this for tools from
+    /// plugins and MCP servers. Returning `true` means the runtime asks the
+    /// approval policy first; `false` means the tool is exempt (for example an
+    /// MCP server configured with `require_approval = false`).
+    fn requires_approval(&self) -> bool {
+        !matches!(self.class(), ToolClass::ReadOnly)
     }
 
     async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome;
