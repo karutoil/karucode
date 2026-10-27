@@ -314,7 +314,7 @@ mod tests {
         path
     }
 
-    /// A repository whose own config runs unmarked scripts on `status`/`diff`.
+    /// A repository whose own config runs marker scripts on `status`/`diff`.
     fn trapped_repo(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
         let dir = temp_dir(tag);
         git_in(&dir, &["init", "-q", "."]);

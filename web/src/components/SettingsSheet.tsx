@@ -520,18 +520,26 @@ export function SettingsSheet(): JSX.Element | null {
                   id="provider"
                   label="Provider"
                   error={errors.provider}
-                  hint="The only built-in provider id is openai_compatible."
+                  hint="Only providers this server implements can be selected."
                 >
-                  <input
+                  <select
                     id="provider"
                     class="input mono"
-                    type="text"
                     value={form.provider}
                     disabled={disabled}
-                    onInput={(event) => update({ provider: event.currentTarget.value })}
+                    onChange={(event) => update({ provider: event.currentTarget.value })}
                     aria-invalid={errors.provider ? 'true' : undefined}
                     aria-describedby={errors.provider ? 'provider-error' : 'provider-hint'}
-                  />
+                  >
+                    {(config?.available_providers?.length
+                      ? config.available_providers
+                      : [form.provider || 'openai_compatible']
+                    ).map((id) => (
+                      <option key={id} value={id}>
+                        {id}
+                      </option>
+                    ))}
+                  </select>
                 </Field>
                 <Field
                   id="model"

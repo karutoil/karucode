@@ -132,7 +132,6 @@ every key. The important ones:
 | `KARUCODE_SUBAGENT_CONCURRENCY` | `3` | concurrent subagents |
 | `KARUCODE_ALLOW_RECURSIVE_SUBAGENTS` | `false` | allow nested delegation |
 | `KARUCODE_LOG` | `info` | tracing filter |
-
 | `KARUCODE_ALLOWED_HOSTS` | empty | extra `Host` names accepted by the loopback-only guard (see below) |
 
 ### Loopback, the `Host` allowlist and reverse proxies

@@ -105,6 +105,8 @@ export interface Config {
   plugins: ConfigPluginSummary[];
   mcp_servers: ConfigMcpSummary[];
   settings_locked: boolean;
+  /** Provider ids this server can actually build. Drives the settings selector. */
+  available_providers?: string[];
   version: string;
 }
 

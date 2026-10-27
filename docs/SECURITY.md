@@ -39,6 +39,13 @@ plus whatever `KARUCODE_ALLOWED_HOSTS` lists for a reverse proxy
 `403 permission_denied` naming the accepted hosts. With a token configured the
 `Host` check is skipped, because the token is the credential.
 
+**Git panels (`GET /api/git/status`, `GET /api/git/diff`).** `git` is spawned
+with an argv array (never a shell), with `-c core.fsmonitor=false`,
+`-c diff.external=`, `-c core.pager=cat`, `--no-ext-diff` for diffs, and
+`GIT_EXTERNAL_DIFF`/`GIT_PAGER`/`GIT_OPTIONAL_LOCKS`/`GIT_TERMINAL_PROMPT` pinned,
+and inherited `GIT_DIR`/`GIT_WORK_TREE` removed — a cloned repository cannot make
+these read-only endpoints execute code through its own `.git/config`.
+
 **File tool confinement.** `read_file`, `list_dir`, `search_files`, `write_file`,
 `edit_file` and the workspace explorer resolve paths through `kc_core::Workspace`:
 

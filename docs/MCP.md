@@ -77,7 +77,7 @@ name = "filesystem"
 transport = "stdio"
 command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/me/project"]
 enabled = true
-require_approval = true              # false = exempt from the prompt (see §4)
+require_approval = true              # false = skip the prompt for this server (see §4)
 
 [mcp_servers.env]
 FASTMCP_LOG_LEVEL = "ERROR"
@@ -111,7 +111,7 @@ Fields:
 | `env` | `{}` | Extra environment for a stdio child. |
 | `headers` | `{}` | Extra HTTP headers (auth). Never logged. |
 | `enabled` | `true` | `false` keeps the server `disconnected` and unconnected. |
-| `require_approval` | `true` | `true` asks through the runtime approval policy; `false` exempts this server's tools from the prompt. It does not change the tool class (`External`), so `read_only` mode still denies the call. |
+| `require_approval` | `true` | `true` asks through the runtime approval policy; `false` skips the prompt for this server's tools. It does not change the class (`External`), so `read_only` mode still denies them. |
 
 ---
 
@@ -146,10 +146,12 @@ external and plugin tools:
   `require_approval`. Only read-only tools are permitted, so a mutating MCP tool
   cannot be called in this mode.
 
-The tool does not ask on its own and cannot bypass the policy: it only reports
-its class and its `requires_approval()` declaration. `require_approval = false`
-is an explicit opt-out of the *prompt* for one configured server, chosen by the
-operator — it is not something the server itself can set.
+The tool does not ask on its own; it only reports its class and its
+`requires_approval()` declaration, and the runtime applies the policy. The only
+effect of `require_approval = false` is to skip the *prompt* for that configured
+server (an operator choice — the server itself cannot set it). It is not an
+escalation: the class stays `External`, so `read_only` mode still denies the call
+before the exemption is consulted.
 
 ---
 

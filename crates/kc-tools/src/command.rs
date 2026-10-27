@@ -64,7 +64,9 @@ pub struct FinishedStream {
 
 impl CommandOutcome {
     pub fn ok(&self) -> bool {
-        !self.timed_out && !self.cancelled
+        // A nonzero exit is a failed command, not a successful tool call: the UI
+        // and the runtime must not paint a green check for a failed build.
+        !self.timed_out && !self.cancelled && self.exit_code == Some(0)
     }
 
     pub fn truncated(&self) -> bool {
@@ -125,32 +127,85 @@ impl BoundedOutput {
     }
 
     pub fn finish(&self) -> FinishedStream {
-        let dropped = self.total.saturating_sub(self.head.len() + self.tail.len());
         if !self.truncated {
-            FinishedStream {
+            return FinishedStream {
                 text: String::from_utf8_lossy(&self.head).into_owned(),
                 truncated: false,
                 total_bytes: self.total,
-            }
-        } else {
-            let text = format!(
-                "{}\n[... {dropped} of {} bytes omitted (kept the first {} and last {}) ...]\n{}",
-                String::from_utf8_lossy(&self.head),
-                self.total,
-                self.head.len(),
-                self.tail.len(),
-                String::from_utf8_lossy(&self.tail),
-            );
-            FinishedStream {
-                text,
-                truncated: true,
-                total_bytes: self.total,
-            }
+            };
+        }
+        // The cuts are byte offsets, so they can land inside a multi-byte
+        // character. Trim both sides to char boundaries first: slicing there and
+        // then decoding would emit U+FFFD garbage at the seam.
+        let head = &self.head[..floor_char_boundary(&self.head, self.head.len())];
+        let tail = &self.tail[ceil_char_boundary(&self.tail, 0)..];
+        let dropped = self.total.saturating_sub(head.len() + tail.len());
+        let text = format!(
+            "{}\n[... {dropped} of {} bytes omitted (kept the first {} and last {}) ...]\n{}",
+            String::from_utf8_lossy(head),
+            self.total,
+            head.len(),
+            tail.len(),
+            String::from_utf8_lossy(tail),
+        );
+        FinishedStream {
+            text,
+            truncated: true,
+            total_bytes: self.total,
         }
     }
 
     pub fn total_bytes(&self) -> usize {
         self.total
+    }
+}
+
+/// Largest index `<= idx` that is a UTF-8 char boundary in `bytes`.
+fn floor_char_boundary(bytes: &[u8], idx: usize) -> usize {
+    let idx = idx.min(bytes.len());
+    match std::str::from_utf8(&bytes[..idx]) {
+        Ok(_) => idx,
+        Err(e) => e.valid_up_to(),
+    }
+}
+
+/// Smallest index `>= idx` that is a UTF-8 char boundary in `bytes`.
+fn ceil_char_boundary(bytes: &[u8], idx: usize) -> usize {
+    let mut i = idx.min(bytes.len());
+    while i < bytes.len() && (bytes[i] & 0xC0) == 0x80 {
+        i += 1;
+    }
+    i
+}
+
+/// Kills the whole process group if the `run` future is dropped before the
+/// leader was reaped (task abort, subagent hard timeout).
+///
+/// `kill_on_drop(true)` only signals the leader, which called `setsid()` and is
+/// therefore the group leader: its children (`sleep` under a shell, a build's
+/// compiler, ...) would survive. The guard is disarmed as soon as the leader is
+/// reaped — after that the pid may be reused and `kill(-pid)` would hit an
+/// unrelated process group.
+struct GroupGuard {
+    pid: u32,
+    armed: bool,
+}
+
+impl GroupGuard {
+    fn new(pid: u32) -> Self {
+        Self { pid, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            signal_group(self.pid, libc::SIGKILL);
+        }
     }
 }
 
@@ -189,6 +244,10 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
     let pid = child.id().ok_or_else(|| {
         Error::Internal("spawned command has no pid; cannot manage its process group".into())
     })?;
+    // Declared after `child`, so it drops first: kill the group while the leader
+    // pid is still guaranteed to be ours, then let `kill_on_drop` handle the
+    // leader itself.
+    let mut group = GroupGuard::new(pid);
 
     ctx.emit(Event::CommandStarted {
         call_id: request.call_id.clone(),
@@ -248,7 +307,12 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
                 // `Child::wait` is cancellation-safe, so re-creating it per loop
                 // iteration cannot lose the exit status.
                 match status {
-                    Ok(status) => exit_status = Some(status),
+                    Ok(status) => {
+                        exit_status = Some(status);
+                        // The leader is reaped; the pid may be reused now, so the
+                        // drop guard must never signal this group again.
+                        group.disarm();
+                    }
                     Err(e) => {
                         return Err(Error::Tool(format!(
                             "failed while waiting for `{}`: {e}",
@@ -266,6 +330,9 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
     } else {
         exit_status
     };
+    if status.is_some() {
+        group.disarm();
+    }
     for pump in pumps {
         pump.abort();
     }
@@ -361,7 +428,100 @@ async fn terminate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use kc_core::approval::{ApprovalDecision, ApprovalRequest};
+    use kc_core::config::{ApprovalPolicy, Limits, ModelConfig, SubagentConfig};
+    use kc_core::ids::{RunId, SessionId};
+    use kc_core::paths::Workspace;
+    use kc_core::settings::Settings;
+    use kc_core::tool::{ApprovalGate, ApprovalHandle};
     use std::os::unix::process::ExitStatusExt;
+    use std::path::Path;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    struct TestSettings;
+
+    #[async_trait]
+    impl Settings for TestSettings {
+        async fn model(&self) -> ModelConfig {
+            ModelConfig::default()
+        }
+        async fn limits(&self) -> Limits {
+            Limits::default()
+        }
+        async fn approval_policy(&self) -> ApprovalPolicy {
+            ApprovalPolicy::default()
+        }
+        async fn subagent_config(&self) -> SubagentConfig {
+            SubagentConfig::default()
+        }
+    }
+
+    struct AllowGate;
+
+    #[async_trait]
+    impl ApprovalGate for AllowGate {
+        async fn request(&self, _request: ApprovalRequest) -> ApprovalDecision {
+            ApprovalDecision::AllowOnce
+        }
+    }
+
+    fn test_ctx(root: &Path) -> ToolCtx {
+        ToolCtx {
+            workspace: Arc::new(Workspace::new(root).unwrap()),
+            cancel: CancellationToken::new(),
+            approvals: ApprovalHandle::new(
+                Arc::new(AllowGate),
+                SessionId::new(),
+                RunId::new(),
+                None,
+            ),
+            events: kc_core::events::noop_sink(),
+            settings: Arc::new(TestSettings),
+            depth: 0,
+        }
+    }
+
+    fn temp_workspace(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "kc-tools-command-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    async fn wait_for_pid(path: &Path) -> Option<u32> {
+        for _ in 0..200 {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if let Ok(pid) = text.trim().parse::<u32>() {
+                    return Some(pid);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        None
+    }
+
+    async fn wait_until_gone(pid: u32, budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            if !alive(pid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        !alive(pid)
+    }
 
     async fn spawn_own_group(script: &str) -> (tokio::process::Child, u32) {
         let mut cmd = tokio::process::Command::new("/bin/sh");
@@ -436,5 +596,71 @@ mod tests {
         assert!(finished.truncated);
         assert!(finished.text.contains("bytes omitted"));
         assert!(finished.text.starts_with("abcdefghij"));
+    }
+
+    #[test]
+    fn truncated_output_is_trimmed_to_char_boundaries() {
+        // 3-byte characters so both the head cut (32 bytes) and the tail cut
+        // land in the middle of a character.
+        let mut out = BoundedOutput::new(64);
+        out.push(b"a");
+        out.push("\u{20ac}".repeat(40).as_bytes());
+        let finished = out.finish();
+        assert!(finished.truncated);
+        assert!(
+            !finished.text.contains('\u{FFFD}'),
+            "truncation must not split multi-byte characters: {}",
+            finished.text
+        );
+        // Both retained segments decode cleanly and keep complete characters.
+        let (head, tail) = finished.text.split_once("[...").expect("head/tail marker");
+        assert!(head.starts_with('a'));
+        assert!(head.trim_end().ends_with('\u{20ac}'), "{head:?}");
+        assert!(tail.contains('\u{20ac}'), "{tail:?}");
+    }
+
+    #[tokio::test]
+    async fn dropping_the_run_future_kills_the_whole_process_group() {
+        let dir = temp_workspace("drop-guard");
+        let leader_pid_file = dir.join("leader.pid");
+        let child_pid_file = dir.join("child.pid");
+        // The leader keeps a `sleep` child alive and waits for it, so a leader-only
+        // kill would leave the child running - the failure mode this guard fixes.
+        let command = format!(
+            "echo $$ > '{}'; sleep 30 & echo $! > '{}'; wait",
+            leader_pid_file.display(),
+            child_pid_file.display()
+        );
+        let ctx = test_ctx(&dir);
+        let request = CommandRequest {
+            call_id: "drop".into(),
+            command,
+            cwd: dir.clone(),
+            cwd_label: ".".into(),
+            timeout: Duration::from_secs(60),
+            max_output_bytes: 4096,
+        };
+        // A subagent hard timeout aborts the task, dropping the `run` future.
+        let task = tokio::spawn(async move { run(request, &ctx).await });
+        let leader = wait_for_pid(&leader_pid_file)
+            .await
+            .expect("the command should start and write its pid");
+        let child = wait_for_pid(&child_pid_file)
+            .await
+            .expect("the command should start its sleep child");
+        assert!(alive(leader) && alive(child));
+
+        task.abort();
+        let _ = task.await;
+
+        assert!(
+            wait_until_gone(leader, Duration::from_secs(2)).await,
+            "leader {leader} survived the dropped run future"
+        );
+        assert!(
+            wait_until_gone(child, Duration::from_secs(2)).await,
+            "child {child} survived the dropped run future (group was not killed)"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

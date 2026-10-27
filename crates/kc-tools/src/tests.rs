@@ -712,18 +712,20 @@ async fn run_command_streams_output_and_events() {
 async fn run_command_propagates_exit_code() {
     let env = env("cmd-exit");
     let out = call(&RunCommand, &env.ctx, json!({"command": "exit 7"})).await;
-    // The tool ran fine; the command failed. Exit code must be visible.
-    assert!(out.ok, "{}", out.content);
+    // A nonzero exit is a failed *command*: the tool result must say so (ok=false)
+    // while still showing the exit code to the model.
+    assert!(!out.ok, "{}", out.content);
     assert!(out.content.contains("exit code: 7"), "{}", out.content);
     assert_eq!(out.meta.unwrap()["exit_code"], json!(7));
 
-    // Non-zero stderr is reported too.
+    // Non-zero stderr is reported too, and the call still fails.
     let out = call(
         &RunCommand,
         &env.ctx,
         json!({"command": "echo boom 1>&2; exit 3"}),
     )
     .await;
+    assert!(!out.ok, "{}", out.content);
     assert!(out.content.contains("exit code: 3"), "{}", out.content);
     assert!(out.content.contains("boom"), "{}", out.content);
 }

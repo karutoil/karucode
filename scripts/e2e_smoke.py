@@ -531,6 +531,28 @@ def main():
         )[-1])
         client.ok("PATCH", "/api/config", {"approvals": {"mode": "ask"}})
 
+        print("\n== hardening ==", flush=True)
+        # DNS rebinding: a rebound host must not be served even with a matching
+        # Origin (the classic attack on a loopback dev server).
+        status, body = client.raw(
+            "PATCH", "/api/config", {"approvals": {"mode": "auto"}},
+            headers={"Host": "evil.example:{}".format(port), "Origin": "http://evil.example"},
+        )
+        check("rebound Host is refused", lambda: (
+            _assert(status == 403, f"expected 403 got {status}: {body}"), "403"
+        )[-1])
+        mode_after = client.ok("GET", "/api/config")["approvals"]["mode"]
+        check("rebinding attempt did not change the approval mode", lambda: (
+            _assert(mode_after == "ask", f"mode became {mode_after}"), mode_after
+        )[-1])
+        # Settings bounds: an OOM-sized read limit must be rejected, not stored.
+        status, body = client.raw(
+            "PATCH", "/api/config", {"limits": {"max_file_read_bytes": 5_000_000_000}}
+        )
+        check("out-of-range settings are rejected", lambda: (
+            _assert(status == 400, f"expected 400 got {status}: {body}"), "400"
+        )[-1])
+
         print("\n== settings ==", flush=True)
         patched = client.ok("PATCH", "/api/config", {"model": {"temperature": 0.7, "api_key": "sk-e2e-secret"}})
         check("settings patch persists and hides the key", lambda: (

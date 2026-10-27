@@ -26,6 +26,9 @@
     "MCP tool requires approval",
     "MCP tool is callable and namespaced",
     "read_only mode denies external tools",
+    "rebound Host is refused",
+    "rebinding attempt did not change the approval mode",
+    "out-of-range settings are rejected",
     "settings patch persists and hides the key",
     "provider test reaches the endpoint",
     "stats endpoint reports RSS",
@@ -37,6 +40,6 @@
   "failed": [],
   "skipped": [],
   "events": 223,
-  "server_log": "/tmp/kc-e2e-53sgwqdc/server.log",
+  "server_log": "/tmp/kc-e2e-utzp18ao/server.log",
   "mock_requests": 22
 }

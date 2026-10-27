@@ -222,7 +222,7 @@ Sent right after `initialize`.
 * `parameters` is a JSON Schema for the arguments object. Default:
   `{"type":"object","properties":{}}`.
 * `class` is optional: `read_only` | `mutating` | `shell` | `external`
-  (default `external`, which always needs approval). See §6.
+  (default `external`, which goes through the runtime approval policy). See §6.
 * Budget: the same 10 s handshake budget.
 
 ### 4.3 `tools/call` (host → plugin)
@@ -306,7 +306,9 @@ surfaced in the tool failure, so write something actionable.
   like a first-party tool: in `ask`/`ask_commands` the user is asked, in `auto`
   the call is allowed (and audited), and in `read_only` mode every external,
   mutating or shell tool is **denied**. Plugin tools do not prompt themselves and
-  cannot bypass the policy; only a read-only tool is auto-allowed.
+  cannot exempt themselves from the policy; only a read-only tool is
+  auto-allowed. (An MCP server's `require_approval = false` skips only the prompt;
+  `read_only` still denies it — see [`MCP.md` §4](./MCP.md#4-approval-behaviour).)
 * Every failure — dead process, timeout, malformed response, remote error — is a
   failed `ToolOutcome` with text that says what happened and what to try. A
   broken plugin can never panic the host or corrupt the tool registry.
