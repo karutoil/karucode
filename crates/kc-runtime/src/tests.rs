@@ -5,11 +5,11 @@
 //! (inside `Harness::next_event` / `wait_idle`) so a regression that hangs the
 //! loop fails the test instead of blocking CI.
 
-use crate::approvals::ApprovalRegistry;
+use crate::approvals::{ApprovalRegistry, RuntimeApprovalGate};
 use crate::subagent::SPAWN_AGENT_TOOL;
 use crate::tests_support::{
-    ApprovalTool, EchoTool, FakeSettings, Harness, HarnessBuilder, PanicTool, Script,
-    ScriptedFactory,
+    test_inner_with_settings, ApprovalTool, EchoTool, ExternalTool, FakeSettings, Harness,
+    HarnessBuilder, PanicTool, Script, ScriptedFactory, SlowCancelTool,
 };
 use crate::{ActiveRun, RecoveryReport, Runtime, RuntimeDeps};
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, ApprovalRequest};
@@ -17,13 +17,16 @@ use kc_core::config::{ApprovalMode, ApprovalPolicy, Limits, SubagentConfig};
 use kc_core::error::Error;
 use kc_core::events::{Event, EventEnvelope};
 use kc_core::hooks::NoHooks;
+use kc_core::ids::{AgentId, RunId, SessionId};
 use kc_core::message::Role;
 use kc_core::paths::Workspace;
 use kc_core::provider::ProviderChunk;
 use kc_core::store::{AgentRecord, ApprovalRecord, RunStatus, Store};
-use kc_core::tool::{ToolOutcome, ToolRegistry};
+use kc_core::tool::{ApprovalGate, ToolClass, ToolOrigin, ToolOutcome, ToolRegistry};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -614,6 +617,219 @@ async fn policy_allow_and_deny_never_create_approval_rows() {
     assert_eq!(deny.store.approvals().len(), 0);
     let denied = tool_finished(&events);
     assert!(!denied.is_empty() && !denied[0].1);
+}
+
+// ---------------------------------------------------------------------------
+// external (plugin / MCP) tool gating
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mcp_tool_in_ask_mode_asks_and_runs_when_allowed() {
+    let policy = ApprovalPolicy {
+        mode: ApprovalMode::Ask,
+        timeout_secs: 30,
+        ..Default::default()
+    };
+    let tool = Arc::new(ExternalTool::mcp("mcp_write", "fs"));
+    let invocations = tool.invocations();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[(
+            "call_1",
+            "mcp_write",
+            "{\"path\":\"outside.txt\",\"contents\":\"pwned\"}",
+        )]),
+        Script::text("done"),
+    ])
+    .tool(tool)
+    .settings(FakeSettings::default().with_policy(policy))
+    .build()
+    .await;
+
+    h.submit("write outside the workspace").await;
+    let (event, mut seen) = wait_for_kind(&mut h, "approval_requested").await;
+    let approval = approval_from(&event);
+    assert_eq!(approval.kind, ApprovalKind::Mcp);
+    assert_eq!(approval.title, "Call mcp_write");
+    assert_eq!(approval.session_id, h.session());
+    assert!(
+        approval.detail.contains("mcp:fs"),
+        "detail must name the origin: {}",
+        approval.detail
+    );
+    assert!(approval.detail.contains("outside.txt"));
+    assert_eq!(approval.payload["tool"], "mcp_write");
+    assert_eq!(approval.payload["arguments"]["path"], "outside.txt");
+    assert_eq!(approval.payload["origin"]["kind"], "mcp");
+    assert_eq!(invocations.load(Ordering::SeqCst), 0, "not invoked yet");
+
+    h.runtime
+        .resolve_approval(&approval.id, ApprovalDecision::AllowOnce)
+        .await
+        .expect("resolve");
+    seen.extend(h.collect_until_finished().await);
+
+    assert_eq!(finished_status(&seen), "completed");
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
+    let messages = h.session_messages().await;
+    let tool_message = messages.iter().find(|m| m.role == "tool").unwrap();
+    assert!(tool_message.content.contains("invoked:mcp_write"));
+    assert_eq!(h.store.approvals()[0].status, "resolved");
+}
+
+#[tokio::test]
+async fn denying_an_mcp_approval_skips_the_tool_and_the_run_continues() {
+    let policy = ApprovalPolicy {
+        mode: ApprovalMode::Ask,
+        timeout_secs: 30,
+        ..Default::default()
+    };
+    let tool = Arc::new(ExternalTool::mcp("mcp_write", "fs"));
+    let invocations = tool.invocations();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "mcp_write", "{\"path\":\"/tmp/x\"}")]),
+        Script::text("continued"),
+    ])
+    .tool(tool)
+    .settings(FakeSettings::default().with_policy(policy))
+    .build()
+    .await;
+
+    h.submit("try to write").await;
+    let (event, mut seen) = wait_for_kind(&mut h, "approval_requested").await;
+    let approval = approval_from(&event);
+    h.runtime
+        .resolve_approval(&approval.id, ApprovalDecision::Deny)
+        .await
+        .expect("resolve");
+    seen.extend(h.collect_until_finished().await);
+
+    // The refusal is a tool error; the run keeps going.
+    assert_eq!(finished_status(&seen), "completed");
+    assert_eq!(invocations.load(Ordering::SeqCst), 0, "must not be invoked");
+    let finished = tool_finished(&seen);
+    assert_eq!(finished.len(), 1);
+    assert!(!finished[0].1);
+    assert!(
+        finished[0].2.contains("denied by user"),
+        "{}",
+        finished[0].2
+    );
+    assert_eq!(
+        h.session_messages().await.last().unwrap().content,
+        "continued"
+    );
+}
+
+#[tokio::test]
+async fn plugin_tool_is_denied_without_invoking_in_read_only_mode() {
+    let tool = Arc::new(ExternalTool::plugin("plugin_write", "fs-helper"));
+    let invocations = tool.invocations();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "plugin_write", "{\"path\":\"/etc/passwd\"}")]),
+        Script::text("after denial"),
+    ])
+    .tool(tool)
+    .settings(FakeSettings::default().with_policy(ApprovalPolicy {
+        mode: ApprovalMode::ReadOnly,
+        ..Default::default()
+    }))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("try a mutation").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(count(&events, "approval_requested"), 0);
+    assert_eq!(h.store.approvals().len(), 0);
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        0,
+        "side effect happened"
+    );
+    let finished = tool_finished(&events);
+    assert!(!finished[0].1);
+    assert!(
+        finished[0].2.contains("denied by policy: read_only mode"),
+        "{}",
+        finished[0].2
+    );
+    assert_eq!(
+        h.session_messages().await.last().unwrap().content,
+        "after denial"
+    );
+}
+
+#[tokio::test]
+async fn external_tool_without_approval_requirement_runs_silently() {
+    let tool = Arc::new(ExternalTool::mcp("mcp_read", "fs").with_require_approval(false));
+    let invocations = tool.invocations();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "mcp_read", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(tool)
+    .settings(FakeSettings::default().with_policy(ApprovalPolicy {
+        mode: ApprovalMode::Ask,
+        ..Default::default()
+    }))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("read").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(count(&events, "approval_requested"), 0);
+    assert_eq!(h.store.approvals().len(), 0);
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn read_only_external_tool_does_not_prompt_in_ask_mode() {
+    let tool = Arc::new(ExternalTool::new(
+        "plugin_read",
+        ToolOrigin::Plugin {
+            name: "reader".into(),
+        },
+        ToolClass::ReadOnly,
+    ));
+    let invocations = tool.invocations();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "plugin_read", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(tool)
+    .settings(FakeSettings::default().with_policy(ApprovalPolicy {
+        mode: ApprovalMode::Ask,
+        ..Default::default()
+    }))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("inspect").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(count(&events, "approval_requested"), 0);
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn auto_mode_allows_external_tools_without_a_prompt() {
+    let tool = Arc::new(ExternalTool::mcp("mcp_write", "fs"));
+    let invocations = tool.invocations();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "mcp_write", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(tool)
+    .settings(FakeSettings::default().with_policy(ApprovalPolicy {
+        mode: ApprovalMode::Auto,
+        ..Default::default()
+    }))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("allowed").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(count(&events, "approval_requested"), 0);
+    assert_eq!(h.store.approvals().len(), 0);
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1343,6 +1559,210 @@ async fn subagent_approvals_carry_the_agent_id() {
     assert_eq!(h.store.agents()[0].status, "completed");
 }
 
+/// Build an MCP approval request for the scope-expiry tests.
+fn scoped_mcp_approval(id: &str, session: &str, run: &str, agent: &str) -> ApprovalRequest {
+    ApprovalRequest {
+        id: id.to_string(),
+        kind: ApprovalKind::Mcp,
+        title: format!("Call tool_{agent}"),
+        detail: "mcp:fs".into(),
+        payload: serde_json::json!({ "tool": format!("tool_{agent}") }),
+        session_id: session.to_string(),
+        run_id: run.to_string(),
+        agent_id: Some(agent.to_string()),
+    }
+}
+
+#[tokio::test]
+async fn expiring_one_subagent_scope_keeps_a_sibling_approval_pending() {
+    let inner = test_inner_with_settings(FakeSettings::default().with_policy(ApprovalPolicy {
+        mode: ApprovalMode::Ask,
+        timeout_secs: 30,
+        ..Default::default()
+    }));
+    inner
+        .deps
+        .store
+        .create_session("s_scope", "scoped", "/w")
+        .await
+        .expect("session");
+
+    // Two concurrent subagent loops share one parent run id but have their own
+    // agent id and cancellation token.
+    let run_id = RunId::new();
+    let session_id = SessionId::from_string("s_scope");
+    let cancel_a = CancellationToken::new();
+    let cancel_b = CancellationToken::new();
+    let gate_a = Arc::new(RuntimeApprovalGate::new(
+        Arc::clone(&inner),
+        session_id.clone(),
+        run_id.clone(),
+        Some(AgentId::from_string("a_one")),
+        cancel_a.clone(),
+        1,
+    ));
+    let gate_b = Arc::new(RuntimeApprovalGate::new(
+        Arc::clone(&inner),
+        session_id.clone(),
+        run_id.clone(),
+        Some(AgentId::from_string("a_two")),
+        cancel_b.clone(),
+        1,
+    ));
+
+    let request_a = scoped_mcp_approval("ap_a", "s_scope", &run_id.0, "a_one");
+    let request_b = scoped_mcp_approval("ap_b", "s_scope", &run_id.0, "a_two");
+    let task_a = tokio::spawn(async move { gate_a.request(request_a).await });
+    let task_b = tokio::spawn(async move { gate_b.request(request_b).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let pending = inner
+            .deps
+            .store
+            .list_pending_approvals(Some("s_scope"))
+            .await
+            .expect("pending");
+        if pending.len() == 2 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both scopes must have a pending approval, got {pending:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Cancel only scope A. Scope B's request must keep waiting.
+    cancel_a.cancel();
+    let decision_a = tokio::time::timeout(Duration::from_secs(5), task_a)
+        .await
+        .expect("scope A must return")
+        .expect("join");
+    assert_eq!(decision_a, ApprovalDecision::Expired);
+
+    let pending = inner
+        .deps
+        .store
+        .list_pending_approvals(Some("s_scope"))
+        .await
+        .expect("pending");
+    assert_eq!(
+        pending.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        vec!["ap_b"],
+        "expiring scope A must not expire scope B: {pending:?}"
+    );
+    assert_eq!(
+        inner.approvals.pending_count(),
+        1,
+        "the sibling's in-process waiter must still be registered"
+    );
+    assert_eq!(pending[0].status, "pending");
+
+    // Clean up scope B so the test leaves no parked task.
+    cancel_b.cancel();
+    let decision_b = tokio::time::timeout(Duration::from_secs(5), task_b)
+        .await
+        .expect("scope B must return")
+        .expect("join");
+    assert_eq!(decision_b, ApprovalDecision::Expired);
+    assert_eq!(inner.approvals.pending_count(), 0);
+}
+
+#[tokio::test]
+async fn subagent_timeout_cancels_inflight_tool_before_dropping_the_loop() {
+    let subagents = SubagentConfig {
+        max_concurrent: 1,
+        max_iterations: 8,
+        allow_recursive: false,
+        max_depth: 1,
+        timeout_secs: 1,
+    };
+    let slow = Arc::new(SlowCancelTool::new("slow"));
+    let started = slow.started();
+    let cancelled = slow.cancelled();
+    let finished = slow.finished();
+    let mut h = HarnessBuilder::new(vec![
+        spawn_call("call the slow tool", None, false),
+        Script::call(&[("call_slow", "slow", "{}")]),
+        Script::text("parent recovered"),
+    ])
+    .tool(slow)
+    .settings(FakeSettings::default().with_subagents(subagents))
+    .build()
+    .await;
+
+    let events = tokio::time::timeout(Duration::from_secs(20), h.run_to_finish("go"))
+        .await
+        .expect("a stuck child tool must not hang the parent");
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(started.load(Ordering::SeqCst), 1, "child ran the tool");
+    assert!(
+        cancelled.load(Ordering::SeqCst),
+        "the tool must observe cancellation during the grace period before the loop future is dropped"
+    );
+    assert!(
+        !finished.load(Ordering::SeqCst),
+        "the tool must not finish on its own"
+    );
+
+    let agents = h.store.agents();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].status, "failed");
+    assert!(agents[0]
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("timed out"));
+
+    assert!(h.wait_idle().await.is_empty(), "no child loop may survive");
+    assert!(
+        h.runtime.active_runs().iter().all(|r| r.agent_id.is_none()),
+        "the timed-out subagent is no longer registered"
+    );
+    assert_eq!(
+        h.session_messages().await.last().unwrap().content,
+        "parent recovered"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_the_parent_lets_the_subagent_tool_observe_cancellation() {
+    let slow = Arc::new(SlowCancelTool::new("slow"));
+    let started = slow.started();
+    let cancelled = slow.cancelled();
+    let mut h = HarnessBuilder::new(vec![
+        spawn_call("call the slow tool", None, false),
+        Script::call(&[("call_slow", "slow", "{}")]),
+        Script::text("unused"),
+    ])
+    .tool(slow)
+    .build()
+    .await;
+
+    h.submit("go").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while started.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child never invoked the slow tool"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    assert!(h.runtime.cancel(h.session()));
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "cancelled");
+    assert!(
+        cancelled.load(Ordering::SeqCst),
+        "the child tool must see the parent's cancellation"
+    );
+    let agents = h.store.agents();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].status, "cancelled");
+    assert!(h.wait_idle().await.is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // recovery
 // ---------------------------------------------------------------------------
@@ -1499,6 +1919,37 @@ async fn active_runs_reports_the_iteration_count() {
     h.runtime.cancel(h.session());
     let _ = h.collect_until_finished().await;
     assert!(h.wait_idle().await.is_empty());
+}
+
+#[tokio::test]
+async fn is_running_ignores_cancelled_runs() {
+    let h = HarnessBuilder::new(vec![Script::text("unused")])
+        .build()
+        .await;
+    let run_id = RunId::new();
+    let cancel = CancellationToken::new();
+    let state = Arc::new(crate::RunState::new(
+        run_id.clone(),
+        SessionId::from_string(h.session()),
+        None,
+        cancel.clone(),
+        true,
+    ));
+    h.runtime
+        .shared()
+        .runs
+        .lock()
+        .expect("runs lock")
+        .insert(run_id.0.clone(), Arc::clone(&state));
+    assert!(h.runtime.is_running(h.session()));
+
+    cancel.cancel();
+    assert!(
+        !h.runtime.is_running(h.session()),
+        "a cancelled run must not count as running"
+    );
+
+    h.runtime.shared().runs.lock().expect("runs lock").clear();
 }
 
 #[test]

@@ -24,11 +24,11 @@ use kc_core::store::{
     SessionSummary, Store, StoredMessage,
 };
 use kc_core::tool::{
-    Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOutcome, ToolRegistry, ToolSpec,
+    Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOrigin, ToolOutcome, ToolRegistry, ToolSpec,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -710,6 +710,154 @@ impl Tool for ApprovalTool {
     }
 }
 
+/// A non-builtin tool (plugin/MCP) that records whether it was invoked.
+///
+/// The runtime must gate these itself: nothing in this tool asks for approval,
+/// which mirrors the audited plugin/MCP implementations.
+pub(crate) struct ExternalTool {
+    pub name: String,
+    pub origin: ToolOrigin,
+    pub class: ToolClass,
+    /// `None` keeps the trait default (`class != ReadOnly`).
+    pub require_approval: Option<bool>,
+    invocations: Arc<AtomicUsize>,
+}
+
+impl ExternalTool {
+    pub(crate) fn new(name: &str, origin: ToolOrigin, class: ToolClass) -> Self {
+        Self {
+            name: name.to_string(),
+            origin,
+            class,
+            require_approval: None,
+            invocations: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub(crate) fn mcp(name: &str, server: &str) -> Self {
+        Self::new(
+            name,
+            ToolOrigin::Mcp {
+                server: server.to_string(),
+            },
+            ToolClass::External,
+        )
+    }
+
+    pub(crate) fn plugin(name: &str, plugin: &str) -> Self {
+        Self::new(
+            name,
+            ToolOrigin::Plugin {
+                name: plugin.to_string(),
+            },
+            ToolClass::External,
+        )
+    }
+
+    pub(crate) fn with_require_approval(mut self, require: bool) -> Self {
+        self.require_approval = Some(require);
+        self
+    }
+
+    pub(crate) fn with_class(mut self, class: ToolClass) -> Self {
+        self.class = class;
+        self
+    }
+
+    /// Counter of successful invocations (the tool's "side effect").
+    pub(crate) fn invocations(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.invocations)
+    }
+}
+
+#[async_trait]
+impl Tool for ExternalTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "A non-builtin tool that records invocations.".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            origin: self.origin.clone(),
+        }
+    }
+
+    fn class(&self) -> ToolClass {
+        self.class
+    }
+
+    fn requires_approval(&self) -> bool {
+        self.require_approval
+            .unwrap_or(!matches!(self.class, ToolClass::ReadOnly))
+    }
+
+    async fn invoke(&self, request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        ToolOutcome::ok(format!("invoked:{}:{}", self.name, request.arguments))
+    }
+}
+
+/// A tool that blocks until the run's cancellation token fires.
+///
+/// Used to prove that a timed-out or cancelled subagent gets the chance to
+/// observe cancellation (and kill its process group) before its loop future is
+/// dropped.
+pub(crate) struct SlowCancelTool {
+    pub name: String,
+    started: Arc<AtomicUsize>,
+    cancelled: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+}
+
+impl SlowCancelTool {
+    pub(crate) fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            started: Arc::new(AtomicUsize::new(0)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            finished: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn started(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.started)
+    }
+
+    pub(crate) fn cancelled(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
+    pub(crate) fn finished(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.finished)
+    }
+}
+
+#[async_trait]
+impl Tool for SlowCancelTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Blocks until the runtime cancels the run.".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            origin: ToolOrigin::Builtin,
+        }
+    }
+
+    async fn invoke(&self, _request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => {
+                self.cancelled.store(true, Ordering::SeqCst);
+                ToolOutcome::err("cancelled by the runtime")
+            }
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                self.finished.store(true, Ordering::SeqCst);
+                ToolOutcome::ok("finished after waiting")
+            }
+        }
+    }
+}
+
 /// Panics on every invocation (exercises the tool panic guard).
 pub(crate) struct PanicTool {
     pub name: String,
@@ -895,13 +1043,17 @@ impl Drop for Harness {
 
 /// A `RuntimeInner` for unit tests that only need event plumbing.
 pub(crate) fn test_inner() -> Arc<RuntimeInner> {
+    test_inner_with_settings(FakeSettings::default())
+}
+
+pub(crate) fn test_inner_with_settings(settings: FakeSettings) -> Arc<RuntimeInner> {
     let workspace = Arc::new(Workspace::new(std::env::temp_dir()).expect("workspace"));
     Arc::new(RuntimeInner {
         deps: RuntimeDeps {
             store: Arc::new(FakeStore::new()),
             providers: Arc::new(ScriptedFactory::new(Vec::new())),
             tools: Arc::new(ToolRegistry::new()),
-            settings: Arc::new(FakeSettings::default()),
+            settings: Arc::new(settings),
             hooks: Arc::new(NoHooks),
             workspace,
         },

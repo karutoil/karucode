@@ -19,7 +19,7 @@ use kc_core::events::Event;
 use kc_core::ids::{AgentId, RunId, SessionId};
 use kc_core::store::ApprovalRecord;
 use kc_core::tool::ApprovalGate;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -123,6 +123,130 @@ fn session_key(session_id: &str, kind: &ApprovalKind, target: &str) -> String {
     format!("{session_id}\u{1f}{}\u{1f}{target}", kind_key(kind))
 }
 
+/// The approval ids one loop scope (session + run + agent) requested.
+///
+/// A subagent shares its parent's `run_id`, so expiring by run alone would also
+/// expire a concurrent sibling's request. The gate records every id it created
+/// here and expires *exactly* those, both when a single request gives up and when
+/// the loop tears down.
+#[derive(Clone, Default)]
+pub(crate) struct ApprovalScope {
+    ids: Arc<Mutex<HashSet<String>>>,
+}
+
+impl ApprovalScope {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn record(&self, id: &str) {
+        self.ids
+            .lock()
+            .expect("approval scope lock")
+            .insert(id.to_string());
+    }
+
+    fn forget(&self, id: &str) {
+        self.ids.lock().expect("approval scope lock").remove(id);
+    }
+
+    fn take(&self) -> Vec<String> {
+        self.ids
+            .lock()
+            .expect("approval scope lock")
+            .drain()
+            .collect()
+    }
+
+    /// Expire the approvals this scope requested that are still pending.
+    ///
+    /// `run_wide` is only set for the top-level run, whose scope *is* the run:
+    /// when it ends or is cancelled every approval belonging to it must expire,
+    /// and the store's `expire_pending_approvals(run_id, ..)` is the only way to
+    /// record them with status `expired`. Subagent scopes always expire per id
+    /// so a sibling loop's pending request is never touched; the store has no
+    /// per-id `expired` transition, so those rows are closed as `resolved` with
+    /// decision `expired` (the decision, not the status, is what the API and UI
+    /// read).
+    pub(crate) async fn expire_pending(
+        &self,
+        inner: &Arc<RuntimeInner>,
+        session_id: &str,
+        run_id: &str,
+        run_wide: bool,
+        reason: &str,
+    ) {
+        let ids = self.take();
+        if ids.is_empty() {
+            return;
+        }
+        let store = &inner.deps.store;
+        let pending = match store.list_pending_approvals(Some(session_id)).await {
+            Ok(pending) => pending,
+            Err(e) => {
+                tracing::warn!(
+                    session = %session_id,
+                    run = %run_id,
+                    error = %e,
+                    "could not list pending approvals while expiring scope"
+                );
+                return;
+            }
+        };
+        let pending_for_run: Vec<&ApprovalRecord> =
+            pending.iter().filter(|a| a.run_id == run_id).collect();
+        let ours: Vec<&ApprovalRecord> = pending_for_run
+            .iter()
+            .filter(|a| ids.contains(&a.id))
+            .copied()
+            .collect();
+        if ours.is_empty() {
+            return;
+        }
+
+        if run_wide {
+            match store.expire_pending_approvals(run_id, reason).await {
+                Ok(n) => {
+                    tracing::debug!(run = %run_id, expired = n, reason, "expired pending approvals");
+                }
+                Err(e) => {
+                    tracing::warn!(run = %run_id, error = %e, "could not expire the run's pending approvals");
+                }
+            }
+            // The store call closes every pending row of the run, so release
+            // every parked waiter too (normally there is none by now).
+            for approval in pending_for_run {
+                inner
+                    .approvals
+                    .resolve(&approval.id, ApprovalDecision::Expired);
+            }
+            return;
+        }
+
+        for approval in ours {
+            // Wake a waiter that is still parked on the id (for example when the
+            // loop future was dropped before its own timeout branch ran).
+            inner
+                .approvals
+                .resolve(&approval.id, ApprovalDecision::Expired);
+            match store
+                .resolve_approval(&approval.id, ApprovalDecision::Expired.as_str())
+                .await
+            {
+                Ok(()) => {}
+                // Already resolved/expired concurrently is fine; anything else is
+                // a real persistence problem and must not be silent.
+                Err(Error::NotFound(_)) => {}
+                Err(e) => tracing::warn!(
+                    approval = %approval.id,
+                    error = %e,
+                    "could not expire the scoped approval"
+                ),
+            }
+        }
+    }
+}
+
 impl RuntimeInner {
     pub(crate) fn remember_session_allow(
         &self,
@@ -193,6 +317,7 @@ pub(crate) struct RuntimeApprovalGate {
     agent_id: Option<AgentId>,
     cancel: CancellationToken,
     depth: u8,
+    scope: ApprovalScope,
 }
 
 impl RuntimeApprovalGate {
@@ -211,7 +336,14 @@ impl RuntimeApprovalGate {
             agent_id,
             cancel,
             depth,
+            scope: ApprovalScope::new(),
         }
+    }
+
+    /// Handle to the ids this gate requested, so the loop can expire exactly
+    /// them when it ends or is cancelled.
+    pub(crate) fn scope(&self) -> ApprovalScope {
+        self.scope.clone()
     }
 
     fn ctx(&self) -> EmitCtx {
@@ -278,6 +410,7 @@ impl ApprovalGate for RuntimeApprovalGate {
             return ApprovalDecision::Expired;
         }
 
+        self.scope.record(&approval_id);
         let receiver = self.inner.approvals.insert(&approval_id);
         ctx.emit(Event::ApprovalRequested {
             approval: ApprovalRequest {
@@ -302,11 +435,11 @@ impl ApprovalGate for RuntimeApprovalGate {
         let decision = tokio::select! {
             biased;
             _ = self.cancel.cancelled() => {
-                self.expire(&run_id, "run cancelled").await;
+                self.expire("run cancelled").await;
                 None
             }
             _ = tokio::time::sleep(timeout) => {
-                self.expire(&run_id, "approval timed out").await;
+                self.expire("approval timed out").await;
                 None
             }
             answer = receiver => answer.ok(),
@@ -314,6 +447,8 @@ impl ApprovalGate for RuntimeApprovalGate {
 
         match decision {
             Some(decision) => {
+                // Resolved by the UI: nothing left to expire for this id.
+                self.scope.forget(&approval_id);
                 if decision == ApprovalDecision::AllowSession {
                     self.inner
                         .remember_session_allow(&session_id, &request.kind, &target);
@@ -334,22 +469,18 @@ impl ApprovalGate for RuntimeApprovalGate {
 }
 
 impl RuntimeApprovalGate {
-    async fn expire(&self, run_id: &str, reason: &str) {
-        // Only one approval is awaited at a time per run (tool calls are
-        // sequential), so expiring the run's pending rows expires exactly this
-        // one. Failures are surfaced as an event, never swallowed.
-        if let Err(e) = self
-            .inner
-            .deps
-            .store
-            .expire_pending_approvals(run_id, reason)
-            .await
-        {
-            self.ctx().error(
-                "store",
-                format!("could not expire the pending approval ({reason}): {e}"),
-            );
-        }
+    async fn expire(&self, reason: &str) {
+        // Expire exactly the ids *this* scope created: a concurrent sibling
+        // subagent shares our run id and must keep waiting for its own answer.
+        self.scope
+            .expire_pending(
+                &self.inner,
+                &self.session_id.0,
+                &self.run_id.0,
+                self.agent_id.is_none(),
+                reason,
+            )
+            .await;
     }
 }
 

@@ -40,6 +40,12 @@ use tokio_util::sync::CancellationToken;
 /// Name of the built-in delegate tool.
 pub const SPAWN_AGENT_TOOL: &str = "spawn_agent";
 
+/// How long a timed-out or cancelled subagent's tools get to observe the
+/// cancellation token and kill their process groups before the loop future is
+/// dropped. Dropping first would only kill the leader process (`kill_on_drop`),
+/// leaving children behind.
+const SUBAGENT_CANCEL_GRACE: Duration = Duration::from_millis(500);
+
 /// Upper bound for a subagent summary returned to the parent and stored on the
 /// agent record.
 pub const MAX_SUMMARY_BYTES: usize = 8_000;
@@ -335,14 +341,16 @@ async fn run_subagent(
     // --- nested loop ----------------------------------------------------------
     let child_tools =
         child_tool_registry(inner, cfg.allow_recursive && child_depth < cfg.max_depth);
-    let gate: Arc<dyn kc_core::tool::ApprovalGate> = Arc::new(RuntimeApprovalGate::new(
+    let gate = RuntimeApprovalGate::new(
         Arc::clone(inner),
         session_id.clone(),
         parent_run_id.clone(),
         Some(agent_id.clone()),
         child_cancel.clone(),
         child_depth,
-    ));
+    );
+    let approval_scope = gate.scope();
+    let gate: Arc<dyn kc_core::tool::ApprovalGate> = Arc::new(gate);
     let child_state = Arc::new(crate::RunState::new(
         parent_run_id.clone(),
         session_id.clone(),
@@ -371,6 +379,7 @@ async fn run_subagent(
         limits,
         approval_mode: policy.mode.as_str().to_string(),
         gate,
+        approval_scope,
         tools: Arc::new(child_tools),
         cancel: child_cancel.clone(),
         history: vec![Message::user(task.clone())],
@@ -379,26 +388,61 @@ async fn run_subagent(
 
     let guarded = std::panic::AssertUnwindSafe(crate::agent::run_loop(Arc::clone(inner), spec))
         .catch_unwind();
-    let outcome = match tokio::time::timeout(Duration::from_secs(timeout_secs), guarded).await {
-        Ok(Ok(outcome)) => outcome,
-        Ok(Err(payload)) => LoopOutcome {
-            status: RunStatus::Failed,
-            error: Some(format!(
-                "subagent panicked: {}",
-                crate::agent::panic_message(payload.as_ref())
-            )),
-            text: String::new(),
-            iterations: child_state.iterations.load(Ordering::Relaxed),
-        },
-        Err(_) => {
-            child_cancel.cancel();
-            LoopOutcome {
+    tokio::pin!(guarded);
+    let hard_deadline = tokio::time::sleep(Duration::from_secs(timeout_secs));
+    tokio::pin!(hard_deadline);
+
+    enum Exit {
+        Completed(LoopOutcome),
+        TimedOut,
+        ParentCancelled,
+    }
+
+    let exit = tokio::select! {
+        biased;
+        _ = ctx.cancel.cancelled() => Exit::ParentCancelled,
+        _ = &mut hard_deadline => Exit::TimedOut,
+        result = guarded.as_mut() => Exit::Completed(match result {
+            Ok(outcome) => outcome,
+            Err(payload) => LoopOutcome {
                 status: RunStatus::Failed,
                 error: Some(format!(
-                    "subagent timed out after {timeout_secs}s (settings.subagents.timeout_secs)"
+                    "subagent panicked: {}",
+                    crate::agent::panic_message(payload.as_ref())
                 )),
                 text: String::new(),
                 iterations: child_state.iterations.load(Ordering::Relaxed),
+            },
+        }),
+    };
+
+    let timed_out = matches!(exit, Exit::TimedOut);
+    let outcome = match exit {
+        Exit::Completed(outcome) => outcome,
+        Exit::TimedOut | Exit::ParentCancelled => {
+            // Fire the child token, then keep polling the loop for a short grace
+            // period: in-flight tools select on the token, kill their process
+            // groups and return. Only then is the future dropped.
+            child_cancel.cancel();
+            let _ = tokio::time::timeout(SUBAGENT_CANCEL_GRACE, guarded.as_mut()).await;
+
+            let iterations = child_state.iterations.load(Ordering::Relaxed);
+            if timed_out {
+                LoopOutcome {
+                    status: RunStatus::Failed,
+                    error: Some(format!(
+                        "subagent timed out after {timeout_secs}s (settings.subagents.timeout_secs)"
+                    )),
+                    text: String::new(),
+                    iterations,
+                }
+            } else {
+                LoopOutcome {
+                    status: RunStatus::Cancelled,
+                    error: None,
+                    text: String::new(),
+                    iterations,
+                }
             }
         }
     };

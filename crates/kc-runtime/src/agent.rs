@@ -10,20 +10,23 @@
 //! failure (`failed`). Every path persists what actually happened and emits a
 //! visible event.
 
-use crate::approvals::RuntimeApprovalGate;
+use crate::approvals::{ApprovalScope, RuntimeApprovalGate};
 use crate::context;
 use crate::events::EmitCtx;
 use crate::{RunHandle, RunState, Runtime, RuntimeInner, HISTORY_LIMIT};
 use futures_util::{FutureExt, StreamExt};
-use kc_core::approval::ApprovalKind;
-use kc_core::config::{Limits, ModelConfig};
+use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView};
+use kc_core::config::{ApprovalMode, Limits, ModelConfig};
 use kc_core::error::{Error, Result};
 use kc_core::events::Event;
 use kc_core::ids::{AgentId, RunId, SessionId};
 use kc_core::message::{Message, Role, ToolCall};
 use kc_core::provider::{ChatRequest, ProviderChunk, ProviderStream};
 use kc_core::store::{NewMessage, RunStatus};
-use kc_core::tool::{truncate_output, ApprovalGate, ToolCtx, ToolRegistry};
+use kc_core::tool::{
+    truncate_output, ApprovalGate, ApprovalHandle, Tool, ToolCtx, ToolOrigin, ToolOutcome,
+    ToolRegistry,
+};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,6 +53,9 @@ pub(crate) struct LoopSpec {
     pub limits: Limits,
     pub approval_mode: String,
     pub gate: Arc<dyn ApprovalGate>,
+    /// Approval ids this loop scope created; expired at loop end/cancel without
+    /// touching a concurrent sibling scope that shares the run id.
+    pub approval_scope: ApprovalScope,
     pub tools: Arc<ToolRegistry>,
     pub cancel: CancellationToken,
     /// Conversation without the system message; the system prompt is rebuilt
@@ -293,14 +299,16 @@ pub(crate) async fn run_top_level(
         prompt,
     });
 
-    let gate: Arc<dyn ApprovalGate> = Arc::new(RuntimeApprovalGate::new(
+    let gate = RuntimeApprovalGate::new(
         Arc::clone(&inner),
         state.session_id.clone(),
         state.run_id.clone(),
         None,
         state.cancel.clone(),
         0,
-    ));
+    );
+    let approval_scope = gate.scope();
+    let gate: Arc<dyn ApprovalGate> = Arc::new(gate);
 
     let spec = LoopSpec {
         session_id: state.session_id.clone(),
@@ -315,6 +323,7 @@ pub(crate) async fn run_top_level(
         limits,
         approval_mode: policy.mode.as_str().to_string(),
         gate,
+        approval_scope,
         tools,
         cancel: state.cancel.clone(),
         history,
@@ -365,7 +374,30 @@ pub(crate) async fn run_top_level(
 
 /// The shared agent loop. Never panics on model or tool misbehaviour: every
 /// failure becomes a status plus a visible event.
-pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOutcome {
+pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, spec: LoopSpec) -> LoopOutcome {
+    let scope = spec.approval_scope.clone();
+    let session_id = spec.session_id.0.clone();
+    let run_id = spec.run_id.0.clone();
+    let run_wide = spec.agent_id.is_none();
+
+    let outcome = run_loop_inner(Arc::clone(&inner), spec).await;
+
+    // Whatever ended the loop, no approval it requested may stay pending: the
+    // waiter is gone, and a stale card would block later runs. Because the scope
+    // is per agent, this never expires a sibling subagent's request.
+    let reason = if outcome.status == RunStatus::Cancelled {
+        "run cancelled"
+    } else {
+        "run finished"
+    };
+    scope
+        .expire_pending(&inner, &session_id, &run_id, run_wide, reason)
+        .await;
+
+    outcome
+}
+
+async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOutcome {
     let ctx = spec.emit_ctx(&inner);
     let mut history = std::mem::take(&mut spec.history);
     let mut iterations = 0u32;
@@ -685,6 +717,104 @@ async fn persist(
     inner.deps.store.append_message(&record).await
 }
 
+/// How much of the argument JSON an approval card shows.
+const APPROVAL_ARGUMENTS_LIMIT: usize = 2_000;
+
+/// Central approval gate for tools the runtime does not own.
+///
+/// Built-in shell/mutating tools gate themselves: they call
+/// [`ToolCtx::approvals`] so they can show the exact command or diff. Plugin and
+/// MCP tools are untrusted in that respect (buggy or malicious plugin code could
+/// simply skip the ask), so the loop applies the approval policy here, before
+/// invoke, using the tool's declared origin and class.
+///
+/// Returns `Some(outcome)` when the call must not be invoked, and `None` when it
+/// may proceed. A policy denial is a tool error, never a run failure: the model
+/// sees the refusal and can adapt.
+async fn gate_external_tool(
+    inner: &Arc<RuntimeInner>,
+    spec: &LoopSpec,
+    call: &ToolCall,
+    tool: &Arc<dyn Tool>,
+    arguments: &serde_json::Value,
+) -> Option<ToolOutcome> {
+    let origin = tool.spec().origin;
+    // Built-ins self-gate; read-only built-ins need no gate at all.
+    if origin == ToolOrigin::Builtin {
+        return None;
+    }
+    // `requires_approval` is the tool's declaration (default: every class except
+    // ReadOnly). A read-only external tool needs no prompt.
+    if !tool.requires_approval() {
+        return None;
+    }
+
+    let policy = inner.deps.settings.approval_policy().await;
+    let view = ApprovalPolicyView {
+        mode: policy.mode.clone(),
+        allow_commands: policy.allow_commands.clone(),
+        auto_approve_paths: policy.auto_approve_paths.clone(),
+    };
+    match view.mode {
+        ApprovalMode::Auto => None,
+        ApprovalMode::ReadOnly => Some(ToolOutcome::err("denied by policy: read_only mode")),
+        ApprovalMode::Ask | ApprovalMode::AskCommands => {
+            let kind = match &origin {
+                ToolOrigin::Mcp { .. } => ApprovalKind::Mcp,
+                ToolOrigin::Plugin { .. } => ApprovalKind::Plugin,
+                _ => ApprovalKind::Other,
+            };
+            let arguments_json =
+                serde_json::to_string(arguments).unwrap_or_else(|_| call.arguments.clone());
+            let detail = format!(
+                "{}\n{}",
+                origin.label(),
+                truncate_detail(&arguments_json, APPROVAL_ARGUMENTS_LIMIT)
+            );
+            let payload = serde_json::json!({
+                "tool": call.name,
+                "origin": origin,
+                "arguments": arguments,
+            });
+            // Same handle the tool would use, so the store row, the
+            // `approval_requested`/`approval_resolved` events and the
+            // `allow_session` grants behave exactly like a built-in's request.
+            let approvals = ApprovalHandle::new(
+                Arc::clone(&spec.gate),
+                spec.session_id.clone(),
+                spec.run_id.clone(),
+                spec.agent_id.clone(),
+            );
+            let decision = approvals
+                .ask(kind, format!("Call {}", call.name), detail, payload)
+                .await;
+            match decision {
+                ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession => None,
+                ApprovalDecision::Deny => Some(ToolOutcome::err(format!(
+                    "approval denied by user for `{}`; the tool was not invoked",
+                    call.name
+                ))),
+                ApprovalDecision::Expired => Some(ToolOutcome::err(format!(
+                    "approval timed out for `{}`; the tool was not invoked",
+                    call.name
+                ))),
+            }
+        }
+    }
+}
+
+/// Truncate approval detail without splitting a UTF-8 character.
+fn truncate_detail(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}... [truncated]", &text[..end])
+}
+
 /// Execute a single tool call: emit start/finish, invoke, truncate, persist.
 async fn run_one_tool(
     inner: &Arc<RuntimeInner>,
@@ -725,34 +855,38 @@ async fn run_one_tool(
             ))
         }
         (Some(arguments), Some(tool)) => {
-            let tool_ctx = ToolCtx {
-                workspace: Arc::clone(&inner.deps.workspace),
-                cancel: spec.cancel.clone(),
-                approvals: kc_core::tool::ApprovalHandle::new(
-                    Arc::clone(&spec.gate),
-                    spec.session_id.clone(),
-                    spec.run_id.clone(),
-                    spec.agent_id.clone(),
-                ),
-                events: ctx.sink(),
-                settings: inner.deps.settings.clone(),
-                depth: spec.depth,
-            };
-            let request = kc_core::tool::ToolCallRequest {
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                arguments,
-            };
-            match std::panic::AssertUnwindSafe(tool.invoke(request, tool_ctx))
-                .catch_unwind()
-                .await
-            {
-                Ok(outcome) => outcome,
-                Err(payload) => kc_core::tool::ToolOutcome::err(format!(
-                    "tool `{}` panicked: {}",
-                    call.name,
-                    panic_message(payload.as_ref())
-                )),
+            if let Some(denied) = gate_external_tool(inner, spec, call, &tool, &arguments).await {
+                denied
+            } else {
+                let tool_ctx = ToolCtx {
+                    workspace: Arc::clone(&inner.deps.workspace),
+                    cancel: spec.cancel.clone(),
+                    approvals: kc_core::tool::ApprovalHandle::new(
+                        Arc::clone(&spec.gate),
+                        spec.session_id.clone(),
+                        spec.run_id.clone(),
+                        spec.agent_id.clone(),
+                    ),
+                    events: ctx.sink(),
+                    settings: inner.deps.settings.clone(),
+                    depth: spec.depth,
+                };
+                let request = kc_core::tool::ToolCallRequest {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments,
+                };
+                match std::panic::AssertUnwindSafe(tool.invoke(request, tool_ctx))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(payload) => kc_core::tool::ToolOutcome::err(format!(
+                        "tool `{}` panicked: {}",
+                        call.name,
+                        panic_message(payload.as_ref())
+                    )),
+                }
             }
         }
     };
