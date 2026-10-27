@@ -1,0 +1,15 @@
+[package]
+name = "kc-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kc-core.workspace = true
+async-trait.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

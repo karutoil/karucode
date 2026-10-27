@@ -1,0 +1,1 @@
+//! Git read-only helpers.

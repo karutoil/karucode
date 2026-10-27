@@ -1,0 +1,32 @@
+[package]
+name = "kc-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "karucode"
+path = "src/main.rs"
+
+[dependencies]
+kc-core.workspace = true
+kc-store.workspace = true
+kc-provider.workspace = true
+kc-tools.workspace = true
+kc-runtime.workspace = true
+kc-plugin-host.workspace = true
+kc-mcp.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+mime_guess.workspace = true
+rust-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
