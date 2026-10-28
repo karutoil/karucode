@@ -9,6 +9,7 @@ stream and the built frontend. No Node.js at runtime.
         ▼
  kc-server (axum)
    ├── config/settings layer (env + file + SQLite overrides)
+   ├── project registry (workspace per run)
    ├── kc-runtime ── agent loop, approvals, subagents, context budget
    │     ├── kc-provider  (OpenAI-compatible streaming)
    │     ├── kc-tools     (files, search, shell, git)
@@ -29,7 +30,7 @@ concrete implementations together.
 | Crate | Responsibility |
 | --- | --- |
 | `kc-core` | ids, messages, config, approval policy, workspace path confinement, event schema, tool/provider/store/hooks traits, plugin protocol types, system prompt |
-| `kc-store` | SQLite schema + queries (sessions, messages, runs, agents, approvals, settings, claims) |
+| `kc-store` | SQLite schema + queries (projects, sessions, messages, runs, agents, approvals, settings, claims) |
 | `kc-provider` | `POST /chat/completions` streaming, SSE parsing, tool-call deltas, errors |
 | `kc-tools` | read/list/search/write/edit/command/git, output bounds, process-group kill |
 | `kc-runtime` | multi-step loop, streaming aggregation, approvals, cancellation, subagents, context trimming, run recovery |
@@ -54,6 +55,77 @@ shell process groups, expires pending approvals, and marks the run `cancelled`.
 On startup `recover()` marks leftover `running` runs/agents `interrupted` and
 pending approvals `expired`, so interrupted work is visible instead of hidden.
 
+## Workspace per run (projects)
+
+A project is a row in `projects` (id, name, canonical `path`, timestamps); every
+session carries a nullable `project_id` (`NULL` for rows written before schema v2
+and for sessions a delete detached). One server instance therefore serves several
+directories without a mutable "current workspace":
+
+* `kc_runtime::RuntimeDeps` holds a `WorkspaceProvider`. `start_run` resolves the
+  workspace from the session's `project_id` *before* it writes the run row, so a
+  run cannot start in the wrong directory.
+* Subagents reuse the `Arc<Workspace>` of the run that spawned them
+  (`subagent.rs` copies it into the child's tool context). There is no
+  per-subagent worktree, so `owned_paths` stays advisory.
+* `kc-server` implements the trait with `state::ProjectRegistry`: the default
+  workspace plus a map of project id → already-canonicalised `Workspace`. The
+  registry is process memory, not a query, because every file tool, workspace
+  listing and git panel resolves through it — a SQLite round-trip per tool call
+  would put the database in the hot path, and `Workspace` canonicalisation should
+  happen once rather than per request. SQLite stays the source of truth: rows are
+  written first and the map is updated in step (`create` rolls the row back if the
+  directory cannot be registered; `delete` removes the entry after the rows are
+  gone).
+* A project whose directory disappears keeps its row; resolution then fails with
+  "not available; its directory may have been removed", so a run is refused
+  instead of silently running in the default workspace.
+
+`bootstrap::seed_projects` runs before the runtime is built:
+
+* with no projects at all, one is created for the configured workspace;
+* a session with `project_id IS NULL` is attached to the project whose `path`
+  matches its recorded `workspace`, creating that project if this is the first
+  session in that directory. A recorded workspace that no longer exists is logged
+  and left unattached, not moved to a different repository.
+
+## Provider profiles and resolution
+
+Endpoints, credentials and the curated model library live in `ProviderProfile`s
+(`[[providers]]` in the config file, `model.providers` rows in SQLite, or the
+reserved `env` profile synthesised from environment variables). The runtime never
+reads a profile directly: `SettingsHandle::model()` returns
+`Config::effective_model()`, which flattens the active profile (base URL, provider
+implementation id, key, timeout, `active_model`) into one `ModelConfig`. Sampling
+knobs — `temperature`, `max_tokens`, `top_p`, `parallel_tool_calls` — stay
+install-wide, so switching profiles does not silently change them.
+
+`Config::normalize_providers()` is the single repair and normalisation point. It
+runs when configuration is loaded, after the persisted rows are applied, and after
+every accepted `PATCH /api/config`:
+
+* no profiles → a `default` profile is synthesised from the flat `[model]`
+  section, which is what a config file, the environment or a pre-profiles database
+  provides;
+* unknown `active_provider` → the first profile; unknown `active_model` → the
+  profile's first model, then the flat `model.model` (a profile may legitimately
+  have no models yet);
+* the resolved connection is mirrored into the flat `model` section so legacy
+  readers, `GET /api/config` and provider probes all see the same endpoint. The
+  key is deliberately **not** mirrored: it lives on the profile, so it is stored
+  and redacted in one place.
+
+`KARUCODE_MODEL` / `KARUCODE_BASE_URL` / `KARUCODE_API_KEY` (with
+`OPENAI_BASE_URL` / `OPENAI_API_KEY` as fallbacks) win over `[[providers]]`
+tables: when any of them is set, an `env` profile is created and selected. That
+keeps one resolution path for profiles, environment and the flat section.
+
+Everything that needs to know which endpoint will be called reads that
+resolution: the agent loop, `GET /api/config`'s `model`, `GET /api/health`'s
+`provider_configured`, and `POST /api/provider/test`. A probe of a profile that
+is not selected uses that profile's first model
+(`Config::model_for_profile`).
+
 ## Trust boundaries
 
 * File tools resolve through `Workspace`: lexical `..`/absolute checks plus
@@ -64,7 +136,8 @@ pending approvals `expired`, so interrupted work is visible instead of hidden.
 * Model output, tool output, plugin output and MCP output are untrusted. The UI
   renders Markdown with raw HTML disabled and sanitises the result.
 * API keys live in the config file/env or the SQLite settings table (file mode
-  0600) and never leave the server; the browser only sees `api_key_set`.
+  0600) and never leave the server; the browser only sees `api_key_set`, and every
+  profile's key is added to the redaction set used for outgoing error messages.
 * Browser CSRF: custom header required on mutations + Origin/Host match. Remote
   binds require `KARUCODE_AUTH_TOKEN` at startup.
 
@@ -76,6 +149,7 @@ analysis against Wasm and in-process Rust plugins.
 
 ## Extension points
 
-`Provider` / `ProviderFactory`, `Tool`, `Store`, `Settings`, `Hooks`, plugin
-protocol v1, MCP servers. Adding a native provider means implementing `Provider`
-and registering it in the server's factory; nothing in the runtime changes.
+`Provider` / `ProviderFactory`, `Tool`, `Store`, `Settings`, `Hooks`,
+`WorkspaceProvider`, plugin protocol v1, MCP servers. Adding a native provider
+means implementing `Provider` and registering it in the server's factory; nothing
+in the runtime changes.
