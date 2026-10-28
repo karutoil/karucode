@@ -7,9 +7,10 @@ use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::Json;
+use kc_core::config::Config;
 use kc_core::message::Message;
 use kc_core::provider::{ChatRequest, ProviderChunk};
-use kc_core::settings::Settings;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -49,14 +50,79 @@ pub async fn patch_config(State(state): State<AppState>, body: Bytes) -> ApiResu
     Ok(Json(state.config_payload().await))
 }
 
+/// `POST /api/provider/test` body. Every field is optional: an empty body
+/// probes the active model exactly as before, and the settings screen can probe
+/// a profile that is not saved or selected yet (`profile`), or a draft endpoint
+/// the user is still typing (`base_url`/`api_key`/`model`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderTestBody {
+    /// Saved profile id to probe instead of the active one.
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    /// Write-only; an empty string clears the key for this probe only.
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    request_timeout_secs: Option<u64>,
+}
+
 /// `POST /api/provider/test` — always 200 with `{ok, models, error, latency_ms}`.
 /// A failing endpoint is a result, not an HTTP error: the settings screen shows
 /// the message next to the form.
 pub async fn provider_test(State(state): State<AppState>, body: Bytes) -> ApiResult<Json<Value>> {
-    // The documented request has an empty/ignored body; validate it if present.
-    let _: Value = parse_body(&body)?;
-    let model = state.settings().model().await;
+    let body: ProviderTestBody = parse_body(&body)?;
     let started = Instant::now();
+    let config: Config = state.settings().snapshot();
+
+    let mut model = match body.profile.as_deref() {
+        Some(id) => {
+            let profile = config.providers.iter().find(|profile| profile.id == id);
+            match profile {
+                Some(profile) => config.model_for_profile(profile),
+                None => {
+                    return Err(ApiError::not_found(format!(
+                        "no provider profile with id `{id}`"
+                    )))
+                }
+            }
+        }
+        None => config.effective_model(),
+    };
+    if let Some(base_url) = &body.base_url {
+        model.base_url = base_url.trim().to_string();
+    }
+    if let Some(model_id) = &body.model {
+        model.model = model_id.trim().to_string();
+    }
+    if let Some(timeout) = body.request_timeout_secs {
+        model.request_timeout_secs = timeout.clamp(1, 3600);
+    }
+    if let Some(key) = &body.api_key {
+        let key = key.trim();
+        model.api_key = (!key.is_empty()).then(|| key.to_string());
+    }
+
+    if let Err(error) = crate::settings::validate_base_url(&model.base_url) {
+        return Ok(Json(probe_result(
+            false,
+            Vec::new(),
+            Some(state.redact(&error.to_string())),
+            started,
+        )));
+    }
+    if model.model.trim().is_empty() {
+        return Ok(Json(probe_result(
+            false,
+            Vec::new(),
+            Some("a model id is required to probe the endpoint".into()),
+            started,
+        )));
+    }
 
     let provider = match state.providers().build(&model).await {
         Ok(provider) => provider,

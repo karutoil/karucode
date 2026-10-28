@@ -162,6 +162,139 @@ impl ModelConfig {
     }
 }
 
+/// One model reachable through a provider profile.
+///
+/// The connection details live on [`ProviderProfile`]; this is the part a user
+/// curates — the ids they actually want to use, plus the metadata the settings
+/// screen shows. `context_window`, `max_output_tokens`, capabilities and costs
+/// are prefilled from models.dev when the model is picked from the catalog and
+/// stay editable, because a self-hosted gateway may serve the same id with
+/// different limits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ModelEntry {
+    /// Model id sent to the endpoint (`model` in the chat request).
+    pub id: String,
+    /// Human label; falls back to `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Total context window in tokens, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    /// USD per million input tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input: Option<f64>,
+    /// USD per million output tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output: Option<f64>,
+    /// models.dev provider id the metadata was prefilled from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_provider: Option<String>,
+}
+
+impl ModelEntry {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Label to show in pickers: the friendly name when there is one.
+    pub fn label(&self) -> &str {
+        self.name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&self.id)
+    }
+}
+
+/// A named OpenAI-compatible endpoint plus the models the user wants from it.
+///
+/// Profiles are the only place credentials live: the flat [`ModelConfig`]
+/// section is the live/effective view the runtime reads, derived from the
+/// active profile by [`Config::effective_model`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderProfile {
+    /// Stable slug used by the API (`active.provider`).
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// Provider implementation id; `openai_compatible` is always available.
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    #[serde(default = "default_base_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub models: Vec<ModelEntry>,
+    #[serde(default = "default_request_timeout")]
+    pub request_timeout_secs: u64,
+    #[serde(default)]
+    pub extra_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub extra_body: BTreeMap<String, serde_json::Value>,
+}
+
+impl Default for ProviderProfile {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            provider: default_provider(),
+            base_url: default_base_url(),
+            api_key: None,
+            models: Vec::new(),
+            request_timeout_secs: default_request_timeout(),
+            extra_headers: BTreeMap::new(),
+            extra_body: BTreeMap::new(),
+        }
+    }
+}
+
+impl ProviderProfile {
+    pub fn label(&self) -> &str {
+        let name = self.name.trim();
+        if name.is_empty() {
+            &self.id
+        } else {
+            name
+        }
+    }
+
+    pub fn has_api_key(&self) -> bool {
+        self.api_key
+            .as_deref()
+            .map(|key| !key.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Browser-safe view: the key itself is never serialised.
+    pub fn public_view(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "name": self.label(),
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "models": self.models,
+            "request_timeout_secs": self.request_timeout_secs,
+            "api_key_set": self.has_api_key(),
+        })
+    }
+}
+
+/// Profile id synthesized from the flat `model` section (file/env/legacy DB).
+pub const DEFAULT_PROFILE_ID: &str = "default";
+/// Reserved profile id used when the legacy `KARUCODE_*` model variables are set.
+pub const ENV_PROFILE_ID: &str = "env";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Limits {
     /// Maximum model round-trips per run before the agent must stop.
@@ -350,6 +483,14 @@ pub struct ConfigFile {
     pub log_level: Option<String>,
     #[serde(default)]
     pub model: Option<ModelConfig>,
+    /// `[[providers]]` tables. When present they are the source of truth for
+    /// endpoints, keys and the model library.
+    #[serde(default)]
+    pub providers: Option<Vec<ProviderProfile>>,
+    #[serde(default)]
+    pub active_provider: Option<String>,
+    #[serde(default)]
+    pub active_model: Option<String>,
     #[serde(default)]
     pub limits: Option<Limits>,
     #[serde(default)]
@@ -371,7 +512,13 @@ pub struct Config {
     pub auth_token: Option<String>,
     pub lock_settings: bool,
     pub log_level: String,
+    /// Live/effective model connection + sampling. Derived from the active
+    /// provider profile by [`Config::normalize_providers`].
     pub model: ModelConfig,
+    /// Named endpoints and their model libraries.
+    pub providers: Vec<ProviderProfile>,
+    pub active_provider: Option<String>,
+    pub active_model: Option<String>,
     pub limits: Limits,
     pub approvals: ApprovalPolicy,
     pub subagents: SubagentConfig,
@@ -392,6 +539,9 @@ impl Default for Config {
             lock_settings: false,
             log_level: "info".into(),
             model: ModelConfig::default(),
+            providers: Vec::new(),
+            active_provider: None,
+            active_model: None,
             limits: Limits::default(),
             approvals: ApprovalPolicy::default(),
             subagents: SubagentConfig::default(),
@@ -478,6 +628,15 @@ impl Config {
         if let Some(v) = file.model {
             cfg.model = v;
         }
+        if let Some(providers) = file.providers {
+            cfg.providers = providers;
+        }
+        if let Some(v) = file.active_provider {
+            cfg.active_provider = Some(v);
+        }
+        if let Some(v) = file.active_model {
+            cfg.active_model = Some(v);
+        }
         if let Some(v) = file.limits {
             cfg.limits = v;
         }
@@ -520,14 +679,36 @@ impl Config {
             cfg.web_dir = Some(PathBuf::from(v));
         }
 
-        if let Some(v) = env_str("KARUCODE_MODEL") {
+        let env_model = env_str("KARUCODE_MODEL");
+        let env_base_url = env_str("KARUCODE_BASE_URL").or_else(|| env_str("OPENAI_BASE_URL"));
+        let env_api_key = env_str("KARUCODE_API_KEY").or_else(|| env_str("OPENAI_API_KEY"));
+        if let Some(v) = env_model.clone() {
             cfg.model.model = v;
         }
-        if let Some(v) = env_str("KARUCODE_BASE_URL").or_else(|| env_str("OPENAI_BASE_URL")) {
+        if let Some(v) = env_base_url.clone() {
             cfg.model.base_url = v;
         }
-        if let Some(v) = env_str("KARUCODE_API_KEY").or_else(|| env_str("OPENAI_API_KEY")) {
+        if let Some(v) = env_api_key.clone() {
             cfg.model.api_key = Some(v);
+        }
+        // The flat KARUCODE_* model variables are the legacy way to configure a
+        // single endpoint. When any of them is set they win over [[providers]]
+        // tables in the file, expressed as a reserved `env` profile so there is
+        // exactly one code path that resolves an endpoint.
+        if env_model.is_some() || env_base_url.is_some() || env_api_key.is_some() {
+            cfg.providers.retain(|profile| profile.id != ENV_PROFILE_ID);
+            cfg.providers.push(ProviderProfile {
+                id: ENV_PROFILE_ID.to_string(),
+                name: "From environment".into(),
+                provider: cfg.model.provider.clone(),
+                base_url: cfg.model.base_url.clone(),
+                api_key: cfg.model.api_key.clone(),
+                models: vec![ModelEntry::new(cfg.model.model.clone())],
+                request_timeout_secs: cfg.model.request_timeout_secs,
+                ..ProviderProfile::default()
+            });
+            cfg.active_provider = Some(ENV_PROFILE_ID.to_string());
+            cfg.active_model = Some(cfg.model.model.clone());
         }
         if let Some(v) = env_parse("KARUCODE_TEMPERATURE") {
             cfg.model.temperature = v;
@@ -590,6 +771,7 @@ impl Config {
         if cfg.port == 0 {
             return Err(Error::Config("port may not be 0".into()));
         }
+        cfg.normalize_providers();
         if cfg.model.base_url.trim().is_empty() {
             return Err(Error::Config("model.base_url may not be empty".into()));
         }
@@ -623,6 +805,139 @@ impl Config {
         self.data_dir.join("karucode.db")
     }
 
+    /// Make `providers` / `active_provider` / `active_model` consistent and
+    /// mirror the resulting connection into the flat `model` section.
+    ///
+    /// * no profiles at all: synthesize one from the flat `model` section, which
+    ///   is what a config file, the environment or a pre-profiles database row
+    ///   provides;
+    /// * unknown `active_provider`: fall back to the first profile;
+    /// * unknown or empty `active_model`: fall back to the profile's first
+    ///   model, then to the flat `model.model` (a profile may legitimately have
+    ///   no models yet, while the user is still filling it in).
+    ///
+    /// Idempotent: calling it twice yields the same config.
+    pub fn normalize_providers(&mut self) {
+        if self.providers.is_empty() {
+            let entry = ModelEntry::new(self.model.model.clone());
+            self.providers.push(ProviderProfile {
+                id: DEFAULT_PROFILE_ID.to_string(),
+                name: "Default".into(),
+                provider: self.model.provider.clone(),
+                base_url: self.model.base_url.clone(),
+                api_key: self.model.api_key.clone(),
+                models: if self.model.model.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    vec![entry]
+                },
+                request_timeout_secs: self.model.request_timeout_secs,
+                extra_headers: self.model.extra_headers.clone(),
+                extra_body: self.model.extra_body.clone(),
+            });
+            self.active_provider = Some(DEFAULT_PROFILE_ID.to_string());
+            self.active_model = Some(self.model.model.clone());
+            return;
+        }
+
+        let active_exists = self
+            .active_provider
+            .as_deref()
+            .map(|id| self.providers.iter().any(|profile| profile.id == id))
+            .unwrap_or(false);
+        if !active_exists {
+            self.active_provider = Some(self.providers[0].id.clone());
+        }
+
+        let profile = self
+            .providers
+            .iter()
+            .find(|profile| Some(profile.id.as_str()) == self.active_provider.as_deref());
+        let Some(profile) = profile else { return };
+        let model_known = self
+            .active_model
+            .as_deref()
+            .map(|id| profile.models.iter().any(|model| model.id == id))
+            .unwrap_or(false);
+        if !model_known {
+            self.active_model = profile
+                .models
+                .first()
+                .map(|model| model.id.clone())
+                .or_else(|| {
+                    (!self.model.model.trim().is_empty()).then(|| self.model.model.clone())
+                });
+        }
+
+        // Mirror so `GET /api/config.model`, provider probes and any legacy
+        // reader see the same endpoint the runtime will use. The API key stays
+        // on the profile only, so it is stored and redacted in one place.
+        self.model.provider = profile.provider.clone();
+        self.model.base_url = profile.base_url.clone();
+        self.model.request_timeout_secs = profile.request_timeout_secs;
+        self.model.extra_headers = profile.extra_headers.clone();
+        self.model.extra_body = profile.extra_body.clone();
+        if let Some(model) = self.active_model.clone() {
+            self.model.model = model;
+        }
+    }
+
+    /// The profile the runtime should use, if any.
+    pub fn active_profile(&self) -> Option<&ProviderProfile> {
+        let id = self.active_provider.as_deref()?;
+        self.providers
+            .iter()
+            .find(|profile| profile.id == id)
+            .or_else(|| self.providers.first())
+    }
+
+    /// The model id the active profile will send.
+    pub fn active_model_id(&self, profile: &ProviderProfile) -> String {
+        self.active_model
+            .clone()
+            .filter(|id| !id.trim().is_empty())
+            .or_else(|| profile.models.first().map(|model| model.id.clone()))
+            .unwrap_or_else(|| self.model.model.clone())
+    }
+
+    /// Resolve one profile into the live [`ModelConfig`] the runtime reads.
+    /// The active profile uses the active model; any other profile uses its
+    /// first model (used by provider probes on a profile that is not selected).
+    pub fn model_for_profile(&self, profile: &ProviderProfile) -> ModelConfig {
+        let model = if Some(profile.id.as_str()) == self.active_provider.as_deref() {
+            self.active_model_id(profile)
+        } else {
+            profile
+                .models
+                .first()
+                .map(|entry| entry.id.clone())
+                .unwrap_or_else(|| self.model.model.clone())
+        };
+        ModelConfig {
+            provider: profile.provider.clone(),
+            base_url: profile.base_url.clone(),
+            api_key: profile.api_key.clone(),
+            model,
+            temperature: self.model.temperature,
+            max_tokens: self.model.max_tokens,
+            top_p: self.model.top_p,
+            request_timeout_secs: profile.request_timeout_secs,
+            extra_headers: profile.extra_headers.clone(),
+            extra_body: profile.extra_body.clone(),
+            parallel_tool_calls: self.model.parallel_tool_calls,
+        }
+    }
+
+    /// Resolve the active profile into the live [`ModelConfig`] the runtime
+    /// reads. Sampling tunables stay global; connection details come from the
+    /// profile. With no profiles this is the flat `model` section unchanged.
+    pub fn effective_model(&self) -> ModelConfig {
+        match self.active_profile() {
+            Some(profile) => self.model_for_profile(profile),
+            None => self.model.clone(),
+        }
+    }
+
     pub fn is_local_bind(&self) -> bool {
         matches!(self.host.as_str(), "127.0.0.1" | "localhost" | "::1")
     }
@@ -653,6 +968,128 @@ mod tests {
         let text = v.to_string();
         assert!(!text.contains("sk-super-secret"));
         assert_eq!(v["api_key_set"], serde_json::json!(true));
+    }
+
+    fn profile(id: &str, models: &[&str]) -> ProviderProfile {
+        ProviderProfile {
+            id: id.into(),
+            name: id.to_uppercase(),
+            base_url: format!("https://{id}.example/v1"),
+            models: models.iter().map(|id| ModelEntry::new(*id)).collect(),
+            ..ProviderProfile::default()
+        }
+    }
+
+    #[test]
+    fn normalize_synthesizes_one_profile_from_the_flat_section() {
+        let mut cfg = Config::default();
+        cfg.model.model = "qwen3-32b".into();
+        cfg.model.base_url = "http://127.0.0.1:8000/v1".into();
+        cfg.normalize_providers();
+
+        assert_eq!(cfg.providers.len(), 1);
+        let active = cfg.active_profile().expect("active profile");
+        assert_eq!(active.id, DEFAULT_PROFILE_ID);
+        assert_eq!(active.base_url, "http://127.0.0.1:8000/v1");
+        assert_eq!(active.models.len(), 1);
+        assert_eq!(active.models[0].id, "qwen3-32b");
+        assert_eq!(cfg.active_model.as_deref(), Some("qwen3-32b"));
+
+        // Idempotent: normalising again changes nothing.
+        let before = cfg.clone();
+        cfg.normalize_providers();
+        assert_eq!(cfg.providers, before.providers);
+        assert_eq!(cfg.active_provider, before.active_provider);
+        assert_eq!(cfg.active_model, before.active_model);
+    }
+
+    #[test]
+    fn effective_model_uses_the_active_profile_and_keeps_sampling_global() {
+        let mut cfg = Config::default();
+        cfg.model.temperature = 0.7;
+        cfg.model.max_tokens = Some(4096);
+        cfg.model.top_p = Some(0.9);
+        cfg.providers = vec![
+            profile("gateway", &["model-a", "model-b"]),
+            profile("local", &["tiny"]),
+        ];
+        cfg.providers[0].api_key = Some("sk-gateway".into());
+        cfg.active_provider = Some("gateway".into());
+        cfg.active_model = Some("model-b".into());
+        cfg.normalize_providers();
+
+        let effective = cfg.effective_model();
+        assert_eq!(effective.base_url, "https://gateway.example/v1");
+        assert_eq!(effective.api_key.as_deref(), Some("sk-gateway"));
+        assert_eq!(effective.model, "model-b");
+        assert_eq!(effective.temperature, 0.7);
+        assert_eq!(effective.max_tokens, Some(4096));
+        assert_eq!(effective.top_p, Some(0.9));
+        // The flat section mirrors the active connection...
+        assert_eq!(cfg.model.base_url, "https://gateway.example/v1");
+        assert_eq!(cfg.model.model, "model-b");
+        // ...but never the key, which lives on the profile only.
+        assert_ne!(cfg.model.api_key.as_deref(), Some("sk-gateway"));
+    }
+
+    #[test]
+    fn normalize_repairs_a_stale_selection() {
+        let mut cfg = Config::default();
+        cfg.providers = vec![profile("gateway", &["model-a"])];
+        cfg.active_provider = Some("deleted".into());
+        cfg.active_model = Some("also-gone".into());
+        cfg.normalize_providers();
+
+        assert_eq!(cfg.active_provider.as_deref(), Some("gateway"));
+        assert_eq!(cfg.active_model.as_deref(), Some("model-a"));
+    }
+
+    #[test]
+    fn a_profile_with_no_models_falls_back_to_the_flat_model_id() {
+        let mut cfg = Config::default();
+        cfg.model.model = "legacy-id".into();
+        cfg.providers = vec![profile("empty", &[])];
+        cfg.active_provider = Some("empty".into());
+        cfg.active_model = None;
+        cfg.normalize_providers();
+
+        assert_eq!(cfg.active_model.as_deref(), Some("legacy-id"));
+        assert_eq!(cfg.effective_model().model, "legacy-id");
+    }
+
+    #[test]
+    fn provider_public_view_never_leaks_the_key() {
+        let mut p = profile("gateway", &["m"]);
+        p.api_key = Some("sk-super-secret".into());
+        let text = p.public_view().to_string();
+        assert!(!text.contains("sk-super-secret"));
+        assert_eq!(p.public_view()["api_key_set"], serde_json::json!(true));
+        assert_eq!(p.public_view()["name"], serde_json::json!("GATEWAY"));
+    }
+
+    #[test]
+    fn provider_tables_parse_from_toml() {
+        let text = r#"
+active_provider = "gateway"
+active_model = "model-a"
+
+[[providers]]
+id = "gateway"
+name = "Gateway"
+base_url = "https://gw.example/v1"
+
+  [[providers.models]]
+  id = "model-a"
+  name = "Model A"
+  context_window = 128000
+  tool_call = true
+"#;
+        let file: ConfigFile = toml::from_str(text).unwrap();
+        let providers = file.providers.expect("providers");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].models[0].context_window, Some(128_000));
+        assert_eq!(providers[0].models[0].label(), "Model A");
+        assert_eq!(file.active_model.as_deref(), Some("model-a"));
     }
 
     #[test]

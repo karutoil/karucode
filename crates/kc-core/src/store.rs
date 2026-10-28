@@ -83,8 +83,27 @@ pub struct Session {
     pub id: String,
     pub title: String,
     pub workspace: String,
+    /// Project this session belongs to. `None` for sessions created before
+    /// projects existed; they run in the default workspace and are attached to
+    /// a project at startup.
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A workspace the agent may work in, shown as one entry in the project rail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    /// Canonical absolute directory path. Unique across projects.
+    pub path: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// Number of sessions in this project (computed by `list_projects`).
+    #[serde(default)]
+    pub session_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +111,8 @@ pub struct SessionSummary {
     pub id: String,
     pub title: String,
     pub workspace: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub message_count: i64,
@@ -231,12 +252,28 @@ pub struct ClaimRecord {
 
 #[async_trait]
 pub trait Store: Send + Sync {
-    async fn create_session(&self, id: &str, title: &str, workspace: &str) -> Result<Session>;
+    async fn create_session(
+        &self,
+        id: &str,
+        title: &str,
+        workspace: &str,
+        project_id: Option<&str>,
+    ) -> Result<Session>;
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>>;
+    async fn list_sessions_for_project(&self, project_id: &str) -> Result<Vec<SessionSummary>>;
     async fn get_session(&self, id: &str) -> Result<Option<Session>>;
     async fn rename_session(&self, id: &str, title: &str) -> Result<()>;
     async fn delete_session(&self, id: &str) -> Result<()>;
     async fn touch_session(&self, id: &str) -> Result<()>;
+    /// Attach a session (typically one created before projects existed) to a
+    /// project, and record the project's directory as the session workspace.
+    async fn assign_session_project(&self, session_id: &str, project_id: &str) -> Result<()>;
+
+    async fn create_project(&self, id: &str, name: &str, path: &str) -> Result<Project>;
+    async fn list_projects(&self) -> Result<Vec<Project>>;
+    async fn get_project(&self, id: &str) -> Result<Option<Project>>;
+    async fn rename_project(&self, id: &str, name: &str) -> Result<()>;
+    async fn delete_project(&self, id: &str) -> Result<()>;
 
     async fn append_message(&self, message: &NewMessage) -> Result<i64>;
     async fn list_messages(&self, session_id: &str, limit: usize) -> Result<Vec<StoredMessage>>;

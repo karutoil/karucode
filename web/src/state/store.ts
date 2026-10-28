@@ -1,5 +1,13 @@
 import { computed, signal } from '@preact/signals';
-import type { Config, ConnectionState, Health, SessionSummary, Toast } from '../api/types';
+import type {
+  Config,
+  ConnectionState,
+  Health,
+  Project,
+  ProviderProfile,
+  SessionSummary,
+  Toast,
+} from '../api/types';
 import { emptyChatState, type ChatState } from './chat';
 import { agentActivity, pendingApprovals } from './selectors';
 
@@ -10,6 +18,7 @@ export type BootState = 'loading' | 'ready' | 'auth' | 'error';
 const RAIL_KEY = 'karucode.railCollapsed';
 const INSPECTOR_KEY = 'karucode.inspectorCollapsed';
 const LAST_SESSION_KEY = 'karucode.lastSession';
+const LAST_PROJECT_KEY = 'karucode.lastProject';
 
 function readBool(key: string, fallback: boolean): boolean {
   try {
@@ -50,6 +59,24 @@ export function writeLastSessionId(id: string | null): void {
   }
 }
 
+export function readLastProjectId(): string | null {
+  try {
+    return typeof localStorage === 'undefined' ? null : localStorage.getItem(LAST_PROJECT_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function writeLastProjectId(id: string | null): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    if (id) localStorage.setItem(LAST_PROJECT_KEY, id);
+    else localStorage.removeItem(LAST_PROJECT_KEY);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 export const boot = signal<BootState>('loading');
 export const bootError = signal<string | null>(null);
 export const health = signal<Health | null>(null);
@@ -59,6 +86,12 @@ export const authError = signal<string | null>(null);
 export const sessions = signal<SessionSummary[]>([]);
 export const sessionsLoading = signal(true);
 export const currentSessionId = signal<string | null>(null);
+
+/** Projects (workspaces) and the one the rail is currently showing. */
+export const projects = signal<Project[]>([]);
+export const projectsLoading = signal(true);
+export const currentProjectId = signal<string | null>(readLastProjectId());
+export const projectSheetOpen = signal(false);
 export const chat = signal<ChatState>(emptyChatState());
 export const chatLoading = signal(false);
 export const chatError = signal<string | null>(null);
@@ -123,6 +156,30 @@ export function resetToastTimers(): void {
 export const activeSession = computed<SessionSummary | null>(
   () => sessions.value.find((session) => session.id === currentSessionId.value) ?? null,
 );
+
+export const currentProject = computed<Project | null>(() => {
+  const list = projects.value;
+  const id = currentProjectId.value;
+  return list.find((project) => project.id === id) ?? list[0] ?? null;
+});
+
+/** The active provider profile (falls back to the first one). */
+export const activeProvider = computed<ProviderProfile | null>(() => {
+  const current = config.value;
+  if (!current) return null;
+  const id = current.active?.provider;
+  return current.providers.find((profile) => profile.id === id) ?? current.providers[0] ?? null;
+});
+
+/** `provider / model` for the chat header, or null when nothing is selected. */
+export const activeModelLabel = computed<string | null>(() => {
+  const current = config.value;
+  const provider = activeProvider.value;
+  if (!current || !provider) return null;
+  const modelId = current.active?.model ?? provider.models[0]?.id ?? current.model.model;
+  const entry = provider.models.find((model) => model.id === modelId);
+  return entry?.name?.trim() ? entry.name : modelId;
+});
 
 export const providerConfigured = computed<boolean>(() => {
   const current = health.value;

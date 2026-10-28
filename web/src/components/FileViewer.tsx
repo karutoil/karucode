@@ -28,7 +28,7 @@ export function FileViewer(): JSX.Element | null {
     setError(null);
     setFile(null);
     setCopied(false);
-    getWorkspaceFile(path, { signal: controller.signal })
+    getWorkspaceFile(path, store.currentProjectId.value, { signal: controller.signal })
       .then((result) => {
         if (controller.signal.aborted) return;
         setFile(result);

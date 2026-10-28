@@ -27,6 +27,7 @@ async-trait.workspace = true
 axum.workspace = true
 futures-util.workspace = true
 mime_guess.workspace = true
+reqwest.workspace = true
 rust-embed = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true

@@ -54,6 +54,7 @@ macro_rules! id_type {
 id_type!(SessionId, "s");
 id_type!(RunId, "r");
 id_type!(AgentId, "a");
+id_type!(ProjectId, "p");
 id_type!(ApprovalId, "ap");
 
 #[cfg(test)]
@@ -67,6 +68,7 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.as_str().starts_with("s_"));
         assert_eq!(a.to_string(), a.0);
+        assert!(ProjectId::new().as_str().starts_with("p_"));
     }
 
     #[test]

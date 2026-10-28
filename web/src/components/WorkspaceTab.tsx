@@ -32,7 +32,7 @@ export function WorkspaceTab(): JSX.Element {
     setError(null);
     setChildren({});
     setExpanded(new Set());
-    getWorkspaceTree('.', 1, { signal: controller.signal })
+    getWorkspaceTree('.', 1, store.currentProjectId.value, { signal: controller.signal })
       .then((tree) => {
         if (controller.signal.aborted) return;
         setRootEntries(visibleEntries(tree.entries));
@@ -50,7 +50,7 @@ export function WorkspaceTab(): JSX.Element {
     if (children[path] || loadingPaths.has(path)) return;
     setLoadingPaths((current) => new Set(current).add(path));
     try {
-      const tree = await getWorkspaceTree(path, 1);
+      const tree = await getWorkspaceTree(path, 1, store.currentProjectId.value);
       setChildren((current) => ({ ...current, [path]: visibleEntries(tree.entries) }));
     } catch (cause) {
       store.pushToast(toErrorMessage(cause));

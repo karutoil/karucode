@@ -3,6 +3,7 @@ import { useEffect, useState } from 'preact/hooks';
 import { toErrorMessage } from '../api/client';
 import { getGitDiff, getGitStatus } from '../api/endpoints';
 import type { GitDiff, GitFile, GitStatus } from '../api/types';
+import * as store from '../state/store';
 import { DiffView } from './DiffView';
 import { GitIcon, RefreshIcon } from './icons';
 
@@ -93,7 +94,7 @@ export function ChangesTab(): JSX.Element {
     setError(null);
     setSelected(null);
     setDiff(null);
-    getGitStatus({ signal: controller.signal })
+    getGitStatus(store.currentProjectId.value, { signal: controller.signal })
       .then((result) => {
         if (controller.signal.aborted) return;
         setStatus(result);
@@ -115,7 +116,9 @@ export function ChangesTab(): JSX.Element {
     const controller = new AbortController();
     setDiffState('loading');
     setDiffError(null);
-    getGitDiff(selected.path, selected.staged, undefined, { signal: controller.signal })
+    getGitDiff(selected.path, selected.staged, undefined, store.currentProjectId.value, {
+      signal: controller.signal,
+    })
       .then((result) => {
         if (controller.signal.aborted) return;
         setDiff(result);

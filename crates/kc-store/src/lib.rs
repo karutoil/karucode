@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Schema v1. Every statement is `IF NOT EXISTS` so a partially applied
 /// migration can be re-run safely; the whole batch runs in one transaction.
@@ -104,6 +104,24 @@ CREATE TABLE IF NOT EXISTS claims (
 CREATE INDEX IF NOT EXISTS idx_claims_session_id ON claims(session_id);
 "#;
 
+/// Schema v2: projects. A project is a directory the agent may work in; every
+/// session belongs to one (nullable for sessions created before v2, which the
+/// server attaches at startup). The `workspace` column on sessions stays: it is
+/// the path the session actually ran in, even if the project is later renamed.
+const MIGRATION_2: &str = r#"
+CREATE TABLE IF NOT EXISTS projects (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
+
+ALTER TABLE sessions ADD COLUMN project_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_sessions_project_id ON sessions(project_id);
+"#;
+
 pub struct SqliteStore {
     conn: Arc<Mutex<rusqlite::Connection>>,
     path: PathBuf,
@@ -175,8 +193,20 @@ fn map_session(row: &Row<'_>) -> rusqlite::Result<Session> {
         id: row.get("id")?,
         title: row.get("title")?,
         workspace: row.get("workspace")?,
+        project_id: row.get("project_id")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+    })
+}
+
+fn map_project(row: &Row<'_>) -> rusqlite::Result<Project> {
+    Ok(Project {
+        id: row.get("id")?,
+        name: row.get("name")?,
+        path: row.get("path")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        session_count: row.get("session_count")?,
     })
 }
 
@@ -185,12 +215,41 @@ fn map_session_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         id: row.get("id")?,
         title: row.get("title")?,
         workspace: row.get("workspace")?,
+        project_id: row.get("project_id")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         message_count: row.get("message_count")?,
         last_run_status: row.get("last_run_status")?,
         running: row.get::<_, i64>("running")? != 0,
     })
+}
+
+fn summarize_sessions(
+    conn: &rusqlite::Connection,
+    project_id: Option<&str>,
+) -> Result<Vec<SessionSummary>> {
+    let base = "SELECT s.id, s.title, s.workspace, s.project_id, s.created_at, s.updated_at,
+                       (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
+                       (SELECT r.status FROM runs r
+                         WHERE r.session_id = s.id
+                         ORDER BY r.started_at DESC, r.id DESC LIMIT 1) AS last_run_status,
+                       EXISTS(SELECT 1 FROM runs r
+                               WHERE r.session_id = s.id AND r.status = 'running') AS running
+                  FROM sessions s";
+    let sql = match project_id {
+        Some(_) => format!("{base} WHERE s.project_id = ?1 ORDER BY s.updated_at DESC, s.id DESC"),
+        None => format!("{base} ORDER BY s.updated_at DESC, s.id DESC"),
+    };
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| db_err("list_sessions prepare", e))?;
+    let rows = match project_id {
+        Some(id) => stmt.query_map(params![id], map_session_summary),
+        None => stmt.query_map([], map_session_summary),
+    }
+    .map_err(|e| db_err("list_sessions query", e))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| db_err("list_sessions rows", e))
 }
 
 fn map_stored_message(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
@@ -385,6 +444,9 @@ impl SqliteStore {
                     1 => tx
                         .execute_batch(MIGRATION_1)
                         .map_err(|e| db_err("migration v1", e))?,
+                    2 => tx
+                        .execute_batch(MIGRATION_2)
+                        .map_err(|e| db_err("migration v2", e))?,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -402,21 +464,29 @@ impl SqliteStore {
 
 #[async_trait]
 impl Store for SqliteStore {
-    async fn create_session(&self, id: &str, title: &str, workspace: &str) -> Result<Session> {
+    async fn create_session(
+        &self,
+        id: &str,
+        title: &str,
+        workspace: &str,
+        project_id: Option<&str>,
+    ) -> Result<Session> {
         let id = id.to_string();
         let title = title.to_string();
         let workspace = workspace.to_string();
+        let project_id = project_id.map(str::to_string);
         self.with(move |conn| {
             let now = now_ms();
             conn.execute(
-                "INSERT INTO sessions (id, title, workspace, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO sessions (id, title, workspace, project_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(id) DO NOTHING",
-                params![id, title, workspace, now, now],
+                params![id, title, workspace, project_id, now, now],
             )
             .map_err(|e| db_err("create_session", e))?;
             conn.query_row(
-                "SELECT id, title, workspace, created_at, updated_at FROM sessions WHERE id = ?1",
+                "SELECT id, title, workspace, project_id, created_at, updated_at
+                   FROM sessions WHERE id = ?1",
                 params![id],
                 map_session,
             )
@@ -426,34 +496,20 @@ impl Store for SqliteStore {
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
-        self.with(|conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT s.id, s.title, s.workspace, s.created_at, s.updated_at,
-                            (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
-                            (SELECT r.status FROM runs r
-                              WHERE r.session_id = s.id
-                              ORDER BY r.started_at DESC, r.id DESC LIMIT 1) AS last_run_status,
-                            EXISTS(SELECT 1 FROM runs r
-                                    WHERE r.session_id = s.id AND r.status = 'running') AS running
-                       FROM sessions s
-                      ORDER BY s.updated_at DESC, s.id DESC",
-                )
-                .map_err(|e| db_err("list_sessions prepare", e))?;
-            let rows = stmt
-                .query_map([], map_session_summary)
-                .map_err(|e| db_err("list_sessions query", e))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|e| db_err("list_sessions rows", e))
-        })
-        .await
+        self.with(|conn| summarize_sessions(conn, None)).await
+    }
+
+    async fn list_sessions_for_project(&self, project_id: &str) -> Result<Vec<SessionSummary>> {
+        let project_id = project_id.to_string();
+        self.with(move |conn| summarize_sessions(conn, Some(&project_id)))
+            .await
     }
 
     async fn get_session(&self, id: &str) -> Result<Option<Session>> {
         let id = id.to_string();
         self.with(move |conn| {
             let mut stmt = conn
-                .prepare("SELECT id, title, workspace, created_at, updated_at FROM sessions WHERE id = ?1")
+                .prepare("SELECT id, title, workspace, project_id, created_at, updated_at FROM sessions WHERE id = ?1")
                 .map_err(|e| db_err("get_session prepare", e))?;
             let mut rows = stmt.query_map(params![id], map_session).map_err(|e| db_err("get_session query", e))?;
             match rows.next() {
@@ -503,6 +559,133 @@ impl Store for SqliteStore {
                 params![id, now],
             )
             .map_err(|e| db_err("touch_session", e))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn assign_session_project(&self, session_id: &str, project_id: &str) -> Result<()> {
+        let session_id = session_id.to_string();
+        let project_id = project_id.to_string();
+        self.with(move |conn| {
+            let now = now_ms();
+            let updated = conn
+                .execute(
+                    "UPDATE sessions
+                        SET project_id = ?2,
+                            workspace = (SELECT path FROM projects WHERE id = ?2),
+                            updated_at = ?3
+                      WHERE id = ?1
+                        AND EXISTS (SELECT 1 FROM projects WHERE id = ?2)",
+                    params![session_id, project_id, now],
+                )
+                .map_err(|e| db_err("assign_session_project", e))?;
+            if updated == 0 {
+                return Err(Error::NotFound(format!(
+                    "session {session_id} or project {project_id}"
+                )));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn create_project(&self, id: &str, name: &str, path: &str) -> Result<Project> {
+        let id = id.to_string();
+        let name = name.to_string();
+        let path = path.to_string();
+        self.with(move |conn| {
+            let now = now_ms();
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, name, path, now, now],
+            )
+            .map_err(|e| db_err("create_project", e))?;
+            conn.query_row(
+                "SELECT p.id, p.name, p.path, p.created_at, p.updated_at,
+                        (SELECT COUNT(*) FROM sessions s WHERE s.project_id = p.id) AS session_count
+                   FROM projects p WHERE p.id = ?1",
+                params![id],
+                map_project,
+            )
+            .map_err(|e| db_err("create_project read back", e))
+        })
+        .await
+    }
+
+    async fn list_projects(&self) -> Result<Vec<Project>> {
+        self.with(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT p.id, p.name, p.path, p.created_at, p.updated_at,
+                            (SELECT COUNT(*) FROM sessions s WHERE s.project_id = p.id) AS session_count
+                       FROM projects p
+                      ORDER BY p.created_at ASC, p.id ASC",
+                )
+                .map_err(|e| db_err("list_projects prepare", e))?;
+            let rows = stmt
+                .query_map([], map_project)
+                .map_err(|e| db_err("list_projects query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("list_projects rows", e))
+        })
+        .await
+    }
+
+    async fn get_project(&self, id: &str) -> Result<Option<Project>> {
+        let id = id.to_string();
+        self.with(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT p.id, p.name, p.path, p.created_at, p.updated_at,
+                            (SELECT COUNT(*) FROM sessions s WHERE s.project_id = p.id) AS session_count
+                       FROM projects p WHERE p.id = ?1",
+                )
+                .map_err(|e| db_err("get_project prepare", e))?;
+            let mut rows = stmt
+                .query_map(params![id], map_project)
+                .map_err(|e| db_err("get_project query", e))?;
+            match rows.next() {
+                Some(row) => row.map(Some).map_err(|e| db_err("get_project row", e)),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    async fn rename_project(&self, id: &str, name: &str) -> Result<()> {
+        let id = id.to_string();
+        let name = name.to_string();
+        self.with(move |conn| {
+            let now = now_ms();
+            let updated = conn
+                .execute(
+                    "UPDATE projects SET name = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, name, now],
+                )
+                .map_err(|e| db_err("rename_project", e))?;
+            if updated == 0 {
+                return Err(Error::NotFound(format!("project {id}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn delete_project(&self, id: &str) -> Result<()> {
+        let id = id.to_string();
+        self.with(move |conn| {
+            // Sessions keep their history but lose the (now dangling) project
+            // reference; the route deletes them first when the caller asked for
+            // a cascade.
+            conn.execute(
+                "UPDATE sessions SET project_id = NULL WHERE project_id = ?1",
+                params![id],
+            )
+            .map_err(|e| db_err("delete_project detach sessions", e))?;
+            conn.execute("DELETE FROM projects WHERE id = ?1", params![id])
+                .map_err(|e| db_err("delete_project", e))?;
             Ok(())
         })
         .await
@@ -1034,13 +1217,13 @@ mod tests {
     use super::*;
     use kc_core::store::{AgentRecord, ApprovalRecord, NewMessage, RunStatus};
 
-    struct TempDb {
+    pub(super) struct TempDb {
         dir: PathBuf,
         path: PathBuf,
     }
 
     impl TempDb {
-        fn new(tag: &str) -> Self {
+        pub(super) fn new(tag: &str) -> Self {
             let dir = std::env::temp_dir().join(format!(
                 "karucode-store-test-{tag}-{}",
                 uuid::Uuid::new_v4().simple()
@@ -1049,7 +1232,7 @@ mod tests {
             Self { dir, path }
         }
 
-        async fn open(&self) -> SqliteStore {
+        pub(super) async fn open(&self) -> SqliteStore {
             SqliteStore::open(&self.path).await.expect("open store")
         }
     }
@@ -1128,7 +1311,7 @@ mod tests {
         let store = db.open().await;
 
         let session = store
-            .create_session("s_1", "First", "/workspace")
+            .create_session("s_1", "First", "/workspace", None)
             .await
             .expect("create");
         assert_eq!(session.id, "s_1");
@@ -1138,7 +1321,7 @@ mod tests {
 
         // Caller-supplied id, idempotent on repeat.
         let again = store
-            .create_session("s_1", "Ignored", "/other")
+            .create_session("s_1", "Ignored", "/other", None)
             .await
             .expect("create again");
         assert_eq!(again.title, "First");
@@ -1200,7 +1383,7 @@ mod tests {
         let store = db.open().await;
 
         store
-            .create_session("s_1", "t", "/w")
+            .create_session("s_1", "t", "/w", None)
             .await
             .expect("session");
         let msg_id = store
@@ -1241,8 +1424,14 @@ mod tests {
         let db = TempDb::new("session-summary");
         let store = db.open().await;
 
-        store.create_session("s_a", "A", "/w").await.expect("a");
-        store.create_session("s_b", "B", "/w").await.expect("b");
+        store
+            .create_session("s_a", "A", "/w", None)
+            .await
+            .expect("a");
+        store
+            .create_session("s_b", "B", "/w", None)
+            .await
+            .expect("b");
 
         store
             .append_message(&new_message("s_a", "user", "one"))
@@ -1288,7 +1477,7 @@ mod tests {
         let db = TempDb::new("messages");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w")
+            .create_session("s_1", "t", "/w", None)
             .await
             .expect("session");
 
@@ -1300,7 +1489,7 @@ mod tests {
         }
         // Another session must not leak in.
         store
-            .create_session("s_2", "t2", "/w")
+            .create_session("s_2", "t2", "/w", None)
             .await
             .expect("session2");
         store
@@ -1333,7 +1522,7 @@ mod tests {
         let db = TempDb::new("messages-after");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w")
+            .create_session("s_1", "t", "/w", None)
             .await
             .expect("session");
 
@@ -1417,7 +1606,7 @@ mod tests {
         let db = TempDb::new("runs");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w")
+            .create_session("s_1", "t", "/w", None)
             .await
             .expect("session");
 
@@ -1467,7 +1656,7 @@ mod tests {
         let db = TempDb::new("runs-limit");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w")
+            .create_session("s_1", "t", "/w", None)
             .await
             .expect("session");
 
@@ -1479,7 +1668,10 @@ mod tests {
             // started_at has 1ms resolution; keep ordering deterministic.
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
-        store.create_session("s_2", "t", "/w").await.expect("s2");
+        store
+            .create_session("s_2", "t", "/w", None)
+            .await
+            .expect("s2");
         store
             .create_run("r_other", "s_2", "m", "p")
             .await
@@ -1497,7 +1689,7 @@ mod tests {
         let db = TempDb::new("agents");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w")
+            .create_session("s_1", "t", "/w", None)
             .await
             .expect("session");
 
@@ -1554,8 +1746,14 @@ mod tests {
     async fn approvals_resolve_list_and_filter_by_session() {
         let db = TempDb::new("approvals");
         let store = db.open().await;
-        store.create_session("s_1", "t", "/w").await.expect("s1");
-        store.create_session("s_2", "t", "/w").await.expect("s2");
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("s1");
+        store
+            .create_session("s_2", "t", "/w", None)
+            .await
+            .expect("s2");
 
         store
             .create_approval(&approval("ap_1", "s_1", "r_1"))
@@ -1627,7 +1825,7 @@ mod tests {
         let db = TempDb::new("approvals-expire");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w")
+            .create_session("s_1", "t", "/w", None)
             .await
             .expect("session");
 
@@ -1694,7 +1892,7 @@ mod tests {
         let db = TempDb::new("claims-conflict");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w")
+            .create_session("s_1", "t", "/w", None)
             .await
             .expect("session");
 
@@ -1776,7 +1974,10 @@ mod tests {
         );
 
         let other_session = {
-            store.create_session("s_2", "t2", "/w").await.expect("s2");
+            store
+                .create_session("s_2", "t2", "/w", None)
+                .await
+                .expect("s2");
             store
                 .claim_paths(
                     "s_2",
@@ -1811,7 +2012,7 @@ mod tests {
         let db = TempDb::new("claims-release");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w")
+            .create_session("s_1", "t", "/w", None)
             .await
             .expect("session");
 
@@ -1851,7 +2052,7 @@ mod tests {
                 for i in 0..5u32 {
                     let session = format!("s_{task}_{i}");
                     store
-                        .create_session(&session, "t", "/w")
+                        .create_session(&session, "t", "/w", None)
                         .await
                         .expect("create session");
                     for j in 0..3u32 {
@@ -1924,7 +2125,7 @@ mod tests {
         {
             let store = db.open().await;
             store
-                .create_session("s_1", "Persisted", "/w")
+                .create_session("s_1", "Persisted", "/w", None)
                 .await
                 .expect("session");
             store
@@ -1982,7 +2183,7 @@ mod tests {
         let db = TempDb::new("malformed");
         let store = db.open().await;
         store
-            .create_session("s_1", "t", "/w")
+            .create_session("s_1", "t", "/w", None)
             .await
             .expect("session");
 
@@ -2112,5 +2313,112 @@ mod tests {
         let db = TempDb::new("path");
         let store = db.open().await;
         assert_eq!(store.path(), db.path.as_path());
+    }
+}
+
+#[cfg(test)]
+mod project_tests {
+    use super::tests::TempDb;
+    use super::*;
+    use kc_core::store::Store;
+
+    #[tokio::test]
+    async fn projects_are_unique_by_path_and_count_their_sessions() {
+        let db = TempDb::new("projects");
+        let store = db.open().await;
+
+        let project = store
+            .create_project("p_1", "Karucode", "/home/me/karucode")
+            .await
+            .expect("create project");
+        assert_eq!(project.session_count, 0);
+
+        let duplicate = store
+            .create_project("p_2", "Other", "/home/me/karucode")
+            .await;
+        assert!(duplicate.is_err(), "two projects may not share a directory");
+
+        store
+            .create_session("s_1", "First", "/home/me/karucode", Some("p_1"))
+            .await
+            .expect("session in project");
+        store
+            .create_session("s_2", "Loose", "/elsewhere", None)
+            .await
+            .expect("session without project");
+
+        let projects = store.list_projects().await.expect("list projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].session_count, 1);
+
+        let scoped = store
+            .list_sessions_for_project("p_1")
+            .await
+            .expect("scoped sessions");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, "s_1");
+        assert_eq!(scoped[0].project_id.as_deref(), Some("p_1"));
+        assert_eq!(store.list_sessions().await.unwrap().len(), 2);
+
+        let session = store.get_session("s_1").await.unwrap().unwrap();
+        assert_eq!(session.project_id.as_deref(), Some("p_1"));
+    }
+
+    #[tokio::test]
+    async fn a_legacy_session_can_be_attached_to_a_project() {
+        let db = TempDb::new("attach");
+        let store = db.open().await;
+        store
+            .create_session("s_old", "Legacy", "/legacy/root", None)
+            .await
+            .expect("legacy session");
+        store
+            .create_project("p_1", "Legacy", "/legacy/root")
+            .await
+            .expect("project");
+
+        store
+            .assign_session_project("s_old", "p_1")
+            .await
+            .expect("attach");
+        let session = store.get_session("s_old").await.unwrap().unwrap();
+        assert_eq!(session.project_id.as_deref(), Some("p_1"));
+        assert_eq!(session.workspace, "/legacy/root");
+
+        // Unknown projects and unknown sessions are a NotFound, never a silent
+        // update of a different row.
+        assert!(store.assign_session_project("s_old", "nope").await.is_err());
+        assert!(store.assign_session_project("nope", "p_1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn renaming_and_deleting_a_project_detaches_its_sessions() {
+        let db = TempDb::new("project-delete");
+        let store = db.open().await;
+        store
+            .create_project("p_1", "Old name", "/tmp/project")
+            .await
+            .expect("project");
+        store
+            .create_session("s_1", "Work", "/tmp/project", Some("p_1"))
+            .await
+            .expect("session");
+
+        store
+            .rename_project("p_1", "New name")
+            .await
+            .expect("rename");
+        let project = store.get_project("p_1").await.unwrap().unwrap();
+        assert_eq!(project.name, "New name");
+        assert!(store.rename_project("missing", "x").await.is_err());
+
+        store.delete_project("p_1").await.expect("delete");
+        assert!(store.get_project("p_1").await.unwrap().is_none());
+        let session = store.get_session("s_1").await.unwrap().unwrap();
+        assert_eq!(
+            session.project_id, None,
+            "sessions survive a project delete but lose the reference"
+        );
+        assert!(store.list_projects().await.unwrap().is_empty());
     }
 }

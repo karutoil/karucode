@@ -13,7 +13,10 @@
 
 use crate::error::ApiError;
 use async_trait::async_trait;
-use kc_core::config::{ApprovalMode, ApprovalPolicy, Config, Limits, ModelConfig, SubagentConfig};
+use kc_core::config::{
+    ApprovalMode, ApprovalPolicy, Config, Limits, ModelConfig, ModelEntry, ProviderProfile,
+    SubagentConfig,
+};
 use kc_core::error::{Error, Result};
 use kc_core::settings::Settings;
 use kc_core::store::Store;
@@ -34,6 +37,11 @@ mod keys {
     pub const MODEL_TOP_P: &str = "model.top_p";
     pub const MODEL_REQUEST_TIMEOUT: &str = "model.request_timeout_secs";
     pub const MODEL_PARALLEL_TOOL_CALLS: &str = "model.parallel_tool_calls";
+    pub const MODEL_ACTIVE_PROVIDER: &str = "model.active_provider";
+    pub const MODEL_ACTIVE_MODEL: &str = "model.active_model";
+    /// JSON array of [`ProviderProfile`]s, keys included. Written as one row so
+    /// a profile and its models can never be torn apart across rows.
+    pub const PROVIDERS: &str = "model.providers";
 
     pub const LIMITS_MAX_ITERATIONS: &str = "limits.max_iterations";
     pub const LIMITS_MAX_RUN_SECS: &str = "limits.max_run_secs";
@@ -124,12 +132,50 @@ pub struct SubagentsPatch {
     pub timeout_secs: Option<u64>,
 }
 
+/// One provider profile to create or update. Fields left out keep their current
+/// value, so the settings screen can save just the model list.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderPatch {
+    pub id: String,
+    pub name: Option<String>,
+    pub provider: Option<String>,
+    pub base_url: Option<String>,
+    /// Write-only; an empty string is treated as absent.
+    pub api_key: Option<String>,
+    /// Erase the stored key (wins over `api_key`).
+    pub clear_api_key: Option<bool>,
+    /// Replaces the whole model list when present.
+    pub models: Option<Vec<ModelEntry>>,
+    pub request_timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProvidersPatch {
+    #[serde(default)]
+    pub upsert: Vec<ProviderPatch>,
+    #[serde(default)]
+    pub delete: Vec<String>,
+}
+
+/// Which profile/model the runtime should use. This is install-wide (not per
+/// project), matching the rest of the settings model.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivePatch {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
 /// Body of `PATCH /api/config`. Every section is optional; unknown fields are
 /// rejected so a typo in the browser cannot silently do nothing.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigPatch {
     pub model: Option<ModelPatch>,
+    pub providers: Option<ProvidersPatch>,
+    pub active: Option<ActivePatch>,
     pub limits: Option<LimitsPatch>,
     pub approvals: Option<ApprovalsPatch>,
     pub subagents: Option<SubagentsPatch>,
@@ -180,14 +226,19 @@ impl SettingsHandle {
     ///   on stale defaults would be worse.
     pub async fn new(config: Config, store: Arc<dyn Store>) -> Result<Arc<Self>> {
         // Layer 3/2 (file, environment) and the CLI overrides on top of it.
-        validate_settings(&config)?;
         let mut config = config;
+        // A config from the file/env path is already normalised; a config built
+        // in code (tests, embedders) may not be. Normalising here means every
+        // caller sees the same provider-profile invariants.
+        let legacy_config = config.providers.is_empty();
+        config.normalize_providers();
+        validate_settings(&config)?;
         if !config.lock_settings {
             let rows = store
                 .all_settings()
                 .await
                 .map_err(|e| Error::Store(format!("could not read persisted settings: {e}")))?;
-            apply_rows_resilient(&mut config, &rows);
+            apply_rows_resilient(&mut config, &rows, legacy_config);
         }
         Ok(Arc::new(Self {
             config: RwLock::new(config),
@@ -219,11 +270,17 @@ impl SettingsHandle {
     /// Every secret that must not appear in an outgoing error message.
     pub fn secrets(&self) -> Vec<String> {
         let cfg = self.read();
-        [cfg.model.api_key.clone(), cfg.auth_token.clone()]
-            .into_iter()
-            .flatten()
-            .filter(|s| s.len() >= 4)
-            .collect()
+        let mut secrets: Vec<String> = Vec::new();
+        secrets.push(cfg.model.api_key.clone().unwrap_or_default());
+        if let Some(token) = &cfg.auth_token {
+            secrets.push(token.clone());
+        }
+        for profile in &cfg.providers {
+            if let Some(key) = &profile.api_key {
+                secrets.push(key.clone());
+            }
+        }
+        secrets.into_iter().filter(|s| s.len() >= 4).collect()
     }
 
     pub fn redact(&self, text: &str) -> String {
@@ -300,9 +357,15 @@ impl SettingsHandle {
     /// Browser-safe config document (`GET/PATCH /api/config`).
     pub async fn public_config(&self) -> serde_json::Value {
         let cfg = self.snapshot();
+        let effective = cfg.effective_model();
         serde_json::json!({
             "workspace": cfg.workspace_root.to_string_lossy(),
-            "model": public_model(&cfg.model),
+            "model": public_model(&effective),
+            "providers": cfg.providers.iter().map(|p| p.public_view()).collect::<Vec<_>>(),
+            "active": {
+                "provider": cfg.active_provider,
+                "model": cfg.active_model,
+            },
             "limits": cfg.limits,
             "approvals": cfg.approvals,
             "subagents": cfg.subagents,
@@ -315,7 +378,7 @@ impl SettingsHandle {
 #[async_trait]
 impl Settings for SettingsHandle {
     async fn model(&self) -> ModelConfig {
-        self.read().model.clone()
+        self.read().effective_model()
     }
 
     async fn limits(&self) -> Limits {
@@ -361,6 +424,7 @@ pub fn api_key_set(model: &ModelConfig) -> bool {
 // ---------------------------------------------------------------------------
 
 fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
+    let mut legacy_connection = false;
     if let Some(model) = &patch.model {
         // `clear_api_key` wins over a value in the same request so the browser
         // can always express "forget it".
@@ -402,6 +466,122 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
                 if !key.is_empty() {
                     config.model.api_key = Some(key.to_string());
                 }
+            }
+        }
+        // The legacy flat fields still work for scripts, but they describe the
+        // active profile now: mirror them onto it below so a later
+        // `normalize_providers` cannot silently undo the patch.
+        legacy_connection = model.provider.is_some()
+            || model.base_url.is_some()
+            || model.model.is_some()
+            || model.api_key.is_some()
+            || model.clear_api_key.is_some()
+            || model.request_timeout_secs.is_some();
+    }
+
+    if let Some(providers) = &patch.providers {
+        for id in &providers.delete {
+            let id = id.trim();
+            if id.is_empty() {
+                return Err(Error::BadRequest(
+                    "providers.delete may not contain an empty id".into(),
+                ));
+            }
+            config.providers.retain(|profile| profile.id != id);
+            if config.active_provider.as_deref() == Some(id) {
+                config.active_provider = None;
+            }
+        }
+        for incoming in &providers.upsert {
+            let id = incoming.id.trim();
+            if id.is_empty() {
+                return Err(Error::BadRequest(
+                    "providers.upsert[].id may not be empty".into(),
+                ));
+            }
+            let index = config.providers.iter().position(|profile| profile.id == id);
+            let mut profile = match index {
+                Some(index) => config.providers[index].clone(),
+                None => ProviderProfile {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    ..ProviderProfile::default()
+                },
+            };
+            if let Some(name) = &incoming.name {
+                profile.name = name.trim().to_string();
+            }
+            if let Some(provider) = &incoming.provider {
+                profile.provider = provider.trim().to_string();
+            }
+            if let Some(base_url) = &incoming.base_url {
+                profile.base_url = base_url.trim().to_string();
+            }
+            // `clear_api_key` wins over a value in the same request.
+            if incoming.clear_api_key == Some(true) {
+                profile.api_key = Some(String::new());
+            } else if let Some(key) = &incoming.api_key {
+                let key = key.trim();
+                if !key.is_empty() {
+                    profile.api_key = Some(key.to_string());
+                }
+            }
+            if let Some(models) = &incoming.models {
+                profile.models = models.clone();
+            }
+            if let Some(timeout) = incoming.request_timeout_secs {
+                profile.request_timeout_secs = timeout;
+            }
+            match index {
+                Some(index) => config.providers[index] = profile,
+                None => config.providers.push(profile),
+            }
+        }
+    }
+
+    if let Some(active) = &patch.active {
+        if let Some(provider) = &active.provider {
+            let provider = provider.trim();
+            if !provider.is_empty() {
+                config.active_provider = Some(provider.to_string());
+            }
+        }
+        if let Some(model) = &active.model {
+            let model = model.trim();
+            config.active_model = (!model.is_empty()).then(|| model.to_string());
+        }
+    }
+
+    if legacy_connection {
+        let model_patch = patch.model.as_ref();
+        let active = config.active_provider.clone();
+        if let Some(profile) = config
+            .providers
+            .iter_mut()
+            .find(|profile| Some(profile.id.as_str()) == active.as_deref())
+        {
+            if model_patch.and_then(|m| m.provider.as_ref()).is_some() {
+                profile.provider = config.model.provider.clone();
+            }
+            if model_patch.and_then(|m| m.base_url.as_ref()).is_some() {
+                profile.base_url = config.model.base_url.clone();
+            }
+            if model_patch.and_then(|m| m.request_timeout_secs).is_some() {
+                profile.request_timeout_secs = config.model.request_timeout_secs;
+            }
+            if model_patch.and_then(|m| m.clear_api_key) == Some(true) {
+                profile.api_key = Some(String::new());
+            } else if let Some(key) = model_patch.and_then(|m| m.api_key.as_deref()) {
+                if !key.trim().is_empty() {
+                    profile.api_key = Some(key.trim().to_string());
+                }
+            }
+            if let Some(model_id) = model_patch.and_then(|m| m.model.as_deref()) {
+                let model_id = model_id.trim();
+                if !profile.models.iter().any(|model| model.id == model_id) {
+                    profile.models.push(ModelEntry::new(model_id));
+                }
+                config.active_model = Some(model_id.to_string());
             }
         }
     }
@@ -477,6 +657,17 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         }
     }
 
+    // Repair a missing selection (first profile added, active profile deleted)
+    // and mirror the active connection into the flat section. An explicit but
+    // wrong selection is an error, not something to silently rewrite.
+    let selection_dangling = config.active_provider.is_none();
+    if selection_dangling {
+        config.normalize_providers();
+    }
+    if !config.providers.is_empty() {
+        validate_active_selection(config)?;
+    }
+    config.normalize_providers();
     Ok(())
 }
 
@@ -502,16 +693,227 @@ fn clean_list(field: &str, list: &[String]) -> Result<Vec<String>> {
 /// Validate every tunable that the UI can change. Called for the merged config,
 /// so a patch can never produce a config that startup validation would reject.
 pub fn validate_settings(config: &Config) -> Result<()> {
+    // Validate the config as given. Load-time paths normalise first (see
+    // `Config::normalize_providers`), an API patch is checked strictly against
+    // the profile list by `apply_patch`, and a config with no profiles at all
+    // is the legacy flat shape, which `validate_profiles` skips.
     validate_model(&config.model)?;
-    // An unknown provider in the file or environment would otherwise start a
-    // server that silently speaks a different wire format than configured.
-    check_provider_id(
-        &config.model.provider,
-        &kc_core::provider::ProviderFactory::supported(&kc_provider::ProviderFactoryImpl),
-    )?;
+    validate_profiles(config)?;
+    // The runtime reads the effective model, so that is what must be valid too
+    // (it catches an active profile with no models and an empty flat fallback).
+    validate_model(&config.effective_model())?;
+    // An unknown provider in the file, environment or a profile would otherwise
+    // start a server that silently speaks a different wire format.
+    let supported =
+        kc_core::provider::ProviderFactory::supported(&kc_provider::ProviderFactoryImpl);
+    check_provider_id(&config.model.provider, &supported)?;
     validate_limits(&config.limits)?;
     validate_approvals(&config.approvals)?;
     validate_subagents(&config.subagents)
+}
+
+/// Bound on how many endpoints one install may configure. Generous for a real
+/// setup, small enough that `GET /api/config` stays a cheap document.
+pub const MAX_PROFILES: usize = 16;
+/// Bound on the curated model list of one profile.
+pub const MAX_MODELS_PER_PROFILE: usize = 64;
+const MAX_PROFILE_ID_CHARS: usize = 64;
+const MAX_PROFILE_NAME_CHARS: usize = 80;
+const MAX_MODEL_ID_CHARS: usize = 200;
+const MAX_MODEL_NAME_CHARS: usize = 200;
+/// Tokens. Far above any current model, low enough to catch a unit mistake
+/// (writing 128 (thousands) or the context in characters).
+const MAX_CONTEXT_TOKENS: u64 = 100_000_000;
+/// USD per million tokens.
+const MAX_MODEL_COST: f64 = 1_000_000.0;
+
+fn validate_profiles(config: &Config) -> Result<()> {
+    if config.providers.len() > MAX_PROFILES {
+        return Err(Error::BadRequest(format!(
+            "at most {MAX_PROFILES} provider profiles are supported (got {})",
+            config.providers.len()
+        )));
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for profile in &config.providers {
+        validate_provider(profile)?;
+        if seen.contains(&profile.id.as_str()) {
+            return Err(Error::BadRequest(format!(
+                "provider id `{}` is used more than once",
+                profile.id
+            )));
+        }
+        seen.push(profile.id.as_str());
+    }
+    if !config.providers.is_empty() {
+        validate_active_selection(config)?;
+    }
+    Ok(())
+}
+
+fn validate_active_selection(config: &Config) -> Result<()> {
+    let active_id = config.active_provider.as_deref().ok_or_else(|| {
+        Error::BadRequest("active.provider is required when provider profiles exist".into())
+    })?;
+    let profile = config
+        .providers
+        .iter()
+        .find(|profile| profile.id == active_id)
+        .ok_or_else(|| {
+            Error::BadRequest(format!(
+                "active.provider `{active_id}` does not match any configured provider"
+            ))
+        })?;
+    match config.active_model.as_deref() {
+        Some(model) => {
+            if !profile.models.is_empty() && !profile.models.iter().any(|entry| entry.id == model) {
+                return Err(Error::BadRequest(format!(
+                    "active.model `{model}` is not in the model list of provider `{}`",
+                    profile.id
+                )));
+            }
+        }
+        None => {
+            if !profile.models.is_empty() {
+                return Err(Error::BadRequest(
+                    "active.model is required when the active provider has models".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One profile: id, endpoint, library and the tunables that live per endpoint.
+pub fn validate_provider(profile: &ProviderProfile) -> Result<()> {
+    let id = profile.id.trim();
+    if id.is_empty() {
+        return Err(Error::BadRequest("providers[].id may not be empty".into()));
+    }
+    if id.len() > MAX_PROFILE_ID_CHARS {
+        return Err(Error::BadRequest(format!(
+            "provider id `{id}` is longer than {MAX_PROFILE_ID_CHARS} characters"
+        )));
+    }
+    let first_ok = id
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_alphanumeric())
+        .unwrap_or(false);
+    if !first_ok
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(Error::BadRequest(format!(
+            "provider id `{id}` may only contain letters, digits, '.', '_' and '-', and must start with a letter or digit"
+        )));
+    }
+    if profile.name.chars().any(char::is_control) {
+        return Err(Error::BadRequest(format!(
+            "provider `{id}` name may not contain control characters"
+        )));
+    }
+    if profile.name.trim().chars().count() > MAX_PROFILE_NAME_CHARS {
+        return Err(Error::BadRequest(format!(
+            "provider `{id}` name is longer than {MAX_PROFILE_NAME_CHARS} characters"
+        )));
+    }
+    let supported =
+        kc_core::provider::ProviderFactory::supported(&kc_provider::ProviderFactoryImpl);
+    check_provider_id(&profile.provider, &supported)?;
+    validate_base_url(&profile.base_url)?;
+    if profile.request_timeout_secs == 0 || profile.request_timeout_secs > 3600 {
+        return Err(Error::BadRequest(format!(
+            "provider `{id}` request_timeout_secs must be between 1 and 3600 (got {})",
+            profile.request_timeout_secs
+        )));
+    }
+    if profile.models.len() > MAX_MODELS_PER_PROFILE {
+        return Err(Error::BadRequest(format!(
+            "provider `{id}` has more than {MAX_MODELS_PER_PROFILE} models"
+        )));
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for model in &profile.models {
+        validate_model_entry(id, model)?;
+        if seen.contains(&model.id.trim()) {
+            return Err(Error::BadRequest(format!(
+                "provider `{id}` lists model `{}` more than once",
+                model.id.trim()
+            )));
+        }
+        seen.push(model.id.trim());
+    }
+    for (name, value) in &profile.extra_headers {
+        if name.trim().is_empty()
+            || name.contains('\n')
+            || name.contains('\r')
+            || value.contains('\n')
+            || value.contains('\r')
+        {
+            return Err(Error::BadRequest(format!(
+                "provider `{id}` extra_headers contains an invalid header name or value"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_model_entry(provider_id: &str, model: &ModelEntry) -> Result<()> {
+    let id = model.id.trim();
+    if id.is_empty() {
+        return Err(Error::BadRequest(format!(
+            "provider `{provider_id}` has a model with an empty id"
+        )));
+    }
+    if id.len() > MAX_MODEL_ID_CHARS {
+        return Err(Error::BadRequest(format!(
+            "provider `{provider_id}` model id is longer than {MAX_MODEL_ID_CHARS} characters"
+        )));
+    }
+    if id.chars().any(char::is_control) {
+        return Err(Error::BadRequest(format!(
+            "provider `{provider_id}` model `{id}` id may not contain control characters"
+        )));
+    }
+    if let Some(name) = &model.name {
+        if name.chars().any(char::is_control) {
+            return Err(Error::BadRequest(format!(
+                "provider `{provider_id}` model `{id}` name may not contain control characters"
+            )));
+        }
+        if name.trim().chars().count() > MAX_MODEL_NAME_CHARS {
+            return Err(Error::BadRequest(format!(
+                "provider `{provider_id}` model `{id}` name is longer than {MAX_MODEL_NAME_CHARS} characters"
+            )));
+        }
+    }
+    for (field, value) in [
+        ("context_window", model.context_window),
+        ("max_output_tokens", model.max_output_tokens),
+    ] {
+        if let Some(value) = value {
+            if value == 0 || value > MAX_CONTEXT_TOKENS {
+                return Err(Error::BadRequest(format!(
+                    "provider `{provider_id}` model `{id}` {field} must be between 1 and {MAX_CONTEXT_TOKENS} (got {value})"
+                )));
+            }
+        }
+    }
+    for (field, value) in [
+        ("cost_input", model.cost_input),
+        ("cost_output", model.cost_output),
+    ] {
+        if let Some(value) = value {
+            if !value.is_finite() || value < 0.0 || value > MAX_MODEL_COST {
+                return Err(Error::BadRequest(format!(
+                    "provider `{provider_id}` model `{id}` {field} must be between 0 and {MAX_MODEL_COST} USD per million tokens (got {value})"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_model(model: &ModelConfig) -> Result<()> {
@@ -761,10 +1163,22 @@ fn validate_subagents(subagents: &SubagentConfig) -> Result<()> {
 /// Validation runs per row, not once at the end, precisely so that one bad row
 /// cannot take the process down; the aggregate cannot be invalid either, because
 /// the starting config is validated and every accepted row keeps it valid.
-fn apply_rows_resilient(config: &mut Config, rows: &[(String, String)]) {
+fn apply_rows_resilient(config: &mut Config, rows: &[(String, String)], legacy_config: bool) {
+    // The provider list and its selection are one logical unit: a profile row
+    // applied without its selection (or vice versa) is not a state anyone
+    // wrote. Collect them and apply the unit last, so repairing the selection
+    // never sees a half-applied library.
+    let mut provider_rows: Vec<&(String, String)> = Vec::new();
     for row in rows {
+        if matches!(
+            row.0.as_str(),
+            keys::PROVIDERS | keys::MODEL_ACTIVE_PROVIDER | keys::MODEL_ACTIVE_MODEL
+        ) {
+            provider_rows.push(row);
+            continue;
+        }
         let previous = config.clone();
-        apply_rows(config, std::slice::from_ref(row));
+        apply_row(config, &row.0, &row.1);
         if let Err(error) = validate_settings(config) {
             warn!(
                 key = row.0.as_str(),
@@ -773,6 +1187,26 @@ fn apply_rows_resilient(config: &mut Config, rows: &[(String, String)]) {
             );
             *config = previous;
         }
+    }
+    let previous = config.clone();
+    for row in provider_rows {
+        apply_row(config, &row.0, &row.1);
+    }
+    // A database written before provider profiles existed only has the flat
+    // `model.*` rows. Re-synthesize the profile from those rows so an upgraded
+    // install keeps the endpoint and key it was actually using. A config that
+    // already declared profiles keeps them: those are authoritative.
+    if legacy_config && !rows.iter().any(|(key, _)| key == keys::PROVIDERS) {
+        config.providers.clear();
+    }
+    config.normalize_providers();
+    if let Err(error) = validate_settings(config) {
+        warn!(
+            %error,
+            "ignoring persisted provider profiles that are no longer valid; keeping the configured value"
+        );
+        *config = previous;
+        config.normalize_providers();
     }
 }
 
@@ -802,6 +1236,18 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
     rows.insert(
         keys::MODEL_PARALLEL_TOOL_CALLS,
         model.parallel_tool_calls.to_string(),
+    );
+    rows.insert(
+        keys::PROVIDERS,
+        serde_json::to_string(&config.providers).unwrap_or_else(|_| "[]".into()),
+    );
+    rows.insert(
+        keys::MODEL_ACTIVE_PROVIDER,
+        config.active_provider.clone().unwrap_or_default(),
+    );
+    rows.insert(
+        keys::MODEL_ACTIVE_MODEL,
+        config.active_model.clone().unwrap_or_default(),
     );
 
     let limits = &config.limits;
@@ -926,146 +1372,170 @@ fn parse_list(key: &str, value: &str) -> Option<Vec<String>> {
     }
 }
 
+#[cfg(test)]
 fn apply_rows(config: &mut Config, rows: &[(String, String)]) {
     for (key, value) in rows {
-        match key.as_str() {
-            keys::MODEL_PROVIDER => config.model.provider = value.clone(),
-            keys::MODEL_BASE_URL => config.model.base_url = value.clone(),
-            keys::MODEL_NAME => config.model.model = value.clone(),
-            keys::MODEL_API_KEY => config.model.api_key = Some(value.clone()),
-            keys::MODEL_TEMPERATURE => {
-                if let Some(v) = parse_value::<f32>(key, value) {
-                    config.model.temperature = v;
-                }
-            }
-            keys::MODEL_MAX_TOKENS => {
-                if value.trim().is_empty() {
-                    config.model.max_tokens = None;
-                } else if let Some(v) = parse_value::<u32>(key, value) {
-                    config.model.max_tokens = Some(v);
-                }
-            }
-            keys::MODEL_TOP_P => {
-                if value.trim().is_empty() {
-                    config.model.top_p = None;
-                } else if let Some(v) = parse_value::<f32>(key, value) {
-                    config.model.top_p = Some(v);
-                }
-            }
-            keys::MODEL_REQUEST_TIMEOUT => {
-                if let Some(v) = parse_value::<u64>(key, value) {
-                    config.model.request_timeout_secs = v;
-                }
-            }
-            keys::MODEL_PARALLEL_TOOL_CALLS => {
-                if let Some(v) = parse_bool(key, value) {
-                    config.model.parallel_tool_calls = v;
-                }
-            }
+        apply_row(config, key, value);
+    }
+    config.normalize_providers();
+}
 
-            keys::LIMITS_MAX_ITERATIONS => {
-                if let Some(v) = parse_value(key, value) {
-                    config.limits.max_iterations = v;
+fn apply_row(config: &mut Config, key: &str, value: &str) {
+    match key {
+        keys::MODEL_PROVIDER => config.model.provider = value.to_string(),
+        keys::MODEL_BASE_URL => config.model.base_url = value.to_string(),
+        keys::MODEL_NAME => config.model.model = value.to_string(),
+        keys::MODEL_API_KEY => config.model.api_key = Some(value.to_string()),
+        keys::PROVIDERS => {
+            if value.trim().is_empty() {
+                return;
+            }
+            match serde_json::from_str::<Vec<ProviderProfile>>(value) {
+                Ok(providers) => config.providers = providers,
+                Err(e) => {
+                    // Never log the value: it holds API keys.
+                    warn!(key, error = %e, "ignoring a provider profile row that is not valid JSON");
                 }
             }
-            keys::LIMITS_MAX_RUN_SECS => {
-                if let Some(v) = parse_value(key, value) {
-                    config.limits.max_run_secs = v;
-                }
-            }
-            keys::LIMITS_MAX_TOOL_OUTPUT_BYTES => {
-                if let Some(v) = parse_value(key, value) {
-                    config.limits.max_tool_output_bytes = v;
-                }
-            }
-            keys::LIMITS_MAX_COMMAND_OUTPUT_BYTES => {
-                if let Some(v) = parse_value(key, value) {
-                    config.limits.max_command_output_bytes = v;
-                }
-            }
-            keys::LIMITS_COMMAND_TIMEOUT_SECS => {
-                if let Some(v) = parse_value(key, value) {
-                    config.limits.command_timeout_secs = v;
-                }
-            }
-            keys::LIMITS_MAX_COMMAND_TIMEOUT_SECS => {
-                if let Some(v) = parse_value(key, value) {
-                    config.limits.max_command_timeout_secs = v;
-                }
-            }
-            keys::LIMITS_MAX_FILE_READ_BYTES => {
-                if let Some(v) = parse_value(key, value) {
-                    config.limits.max_file_read_bytes = v;
-                }
-            }
-            keys::LIMITS_SEARCH_MAX_RESULTS => {
-                if let Some(v) = parse_value(key, value) {
-                    config.limits.search_max_results = v;
-                }
-            }
-            keys::LIMITS_CONTEXT_MAX_CHARS => {
-                if let Some(v) = parse_value(key, value) {
-                    config.limits.context_max_chars = v;
-                }
-            }
-            keys::LIMITS_MAX_TOOL_CALLS_PER_TURN => {
-                if let Some(v) = parse_value(key, value) {
-                    config.limits.max_tool_calls_per_turn = v;
-                }
-            }
-
-            keys::APPROVALS_MODE => match ApprovalMode::parse(value) {
-                Some(mode) => config.approvals.mode = mode,
-                None => warn!(
-                    key,
-                    "ignoring an unknown approval mode in the settings table"
-                ),
-            },
-            keys::APPROVALS_ALLOW_COMMANDS => {
-                if let Some(list) = parse_list(key, value) {
-                    config.approvals.allow_commands = list;
-                }
-            }
-            keys::APPROVALS_AUTO_APPROVE_PATHS => {
-                if let Some(list) = parse_list(key, value) {
-                    config.approvals.auto_approve_paths = list;
-                }
-            }
-            keys::APPROVALS_TIMEOUT_SECS => {
-                if let Some(v) = parse_value(key, value) {
-                    config.approvals.timeout_secs = v;
-                }
-            }
-
-            keys::SUBAGENTS_MAX_CONCURRENT => {
-                if let Some(v) = parse_value(key, value) {
-                    config.subagents.max_concurrent = v;
-                }
-            }
-            keys::SUBAGENTS_MAX_ITERATIONS => {
-                if let Some(v) = parse_value(key, value) {
-                    config.subagents.max_iterations = v;
-                }
-            }
-            keys::SUBAGENTS_ALLOW_RECURSIVE => {
-                if let Some(v) = parse_bool(key, value) {
-                    config.subagents.allow_recursive = v;
-                }
-            }
-            keys::SUBAGENTS_MAX_DEPTH => {
-                if let Some(v) = parse_value(key, value) {
-                    config.subagents.max_depth = v;
-                }
-            }
-            keys::SUBAGENTS_TIMEOUT_SECS => {
-                if let Some(v) = parse_value(key, value) {
-                    config.subagents.timeout_secs = v;
-                }
-            }
-
-            // Unknown keys belong to a newer build; ignore instead of failing.
-            _ => {}
         }
+        keys::MODEL_ACTIVE_PROVIDER => {
+            config.active_provider = (!value.trim().is_empty()).then(|| value.trim().to_string());
+        }
+        keys::MODEL_ACTIVE_MODEL => {
+            config.active_model = (!value.trim().is_empty()).then(|| value.trim().to_string());
+        }
+        keys::MODEL_TEMPERATURE => {
+            if let Some(v) = parse_value::<f32>(key, value) {
+                config.model.temperature = v;
+            }
+        }
+        keys::MODEL_MAX_TOKENS => {
+            if value.trim().is_empty() {
+                config.model.max_tokens = None;
+            } else if let Some(v) = parse_value::<u32>(key, value) {
+                config.model.max_tokens = Some(v);
+            }
+        }
+        keys::MODEL_TOP_P => {
+            if value.trim().is_empty() {
+                config.model.top_p = None;
+            } else if let Some(v) = parse_value::<f32>(key, value) {
+                config.model.top_p = Some(v);
+            }
+        }
+        keys::MODEL_REQUEST_TIMEOUT => {
+            if let Some(v) = parse_value::<u64>(key, value) {
+                config.model.request_timeout_secs = v;
+            }
+        }
+        keys::MODEL_PARALLEL_TOOL_CALLS => {
+            if let Some(v) = parse_bool(key, value) {
+                config.model.parallel_tool_calls = v;
+            }
+        }
+
+        keys::LIMITS_MAX_ITERATIONS => {
+            if let Some(v) = parse_value(key, value) {
+                config.limits.max_iterations = v;
+            }
+        }
+        keys::LIMITS_MAX_RUN_SECS => {
+            if let Some(v) = parse_value(key, value) {
+                config.limits.max_run_secs = v;
+            }
+        }
+        keys::LIMITS_MAX_TOOL_OUTPUT_BYTES => {
+            if let Some(v) = parse_value(key, value) {
+                config.limits.max_tool_output_bytes = v;
+            }
+        }
+        keys::LIMITS_MAX_COMMAND_OUTPUT_BYTES => {
+            if let Some(v) = parse_value(key, value) {
+                config.limits.max_command_output_bytes = v;
+            }
+        }
+        keys::LIMITS_COMMAND_TIMEOUT_SECS => {
+            if let Some(v) = parse_value(key, value) {
+                config.limits.command_timeout_secs = v;
+            }
+        }
+        keys::LIMITS_MAX_COMMAND_TIMEOUT_SECS => {
+            if let Some(v) = parse_value(key, value) {
+                config.limits.max_command_timeout_secs = v;
+            }
+        }
+        keys::LIMITS_MAX_FILE_READ_BYTES => {
+            if let Some(v) = parse_value(key, value) {
+                config.limits.max_file_read_bytes = v;
+            }
+        }
+        keys::LIMITS_SEARCH_MAX_RESULTS => {
+            if let Some(v) = parse_value(key, value) {
+                config.limits.search_max_results = v;
+            }
+        }
+        keys::LIMITS_CONTEXT_MAX_CHARS => {
+            if let Some(v) = parse_value(key, value) {
+                config.limits.context_max_chars = v;
+            }
+        }
+        keys::LIMITS_MAX_TOOL_CALLS_PER_TURN => {
+            if let Some(v) = parse_value(key, value) {
+                config.limits.max_tool_calls_per_turn = v;
+            }
+        }
+
+        keys::APPROVALS_MODE => match ApprovalMode::parse(value) {
+            Some(mode) => config.approvals.mode = mode,
+            None => warn!(
+                key,
+                "ignoring an unknown approval mode in the settings table"
+            ),
+        },
+        keys::APPROVALS_ALLOW_COMMANDS => {
+            if let Some(list) = parse_list(key, value) {
+                config.approvals.allow_commands = list;
+            }
+        }
+        keys::APPROVALS_AUTO_APPROVE_PATHS => {
+            if let Some(list) = parse_list(key, value) {
+                config.approvals.auto_approve_paths = list;
+            }
+        }
+        keys::APPROVALS_TIMEOUT_SECS => {
+            if let Some(v) = parse_value(key, value) {
+                config.approvals.timeout_secs = v;
+            }
+        }
+
+        keys::SUBAGENTS_MAX_CONCURRENT => {
+            if let Some(v) = parse_value(key, value) {
+                config.subagents.max_concurrent = v;
+            }
+        }
+        keys::SUBAGENTS_MAX_ITERATIONS => {
+            if let Some(v) = parse_value(key, value) {
+                config.subagents.max_iterations = v;
+            }
+        }
+        keys::SUBAGENTS_ALLOW_RECURSIVE => {
+            if let Some(v) = parse_bool(key, value) {
+                config.subagents.allow_recursive = v;
+            }
+        }
+        keys::SUBAGENTS_MAX_DEPTH => {
+            if let Some(v) = parse_value(key, value) {
+                config.subagents.max_depth = v;
+            }
+        }
+        keys::SUBAGENTS_TIMEOUT_SECS => {
+            if let Some(v) = parse_value(key, value) {
+                config.subagents.timeout_secs = v;
+            }
+        }
+
+        // Unknown keys belong to a newer build; ignore instead of failing.
+        _ => {}
     }
 }
 
@@ -1223,6 +1693,7 @@ mod tests {
                 ("model.temperature".into(), "0.5".into()),
                 ("limits.search_max_results".into(), "7".into()),
             ],
+            true,
         );
         assert_eq!(cfg.limits.max_iterations, 32, "invalid row ignored");
         assert_eq!(cfg.model.base_url, base_url, "invalid row ignored");
@@ -1242,6 +1713,7 @@ mod tests {
                 ("approvals.mode".into(), "whatever".into()),
                 ("some.future.key".into(), "x".into()),
             ],
+            true,
         );
         assert_eq!(cfg.model.temperature, 0.2);
         assert_eq!(cfg.approvals.mode, ApprovalMode::Ask);
@@ -1361,6 +1833,215 @@ mod tests {
         )
         .unwrap();
         assert!(validate_settings(&cfg).is_err());
+    }
+
+    #[test]
+    fn provider_profiles_and_selection_roundtrip_through_rows() {
+        let mut cfg = test_config();
+        cfg.providers = vec![
+            ProviderProfile {
+                id: "gateway".into(),
+                name: "Gateway".into(),
+                base_url: "https://gw.example/v1".into(),
+                api_key: Some("sk-gateway".into()),
+                models: vec![
+                    ModelEntry {
+                        id: "model-a".into(),
+                        name: Some("Model A".into()),
+                        context_window: Some(128_000),
+                        max_output_tokens: Some(16_384),
+                        tool_call: Some(true),
+                        ..ModelEntry::default()
+                    },
+                    ModelEntry::new("model-b"),
+                ],
+                ..ProviderProfile::default()
+            },
+            ProviderProfile {
+                id: "local".into(),
+                name: "Local".into(),
+                base_url: "http://127.0.0.1:8000/v1".into(),
+                models: vec![ModelEntry::new("tiny")],
+                ..ProviderProfile::default()
+            },
+        ];
+        cfg.active_provider = Some("gateway".into());
+        cfg.active_model = Some("model-b".into());
+        cfg.normalize_providers();
+        assert!(validate_settings(&cfg).is_ok());
+
+        let rows: Vec<(String, String)> = rows_for(&cfg)
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        assert!(rows.iter().any(|(k, _)| k == keys::PROVIDERS));
+        // The profile row is the only place the key is stored.
+        assert!(!rows
+            .iter()
+            .any(|(k, v)| k == keys::MODEL_API_KEY && v.contains("sk-gateway")));
+
+        let mut restored = Config::default();
+        apply_rows(&mut restored, &rows);
+        assert_eq!(restored.providers.len(), 2);
+        assert_eq!(restored.active_provider.as_deref(), Some("gateway"));
+        assert_eq!(restored.active_model.as_deref(), Some("model-b"));
+        assert_eq!(
+            restored.effective_model().api_key.as_deref(),
+            Some("sk-gateway")
+        );
+        assert_eq!(
+            restored.providers[0].models[0].context_window,
+            Some(128_000)
+        );
+        assert_eq!(restored.effective_model().base_url, "https://gw.example/v1");
+    }
+
+    #[test]
+    fn a_new_profile_can_be_added_and_selected_in_one_patch() {
+        let mut cfg = test_config();
+        cfg.normalize_providers();
+        let patch = ConfigPatch {
+            providers: Some(ProvidersPatch {
+                upsert: vec![ProviderPatch {
+                    id: "gateway".into(),
+                    name: Some("My gateway".into()),
+                    base_url: Some("https://gw.example/v1".into()),
+                    api_key: Some("sk-secret".into()),
+                    models: Some(vec![ModelEntry::new("model-a")]),
+                    ..ProviderPatch::default()
+                }],
+                delete: Vec::new(),
+            }),
+            active: Some(ActivePatch {
+                provider: Some("gateway".into()),
+                model: Some("model-a".into()),
+            }),
+            ..ConfigPatch::default()
+        };
+        apply_patch(&mut cfg, &patch).unwrap();
+        assert!(validate_settings(&cfg).is_ok());
+        assert_eq!(cfg.active_provider.as_deref(), Some("gateway"));
+        let effective = cfg.effective_model();
+        assert_eq!(effective.base_url, "https://gw.example/v1");
+        assert_eq!(effective.api_key.as_deref(), Some("sk-secret"));
+        assert_eq!(effective.model, "model-a");
+
+        // A second patch that only replaces the model list keeps the key.
+        let patch = ConfigPatch {
+            providers: Some(ProvidersPatch {
+                upsert: vec![ProviderPatch {
+                    id: "gateway".into(),
+                    models: Some(vec![ModelEntry::new("model-a"), ModelEntry::new("model-b")]),
+                    ..ProviderPatch::default()
+                }],
+                ..ProvidersPatch::default()
+            }),
+            ..ConfigPatch::default()
+        };
+        apply_patch(&mut cfg, &patch).unwrap();
+        let profile = cfg.active_profile().unwrap();
+        assert_eq!(profile.models.len(), 2);
+        assert_eq!(profile.api_key.as_deref(), Some("sk-secret"));
+    }
+
+    #[test]
+    fn deleting_the_active_profile_reselects_another() {
+        let mut cfg = test_config();
+        cfg.providers = vec![
+            ProviderProfile {
+                id: "a".into(),
+                models: vec![ModelEntry::new("ma")],
+                ..ProviderProfile::default()
+            },
+            ProviderProfile {
+                id: "b".into(),
+                models: vec![ModelEntry::new("mb")],
+                ..ProviderProfile::default()
+            },
+        ];
+        cfg.active_provider = Some("a".into());
+        cfg.active_model = Some("ma".into());
+        cfg.normalize_providers();
+
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                providers: Some(ProvidersPatch {
+                    delete: vec!["a".into()],
+                    ..ProvidersPatch::default()
+                }),
+                ..ConfigPatch::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.providers.len(), 1);
+        assert_eq!(cfg.active_provider.as_deref(), Some("b"));
+        assert_eq!(cfg.active_model.as_deref(), Some("mb"));
+    }
+
+    #[test]
+    fn provider_validation_rejects_bad_shapes_and_names_the_field() {
+        let mut cfg = test_config();
+        cfg.providers = vec![ProviderProfile {
+            id: "bad id".into(),
+            ..ProviderProfile::default()
+        }];
+        cfg.active_provider = Some("bad id".into());
+        let err = validate_settings(&cfg).unwrap_err().to_string();
+        assert!(err.contains("letters, digits"), "{err}");
+
+        let mut cfg = test_config();
+        cfg.providers = vec![ProviderProfile {
+            id: "dup".into(),
+            models: vec![ModelEntry::new("m"), ModelEntry::new("m")],
+            ..ProviderProfile::default()
+        }];
+        cfg.active_provider = Some("dup".into());
+        cfg.active_model = Some("m".into());
+        let err = validate_settings(&cfg).unwrap_err().to_string();
+        assert!(err.contains("more than once"), "{err}");
+
+        let mut cfg = test_config();
+        cfg.providers = vec![ProviderProfile {
+            id: "ctx".into(),
+            models: vec![ModelEntry {
+                id: "m".into(),
+                context_window: Some(0),
+                ..ModelEntry::default()
+            }],
+            ..ProviderProfile::default()
+        }];
+        cfg.active_provider = Some("ctx".into());
+        cfg.active_model = Some("m".into());
+        let err = validate_settings(&cfg).unwrap_err().to_string();
+        assert!(err.contains("context_window"), "{err}");
+
+        let mut cfg = test_config();
+        cfg.providers = vec![
+            ProviderProfile {
+                id: "dup-id".into(),
+                ..ProviderProfile::default()
+            },
+            ProviderProfile {
+                id: "dup-id".into(),
+                ..ProviderProfile::default()
+            },
+        ];
+        cfg.active_provider = Some("dup-id".into());
+        let err = validate_settings(&cfg).unwrap_err().to_string();
+        assert!(err.contains("used more than once"), "{err}");
+
+        // An unknown selection is rejected rather than silently repaired.
+        let mut cfg = test_config();
+        cfg.providers = vec![ProviderProfile {
+            id: "p".into(),
+            models: vec![ModelEntry::new("m")],
+            ..ProviderProfile::default()
+        }];
+        cfg.active_provider = Some("p".into());
+        cfg.active_model = Some("other".into());
+        let err = validate_settings(&cfg).unwrap_err().to_string();
+        assert!(err.contains("active.model"), "{err}");
     }
 
     #[test]

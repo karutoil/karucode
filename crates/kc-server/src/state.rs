@@ -3,10 +3,12 @@
 //!
 //! [`AppState`] is a cheap `Arc` clone so axum can hand it to every handler.
 
+use crate::catalog::CatalogCache;
 use crate::host::HostAllowlist;
 use crate::settings::SettingsHandle;
 use crate::static_ui::WebAssets;
 use async_trait::async_trait;
+use kc_core::error::{Error, Result};
 use kc_core::hooks::Hooks;
 use kc_core::paths::Workspace;
 use kc_core::plugin::{PluginDiagnostics, PluginStatus};
@@ -16,9 +18,11 @@ use kc_core::tool::{Tool, ToolRegistry};
 use kc_mcp::McpManager;
 use kc_plugin_host::{namespaced_name, PluginHost};
 use kc_runtime::Runtime;
+use kc_runtime::WorkspaceProvider;
 use serde_json::json;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -27,6 +31,103 @@ pub fn now_ms() -> i64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(d) => d.as_millis() as i64,
         Err(_) => 0,
+    }
+}
+
+/// Workspaces for the projects the server serves.
+///
+/// Projects live in SQLite, but resolving a project to a `Workspace` on every
+/// tool call would mean hitting the database per file operation. The registry is
+/// the in-memory, already-canonicalised view: it is loaded at startup and kept
+/// current by the project routes. The default workspace (the `--workspace` /
+/// `KARUCODE_WORKSPACE` directory) always exists and backs sessions that are not
+/// attached to a project yet.
+pub struct ProjectRegistry {
+    default_workspace: Arc<Workspace>,
+    projects: RwLock<HashMap<String, Arc<Workspace>>>,
+}
+
+impl ProjectRegistry {
+    pub fn new(default_workspace: Arc<Workspace>) -> Self {
+        Self {
+            default_workspace,
+            projects: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn default_workspace(&self) -> Arc<Workspace> {
+        Arc::clone(&self.default_workspace)
+    }
+
+    /// Canonicalise `root` and register it. The path must exist and be a
+    /// directory; a project whose directory disappears later keeps its row but
+    /// fails to resolve, with a message naming the directory.
+    pub fn insert(&self, id: &str, root: &Path) -> Result<()> {
+        let workspace = Arc::new(Workspace::new(root)?);
+        self.projects
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_string(), workspace);
+        Ok(())
+    }
+
+    /// Drop a project from the cache. Its rows/sessions are the store's job.
+    pub fn remove(&self, id: &str) {
+        self.projects
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.projects
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.projects
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Every registered project id and its root, sorted by id.
+    pub fn roots(&self) -> Vec<(String, PathBuf)> {
+        let projects = self.projects.read().unwrap_or_else(|e| e.into_inner());
+        let mut out: Vec<(String, PathBuf)> = projects
+            .iter()
+            .map(|(id, workspace)| (id.clone(), workspace.root().to_path_buf()))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+}
+
+impl WorkspaceProvider for ProjectRegistry {
+    fn default_workspace(&self) -> Arc<Workspace> {
+        ProjectRegistry::default_workspace(self)
+    }
+
+    fn workspace_for(&self, project_id: Option<&str>) -> Result<Arc<Workspace>> {
+        let Some(id) = project_id else {
+            return Ok(self.default_workspace());
+        };
+        self.projects
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+            .ok_or_else(|| {
+                Error::NotFound(format!(
+                    "project `{id}` is not available; its directory may have been removed"
+                ))
+            })
     }
 }
 
@@ -79,6 +180,8 @@ pub struct AppStateDeps {
     pub runtime: Arc<Runtime>,
     pub providers: Arc<dyn ProviderFactory>,
     pub workspace: Arc<Workspace>,
+    /// Project id -> workspace, already seeded by the bootstrap.
+    pub projects: Arc<ProjectRegistry>,
     pub plugins: Arc<Mutex<PluginHost>>,
     pub mcp: Arc<Mutex<McpManager>>,
     /// First-party tools (plus test extras). Kept so `reload_tools` can rebuild
@@ -105,6 +208,10 @@ pub struct AppStateInner {
     pub builtin_tools: Vec<Arc<dyn Tool>>,
     pub web: WebAssets,
     pub db_path: PathBuf,
+    /// models.dev catalog cache (provider/model metadata for the settings UI).
+    pub catalog: Arc<CatalogCache>,
+    /// Project id -> confined workspace, plus the default workspace.
+    pub projects: Arc<ProjectRegistry>,
     /// DNS-rebinding `Host` allowlist (see [`crate::host`]).
     pub host_allowlist: HostAllowlist,
     pub started: Instant,
@@ -125,12 +232,14 @@ impl AppState {
                 store: deps.store,
                 runtime: deps.runtime,
                 providers: deps.providers,
-                workspace: deps.workspace,
+                workspace: Arc::clone(&deps.workspace),
                 plugins: deps.plugins,
                 mcp: deps.mcp,
                 builtin_tools: deps.builtin_tools,
                 web: WebAssets::new(deps.web_dir),
                 db_path: deps.db_path,
+                catalog: Arc::new(CatalogCache::new()),
+                projects: deps.projects,
                 host_allowlist: HostAllowlist::new(&deps.bind_host, deps.allowed_hosts.as_deref()),
                 started: Instant::now(),
                 shutdown: CancellationToken::new(),
@@ -154,6 +263,23 @@ impl AppState {
         &self.inner.workspace
     }
 
+    /// The in-memory project registry (workspace resolution per project).
+    pub fn projects(&self) -> &Arc<ProjectRegistry> {
+        &self.inner.projects
+    }
+
+    /// Resolve a project id to its workspace. Unknown ids are a 404; a missing
+    /// directory is reported with the path so the operator can fix it.
+    pub fn workspace_for_project(
+        &self,
+        project_id: Option<&str>,
+    ) -> std::result::Result<Arc<Workspace>, crate::error::ApiError> {
+        self.inner
+            .projects
+            .workspace_for(project_id)
+            .map_err(crate::error::ApiError::from)
+    }
+
     pub fn providers(&self) -> &Arc<dyn ProviderFactory> {
         &self.inner.providers
     }
@@ -168,6 +294,10 @@ impl AppState {
 
     pub fn web(&self) -> &WebAssets {
         &self.inner.web
+    }
+
+    pub fn catalog(&self) -> &Arc<CatalogCache> {
+        &self.inner.catalog
     }
 
     pub fn db_path(&self) -> &Path {

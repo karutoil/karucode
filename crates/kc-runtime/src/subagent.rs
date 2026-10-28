@@ -387,6 +387,9 @@ async fn run_subagent(
         approval_scope,
         tools: Arc::new(child_tools),
         cancel: child_cancel.clone(),
+        // Inherited from the parent's tool context: a subagent works in the
+        // same project as the run that spawned it.
+        workspace: Arc::clone(&ctx.workspace),
         history: vec![Message::user(task.clone())],
         run_state: Some(Arc::clone(&child_state)),
     };

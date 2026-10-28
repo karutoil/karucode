@@ -54,7 +54,40 @@ pub struct RuntimeDeps {
     pub tools: Arc<ToolRegistry>,
     pub settings: Arc<dyn Settings>,
     pub hooks: Arc<dyn Hooks>,
-    pub workspace: Arc<Workspace>,
+    /// Resolves the workspace a run is confined to. A run uses the workspace of
+    /// the session's project, so one process can serve several projects without
+    /// sharing a mutable "current workspace".
+    pub workspaces: Arc<dyn WorkspaceProvider>,
+}
+
+/// Resolve the workspace for a run. The server implements this over its project
+/// registry; [`SingleWorkspace`] covers tests and single-directory embeddings.
+pub trait WorkspaceProvider: Send + Sync {
+    fn default_workspace(&self) -> Arc<Workspace>;
+    /// `None` means "the default workspace" (a session created before projects
+    /// existed, or one the caller did not scope).
+    fn workspace_for(&self, project_id: Option<&str>) -> Result<Arc<Workspace>>;
+}
+
+/// One workspace for every run.
+pub struct SingleWorkspace {
+    workspace: Arc<Workspace>,
+}
+
+impl SingleWorkspace {
+    pub fn new(workspace: Arc<Workspace>) -> Self {
+        Self { workspace }
+    }
+}
+
+impl WorkspaceProvider for SingleWorkspace {
+    fn default_workspace(&self) -> Arc<Workspace> {
+        Arc::clone(&self.workspace)
+    }
+
+    fn workspace_for(&self, _project_id: Option<&str>) -> Result<Arc<Workspace>> {
+        Ok(Arc::clone(&self.workspace))
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

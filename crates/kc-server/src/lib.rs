@@ -20,6 +20,7 @@
 
 pub mod app;
 pub mod bootstrap;
+pub mod catalog;
 pub mod error;
 pub mod host;
 pub mod routes;
@@ -29,6 +30,7 @@ pub mod static_ui;
 
 pub use app::build_router;
 pub use bootstrap::{Cli, CliAction};
+pub use catalog::CatalogCache;
 pub use host::HostAllowlist;
 pub use settings::{ConfigPatch, SettingsHandle};
 pub use state::{AppState, AppStateDeps};

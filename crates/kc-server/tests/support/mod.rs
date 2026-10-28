@@ -24,7 +24,7 @@ use kc_plugin_host::PluginHost;
 use kc_runtime::{Runtime, RuntimeDeps};
 use kc_server::app::build_router;
 use kc_server::settings::SettingsHandle;
-use kc_server::state::{base_tool_registry, AppState, AppStateDeps};
+use kc_server::state::{base_tool_registry, AppState, AppStateDeps, ProjectRegistry};
 use kc_store::SqliteStore;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -361,13 +361,29 @@ impl HarnessBuilder {
         builtin_tools.extend(self.extra_tools);
         let tools = base_tool_registry(builtin_tools.clone(), Vec::new(), Vec::new());
 
+        // Mirrors the bootstrap: one default project for the workspace, loaded
+        // into the registry the runtime resolves runs against.
+        let projects = Arc::new(ProjectRegistry::new(Arc::clone(&workspace)));
+        let default_project = kc_core::ids::ProjectId::new();
+        store
+            .create_project(
+                default_project.as_str(),
+                "test-workspace",
+                &workspace.root().to_string_lossy(),
+            )
+            .await
+            .expect("default project");
+        projects
+            .insert(default_project.as_str(), workspace.root())
+            .expect("register default project");
+
         let runtime = Runtime::new(RuntimeDeps {
             store: store.clone(),
             providers: factory.clone(),
             tools,
             settings: settings.clone(),
             hooks: Arc::new(NoHooks),
-            workspace: workspace.clone(),
+            workspaces: Arc::clone(&projects) as Arc<dyn kc_runtime::WorkspaceProvider>,
         });
         runtime.recover().await.expect("recover");
 
@@ -377,6 +393,7 @@ impl HarnessBuilder {
             runtime,
             providers: factory.clone(),
             workspace,
+            projects,
             plugins,
             mcp,
             builtin_tools,

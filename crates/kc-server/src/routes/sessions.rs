@@ -1,10 +1,10 @@
 //! Session CRUD, message submission and cancellation.
 
 use crate::error::{ApiError, ApiResult};
-use crate::routes::parse_required;
+use crate::routes::{parse_required, query_str, QueryMap};
 use crate::state::AppState;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -33,6 +33,10 @@ const RUN_LIMIT: usize = 200;
 struct TitleBody {
     #[serde(default)]
     title: Option<String>,
+    /// Project to create the session in. Omitted means the default workspace
+    /// (and no project), which is what an older client sends.
+    #[serde(default)]
+    project: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -42,8 +46,21 @@ struct MessageBody {
     content: Option<String>,
 }
 
-pub async fn list_sessions(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    let sessions = state.store().list_sessions().await?;
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+) -> ApiResult<Json<Value>> {
+    let sessions = match query_str(&query, "project") {
+        Some(project_id) => {
+            if state.store().get_project(project_id).await?.is_none() {
+                return Err(ApiError::not_found(format!(
+                    "no project with id `{project_id}`"
+                )));
+            }
+            state.store().list_sessions_for_project(project_id).await?
+        }
+        None => state.store().list_sessions().await?,
+    };
     Ok(Json(json!({ "sessions": sessions })))
 }
 
@@ -51,12 +68,14 @@ pub async fn create_session(State(state): State<AppState>, body: Bytes) -> ApiRe
     let body: TitleBody = crate::routes::parse_body(&body)?;
     let title = normalize_title(body.title)?;
     let id = SessionId::new();
+    let workspace = state.workspace_for_project(body.project.as_deref())?;
     let session = state
         .store()
         .create_session(
             id.as_str(),
             &title,
-            &state.workspace().root().to_string_lossy(),
+            &workspace.root().to_string_lossy(),
+            body.project.as_deref(),
         )
         .await?;
     // Runtime-stamped so the SSE `seq` stays monotonic for all clients.

@@ -6,13 +6,15 @@
 //! `main`'s `anyhow::Result`.
 
 use crate::settings::SettingsHandle;
-use crate::state::{base_tool_registry, AppState, AppStateDeps, PluginHooks};
+use crate::state::{base_tool_registry, AppState, AppStateDeps, PluginHooks, ProjectRegistry};
 use crate::static_ui::WebAssets;
 use anyhow::{anyhow, bail};
 use kc_core::config::Config;
+use kc_core::ids::ProjectId;
 use kc_core::paths::Workspace;
 use kc_core::provider::ProviderFactory;
 use kc_core::settings::Settings;
+use kc_core::store::Project;
 use kc_core::store::Store;
 use kc_mcp::McpManager;
 use kc_plugin_host::PluginHost;
@@ -209,6 +211,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let plugins = Arc::new(Mutex::new(plugin_host));
     let mcp = Arc::new(Mutex::new(mcp_manager));
 
+    // Projects: seed the default one for the configured workspace, attach
+    // sessions created before projects existed, then load the registry the
+    // runtime resolves runs against.
+    let projects = Arc::new(ProjectRegistry::new(Arc::clone(&workspace)));
+    seed_projects(&store, &projects, &workspace).await?;
+
     let plugin_tools = {
         let host = plugins.lock().await;
         host.tools()
@@ -226,7 +234,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         tools,
         settings: settings.clone(),
         hooks: Arc::new(PluginHooks::new(Arc::clone(&plugins))),
-        workspace: Arc::clone(&workspace),
+        workspaces: Arc::clone(&projects) as Arc<dyn kc_runtime::WorkspaceProvider>,
     });
 
     let recovery = match runtime.recover().await {
@@ -245,6 +253,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         runtime: Arc::clone(&runtime),
         providers,
         workspace,
+        projects: Arc::clone(&projects),
         plugins: Arc::clone(&plugins),
         mcp: Arc::clone(&mcp),
         builtin_tools,
@@ -589,4 +598,114 @@ mod tests {
         assert_eq!(host_for_url("::1", 8787), "[::1]:8787");
         assert_eq!(host_for_url("127.0.0.1", 8787), "127.0.0.1:8787");
     }
+}
+
+/// Make sure every session has a project and the registry knows every project.
+///
+/// * no projects at all -> create one for the configured workspace;
+/// * a session without `project_id` (created before projects existed, or left
+///   behind by a project delete) -> attach it to the project with the same
+///   directory, creating that project if this is the first session in it.
+///
+/// A session whose old workspace no longer exists keeps its row (and its
+/// history) and is logged; it will run in that project once the directory is
+/// back, instead of being silently moved to a different repository.
+async fn seed_projects(
+    store: &Arc<dyn kc_core::store::Store>,
+    registry: &ProjectRegistry,
+    workspace: &Arc<Workspace>,
+) -> anyhow::Result<()> {
+    let mut projects = store.list_projects().await?;
+    if projects.is_empty() {
+        let id = ProjectId::new();
+        let name = project_name_for(workspace.root());
+        let project = store
+            .create_project(id.as_str(), &name, &workspace.root().to_string_lossy())
+            .await?;
+        tracing::info!(project = %project.id, path = %project.path, "created the default project");
+        projects.push(project);
+    }
+
+    for session in store.list_sessions().await? {
+        if session.project_id.is_some() {
+            continue;
+        }
+        let raw = session.workspace.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let project = match projects.iter().find(|project| project.path == raw) {
+            Some(project) => project.clone(),
+            None => {
+                let path = PathBuf::from(raw);
+                let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+                let id = ProjectId::new();
+                let name = unique_project_name(&projects, project_name_for(&canonical));
+                match store
+                    .create_project(id.as_str(), &name, &canonical.to_string_lossy())
+                    .await
+                {
+                    Ok(project) => {
+                        tracing::info!(
+                            project = %project.id,
+                            path = %project.path,
+                            "adopted a session workspace as a project"
+                        );
+                        projects.push(project.clone());
+                        project
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            session = %session.id,
+                            path = %canonical.display(),
+                            %error,
+                            "could not adopt a legacy session workspace"
+                        );
+                        continue;
+                    }
+                }
+            }
+        };
+        if let Err(error) = store.assign_session_project(&session.id, &project.id).await {
+            tracing::warn!(
+                session = %session.id,
+                project = %project.id,
+                %error,
+                "could not attach a legacy session to its project"
+            );
+        }
+    }
+
+    for project in store.list_projects().await? {
+        if let Err(error) = registry.insert(&project.id, Path::new(&project.path)) {
+            tracing::warn!(
+                project = %project.id,
+                path = %project.path,
+                %error,
+                "project directory is not usable; sessions in it will not run until it is fixed"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn project_name_for(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Project".to_string())
+}
+
+fn unique_project_name(existing: &[Project], base: String) -> String {
+    if !existing.iter().any(|project| project.name == base) {
+        return base;
+    }
+    for suffix in 2..1000 {
+        let candidate = format!("{base} ({suffix})");
+        if !existing.iter().any(|project| project.name == candidate) {
+            return candidate;
+        }
+    }
+    // Unreachable in practice (1000 same-named projects); still unique.
+    format!("{base} ({})", crate::state::now_ms())
 }

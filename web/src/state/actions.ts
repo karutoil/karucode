@@ -5,7 +5,10 @@ import type {
   ApprovalDecision,
   Config,
   ConfigPatch,
+  CatalogResponse,
   KarucodeEvent,
+  Project,
+  ProviderTestRequest,
   ProviderTestResult,
   RawEvent,
   Session,
@@ -164,7 +167,7 @@ function drainRefreshQueue(): void {
 
 async function doRefreshSessions(): Promise<void> {
   try {
-    const list = await api.listSessions();
+    const list = await api.listSessions(store.currentProjectId.value);
     store.sessions.value = list;
     store.sessionsLoading.value = false;
     const current = store.currentSessionId.value;
@@ -211,13 +214,25 @@ export async function bootstrap(force = false): Promise<void> {
     store.fileViewerPath.value = null;
     store.mobileSheet.value = null;
     try {
-      const [health, config, list] = await Promise.all([
+      const [health, config, projectList] = await Promise.all([
         api.getHealth(),
         api.getConfig(),
-        api.listSessions(),
+        api.listProjects(),
       ]);
       store.health.value = health;
       store.config.value = config;
+      store.projects.value = projectList.projects;
+      store.projectsLoading.value = false;
+      // Keep the remembered project when it still exists, otherwise open the
+      // first one (the bootstrap-created default).
+      const remembered = store.readLastProjectId();
+      const project =
+        projectList.projects.find((candidate) => candidate.id === remembered) ??
+        projectList.projects[0] ??
+        null;
+      store.currentProjectId.value = project?.id ?? null;
+      store.writeLastProjectId(project?.id ?? null);
+      const list = await api.listSessions(project?.id ?? null);
       store.sessions.value = list;
       store.sessionsLoading.value = false;
       store.authError.value = null;
@@ -234,6 +249,7 @@ export async function bootstrap(force = false): Promise<void> {
       startStream();
     } catch (error) {
       store.sessionsLoading.value = false;
+      store.projectsLoading.value = false;
       if (isUnauthorized(error)) {
         enterAuthState();
         store.authError.value = null;
@@ -315,7 +331,7 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
 
 export async function createSession(): Promise<Session | null> {
   try {
-    const session = await api.createSession();
+    const session = await api.createSession(undefined, store.currentProjectId.value);
     mergeSummary(summaryFromSession(session));
     store.mobileSheet.value = null;
     await openSession(session.id);
@@ -583,8 +599,165 @@ export async function clearApiKey(): Promise<Config> {
   return result;
 }
 
-export function testProvider(): Promise<ProviderTestResult> {
-  return api.testProvider();
+export function testProvider(body: ProviderTestRequest = {}): Promise<ProviderTestResult> {
+  return api.testProvider(body);
+}
+
+/** Save provider profiles and/or select the active provider+model. */
+export async function saveProviders(
+  patch: Pick<ConfigPatch, 'providers' | 'active'>,
+  options: { toast?: string | null } = {},
+): Promise<Config | null> {
+  try {
+    const result = await api.patchConfig(patch);
+    store.config.value = result;
+    if (options.toast !== null) store.pushToast(options.toast ?? 'Providers saved.', 'success');
+    void checkHealth();
+    return result;
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+      return null;
+    }
+    store.pushToast(toErrorMessage(error));
+    return null;
+  }
+}
+
+/** Switch the active model (optionally on another provider) for every project. */
+export async function switchModel(providerId: string, modelId: string): Promise<boolean> {
+  const current = store.config.value;
+  if (current?.active.provider === providerId && current.active.model === modelId) return true;
+  const result = await saveProviders(
+    { active: { provider: providerId, model: modelId } },
+    { toast: null },
+  );
+  if (!result) return false;
+  const provider = result.providers.find((profile) => profile.id === providerId);
+  const label = provider?.models.find((model) => model.id === modelId)?.name ?? modelId;
+  store.pushToast(`Now using ${label}.`, 'success');
+  return true;
+}
+
+/** models.dev catalog: provider list or one provider's models. */
+export async function loadCatalog(
+  provider?: string,
+  refresh = false,
+): Promise<CatalogResponse | null> {
+  try {
+    return await api.getModelsCatalog({ provider, refresh });
+  } catch (error) {
+    if (isUnauthorized(error)) enterAuthState();
+    else store.pushToast(toErrorMessage(error));
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Projects
+// ---------------------------------------------------------------------------
+
+export async function refreshProjects(): Promise<void> {
+  try {
+    const result = await api.listProjects();
+    store.projects.value = result.projects;
+    store.projectsLoading.value = false;
+    const current = store.currentProjectId.value;
+    if (!result.projects.some((project) => project.id === current)) {
+      const next = result.projects[0] ?? null;
+      store.currentProjectId.value = next?.id ?? null;
+      store.writeLastProjectId(next?.id ?? null);
+    }
+  } catch (error) {
+    store.projectsLoading.value = false;
+    if (isUnauthorized(error)) {
+      enterAuthState();
+      return;
+    }
+    store.pushToast(toErrorMessage(error));
+  }
+}
+
+/**
+ * Show another project. Sessions are fetched per project from the server, so
+ * switching never mixes two projects' histories (or their chat state).
+ */
+export async function switchProject(id: string): Promise<void> {
+  if (store.currentProjectId.value === id) {
+    store.projectSheetOpen.value = false;
+    return;
+  }
+  // Invalidate any in-flight chat/session read from the previous project.
+  sessionGeneration += 1;
+  store.currentProjectId.value = id;
+  store.writeLastProjectId(id);
+  store.projectSheetOpen.value = false;
+  store.mobileSheet.value = null;
+  store.inspectorTab.value = 'workspace';
+  store.sessions.value = [];
+  store.sessionsLoading.value = true;
+  store.fileViewerPath.value = null;
+  clearSelection();
+  await refreshSessions();
+  const next = pickSession();
+  if (next) await openSession(next.id);
+}
+
+export async function createProject(name: string, path: string): Promise<Project | null> {
+  try {
+    const project = await api.createProject(path, name.trim() || undefined);
+    store.projects.value = [...store.projects.value, project];
+    store.pushToast(`Added ${project.name}.`, 'success');
+    await switchProject(project.id);
+    return project;
+  } catch (error) {
+    if (isUnauthorized(error)) enterAuthState();
+    else store.pushToast(toErrorMessage(error));
+    return null;
+  }
+}
+
+export async function renameProjectById(id: string, name: string): Promise<boolean> {
+  const trimmed = name.trim();
+  if (!trimmed) return false;
+  try {
+    const project = await api.renameProject(id, trimmed);
+    store.projects.value = store.projects.value.map((candidate) =>
+      candidate.id === id ? { ...candidate, ...project } : candidate,
+    );
+    store.pushToast('Project renamed.', 'success');
+    return true;
+  } catch (error) {
+    if (isUnauthorized(error)) enterAuthState();
+    else store.pushToast(toErrorMessage(error));
+    return false;
+  }
+}
+
+export async function deleteProjectById(id: string, force = false): Promise<boolean> {
+  try {
+    const result = await api.deleteProject(id, force);
+    const remaining = store.projects.value.filter((project) => project.id !== id);
+    store.projects.value = remaining;
+    store.pushToast(
+      result.deleted_sessions > 0
+        ? `Project deleted with ${result.deleted_sessions} session(s).`
+        : 'Project removed from the rail (its files are untouched).',
+      'info',
+    );
+    if (store.currentProjectId.value === id) {
+      const next = remaining[0] ?? null;
+      store.currentProjectId.value = null;
+      clearSelection();
+      if (next) await switchProject(next.id);
+      else store.sessions.value = [];
+    }
+    return true;
+  } catch (error) {
+    if (isUnauthorized(error)) enterAuthState();
+    else store.pushToast(toErrorMessage(error));
+    return false;
+  }
 }
 
 export async function refreshSessionAgents(): Promise<void> {

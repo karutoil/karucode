@@ -32,9 +32,119 @@ export interface Health {
   version: string;
   uptime_secs: number;
   workspace: string;
+  /** Every project the server can serve, newest counts included. */
+  projects: Project[];
   auth_required: boolean;
   provider_configured: boolean;
   db: string;
+}
+
+/** A workspace the agent may work in; one entry in the project rail. */
+export interface Project {
+  id: string;
+  name: string;
+  /** Canonical absolute directory. */
+  path: string;
+  created_at: number;
+  updated_at: number;
+  session_count: number;
+}
+
+export interface ProjectListResponse {
+  projects: Project[];
+  /** The server's default workspace (KARUCODE_WORKSPACE / --workspace). */
+  workspace: string;
+}
+
+/** One model the user keeps available on a provider profile. */
+export interface ModelEntry {
+  id: string;
+  name?: string | null;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+  tool_call?: boolean | null;
+  reasoning?: boolean | null;
+  cost_input?: number | null;
+  cost_output?: number | null;
+  /** models.dev provider the metadata came from, when prefilled. */
+  catalog_provider?: string | null;
+}
+
+/** A named OpenAI-compatible endpoint plus its curated model list. */
+export interface ProviderProfile {
+  id: string;
+  name: string;
+  provider: string;
+  base_url: string;
+  models: ModelEntry[];
+  request_timeout_secs: number;
+  /** The key itself is write-only and never sent to the browser. */
+  api_key_set: boolean;
+}
+
+export interface ActiveSelection {
+  provider: string | null;
+  model: string | null;
+}
+
+export interface ProviderPatch {
+  id: string;
+  name?: string;
+  provider?: string;
+  base_url?: string;
+  /** Write-only; empty strings are ignored. */
+  api_key?: string;
+  clear_api_key?: boolean;
+  /** Replaces the whole list when present. */
+  models?: ModelEntry[];
+  request_timeout_secs?: number;
+}
+
+export interface ProvidersPatch {
+  upsert?: ProviderPatch[];
+  delete?: string[];
+}
+
+export interface ActivePatch {
+  provider?: string;
+  model?: string;
+}
+
+/** One models.dev model, normalized by the server for prefilling. */
+export interface CatalogModel {
+  id: string;
+  name: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  tool_call?: boolean;
+  reasoning?: boolean;
+  cost_input?: number;
+  cost_output?: number;
+}
+
+export interface CatalogProviderSummary {
+  id: string;
+  name: string;
+  model_count: number;
+}
+
+export interface CatalogResponse {
+  ok: boolean;
+  providers: CatalogProviderSummary[];
+  provider?: CatalogProviderSummary | null;
+  models: CatalogModel[];
+  fetched_at_ms: number;
+  /** True when an unreachable catalog served a cached copy. */
+  stale: boolean;
+  error: string | null;
+}
+
+export interface ProviderTestRequest {
+  profile?: string;
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  request_timeout_secs?: number;
 }
 
 export interface PublicModelConfig {
@@ -98,7 +208,11 @@ export interface ConfigMcpSummary {
 
 export interface Config {
   workspace: string;
+  /** Live/effective model connection (mirrors the active provider profile). */
   model: PublicModelConfig;
+  /** Named endpoints and their model libraries. */
+  providers: ProviderProfile[];
+  active: ActiveSelection;
   limits: Limits;
   approvals: ApprovalPolicy;
   subagents: SubagentConfig;
@@ -126,6 +240,8 @@ export interface ModelConfigPatch {
 
 export interface ConfigPatch {
   model?: ModelConfigPatch;
+  providers?: ProvidersPatch;
+  active?: ActivePatch;
   limits?: Partial<Limits>;
   approvals?: Partial<ApprovalPolicy>;
   subagents?: Partial<SubagentConfig>;
@@ -159,6 +275,8 @@ export interface Session {
   id: string;
   title: string;
   workspace: string;
+  /** Project the session runs in (null for a session created without one). */
+  project_id: string | null;
   created_at: number;
   updated_at: number;
 }

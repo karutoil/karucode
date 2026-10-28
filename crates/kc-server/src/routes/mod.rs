@@ -5,7 +5,9 @@ pub mod config;
 pub mod events;
 pub mod git;
 pub mod health;
+pub mod models;
 pub mod plugins;
+pub mod projects;
 pub mod sessions;
 pub mod workspace;
 
@@ -27,6 +29,7 @@ pub fn api_router() -> Router<AppState> {
             get(config::get_config).patch(config::patch_config),
         )
         .route("/provider/test", post(config::provider_test))
+        .route("/models/catalog", get(models::catalog))
         .route("/stats", get(config::stats))
         .route(
             "/sessions",
@@ -40,6 +43,14 @@ pub fn api_router() -> Router<AppState> {
         )
         .route("/sessions/:id/messages", post(sessions::send_message))
         .route("/sessions/:id/cancel", post(sessions::cancel_run))
+        .route(
+            "/projects",
+            get(projects::list_projects).post(projects::create_project),
+        )
+        .route(
+            "/projects/:id",
+            axum::routing::patch(projects::rename_project).delete(projects::delete_project),
+        )
         .route("/approvals", get(approvals::list_approvals))
         .route("/approvals/:id", post(approvals::resolve_approval))
         .route("/workspace/tree", get(workspace::tree))

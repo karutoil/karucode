@@ -2,6 +2,7 @@ import { apiRequest, withQuery } from './client';
 import type {
   ApprovalDecision,
   ApprovalRecord,
+  CatalogResponse,
   Config,
   ConfigPatch,
   GitDiff,
@@ -9,6 +10,9 @@ import type {
   Health,
   McpServer,
   PluginDiagnostics,
+  Project,
+  ProjectListResponse,
+  ProviderTestRequest,
   ProviderTestResult,
   Session,
   SessionDetail,
@@ -38,28 +42,101 @@ export function patchConfig(patch: ConfigPatch, options: CallOptions = {}): Prom
   return apiRequest<Config>('/api/config', { ...options, method: 'PATCH', body: patch });
 }
 
-export function testProvider(options: CallOptions = {}): Promise<ProviderTestResult> {
+export function testProvider(
+  body: ProviderTestRequest = {},
+  options: CallOptions = {},
+): Promise<ProviderTestResult> {
   return apiRequest<ProviderTestResult>('/api/provider/test', {
     ...options,
     method: 'POST',
-    body: {},
+    body,
   });
+}
+
+/** models.dev metadata: provider list, or one provider's models. */
+export function getModelsCatalog(
+  params: { provider?: string; refresh?: boolean } = {},
+  options: CallOptions = {},
+): Promise<CatalogResponse> {
+  return apiRequest<CatalogResponse>(
+    withQuery('/api/models/catalog', {
+      provider: params.provider,
+      refresh: params.refresh ? 'true' : undefined,
+    }),
+    options,
+  );
 }
 
 export function getStats(options: CallOptions = {}): Promise<Stats> {
   return apiRequest<Stats>('/api/stats', options);
 }
 
-export function listSessions(options: CallOptions = {}): Promise<SessionSummary[]> {
-  return apiRequest<{ sessions: SessionSummary[] }>('/api/sessions', options).then((r) => r.sessions);
+export function listSessions(
+  projectId?: string | null,
+  options: CallOptions = {},
+): Promise<SessionSummary[]> {
+  return apiRequest<{ sessions: SessionSummary[] }>(
+    withQuery('/api/sessions', { project: projectId ?? undefined }),
+    options,
+  ).then((r) => r.sessions);
 }
 
-export function createSession(title?: string, options: CallOptions = {}): Promise<Session> {
+export function createSession(
+  title?: string,
+  projectId?: string | null,
+  options: CallOptions = {},
+): Promise<Session> {
+  const body: Record<string, string> = {};
+  if (title) body.title = title;
+  if (projectId) body.project = projectId;
   return apiRequest<Session>('/api/sessions', {
     ...options,
     method: 'POST',
-    body: title ? { title } : {},
+    body,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Projects
+// ---------------------------------------------------------------------------
+
+export function listProjects(options: CallOptions = {}): Promise<ProjectListResponse> {
+  return apiRequest<ProjectListResponse>('/api/projects', options);
+}
+
+export function createProject(
+  path: string,
+  name?: string,
+  options: CallOptions = {},
+): Promise<Project> {
+  return apiRequest<{ project: Project }>('/api/projects', {
+    ...options,
+    method: 'POST',
+    body: name ? { path, name } : { path },
+  }).then((r) => r.project);
+}
+
+export function renameProject(
+  id: string,
+  name: string,
+  options: CallOptions = {},
+): Promise<Project> {
+  return apiRequest<{ project: Project }>(`/api/projects/${encodeURIComponent(id)}`, {
+    ...options,
+    method: 'PATCH',
+    body: { name },
+  }).then((r) => r.project);
+}
+
+export function deleteProject(
+  id: string,
+  force = false,
+  options: CallOptions = {},
+): Promise<{ deleted: boolean; deleted_sessions: number }> {
+  return apiRequest<{ deleted: boolean; deleted_sessions: number }>(
+    withQuery(`/api/projects/${encodeURIComponent(id)}`, { force: force ? 'true' : undefined }),
+    { ...options, method: 'DELETE' },
+  );
 }
 
 export function getSession(id: string, options: CallOptions = {}): Promise<SessionDetail> {
@@ -120,27 +197,50 @@ export function resolveApproval(
 export function getWorkspaceTree(
   path = '.',
   depth = 1,
+  project?: string | null,
   options: CallOptions = {},
 ): Promise<WorkspaceTree> {
-  return apiRequest<WorkspaceTree>(withQuery('/api/workspace/tree', { path, depth }), options);
+  return apiRequest<WorkspaceTree>(
+    withQuery('/api/workspace/tree', { path, depth, project: project ?? undefined }),
+    options,
+  );
 }
 
-export function getWorkspaceFile(path: string, options: CallOptions = {}): Promise<WorkspaceFile> {
-  return apiRequest<WorkspaceFile>(withQuery('/api/workspace/file', { path }), options);
+export function getWorkspaceFile(
+  path: string,
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<WorkspaceFile> {
+  return apiRequest<WorkspaceFile>(
+    withQuery('/api/workspace/file', { path, project: project ?? undefined }),
+    options,
+  );
 }
 
-export function getGitStatus(options: CallOptions = {}): Promise<GitStatus> {
-  return apiRequest<GitStatus>('/api/git/status', options);
+export function getGitStatus(
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<GitStatus> {
+  return apiRequest<GitStatus>(
+    withQuery('/api/git/status', { project: project ?? undefined }),
+    options,
+  );
 }
 
 export function getGitDiff(
   path: string,
   staged: boolean,
   base?: string,
+  project?: string | null,
   options: CallOptions = {},
 ): Promise<GitDiff> {
   return apiRequest<GitDiff>(
-    withQuery('/api/git/diff', { path, staged, base: base ?? undefined }),
+    withQuery('/api/git/diff', {
+      path,
+      staged,
+      base: base ?? undefined,
+      project: project ?? undefined,
+    }),
     options,
   );
 }

@@ -30,7 +30,7 @@ pub async fn tree(
     let depth = query_usize(&query, "depth")?
         .unwrap_or(DEFAULT_DEPTH)
         .clamp(DEFAULT_DEPTH, MAX_DEPTH);
-    let workspace = state.workspace().clone();
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
 
     let value = tokio::task::spawn_blocking(move || tree_blocking(&workspace, &path, depth))
         .await

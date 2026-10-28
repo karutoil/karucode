@@ -650,6 +650,7 @@ export function applyEventToSessions(sessions: SessionSummary[], event: Karucode
           id: event.session_id,
           title: event.title,
           workspace: '',
+          project_id: null,
           created_at: event.ts_ms,
           updated_at: event.ts_ms,
           message_count: 0,

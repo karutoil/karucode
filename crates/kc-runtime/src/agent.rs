@@ -22,6 +22,7 @@ use kc_core::error::{Error, Result};
 use kc_core::events::Event;
 use kc_core::ids::{AgentId, RunId, SessionId};
 use kc_core::message::{Message, ToolCall};
+use kc_core::paths::Workspace;
 use kc_core::provider::{ChatRequest, ProviderChunk, ProviderStream};
 use kc_core::store::{NewMessage, RunStatus};
 use kc_core::tool::{
@@ -60,6 +61,10 @@ pub(crate) struct LoopSpec {
     pub approval_scope: ApprovalScope,
     pub tools: Arc<ToolRegistry>,
     pub cancel: CancellationToken,
+    /// Directory every file/shell tool in this loop is confined to. Inherited
+    /// by subagents from the tool context, so a child never escapes its parent's
+    /// project.
+    pub workspace: Arc<Workspace>,
     /// Conversation without the system message; the system prompt is rebuilt
     /// each iteration from the current tool set and hook contributions.
     pub history: Vec<Message>,
@@ -120,10 +125,16 @@ pub(crate) async fn start_run(
     let inner = Arc::clone(runtime.shared());
     let store = inner.deps.store.clone();
 
-    store
+    let session = store
         .get_session(session_id)
         .await?
         .ok_or_else(|| Error::NotFound(format!("session {session_id} not found")))?;
+    // The project decides the workspace before anything is written, so a run can
+    // never start in the wrong directory.
+    let workspace = inner
+        .deps
+        .workspaces
+        .workspace_for(session.project_id.as_deref())?;
 
     let model = inner.deps.settings.model().await;
     let run_id = RunId::new();
@@ -181,6 +192,7 @@ pub(crate) async fn start_run(
             prompt,
             history,
             model,
+            workspace,
         ))
         .catch_unwind()
         .await;
@@ -278,6 +290,7 @@ pub(crate) async fn run_top_level(
     prompt: String,
     history: Vec<Message>,
     model: ModelConfig,
+    workspace: Arc<Workspace>,
 ) -> Result<()> {
     let settings = inner.deps.settings.clone();
     let limits = settings.limits().await;
@@ -322,6 +335,7 @@ pub(crate) async fn run_top_level(
         approval_scope,
         tools,
         cancel: state.cancel.clone(),
+        workspace,
         history,
         run_state: Some(Arc::clone(&state)),
     };
@@ -460,14 +474,11 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
         let extra = inner
             .deps
             .hooks
-            .before_prompt(
-                &spec.session_id.0,
-                &inner.deps.workspace.root().to_string_lossy(),
-            )
+            .before_prompt(&spec.session_id.0, &spec.workspace.root().to_string_lossy())
             .await;
         let tool_specs = spec.tools.specs();
         let system = kc_core::prompt::system_prompt(
-            &inner.deps.workspace.root().to_string_lossy(),
+            &spec.workspace.root().to_string_lossy(),
             &tool_specs,
             &spec.approval_mode,
             &spec.limits,
@@ -889,7 +900,7 @@ async fn run_one_tool(
                 denied
             } else {
                 let tool_ctx = ToolCtx {
-                    workspace: Arc::clone(&inner.deps.workspace),
+                    workspace: Arc::clone(&spec.workspace),
                     cancel: spec.cancel.clone(),
                     approvals: kc_core::tool::ApprovalHandle::new(
                         Arc::clone(&spec.gate),

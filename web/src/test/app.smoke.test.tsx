@@ -15,6 +15,7 @@ const healthFixture: Health = {
   version: '0.1.0',
   uptime_secs: 12,
   workspace: '/home/me/project',
+  projects: [],
   auth_required: false,
   provider_configured: true,
   db: 'ok',
@@ -38,6 +39,21 @@ function installFetch() {
     if (url.startsWith('/api/events')) return openEventStream();
     if (url === '/api/health') return jsonResponse(healthFixture);
     if (url === '/api/config') return jsonResponse(configFixture);
+    if (url === '/api/projects')
+      return jsonResponse({
+        projects: [
+          {
+            id: 'p_one',
+            name: 'project',
+            path: '/home/me/project',
+            created_at: 1,
+            updated_at: 1,
+            session_count: 1,
+          },
+        ],
+        workspace: '/home/me/project',
+      });
+    if (url.startsWith('/api/sessions?')) return jsonResponse({ sessions: [summaryFixture] });
     if (url === '/api/sessions') return jsonResponse({ sessions: [summaryFixture] });
     if (url === '/api/sessions/s_ab12') return jsonResponse(detailFixture);
     if (url === '/api/plugins') return jsonResponse({ plugins: [] });

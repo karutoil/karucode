@@ -62,8 +62,14 @@ const GIT_HARDENING_ARGS: [&str; 6] = [
     "core.pager=cat",
 ];
 
-pub async fn status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    let root = state.workspace().root().to_path_buf();
+pub async fn status(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+) -> ApiResult<Json<Value>> {
+    let root = state
+        .workspace_for_project(query_str(&query, "project"))?
+        .root()
+        .to_path_buf();
     let outcome = run_git(&root, &["status", "--porcelain=v1", "-b"]).await;
 
     match outcome {
@@ -121,7 +127,7 @@ pub async fn diff(
         validate_ref(base)?;
     }
     let requested_path = query_str(&query, "path");
-    let workspace = state.workspace().clone();
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
 
     let mut args: Vec<String> = vec!["diff".into(), "--no-ext-diff".into()];
     if staged {

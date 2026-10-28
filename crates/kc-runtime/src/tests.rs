@@ -1883,7 +1883,7 @@ async fn expiring_one_subagent_scope_keeps_a_sibling_approval_pending() {
     inner
         .deps
         .store
-        .create_session("s_scope", "scoped", "/w")
+        .create_session("s_scope", "scoped", "/w", None)
         .await
         .expect("session");
 
@@ -2280,7 +2280,7 @@ async fn tool_outcomes_and_specs_are_reachable_without_a_store() {
         tools: Arc::new(ToolRegistry::new()),
         settings: Arc::new(FakeSettings::default()),
         hooks: Arc::new(NoHooks),
-        workspace,
+        workspaces: Arc::new(crate::SingleWorkspace::new(workspace)),
     });
     assert_eq!(runtime.active_runs().len(), 0);
     let mut registry = ToolRegistry::new();

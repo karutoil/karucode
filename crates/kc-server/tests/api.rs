@@ -215,6 +215,179 @@ async fn session_lifecycle_events_reach_the_stream() {
 }
 
 #[tokio::test]
+async fn projects_scope_sessions_workspace_and_runs() {
+    let h = HarnessBuilder::new(vec![
+        tool_call(
+            "write_file",
+            &json!({ "path": "made-by-project-run.txt", "content": "hello from two" }).to_string(),
+        ),
+        text("done"),
+    ])
+    .build()
+    .await;
+
+    // The bootstrap-shaped harness seeds one project for its workspace.
+    let listed = h.get("/api/projects").await;
+    assert_eq!(listed.status, StatusCode::OK);
+    let body = listed.json();
+    let projects = body["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1, "one default project: {body}");
+    let default_id = projects[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(projects[0]["session_count"], 0);
+
+    // A second project, a sibling of the default workspace.
+    let second_dir = h.workspace_path().parent().unwrap().join("project-two");
+    std::fs::create_dir_all(&second_dir).unwrap();
+    let second_path = second_dir
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let created = h
+        .post(
+            "/api/projects",
+            json!({ "name": "Second", "path": second_path }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.text());
+    let project = created.json()["project"].clone();
+    let second_id = project["id"].as_str().unwrap().to_string();
+    assert_eq!(project["name"], "Second");
+    assert_eq!(project["path"], second_path);
+
+    // Path validation: duplicates, relative paths and missing directories are
+    // rejected with a message naming the problem, never silently created.
+    let duplicate = h
+        .post("/api/projects", json!({ "path": second_path }))
+        .await;
+    assert_eq!(duplicate.status, StatusCode::BAD_REQUEST);
+    assert!(duplicate.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("already the project"));
+    let relative = h
+        .post("/api/projects", json!({ "path": "relative/dir" }))
+        .await;
+    assert_eq!(relative.status, StatusCode::BAD_REQUEST);
+    assert!(relative.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("absolute"));
+    let missing = h
+        .post("/api/projects", json!({ "path": "/definitely/not/here" }))
+        .await;
+    assert_eq!(missing.status, StatusCode::BAD_REQUEST);
+
+    // A session in the second project records that directory.
+    let session = h
+        .post(
+            "/api/sessions",
+            json!({ "title": "Two", "project": second_id }),
+        )
+        .await;
+    assert_eq!(session.status, StatusCode::OK, "{}", session.text());
+    let session = session.json();
+    let session_id = session["id"].as_str().unwrap().to_string();
+    assert_eq!(session["project_id"], second_id);
+    assert_eq!(session["workspace"], second_path);
+
+    // An unknown project is a 404 rather than a silently defaulted session.
+    let unknown = h
+        .post("/api/sessions", json!({ "project": "p_nope" }))
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+
+    // Session listing can be scoped to one project.
+    let scoped = h.get(&format!("/api/sessions?project={second_id}")).await;
+    assert_eq!(scoped.status, StatusCode::OK);
+    assert_eq!(scoped.json()["sessions"].as_array().unwrap().len(), 1);
+    let unknown_filter = h.get("/api/sessions?project=p_nope").await;
+    assert_eq!(unknown_filter.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        h.get("/api/projects").await.json()["projects"][1]["session_count"],
+        1
+    );
+
+    // Auto approvals so the tool call runs without an approval round trip.
+    let patched = h
+        .patch("/api/config", json!({ "approvals": { "mode": "auto" } }))
+        .await;
+    assert_eq!(patched.status, StatusCode::OK);
+
+    let (status, _, stream) = h.open_events(&format!("?session={session_id}"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let started = h
+        .post(
+            &format!("/api/sessions/{session_id}/messages"),
+            json!({ "content": "write the file" }),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::ACCEPTED);
+    let events = collect_events_until(stream, "run_finished").await;
+    let finished = events
+        .iter()
+        .find(|event| event["type"] == "run_finished")
+        .expect("run finished");
+    assert_eq!(finished["status"], "completed", "events: {events:?}");
+
+    // The tool ran inside the project's directory, not the default workspace.
+    let written = second_dir.join("made-by-project-run.txt");
+    assert!(written.exists(), "the run must write into its project");
+    assert!(
+        !h.workspace_path().join("made-by-project-run.txt").exists(),
+        "the run must not write into the default workspace"
+    );
+
+    // Workspace and git endpoints follow ?project=.
+    let tree = h
+        .get(&format!("/api/workspace/tree?path=.&project={second_id}"))
+        .await;
+    assert_eq!(tree.status, StatusCode::OK);
+    let tree_body = tree.json();
+    let names: Vec<&str> = tree_body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"made-by-project-run.txt"), "{names:?}");
+
+    let tree_default = h
+        .get(&format!("/api/workspace/tree?path=.&project={default_id}"))
+        .await;
+    assert_eq!(tree_default.status, StatusCode::OK);
+    let tree_default_body = tree_default.json();
+    let names: Vec<&str> = tree_default_body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"made-by-project-run.txt"), "{names:?}");
+
+    // Deleting a project with sessions needs force=, and says so.
+    let refused = h.delete(&format!("/api/projects/{second_id}")).await;
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+    assert!(refused.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("force=true"));
+    let deleted = h
+        .delete(&format!("/api/projects/{second_id}?force=true"))
+        .await;
+    assert_eq!(deleted.status, StatusCode::OK);
+    assert_eq!(deleted.json()["deleted_sessions"], 1);
+    assert!(h.get(&format!("/api/sessions/{session_id}")).await.status == StatusCode::NOT_FOUND);
+    assert_eq!(
+        h.get("/api/projects").await.json()["projects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn a_message_streams_text_and_finishes() {
     let h = HarnessBuilder::new(vec![Script::Text(vec![
         "Hello".to_string(),
@@ -555,6 +728,179 @@ async fn bearer_auth_is_enforced_and_query_tokens_are_sse_only() {
         .await;
     assert_eq!(header_status, StatusCode::OK);
     drop(header_body);
+}
+
+#[tokio::test]
+async fn provider_profiles_can_be_saved_selected_and_probed() {
+    let h = HarnessBuilder::new(Vec::new())
+        .models(ModelsMode::Ok(vec!["model-a".into(), "model-b".into()]))
+        .build()
+        .await;
+    let secret = "sk-profile-secret-123";
+
+    let created = h.post("/api/config", json!({})).await;
+    // POST is not the config verb; the patch below is the real path. (Keeps the
+    // test honest about the documented method.)
+    assert_eq!(created.status, StatusCode::METHOD_NOT_ALLOWED);
+
+    let response = h
+        .patch(
+            "/api/config",
+            json!({
+                "providers": { "upsert": [{
+                    "id": "gateway",
+                    "name": "My gateway",
+                    "base_url": "https://gw.example/v1",
+                    "api_key": secret,
+                    "models": [
+                        {"id": "model-a", "name": "Model A", "context_window": 128000, "tool_call": true},
+                        {"id": "model-b"}
+                    ]
+                }] },
+                "active": { "provider": "gateway", "model": "model-b" }
+            }),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.text());
+    let text = response.text();
+    assert!(!text.contains(secret), "the key leaked into /api/config");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    let profile = body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "gateway")
+        .expect("saved profile");
+    assert_eq!(profile["name"], "My gateway");
+    assert_eq!(profile["api_key_set"], true);
+    assert_eq!(profile["models"][0]["context_window"], 128000);
+    assert_eq!(body["active"]["provider"], "gateway");
+    assert_eq!(body["active"]["model"], "model-b");
+    // The flat view follows the active profile.
+    assert_eq!(body["model"]["base_url"], "https://gw.example/v1");
+    assert_eq!(body["model"]["model"], "model-b");
+    assert_eq!(body["model"]["api_key_set"], true);
+
+    // Probing a saved profile by id and a draft endpoint both work.
+    let probe = h
+        .post("/api/provider/test", json!({ "profile": "gateway" }))
+        .await;
+    assert_eq!(probe.status, StatusCode::OK);
+    assert_eq!(probe.json()["ok"], true);
+    assert_eq!(probe.json()["models"], json!(["model-a", "model-b"]));
+
+    let draft = h
+        .post(
+            "/api/provider/test",
+            json!({ "base_url": "http://127.0.0.1:9/v1", "model": "draft-model" }),
+        )
+        .await;
+    assert_eq!(draft.status, StatusCode::OK);
+    assert_eq!(draft.json()["ok"], true, "the scripted factory accepts it");
+
+    let bad_url = h
+        .post(
+            "/api/provider/test",
+            json!({ "base_url": "ftp://nope", "model": "m" }),
+        )
+        .await;
+    assert_eq!(bad_url.status, StatusCode::OK);
+    assert_eq!(bad_url.json()["ok"], false);
+    assert!(bad_url.json()["error"]
+        .as_str()
+        .unwrap()
+        .contains("http://"));
+
+    let missing = h
+        .post("/api/provider/test", json!({ "profile": "nope" }))
+        .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    assert_eq!(missing.error_code(), "not_found");
+
+    // An explicit but unknown model is rejected, not silently rewritten.
+    let bad_selection = h
+        .patch(
+            "/api/config",
+            json!({ "active": { "provider": "gateway", "model": "not-in-list" } }),
+        )
+        .await;
+    assert_eq!(bad_selection.status, StatusCode::BAD_REQUEST);
+    assert!(bad_selection.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("active.model"));
+
+    // Deleting the active profile re-selects a remaining one.
+    let deleted = h
+        .patch(
+            "/api/config",
+            json!({ "providers": { "delete": ["gateway"] } }),
+        )
+        .await;
+    assert_eq!(deleted.status, StatusCode::OK);
+    let body = deleted.json();
+    assert!(!body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["id"] == "gateway"));
+    assert_ne!(body["active"]["provider"], "gateway");
+
+    // The selection and profiles survive a restart (persisted rows).
+    let config = h.get("/api/config").await.json();
+    assert!(config["providers"].as_array().unwrap().len() >= 1);
+}
+
+#[tokio::test]
+async fn models_catalog_lists_providers_and_filters_one() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let catalog = kc_server::catalog::parse_catalog(&json!({
+        "openai": {
+            "id": "openai", "name": "OpenAI",
+            "models": {
+                "gpt-a": {
+                    "id": "gpt-a", "name": "GPT A", "tool_call": true,
+                    "limit": {"context": 128000, "output": 16384},
+                    "cost": {"input": 0.25, "output": 1.5}
+                }
+            }
+        },
+        "local": {"id": "local", "name": "Local", "models": {"tiny": {"id": "tiny"}}}
+    }))
+    .unwrap();
+    h.state.catalog().seed(catalog);
+
+    let list = h.get("/api/models/catalog").await;
+    assert_eq!(list.status, StatusCode::OK);
+    let body = list.json();
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["stale"], false);
+    let ids: Vec<&str> = body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"openai") && ids.contains(&"local"));
+    assert!(body["models"].as_array().unwrap().is_empty());
+
+    let one = h.get("/api/models/catalog?provider=openai").await;
+    assert_eq!(one.status, StatusCode::OK);
+    let body = one.json();
+    assert_eq!(body["provider"]["name"], "OpenAI");
+    assert_eq!(body["models"].as_array().unwrap().len(), 1);
+    let model = &body["models"][0];
+    assert_eq!(model["context_window"], 128000);
+    assert_eq!(model["max_output_tokens"], 16384);
+    assert_eq!(model["tool_call"], true);
+    assert_eq!(model["cost_input"], 0.25);
+
+    let unknown = h.get("/api/models/catalog?provider=nope").await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown.error_code(), "not_found");
+
+    let bad_query = h.get("/api/models/catalog?refresh=maybe").await;
+    assert_eq!(bad_query.status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -1471,9 +1817,12 @@ async fn a_corrupt_persisted_row_cannot_prevent_startup() {
     // (The skip is logged at WARN with the key; `apply_rows_resilient`'s unit
     // test covers the policy itself, this covers the startup path.)
 
-    // The operational (file/env) layer is still validated loudly.
+    // The operational (file/env) layer is still validated loudly. That layer
+    // feeds the provider profile, so break the profile the way a bad
+    // KARUCODE_BASE_URL would.
     let mut broken = restarted.snapshot();
-    broken.model.base_url = "ftp://still-not-an-url".into();
+    broken.providers[0].base_url = "ftp://still-not-an-url".into();
+    broken.normalize_providers();
     assert!(
         kc_server::SettingsHandle::new(broken, store).await.is_err(),
         "a bad file/env value must abort startup"

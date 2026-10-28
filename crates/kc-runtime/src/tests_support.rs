@@ -20,7 +20,7 @@ use kc_core::paths::Workspace;
 use kc_core::provider::{ChatRequest, Provider, ProviderChunk, ProviderFactory, ProviderStream};
 use kc_core::settings::Settings;
 use kc_core::store::{
-    AgentRecord, ApprovalRecord, ClaimRecord, NewMessage, RunRecord, RunStatus, Session,
+    AgentRecord, ApprovalRecord, ClaimRecord, NewMessage, Project, RunRecord, RunStatus, Session,
     SessionSummary, Store, StoredMessage,
 };
 use kc_core::tool::{
@@ -72,6 +72,7 @@ fn claim_paths_overlap(a: &str, b: &str) -> bool {
 #[derive(Default)]
 struct Db {
     sessions: Vec<Session>,
+    projects: Vec<Project>,
     messages: Vec<StoredMessage>,
     next_message_id: i64,
     runs: Vec<RunRecord>,
@@ -154,12 +155,19 @@ impl FakeStore {
 
 #[async_trait]
 impl Store for FakeStore {
-    async fn create_session(&self, id: &str, title: &str, workspace: &str) -> Result<Session> {
+    async fn create_session(
+        &self,
+        id: &str,
+        title: &str,
+        workspace: &str,
+        project_id: Option<&str>,
+    ) -> Result<Session> {
         let now = now_ms();
         let session = Session {
             id: id.to_string(),
             title: title.to_string(),
             workspace: workspace.to_string(),
+            project_id: project_id.map(str::to_string),
             created_at: now,
             updated_at: now,
         };
@@ -176,12 +184,22 @@ impl Store for FakeStore {
                 id: s.id.clone(),
                 title: s.title.clone(),
                 workspace: s.workspace.clone(),
+                project_id: s.project_id.clone(),
                 created_at: s.created_at,
                 updated_at: s.updated_at,
                 message_count: 0,
                 last_run_status: None,
                 running: false,
             })
+            .collect())
+    }
+
+    async fn list_sessions_for_project(&self, project_id: &str) -> Result<Vec<SessionSummary>> {
+        Ok(self
+            .list_sessions()
+            .await?
+            .into_iter()
+            .filter(|s| s.project_id.as_deref() == Some(project_id))
             .collect())
     }
 
@@ -211,6 +229,86 @@ impl Store for FakeStore {
     async fn touch_session(&self, id: &str) -> Result<()> {
         if let Some(s) = self.db().sessions.iter_mut().find(|s| s.id == id) {
             s.updated_at = now_ms();
+        }
+        Ok(())
+    }
+
+    async fn assign_session_project(&self, session_id: &str, project_id: &str) -> Result<()> {
+        let mut db = self.db();
+        let path = db
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.path.clone())
+            .ok_or_else(|| Error::NotFound(format!("project {project_id}")))?;
+        match db.sessions.iter_mut().find(|s| s.id == session_id) {
+            Some(session) => {
+                session.project_id = Some(project_id.to_string());
+                session.workspace = path;
+                session.updated_at = now_ms();
+                Ok(())
+            }
+            None => Err(Error::NotFound(format!("session {session_id}"))),
+        }
+    }
+
+    async fn create_project(&self, id: &str, name: &str, path: &str) -> Result<Project> {
+        let mut db = self.db();
+        if db.projects.iter().any(|p| p.path == path) {
+            return Err(Error::Store(format!("a project already uses {path}")));
+        }
+        let now = now_ms();
+        let project = Project {
+            id: id.to_string(),
+            name: name.to_string(),
+            path: path.to_string(),
+            created_at: now,
+            updated_at: now,
+            session_count: 0,
+        };
+        db.projects.push(project.clone());
+        Ok(project)
+    }
+
+    async fn list_projects(&self) -> Result<Vec<Project>> {
+        let db = self.db();
+        Ok(db
+            .projects
+            .iter()
+            .map(|project| Project {
+                session_count: db
+                    .sessions
+                    .iter()
+                    .filter(|s| s.project_id.as_deref() == Some(project.id.as_str()))
+                    .count() as i64,
+                ..project.clone()
+            })
+            .collect())
+    }
+
+    async fn get_project(&self, id: &str) -> Result<Option<Project>> {
+        Ok(self.db().projects.iter().find(|p| p.id == id).cloned())
+    }
+
+    async fn rename_project(&self, id: &str, name: &str) -> Result<()> {
+        let mut db = self.db();
+        match db.projects.iter_mut().find(|p| p.id == id) {
+            Some(project) => {
+                project.name = name.to_string();
+                project.updated_at = now_ms();
+                Ok(())
+            }
+            None => Err(Error::NotFound(format!("project {id}"))),
+        }
+    }
+
+    async fn delete_project(&self, id: &str) -> Result<()> {
+        let mut db = self.db();
+        db.projects.retain(|p| p.id != id);
+        for session in db.sessions.iter_mut() {
+            if session.project_id.as_deref() == Some(id) {
+                session.project_id = None;
+            }
         }
         Ok(())
     }
@@ -1013,12 +1111,12 @@ impl HarnessBuilder {
             tools: Arc::new(registry),
             settings: settings.clone(),
             hooks: Arc::new(NoHooks),
-            workspace,
+            workspaces: Arc::new(crate::SingleWorkspace::new(workspace)),
         });
         let events = runtime.subscribe();
         let session_id = format!("s_{}", uuid::Uuid::new_v4().simple());
         store
-            .create_session(&session_id, "test session", &dir.to_string_lossy())
+            .create_session(&session_id, "test session", &dir.to_string_lossy(), None)
             .await
             .expect("create session");
 
@@ -1123,7 +1221,7 @@ pub(crate) fn test_inner_with_settings(settings: FakeSettings) -> Arc<RuntimeInn
             tools: Arc::new(ToolRegistry::new()),
             settings: Arc::new(settings),
             hooks: Arc::new(NoHooks),
-            workspace,
+            workspaces: Arc::new(crate::SingleWorkspace::new(workspace)),
         },
         events: broadcast::channel(64).0,
         tools: RwLock::new(Arc::new(ToolRegistry::new())),
