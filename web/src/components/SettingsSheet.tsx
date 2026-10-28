@@ -4,29 +4,30 @@ import { ApiError, toErrorMessage } from '../api/client';
 import { listMcpServers, listPlugins } from '../api/endpoints';
 import type {
   ApprovalMode,
+  CatalogModel,
+  CatalogProviderSummary,
   Config,
   ConfigPatch,
   Limits,
   McpServer,
+  ModelEntry,
   PluginDiagnostics,
+  ProviderPatch,
+  ProviderProfile,
   ProviderTestResult,
 } from '../api/types';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { Dialog } from './Dialog';
 import { Toggle } from './Toggle';
-import { AlertIcon, CheckIcon, RefreshIcon } from './icons';
+import { AlertIcon, CheckIcon, PlusIcon, RefreshIcon } from './icons';
 
 interface FormState {
-  provider: string;
-  baseUrl: string;
-  model: string;
   temperature: string;
   maxTokens: string;
   topP: string;
   requestTimeout: string;
   parallelToolCalls: boolean;
-  apiKey: string;
   approvalMode: ApprovalMode;
   allowCommands: string[];
   autoApprovePaths: string[];
@@ -77,15 +78,11 @@ const APPROVAL_MODES: { value: ApprovalMode; label: string; description: string 
 
 function formFromConfig(config: Config): FormState {
   return {
-    provider: config.model.provider,
-    baseUrl: config.model.base_url,
-    model: config.model.model,
     temperature: String(config.model.temperature),
     maxTokens: config.model.max_tokens === null ? '' : String(config.model.max_tokens),
     topP: config.model.top_p === null ? '' : String(config.model.top_p),
     requestTimeout: String(config.model.request_timeout_secs),
     parallelToolCalls: config.model.parallel_tool_calls,
-    apiKey: '',
     approvalMode: config.approvals.mode,
     allowCommands: [...config.approvals.allow_commands],
     autoApprovePaths: [...config.approvals.auto_approve_paths],
@@ -115,10 +112,6 @@ function integerAtLeast(value: string, min: number, max: number): boolean {
 
 function validate(form: FormState): Record<string, string> {
   const errors: Record<string, string> = {};
-  if (form.provider.trim() === '') errors.provider = 'Provider id is required.';
-  if (form.baseUrl.trim() === '') errors.baseUrl = 'Base URL is required.';
-  else if (!/^https?:\/\//i.test(form.baseUrl.trim())) errors.baseUrl = 'Use an http:// or https:// URL.';
-  if (form.model.trim() === '') errors.model = 'Model name is required.';
 
   const temperature = numberValue(form.temperature);
   if (temperature === null || temperature < 0 || temperature > 2) {
@@ -174,11 +167,10 @@ function buildPatch(form: FormState): ConfigPatch {
   for (const field of LIMIT_FIELDS) {
     limits[field.key] = Number(form.limits[field.key]);
   }
-  const patch: ConfigPatch = {
+  return {
+    // Connection details live on provider profiles now; only the sampling
+    // tunables (which are install-wide) stay in the flat model section.
     model: {
-      provider: form.provider.trim(),
-      base_url: form.baseUrl.trim(),
-      model: form.model.trim(),
       temperature: Number(form.temperature),
       max_tokens: form.maxTokens.trim() === '' ? null : Number(form.maxTokens),
       top_p: form.topP.trim() === '' ? null : Number(form.topP),
@@ -200,10 +192,6 @@ function buildPatch(form: FormState): ConfigPatch {
       timeout_secs: Number(form.subagentTimeout),
     },
   };
-  if (form.apiKey.trim() !== '') {
-    patch.model = { ...patch.model, api_key: form.apiKey.trim() };
-  }
-  return patch;
 }
 
 function Field({
@@ -321,9 +309,1137 @@ function statusTone(status: string): string {
   return 'muted';
 }
 
+// ---------------------------------------------------------------------------
+// Provider profiles
+// ---------------------------------------------------------------------------
+
+const DEFAULT_PROVIDER_ID = 'openai_compatible';
+/** Mirrors the server's bound on a curated model list (kc-server validate_profiles). */
+const MAX_MODELS_PER_PROFILE = 64;
+
+interface TestState {
+  running: boolean;
+  result: ProviderTestResult | null;
+  error: string | null;
+}
+
+interface AddProviderDraft {
+  id: string;
+  name: string;
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+}
+
+function emptyDraft(): AddProviderDraft {
+  return { id: '', name: '', provider: '', baseUrl: '', apiKey: '' };
+}
+
+function formatTokenCount(value: number | null | undefined): string | null {
+  if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) return null;
+  if (value >= 1_000_000) {
+    const millions = value / 1_000_000;
+    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`;
+  }
+  if (value >= 1_000) {
+    const thousands = value / 1_000;
+    return `${Number.isInteger(thousands) ? thousands : thousands.toFixed(1)}k`;
+  }
+  return String(value);
+}
+
+function formatCost(value: number | null | undefined): string | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  const digits = value > 0 && value < 0.1 ? 3 : 2;
+  return `$${value.toFixed(digits)}`;
+}
+
+function latencyLabel(ms: number): string {
+  return ms <= 0 ? '<1 ms' : `${ms} ms`;
+}
+
+function slugifyProfileId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^[^a-z0-9]+/, '')
+    .replace(/[-._]+$/, '')
+    .slice(0, 40);
+}
+
+/** Stable slug for a new profile: the name when usable, else the endpoint host. */
+function deriveProfileId(name: string, baseUrl: string, taken: string[]): string {
+  let base = slugifyProfileId(name);
+  if (base === '') {
+    try {
+      base = slugifyProfileId(new URL(baseUrl).hostname.replace(/\./g, '-'));
+    } catch {
+      base = '';
+    }
+  }
+  if (base === '') base = 'provider';
+  let candidate = base;
+  let suffix = 2;
+  while (taken.includes(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate.slice(0, 64);
+}
+
+function baseUrlError(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed === '') return 'Base URL is required.';
+  if (!/^https?:\/\//i.test(trimmed)) return 'Use an http:// or https:// URL.';
+  return null;
+}
+
+function providerIdError(value: string, taken: string[]): string | null {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)) {
+    return 'Use letters, digits, dot, underscore or dash, starting with a letter or digit.';
+  }
+  if (value.length > 64) return 'Keep the id to 64 characters or fewer.';
+  if (taken.includes(value)) return 'That id is already in use.';
+  return null;
+}
+
+function modelMetaParts(entry: ModelEntry): string[] {
+  const parts: string[] = [];
+  const context = formatTokenCount(entry.context_window);
+  if (context) parts.push(`ctx ${context}`);
+  const output = formatTokenCount(entry.max_output_tokens);
+  if (output) parts.push(`out ${output}`);
+  const input = formatCost(entry.cost_input);
+  const outCost = formatCost(entry.cost_output);
+  if (input || outCost) {
+    parts.push(`${input ?? '?'} in / ${outCost ?? '?'} out per M`);
+  }
+  return parts;
+}
+
+function catalogModelMeta(model: CatalogModel): string {
+  return modelMetaParts({
+    id: model.id,
+    context_window: model.context_window ?? null,
+    max_output_tokens: model.max_output_tokens ?? null,
+    cost_input: model.cost_input ?? null,
+    cost_output: model.cost_output ?? null,
+  }).join(' · ');
+}
+
+interface CatalogPickerProps {
+  profile: ProviderProfile;
+  existingIds: string[];
+  onAdd: (entries: ModelEntry[]) => Promise<boolean>;
+  onClose: () => void;
+}
+
+/** Two-step models.dev browser: provider list, then a searchable model checklist. */
+function CatalogPickerDialog({ profile, existingIds, onAdd, onClose }: CatalogPickerProps): JSX.Element {
+  const [stage, setStage] = useState<'providers' | 'models'>('providers');
+  const [providers, setProviders] = useState<CatalogProviderSummary[]>([]);
+  const [provider, setProvider] = useState<CatalogProviderSummary | null>(null);
+  const [models, setModels] = useState<CatalogModel[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  const loadProviders = async (refresh: boolean): Promise<void> => {
+    setLoading(true);
+    setError(null);
+    setNotice(null);
+    const response = await actions.loadCatalog(undefined, refresh);
+    setLoading(false);
+    if (!response) {
+      setError('Could not reach the models.dev catalog. You can still add model ids by hand.');
+      return;
+    }
+    setProviders(response.providers);
+    if (!response.ok) {
+      setError(response.error ?? 'The models.dev catalog is unavailable. You can still add model ids by hand.');
+    } else {
+      setNotice(response.error ? `Showing a cached catalog: ${response.error}` : response.stale ? 'Showing a cached catalog.' : null);
+    }
+  };
+
+  useEffect(() => {
+    void loadProviders(false);
+    // The picker is mounted fresh per profile; load once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const chooseProvider = async (summary: CatalogProviderSummary): Promise<void> => {
+    setStage('models');
+    setProvider(summary);
+    setModels([]);
+    setSelected([]);
+    setQuery('');
+    setLoading(true);
+    setError(null);
+    setNotice(null);
+    const response = await actions.loadCatalog(summary.id, false);
+    setLoading(false);
+    if (!response) {
+      setError('Could not load models for this provider. You can still add model ids by hand.');
+      return;
+    }
+    setModels(response.models);
+    setProvider(response.provider ?? summary);
+    if (!response.ok) {
+      setError(response.error ?? 'The models.dev catalog is unavailable for this provider.');
+    } else if (response.error) {
+      setNotice(`Showing a cached catalog: ${response.error}`);
+    }
+  };
+
+  const toggle = (id: string): void => {
+    setSelected((current) =>
+      current.includes(id) ? current.filter((candidate) => candidate !== id) : [...current, id],
+    );
+  };
+
+  const submit = async (): Promise<void> => {
+    const chosen = models.filter((model) => selected.includes(model.id) && !existingIds.includes(model.id));
+    if (chosen.length === 0) return;
+    const entries: ModelEntry[] = chosen.map((model) => ({
+      id: model.id,
+      name: model.name.trim() === '' ? null : model.name.trim(),
+      context_window: model.context_window ?? null,
+      max_output_tokens: model.max_output_tokens ?? null,
+      tool_call: model.tool_call ?? null,
+      reasoning: model.reasoning ?? null,
+      cost_input: model.cost_input ?? null,
+      cost_output: model.cost_output ?? null,
+      catalog_provider: provider?.id ?? null,
+    }));
+    setSaving(true);
+    const ok = await onAdd(entries);
+    setSaving(false);
+    if (ok) onClose();
+  };
+
+  const needle = query.trim().toLowerCase();
+  const visibleProviders = providers.filter(
+    (candidate) =>
+      needle === '' ||
+      candidate.name.toLowerCase().includes(needle) ||
+      candidate.id.toLowerCase().includes(needle),
+  );
+  const visibleModels = models.filter(
+    (candidate) =>
+      needle === '' ||
+      candidate.name.toLowerCase().includes(needle) ||
+      candidate.id.toLowerCase().includes(needle),
+  );
+  const addable = models.filter((model) => selected.includes(model.id) && !existingIds.includes(model.id)).length;
+
+  return (
+    <Dialog
+      open
+      title={`models.dev: ${profile.name}`}
+      onClose={onClose}
+      class="dialog-catalog"
+      labelId="catalog-title"
+    >
+      <div class="catalog-body">
+        {stage === 'providers' ? (
+          <div class="catalog-stage">
+            <div class="catalog-toolbar">
+              <span class="eyebrow">Providers</span>
+              <button
+                type="button"
+                class="button button-small"
+                disabled={loading}
+                onClick={() => void loadProviders(true)}
+              >
+                <RefreshIcon size={12} class={loading ? 'spin' : undefined} /> Refresh catalog
+              </button>
+            </div>
+            <Field
+              id="catalog-provider-search"
+              label="Search providers"
+              hint="Pick a models.dev provider to browse its models."
+            >
+              <input
+                id="catalog-provider-search"
+                class="input"
+                type="search"
+                value={query}
+                data-autofocus
+                placeholder="anthropic"
+                aria-describedby="catalog-provider-search-hint"
+                onInput={(event) => setQuery(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') event.preventDefault();
+                }}
+              />
+            </Field>
+            {loading ? (
+              <div class="catalog-skeletons" aria-busy="true" aria-label="Loading catalog providers">
+                {[0, 1, 2].map((index) => (
+                  <div class="skeleton catalog-skeleton" key={index} />
+                ))}
+              </div>
+            ) : null}
+            {error ? (
+              <div class="inline-error" role="alert">
+                <p>{error}</p>
+              </div>
+            ) : null}
+            {notice ? <p class="catalog-notice">{notice}</p> : null}
+            {!loading && visibleProviders.length === 0 && !error ? (
+              <p class="field-hint">No catalog provider matches “{query}”.</p>
+            ) : null}
+            <ul class="catalog-provider-list">
+              {visibleProviders.map((candidate) => (
+                <li key={candidate.id}>
+                  <button type="button" class="catalog-provider" onClick={() => void chooseProvider(candidate)}>
+                    <span class="catalog-provider-name">{candidate.name}</span>
+                    <code class="catalog-provider-id">{candidate.id}</code>
+                    <span class="catalog-count">
+                      {candidate.model_count} model{candidate.model_count === 1 ? '' : 's'}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : (
+          <div class="catalog-stage">
+            <div class="catalog-models-head">
+              <button
+                type="button"
+                class="button button-small"
+                onClick={() => {
+                  setStage('providers');
+                  setQuery('');
+                  setSelected([]);
+                }}
+              >
+                ← Providers
+              </button>
+              <span class="catalog-models-provider">
+                {provider?.name ?? provider?.id ?? ''}
+                {provider ? ` · ${provider.model_count} models` : ''}
+              </span>
+            </div>
+            <Field
+              id="catalog-model-search"
+              label="Search models"
+              hint="Tick one or more models, then add them to the profile."
+            >
+              <input
+                id="catalog-model-search"
+                class="input"
+                type="search"
+                value={query}
+                data-autofocus
+                placeholder="qwen3"
+                aria-describedby="catalog-model-search-hint"
+                onInput={(event) => setQuery(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') event.preventDefault();
+                }}
+              />
+            </Field>
+            {loading ? (
+              <div class="catalog-skeletons" aria-busy="true" aria-label="Loading catalog models">
+                {[0, 1, 2, 3, 4].map((index) => (
+                  <div class="skeleton catalog-skeleton" key={index} />
+                ))}
+              </div>
+            ) : null}
+            {error ? (
+              <div class="inline-error" role="alert">
+                <p>{error}</p>
+              </div>
+            ) : null}
+            {notice ? <p class="catalog-notice">{notice}</p> : null}
+            {!loading && visibleModels.length === 0 && !error ? (
+              <p class="field-hint">No catalog model matches “{query}”.</p>
+            ) : null}
+            <ul class="catalog-model-list">
+              {visibleModels.map((model) => {
+                const added = existingIds.includes(model.id);
+                const meta = catalogModelMeta(model);
+                return (
+                  <li class="catalog-model" key={model.id}>
+                    <label class="catalog-model-label">
+                      <input
+                        type="checkbox"
+                        checked={added || selected.includes(model.id)}
+                        disabled={added}
+                        onChange={() => toggle(model.id)}
+                      />
+                      <span class="catalog-model-text">
+                        <span class="catalog-model-name">{model.name}</span>
+                        <code class="catalog-model-id">{model.id}</code>
+                        {meta ? <span class="catalog-model-meta">{meta}</span> : null}
+                      </span>
+                      {added ? <span class="chip chip-muted">added</span> : null}
+                      {!added && model.tool_call ? <span class="chip">tools</span> : null}
+                      {!added && model.reasoning ? <span class="chip">reasoning</span> : null}
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
+        <footer class="catalog-footer">
+          <span class="field-hint">
+            Manual ids always work: if the catalog is down, add a model id to the profile directly.
+          </span>
+          <div class="catalog-footer-actions">
+            <button type="button" class="button button-small" onClick={onClose}>
+              Cancel
+            </button>
+            {stage === 'models' ? (
+              <button
+                type="button"
+                class="button button-small button-primary"
+                disabled={saving || addable === 0}
+                onClick={() => void submit()}
+              >
+                {saving ? 'Adding…' : `Add selected${addable > 0 ? ` (${addable})` : ''}`}
+              </button>
+            ) : null}
+          </div>
+        </footer>
+      </div>
+    </Dialog>
+  );
+}
+
+function ProvidersSection({ disabled }: { disabled: boolean }): JSX.Element | null {
+  const config = store.config.value;
+  const [pending, setPending] = useState<Record<string, boolean>>({});
+  const [tests, setTests] = useState<Record<string, TestState>>({});
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [keyEditor, setKeyEditor] = useState<string | null>(null);
+  const [keyDraft, setKeyDraft] = useState('');
+  const [confirmClearKey, setConfirmClearKey] = useState<string | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [modelDrafts, setModelDrafts] = useState<Record<string, string>>({});
+  const [modelErrors, setModelErrors] = useState<Record<string, string>>({});
+  const [catalogFor, setCatalogFor] = useState<ProviderProfile | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [draft, setDraft] = useState<AddProviderDraft>(emptyDraft);
+  const [draftErrors, setDraftErrors] = useState<Record<string, string>>({});
+
+  if (!config) return null;
+
+  const profiles = config.providers;
+  const active = config.active;
+  const supportedProviders = config.available_providers?.length
+    ? config.available_providers
+    : profiles.length > 0
+      ? [profiles[0]?.provider ?? DEFAULT_PROVIDER_ID]
+      : [DEFAULT_PROVIDER_ID];
+  const defaultProvider = supportedProviders[0] ?? DEFAULT_PROVIDER_ID;
+  const takenIds = profiles.map((profile) => profile.id);
+  const derivedId = deriveProfileId(draft.name, draft.baseUrl, takenIds);
+
+  const markPending = (key: string, value: boolean): void => {
+    setPending((current) => ({ ...current, [key]: value }));
+  };
+
+  const savePatch = async (
+    patch: Pick<ConfigPatch, 'providers' | 'active'>,
+    toast: string | null,
+  ): Promise<boolean> => {
+    setActionError(null);
+    const result = await actions.saveProviders(patch, { toast });
+    if (!result) {
+      setActionError('The server rejected that change. Check the connection and try again.');
+      return false;
+    }
+    return true;
+  };
+
+  const runTest = async (profile: ProviderProfile): Promise<void> => {
+    markPending(`${profile.id}:test`, true);
+    setTests((current) => ({ ...current, [profile.id]: { running: true, result: null, error: null } }));
+    try {
+      const result = await actions.testProvider({ profile: profile.id });
+      setTests((current) => ({
+        ...current,
+        [profile.id]: { running: false, result, error: null },
+      }));
+    } catch (cause) {
+      setTests((current) => ({
+        ...current,
+        [profile.id]: { running: false, result: null, error: toErrorMessage(cause) },
+      }));
+    } finally {
+      markPending(`${profile.id}:test`, false);
+    }
+  };
+
+  const setActive = async (profile: ProviderProfile): Promise<void> => {
+    const currentModel = active.provider === profile.id ? active.model : null;
+    const model = currentModel ?? profile.models[0]?.id ?? '';
+    markPending(`${profile.id}:active`, true);
+    const ok = await savePatch(
+      { active: { provider: profile.id, model } },
+      `Now using ${profile.name}.`,
+    );
+    markPending(`${profile.id}:active`, false);
+    if (!ok) setActionError(`Could not switch to ${profile.name}.`);
+  };
+
+  const saveKey = async (profile: ProviderProfile): Promise<void> => {
+    const key = keyDraft.trim();
+    if (key === '') return;
+    markPending(`${profile.id}:key`, true);
+    const ok = await savePatch(
+      { providers: { upsert: [{ id: profile.id, api_key: key }] } },
+      `API key saved for ${profile.name}.`,
+    );
+    markPending(`${profile.id}:key`, false);
+    if (ok) {
+      setKeyEditor(null);
+      setKeyDraft('');
+    }
+  };
+
+  const clearKey = async (profile: ProviderProfile): Promise<void> => {
+    markPending(`${profile.id}:key`, true);
+    const ok = await savePatch(
+      { providers: { upsert: [{ id: profile.id, clear_api_key: true }] } },
+      `API key cleared for ${profile.name}.`,
+    );
+    markPending(`${profile.id}:key`, false);
+    if (ok) setConfirmClearKey(null);
+  };
+
+  const removeModel = async (profile: ProviderProfile, modelId: string): Promise<void> => {
+    const models = profile.models.filter((model) => model.id !== modelId);
+    const patch: Pick<ConfigPatch, 'providers' | 'active'> = {
+      providers: { upsert: [{ id: profile.id, models }] },
+    };
+    // The server refuses an active model that is missing from its profile, so
+    // move the selection in the same request instead of failing the removal.
+    if (active.provider === profile.id && active.model === modelId) {
+      patch.active = { provider: profile.id, model: models[0]?.id ?? '' };
+    }
+    markPending(`${profile.id}:models`, true);
+    await savePatch(patch, `Removed ${modelId} from ${profile.name}.`);
+    markPending(`${profile.id}:models`, false);
+  };
+
+  const addModelById = async (profile: ProviderProfile): Promise<void> => {
+    const modelId = (modelDrafts[profile.id] ?? '').trim();
+    if (modelId === '') return;
+    if (profile.models.some((model) => model.id === modelId)) {
+      setModelErrors((current) => ({ ...current, [profile.id]: `${modelId} is already in this profile.` }));
+      return;
+    }
+    if (profile.models.length >= MAX_MODELS_PER_PROFILE) {
+      setModelErrors((current) => ({
+        ...current,
+        [profile.id]: `A profile can hold at most ${MAX_MODELS_PER_PROFILE} models.`,
+      }));
+      return;
+    }
+    setModelErrors((current) => ({ ...current, [profile.id]: '' }));
+    const entries: ModelEntry[] = [...profile.models, { id: modelId, name: null }];
+    markPending(`${profile.id}:models`, true);
+    const ok = await savePatch(
+      { providers: { upsert: [{ id: profile.id, models: entries }] } },
+      `Added ${modelId} to ${profile.name}.`,
+    );
+    markPending(`${profile.id}:models`, false);
+    if (ok) setModelDrafts((current) => ({ ...current, [profile.id]: '' }));
+  };
+
+  const useModel = async (profile: ProviderProfile, modelId: string): Promise<void> => {
+    markPending(`${profile.id}:use`, true);
+    const ok = await actions.switchModel(profile.id, modelId);
+    markPending(`${profile.id}:use`, false);
+    if (!ok) setActionError(`Could not switch to ${modelId}.`);
+  };
+
+  const addCatalogModels = async (profile: ProviderProfile, entries: ModelEntry[]): Promise<boolean> => {
+    const merged = [...profile.models];
+    for (const entry of entries) {
+      if (!merged.some((model) => model.id === entry.id)) merged.push(entry);
+    }
+    if (merged.length === profile.models.length) return true;
+    const capped = merged.slice(0, MAX_MODELS_PER_PROFILE);
+    const added = capped.length - profile.models.length;
+    const ok = await savePatch(
+      { providers: { upsert: [{ id: profile.id, models: capped }] } },
+      `Added ${added} model${added === 1 ? '' : 's'} to ${profile.name}.`,
+    );
+    return ok;
+  };
+
+  const removeProfile = async (profile: ProviderProfile): Promise<void> => {
+    const remaining = profiles.filter((candidate) => candidate.id !== profile.id);
+    const next = remaining[0];
+    const payload: Pick<ConfigPatch, 'providers' | 'active'> = {
+      providers: { delete: [profile.id] },
+    };
+    if (active.provider === profile.id && next) {
+      payload.active = { provider: next.id, model: next.models[0]?.id ?? '' };
+    }
+    markPending(`${profile.id}:remove`, true);
+    const ok = await savePatch(payload, `Removed ${profile.name}.`);
+    markPending(`${profile.id}:remove`, false);
+    if (ok) setConfirmRemove(null);
+  };
+
+  const addProvider = async (): Promise<void> => {
+    const errors: Record<string, string> = {};
+    const urlError = baseUrlError(draft.baseUrl);
+    if (urlError) errors.baseUrl = urlError;
+    const id = draft.id.trim() === '' ? derivedId : draft.id.trim();
+    const idError = providerIdError(id, takenIds);
+    if (idError) errors.id = idError;
+    setDraftErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+
+    const patch: ProviderPatch = {
+      id,
+      base_url: draft.baseUrl.trim(),
+      provider: draft.provider || defaultProvider,
+    };
+    const name = draft.name.trim();
+    if (name !== '') patch.name = name;
+    const apiKey = draft.apiKey.trim();
+    if (apiKey !== '') patch.api_key = apiKey;
+
+    const payload: Pick<ConfigPatch, 'providers' | 'active'> = { providers: { upsert: [patch] } };
+    // The first profile becomes the active one; the server requires an explicit
+    // selection whenever profiles exist.
+    if (profiles.length === 0) payload.active = { provider: id, model: '' };
+
+    markPending('add', true);
+    const ok = await savePatch(payload, `Added ${name === '' ? id : name}.`);
+    markPending('add', false);
+    if (ok) {
+      setDraft(emptyDraft());
+      setDraftErrors({});
+      setShowAdd(false);
+    }
+  };
+
+  return (
+    <section class="settings-section" aria-labelledby="settings-providers">
+      <div class="settings-section-head">
+        <h3 id="settings-providers">Providers</h3>
+        <div class="settings-section-actions">
+          <span class="settings-section-note">OpenAI-compatible endpoints and their model libraries</span>
+          {profiles.length > 0 ? (
+            <button
+              type="button"
+              class="button button-small"
+              aria-expanded={showAdd}
+              aria-controls="provider-add-form"
+              onClick={() => {
+                setDraftErrors({});
+                setShowAdd((current) => !current);
+              }}
+            >
+              <PlusIcon size={12} /> Add provider
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      {actionError ? (
+        <div class="inline-error" role="alert">
+          <p>{actionError}</p>
+        </div>
+      ) : null}
+
+      {profiles.length === 0 ? (
+        <p class="field-hint">
+          No providers configured yet. Add one below, then pick its models — manually or from models.dev.
+        </p>
+      ) : null}
+
+      <div class="providers-list">
+        {profiles.map((profile) => {
+          const isActive = active.provider === profile.id;
+          const selectedModelId = isActive ? active.model ?? profile.models[0]?.id ?? null : null;
+          const test = tests[profile.id];
+          const headingId = `provider-${profile.id}-name`;
+          const testPending = pending[`${profile.id}:test`] === true;
+          const keyPending = pending[`${profile.id}:key`] === true;
+          const modelsPending = pending[`${profile.id}:models`] === true;
+          const usePending = pending[`${profile.id}:use`] === true;
+          const activePending = pending[`${profile.id}:active`] === true;
+          const removePending = pending[`${profile.id}:remove`] === true;
+          const modelError = modelErrors[profile.id];
+
+          return (
+            <article class="provider-card" key={profile.id} aria-labelledby={headingId}>
+              <header class="provider-card-head">
+                <div class="provider-card-title">
+                  <h4 class="provider-name" id={headingId}>
+                    {profile.name}
+                  </h4>
+                  <code class="provider-id">{profile.id}</code>
+                  {isActive ? <span class="badge badge-ok provider-badge">active</span> : null}
+                  <span class={`chip ${profile.api_key_set ? 'chip-ok' : 'chip-muted'}`}>
+                    {profile.api_key_set ? (
+                      <>
+                        <CheckIcon size={11} /> key set
+                      </>
+                    ) : (
+                      'no key'
+                    )}
+                  </span>
+                </div>
+                <div class="provider-meta">
+                  <span class="chip chip-muted">{profile.provider}</span>
+                  <code class="provider-url" title={profile.base_url}>
+                    {profile.base_url}
+                  </code>
+                  <span class="provider-count">
+                    {profile.models.length} model{profile.models.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+              </header>
+
+              <div class="provider-actions">
+                <button
+                  type="button"
+                  class="button button-small"
+                  disabled={disabled || testPending}
+                  aria-label={`Test connection for ${profile.name}`}
+                  onClick={() => void runTest(profile)}
+                >
+                  <RefreshIcon size={12} class={testPending ? 'spin' : undefined} />
+                  {testPending ? 'Testing…' : 'Test'}
+                </button>
+                <button
+                  type="button"
+                  class="button button-small"
+                  disabled={disabled || isActive || activePending}
+                  aria-label={`Set active provider: ${profile.name}`}
+                  onClick={() => void setActive(profile)}
+                >
+                  {isActive ? 'Active' : 'Set active'}
+                </button>
+                <button
+                  type="button"
+                  class="button button-small"
+                  disabled={disabled}
+                  aria-expanded={keyEditor === profile.id}
+                  aria-label={
+                    profile.api_key_set ? `Replace key for ${profile.name}` : `Add key for ${profile.name}`
+                  }
+                  onClick={() => {
+                    setConfirmClearKey(null);
+                    setConfirmRemove(null);
+                    setKeyDraft('');
+                    setKeyEditor((current) => (current === profile.id ? null : profile.id));
+                  }}
+                >
+                  {profile.api_key_set ? 'Replace key' : 'Add key'}
+                </button>
+                {profile.api_key_set ? (
+                  confirmClearKey === profile.id ? (
+                    <>
+                      <button
+                        type="button"
+                        class="button button-small button-danger"
+                        disabled={disabled || keyPending}
+                        aria-label={`Confirm clear key for ${profile.name}`}
+                        onClick={() => void clearKey(profile)}
+                      >
+                        Confirm clear key
+                      </button>
+                      <button
+                        type="button"
+                        class="button button-small"
+                        aria-label={`Cancel clearing the key for ${profile.name}`}
+                        onClick={() => setConfirmClearKey(null)}
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      class="button button-small button-danger-ghost"
+                      disabled={disabled || keyPending}
+                      aria-label={`Clear key for ${profile.name}`}
+                      onClick={() => {
+                        setKeyEditor(null);
+                        setConfirmRemove(null);
+                        setConfirmClearKey(profile.id);
+                      }}
+                    >
+                      Clear key
+                    </button>
+                  )
+                ) : null}
+                <button
+                  type="button"
+                  class="button button-small"
+                  disabled={disabled}
+                  aria-label={`Browse models.dev for ${profile.name}`}
+                  onClick={() => setCatalogFor(profile)}
+                >
+                  Browse models.dev
+                </button>
+                {confirmRemove === profile.id ? (
+                  <>
+                    <button
+                      type="button"
+                      class="button button-small button-danger"
+                      disabled={disabled || removePending}
+                      aria-label={`Confirm remove profile ${profile.name}`}
+                      onClick={() => void removeProfile(profile)}
+                    >
+                      Confirm remove profile
+                    </button>
+                    <button
+                      type="button"
+                      class="button button-small"
+                      aria-label={`Cancel removing ${profile.name}`}
+                      onClick={() => setConfirmRemove(null)}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    class="button button-small button-danger-ghost"
+                    disabled={disabled}
+                    aria-label={`Remove profile ${profile.name}`}
+                    onClick={() => {
+                      setConfirmClearKey(null);
+                      setKeyEditor(null);
+                      setConfirmRemove(profile.id);
+                    }}
+                  >
+                    Remove profile
+                  </button>
+                )}
+              </div>
+
+              {test && (test.running || test.result || test.error) ? (
+                <div
+                  class={`test-result${test.result ? (test.result.ok ? ' is-ok' : ' is-error') : ''}`}
+                  role="status"
+                >
+                  {test.running ? <span>Testing {profile.name}…</span> : null}
+                  {test.result ? (
+                    <>
+                      <strong>{test.result.ok ? 'Connection succeeded' : 'Connection failed'}</strong>
+                      <span>{latencyLabel(test.result.latency_ms)}</span>
+                      {test.result.models && test.result.models.length > 0 ? (
+                        <span class="test-models">
+                          {test.result.models.length} model{test.result.models.length === 1 ? '' : 's'}:{' '}
+                          {test.result.models.slice(0, 8).join(', ')}
+                          {test.result.models.length > 8 ? '…' : ''}
+                        </span>
+                      ) : null}
+                      {test.result.error ? <span class="test-error">{test.result.error}</span> : null}
+                    </>
+                  ) : null}
+                  {test.error ? <span class="test-error">{test.error}</span> : null}
+                </div>
+              ) : null}
+
+              {keyEditor === profile.id ? (
+                <div class="provider-key-editor">
+                  <label class="field-label" for={`provider-key-${profile.id}`}>
+                    {profile.api_key_set ? 'New API key' : 'API key'} for {profile.name}
+                  </label>
+                  <div class="provider-key-row">
+                    <input
+                      id={`provider-key-${profile.id}`}
+                      class="input mono"
+                      type="password"
+                      autoComplete="off"
+                      placeholder={profile.api_key_set ? 'Enter a new key to replace the stored one' : 'sk-…'}
+                      value={keyDraft}
+                      disabled={disabled || keyPending}
+                      onInput={(event) => setKeyDraft(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          void saveKey(profile);
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      class="button button-small button-primary"
+                      disabled={disabled || keyPending || keyDraft.trim() === ''}
+                      aria-label={`Save key for ${profile.name}`}
+                      onClick={() => void saveKey(profile)}
+                    >
+                      {keyPending ? 'Saving…' : 'Save key'}
+                    </button>
+                    <button
+                      type="button"
+                      class="button button-small"
+                      aria-label={`Cancel key change for ${profile.name}`}
+                      onClick={() => {
+                        setKeyEditor(null);
+                        setKeyDraft('');
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <p class="field-hint">
+                    Write-only: the server never returns the stored key. Saving replaces the current one.
+                  </p>
+                </div>
+              ) : null}
+
+              <div class="model-library">
+                <div class="model-library-head">
+                  <span class="eyebrow">Model library</span>
+                  {profile.models.length === 0 ? (
+                    <span class="field-hint">No models yet — add one below or browse models.dev.</span>
+                  ) : null}
+                </div>
+                {profile.models.length > 0 ? (
+                  <ul class="model-list" aria-label={`Models on ${profile.name}`}>
+                    {profile.models.map((model) => {
+                      const using = selectedModelId === model.id;
+                      const label = model.name?.trim() ? model.name : model.id;
+                      const meta = modelMetaParts(model);
+                      return (
+                        <li class="model-row" key={model.id}>
+                          <div class="model-row-main">
+                            <span class="model-name">{label}</span>
+                            {label !== model.id ? <code class="model-id">{model.id}</code> : null}
+                            {using ? <span class="badge badge-ok">in use</span> : null}
+                            {model.catalog_provider ? (
+                              <span class="chip chip-muted">via {model.catalog_provider}</span>
+                            ) : null}
+                          </div>
+                          <div class="model-meta">
+                            {meta.length > 0 ? <span>{meta.join(' · ')}</span> : <span>metadata unknown</span>}
+                            {model.tool_call ? <span class="chip">tools</span> : null}
+                            {model.reasoning ? <span class="chip">reasoning</span> : null}
+                          </div>
+                          <div class="model-actions">
+                            <button
+                              type="button"
+                              class="button button-small"
+                              disabled={disabled || usePending || using}
+                              aria-label={
+                                using ? `In use: ${label} on ${profile.name}` : `Use ${label} on ${profile.name}`
+                              }
+                              onClick={() => void useModel(profile, model.id)}
+                            >
+                              {using ? 'In use' : 'Use'}
+                            </button>
+                            <button
+                              type="button"
+                              class="button button-small button-danger-ghost"
+                              disabled={disabled || modelsPending}
+                              aria-label={`Remove ${label} from ${profile.name}`}
+                              onClick={() => void removeModel(profile, model.id)}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : null}
+                <div class="model-add">
+                  <label class="field-label" for={`model-add-${profile.id}`}>
+                    Add a model id
+                  </label>
+                  <div class="model-add-row">
+                    <input
+                      id={`model-add-${profile.id}`}
+                      class="input mono"
+                      type="text"
+                      placeholder="qwen3-32b"
+                      value={modelDrafts[profile.id] ?? ''}
+                      disabled={disabled || modelsPending}
+                      onInput={(event) => {
+                        const value = event.currentTarget.value;
+                        setModelDrafts((current) => ({ ...current, [profile.id]: value }));
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          void addModelById(profile);
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      class="button button-small"
+                      disabled={disabled || modelsPending || (modelDrafts[profile.id] ?? '').trim() === ''}
+                      aria-label={`Add model id to ${profile.name}`}
+                      onClick={() => void addModelById(profile)}
+                    >
+                      Add
+                    </button>
+                  </div>
+                  {modelError ? (
+                    <p class="field-error" role="alert">
+                      {modelError}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+
+      {showAdd || profiles.length === 0 ? (
+        <div class="provider-add" id="provider-add-form">
+          <div class="settings-section-head">
+            <h4 class="provider-add-title">New provider</h4>
+            <span class="settings-section-note">The key is write-only and never shown again</span>
+          </div>
+          <div class="field-grid">
+            <Field id="new-provider-name" label="Name (optional)" hint="Shown in this list; defaults to the id.">
+              <input
+                id="new-provider-name"
+                class="input"
+                type="text"
+                value={draft.name}
+                disabled={disabled || pending['add'] === true}
+                aria-describedby="new-provider-name-hint"
+                onInput={(event) => {
+                  const value = event.currentTarget.value;
+                  setDraft((current) => ({ ...current, name: value }));
+                }}
+              />
+            </Field>
+            <Field
+              id="new-provider-id"
+              label="Profile id"
+              error={draftErrors.id}
+              hint={`Used by the API. Leave blank for “${derivedId}”.`}
+            >
+              <input
+                id="new-provider-id"
+                class="input mono"
+                type="text"
+                value={draft.id}
+                placeholder={derivedId}
+                disabled={disabled || pending['add'] === true}
+                aria-invalid={draftErrors.id ? 'true' : undefined}
+                aria-describedby={draftErrors.id ? 'new-provider-id-error' : 'new-provider-id-hint'}
+                onInput={(event) => {
+                  const value = event.currentTarget.value;
+                  setDraft((current) => ({ ...current, id: value }));
+                }}
+              />
+            </Field>
+            <Field id="new-provider-provider" label="API shape" hint="The server implementation that speaks this endpoint.">
+              <select
+                id="new-provider-provider"
+                class="input mono"
+                value={draft.provider || defaultProvider}
+                disabled={disabled || pending['add'] === true}
+                aria-describedby="new-provider-provider-hint"
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setDraft((current) => ({ ...current, provider: value }));
+                }}
+              >
+                {supportedProviders.map((id) => (
+                  <option key={id} value={id}>
+                    {id}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field
+              id="new-provider-base-url"
+              label="Base URL"
+              error={draftErrors.baseUrl}
+              hint="Includes the API version, e.g. https://api.example.com/v1."
+            >
+              <input
+                id="new-provider-base-url"
+                class="input mono"
+                type="url"
+                value={draft.baseUrl}
+                placeholder="https://api.example.com/v1"
+                disabled={disabled || pending['add'] === true}
+                aria-invalid={draftErrors.baseUrl ? 'true' : undefined}
+                aria-describedby={
+                  draftErrors.baseUrl ? 'new-provider-base-url-error' : 'new-provider-base-url-hint'
+                }
+                onInput={(event) => {
+                  const value = event.currentTarget.value;
+                  setDraft((current) => ({ ...current, baseUrl: value }));
+                }}
+              />
+            </Field>
+            <Field
+              id="new-provider-api-key"
+              label="API key"
+              wide
+              hint="Write-only: stored on the server and never sent back to the browser."
+            >
+              <input
+                id="new-provider-api-key"
+                class="input mono"
+                type="password"
+                autoComplete="off"
+                placeholder="sk-…"
+                value={draft.apiKey}
+                disabled={disabled || pending['add'] === true}
+                aria-describedby="new-provider-api-key-hint"
+                onInput={(event) => {
+                  const value = event.currentTarget.value;
+                  setDraft((current) => ({ ...current, apiKey: value }));
+                }}
+              />
+            </Field>
+          </div>
+          <div class="provider-add-actions">
+            {profiles.length > 0 ? (
+              <button type="button" class="button button-small" onClick={() => setShowAdd(false)}>
+                Cancel
+              </button>
+            ) : null}
+            <button
+              type="button"
+              class="button button-small button-primary"
+              disabled={disabled || pending['add'] === true}
+              onClick={() => void addProvider()}
+            >
+              {pending['add'] === true ? 'Adding…' : 'Add provider'}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {catalogFor ? (
+        <CatalogPickerDialog
+          profile={catalogFor}
+          existingIds={catalogFor.models.map((model) => model.id)}
+          onAdd={(entries) => addCatalogModels(catalogFor, entries)}
+          onClose={() => setCatalogFor(null)}
+        />
+      ) : null}
+    </section>
+  );
+}
+
 export function SettingsSheet(): JSX.Element | null {
   const open = store.settingsOpen.value;
-  const [config, setConfig] = useState<Config | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -331,10 +1447,6 @@ export function SettingsSheet(): JSX.Element | null {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<ProviderTestResult | null>(null);
-  const [testError, setTestError] = useState<string | null>(null);
-  const [confirmClear, setConfirmClear] = useState(false);
   const [plugins, setPlugins] = useState<PluginDiagnostics[] | null>(null);
   const [mcpServers, setMcpServers] = useState<McpServer[] | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
@@ -345,19 +1457,23 @@ export function SettingsSheet(): JSX.Element | null {
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    setLoading(true);
-    setForm(null);
-    setLoadError(null);
-    setSaveError(null);
     setErrors({});
-    setTestResult(null);
-    setTestError(null);
-    setConfirmClear(false);
+    setSaveError(null);
+    // Render from the config already in the store immediately; the fetch below
+    // refreshes it (and reports server-side problems) without a blank sheet.
+    const cached = store.config.value;
+    if (cached) {
+      setForm(formFromConfig(cached));
+      setLocked(cached.settings_locked);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
+    setLoadError(null);
     actions
       .loadConfig()
       .then((result) => {
         if (cancelled) return;
-        setConfig(result);
         setForm(formFromConfig(result));
         setLocked(result.settings_locked);
         setLoading(false);
@@ -412,10 +1528,8 @@ export function SettingsSheet(): JSX.Element | null {
     setSaveError(null);
     try {
       const updated = await actions.saveConfig(buildPatch(form));
-      setConfig(updated);
       setForm(formFromConfig(updated));
       setLocked(updated.settings_locked);
-      setTestResult(null);
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 403) {
         setLocked(true);
@@ -425,30 +1539,6 @@ export function SettingsSheet(): JSX.Element | null {
       }
     } finally {
       setSaving(false);
-    }
-  };
-
-  const runTest = async (): Promise<void> => {
-    setTesting(true);
-    setTestResult(null);
-    setTestError(null);
-    try {
-      setTestResult(await actions.testProvider());
-    } catch (cause) {
-      setTestError(toErrorMessage(cause));
-    } finally {
-      setTesting(false);
-    }
-  };
-
-  const clearKey = async (): Promise<void> => {
-    try {
-      const updated = await actions.clearApiKey();
-      setConfig(updated);
-      setForm((current) => (current ? { ...current, apiKey: '' } : current));
-      setConfirmClear(false);
-    } catch (cause) {
-      setSaveError(toErrorMessage(cause));
     }
   };
 
@@ -510,73 +1600,14 @@ export function SettingsSheet(): JSX.Element | null {
               void submit();
             }}
           >
-            <section class="settings-section" aria-labelledby="settings-provider">
+            <ProvidersSection disabled={disabled} />
+
+            <section class="settings-section" aria-labelledby="settings-generation">
               <div class="settings-section-head">
-                <h3 id="settings-provider">Model provider</h3>
-                <span class="settings-section-note">OpenAI-compatible endpoint</span>
+                <h3 id="settings-generation">Generation</h3>
+                <span class="settings-section-note">Sampling tunables, shared by every provider</span>
               </div>
               <div class="field-grid">
-                <Field
-                  id="provider"
-                  label="Provider"
-                  error={errors.provider}
-                  hint="Only providers this server implements can be selected."
-                >
-                  <select
-                    id="provider"
-                    class="input mono"
-                    value={form.provider}
-                    disabled={disabled}
-                    onChange={(event) => update({ provider: event.currentTarget.value })}
-                    aria-invalid={errors.provider ? 'true' : undefined}
-                    aria-describedby={errors.provider ? 'provider-error' : 'provider-hint'}
-                  >
-                    {(config?.available_providers?.length
-                      ? config.available_providers
-                      : [form.provider || 'openai_compatible']
-                    ).map((id) => (
-                      <option key={id} value={id}>
-                        {id}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <Field
-                  id="model"
-                  label="Model"
-                  error={errors.model}
-                  hint="Model name sent to the endpoint."
-                >
-                  <input
-                    id="model"
-                    class="input mono"
-                    type="text"
-                    value={form.model}
-                    disabled={disabled}
-                    onInput={(event) => update({ model: event.currentTarget.value })}
-                    aria-invalid={errors.model ? 'true' : undefined}
-                    aria-describedby={errors.model ? 'model-error' : 'model-hint'}
-                  />
-                </Field>
-                <Field
-                  id="base-url"
-                  label="Base URL"
-                  error={errors.baseUrl}
-                  wide
-                  hint="Includes the API version, e.g. http://127.0.0.1:4000/v1."
-                >
-                  <input
-                    id="base-url"
-                    class="input mono"
-                    type="url"
-                    value={form.baseUrl}
-                    disabled={disabled}
-                    data-autofocus
-                    onInput={(event) => update({ baseUrl: event.currentTarget.value })}
-                    aria-invalid={errors.baseUrl ? 'true' : undefined}
-                    aria-describedby={errors.baseUrl ? 'base-url-error' : 'base-url-hint'}
-                  />
-                </Field>
                 <Field
                   id="temperature"
                   label="Temperature"
@@ -658,99 +1689,6 @@ export function SettingsSheet(): JSX.Element | null {
                   />
                 </div>
               </div>
-
-              <div class="field-grid">
-                <Field
-                  id="api-key"
-                  label="API key"
-                  wide
-                  hint="Write-only: the server never returns a stored key, only whether one is configured."
-                >
-                  <div class="api-key-row">
-                    <input
-                      id="api-key"
-                      class="input mono"
-                      type="password"
-                      autoComplete="off"
-                      placeholder={config?.model.api_key_set ? 'Configured — enter a new key to replace it' : 'sk-…'}
-                      value={form.apiKey}
-                      disabled={disabled}
-                      aria-describedby="api-key-hint"
-                      onInput={(event) => update({ apiKey: event.currentTarget.value })}
-                    />
-                    <span class={`chip ${config?.model.api_key_set ? 'chip-ok' : 'chip-muted'}`}>
-                      {config?.model.api_key_set ? (
-                        <>
-                          <CheckIcon size={12} /> Configured
-                        </>
-                      ) : (
-                        'Not configured'
-                      )}
-                    </span>
-                  </div>
-                </Field>
-                {config?.model.api_key_set ? (
-                  <div class="field field-wide clear-key-row">
-                    {confirmClear ? (
-                      <>
-                        <span class="field-hint">Remove the stored API key from the server?</span>
-                        <button
-                          type="button"
-                          class="button button-small button-danger"
-                          disabled={disabled}
-                          onClick={() => void clearKey()}
-                        >
-                          Confirm clear
-                        </button>
-                        <button type="button" class="button button-small" onClick={() => setConfirmClear(false)}>
-                          Cancel
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        type="button"
-                        class="button button-small button-danger-ghost"
-                        disabled={disabled}
-                        onClick={() => setConfirmClear(true)}
-                      >
-                        Clear stored key
-                      </button>
-                    )}
-                  </div>
-                ) : null}
-              </div>
-
-              <div class="test-connection">
-                <button
-                  type="button"
-                  class="button button-small"
-                  onClick={() => void runTest()}
-                  disabled={testing}
-                >
-                  <RefreshIcon size={13} class={testing ? 'spin' : undefined} />
-                  {testing ? 'Testing…' : 'Test connection'}
-                </button>
-                <span class="field-hint">Uses the saved configuration — save first if you changed the fields.</span>
-              </div>
-              {testResult ? (
-                <div class={`test-result ${testResult.ok ? 'is-ok' : 'is-error'}`} role="status">
-                  <strong>{testResult.ok ? 'Connection succeeded' : 'Connection failed'}</strong>
-                  <span>{testResult.latency_ms} ms</span>
-                  {testResult.models && testResult.models.length > 0 ? (
-                    <span class="test-models">
-                      {testResult.models.length} model{testResult.models.length === 1 ? '' : 's'}:{' '}
-                      {testResult.models.slice(0, 8).join(', ')}
-                      {testResult.models.length > 8 ? '…' : ''}
-                    </span>
-                  ) : null}
-                  {testResult.error ? <span class="test-error">{testResult.error}</span> : null}
-                </div>
-              ) : null}
-              {testError ? (
-                <div class="run-error-banner" role="alert">
-                  <p class="run-error-message">{testError}</p>
-                </div>
-              ) : null}
             </section>
 
             <section class="settings-section" aria-labelledby="settings-approvals">
