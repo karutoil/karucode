@@ -9,6 +9,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { FileViewer } from './components/FileViewer';
 import { Inspector } from './components/Inspector';
 import { MobileToolbar } from './components/MobileToolbar';
+import { ProjectRail } from './components/ProjectRail';
 import { SessionsRail } from './components/SessionsRail';
 import { SettingsSheet } from './components/SettingsSheet';
 import { ToastRegion } from './components/ToastRegion';
@@ -124,6 +125,7 @@ export function App(): JSX.Element {
         data-rail-collapsed={store.railCollapsed.value ? 'true' : 'false'}
         data-inspector-collapsed={store.inspectorCollapsed.value ? 'true' : 'false'}
       >
+        <ProjectRail />
         <SessionsRail />
         <ChatView />
         <Inspector />
