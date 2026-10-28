@@ -1,0 +1,440 @@
+/* ---------- project rail (far-left, Discord-style) ----------
+   Layout-independent: the rail is its own narrow column. It never positions
+   itself over the rest of the page, so the orchestrator decides where it lives
+   (inline flex column on desktop, beside the chat on mobile). */
+
+.project-rail {
+  --project-rail-width: 60px;
+  --project-rail-item: 38px;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-self: stretch;
+  width: var(--project-rail-width);
+  min-width: var(--project-rail-width);
+  max-width: var(--project-rail-width);
+  height: 100%;
+  min-height: 0;
+  padding: 10px 0 8px;
+  background: var(--bg-sunken);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.project-rail-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 2px 0 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.project-rail-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.project-rail-list,
+.project-rail-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-rail-loading {
+  padding-top: 2px;
+}
+
+.project-rail-item-wrap {
+  --project-tone: var(--text-muted);
+  position: relative;
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.project-rail-item-wrap[data-tone='0'] {
+  --project-tone: var(--accent);
+}
+
+.project-rail-item-wrap[data-tone='1'] {
+  --project-tone: var(--ok);
+}
+
+.project-rail-item-wrap[data-tone='2'] {
+  --project-tone: var(--warn);
+}
+
+.project-rail-item-wrap[data-tone='3'] {
+  --project-tone: var(--danger);
+}
+
+.project-rail-item-wrap[data-tone='4'] {
+  --project-tone: var(--text-muted);
+}
+
+/* Colour tones are picked deterministically from the project id in JS and map
+   onto existing palette tokens here (no hard-coded brand colours). */
+.project-rail-item {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--project-rail-item);
+  height: var(--project-rail-item);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    border-radius var(--transition),
+    box-shadow var(--transition-fast),
+    transform var(--transition);
+}
+
+.project-rail-avatar {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: var(--bg-raised);
+  background: color-mix(in srgb, var(--project-tone) 22%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--project-tone) 34%, transparent);
+  color: var(--project-tone);
+  color: color-mix(in srgb, var(--project-tone) 76%, var(--text));
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 620;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  text-transform: uppercase;
+  user-select: none;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+/* Left pill indicator: grows on hover and pins to the active project, like
+   Discord's unread/active markers. It is a pseudo-element of the full-width
+   row so it always sits flush against the rail's left edge. */
+.project-rail-item-wrap::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  z-index: 1;
+  width: 3px;
+  height: 0;
+  border-radius: 0 3px 3px 0;
+  background: var(--text-muted);
+  transform: translateY(-50%);
+  transition:
+    height var(--transition),
+    background-color var(--transition-fast);
+}
+
+.project-rail-item:hover {
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.project-rail-item-wrap:hover::before {
+  height: 14px;
+  background: var(--text-muted);
+}
+
+.project-rail-item:hover .project-rail-avatar {
+  transform: scale(1.05);
+  border-color: color-mix(in srgb, var(--project-tone) 55%, transparent);
+}
+
+.project-rail-item.is-active {
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.06);
+  transform: translateY(-1px);
+}
+
+.project-rail-item-wrap.is-active::before {
+  height: 26px;
+  background: var(--project-tone);
+}
+
+.project-rail-item.is-active .project-rail-avatar {
+  width: 34px;
+  height: 34px;
+  background: color-mix(in srgb, var(--project-tone) 44%, var(--bg-raised));
+  border-color: var(--project-tone);
+  color: var(--text);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--project-tone) 40%, transparent),
+    0 6px 14px rgba(0, 0, 0, 0.4);
+  transform: none;
+}
+
+.project-rail-item:focus-visible {
+  border-radius: 14px;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px var(--accent-soft);
+  z-index: 2;
+}
+
+/* Per-project actions live on the active item only: a small menu button that
+   appears on hover/focus (and always on touch/compact layouts). */
+.project-rail-kebab {
+  position: absolute;
+  top: -5px;
+  right: 1px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--panel);
+  box-shadow: 0 0 0 2px var(--bg-sunken);
+  color: var(--text-muted);
+  opacity: 0;
+  transition:
+    opacity var(--transition-fast),
+    color var(--transition-fast),
+    border-color var(--transition-fast),
+    background-color var(--transition-fast);
+}
+
+.project-rail-kebab:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-raised);
+  color: var(--text);
+}
+
+.project-rail-kebab:focus-visible,
+.project-rail-kebab[aria-expanded='true'],
+.project-rail-item-wrap:hover .project-rail-kebab,
+.project-rail-item-wrap:focus-within .project-rail-kebab {
+  opacity: 1;
+}
+
+.project-rail-skeleton {
+  width: var(--project-rail-item);
+  height: var(--project-rail-item);
+  border-radius: 12px;
+}
+
+.project-rail-empty {
+  padding: 6px 6px 0;
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.45;
+  text-align: center;
+  letter-spacing: 0.01em;
+}
+
+.project-rail-footer {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+  margin-top: 4px;
+  padding: 8px 0 2px;
+  border-top: 1px solid var(--border);
+}
+
+.project-rail-add {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-muted);
+  transition:
+    color var(--transition-fast),
+    border-color var(--transition-fast),
+    background-color var(--transition-fast),
+    border-radius var(--transition),
+    transform var(--transition-fast);
+}
+
+.project-rail-add:hover {
+  border-style: solid;
+  border-color: var(--accent);
+  border-radius: 14px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  transform: scale(1.05);
+}
+
+.project-rail-add:focus-visible {
+  border-style: solid;
+  border-radius: 14px;
+}
+
+/* Popover menu. Fixed so a scrolling rail never clips it; it is positioned from
+   the trigger's bounding box in JS. */
+.project-rail-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 216px;
+  max-width: min(280px, calc(100vw - 24px));
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.45);
+}
+
+.project-rail-menu-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 4px;
+  padding: 6px 9px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.project-rail-menu-name {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--fs-small);
+  font-weight: 540;
+}
+
+.project-rail-menu-path {
+  overflow-wrap: anywhere;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.project-rail-menu-count {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+/* ---------- dialogs ---------- */
+
+.project-rail-dialog {
+  width: min(520px, calc(100vw - 32px));
+}
+
+.project-rail-form {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 16px 18px 18px;
+}
+
+.project-rail-form .dialog-actions {
+  margin-top: 4px;
+}
+
+.project-rail-delete-body {
+  padding: 16px 18px 18px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.project-rail-delete-body strong {
+  color: var(--text);
+  font-weight: 560;
+}
+
+.project-rail-delete-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 11px 0 0;
+  padding-left: 18px;
+}
+
+.project-rail-delete-list li::marker {
+  color: var(--text-faint);
+}
+
+/* ---------- compact rail ---------- */
+
+@media (max-width: 640px) {
+  .project-rail {
+    --project-rail-width: 48px;
+    --project-rail-item: 32px;
+    padding: 6px 0 6px;
+  }
+
+  .project-rail-list {
+    gap: 6px;
+  }
+
+  .project-rail-avatar {
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    font-size: 10.5px;
+  }
+
+  .project-rail-add {
+    width: 30px;
+    height: 30px;
+    border-radius: 10px;
+  }
+
+  .project-rail-kebab {
+    top: -6px;
+    right: 0;
+    width: 18px;
+    height: 18px;
+    opacity: 1;
+  }
+
+  .project-rail-menu {
+    min-width: 200px;
+  }
+}
+
+@media (hover: none) {
+  .project-rail-kebab {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-rail-item,
+  .project-rail-item-wrap::before,
+  .project-rail-item:hover .project-rail-avatar,
+  .project-rail-item.is-active,
+  .project-rail-avatar,
+  .project-rail-add,
+  .project-rail-kebab,
+  .project-rail-skeleton {
+    transition: none;
+    animation: none;
+  }
+
+  .project-rail-item.is-active,
+  .project-rail-add:hover,
+  .project-rail-item:hover .project-rail-avatar {
+    transform: none;
+  }
+
+  .project-rail-item-wrap:hover::before {
+    height: 26px;
+  }
+}
