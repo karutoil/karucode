@@ -11,7 +11,7 @@ and a UI designed for long sessions rather than for a dashboard demo.
                  REST + SSE  (same origin, no websocket server)
 ┌──────────────────────────────── karucode (Rust) ─────────────────────────────────┐
 │ axum API  ·  agent runtime  ·  provider  ·  tools  ·  subagents  ·  plugins/MCP  │
-│ SQLite (WAL): sessions, messages, runs, agents, approvals, settings, claims      │
+│ SQLite (WAL): projects, sessions, runs, agents, settings, claims                      │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -41,6 +41,25 @@ process group, timeout, output cap), `git_status`, `git_diff`, plus `spawn_agent
 **Workspace containment**: every file tool resolves through a confined workspace
 (no `..` escapes, no absolute paths outside, canonicalisation blocks symlink
 escapes, atomic writes). Shell commands are explicitly **not** sandboxed.
+
+**Projects**: a project is a canonical directory plus a display name; sessions can
+be grouped by project and each run is confined to its session's project directory
+(a session without a project uses the default directory).
+`--workspace` / `KARUCODE_WORKSPACE` is that default. On first start one project
+is created for the configured workspace, and sessions from before projects existed
+are attached to the project matching their recorded directory (creating it if
+needed); a workspace that has disappeared keeps its history and stays unattached.
+Subagents inherit the workspace of the run that spawned them. Deleting a project
+removes its rows, never files on disk. The web client lists and switches projects
+through `/api/projects` and the `?project=`-scoped session, workspace-file/tree and
+git requests.
+
+**Provider profiles**: a config file can declare several named OpenAI-compatible
+endpoints, each with its own key, timeout and curated model list; `active_provider`
+/ `active_model` (or the equivalent `PATCH /api/config`) select what every run
+uses. Model metadata (context window, output limit, tool calling, reasoning, cost)
+can be prefilled from the models.dev catalog, which the server fetches and caches.
+See [Provider profiles](#provider-profiles-and-the-model-library).
 
 **Approvals**: `ask` by default for shell + writes, with command prefix
 allowlists, per-path auto-approval, `ask_commands`, `auto` and `read_only` modes;
@@ -110,19 +129,26 @@ Precedence, highest first:
 `KARUCODE_LOCK_SETTINGS=1` removes layer 1, so a deployment can pin settings from
 the environment and reject browser edits with 403.
 
+`[[providers]]` tables in the config file are part of layer 3. When any of
+`KARUCODE_MODEL`, `KARUCODE_BASE_URL`, `KARUCODE_API_KEY` (or `OPENAI_BASE_URL` /
+`OPENAI_API_KEY`) is set, the environment wins for the connection: the server
+expresses it as a reserved `env` profile and selects it, so the file's profiles
+stay defined but are not active.
+
 See [config.example.toml](config.example.toml) and [.env.example](.env.example) for
 every key. The important ones:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `KARUCODE_HOST` / `KARUCODE_PORT` | `127.0.0.1` / `8787` | bind address; non-loopback requires a token |
-| `KARUCODE_WORKSPACE` | cwd | workspace root for file tools |
+| `KARUCODE_WORKSPACE` | cwd | default workspace root (for sessions without a project) |
 | `KARUCODE_DATA_DIR` | `~/.local/share/karucode` | SQLite + plugin data |
 | `KARUCODE_AUTH_TOKEN` | unset | Bearer token for remote access (≥16 chars) |
-| `KARUCODE_BASE_URL` | `http://127.0.0.1:4000/v1` | OpenAI-compatible base URL |
+| `KARUCODE_BASE_URL` | `http://127.0.0.1:4000/v1` | OpenAI-compatible base URL (wins over `[[providers]]`) |
 | `KARUCODE_API_KEY` | unset | provider key (falls back to `OPENAI_API_KEY`) |
-| `KARUCODE_MODEL` | `gpt-4o-mini` | model id |
+| `KARUCODE_MODEL` | `gpt-4o-mini` | model id (wins over `[[providers]]`) |
 | `KARUCODE_TEMPERATURE` / `KARUCODE_MAX_TOKENS` | `0.2` / unset | sampling |
+| `KARUCODE_MODELS_DEV_URL` | `https://models.dev/api.json` | catalog source for the model library (read once at startup) |
 | `KARUCODE_APPROVAL_MODE` | `ask` | `ask`, `ask_commands`, `auto`, `read_only` |
 | `KARUCODE_ALLOW_COMMANDS` | empty | comma-separated command prefixes never prompted |
 | `KARUCODE_MAX_ITERATIONS` | `32` | model turns per run |
@@ -179,6 +205,93 @@ Extra headers and body fields are supported in the config file
 (`[model.extra_headers]`, `[model.extra_body]`) for gateways that need routing
 hints. Provider settings can be changed live in the UI (Settings), which writes to
 SQLite; the API key is write-only and never returned to the browser.
+
+### Provider profiles and the model library
+
+Instead of — or in addition to — the flat `[model]` table, a config file can
+declare named endpoints. Each profile owns its base URL, key, timeout and a
+curated list of models; `active_provider` / `active_model` pick the one every run
+uses:
+
+```toml
+active_provider = "gateway"
+active_model = "claude-sonnet"
+
+[[providers]]
+id = "gateway"                 # 1-64 chars: letters, digits, '.', '_', '-'
+name = "LiteLLM gateway"
+provider = "openai_compatible"
+base_url = "http://127.0.0.1:4000/v1"
+api_key = "sk-litellm"
+request_timeout_secs = 300
+
+  [[providers.models]]
+  id = "claude-sonnet"         # the id sent to the endpoint
+  name = "Claude Sonnet"       # label; falls back to the id
+  context_window = 200000
+  max_output_tokens = 8192
+  tool_call = true
+  reasoning = true
+  cost_input = 3.0             # USD per million input tokens
+  cost_output = 15.0
+
+  [[providers.models]]
+  id = "qwen2.5-coder-32b"
+  name = "Qwen2.5 Coder 32B"
+  context_window = 131072
+  tool_call = true
+
+[[providers]]
+id = "local-vllm"
+name = "vLLM on this box"
+base_url = "http://127.0.0.1:8000/v1"
+
+  [[providers.models]]
+  id = "Qwen/Qwen2.5-Coder-32B-Instruct"
+  context_window = 32768
+  tool_call = true
+```
+
+* `active_provider` / `active_model` are install-wide. `temperature`, `max_tokens`,
+  `top_p` and `parallel_tool_calls` stay global (read from `[model]`), so
+  switching profiles does not change sampling.
+* With `[[providers]]` present, the connection fields of `[model]` (`provider`,
+  `base_url`, `api_key`, `request_timeout_secs`, `extra_headers`, `extra_body`)
+  are not used — the active profile supplies them; `model` is only a fallback for
+  a profile that has no models yet. Without profiles, a `default` profile is
+  synthesised from `[model]`, so both shapes work.
+* `KARUCODE_MODEL` / `KARUCODE_BASE_URL` / `KARUCODE_API_KEY` (and the `OPENAI_*`
+  fallbacks) win over this file: they become the active `env` profile.
+* Limits: 16 profiles, 64 models per profile, unique model ids within a profile,
+  `base_url` must be `http://` or `https://` and must not embed credentials, model
+  ids ≤200 characters. The same rules are enforced by `PATCH /api/config`, which
+  returns `400 bad_request` naming the field — see [docs/API.md](docs/API.md).
+* Keys are write-only: the browser and `GET /api/config` only ever see
+  `api_key_set`.
+
+The same data can be edited at runtime: `PATCH /api/config` takes
+`providers: { upsert: [...], delete: [...] }` and `active: { provider, model }`,
+persists them in SQLite and hot-swaps the configuration for the next run. The
+legacy flat `model.*` patch still works and is mirrored onto the active profile.
+The settings screen edits profiles and their model lists this way, and the chat
+header shows the active profile/model and switches them with the same call — no
+restart is needed for either.
+
+Model metadata can be prefilled from [models.dev](https://models.dev) instead of
+typed by hand. The server fetches the catalog itself (`GET /api/models/catalog`),
+caches it for six hours and serves one provider's models at a time; `refresh=true`
+forces a refetch. Point it at a mirror or an air-gapped copy (read once at
+startup; it must be an `http(s)://` URL, otherwise every fetch fails with
+`ok: false`):
+
+```bash
+KARUCODE_MODELS_DEV_URL=https://mirror.internal/models-dev/api.json
+```
+
+A failed fetch with nothing cached answers `ok: false` with the reason; no other
+part of the settings path depends on the catalog. Prefilled values are stored in
+the profile and stay editable, because a gateway may serve the same model id with
+different limits.
 
 ## Plugins and MCP
 
@@ -307,8 +420,10 @@ Architecture details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). HTTP contrac
   implemented. Resources/prompts are not surfaced — tools only.
 * **Plugins** are processes, not Wasm; no filesystem sandbox, no hot reload of
   changed binaries (disable/enable restarts the process).
-* **One workspace per server instance.** Sessions share it; per-session workspace
-  switching is not implemented.
+* **One active model per install.** `active_provider` / `active_model` are
+  install-wide, not per project: every project shares the selected model. Sessions
+  are confined to their project directory, and per-session workspace overrides do
+  not exist.
 * **No built-in TLS.** Put a reverse proxy in front for remote access.
 * **Compaction is trimming**, not model-assisted summarisation: old turns are
   dropped (with a notice) once the context budget is exceeded.

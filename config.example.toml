@@ -3,6 +3,8 @@
 # Copy to ~/.config/karucode/config.toml (or point KARUCODE_CONFIG at it).
 # Precedence: UI/DB overrides > environment variables > this file > defaults.
 # Set KARUCODE_LOCK_SETTINGS=1 to ignore UI/DB overrides (env becomes truth).
+# The KARUCODE_* model variables (KARUCODE_MODEL, KARUCODE_BASE_URL,
+# KARUCODE_API_KEY / OPENAI_*) override the [[providers]] tables below.
 
 host = "127.0.0.1"          # remote binds require auth_token
 port = 8787
@@ -25,6 +27,56 @@ parallel_tool_calls = true
 
 # [model.extra_headers]
 # "X-Gateway-Project" = "karucode"
+
+# --- Provider profiles (optional) -------------------------------------------
+# Named endpoints instead of the single [model] connection. With at least one
+# [[providers]] table present, the connection fields of [model] (provider,
+# base_url, model, api_key, request_timeout_secs, extra_headers, extra_body) are
+# ignored and the active profile supplies them. Sampling (temperature,
+# max_tokens, top_p, parallel_tool_calls) still comes from [model].
+#
+# KARUCODE_MODEL / KARUCODE_BASE_URL / KARUCODE_API_KEY (or OPENAI_BASE_URL /
+# OPENAI_API_KEY) override this whole section: they become the active "env"
+# profile. KARUCODE_MODELS_DEV_URL points the model-library catalog at a mirror
+# (default https://models.dev/api.json; read once at startup, http(s) only).
+#
+# active_provider = "gateway"
+# active_model = "claude-sonnet"
+#
+# [[providers]]
+# id = "gateway"                   # 1-64 chars: letters, digits, '.', '_', '-'
+# name = "LiteLLM gateway"
+# provider = "openai_compatible"
+# base_url = "http://127.0.0.1:4000/v1"
+# api_key = "sk-litellm"           # write-only: the browser only sees api_key_set
+# request_timeout_secs = 300
+#
+#   [[providers.models]]
+#   id = "claude-sonnet"           # the id sent to the endpoint (unique per profile)
+#   name = "Claude Sonnet"         # label; falls back to the id
+#   context_window = 200000        # metadata: shown in the UI, prefilled from models.dev
+#   max_output_tokens = 8192
+#   tool_call = true
+#   reasoning = true
+#   cost_input = 3.0               # USD per million input tokens
+#   cost_output = 15.0
+#   # catalog_provider = "anthropic"   # models.dev provider it was prefilled from
+#
+#   [[providers.models]]
+#   id = "qwen2.5-coder-32b"
+#   name = "Qwen2.5 Coder 32B"
+#   context_window = 131072
+#   tool_call = true
+#
+# [[providers]]
+# id = "local-vllm"
+# name = "vLLM on this box"
+# base_url = "http://127.0.0.1:8000/v1"
+#
+#   [[providers.models]]
+#   id = "Qwen/Qwen2.5-Coder-32B-Instruct"
+#   context_window = 32768
+#   tool_call = true
 
 [limits]
 max_iterations = 32
