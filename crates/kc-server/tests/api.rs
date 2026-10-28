@@ -356,6 +356,25 @@ async fn projects_scope_sessions_workspace_and_runs() {
         .get(&format!("/api/workspace/tree?path=.&project={default_id}"))
         .await;
     assert_eq!(tree_default.status, StatusCode::OK);
+    // A file read is scoped to the project the tree came from.
+    let file = h
+        .get(&format!(
+            "/api/workspace/file?path=made-by-project-run.txt&project={second_id}"
+        ))
+        .await;
+    assert_eq!(file.status, StatusCode::OK, "{}", file.text());
+    assert!(file.json()["content"].as_str().unwrap().contains("hello from two"));
+    let file_default = h
+        .get(&format!(
+            "/api/workspace/file?path=made-by-project-run.txt&project={default_id}"
+        ))
+        .await;
+    assert_ne!(
+        file_default.status,
+        StatusCode::OK,
+        "the default project must not see the other project's file"
+    );
+
     let tree_default_body = tree_default.json();
     let names: Vec<&str> = tree_default_body["entries"]
         .as_array()

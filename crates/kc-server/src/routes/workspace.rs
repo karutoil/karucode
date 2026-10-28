@@ -117,7 +117,9 @@ pub async fn file(
     let path = query_str(&query, "path")
         .ok_or_else(|| ApiError::bad_request("query parameter `path` is required"))?
         .to_string();
-    let workspace = state.workspace().clone();
+    // Reads are confined to the same project the tree/git endpoints use, so a
+    // file opened from a project's tree is read from that project.
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
     let limit = state
         .settings()
         .limits()

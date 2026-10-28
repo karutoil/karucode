@@ -6,6 +6,7 @@ import { totalUsage } from '../state/selectors';
 import * as store from '../state/store';
 import { ChatTranscript } from './ChatTranscript';
 import { Composer } from './Composer';
+import { ModelSwitcher } from './ModelSwitcher';
 import { AlertIcon, ChevronDownIcon, PanelIcon, RefreshIcon, SidebarIcon } from './icons';
 
 function ProviderBanner(): JSX.Element | null {
@@ -82,7 +83,11 @@ function ChatSkeleton(): JSX.Element {
 }
 
 function NoSessionState(): JSX.Element {
-  const workspace = store.health.value?.workspace ?? store.config.value?.workspace ?? '';
+  const workspace =
+    store.currentProject.value?.path ??
+    store.health.value?.workspace ??
+    store.config.value?.workspace ??
+    '';
   return (
     <div class="empty-state">
       <p class="eyebrow">No session open</p>
@@ -111,6 +116,7 @@ function NoSessionState(): JSX.Element {
 function EmptySessionState(): JSX.Element {
   const workspace =
     store.activeSession.value?.workspace ??
+    store.currentProject.value?.path ??
     store.health.value?.workspace ??
     store.config.value?.workspace ??
     '';
@@ -145,7 +151,11 @@ function SessionHeader(): JSX.Element {
     ? store.mobileSheet.value === 'inspector'
     : !store.inspectorCollapsed.value;
   const workspace =
-    session?.workspace ?? store.health.value?.workspace ?? store.config.value?.workspace ?? '';
+    session?.workspace ??
+    store.currentProject.value?.path ??
+    store.health.value?.workspace ??
+    store.config.value?.workspace ??
+    '';
 
   return (
     <header class="topbar">
@@ -187,6 +197,7 @@ function SessionHeader(): JSX.Element {
       </div>
 
       <div class="topbar-actions">
+        <ModelSwitcher />
         <button
           type="button"
           class="icon-button"
@@ -222,7 +233,11 @@ export function ChatView(): JSX.Element {
   const showLoading = store.chatLoading.value && currentId !== null;
   const hasItems = chat.items.length > 0;
   const workspace =
-    session?.workspace ?? store.health.value?.workspace ?? store.config.value?.workspace ?? '';
+    session?.workspace ??
+    store.currentProject.value?.path ??
+    store.health.value?.workspace ??
+    store.config.value?.workspace ??
+    '';
 
   return (
     <main class="chat-main" id="chat-main" aria-label="Conversation" tabIndex={-1}>
