@@ -1,14 +1,12 @@
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { Project } from '../api/types';
+import { modKey } from '../lib/platform';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { Dialog } from './Dialog';
-import { KebabIcon, PlusIcon } from './icons';
+import { KebabIcon, PaletteIcon, PlusIcon, SearchIcon } from './icons';
 import '../styles/rail.css';
-
-/** Number of avatar tones; each maps to a palette token in rail.css. */
-const TONE_COUNT = 5;
 
 /**
  * Discord-style initials: first letter of each word, at most two characters.
@@ -25,17 +23,6 @@ export function projectInitials(name: string, path = ''): string {
     .map((word) => Array.from(word)[0] ?? '')
     .join('');
   return (letters === '' ? '?' : letters).toUpperCase();
-}
-
-/** Stable hash → tone index, so a project keeps its colour across reloads. */
-export function projectTone(project: Pick<Project, 'id' | 'name'>): number {
-  const key = project.id || project.name;
-  let hash = 2166136261;
-  for (let index = 0; index < key.length; index += 1) {
-    hash ^= key.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return Math.abs(hash) % TONE_COUNT;
 }
 
 function sessionLabel(count: number): string {
@@ -408,6 +395,13 @@ export function ProjectRail(): JSX.Element {
   return (
     <>
       <nav class="project-rail" aria-label="Projects" data-testid="project-rail">
+        <div class="project-rail-brand">
+          <span class="brand-mark" title="karucode" aria-hidden="true">
+            k<span>.</span>
+          </span>
+        </div>
+        <div class="project-rail-divider" aria-hidden="true" />
+
         <div class="project-rail-scroll">
           {loading && projects.length === 0 ? (
             <div class="project-rail-loading" aria-busy="true" aria-label="Loading projects">
@@ -434,7 +428,6 @@ export function ProjectRail(): JSX.Element {
                   class={`project-rail-item-wrap${active ? ' is-active' : ''}`}
                   key={project.id}
                   data-project-id={project.id}
-                  data-tone={projectTone(project)}
                 >
                   <button
                     type="button"
@@ -477,17 +470,52 @@ export function ProjectRail(): JSX.Element {
               );
             })}
           </ul>
+
+          <div class="project-rail-add-row">
+            <button
+              type="button"
+              class="project-rail-add"
+              aria-label="Add project"
+              title="Add project"
+              onClick={() => setDialog('add')}
+            >
+              <PlusIcon size={17} />
+            </button>
+          </div>
         </div>
 
-        <div class="project-rail-footer">
+        <div class="project-rail-bottom">
           <button
             type="button"
-            class="project-rail-add"
-            aria-label="Add project"
-            title="Add project"
-            onClick={() => setDialog('add')}
+            class="rail-tool rail-tool-accent"
+            data-tip={`Theme studio · ${modKey()} Shift T`}
+            aria-label="Open theme studio"
+            aria-haspopup="dialog"
+            aria-keyshortcuts="Control+Shift+T Meta+Shift+T"
+            onClick={actions.openThemeStudio}
           >
-            <PlusIcon size={18} />
+            <PaletteIcon size={15} />
+          </button>
+          <button
+            type="button"
+            class="rail-tool"
+            data-tip={`Command palette · ${modKey()} K`}
+            aria-label="Open command palette"
+            aria-haspopup="dialog"
+            aria-keyshortcuts="Control+K Meta+K"
+            onClick={actions.togglePalette}
+          >
+            <SearchIcon size={15} />
+          </button>
+          <button
+            type="button"
+            class="rail-avatar"
+            data-tip="Settings"
+            aria-label="Open settings"
+            aria-haspopup="dialog"
+            onClick={actions.openSettings}
+          >
+            KC
           </button>
         </div>
 

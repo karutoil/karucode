@@ -40,6 +40,8 @@ export const configFixture: Config = {
   limits: {
     max_iterations: 32,
     max_run_secs: 1800,
+    auto_continue: true,
+    max_continues: 50,
     max_tool_output_bytes: 24000,
     max_command_output_bytes: 32000,
     command_timeout_secs: 120,
@@ -58,6 +60,7 @@ export const configFixture: Config = {
   subagents: {
     max_concurrent: 3,
     max_iterations: 16,
+    max_continues: 0,
     allow_recursive: false,
     max_depth: 1,
     timeout_secs: 900,

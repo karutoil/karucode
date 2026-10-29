@@ -292,6 +292,29 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
       };
     }
 
+    case 'stream_retry': {
+      if (event.agent_id) return state;
+      // The runtime threw the attempt that just died away: drop everything it
+      // streamed (text and reasoning) so the retry is not shown twice, and say
+      // why the answer restarted.
+      const items = state.items.filter(
+        (item) => !(item.kind === 'message' && item.streaming && item.runId === runId),
+      );
+      const kept = { ...seen, items: items.length === state.items.length ? state.items : items };
+      return {
+        ...appendNotice(
+          kept,
+          `stream-retry:${event.seq}`,
+          'warn',
+          `the model stream died mid-answer (${event.reason}); retrying (attempt ${
+            event.attempt + 1
+          } of ${event.max_attempts})`,
+          at,
+        ),
+        running: true,
+      };
+    }
+
     case 'iteration_started':
       if (event.agent_id) return state;
       return { ...seen, iteration: event.iteration };
@@ -509,6 +532,17 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
         at,
       );
 
+    case 'stream_lagged':
+      // The client refetches the session on this event, so the notice explains
+      // the jump rather than asking for a manual reload.
+      return appendNotice(
+        seen,
+        `lag:${event.seq}`,
+        'warn',
+        `The live stream fell behind and ${event.skipped} update(s) were dropped; the transcript was resynchronised from the server.`,
+        at,
+      );
+
     case 'error':
       return {
         ...seen,
@@ -614,6 +648,7 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
 
     case 'session_created':
     case 'session_renamed':
+    case 'session_model_changed':
     case 'session_deleted':
       return seen;
 
@@ -663,6 +698,12 @@ export function applyEventToSessions(sessions: SessionSummary[], event: Karucode
       return patchSession(sessions, event.session_id, (session) => ({
         ...session,
         title: event.title,
+        updated_at: event.ts_ms,
+      }));
+    case 'session_model_changed':
+      return patchSession(sessions, event.session_id, (session) => ({
+        ...session,
+        model: event.model,
         updated_at: event.ts_ms,
       }));
     case 'session_deleted':

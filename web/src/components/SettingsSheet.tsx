@@ -20,7 +20,10 @@ import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { Dialog } from './Dialog';
 import { Toggle } from './Toggle';
-import { AlertIcon, CheckIcon, PlusIcon, RefreshIcon } from './icons';
+import { AlertIcon, CheckIcon, EditIcon, PaletteIcon, PlusIcon, RefreshIcon } from './icons';
+
+/** Every limit the sheet edits as a number (`auto_continue` is a toggle). */
+type NumericLimitKey = Exclude<keyof Limits, 'auto_continue'>;
 
 interface FormState {
   temperature: string;
@@ -32,17 +35,20 @@ interface FormState {
   allowCommands: string[];
   autoApprovePaths: string[];
   approvalTimeout: string;
-  limits: Record<keyof Limits, string>;
+  limits: Record<NumericLimitKey, string>;
+  autoContinue: boolean;
   subagentConcurrent: string;
   subagentIterations: string;
+  subagentContinues: string;
   allowRecursive: boolean;
   subagentMaxDepth: string;
   subagentTimeout: string;
 }
 
-const LIMIT_FIELDS: { key: keyof Limits; label: string }[] = [
-  { key: 'max_iterations', label: 'Max iterations' },
-  { key: 'max_run_secs', label: 'Max run seconds' },
+const LIMIT_FIELDS: { key: NumericLimitKey; label: string }[] = [
+  { key: 'max_iterations', label: 'Max iterations per segment' },
+  { key: 'max_run_secs', label: 'Max run seconds (whole run)' },
+  { key: 'max_continues', label: 'Auto-continues per run' },
   { key: 'max_tool_output_bytes', label: 'Max tool output (bytes)' },
   { key: 'max_command_output_bytes', label: 'Max command output (bytes)' },
   { key: 'command_timeout_secs', label: 'Command timeout (s)' },
@@ -89,9 +95,11 @@ function formFromConfig(config: Config): FormState {
     approvalTimeout: String(config.approvals.timeout_secs),
     limits: Object.fromEntries(
       LIMIT_FIELDS.map((field) => [field.key, String(config.limits[field.key])]),
-    ) as Record<keyof Limits, string>,
+    ) as Record<NumericLimitKey, string>,
+    autoContinue: config.limits.auto_continue,
     subagentConcurrent: String(config.subagents.max_concurrent),
     subagentIterations: String(config.subagents.max_iterations),
+    subagentContinues: String(config.subagents.max_continues),
     allowRecursive: config.subagents.allow_recursive,
     subagentMaxDepth: String(config.subagents.max_depth),
     subagentTimeout: String(config.subagents.timeout_secs),
@@ -149,14 +157,17 @@ function validate(form: FormState): Record<string, string> {
   if (!integerAtLeast(form.subagentConcurrent, 1, 32)) {
     errors.subagentConcurrent = 'Concurrency must be 1–32.';
   }
-  if (!integerAtLeast(form.subagentIterations, 1, 1000)) {
-    errors.subagentIterations = 'Iterations must be 1–1000.';
+  if (!integerAtLeast(form.subagentIterations, 1, 10_000)) {
+    errors.subagentIterations = 'Iterations must be 1–10000.';
+  }
+  if (!integerAtLeast(form.subagentContinues, 0, 1_000)) {
+    errors.subagentContinues = 'Auto-continues must be 0–1000.';
   }
   if (!integerAtLeast(form.subagentMaxDepth, 0, 10)) {
     errors.subagentMaxDepth = 'Max depth must be 0–10.';
   }
-  if (!integerAtLeast(form.subagentTimeout, 1, 86_400)) {
-    errors.subagentTimeout = 'Timeout must be 1–86400 seconds.';
+  if (!integerAtLeast(form.subagentTimeout, 1, 604_800)) {
+    errors.subagentTimeout = 'Timeout must be 1–604800 seconds.';
   }
 
   return errors;
@@ -167,6 +178,7 @@ function buildPatch(form: FormState): ConfigPatch {
   for (const field of LIMIT_FIELDS) {
     limits[field.key] = Number(form.limits[field.key]);
   }
+  limits.auto_continue = form.autoContinue;
   return {
     // Connection details live on provider profiles now; only the sampling
     // tunables (which are install-wide) stay in the flat model section.
@@ -187,6 +199,7 @@ function buildPatch(form: FormState): ConfigPatch {
     subagents: {
       max_concurrent: Number(form.subagentConcurrent),
       max_iterations: Number(form.subagentIterations),
+      max_continues: Number(form.subagentContinues),
       allow_recursive: form.allowRecursive,
       max_depth: Number(form.subagentMaxDepth),
       timeout_secs: Number(form.subagentTimeout),
@@ -433,6 +446,201 @@ interface CatalogPickerProps {
   existingIds: string[];
   onAdd: (entries: ModelEntry[]) => Promise<boolean>;
   onClose: () => void;
+}
+
+/* ------------------------------------------------------------------ *
+ * Per-model metadata editing. Bounds mirror the server's validators
+ * (kc-server settings.rs) so mistakes are caught before the PATCH.
+ * ------------------------------------------------------------------ */
+
+const MODEL_TOKEN_LIMIT = 100_000_000;
+const MODEL_COST_LIMIT = 1_000_000;
+const MODEL_NAME_LIMIT = 200;
+
+type TriState = '' | 'true' | 'false';
+
+function triStateOf(value: boolean | null | undefined): TriState {
+  return value === null || value === undefined ? '' : value ? 'true' : 'false';
+}
+
+function triStateValue(value: TriState): boolean | null {
+  return value === '' ? null : value === 'true';
+}
+
+/** Empty string stays null; otherwise an integer within [min, max]. */
+function boundedInt(raw: string, min: number, max: number): number | null | undefined {
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) return undefined;
+  return parsed;
+}
+
+/** Empty string stays null; otherwise a finite number within [0, max]. */
+function boundedCost(raw: string, max: number): number | null | undefined {
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > max) return undefined;
+  return parsed;
+}
+
+interface ModelEditDialogProps {
+  profile: ProviderProfile;
+  model: ModelEntry;
+  onSave: (entry: ModelEntry) => Promise<boolean>;
+  onClose: () => void;
+}
+
+/** Edit one model entry: the label plus every prefilled metadata field. */
+function ModelEditDialog({ profile, model, onSave, onClose }: ModelEditDialogProps): JSX.Element {
+  const [name, setName] = useState(model.name ?? '');
+  const [contextWindow, setContextWindow] = useState(model.context_window?.toString() ?? '');
+  const [maxOutput, setMaxOutput] = useState(model.max_output_tokens?.toString() ?? '');
+  const [costInput, setCostInput] = useState(model.cost_input?.toString() ?? '');
+  const [costOutput, setCostOutput] = useState(model.cost_output?.toString() ?? '');
+  const [toolCall, setToolCall] = useState<TriState>(triStateOf(model.tool_call));
+  const [reasoning, setReasoning] = useState<TriState>(triStateOf(model.reasoning));
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+
+  const submit = async (): Promise<void> => {
+    const context = boundedInt(contextWindow, 1, MODEL_TOKEN_LIMIT);
+    const output = boundedInt(maxOutput, 1, MODEL_TOKEN_LIMIT);
+    const inputCost = boundedCost(costInput, MODEL_COST_LIMIT);
+    const outputCost = boundedCost(costOutput, MODEL_COST_LIMIT);
+    const next: Record<string, string> = {};
+    if (name.trim().length > MODEL_NAME_LIMIT) {
+      next.name = `Keep the name to ${MODEL_NAME_LIMIT} characters or fewer.`;
+    }
+    if (context === undefined) {
+      next.context = `Whole tokens between 1 and ${MODEL_TOKEN_LIMIT.toLocaleString()}, or empty.`;
+    }
+    if (output === undefined) {
+      next.output = `Whole tokens between 1 and ${MODEL_TOKEN_LIMIT.toLocaleString()}, or empty.`;
+    }
+    if (inputCost === undefined) next.costInput = 'A non-negative number (USD per million), or empty.';
+    if (outputCost === undefined) next.costOutput = 'A non-negative number (USD per million), or empty.';
+    setErrors(next);
+    if (Object.keys(next).length > 0) return;
+    setSaving(true);
+    const ok = await onSave({
+      id: model.id,
+      name: name.trim() === '' ? null : name.trim(),
+      context_window: context ?? null,
+      max_output_tokens: output ?? null,
+      tool_call: triStateValue(toolCall),
+      reasoning: triStateValue(reasoning),
+      cost_input: inputCost ?? null,
+      cost_output: outputCost ?? null,
+      catalog_provider: model.catalog_provider ?? null,
+    });
+    setSaving(false);
+    if (ok) onClose();
+  };
+
+  return (
+    <Dialog open title={`Edit ${model.id}`} onClose={onClose} class="dialog-model-edit">
+      <p class="field-hint">
+        Custom values for this model on {profile.name}. Refreshing the metadata later updates the
+        catalog fields but leaves this label untouched.
+      </p>
+      <div class="field-grid">
+        <Field id="model-edit-name" label="Display name" error={errors.name} wide>
+          <input
+            id="model-edit-name"
+            class="input"
+            type="text"
+            value={name}
+            placeholder={model.id}
+            data-autofocus
+            onInput={(event) => setName(event.currentTarget.value)}
+          />
+        </Field>
+        <Field id="model-edit-context" label="Context window" error={errors.context}>
+          <input
+            id="model-edit-context"
+            class="input mono"
+            type="text"
+            inputmode="numeric"
+            value={contextWindow}
+            placeholder="128000"
+            onInput={(event) => setContextWindow(event.currentTarget.value)}
+          />
+        </Field>
+        <Field id="model-edit-output" label="Max output tokens" error={errors.output}>
+          <input
+            id="model-edit-output"
+            class="input mono"
+            type="text"
+            inputmode="numeric"
+            value={maxOutput}
+            placeholder="16384"
+            onInput={(event) => setMaxOutput(event.currentTarget.value)}
+          />
+        </Field>
+        <Field id="model-edit-cost-in" label="Input cost / M tokens" error={errors.costInput}>
+          <input
+            id="model-edit-cost-in"
+            class="input mono"
+            type="text"
+            inputmode="decimal"
+            value={costInput}
+            placeholder="0.15"
+            onInput={(event) => setCostInput(event.currentTarget.value)}
+          />
+        </Field>
+        <Field id="model-edit-cost-out" label="Output cost / M tokens" error={errors.costOutput}>
+          <input
+            id="model-edit-cost-out"
+            class="input mono"
+            type="text"
+            inputmode="decimal"
+            value={costOutput}
+            placeholder="0.60"
+            onInput={(event) => setCostOutput(event.currentTarget.value)}
+          />
+        </Field>
+        <Field id="model-edit-tools" label="Tool calling">
+          <select
+            id="model-edit-tools"
+            class="input"
+            value={toolCall}
+            onChange={(event) => setToolCall(event.currentTarget.value as TriState)}
+          >
+            <option value="">Unknown</option>
+            <option value="true">Supported</option>
+            <option value="false">Not supported</option>
+          </select>
+        </Field>
+        <Field id="model-edit-reasoning" label="Reasoning">
+          <select
+            id="model-edit-reasoning"
+            class="input"
+            value={reasoning}
+            onChange={(event) => setReasoning(event.currentTarget.value as TriState)}
+          >
+            <option value="">Unknown</option>
+            <option value="true">Supported</option>
+            <option value="false">Not supported</option>
+          </select>
+        </Field>
+      </div>
+      <footer class="dialog-actions">
+        <button type="button" class="button button-small" onClick={onClose} disabled={saving}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="button button-small button-primary"
+          disabled={saving}
+          onClick={() => void submit()}
+        >
+          {saving ? 'Saving…' : 'Save model'}
+        </button>
+      </footer>
+    </Dialog>
+  );
 }
 
 /** Two-step models.dev browser: provider list, then a searchable model checklist. */
@@ -728,6 +936,9 @@ function ProvidersSection({ disabled }: { disabled: boolean }): JSX.Element | nu
   const [modelDrafts, setModelDrafts] = useState<Record<string, string>>({});
   const [modelErrors, setModelErrors] = useState<Record<string, string>>({});
   const [catalogFor, setCatalogFor] = useState<ProviderProfile | null>(null);
+  const [editingModel, setEditingModel] = useState<{ profile: ProviderProfile; model: ModelEntry } | null>(
+    null,
+  );
   const [showAdd, setShowAdd] = useState(false);
   const [draft, setDraft] = useState<AddProviderDraft>(emptyDraft);
   const [draftErrors, setDraftErrors] = useState<Record<string, string>>({});
@@ -848,14 +1059,83 @@ function ProvidersSection({ disabled }: { disabled: boolean }): JSX.Element | nu
       return;
     }
     setModelErrors((current) => ({ ...current, [profile.id]: '' }));
-    const entries: ModelEntry[] = [...profile.models, { id: modelId, name: null }];
     markPending(`${profile.id}:models`, true);
+    // Best-effort metadata detection: the server strips gateway routing
+    // prefixes (a6api/model, a6api/upstream/model) until a models.dev entry
+    // matches. Any failure just adds the bare id, as before.
+    const lookup = await actions.lookupModel(modelId);
+    const detected = lookup?.ok ? lookup.match : null;
+    const entry: ModelEntry = detected
+      ? {
+          id: modelId,
+          name: detected.model.name.trim() === '' ? null : detected.model.name.trim(),
+          context_window: detected.model.context_window ?? null,
+          max_output_tokens: detected.model.max_output_tokens ?? null,
+          tool_call: detected.model.tool_call ?? null,
+          reasoning: detected.model.reasoning ?? null,
+          cost_input: detected.model.cost_input ?? null,
+          cost_output: detected.model.cost_output ?? null,
+          catalog_provider: detected.provider,
+        }
+      : { id: modelId, name: null };
+    const entries: ModelEntry[] = [...profile.models, entry];
     const ok = await savePatch(
       { providers: { upsert: [{ id: profile.id, models: entries }] } },
-      `Added ${modelId} to ${profile.name}.`,
+      detected
+        ? `Added ${modelId} to ${profile.name} (metadata via ${detected.provider}).`
+        : `Added ${modelId} to ${profile.name}.`,
     );
     markPending(`${profile.id}:models`, false);
     if (ok) setModelDrafts((current) => ({ ...current, [profile.id]: '' }));
+  };
+
+  const refreshModel = async (profile: ProviderProfile, model: ModelEntry): Promise<void> => {
+    const key = `${profile.id}:refresh:${model.id}`;
+    markPending(key, true);
+    try {
+      const lookup = await actions.lookupModel(model.id);
+      const detected = lookup?.ok ? lookup.match : null;
+      if (!detected) {
+        store.pushToast(
+          lookup && !lookup.ok
+            ? `Could not refresh ${model.id}: ${lookup.error ?? 'the catalog is unavailable'}`
+            : `No models.dev entry matches ${model.id}; its metadata is unchanged.`,
+          'info',
+        );
+        return;
+      }
+      // Refresh metadata only: a custom display name stays the user's.
+      const models = profile.models.map((entry) =>
+        entry.id === model.id
+          ? {
+              ...entry,
+              context_window: detected.model.context_window ?? null,
+              max_output_tokens: detected.model.max_output_tokens ?? null,
+              tool_call: detected.model.tool_call ?? null,
+              reasoning: detected.model.reasoning ?? null,
+              cost_input: detected.model.cost_input ?? null,
+              cost_output: detected.model.cost_output ?? null,
+              catalog_provider: detected.provider,
+            }
+          : entry,
+      );
+      await savePatch(
+        { providers: { upsert: [{ id: profile.id, models }] } },
+        `Refreshed metadata for ${model.id} (via ${detected.provider}).`,
+      );
+    } finally {
+      markPending(key, false);
+    }
+  };
+
+  const saveEditedModel = async (entry: ModelEntry): Promise<boolean> => {
+    const editing = editingModel;
+    if (!editing) return false;
+    const models = editing.profile.models.map((model) => (model.id === entry.id ? entry : model));
+    return savePatch(
+      { providers: { upsert: [{ id: editing.profile.id, models }] } },
+      `Saved ${entry.name?.trim() || entry.id}.`,
+    );
   };
 
   const useModel = async (profile: ProviderProfile, modelId: string): Promise<void> => {
@@ -1215,6 +1495,7 @@ function ProvidersSection({ disabled }: { disabled: boolean }): JSX.Element | nu
                       const using = selectedModelId === model.id;
                       const label = model.name?.trim() ? model.name : model.id;
                       const meta = modelMetaParts(model);
+                      const refreshPending = pending[`${profile.id}:refresh:${model.id}`] === true;
                       return (
                         <li class="model-row" key={model.id}>
                           <div class="model-row-main">
@@ -1241,6 +1522,27 @@ function ProvidersSection({ disabled }: { disabled: boolean }): JSX.Element | nu
                               onClick={() => void useModel(profile, model.id)}
                             >
                               {using ? 'In use' : 'Use'}
+                            </button>
+                            <button
+                              type="button"
+                              class="button button-small"
+                              disabled={disabled || modelsPending}
+                              aria-label={`Edit ${label} on ${profile.name}`}
+                              onClick={() => setEditingModel({ profile, model })}
+                            >
+                              <EditIcon size={12} />
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              class="button button-small"
+                              disabled={disabled || modelsPending || refreshPending}
+                              aria-label={`Refresh metadata for ${label} on ${profile.name}`}
+                              title="Re-read this model's metadata from models.dev (routing prefixes are stripped to find it)."
+                              onClick={() => void refreshModel(profile, model)}
+                            >
+                              <RefreshIcon size={12} class={refreshPending ? 'spin' : undefined} />
+                              {refreshPending ? 'Refreshing…' : 'Refresh'}
                             </button>
                             <button
                               type="button"
@@ -1434,6 +1736,15 @@ function ProvidersSection({ disabled }: { disabled: boolean }): JSX.Element | nu
           onClose={() => setCatalogFor(null)}
         />
       ) : null}
+
+      {editingModel ? (
+        <ModelEditDialog
+          profile={editingModel.profile}
+          model={editingModel.model}
+          onSave={saveEditedModel}
+          onClose={() => setEditingModel(null)}
+        />
+      ) : null}
     </section>
   );
 }
@@ -1549,6 +1860,7 @@ export function SettingsSheet(): JSX.Element | null {
     <Dialog
       open
       title="Settings"
+      description="Personalize your coding experience."
       onClose={actions.closeSettings}
       class="dialog-sheet dialog-settings"
       labelId="settings-title"
@@ -1595,11 +1907,39 @@ export function SettingsSheet(): JSX.Element | null {
         {form ? (
           <form
             class="settings-form"
+            // The sheet validates every field itself and renders the message
+            // inline (with aria-invalid + aria-describedby). Native constraint
+            // validation would instead block the submit and show a browser
+            // tooltip the app cannot style, translate or announce.
+            noValidate
             onSubmit={(event) => {
               event.preventDefault();
               void submit();
             }}
           >
+            <section class="settings-section" aria-labelledby="settings-appearance">
+              <div class="settings-section-head">
+                <h3 id="settings-appearance">Appearance</h3>
+                <span class="settings-section-note">Themes, colours, fonts and density — stored in this browser</span>
+              </div>
+              <div class="setting-row">
+                <div class="setting-copy">
+                  <span class="setting-name">Theme studio</span>
+                  <span class="setting-hint">
+                    Pick a built-in theme or tune every surface, accent, font and density.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  class="panel-action-btn"
+                  onClick={actions.openThemeStudio}
+                  aria-haspopup="dialog"
+                >
+                  <PaletteIcon size={14} /> Theme studio
+                </button>
+              </div>
+            </section>
+
             <ProvidersSection disabled={disabled} />
 
             <section class="settings-section" aria-labelledby="settings-generation">
@@ -1770,6 +2110,15 @@ export function SettingsSheet(): JSX.Element | null {
                 <span class="settings-section-note">Resource and context bounds</span>
               </div>
               <div class="field-grid field-grid-compact">
+                <div class="field field-toggle field-wide">
+                  <Toggle
+                    label="Auto-continue long runs"
+                    description="When a segment's iteration budget runs out, refresh it and keep working in the same session instead of ending the run."
+                    checked={form.autoContinue}
+                    disabled={disabled}
+                    onChange={(checked) => update({ autoContinue: checked })}
+                  />
+                </div>
                 {LIMIT_FIELDS.map((field) => (
                   <Field
                     key={field.key}
@@ -1829,22 +2178,49 @@ export function SettingsSheet(): JSX.Element | null {
                 </Field>
                 <Field
                   id="subagent-iterations"
-                  label="Max iterations"
+                  label="Turns per segment"
                   error={errors.subagentIterations}
+                  hint="A checkpoint, not a finish line: the subagent refreshes it below."
                 >
                   <input
                     id="subagent-iterations"
                     class="input mono"
                     type="number"
                     min="1"
-                    max="1000"
+                    max="10000"
                     step="1"
                     value={form.subagentIterations}
                     disabled={disabled}
                     onInput={(event) => update({ subagentIterations: event.currentTarget.value })}
                     aria-invalid={errors.subagentIterations ? 'true' : undefined}
                     aria-describedby={
-                      errors.subagentIterations ? 'subagent-iterations-error' : undefined
+                      errors.subagentIterations
+                        ? 'subagent-iterations-error'
+                        : 'subagent-iterations-hint'
+                    }
+                  />
+                </Field>
+                <Field
+                  id="subagent-continues"
+                  label="Auto-continues"
+                  error={errors.subagentContinues}
+                  hint="How many times one subagent may refresh its budget. 0 = stop at the segment."
+                >
+                  <input
+                    id="subagent-continues"
+                    class="input mono"
+                    type="number"
+                    min="0"
+                    max="1000"
+                    step="1"
+                    value={form.subagentContinues}
+                    disabled={disabled}
+                    onInput={(event) => update({ subagentContinues: event.currentTarget.value })}
+                    aria-invalid={errors.subagentContinues ? 'true' : undefined}
+                    aria-describedby={
+                      errors.subagentContinues
+                        ? 'subagent-continues-error'
+                        : 'subagent-continues-hint'
                     }
                   />
                 </Field>
@@ -1876,7 +2252,7 @@ export function SettingsSheet(): JSX.Element | null {
                     class="input mono"
                     type="number"
                     min="1"
-                    max="86400"
+                    max="604800"
                     step="1"
                     value={form.subagentTimeout}
                     disabled={disabled}

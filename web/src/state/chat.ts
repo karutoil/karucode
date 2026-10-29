@@ -228,7 +228,7 @@ function stringArg(args: JsonValue, key: string): string {
 }
 
 /** Builds the transcript for a freshly loaded session. */
-export function seedChatState(detail: SessionDetail): ChatState {
+export function seedChatState(detail: SessionDetail, previous?: ChatState): ChatState {
   const messages = [...detail.messages].sort((a, b) => a.created_at - b.created_at || a.id - b.id);
   const items: ChatItem[] = [];
   const callItems = new Map<string, ToolItem | CommandItem>();
@@ -353,24 +353,23 @@ export function seedChatState(detail: SessionDetail): ChatState {
     };
   }
 
+  // Assistant turns are persisted when they *complete*, so a stored message for
+  // this run is a finished turn: the answer still streaming belongs to a new item.
+  // Reusing the stored one would glue the next deltas into finished prose, above
+  // whatever tool cards follow it.
+  let livePlaceholder: MessageItem | null = null;
   if (running && lastRun) {
-    const streaming = [...items]
-      .reverse()
-      .find((item): item is MessageItem => item.kind === 'message' && item.role === 'assistant');
-    if (streaming && streaming.runId === lastRun.id) streaming.streaming = true;
-    else {
-      items.push({
-        kind: 'message',
-        id: `stream:${lastRun.id}`,
-        at: lastRun.started_at,
-        role: 'assistant',
-        content: '',
-        reasoning: '',
-        streaming: true,
-        runId: lastRun.id,
-        agentId: null,
-      });
-    }
+    livePlaceholder = {
+      kind: 'message',
+      id: `stream:${lastRun.id}`,
+      at: lastRun.started_at,
+      role: 'assistant',
+      content: '',
+      reasoning: '',
+      streaming: true,
+      runId: lastRun.id,
+      agentId: null,
+    };
   }
 
   for (const approval of detail.approvals) {
@@ -407,16 +406,39 @@ export function seedChatState(detail: SessionDetail): ChatState {
     });
   }
 
+  // The snapshot cannot reproduce everything that is on screen: it only carries
+  // *pending* approvals and nothing that was live-only. A refetch must not make a
+  // card the user just approved (or a cancellation notice) disappear.
+  const sameSession = previous !== undefined && previous.sessionId === detail.session.id;
+  if (previous && sameSession) {
+    const seen = new Set(items.map((item) => item.id));
+    for (const item of previous.items) {
+      if (seen.has(item.id)) continue;
+      if (item.kind === 'approval' && item.approval.status !== 'pending') items.push(item);
+      else if (item.kind === 'notice' || item.kind === 'interrupted') items.push(item);
+    }
+  }
+
+  // Approvals and interruption markers are collected separately but belong where
+  // they happened, not appended after the last message.
+  const ordered = items
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => (a.item.at === b.item.at ? a.index - b.index : a.item.at - b.item.at))
+    .map((entry) => entry.item);
+  if (livePlaceholder) ordered.push(livePlaceholder);
+
   return {
     sessionId: detail.session.id,
-    items,
+    items: ordered,
     agents: [...detail.agents].sort((a, b) => a.created_at - b.created_at),
     running,
     runId: lastRunId,
     runStatus: lastRun?.status ?? null,
     runError,
-    usage: null,
-    iteration: 0,
+    // Usage and iteration are state-only (never persisted), so a refetch of the
+    // run that is still in flight must not reset the HUD mid-answer.
+    usage: sameSession && previous.runId === lastRunId ? previous.usage : null,
+    iteration: sameSession && previous.runId === lastRunId ? previous.iteration : 0,
     lastSeq: 0,
   };
 }

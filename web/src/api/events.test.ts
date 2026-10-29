@@ -141,6 +141,250 @@ describe('startEventStream', () => {
     handle.stop();
   });
 
+  it('reconnects when the connection goes silent instead of hanging forever', async () => {
+    // First connection opens and then never sends a byte (half-open socket:
+    // laptop asleep, proxy or server killed without a FIN).
+    const silent = new Response(
+      new ReadableStream<Uint8Array>({
+        start() {
+          // Deliberately nothing: no data, no keepalive, no close.
+        },
+      }),
+      { status: 200 },
+    );
+    const responses = [silent, sseResponse([`data: ${eventPayload(9, 'recovered')}\n\n`])];
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => responses.shift() ?? sseResponse([]),
+    );
+    const received: RawEvent[] = [];
+    const errors: (string | undefined)[] = [];
+
+    const handle = startEventStream({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      idleTimeoutMs: 20,
+      minDelayMs: 1,
+      maxDelayMs: 1,
+      random: () => 0,
+      sleep: async () => undefined,
+      onStatus: (state, detail) => {
+        if (state === 'reconnecting') errors.push(detail?.error);
+      },
+      onEvent: (event) => {
+        received.push(event);
+        if (received.length === 1) handle.stop();
+      },
+    });
+
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    expect(received[0]?.delta).toBe('recovered');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(errors.some((message) => message?.includes('went silent'))).toBe(true);
+    handle.stop();
+  });
+
+  it('does not treat keepalive comments as silence', async () => {
+    // Chunks come from timers, not from `start()`, so the first read can be
+    // waiting on the stream while the watchdog is running.
+    const body = (): ReadableStream<Uint8Array> => {
+      const encoder = new TextEncoder();
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          let sent = 0;
+          const tick = (): void => {
+            if (sent < 4) {
+              controller.enqueue(encoder.encode(': keepalive\n\n'));
+              sent += 1;
+              setTimeout(tick, 5);
+              return;
+            }
+            // Left open on purpose: a closed body is an ordinary EOF, which
+            // reconnects for a different reason than the watchdog.
+            controller.enqueue(encoder.encode(`data: ${eventPayload(1, 'after keepalives')}\n\n`));
+          };
+          setTimeout(tick, 5);
+        },
+      });
+    };
+    const fetchMock = vi.fn(async () => new Response(body(), { status: 200 }));
+    const received: RawEvent[] = [];
+
+    const handle = startEventStream({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      idleTimeoutMs: 60,
+      minDelayMs: 1,
+      maxDelayMs: 1,
+      random: () => 0,
+      sleep: async () => undefined,
+      onEvent: (event) => received.push(event),
+    });
+
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    // The keepalives reset the watchdog: one connection, no reconnect.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(received[0]?.delta).toBe('after keepalives');
+    handle.stop();
+  });
+
+  it('reports a seq hole once per gap so the caller can resync', async () => {
+    const responses = [
+      sseResponse([
+        `data: ${eventPayload(1, 'a')}\n\n`,
+        `data: ${eventPayload(2, 'b')}\n\n`,
+        `data: ${eventPayload(5, 'c')}\n\n`,
+        `data: ${eventPayload(6, 'd')}\n\n`,
+      ]),
+      // A reconnect starts a fresh dedupe scope: a high first seq is not a hole.
+      sseResponse([`data: ${eventPayload(50, 'e')}\n\n`]),
+    ];
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => responses.shift() ?? sseResponse([]),
+    );
+    const gaps: { after: number; seq: number; missed: number }[] = [];
+    const received: RawEvent[] = [];
+
+    const handle = startEventStream({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      minDelayMs: 1,
+      maxDelayMs: 1,
+      random: () => 0,
+      sleep: async () => undefined,
+      onGap: (gap) => gaps.push(gap),
+      onEvent: (event) => {
+        received.push(event);
+        if (received.length === 5) handle.stop();
+      },
+    });
+
+    await vi.waitFor(() => expect(received).toHaveLength(5));
+    expect(gaps).toEqual([{ after: 2, seq: 5, missed: 2 }]);
+    expect(received.map((event) => event.delta)).toEqual(['a', 'b', 'c', 'd', 'e']);
+    handle.stop();
+  });
+
+  it('surfaces a mid-stream read failure instead of reporting a clean close', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(new Error('ECONNRESET'));
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const errors: (string | undefined)[] = [];
+    const handle = startEventStream({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      minDelayMs: 1,
+      maxDelayMs: 1,
+      random: () => 0,
+      onStatus: (state, detail) => {
+        if (state === 'reconnecting') errors.push(detail?.error);
+      },
+      onEvent: () => undefined,
+      sleep: async () => {
+        handle.stop();
+      },
+    });
+
+    await vi.waitFor(() => expect(errors.length).toBeGreaterThan(0));
+    expect(errors[0]).toContain('ECONNRESET');
+    handle.stop();
+  });
+
+  it('grows the backoff while a connection keeps closing without delivering a frame', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([]));
+    const delays: number[] = [];
+    const handle = startEventStream({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      minDelayMs: 10,
+      maxDelayMs: 1000,
+      random: () => 0,
+      onEvent: () => undefined,
+      sleep: async (ms) => {
+        delays.push(ms);
+        if (delays.length === 3) handle.stop();
+      },
+    });
+
+    await vi.waitFor(() => expect(delays).toHaveLength(3));
+    // 10 / 20 / 40 base with half jitter: the backoff must climb, not reset.
+    expect(delays).toEqual([5, 10, 20]);
+    handle.stop();
+  });
+
+  it('gives up on a handshake that never answers', async () => {
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('Aborted', 'AbortError'));
+          });
+        }),
+    );
+    const errors: (string | undefined)[] = [];
+    const handle = startEventStream({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      idleTimeoutMs: 20,
+      minDelayMs: 1,
+      maxDelayMs: 1,
+      random: () => 0,
+      onEvent: () => undefined,
+      onStatus: (state, detail) => {
+        if (state === 'reconnecting') errors.push(detail?.error);
+      },
+      sleep: async () => {
+        handle.stop();
+      },
+    });
+
+    await vi.waitFor(() => expect(errors.length).toBeGreaterThan(0));
+    expect(errors[0]).toContain('did not answer within 20ms');
+    handle.stop();
+  });
+
+  it('accepts a lag marker and does not let it shadow the next real event', async () => {
+    const marker = JSON.stringify({
+      seq: 3,
+      ts_ms: 1700000000003,
+      session_id: 's_1',
+      type: 'stream_lagged',
+      skipped: 2,
+    });
+    const responses = [
+      sseResponse([
+        `data: ${eventPayload(1, 'a')}\n\n`,
+        `data: ${marker}\n\n`,
+        `data: ${eventPayload(4, 'b')}\n\n`,
+      ]),
+    ];
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => responses.shift() ?? sseResponse([]),
+    );
+    const received: RawEvent[] = [];
+    const gaps: { after: number; seq: number; missed: number }[] = [];
+    const handle = startEventStream({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      minDelayMs: 1,
+      maxDelayMs: 1,
+      random: () => 0,
+      sleep: async () => undefined,
+      onGap: (gap) => gaps.push(gap),
+      onEvent: (event) => {
+        received.push(event);
+        if (received.length === 3) handle.stop();
+      },
+    });
+
+    await vi.waitFor(() => expect(received).toHaveLength(3));
+    expect(received.map((event) => event.type)).toEqual(['text_delta', 'stream_lagged', 'text_delta']);
+    // The marker reports its own skipped count, and the real seq-4 frame after it
+    // is contiguous with the marker, so it is neither dropped nor double-reported.
+    expect(gaps).toEqual([{ after: 1, seq: 3, missed: 2 }]);
+    expect(received[2]?.delta).toBe('b');
+    handle.stop();
+  });
+
   it('stops cleanly when aborted while the stream is open', async () => {
     const holder: { controller: ReadableStreamDefaultController<Uint8Array> | null } = {
       controller: null,
@@ -161,7 +405,7 @@ describe('startEventStream', () => {
     });
     await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1));
     handle.stop();
-    expect(handle.getState()).toBe('open');
+    expect(handle.getState()).toBe('idle');
     holder.controller?.close();
   });
 });

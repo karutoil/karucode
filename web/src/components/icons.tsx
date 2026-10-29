@@ -89,6 +89,15 @@ export function RefreshIcon(props: IconProps): JSX.Element {
   );
 }
 
+export function EditIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" />
+    </svg>
+  );
+}
+
 export function CopyIcon(props: IconProps): JSX.Element {
   return (
     <svg {...svgProps(props)}>
@@ -136,6 +145,14 @@ export function FileIcon(props: IconProps): JSX.Element {
     <svg {...svgProps(props)}>
       <path d="M6 3h8l4 4v14H6z" />
       <path d="M14 3v4h4" />
+    </svg>
+  );
+}
+
+export function ChatIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5 8.1 8.1 0 0 1-3.2-.7L4 20l1.7-4.8a7.5 7.5 0 1 1 14.3-3.7Z" />
     </svg>
   );
 }
@@ -209,6 +226,148 @@ export function MenuIcon(props: IconProps): JSX.Element {
   return (
     <svg {...svgProps(props)}>
       <path d="M4 7h16M4 12h16M4 17h16" />
+    </svg>
+  );
+}
+/* ---- icons added for the v3 workspace design -------------------------- */
+
+export function PaletteIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M12 2.5a9.5 9.5 0 1 0 0 19h1.4a2.4 2.4 0 0 0 1.6-4.2 1.5 1.5 0 0 1 .9-2.6h2a4 4 0 0 0 4-4A10 10 0 0 0 12 2.5Z" />
+      <circle cx="7.5" cy="11" r="1" />
+      <circle cx="10" cy="6.7" r="1" />
+      <circle cx="15.5" cy="7.5" r="1" />
+      <circle cx="17" cy="11.4" r="1" />
+    </svg>
+  );
+}
+
+export function UploadIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M12 16V4m-5 5 5-5 5 5M4 17v3h16v-3" />
+    </svg>
+  );
+}
+
+export function DownloadIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M12 3v12m-5-5 5 5 5-5M4 17v3h16v-3" />
+    </svg>
+  );
+}
+
+export function TrashIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M4 7h16M10 4h4m-8 3 1 14h10l1-14M10 11v7m4-7v7" />
+    </svg>
+  );
+}
+
+export function SparkIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="m12 2 1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8L12 2Z" />
+    </svg>
+  );
+}
+
+export function ArrowRightIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M5 12h14m-6-6 6 6-6 6" />
+    </svg>
+  );
+}
+
+export function CircleCheckIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="m8 12 3 3 5-6" />
+    </svg>
+  );
+}
+
+export function LockIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <rect x="4" y="10" width="16" height="11" rx="2" />
+      <path d="M8 10V7a4 4 0 1 1 8 0v3" />
+    </svg>
+  );
+}
+
+export function PaperclipIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="m21 11.5-8.9 8.9a6 6 0 0 1-8.5-8.5l9.6-9.6a4 4 0 0 1 5.7 5.7l-10 10a2 2 0 0 1-2.8-2.8l9.2-9.2" />
+    </svg>
+  );
+}
+
+export function FileCodeIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
+      <path d="M13 2v7h7M10 13l-2 2 2 2m4-4 2 2-2 2" />
+    </svg>
+  );
+}
+
+export function FolderOpenIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v3M3 8v9a2 2 0 0 0 2 2h13l3-8H7l-4 8" />
+    </svg>
+  );
+}
+
+export function BoltIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="m13 2-9 12h7l-1 8 10-12h-7l0-8Z" />
+    </svg>
+  );
+}
+
+export function BranchIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <circle cx="6" cy="5" r="2" />
+      <circle cx="6" cy="19" r="2" />
+      <circle cx="18" cy="7" r="2" />
+      <path d="M6 7v10M18 9a6 6 0 0 1-6 6H6" />
+    </svg>
+  );
+}
+
+export function ThumbUpIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M7 10v11H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Zm0 0 5-8a3 3 0 0 1 2 4l-1 4h6a3 3 0 0 1 3 3l-1.3 6a3 3 0 0 1-3 2H7" />
+    </svg>
+  );
+}
+
+export function CpuIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <rect x="5" y="5" width="14" height="14" rx="2" />
+      <rect x="9" y="9" width="6" height="6" />
+      <path d="M9 2v3m6-3v3M9 19v3m6-3v3M19 9h3m-3 6h3M2 9h3m-3 6h3" />
+    </svg>
+  );
+}
+
+export function EyeIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z" />
+      <circle cx="12" cy="12" r="3" />
     </svg>
   );
 }

@@ -11,6 +11,8 @@ export interface DialogProps {
   class?: string;
   showHeader?: boolean;
   labelId?: string;
+  /** Optional supporting line under the title; announced as the dialog description. */
+  description?: string;
 }
 
 /**
@@ -25,10 +27,12 @@ export function Dialog({
   class: className = '',
   showHeader = true,
   labelId,
+  description,
 }: DialogProps): ComponentChildren {
   const ref = useRef<HTMLDivElement>(null);
   const generatedId = useId();
   const titleId = labelId ?? `dialog-title-${generatedId}`;
+  const descriptionId = description ? `dialog-description-${labelId ?? generatedId}` : undefined;
   useFocusTrap(ref, open, onClose);
   if (!open) return null;
 
@@ -40,22 +44,37 @@ export function Dialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        aria-describedby={descriptionId}
         ref={ref}
         data-testid="dialog"
       >
         {showHeader ? (
           <header class="dialog-header">
-            <h2 id={titleId} class="dialog-title">
-              {title}
-            </h2>
+            <div class="dialog-headings">
+              <h2 id={titleId} class="dialog-title">
+                {title}
+              </h2>
+              {description ? (
+                <p id={descriptionId} class="dialog-description">
+                  {description}
+                </p>
+              ) : null}
+            </div>
             <button type="button" class="icon-button" onClick={onClose} aria-label="Close dialog">
               <CloseIcon />
             </button>
           </header>
         ) : (
-          <h2 id={titleId} class="sr-only">
-            {title}
-          </h2>
+          <>
+            <h2 id={titleId} class="sr-only">
+              {title}
+            </h2>
+            {description ? (
+              <p id={descriptionId} class="sr-only">
+                {description}
+              </p>
+            ) : null}
+          </>
         )}
         {children}
       </div>

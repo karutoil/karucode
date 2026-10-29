@@ -3,13 +3,16 @@ import { fireEvent, render, screen, within } from '@testing-library/preact';
 import type { Project } from '../api/types';
 import * as store from '../state/store';
 import * as actions from '../state/actions';
-import { ProjectRail, pathHint, projectInitials, projectTone } from './ProjectRail';
+import { ProjectRail, pathHint, projectInitials } from './ProjectRail';
 
 vi.mock('../state/actions', () => ({
   switchProject: vi.fn(async () => undefined),
   createProject: vi.fn(async () => null),
   renameProjectById: vi.fn(async () => true),
   deleteProjectById: vi.fn(async () => true),
+  openThemeStudio: vi.fn(),
+  togglePalette: vi.fn(),
+  openSettings: vi.fn(),
 }));
 
 const NOW = 1_710_000_100_000;
@@ -59,6 +62,28 @@ beforeEach(() => {
 });
 
 describe('ProjectRail', () => {
+  it('renders the brand mark and the rail entry points', () => {
+    const { container } = renderRail();
+
+    expect(container.querySelector('.brand-mark')?.textContent).toBe('k.');
+    expect(screen.getByRole('button', { name: 'Open theme studio' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Open command palette' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Open settings' })).not.toBeNull();
+  });
+
+  it('wires the bottom tools to the theme studio, the palette and settings', () => {
+    renderRail();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open theme studio' }));
+    expect(actions.openThemeStudio).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open command palette' }));
+    expect(actions.togglePalette).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    expect(actions.openSettings).toHaveBeenCalledTimes(1);
+  });
+
   it('renders one button per project with the documented accessible name', () => {
     const { container } = renderRail();
 
@@ -283,11 +308,16 @@ describe('ProjectRail helpers', () => {
     expect(projectInitials('   ')).toBe('?');
   });
 
-  it('keeps a project on the same tone across calls', () => {
-    const tone = projectTone(mainProject);
-    expect(projectTone({ ...mainProject, name: 'Renamed' })).toBe(tone);
-    expect(tone).toBeGreaterThanOrEqual(0);
-    expect(tone).toBeLessThan(5);
+  it('renders every project glyph in the neutral rail tile, with no per-project tint', () => {
+    renderRail();
+
+    const active = screen.getByRole('button', { name: 'Switch to KaruCode (/home/me/karucode)' });
+    const idle = screen.getByRole('button', { name: 'Switch to Docs Site (/home/me/docs)' });
+    // The mock's tiles are all the same grey square; only the active one carries gold.
+    expect(active.querySelector('.project-rail-avatar')?.textContent).toBe('K');
+    expect(idle.querySelector('.project-rail-avatar')?.textContent).toBe('DS');
+    expect(active.parentElement?.hasAttribute('data-tone')).toBe(false);
+    expect(idle.parentElement?.hasAttribute('data-tone')).toBe(false);
   });
 
   it('classifies paths for the inline hint', () => {

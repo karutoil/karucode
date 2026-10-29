@@ -1,16 +1,25 @@
-import type { JSX } from 'preact';
+import { Fragment, type JSX } from 'preact';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { relativeTime } from '../lib/format';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { Dialog } from './Dialog';
-import { SearchIcon } from './icons';
+import {
+  ArrowRightIcon,
+  FileIcon,
+  PanelIcon,
+  PlusIcon,
+  SearchIcon,
+  SettingsIcon,
+  SidebarIcon,
+} from './icons';
 
 interface PaletteAction {
   id: string;
   label: string;
   group: string;
   hint?: string;
+  icon: JSX.Element;
   run: () => void;
 }
 
@@ -35,6 +44,7 @@ export function CommandPalette(): JSX.Element | null {
         label: 'New session',
         group: 'Actions',
         hint: 'Cmd/Ctrl+N',
+        icon: <PlusIcon size={15} />,
         run: () => void actions.createSession(),
       },
       {
@@ -46,6 +56,7 @@ export function CommandPalette(): JSX.Element | null {
             : 'Hide sessions rail',
         group: 'Actions',
         hint: 'Cmd/Ctrl+B',
+        icon: <SidebarIcon size={15} />,
         run: actions.toggleRail,
       },
       {
@@ -57,12 +68,14 @@ export function CommandPalette(): JSX.Element | null {
             : 'Hide inspector',
         group: 'Actions',
         hint: 'Cmd/Ctrl+J',
+        icon: <PanelIcon size={15} />,
         run: actions.toggleInspector,
       },
       {
         id: 'open-settings',
         label: 'Open settings',
         group: 'Actions',
+        icon: <SettingsIcon size={15} />,
         run: actions.openSettings,
       },
     ];
@@ -73,6 +86,7 @@ export function CommandPalette(): JSX.Element | null {
         label: session.title || 'Untitled session',
         group: 'Sessions',
         hint: `${relativeTime(session.updated_at, now)}${session.running ? ' · running' : ''}`,
+        icon: <FileIcon size={15} />,
         run: () => actions.switchSession(session.id),
       });
     }
@@ -119,13 +133,14 @@ export function CommandPalette(): JSX.Element | null {
       onClose={actions.closePalette}
       class="dialog-palette"
       labelId="palette-title"
+      showHeader={false}
     >
       <div class="palette-search">
-        <SearchIcon size={16} />
+        <SearchIcon size={17} />
         <input
           type="text"
           class="palette-input"
-          placeholder="Search actions and sessions…"
+          placeholder="Search commands, jump to a view…"
           value={query}
           data-autofocus
           role="combobox"
@@ -154,6 +169,7 @@ export function CommandPalette(): JSX.Element | null {
             }
           }}
         />
+        <kbd class="palette-esc">ESC</kbd>
       </div>
 
       <p class="sr-only" aria-live="polite">
@@ -162,26 +178,40 @@ export function CommandPalette(): JSX.Element | null {
 
       <ul class="palette-list" id="palette-list" role="listbox" aria-label="Commands">
         {filtered.length === 0 ? (
-          <li class="palette-empty">No matching actions.</li>
+          <li class="palette-empty" role="presentation">
+            No matching commands.
+          </li>
         ) : (
           filtered.map((action, index) => {
             const showGroup = index === 0 || filtered[index - 1]?.group !== action.group;
             return (
-              <li
-                key={action.id}
-                id={`palette-option-${action.id}`}
-                role="option"
-                aria-selected={index === activeIndex}
-                class={`palette-option${index === activeIndex ? ' is-active' : ''}`}
-                onMouseMove={() => setActiveIndex(index)}
-                onClick={() => runAction(action)}
-              >
-                <span class="palette-group" aria-hidden={!showGroup}>
-                  {showGroup ? action.group : ''}
-                </span>
-                <span class="palette-label">{action.label}</span>
-                {action.hint ? <span class="palette-hint">{action.hint}</span> : null}
-              </li>
+              <Fragment key={action.id}>
+                {showGroup ? (
+                  <li class="palette-group-label" role="presentation" aria-hidden="true">
+                    {action.group}
+                  </li>
+                ) : null}
+                <li
+                  id={`palette-option-${action.id}`}
+                  role="option"
+                  aria-selected={index === activeIndex}
+                  class={`palette-item${index === activeIndex ? ' is-active' : ''}`}
+                  onMouseMove={() => setActiveIndex(index)}
+                  onClick={() => runAction(action)}
+                >
+                  <span class="palette-item-icon" aria-hidden="true">
+                    {action.icon}
+                  </span>
+                  <span class="palette-label">{action.label}</span>
+                  {action.hint ? (
+                    <span class="palette-hint">{action.hint}</span>
+                  ) : (
+                    <span class="palette-arrow" aria-hidden="true">
+                      <ArrowRightIcon size={13} />
+                    </span>
+                  )}
+                </li>
+              </Fragment>
             );
           })
         )}

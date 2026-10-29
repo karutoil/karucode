@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { SettingsSheet } from './SettingsSheet';
-import type { CatalogResponse, Config, ConfigPatch, ProviderTestResult } from '../api/types';
+import type {
+  CatalogLookupResponse,
+  CatalogResponse,
+  Config,
+  ConfigPatch,
+  ProviderTestResult,
+} from '../api/types';
 import { configFixture, jsonResponse, resetAppState } from '../test/fixtures';
 import * as store from '../state/store';
 
@@ -99,6 +105,38 @@ const CATALOG_MODELS: CatalogResponse = {
   error: null,
 };
 
+/** What the server's prefix-stripping lookup would answer, per queried id. */
+const LOOKUP_HITS: Record<string, CatalogLookupResponse['match']> = {
+  'qwen3-32b': {
+    provider: 'alibaba',
+    matched_id: 'qwen3-32b',
+    model: {
+      id: 'qwen3-32b',
+      name: 'Qwen3 32B',
+      context_window: 131072,
+      max_output_tokens: 16384,
+      tool_call: true,
+      reasoning: true,
+      cost_input: 0.2,
+      cost_output: 0.6,
+    },
+  },
+  'a6api/ali/deepseek-v4.1-flash-1017': {
+    provider: 'deepseek',
+    matched_id: 'deepseek-v4.1-flash-1017',
+    model: {
+      id: 'deepseek-v4.1-flash-1017',
+      name: 'DeepSeek V4.1 Flash',
+      context_window: 128000,
+      max_output_tokens: 8192,
+      tool_call: true,
+      reasoning: false,
+      cost_input: 0.07,
+      cost_output: 0.28,
+    },
+  },
+};
+
 /* ------------------------------------------------------------------ *
  * Fetch stub: applies provider/active patches so the UI sees its writes.
  * ------------------------------------------------------------------ */
@@ -187,6 +225,17 @@ function installFetch(config: Config, options: { testResult?: ProviderTestResult
     if (url === '/api/provider/test') return jsonResponse(testResult);
     if (url === '/api/models/catalog') return jsonResponse(CATALOG_PROVIDERS);
     if (url === '/api/models/catalog?provider=openrouter') return jsonResponse(CATALOG_MODELS);
+    if (url.startsWith('/api/models/lookup')) {
+      const model = new URLSearchParams(url.split('?')[1] ?? '').get('model') ?? '';
+      const response: CatalogLookupResponse = {
+        ok: true,
+        match: LOOKUP_HITS[model] ?? null,
+        fetched_at_ms: 1_710_000_000_000,
+        stale: false,
+        error: null,
+      };
+      return jsonResponse(response);
+    }
     return jsonResponse({ error: { code: 'not_found', message: `unmocked ${method} ${url}` } }, 404);
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -197,6 +246,27 @@ function renderSheet(config: Config) {
   store.config.value = config;
   store.settingsOpen.value = true;
   return render(<SettingsSheet />);
+}
+
+/**
+ * Wait until the sheet has stopped re-seeding itself.
+ *
+ * The sheet paints the cached config, then `loadConfig()` resolves and replaces
+ * the whole form state. A value typed before that lands is silently discarded,
+ * so every test that edits a field has to let the refresh finish first.
+ */
+async function settleSheet(label: string, rendered: Config): Promise<HTMLInputElement> {
+  await screen.findByLabelText(label);
+  // The sheet paints the cached config, then `loadConfig()` resolves, stores the
+  // parsed response (a fresh object) and re-seeds the whole form from it. A value
+  // typed before that lands is silently discarded by `setForm(...)`, so wait for
+  // the store write and the render it schedules, not for a guessed delay.
+  await waitFor(() => expect(store.config.value).not.toBe(rendered));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await waitFor(() =>
+    expect((screen.getByLabelText(label) as HTMLInputElement).disabled).toBe(false),
+  );
+  return screen.getByLabelText(label) as HTMLInputElement;
 }
 
 function profileCard(name: string): Promise<HTMLElement> {
@@ -292,8 +362,11 @@ describe('SettingsSheet providers', () => {
     expect(patch?.model?.model).toBeUndefined();
     expect(patch?.model?.api_key).toBeUndefined();
     expect(patch?.limits?.max_iterations).toBe(32);
+    expect(patch?.limits?.auto_continue).toBe(true);
+    expect(patch?.limits?.max_continues).toBe(50);
     expect(patch?.approvals?.mode).toBe('ask');
     expect(patch?.subagents?.max_concurrent).toBe(3);
+    expect(patch?.subagents?.max_continues).toBe(0);
   });
 
   it('adds a picked models.dev model with prefilled metadata', async () => {
@@ -329,5 +402,247 @@ describe('SettingsSheet providers', () => {
     const updatedGateway = await profileCard('Gateway');
     expect(within(updatedGateway).getAllByText('Qwen3 32B')).toHaveLength(2);
     expect(within(updatedGateway).getByText('qwen/qwen3-32b')).not.toBeNull();
+  });
+
+  it('detects metadata when adding a gateway-prefixed model id by hand', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const gateway = await profileCard('Gateway');
+    const input = within(gateway).getByLabelText('Add a model id');
+    fireEvent.input(input, { target: { value: 'a6api/ali/deepseek-v4.1-flash-1017' } });
+    fireEvent.click(within(gateway).getByRole('button', { name: 'Add model id to Gateway' }));
+
+    await waitFor(() => expect(patches).toHaveLength(1));
+    const upsert = patches[0]?.providers?.upsert?.[0];
+    expect(upsert?.id).toBe('gateway');
+    // The gateway id is kept verbatim; only the metadata comes from the match.
+    expect(upsert?.models?.[1]).toEqual({
+      id: 'a6api/ali/deepseek-v4.1-flash-1017',
+      name: 'DeepSeek V4.1 Flash',
+      context_window: 128000,
+      max_output_tokens: 8192,
+      tool_call: true,
+      reasoning: false,
+      cost_input: 0.07,
+      cost_output: 0.28,
+      catalog_provider: 'deepseek',
+    });
+
+    const updatedGateway = await profileCard('Gateway');
+    expect(within(updatedGateway).getByText('DeepSeek V4.1 Flash')).not.toBeNull();
+    expect(within(updatedGateway).getByText('a6api/ali/deepseek-v4.1-flash-1017')).not.toBeNull();
+    expect(within(updatedGateway).getByText('via deepseek')).not.toBeNull();
+  });
+
+  it('refreshes one model’s metadata from the catalog, keeping the custom name', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const gateway = await profileCard('Gateway');
+    fireEvent.click(within(gateway).getByRole('button', { name: 'Refresh metadata for Qwen3 32B on Gateway' }));
+
+    await waitFor(() => expect(patches).toHaveLength(1));
+    const upsert = patches[0]?.providers?.upsert?.[0];
+    expect(upsert?.id).toBe('gateway');
+    // The custom display name survives; the metadata comes from the match.
+    expect(upsert?.models?.[0]).toEqual({
+      id: 'qwen3-32b',
+      name: 'Qwen3 32B',
+      context_window: 131072,
+      max_output_tokens: 16384,
+      tool_call: true,
+      reasoning: true,
+      cost_input: 0.2,
+      cost_output: 0.6,
+      catalog_provider: 'alibaba',
+    });
+    const updatedGateway = await profileCard('Gateway');
+    expect(within(updatedGateway).getByText('via alibaba')).not.toBeNull();
+  });
+
+  it('leaves the model alone when a refresh finds no catalog entry', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const defaultCard = await profileCard('Default');
+    fireEvent.click(
+      within(defaultCard).getByRole('button', { name: 'Refresh metadata for GPT-4o mini on Default' }),
+    );
+
+    await waitFor(() =>
+      expect(store.toasts.value.some((toast) => toast.message.includes('No models.dev entry matches'))).toBe(
+        true,
+      ),
+    );
+    expect(patches).toHaveLength(0);
+  });
+
+  it('edits a model’s metadata through the dialog', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const gateway = await profileCard('Gateway');
+    fireEvent.click(within(gateway).getByRole('button', { name: 'Edit Qwen3 32B on Gateway' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Edit qwen3-32b' });
+    fireEvent.input(within(dialog).getByLabelText('Context window'), { target: { value: '128000' } });
+    fireEvent.input(within(dialog).getByLabelText('Output cost / M tokens'), { target: { value: '0.9' } });
+    fireEvent.change(within(dialog).getByLabelText('Reasoning'), { target: { value: 'false' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save model' }));
+
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.providers?.upsert?.[0]?.models?.[0]).toEqual({
+      id: 'qwen3-32b',
+      name: 'Qwen3 32B',
+      context_window: 128000,
+      max_output_tokens: 8192,
+      tool_call: true,
+      reasoning: false,
+      cost_input: null,
+      cost_output: 0.9,
+      catalog_provider: null,
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit qwen3-32b' })).toBeNull());
+  });
+
+  it('rejects an out-of-range context window before saving', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const gateway = await profileCard('Gateway');
+    fireEvent.click(within(gateway).getByRole('button', { name: 'Edit Qwen3 32B on Gateway' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Edit qwen3-32b' });
+    fireEvent.input(within(dialog).getByLabelText('Context window'), { target: { value: '0' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save model' }));
+
+    await within(dialog).findByRole('alert');
+    expect(patches).toHaveLength(0);
+  });
+
+  it('still adds the bare id when the catalog has no match', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const gateway = await profileCard('Gateway');
+    const input = within(gateway).getByLabelText('Add a model id');
+    fireEvent.input(input, { target: { value: 'a6api/ali/unlisted-9000' } });
+    fireEvent.click(within(gateway).getByRole('button', { name: 'Add model id to Gateway' }));
+
+    await waitFor(() => expect(patches).toHaveLength(1));
+    const upsert = patches[0]?.providers?.upsert?.[0];
+    expect(upsert?.models?.[1]).toEqual({ id: 'a6api/ali/unlisted-9000', name: null });
+  });
+});
+
+describe('SettingsSheet controls', () => {
+  beforeEach(() => {
+    resetAppState();
+  });
+
+  afterEach(() => {
+    resetAppState();
+    vi.unstubAllGlobals();
+  });
+
+  it('lets a subagent outlive its first segment and saves both numbers', async () => {
+    const config = twoProfileConfig();
+    const { patches } = installFetch(config);
+    renderSheet(config);
+
+    // A delegated task that needs hours is bounded by segments x refreshes, so
+    // both numbers have to be reachable from the settings screen.
+    await settleSheet('Auto-continues', config);
+    // The mock config had the one-shot budget; make it a long-horizon one.
+    fireEvent.input(screen.getByLabelText('Auto-continues'), { target: { value: '60' } });
+    expect((screen.getByLabelText('Auto-continues') as HTMLInputElement).value).toBe('60');
+
+    fireEvent.input(screen.getByLabelText('Turns per segment'), { target: { value: '200' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.subagents?.max_iterations).toBe(200);
+    expect(patches[0]?.subagents?.max_continues).toBe(60);
+  });
+
+  it('rejects an auto-continues value above the server bound', async () => {
+    const config = twoProfileConfig();
+    const { patches } = installFetch(config);
+    renderSheet(config);
+
+    const field = await settleSheet('Auto-continues', config);
+    fireEvent.input(field, { target: { value: '1001' } });
+    expect(field.value).toBe('1001');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(await screen.findByText('Auto-continues must be 0–1000.')).not.toBeNull();
+    expect(patches).toHaveLength(0);
+  });
+
+  it('exposes every toggle as a labelled, described switch and saves the flip', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const parallel = await screen.findByRole('switch', { name: 'Parallel tool calls' });
+    expect(parallel.getAttribute('aria-checked')).toBe('true');
+    expect(parallel.className).toContain('toggle');
+    expect(parallel.className).toContain('is-on');
+
+    // The mock pairs the label with a hint line; both are announced.
+    expect(screen.getByText('Ask the endpoint to allow multiple tool calls per turn.')).not.toBeNull();
+    const describedBy = parallel.getAttribute('aria-describedby');
+    expect(describedBy, 'switch is described by its hint').toBeTruthy();
+    expect(document.getElementById(describedBy!)?.textContent).toContain('multiple tool calls');
+
+    fireEvent.click(parallel);
+    expect(parallel.getAttribute('aria-checked')).toBe('false');
+    expect(parallel.className).not.toContain('is-on');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.model?.parallel_tool_calls).toBe(false);
+  });
+
+  it('keeps the settings sheet on the mock’s chrome classes', async () => {
+    installFetch(twoProfileConfig());
+    const { container } = renderSheet(twoProfileConfig());
+
+    const sheet = await screen.findByRole('dialog', { name: 'Settings' });
+    expect(sheet.className).toContain('dialog-sheet');
+    expect(sheet.className).toContain('dialog-settings');
+    // Title + description are the mock's `.modal-title` / `.modal-desc` pair.
+    expect(within(sheet).getByText('Personalize your coding experience.')).not.toBeNull();
+    expect(container.querySelectorAll('.setting-row').length).toBeGreaterThan(0);
+    expect(container.querySelector('.settings-footer')).not.toBeNull();
+  });
+});
+
+describe('SettingsSheet appearance', () => {
+  beforeEach(() => {
+    resetAppState();
+  });
+
+  afterEach(() => {
+    resetAppState();
+    store.themeStudioOpen.value = false;
+    vi.unstubAllGlobals();
+  });
+
+  it('opens the Theme Studio from the Appearance row without saving settings', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const appearance = await screen.findByRole('region', { name: 'Appearance' });
+    expect(within(appearance).getByText(/stored in this browser/)).not.toBeNull();
+
+    fireEvent.click(within(appearance).getByRole('button', { name: 'Theme studio' }));
+
+    expect(store.themeStudioOpen.value).toBe(true);
+    expect(store.settingsOpen.value).toBe(false);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    // The appearance control is type="button" inside the settings form, so it
+    // must never submit a config patch.
+    expect(patches).toHaveLength(0);
   });
 });

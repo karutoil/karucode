@@ -115,6 +115,10 @@ export const mobileSheet = signal<MobileSheet>(null);
 export const inspectorTab = signal<InspectorTab>('workspace');
 export const settingsOpen = signal(false);
 export const paletteOpen = signal(false);
+/** The Theme Studio drawer (right side). Mutually exclusive with other overlays. */
+export const themeStudioOpen = signal(false);
+/** Text another surface asked the composer to take (empty-state quick prompts). */
+export const composerDraft = signal<string | null>(null);
 export const fileViewerPath = signal<string | null>(null);
 export const toasts = signal<Toast[]>([]);
 export const resolvingApprovals = signal<Record<string, boolean>>({});
@@ -201,6 +205,7 @@ export const connectionLabel = computed<string>(() => {
   const state = connection.value;
   if (state.api === 'offline') return 'Disconnected';
   if (state.stream === 'unauthorized') return 'Auth required';
+  if (state.stream === 'blocked') return 'Blocked';
   if (state.stream === 'reconnecting') return 'Reconnecting';
   if (state.stream === 'connecting') return 'Connecting';
   if (state.stream === 'open') return 'Live';

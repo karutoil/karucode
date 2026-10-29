@@ -1,8 +1,7 @@
 import type { JSX } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { WorkspaceEntry } from '../api/types';
-import { formatBytes } from '../lib/format';
-import { ChevronRightIcon, FileIcon, FolderIcon } from './icons';
+import { ArrowRightIcon, ChevronRightIcon, FileCodeIcon, FileIcon, FolderIcon, FolderOpenIcon } from './icons';
 
 export interface FileTreeProps {
   rootPath: string;
@@ -19,18 +18,45 @@ interface FlatNode {
   depth: number;
 }
 
+type FileKind = 'folder' | 'rust' | 'ts' | 'md' | 'file';
+
+/** Guards against a server listing that claims a directory is its own child. */
+const MAX_TREE_DEPTH = 32;
+
+function fileKind(name: string): FileKind {
+  const dot = name.lastIndexOf('.');
+  const ext = dot <= 0 ? '' : name.slice(dot + 1).toLowerCase();
+  if (ext === 'rs') return 'rust';
+  if (ext === 'ts' || ext === 'tsx' || ext === 'js' || ext === 'jsx' || ext === 'mjs') return 'ts';
+  if (ext === 'md' || ext === 'mdx') return 'md';
+  return 'file';
+}
+
+function iconFor(kind: FileKind, open = false): JSX.Element {
+  if (kind === 'folder') return open ? <FolderOpenIcon size={14} /> : <FolderIcon size={14} />;
+  if (kind === 'rust' || kind === 'ts') return <FileCodeIcon size={14} />;
+  return <FileIcon size={14} />;
+}
+
 function flatten(
   entries: WorkspaceEntry[],
   depth: number,
   children: Record<string, WorkspaceEntry[]>,
   expanded: Set<string>,
+  seen: Set<string> = new Set(),
 ): FlatNode[] {
+  if (depth > MAX_TREE_DEPTH) return [];
   const result: FlatNode[] = [];
   for (const entry of entries) {
+    const key = `${entry.kind}:${entry.path}`;
+    // A listing that repeats a path (or points a directory at itself) would
+    // otherwise recurse forever.
+    if (seen.has(key)) continue;
+    seen.add(key);
     result.push({ entry, depth });
     if (entry.kind === 'dir' && expanded.has(entry.path)) {
       const childEntries = children[entry.path] ?? [];
-      result.push(...flatten(childEntries, depth + 1, children, expanded));
+      result.push(...flatten(childEntries, depth + 1, children, expanded, seen));
     }
   }
   return result;
@@ -89,7 +115,7 @@ export function FileTree({
 
   return (
     <ul
-      class="file-tree"
+      class="tree"
       role="tree"
       aria-label={`Workspace files in ${rootPath}`}
       ref={container}
@@ -146,17 +172,21 @@ export function FileTree({
         const isOpen = isDir && expanded.has(node.entry.path);
         const isLoading = isDir && loading.has(node.entry.path);
         const tabbable = focusedPath === null ? node === visible[0] : focusedPath === node.entry.path;
+        const selected = focusedPath === node.entry.path;
+        const kind: FileKind = isDir ? 'folder' : fileKind(node.entry.name);
         return (
           <li
             key={`${node.entry.kind}:${node.entry.path}`}
             role="treeitem"
             aria-level={node.depth + 1}
             aria-expanded={isDir ? isOpen : undefined}
-            aria-selected={focusedPath === node.entry.path}
+            aria-selected={selected}
             data-tree-path={node.entry.path}
             tabIndex={tabbable ? 0 : -1}
-            class={`tree-item${isDir ? ' is-dir' : ' is-file'}${isOpen ? ' is-open' : ''}`}
-            style={{ paddingLeft: `${node.depth * 14 + 8}px` }}
+            class={`tree-row${isDir ? ' is-dir' : ' is-file'}${isOpen ? ' is-open' : ''}${
+              selected ? ' is-selected' : ''
+            }`}
+            style={{ paddingLeft: `${node.depth * 18 + 8}px` }}
             title={node.entry.path}
             onClick={() => {
               setFocusedPath(node.entry.path);
@@ -165,15 +195,17 @@ export function FileTree({
             onFocus={() => setFocusedPath(node.entry.path)}
           >
             <span class={`tree-chevron${isOpen ? ' is-open' : ''}`} aria-hidden="true">
-              {isDir ? <ChevronRightIcon size={13} /> : null}
+              {isDir ? <ChevronRightIcon size={12} /> : null}
             </span>
-            <span class="tree-icon" aria-hidden="true">
-              {isDir ? <FolderIcon size={14} /> : <FileIcon size={14} />}
+            <span class={`tree-icon kind-${kind}`} aria-hidden="true">
+              {iconFor(kind, isOpen)}
             </span>
             <span class="tree-name">{node.entry.name}</span>
             {isLoading ? <span class="tree-loading">loading…</span> : null}
-            {!isDir && node.entry.size > 0 ? (
-              <span class="tree-size">{formatBytes(node.entry.size)}</span>
+            {selected ? (
+              <span class="tree-open-hint" aria-hidden="true">
+                <ArrowRightIcon size={12} />
+              </span>
             ) : null}
           </li>
         );

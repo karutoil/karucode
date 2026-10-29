@@ -1,7 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/preact';
-import { SessionList, type SessionListProps } from './SessionsRail';
+import { SessionList, SessionsRail, sessionGroup, type SessionListProps } from './SessionsRail';
 import { secondSummaryFixture, summaryFixture, NOW } from '../test/fixtures';
+import * as actions from '../state/actions';
+import * as store from '../state/store';
 
 function renderList(overrides: Partial<SessionListProps> = {}) {
   const props: SessionListProps = {
@@ -27,8 +29,12 @@ describe('SessionList', () => {
     expect(screen.getByText('Fix login bug')).not.toBeNull();
     expect(screen.getByText('Add workspace tree')).not.toBeNull();
     expect(screen.getByText('2m ago')).not.toBeNull();
-    expect(screen.getByText('12')).not.toBeNull();
-    expect(screen.getByText('3')).not.toBeNull();
+    expect(screen.getByText('12 messages')).not.toBeNull();
+    expect(screen.getByText('3 messages')).not.toBeNull();
+    // Meta is separated by the mock's 3px dot, not a middot glyph.
+    expect(container.querySelector('.session-meta .meta-dot')).not.toBeNull();
+    // The group heading carries its own count, like the mock's `RECENT SESSIONS 2`.
+    expect(container.querySelector('.session-group-label span')?.textContent).toBe('2');
 
     const rows = container.querySelectorAll('.session-row');
     expect(rows).toHaveLength(2);
@@ -95,5 +101,163 @@ describe('SessionList', () => {
     const { container } = renderList({ sessions: [], loading: true });
     expect(container.querySelectorAll('.skeleton-session').length).toBeGreaterThan(0);
     expect(screen.getByLabelText('Loading sessions')).not.toBeNull();
+  });
+});
+describe('session grouping and search', () => {
+  it('buckets sessions by last activity', () => {
+    expect(sessionGroup(NOW - 60_000, NOW)).toBe('Today');
+    expect(sessionGroup(NOW - 26 * 3_600_000, NOW)).toBe('Yesterday');
+    expect(sessionGroup(NOW - 3 * 86_400_000, NOW)).toBe('Previous 7 days');
+    expect(sessionGroup(NOW - 30 * 86_400_000, NOW)).toBe('Older');
+  });
+
+  it('renders date group headings above the rows', () => {
+    const older = { ...secondSummaryFixture, id: 's_old', title: 'Ancient history', updated_at: NOW - 30 * 86_400_000 };
+    renderList({ sessions: [summaryFixture, older] });
+
+    expect(screen.getByRole('region', { name: 'Today sessions' })).not.toBeNull();
+    expect(screen.getByRole('region', { name: 'Older sessions' })).not.toBeNull();
+  });
+
+  it('filters by title and keeps a real empty state when nothing matches', () => {
+    const { rerender, props } = renderList();
+    rerender(<SessionList {...props} query="workspace" />);
+    expect(screen.getByText('Add workspace tree')).not.toBeNull();
+    expect(screen.queryByText('Fix login bug')).toBeNull();
+
+    rerender(<SessionList {...props} query="zzz" />);
+    expect(screen.getByText('No matching sessions')).not.toBeNull();
+    expect(screen.queryByRole('button', { name: /Fix login bug/ })).toBeNull();
+  });
+});
+
+describe('SessionsRail shell', () => {
+  function seedStore(): void {
+    store.sessions.value = [summaryFixture, secondSummaryFixture];
+    store.sessionsLoading.value = false;
+    store.currentSessionId.value = summaryFixture.id;
+    store.currentProjectId.value = 'p_karucode';
+    store.projects.value = [
+      {
+        id: 'p_karucode',
+        name: 'KaruCode',
+        path: '/home/me/karucode',
+        created_at: NOW,
+        updated_at: NOW,
+        session_count: 2,
+      },
+    ];
+    store.clock.value = NOW;
+    store.narrowViewport.value = false;
+    store.mobileSheet.value = null;
+  }
+
+  beforeEach(seedStore);
+
+  it('shows the project heading, path and a platform-correct shortcut', () => {
+    render(<SessionsRail />);
+
+    expect(screen.getByText('Your workspace')).not.toBeNull();
+    expect(screen.getByText('/home/me/karucode')).not.toBeNull();
+    const newSession = screen.getByRole('button', { name: /New session/ });
+    expect(newSession.textContent).toContain('New session');
+    expect(newSession.textContent).toContain('N');
+  });
+
+  it('filters the rail from the search field', () => {
+    render(<SessionsRail />);
+
+    const search = screen.getByLabelText('Find a session') as HTMLInputElement;
+    fireEvent.input(search, { target: { value: 'login' } });
+
+    expect(screen.getByText('Fix login bug')).not.toBeNull();
+    expect(screen.queryByText('Add workspace tree')).toBeNull();
+
+    fireEvent.keyDown(search, { key: 'Escape' });
+    expect(search.value).toBe('');
+    expect(screen.getByText('Add workspace tree')).not.toBeNull();
+  });
+
+  it('focuses the session search on "/" and ignores the key inside inputs', async () => {
+    render(<SessionsRail />);
+    const search = screen.getByLabelText('Find a session') as HTMLInputElement;
+
+    fireEvent.keyDown(window, { key: '/' });
+    await vi.waitFor(() => expect(document.activeElement).toBe(search));
+
+    // Typing "/" inside the field must not be swallowed.
+    const event = new KeyboardEvent('keydown', { key: '/', bubbles: true, cancelable: true });
+    search.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('offers real project actions in the options menu', () => {
+    const refresh = vi.spyOn(actions, 'refreshSessions').mockResolvedValue(undefined);
+    const settings = vi.spyOn(actions, 'openSettings').mockImplementation(() => undefined);
+    render(<SessionsRail />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project options' }));
+    const menu = screen.getByRole('menu', { name: /Project options for KaruCode/ });
+    expect(menu.textContent).toContain('/home/me/karucode');
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Refresh sessions' }));
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('menu')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Project settings…' }));
+    expect(settings).toHaveBeenCalledTimes(1);
+
+    refresh.mockRestore();
+    settings.mockRestore();
+  });
+
+  it('creates a session from the rail button', () => {
+    const create = vi.spyOn(actions, 'createSession').mockResolvedValue(null);
+    render(<SessionsRail />);
+
+    fireEvent.click(screen.getByRole('button', { name: /New session/ }));
+    expect(create).toHaveBeenCalledTimes(1);
+    create.mockRestore();
+  });
+
+  it('wraps the search input in the field box so the whole row is the target', () => {
+    const { container } = render(<SessionsRail />);
+    const search = screen.getByLabelText('Find a session') as HTMLInputElement;
+    // The wrapper is the mock's `<label class="side-search">`; implicit labelling
+    // means a click anywhere in the box (icon, keycap, padding) focuses the input.
+    const field = container.querySelector('label.side-search');
+    expect(field).not.toBeNull();
+    expect(field?.querySelector('input')).toBe(search);
+    expect(field?.querySelector('.keycap')).not.toBeNull();
+  });
+
+  it('keeps the project options button pinned to the right gutter', () => {
+    const { container } = render(<SessionsRail />);
+    const heading = container.querySelector('.project-heading');
+    // The mock's heading is a space-between row; the actions sit in their own
+    // group so the ⋯ never hugs the title.
+    expect(heading?.querySelector('.project-title')).not.toBeNull();
+    expect(heading?.querySelector('.side-head-actions .side-mini-btn')).not.toBeNull();
+    expect(heading?.lastElementChild?.className).toBe('side-head-actions');
+  });
+
+  it('puts the version in the footer strip and the provider beside Settings', () => {
+    store.health.value = {
+      status: 'ok',
+      version: '0.2.4',
+      uptime_secs: 12,
+      workspace: '/home/me/karucode',
+      projects: [],
+      auth_required: false,
+      provider_configured: true,
+      db: 'ok',
+    };
+    const { container } = render(<SessionsRail />);
+
+    // Mock: `All systems operational … v0.2.4`, then `Settings … Connected to gateway`.
+    expect(container.querySelector('.online-row .right')?.textContent).toBe('v0.2.4');
+    expect(container.querySelector('.settings-row .provider')?.textContent).not.toBe('v0.2.4');
+    expect(container.querySelector('.settings-row .provider')?.textContent).not.toBe('');
   });
 });

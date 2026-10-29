@@ -124,7 +124,7 @@ export function FileViewer(): JSX.Element | null {
                   The server truncated this file at {formatBytes(file.size)}. Only the beginning is shown.
                 </p>
               ) : null}
-              <div class="file-code-scroll">
+              <div class="file-code-scroll" tabIndex={0} role="region" aria-label={`Contents of ${path}`}>
                 <div class="file-gutter" aria-hidden="true">
                   {Array.from({ length: lineCount }, (_, index) => (
                     <span key={index}>{index + 1}</span>

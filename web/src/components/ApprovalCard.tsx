@@ -46,6 +46,7 @@ export function ApprovalCard({ approval, resolving, onDecide }: ApprovalCardProp
   const diff = stringField(payload, 'diff');
   const cwd = stringField(payload, 'cwd');
   const timeout = payload?.timeout_secs;
+  const hasTimeout = typeof timeout === 'number';
   const titleId = `approval-title-${approval.id}`;
 
   return (
@@ -75,14 +76,19 @@ export function ApprovalCard({ approval, resolving, onDecide }: ApprovalCardProp
 
       {cwd && cwd !== '.' ? (
         <p class="approval-meta">
-          working directory <code>{cwd}</code>
-          {typeof timeout === 'number' ? ` · timeout ${timeout}s` : ''}
+          <span class="approval-meta-label">working directory</span> <code>{cwd}</code>
         </p>
       ) : null}
 
       {path ? (
         <p class="approval-meta">
-          path <code>{path}</code>
+          <span class="approval-meta-label">path</span> <code>{path}</code>
+        </p>
+      ) : null}
+
+      {hasTimeout ? (
+        <p class="approval-meta">
+          <span class="approval-meta-label">timeout</span> <code>{timeout}s</code>
         </p>
       ) : null}
 
@@ -92,7 +98,7 @@ export function ApprovalCard({ approval, resolving, onDecide }: ApprovalCardProp
 
       {diff ? (
         <div class="approval-diff">
-          <DiffView diff={diff} />
+          <DiffView diff={diff} path={path || undefined} showHeader={!path} />
         </div>
       ) : null}
 

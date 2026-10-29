@@ -5,6 +5,7 @@ import type {
   ApprovalDecision,
   Config,
   ConfigPatch,
+  CatalogLookupResponse,
   CatalogResponse,
   KarucodeEvent,
   Project,
@@ -16,7 +17,7 @@ import type {
 } from '../api/types';
 import { isNarrowViewport } from '../lib/dom';
 import { emptyChatState, seedChatState, type MessageItem } from './chat';
-import { applyEventToChat, applyEventToSessions, markUserRun } from './eventReducer';
+import { applyEventToChat, applyEventToSessions, markUserRun, sessionAgentFromRecord } from './eventReducer';
 import { summaryFromDetail } from './selectors';
 import * as store from './store';
 
@@ -26,6 +27,13 @@ let sessionGeneration = 0;
 let refreshingSessionId: string | null = null;
 let refreshQueue: KarucodeEvent[] = [];
 let sessionsRefreshTimer: number | null = null;
+let gapResyncTimer: number | null = null;
+let resyncInFlight = false;
+let resyncAgain = false;
+let resyncFailures = 0;
+/** How often a failed refetch retries before it says so once and stops. */
+const RESYNC_RETRIES = 3;
+const RESYNC_BACKOFF_MS = 1_000;
 let localMessageSequence = 0;
 let sendInFlight = false;
 
@@ -62,6 +70,9 @@ function clearSelection(): void {
   store.chat.value = emptyChatState(null);
   store.chatLoading.value = false;
   store.chatError.value = null;
+  // Nothing is open, so no event can be waiting for a snapshot of it any more.
+  refreshingSessionId = null;
+  refreshQueue = [];
   store.writeLastSessionId(null);
 }
 
@@ -78,6 +89,9 @@ export function startStream(): void {
   stream = startEventStream({
     token: getAuthToken(),
     onEvent: handleRawEvent,
+    // The stream never replays: a `seq` hole means frames are gone, so refetch
+    // the transcript instead of leaving a stale answer on screen.
+    onGap: () => scheduleGapResync(),
     onStatus: (state, detail) => {
       store.connection.value = {
         ...store.connection.value,
@@ -96,7 +110,7 @@ export function startStream(): void {
       if (opens === 1) return;
       void refreshSessions();
       const id = store.currentSessionId.value;
-      if (id) void openSession(id, { silent: true });
+      if (id) void openSession(id, { silent: true, preserveLive: true });
     },
   });
 }
@@ -104,6 +118,83 @@ export function startStream(): void {
 export function stopStream(): void {
   stream?.stop();
   stream = null;
+}
+
+/** Refetch what the stream can no longer tell us: the session list and transcript. */
+async function resyncFromServer(): Promise<void> {
+  // One refetch at a time; a burst of holes must not fan out into N of them.
+  if (resyncInFlight) {
+    resyncAgain = true;
+    return;
+  }
+  resyncInFlight = true;
+  let repaired = false;
+  try {
+    await refreshSessions();
+    // `doRefreshSessions` swallows its own failure into the connection state.
+    if (store.connection.value.api !== 'offline') {
+      const id = store.currentSessionId.value;
+      repaired = id === null || (await openSession(id, { silent: true, preserveLive: true }));
+    }
+  } finally {
+    resyncInFlight = false;
+    if (repaired) {
+      resyncFailures = 0;
+    } else {
+      // A failed repair would leave a stale transcript on screen for good, which
+      // is the bug this whole path exists to kill: retry a few times, then say so
+      // once instead of silently giving up.
+      resyncFailures += 1;
+      if (resyncFailures <= RESYNC_RETRIES) {
+        scheduleGapResync(RESYNC_BACKOFF_MS * 2 ** (resyncFailures - 1));
+      } else if (resyncFailures === RESYNC_RETRIES + 1) {
+        store.pushToast('Could not resynchronise this session; reload the page if it looks stale.');
+      }
+    }
+    if (resyncAgain) {
+      resyncAgain = false;
+      scheduleGapResync();
+    }
+  }
+}
+
+/**
+ * Is an answer being streamed into the open session right now?
+ *
+ * Only a live message counts. A pending approval or a running tool has nothing to
+ * lose from a reseed - and those are exactly the states where a refetch has to be
+ * allowed through, because the lost events may be the approval card itself.
+ */
+function hasLiveAnswer(sessionId: string): boolean {
+  const chat = store.chat.value;
+  if (chat.sessionId !== sessionId) return false;
+  return chat.items.some(
+    (item) =>
+      item.kind === 'message' && item.streaming && (item.content !== '' || item.reasoning !== ''),
+  );
+}
+
+/**
+ * Repair the open session after the event stream lost frames (server lag, a
+ * stalled proxy hop, a connection that had to be re-established, or a lag marker
+ * from the pump). This is what the *reload the page* workaround used to do by
+ * hand.
+ *
+ * The refetch always happens - it is how a stuck `running` flag is cleared when
+ * the terminal event itself was the lost one. Whether it may *replace* the
+ * transcript is decided later, in `openSession`, from the server's `running` flag
+ * plus `hasLiveAnswer`, so a live answer is never deleted. Coalesced at 300 ms.
+ */
+function scheduleGapResync(delayMs = 300): void {
+  if (typeof window === 'undefined') {
+    void resyncFromServer();
+    return;
+  }
+  if (gapResyncTimer !== null) return;
+  gapResyncTimer = window.setTimeout(() => {
+    gapResyncTimer = null;
+    void resyncFromServer();
+  }, delayMs);
 }
 
 export function restartStream(): void {
@@ -136,7 +227,7 @@ function handleRawEvent(raw: RawEvent): void {
     return;
   }
 
-  if (event.type === 'session_renamed') {
+  if (event.type === 'session_renamed' || event.type === 'session_model_changed') {
     return;
   }
 
@@ -158,11 +249,27 @@ function applyChatEvent(event: KarucodeEvent): void {
   store.chat.value = applyEventToChat(store.chat.value, event);
 }
 
-function drainRefreshQueue(): void {
+function drainRefreshQueue(settled = false): void {
   const queued = refreshQueue;
   refreshQueue = [];
   refreshingSessionId = null;
-  for (const event of queued) applyChatEvent(event);
+  // With no run in flight the snapshot contains every completed turn, so
+  // replaying a text delta for one of those runs would append the same words to a
+  // message that is already persisted. Deltas belonging to a run the snapshot does
+  // not know (it started during the fetch) are still replayed.
+  const persisted = new Set<string>();
+  if (settled) {
+    for (const item of store.chat.value.items) {
+      if (item.kind === 'message' && item.role === 'assistant' && !item.streaming && item.runId) {
+        persisted.add(item.runId);
+      }
+    }
+  }
+  for (const event of queued) {
+    const isDelta = event.type === 'text_delta' || event.type === 'reasoning_delta';
+    if (settled && isDelta && event.run_id && persisted.has(event.run_id)) continue;
+    applyChatEvent(event);
+  }
 }
 
 async function doRefreshSessions(): Promise<void> {
@@ -274,11 +381,17 @@ export interface OpenSessionOptions {
   silent?: boolean;
   /** Refetch even when this session is already selected (used by Retry). */
   force?: boolean;
+  /**
+   * Keep a transcript that is still streaming instead of reseeding it. Set by the
+   * stream-recovery paths: `GET /api/sessions/:id` only returns persisted
+   * messages, so replacing the view mid-answer would delete the text arriving now.
+   */
+  preserveLive?: boolean;
 }
 
-export async function openSession(id: string, options: OpenSessionOptions = {}): Promise<void> {
+export async function openSession(id: string, options: OpenSessionOptions = {}): Promise<boolean> {
   const silent = options.silent ?? false;
-  if (id === store.currentSessionId.value && !silent && !options.force) return;
+  if (id === store.currentSessionId.value && !silent && !options.force) return false;
 
   const generation = (sessionGeneration += 1);
   store.currentSessionId.value = id;
@@ -292,19 +405,36 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
   refreshingSessionId = id;
   refreshQueue = [];
 
+  let applied = false;
+  // Whether the snapshot closes the book on every turn it contains.
+  let settled = false;
+
   try {
     const detail = await api.getSession(id);
-    if (generation !== sessionGeneration) return;
-    store.chat.value = seedChatState(detail);
+    if (generation !== sessionGeneration) return false;
+    if (options.preserveLive && detail.running && hasLiveAnswer(id)) {
+      // Never delete an answer that is still streaming. Refresh what the server
+      // does know (agents, live status) and let the next reseed rebuild the items.
+      store.chat.value = {
+        ...store.chat.value,
+        agents: detail.agents.map(sessionAgentFromRecord),
+        running: true,
+        runStatus: 'running',
+      };
+    } else {
+      store.chat.value = seedChatState(detail, store.chat.value);
+      settled = !detail.running;
+    }
     mergeSummary(summaryFromDetail(detail));
     store.chatLoading.value = false;
     store.chatError.value = null;
+    applied = true;
   } catch (error) {
-    if (generation !== sessionGeneration) return;
+    if (generation !== sessionGeneration) return false;
     if (isUnauthorized(error)) {
       enterAuthState();
       store.chatLoading.value = false;
-      return;
+      return false;
     }
     if (error instanceof ApiError && error.status === 404) {
       store.sessions.value = store.sessions.value.filter((session) => session.id !== id);
@@ -314,7 +444,7 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
       store.pushToast('That session no longer exists.', 'info');
       if (next) await openSession(next.id);
       else clearSelection();
-      return;
+      return false;
     }
     store.chatLoading.value = false;
     if (!silent) {
@@ -324,9 +454,10 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
     }
   } finally {
     if (generation === sessionGeneration) {
-      drainRefreshQueue();
+      drainRefreshQueue(settled);
     }
   }
+  return applied;
 }
 
 export async function createSession(): Promise<Session | null> {
@@ -551,7 +682,7 @@ export async function retryConnection(): Promise<void> {
   }
   await refreshSessions();
   const id = store.currentSessionId.value;
-  if (id) await openSession(id, { silent: true });
+  if (id) await openSession(id, { silent: true, preserveLive: true });
   restartStream();
 }
 
@@ -639,6 +770,63 @@ export async function switchModel(providerId: string, modelId: string): Promise<
   return true;
 }
 
+/**
+ * Pin the current session to a provider + model. `reasoningEffort` rides along
+ * (`none` turns reasoning off; absent keeps the endpoint's default). Pass no
+ * model at all (clear) to follow the install-wide default again.
+ */
+export async function setSessionModelSelection(
+  providerId: string,
+  modelId: string,
+  reasoningEffort?: string | null,
+): Promise<boolean> {
+  const sessionId = store.currentSessionId.value;
+  if (!sessionId) return false;
+  const selection = {
+    provider: providerId,
+    model: modelId,
+    ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+  };
+  try {
+    const session = await api.setSessionModel(sessionId, selection);
+    store.sessions.value = store.sessions.value.map((entry) =>
+      entry.id === sessionId ? { ...entry, model: session.model ?? null } : entry,
+    );
+    const provider = store.config.value?.providers.find((profile) => profile.id === providerId);
+    const label = provider?.models.find((model) => model.id === modelId)?.name ?? modelId;
+    store.pushToast(`This session now uses ${label}.`, 'success');
+    return true;
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+      return false;
+    }
+    store.pushToast(toErrorMessage(error));
+    return false;
+  }
+}
+
+/** Drop the session's model pin so it follows the install-wide default. */
+export async function clearSessionModelSelection(): Promise<boolean> {
+  const sessionId = store.currentSessionId.value;
+  if (!sessionId) return false;
+  try {
+    const session = await api.setSessionModel(sessionId, null);
+    store.sessions.value = store.sessions.value.map((entry) =>
+      entry.id === sessionId ? { ...entry, model: session.model ?? null } : entry,
+    );
+    store.pushToast('This session follows the install default again.', 'success');
+    return true;
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+      return false;
+    }
+    store.pushToast(toErrorMessage(error));
+    return false;
+  }
+}
+
 /** models.dev catalog: provider list or one provider's models. */
 export async function loadCatalog(
   provider?: string,
@@ -649,6 +837,19 @@ export async function loadCatalog(
   } catch (error) {
     if (isUnauthorized(error)) enterAuthState();
     else store.pushToast(toErrorMessage(error));
+    return null;
+  }
+}
+
+/**
+ * models.dev metadata for one model id, gateway prefixes stripped server-side.
+ * Best-effort: any failure returns null and the caller adds the id as-is.
+ */
+export async function lookupModel(model: string): Promise<CatalogLookupResponse | null> {
+  try {
+    return await api.lookupModelMetadata(model);
+  } catch (error) {
+    if (isUnauthorized(error)) enterAuthState();
     return null;
   }
 }
@@ -832,6 +1033,33 @@ export function closePalette(): void {
   store.paletteOpen.value = false;
 }
 
+/** Open the Theme Studio drawer, closing any other overlay first. */
+export function openThemeStudio(): void {
+  store.settingsOpen.value = false;
+  store.paletteOpen.value = false;
+  store.fileViewerPath.value = null;
+  store.mobileSheet.value = null;
+  store.themeStudioOpen.value = true;
+}
+
+export function closeThemeStudio(): void {
+  store.themeStudioOpen.value = false;
+}
+
+export function toggleThemeStudio(): void {
+  if (store.themeStudioOpen.value) closeThemeStudio();
+  else openThemeStudio();
+}
+
+/** Put text in the composer and focus it (used by the empty state's prompts). */
+export function fillComposer(text: string): void {
+  // The composer subscribes to `composerDraft` itself, so this lands even while
+  // it is already mounted. The tick is a cheap second nudge: any listener that
+  // only knows to "focus the composer" still fires, and it is idempotent.
+  store.composerDraft.value = text;
+  store.composerFocusTick.value += 1;
+}
+
 export function openFileViewer(path: string): void {
   store.mobileSheet.value = null;
   store.fileViewerPath.value = path;
@@ -864,6 +1092,13 @@ export function resetRuntimeForTests(): void {
   sendInFlight = false;
   refreshingSessionId = null;
   refreshQueue = [];
+  resyncInFlight = false;
+  resyncAgain = false;
+  resyncFailures = 0;
+  if (gapResyncTimer !== null) {
+    window.clearTimeout(gapResyncTimer);
+    gapResyncTimer = null;
+  }
   if (sessionsRefreshTimer !== null) {
     window.clearTimeout(sessionsRefreshTimer);
     sessionsRefreshTimer = null;

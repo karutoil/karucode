@@ -94,6 +94,40 @@ describe('applyEventToChat', () => {
     expect(lastMessage(current).content).toBe('After the tool.');
   });
 
+  it('drops the abandoned attempt when the runtime restarts a dead stream', () => {
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(current, event(2, 'reasoning_delta', { delta: 'thinking hard' }));
+    current = applyEventToChat(current, event(3, 'text_delta', { delta: 'half an ans' }));
+
+    current = applyEventToChat(
+      current,
+      event(4, 'stream_retry', {
+        attempt: 1,
+        max_attempts: 4,
+        reason: 'provider error: invalid response body: error decoding response body',
+      }),
+    );
+
+    // Nothing of the attempt that died may survive: it would be duplicated by
+    // the retry's own deltas.
+    expect(
+      current.items.some(
+        (item) =>
+          item.kind === 'message' &&
+          item.role === 'assistant' &&
+          (item.content === 'half an ans' || item.reasoning === 'thinking hard'),
+      ),
+    ).toBe(false);
+    const notice = current.items.find((item) => item.kind === 'notice');
+    expect(notice?.kind === 'notice' ? notice.message : '').toContain('retrying');
+    expect(notice?.kind === 'notice' ? notice.level : '').toBe('warn');
+    expect(current.running).toBe(true);
+
+    // The retry streams into a fresh segment instead of appending to the dead one.
+    current = applyEventToChat(current, event(5, 'text_delta', { delta: 'the whole answer' }));
+    expect(lastMessage(current).content).toBe('the whole answer');
+  });
+
   it('streams reasoning separately and keeps it on the same segment', () => {
     let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
     current = applyEventToChat(current, event(2, 'reasoning_delta', { delta: 'First, inspect. ' }));
@@ -299,6 +333,17 @@ describe('applyEventToChat', () => {
     const current = state();
     expect(applyEventToChat(current, envelope(1, { session_id: 's_other', type: 'text_delta', delta: 'x' } as Partial<KarucodeEvent>))).toBe(current);
     expect(applyEventToChat(current, envelope(2, { type: 'future_event', payload: 1 } as unknown as Partial<KarucodeEvent>))).toBe(current);
+  });
+  it('records a lag marker as a warning notice without touching the run', () => {
+    const current = applyEventToChat(
+      { ...state(), running: true, runStatus: 'running' },
+      event(7, 'stream_lagged', { skipped: 3 }),
+    );
+    const notice = current.items.find((item) => item.kind === 'notice');
+    expect(notice?.kind === 'notice' ? notice.message : '').toContain('3 update(s) were dropped');
+    // It describes the transport: the run itself is unchanged.
+    expect(current.running).toBe(true);
+    expect(current.runStatus).toBe('running');
   });
 });
 

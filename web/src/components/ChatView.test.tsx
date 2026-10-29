@@ -313,3 +313,184 @@ describe('ChatView sticky bottom', () => {
     expect(scrollToSpy).not.toHaveBeenCalled();
   });
 });
+describe('ChatView workspace tabs', () => {
+  beforeEach(() => {
+    resetAppState();
+    ResizeObserverStub.reset();
+    vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  });
+
+  afterEach(() => {
+    resetAppState();
+    ResizeObserverStub.reset();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function tab(name: RegExp): HTMLElement {
+    const found = screen.getByRole('tab', { name });
+    return found;
+  }
+
+  it('marks the conversation tab selected and keeps the other panes unloaded', () => {
+    renderChat();
+
+    expect(tab(/^Conversation/).getAttribute('aria-selected')).toBe('true');
+    expect(tab(/^Changes/).getAttribute('aria-selected')).toBe('false');
+    expect(document.getElementById('workspace-panel-chat')?.hidden).toBe(false);
+    // Lazy: a git probe only runs once the user asks for the changes view.
+    expect(document.getElementById('workspace-panel-changes')).toBeNull();
+    expect(screen.getByLabelText('Message karucode')).not.toBeNull();
+  });
+
+  it('offers no terminal view: there is no shell backend to drive one', () => {
+    renderChat();
+
+    expect(screen.queryByRole('tab', { name: /terminal/i })).toBeNull();
+    expect(document.getElementById('workspace-panel-terminal')).toBeNull();
+    // Command output lives in the transcript and the inspector's Commands tab.
+    expect(screen.getAllByRole('tab').map((element) => element.textContent?.trim())).toEqual([
+      'Conversation',
+      'Changes',
+    ]);
+  });
+
+  it('mounts the changes pane on first visit and keeps it afterwards', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ error: { code: 'not_found', message: 'no git' } }), { status: 404 })),
+    );
+    renderChat();
+    fireEvent.click(tab(/^Changes/));
+
+    const panel = document.getElementById('workspace-panel-changes');
+    expect(panel).not.toBeNull();
+    expect(panel?.hidden).toBe(false);
+    // The page variant owns the mock's `.secondary-panel` chrome.
+    expect(panel?.querySelector('.panel-kicker')?.textContent).toBe('Source control');
+    expect(panel?.querySelector('.panel-title')?.textContent).toBe('Review changes');
+
+    fireEvent.click(tab(/^Conversation/));
+    expect(document.getElementById('workspace-panel-changes')?.hidden).toBe(true);
+    expect(document.getElementById('workspace-tab-changes')).not.toBeNull();
+  });
+
+  it('moves between views with the arrow keys', () => {
+    renderChat();
+    const conversation = tab(/^Conversation/);
+    conversation.focus();
+    fireEvent.keyDown(conversation, { key: 'ArrowRight' });
+    expect(tab(/^Changes/).getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(tab(/^Changes/));
+
+    // Two tabs: the ends are Conversation and Changes, and it wraps.
+    fireEvent.keyDown(tab(/^Changes/), { key: 'ArrowRight' });
+    expect(tab(/^Conversation/).getAttribute('aria-selected')).toBe('true');
+
+    fireEvent.keyDown(tab(/^Conversation/), { key: 'End' });
+    expect(tab(/^Changes/).getAttribute('aria-selected')).toBe('true');
+
+    fireEvent.keyDown(tab(/^Changes/), { key: 'Home' });
+    expect(tab(/^Conversation/).getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('copies the conversation as Markdown from the header action', async () => {
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    renderChat();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const copied = writeText.mock.calls[0]?.[0] ?? '';
+    expect(copied).toContain('Fix login bug');
+    expect(copied).toContain('Find the login bug.');
+    expect(copied).toContain('The login handler is unfinished.');
+    await vi.waitFor(() => expect(store.toasts.value.length).toBeGreaterThan(0));
+    expect(store.toasts.value[0]?.message).toContain('copied');
+  });
+
+  it('disables the copy action when the session has no transcript', () => {
+    renderChat([]);
+    const copy = screen.getByRole('button', { name: 'Copy' }) as HTMLButtonElement;
+    expect(copy.disabled).toBe(true);
+  });
+
+  it('mounts the shared mock empty state for a session with no messages', () => {
+    const { container } = renderChat([]);
+
+    // One component serves both the empty and the no-session case; here it is
+    // mounted with the `empty` variant, whose prompt behaviour (create-then-fill
+    // for `no-session`) is covered by EmptyState.test.tsx.
+    expect(container.querySelector('.empty-state')).not.toBeNull();
+    expect(screen.getByRole('heading', { name: 'What are we building?' })).not.toBeNull();
+    expect(screen.getByText(/Start with an idea or a task/)).not.toBeNull();
+    expect(container.querySelectorAll('.quick-prompt')).toHaveLength(3);
+  });
+
+  it('renders the project → sessions → activity breadcrumb and the session title', () => {
+    store.projects.value = [
+      {
+        id: 'p_karucode',
+        name: 'KaruCode',
+        path: '/home/me/project',
+        created_at: 1,
+        updated_at: 1,
+        session_count: 1,
+      },
+    ];
+    store.currentProjectId.value = 'p_karucode';
+    renderChat();
+
+    expect(screen.getByText('KaruCode')).not.toBeNull();
+    expect(screen.getByText('sessions')).not.toBeNull();
+    expect(screen.getByText('ready')).not.toBeNull();
+    expect(screen.getByRole('heading', { level: 1, name: 'Fix login bug' })).not.toBeNull();
+  });
+
+  it('gives every workspace tab a 15px glyph and shows the changed-file count', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            is_repo: true,
+            branch: 'main',
+            error: null,
+            files: [
+              { path: 'src/a.ts', status: 'M', staged: false },
+              { path: 'src/b.ts', status: 'A', staged: true },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+    renderChat();
+
+    for (const name of [/^Conversation/, /^Changes/]) {
+      const icon = tab(name).querySelector('.tab-icon svg');
+      expect(icon?.getAttribute('width')).toBe('15');
+    }
+
+    // The count pill is real data (git status), not the mock's demo `3`.
+    await waitFor(() => expect(tab(/^Changes/).querySelector('.tab-count')?.textContent).toBe('2'));
+  });
+
+  it('marks an idle run with the mock\'s circle-check instead of a faint dot', () => {
+    renderChat();
+    const note = document.querySelector('.tab-note');
+    expect(note?.textContent).toBe('Ready to work');
+    expect(note?.querySelector('svg')).not.toBeNull();
+    expect(note?.querySelector('.status-dot')).toBeNull();
+  });
+
+  it('only offers the session-list button while the rail is collapsed', () => {
+    renderChat();
+    const toggle = (): HTMLElement => screen.getByRole('button', { name: 'Toggle session list' });
+    // Rendered for narrow viewports and for desktop once `Ctrl+B` hides the rail;
+    // CSS hides it otherwise, and the class is what carries that rule.
+    expect(toggle().classList.contains('sessions-toggle')).toBe(true);
+    expect(toggle().querySelector('svg')?.getAttribute('width')).toBe('15');
+  });
+});

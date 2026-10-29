@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { App } from '../app';
 import {
   configFixture,
@@ -9,6 +9,7 @@ import {
   summaryFixture,
 } from './fixtures';
 import type { Health } from '../api/types';
+import * as store from '../state/store';
 
 const healthFixture: Health = {
   status: 'ok',
@@ -91,10 +92,17 @@ describe('App smoke render', () => {
     expect(screen.getAllByText('read_file').length).toBeGreaterThan(0);
     expect(screen.getByText('fn login() { todo!() }')).not.toBeNull();
     expect(screen.getByText('Run cargo test')).not.toBeNull();
-    expect(screen.getByRole('tab', { name: 'Workspace' })).not.toBeNull();
-    expect(screen.getByRole('tab', { name: 'Changes' })).not.toBeNull();
-    expect(screen.getByRole('tab', { name: /^Commands/ })).not.toBeNull();
-    expect(screen.getByRole('tab', { name: /^Agents/ })).not.toBeNull();
+    // Two tablists share the page now: the workspace views and the inspector.
+    const inspector = screen.getByRole('complementary', { name: 'Workspace inspector' });
+    const workspace = screen.getByRole('main', { name: 'Workspace' });
+    expect(within(workspace).getByRole('tab', { name: 'Conversation' })).not.toBeNull();
+    // The Changes tab may carry a changed-file count pill, hence the prefix match.
+    expect(within(workspace).getByRole('tab', { name: /^Changes/ })).not.toBeNull();
+    expect(within(workspace).queryByRole('tab', { name: /terminal/i })).toBeNull();
+    expect(within(inspector).getByRole('tab', { name: 'Files' })).not.toBeNull();
+    expect(within(inspector).getByRole('tab', { name: 'Changes' })).not.toBeNull();
+    expect(within(inspector).getByRole('tab', { name: /^Commands/ })).not.toBeNull();
+    expect(within(inspector).getByRole('tab', { name: /^Agents/ })).not.toBeNull();
     expect(screen.getByLabelText('Message karucode')).not.toBeNull();
 
     await act(async () => {
@@ -118,5 +126,61 @@ describe('App smoke render', () => {
     render(<App />);
     expect(await screen.findByText('Authentication required')).not.toBeNull();
     expect(screen.getByLabelText('Access token')).not.toBeNull();
+  });
+});
+/** Preact flushes effects in an animation frame, which jsdom defers; let it run. */
+async function flushEffects(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 32));
+  });
+}
+
+describe('Shell shortcuts', () => {
+  beforeEach(() => {
+    resetAppState();
+    store.themeStudioOpen.value = false;
+  });
+
+  afterEach(() => {
+    resetAppState();
+    store.themeStudioOpen.value = false;
+    vi.unstubAllGlobals();
+  });
+
+  it('opens and closes the Theme Studio with Ctrl/Cmd+Shift+T', async () => {
+    installFetch();
+    render(<App />);
+    await waitFor(() => expect(store.boot.value).toBe('ready'));
+    await flushEffects();
+
+    fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
+    expect(store.themeStudioOpen.value).toBe(true);
+
+    fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
+    expect(store.themeStudioOpen.value).toBe(false);
+
+    fireEvent.keyDown(window, { key: 'T', metaKey: true, shiftKey: true });
+    expect(store.themeStudioOpen.value).toBe(true);
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(store.themeStudioOpen.value).toBe(false);
+  });
+
+  it('focuses the session search on "/" but not while typing in the composer', async () => {
+    installFetch();
+    render(<App />);
+    await waitFor(() => expect(store.boot.value).toBe('ready'));
+    await flushEffects();
+    const search = screen.getByLabelText('Find a session') as HTMLInputElement;
+
+    fireEvent.keyDown(window, { key: '/' });
+    await waitFor(() => expect(document.activeElement).toBe(search));
+
+    const composer = screen.getByLabelText('Message karucode');
+    composer.focus();
+    const event = new KeyboardEvent('keydown', { key: '/', bubbles: true, cancelable: true });
+    composer.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(composer);
   });
 });

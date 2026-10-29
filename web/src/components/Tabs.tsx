@@ -4,8 +4,18 @@ import type { JSX } from 'preact';
 export interface TabItem<T extends string> {
   id: T;
   label: string;
+  /** Optional leading glyph (workspace tabs carry a 15px icon in the mock). */
+  icon?: JSX.Element;
+  /** Optional trailing count pill, e.g. the number of changed files. */
   count?: number;
 }
+
+/**
+ * `default` is the compact inspector strip; `workspace` is the header tab bar
+ * (Conversation / Changes) that shares the same tablist semantics but a
+ * different visual treatment.
+ */
+export type TabVariant = 'default' | 'workspace';
 
 export interface TabsProps<T extends string> {
   items: readonly TabItem<T>[];
@@ -13,12 +23,25 @@ export interface TabsProps<T extends string> {
   onChange: (id: T) => void;
   label: string;
   idPrefix?: string;
+  variant?: TabVariant;
 }
 
-/** Keyboard-operable tablist (automatic activation, Home/End support). */
-export function Tabs<T extends string>({ items, active, onChange, label, idPrefix }: TabsProps<T>): JSX.Element {
+/**
+ * Keyboard-operable tablist: automatic activation, arrow keys move selection,
+ * Home/End jump to the ends, and only the selected tab is in the tab order.
+ */
+export function Tabs<T extends string>({
+  items,
+  active,
+  onChange,
+  label,
+  idPrefix,
+  variant = 'default',
+}: TabsProps<T>): JSX.Element {
   const generated = useId();
   const prefix = idPrefix ?? generated;
+  const workspace = variant === 'workspace';
+
   const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
     const index = items.findIndex((item) => item.id === active);
     if (index === -1) return;
@@ -37,7 +60,12 @@ export function Tabs<T extends string>({ items, active, onChange, label, idPrefi
   };
 
   return (
-    <div class="tabs" role="tablist" aria-label={label} onKeyDown={onKeyDown}>
+    <div
+      class={workspace ? 'workspace-tabs' : 'tabs'}
+      role="tablist"
+      aria-label={label}
+      onKeyDown={onKeyDown}
+    >
       {items.map((item) => {
         const selected = item.id === active;
         return (
@@ -46,14 +74,18 @@ export function Tabs<T extends string>({ items, active, onChange, label, idPrefi
             id={`${prefix}-tab-${item.id}`}
             type="button"
             role="tab"
-            class={`tab${selected ? ' is-active' : ''}`}
+            class={`${workspace ? 'workspace-tab' : 'tab'}${selected ? ' is-active' : ''}`}
             aria-selected={selected}
+            // Panels are mounted lazily, so only the selected tab can point at one.
             aria-controls={selected ? `${prefix}-panel-${item.id}` : undefined}
             tabIndex={selected ? 0 : -1}
             onClick={() => onChange(item.id)}
           >
+            {item.icon ? <span class="tab-icon" aria-hidden="true">{item.icon}</span> : null}
             <span>{item.label}</span>
-            {item.count !== undefined && item.count > 0 ? <span class="tab-count">{item.count}</span> : null}
+            {item.count !== undefined && item.count > 0 ? (
+              <span class="tab-count">{item.count}</span>
+            ) : null}
           </button>
         );
       })}

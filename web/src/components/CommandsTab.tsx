@@ -10,11 +10,11 @@ export function CommandsTab(): JSX.Element {
 
   return (
     <div class="inspector-section">
-      <div class="section-toolbar">
-        <div class="section-heading">
-          <span class="eyebrow">Commands</span>
-          <span class="section-path">{commands.length} in this session</span>
-        </div>
+      <div class="inspector-kicker-row">
+        <span class="inspector-kicker">Recent executions</span>
+        <span class="inspector-kicker-note">
+          {commands.length} {commands.length === 1 ? 'command' : 'commands'}
+        </span>
       </div>
 
       {commands.length === 0 ? (
@@ -27,8 +27,10 @@ export function CommandsTab(): JSX.Element {
         </div>
       ) : (
         <div class="command-list">
-          {commands.map((item) =>
-            item.kind === 'command' ? <CommandCard key={item.id} item={item} defaultOpen /> : null,
+          {commands.map((item, index) =>
+            item.kind === 'command' ? (
+              <CommandCard key={item.id} item={item} defaultOpen={index === 0} />
+            ) : null,
           )}
         </div>
       )}

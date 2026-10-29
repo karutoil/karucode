@@ -1,4 +1,11 @@
-/* ---------- modal shell ---------- */
+/* Overlays — modal shell, command palette, settings sheet, file viewer,
+ * toasts and the full-screen boot/auth states.
+ *
+ * Visual contract: the v3 mock's `.overlay`, `.palette`, `.settings-modal`,
+ * `.toast-stack` blocks. Colours and radii come from tokens only.
+ */
+
+/* ---------- modal shell ------------------------------------------------ */
 
 .dialog-layer {
   position: fixed;
@@ -12,7 +19,8 @@
 .dialog-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(4, 5, 6, 0.66);
+  background: color-mix(in srgb, #000 67%, transparent);
+  backdrop-filter: blur(4px);
 }
 
 .dialog {
@@ -20,46 +28,91 @@
   display: flex;
   flex-direction: column;
   max-height: calc(100dvh - 48px);
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  background: var(--panel);
+  border: 1px solid var(--line-overlay);
+  border-radius: var(--radius);
+  background: var(--surface-menu);
+  box-shadow: var(--shadow-overlay);
   overflow: hidden;
-  animation: dialog-in 150ms ease-out;
+  animation: dialog-in 160ms ease-out;
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .dialog-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   flex: 0 0 auto;
-  padding: 13px 12px 13px 18px;
-  border-bottom: 1px solid var(--border);
+  padding: 18px 16px 16px 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.dialog-headings {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
 }
 
 .dialog-title {
   overflow-wrap: anywhere;
   color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 12.5px;
-  font-weight: 500;
-  line-height: 1.45;
+  font-family: var(--font-ui);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.4px;
+  line-height: 1.25;
 }
 
-.dialog-confirm {
+.dialog-description {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.dialog-header .icon-button {
+  flex: 0 0 auto;
+  width: 31px;
+  height: 31px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-raised);
+  color: var(--muted);
+}
+
+.dialog-header .icon-button:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+
+/* Small dialogs sit at the mock's overlay cap (17vh), like the palette. */
+.dialog-confirm,
+.dialog-model-edit {
+  align-self: start;
   width: min(460px, calc(100vw - 32px));
+  margin-top: min(17vh, 150px);
 }
 
 .confirm-body {
-  padding: 16px 18px 18px;
-  color: var(--text-muted);
-  font-size: 13px;
-  line-height: 1.65;
+  padding: 16px 22px 20px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.7;
 }
 
 .confirm-body strong {
   color: var(--text);
-  font-weight: 560;
+  font-weight: 600;
 }
 
 .dialog-actions {
@@ -69,33 +122,35 @@
   margin-top: 18px;
 }
 
-/* ---------- command palette ---------- */
+/* ---------- command palette ------------------------------------------- */
 
 .dialog-palette {
   align-self: start;
-  width: min(580px, calc(100vw - 32px));
-  margin-top: 12vh;
-  max-height: min(70vh, 620px);
+  width: min(520px, calc(100vw - 32px));
+  margin-top: min(17vh, 150px);
+  max-height: min(90vh, 475px);
+  border-radius: var(--radius);
 }
 
 .palette-search {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 12px;
   flex: 0 0 auto;
-  padding: 11px 16px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-faint);
+  min-height: 56px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line-hair);
+  color: var(--text-caption);
 }
 
 .palette-input {
   flex: 1 1 auto;
   min-width: 0;
-  height: 28px;
+  height: 34px;
   border: 0;
   background: transparent;
   color: var(--text);
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .palette-input:focus {
@@ -105,119 +160,190 @@
 
 .palette-input:focus-visible {
   border-radius: 4px;
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: none;
+}
+
+/* The whole search row is the focus target, as in the mock: no inner box. */
+.palette-search:focus-within {
+  border-bottom-color: var(--accent);
+  box-shadow: inset 0 -1px 0 var(--accent);
 }
 
 .palette-input::placeholder {
-  color: var(--text-faint);
+  color: var(--text-subtle);
 }
 
 .palette-list {
   flex: 1 1 auto;
   min-height: 0;
+  max-height: 380px;
   margin: 0;
-  padding: 6px;
+  padding: 9px;
   overflow-y: auto;
   list-style: none;
+  scrollbar-gutter: stable;
 }
 
-.palette-option {
-  display: grid;
-  grid-template-columns: 96px minmax(0, 1fr) auto;
+.palette-group-label {
+  padding: 8px 11px 6px;
+  color: var(--text-kicker);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+}
+
+.palette-item {
+  display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 34px;
-  padding: 5px 10px;
-  border-radius: var(--radius-sm);
+  gap: 11px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 11px;
+  border-radius: 6px;
+  color: var(--text-body);
+  font-size: 12px;
+  text-align: left;
   cursor: pointer;
 }
 
-.palette-option.is-active {
-  background: var(--accent-soft);
-  box-shadow: inset 2px 0 0 var(--accent);
+.palette-item:hover,
+.palette-item.is-active {
+  background: var(--row-selected-bg);
+  color: var(--row-selected-text);
 }
 
-.palette-group {
-  overflow: hidden;
-  color: var(--text-faint);
-  font-size: 9.5px;
-  font-weight: 560;
-  letter-spacing: 0.07em;
-  text-overflow: ellipsis;
-  text-transform: uppercase;
-  white-space: nowrap;
+.palette-item-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 16px;
+  color: inherit;
+}
+
+.palette-esc {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  height: 18px;
+  padding: 2px 4px;
+  border: 1px solid var(--line-keycap);
+  border-radius: 4px;
+  color: var(--icon-pill-down);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
 }
 
 .palette-label {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
-  color: var(--text);
-  font-size: 12.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .palette-hint {
-  overflow: hidden;
-  color: var(--text-faint);
+  flex: 0 0 auto;
+  color: var(--muted);
   font-family: var(--font-mono);
   font-size: 10px;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.palette-item.is-active .palette-hint {
+  color: inherit;
+}
+
 .palette-empty {
-  padding: 18px 14px;
-  color: var(--text-faint);
-  font-size: 12.5px;
-  text-align: center;
+  padding: 17px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .palette-footer {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 16px;
   flex: 0 0 auto;
-  padding: 8px 16px;
-  border-top: 1px solid var(--border);
-  color: var(--text-faint);
+  padding: 9px 14px;
+  border-top: 1px solid var(--line-hair);
+  color: var(--text-menu-title);
   font-size: 10px;
 }
 
 .palette-footer span {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
 }
 
-/* ---------- side sheet (settings) ---------- */
+.palette-footer kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border: 1px solid var(--line-keycap);
+  border-radius: 4px;
+  background: var(--chip-surface);
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1;
+}
+
+/* ---------- settings sheet -------------------------------------------- */
 
 .dialog-sheet {
   position: fixed;
   top: 0;
   right: 0;
   bottom: 0;
-  width: min(560px, 100vw);
+  width: min(580px, 100vw);
   height: 100dvh;
   max-height: none;
   border: 0;
-  border-left: 1px solid var(--border-strong);
+  border-left: 1px solid var(--line-strong);
   border-radius: 0;
-  animation: slide-in-right 170ms ease-out;
+  background: var(--sidebar);
+  box-shadow: -22px 0 90px var(--shadow-lg);
+  animation: slide-in-right 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes slide-in-right {
+  from {
+    opacity: 0.7;
+    transform: translateX(25px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .dialog-sheet .dialog-header {
-  padding: 16px 16px 16px 22px;
+  padding: 23px 16px 20px 23px;
+  border-bottom: 1px solid var(--line);
 }
 
 .dialog-sheet .dialog-title {
   font-family: var(--font-ui);
-  font-size: 15px;
-  font-weight: 560;
+  font-size: 18px;
+  font-weight: 700;
   letter-spacing: 0;
 }
 
-/* ---------- file viewer ---------- */
+.dialog-sheet .dialog-description {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+/* ---------- file viewer ------------------------------------------------ */
 
 .dialog-file {
   width: min(1040px, calc(100vw - 48px));
@@ -225,59 +351,188 @@
 }
 
 .dialog-file .dialog-header {
-  padding: 11px 12px 11px 16px;
+  padding: 11px 12px;
 }
 
 .dialog-file .dialog-title {
-  font-size: 12px;
+  color: var(--text-user);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
 }
 
-.dialog-file .file-viewer {
+.file-viewer {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
 }
 
-/* ---------- toasts ---------- */
+.file-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line-card);
+  background: var(--surface-menu);
+}
 
+.file-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.file-size {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.file-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.file-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 16px;
+}
+
+.skeleton-code {
+  height: 16px;
+}
+
+.file-notice {
+  margin: 10px 14px;
+  padding: 9px 11px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  background: var(--accent-bg);
+  color: var(--accent-hi);
+  font-size: 11.5px;
+}
+
+.file-code-scroll {
+  display: flex;
+  align-items: flex-start;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  background: var(--surface-preview);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.file-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex: 0 0 auto;
+  min-width: 48px;
+  padding: 12px 8px;
+  border-right: 1px solid var(--line-preview);
+  background: var(--surface-preview);
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 20px;
+  text-align: right;
+  user-select: none;
+}
+
+.file-gutter span {
+  display: block;
+  height: 20px;
+}
+
+.file-code {
+  flex: 1 1 auto;
+  min-width: max-content;
+  margin: 0;
+  padding: 12px;
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 20px;
+  tab-size: 2;
+}
+
+.file-code code {
+  display: block;
+  white-space: pre;
+}
+
+.file-code-scroll:focus-visible {
+  outline-offset: -2px;
+}
+
+/* ---------- toasts ----------------------------------------------------- */
+
+/* The mock's stack is content-sized: each toast hugs its message. */
 .toast-region {
   position: fixed;
-  right: 20px;
-  bottom: 20px;
+  right: 25px;
+  bottom: 22px;
   z-index: 130;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  width: min(340px, calc(100vw - 32px));
+  align-items: flex-end;
+  gap: 9px;
+  max-width: min(420px, calc(100vw - 32px));
   pointer-events: none;
 }
 
 .toast {
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px 10px 10px 13px;
-  border: 1px solid var(--border-strong);
-  border-left: 2px solid var(--text-faint);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  color: var(--text-muted);
+  align-items: center;
+  gap: 11px;
+  max-width: 100%;
+  padding: 12px 10px 12px 15px;
+  border: 1px solid var(--line-toast);
+  border-radius: var(--radius);
+  background: var(--surface-toast);
+  color: var(--text-toast);
   font-size: 12px;
-  line-height: 1.55;
+  line-height: 1.5;
   pointer-events: auto;
-  animation: dialog-in 140ms ease-out;
+  animation: toast-in 200ms ease-out;
+  box-shadow: 0 20px 60px var(--shadow-lg);
 }
 
-.toast-error {
-  border-left-color: var(--danger);
-  background: #171313;
-  color: #dcb0b0;
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(9px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
-.toast-success {
-  border-left-color: var(--ok);
+.toast-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--text-symbol);
 }
 
-.toast-info {
-  border-left-color: var(--accent);
+.toast-error .toast-icon {
+  color: var(--danger);
+}
+
+.toast-info .toast-icon {
+  color: var(--accent);
 }
 
 .toast-message {
@@ -287,27 +542,34 @@
 }
 
 .toast-close {
+  flex: 0 0 auto;
   width: 22px;
   height: 22px;
-  margin-top: -1px;
+  margin-right: -3px;
+  color: var(--muted);
 }
 
-/* ---------- full-screen states (auth / boot error) ---------- */
+.toast-close:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* ---------- full-screen states (auth / boot error) -------------------- */
 
 .full-screen-state {
   display: grid;
   place-items: center;
   min-height: 100dvh;
   padding: 24px;
-  background: var(--bg-sunken);
+  background: var(--bg);
 }
 
 .state-card {
   width: min(500px, 100%);
   padding: 28px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: 0 25px 90px var(--shadow-lg);
 }
 
 .state-title {
@@ -317,22 +579,23 @@
   margin: 20px 0 10px;
   color: var(--text);
   font-size: 19px;
-  font-weight: 560;
+  font-weight: 650;
+  letter-spacing: -0.4px;
 }
 
 .state-body {
-  color: var(--text-muted);
-  font-size: 13.5px;
-  line-height: 1.7;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.72;
 }
 
 .state-body code,
 .state-footnote code {
   padding: 1px 4px;
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  background: var(--bg-sunken);
-  color: var(--text-muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
   font-size: 0.9em;
 }
 
@@ -342,11 +605,11 @@
   gap: 8px;
   margin-top: 14px;
   padding: 9px 11px;
-  border: 1px solid rgba(209, 105, 105, 0.35);
+  border: 1px solid var(--danger);
   border-radius: var(--radius-sm);
-  background: rgba(209, 105, 105, 0.07);
-  color: #dcb0b0;
-  font-size: 12.5px;
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: 12px;
 }
 
 .state-error svg {
@@ -369,8 +632,8 @@
 .state-footnote {
   margin-top: 20px;
   padding-top: 14px;
-  border-top: 1px solid var(--border);
-  color: var(--text-faint);
+  border-top: 1px solid var(--line);
+  color: var(--muted);
   font-size: 11px;
   line-height: 1.7;
 }
@@ -379,7 +642,7 @@
   margin-top: 18px;
 }
 
-/* ---------- responsive overlays ---------- */
+/* ---------- responsive overlays --------------------------------------- */
 
 @media (max-width: 640px) {
   .dialog-layer {
@@ -401,12 +664,12 @@
     max-height: 82dvh;
   }
 
-  .palette-option {
-    grid-template-columns: 1fr auto;
+  .dialog-palette .dialog-header {
+    padding: 12px 12px 12px 18px;
   }
 
-  .palette-group {
-    display: none;
+  .palette-item {
+    min-height: 44px;
   }
 
   .toast-region {
@@ -414,7 +677,8 @@
     right: 12px;
     bottom: auto;
     left: 12px;
-    width: auto;
+    align-items: stretch;
+    max-width: none;
     max-height: 46vh;
     overflow-y: auto;
   }
@@ -423,4 +687,24 @@
     width: calc(100vw - 28px);
     height: auto;
   }
+
+  .dialog-file {
+    height: 100dvh;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialog,
+  .dialog-sheet,
+  .toast {
+    animation: none;
+  }
+}
+/* Trailing affordance on a palette row that has no keycap hint (mock: `arrow`). */
+.palette-arrow {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: inherit;
+  opacity: 0.55;
 }

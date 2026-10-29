@@ -1,13 +1,58 @@
 import type { JSX } from 'preact';
-import { formatCount } from '../lib/format';
+import { useEffect, useState } from 'preact/hooks';
+import type { ChatItem } from '../state/chat';
+import { copyText } from '../lib/clipboard';
+import { modKey } from '../lib/platform';
 import { useStickyBottom } from '../lib/stickyBottom';
+import { getGitStatus } from '../api/endpoints';
 import * as actions from '../state/actions';
 import { totalUsage } from '../state/selectors';
 import * as store from '../state/store';
+import { ChangesTab } from './ChangesTab';
 import { ChatTranscript } from './ChatTranscript';
 import { Composer } from './Composer';
-import { ModelSwitcher } from './ModelSwitcher';
-import { AlertIcon, ChevronDownIcon, PanelIcon, RefreshIcon, SidebarIcon } from './icons';
+import { EmptyState } from './EmptyState';
+import { Tabs, type TabItem } from './Tabs';
+import {
+  AlertIcon,
+  ChatIcon,
+  ChevronDownIcon,
+  CircleCheckIcon,
+  CopyIcon,
+  GitIcon,
+  MenuIcon,
+  PaletteIcon,
+  PanelIcon,
+  RefreshIcon,
+  SearchIcon,
+} from './icons';
+import { activeThemeName } from '../theme/engine';
+
+/** The three centre-pane views of the workspace (the mock's workspace tabs). */
+export type WorkspaceView = 'chat' | 'changes';
+
+/**
+ * Plain-text transcript for the "Copy" header action: speaker, message text,
+ * tool calls and command output, in the order they happened.
+ */
+export function transcriptToText(items: readonly ChatItem[], title: string): string {
+  const lines = [`# ${title}`, ''];
+  for (const item of items) {
+    if (item.kind === 'message') {
+      const who = item.role === 'user' ? 'You' : item.role === 'assistant' ? 'karucode' : item.role;
+      if (item.content.trim() === '') continue;
+      lines.push(`**${who}**`, '', item.content.trim(), '');
+    } else if (item.kind === 'tool') {
+      lines.push(`\`${item.name}\` → ${item.status}`, '');
+      if (item.output.trim() !== '') lines.push('```', item.output.trim(), '```', '');
+    } else if (item.kind === 'command') {
+      lines.push('```', `$ ${item.command}`, item.stdout.trim(), item.stderr.trim(), '```', '');
+    } else if (item.kind === 'approval') {
+      lines.push(`> Approval: ${item.approval.title} — ${item.approval.status}`, '');
+    }
+  }
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd();
+}
 
 function ProviderBanner(): JSX.Element | null {
   if (store.providerConfigured.value) return null;
@@ -27,16 +72,22 @@ function ProviderBanner(): JSX.Element | null {
 function ConnectionBanner(): JSX.Element | null {
   const connection = store.connection.value;
   const offline = connection.api === 'offline';
-  const reconnecting = connection.stream === 'reconnecting';
+  const reconnecting = connection.stream === 'reconnecting' || connection.stream === 'blocked';
   if (!offline && !reconnecting) return null;
+  const blocked = connection.stream === 'blocked';
   return (
-    <div class={`banner ${offline ? 'banner-danger' : 'banner-warn'}`} role="status">
+    <div class={`banner ${offline || blocked ? 'banner-danger' : 'banner-warn'}`} role="status">
       <AlertIcon size={15} />
       <div class="banner-body">
         {offline ? (
           <>
             <strong>Disconnected from karucode.</strong> Showing the last known state; retrying in the
             background.
+          </>
+        ) : blocked ? (
+          <>
+            <strong>This origin is not allowed.</strong> The server refused the event stream; add this
+            host to <code>KARUCODE_ALLOWED_HOSTS</code> and restart it.
           </>
         ) : (
           <>
@@ -82,141 +133,187 @@ function ChatSkeleton(): JSX.Element {
   );
 }
 
-function NoSessionState(): JSX.Element {
-  const workspace =
-    store.currentProject.value?.path ??
-    store.health.value?.workspace ??
-    store.config.value?.workspace ??
-    '';
-  return (
-    <div class="empty-state">
-      <p class="eyebrow">No session open</p>
-      <h2>Start a session</h2>
-      <p>
-        A session keeps one conversation, its runs and approvals. karucode works inside{' '}
-        {workspace ? <code class="inline-path">{workspace}</code> : 'the configured workspace'} and asks before it
-        changes files or runs commands.
-      </p>
-      <div class="empty-actions">
-        <button type="button" class="button button-primary" onClick={() => void actions.createSession()}>
-          New session
-        </button>
-        <button type="button" class="button" onClick={actions.toggleRail}>
-          {store.narrowViewport.value ? 'Show sessions' : 'Show session rail'}
-        </button>
-      </div>
-      <p class="empty-hint">
-        <kbd>Cmd</kbd>/<kbd>Ctrl</kbd> + <kbd>N</kbd> creates a session · <kbd>Cmd</kbd>/<kbd>Ctrl</kbd> +{' '}
-        <kbd>K</kbd> opens the command palette.
-      </p>
-    </div>
-  );
-}
-
-function EmptySessionState(): JSX.Element {
-  const workspace =
-    store.activeSession.value?.workspace ??
-    store.currentProject.value?.path ??
-    store.health.value?.workspace ??
-    store.config.value?.workspace ??
-    '';
-  return (
-    <div class="empty-state">
-      <p class="eyebrow">Session ready</p>
-      <h2>Nothing sent yet</h2>
-      <p>
-        Ask a question or describe a change. karucode can read files in{' '}
-        {workspace ? <code class="inline-path">{workspace}</code> : 'the workspace'}, propose edits and run
-        commands.
-      </p>
-      <ul class="empty-list">
-        <li>Commands and mutating tools stop for approval unless the policy allows them.</li>
-        <li>Output, reasoning and command streams appear here as they happen.</li>
-        <li>
-          Open the inspector with <kbd>Cmd</kbd>/<kbd>Ctrl</kbd> + <kbd>J</kbd> to browse files, changes and
-          subagents.
-        </li>
-      </ul>
-      <p class="empty-hint">Shell commands are not sandboxed — read approvals before allowing them.</p>
-    </div>
-  );
-}
-
-function SessionHeader(): JSX.Element {
+function SessionHeader({ view }: { view: WorkspaceView }): JSX.Element {
   const session = store.activeSession.value;
   const activity = store.activity.value;
   const narrow = store.narrowViewport.value;
+  const project = store.currentProject.value;
+  const projectName = project?.name ?? 'karucode';
   const railExpanded = narrow ? store.mobileSheet.value === 'sessions' : !store.railCollapsed.value;
   const inspectorExpanded = narrow
     ? store.mobileSheet.value === 'inspector'
     : !store.inspectorCollapsed.value;
-  const workspace =
-    session?.workspace ??
-    store.currentProject.value?.path ??
-    store.health.value?.workspace ??
-    store.config.value?.workspace ??
-    '';
+
+  const title =
+    view === 'changes'
+      ? 'Review changes'
+      : session
+        ? session.title || 'Untitled session'
+        : 'karucode';
+  const activityWord = activity.kind === 'idle' ? 'ready' : activity.kind;
+
+  const copyConversation = async (): Promise<void> => {
+    const text = transcriptToText(store.chat.value.items, title);
+    if (text.trim() === '') {
+      store.pushToast('Nothing to copy yet.', 'info');
+      return;
+    }
+    const copied = await copyText(text);
+    store.pushToast(copied ? 'Conversation copied as Markdown.' : 'Could not copy the conversation.', copied ? 'success' : 'error');
+  };
 
   return (
-    <header class="topbar">
+    <header class="main-head">
       <button
         type="button"
-        class="icon-button"
+        class="head-btn head-icon sessions-toggle"
         onClick={actions.toggleRail}
-        aria-label="Toggle sessions panel"
+        aria-label="Toggle session list"
         aria-expanded={railExpanded}
-        title="Toggle sessions — Cmd/Ctrl+B"
+        title={`Sessions — ${modKey()}+B`}
       >
-        <SidebarIcon />
+        <MenuIcon size={15} />
       </button>
 
-      <div class="topbar-titles">
-        <h1 class="topbar-title">{session?.title || 'karucode'}</h1>
-        <p class="topbar-subtitle">
-          {session ? (
-            <>
-              <span class="topbar-workspace" title={workspace}>
-                {workspace || 'workspace'}
-              </span>
-              <span class="meta-sep" aria-hidden="true">
-                ·
-              </span>
-              <span>{formatCount(session.message_count)}</span>
-              <span class="meta-sep" aria-hidden="true">
-                ·
-              </span>
-              <span class={`topbar-status status-${activity.kind}`}>
-                <span class={`status-dot status-${activity.kind}`} aria-hidden="true" />
-                {activity.label}
-              </span>
-            </>
-          ) : (
-            'Local coding agent'
-          )}
-        </p>
+      <div class="head-title-wrap">
+        <div class="breadcrumb">
+          <strong title={project?.path ?? projectName}>{projectName}</strong>
+          <span class="crumb-sep" aria-hidden="true">
+            /
+          </span>
+          <span>sessions</span>
+          <span class="crumb-sep" aria-hidden="true">
+            /
+          </span>
+          <span class={`head-activity status-${activity.kind}`}>{activityWord}</span>
+        </div>
+        <h1 class="main-title" title={title}>
+          {title}
+        </h1>
       </div>
 
-      <div class="topbar-actions">
-        <ModelSwitcher />
+      <div class="header-buttons">
         <button
           type="button"
-          class="icon-button"
+          class="head-btn theme-header-btn"
+          onClick={actions.openThemeStudio}
+          aria-haspopup="dialog"
+          aria-keyshortcuts="Control+Shift+T Meta+Shift+T"
+          title={`Theme studio — ${modKey()}+Shift+T`}
+        >
+          <PaletteIcon size={15} />
+          <span class="theme-header-name">{activeThemeName.value}</span>
+        </button>
+        <button
+          type="button"
+          class="head-btn command-head-btn"
+          onClick={actions.togglePalette}
+          aria-haspopup="dialog"
+          aria-keyshortcuts="Control+K Meta+K"
+          title={`Command palette — ${modKey()}+K`}
+        >
+          <SearchIcon size={15} />
+          <span>Commands</span>
+          <span class="keycap">{modKey()} K</span>
+        </button>
+        <button
+          type="button"
+          class="head-btn accent-head"
+          onClick={() => void copyConversation()}
+          disabled={store.chat.value.items.length === 0}
+          title="Copy this conversation as Markdown"
+        >
+          <CopyIcon size={15} />
+          <span class="head-btn-label">Copy</span>
+        </button>
+        <div class="header-divider" aria-hidden="true" />
+        <button
+          type="button"
+          class="head-btn head-icon"
           onClick={actions.toggleInspector}
           aria-label="Toggle workspace inspector"
           aria-expanded={inspectorExpanded}
-          title="Toggle inspector — Cmd/Ctrl+J"
+          title={`Inspector — ${modKey()}+J`}
         >
-          <PanelIcon />
+          <PanelIcon size={15} />
         </button>
       </div>
     </header>
   );
 }
 
+function WorkspaceTabs({ view, onChange }: { view: WorkspaceView; onChange: (next: WorkspaceView) => void }): JSX.Element {
+  const activity = store.activity.value;
+  const changeCount = useChangeCount();
+  const items: TabItem<WorkspaceView>[] = [
+    { id: 'chat', label: 'Conversation', icon: <ChatIcon size={15} /> },
+    { id: 'changes', label: 'Changes', icon: <GitIcon size={15} />, count: changeCount ?? undefined },
+  ];
+  const note = activity.kind === 'idle' ? 'Ready to work' : activity.label;
+
+  return (
+    <div class="workspace-tabbar">
+      <Tabs
+        items={items}
+        active={view}
+        onChange={onChange}
+        label="Workspace views"
+        idPrefix="workspace"
+        variant="workspace"
+      />
+      <div class="tab-fill" />
+      <p class="tab-note">
+        {activity.kind === 'idle' ? (
+          <CircleCheckIcon size={13} />
+        ) : (
+          <span class={`status-dot status-${activity.kind}`} aria-hidden="true" />
+        )}
+        {note}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Number of files the working tree changed, for the *Changes* tab's count pill.
+ * Re-probed when the project changes and after a run settles (that is when the
+ * agent can have touched files). A non-repo or unreachable backend yields
+ * `null`, so the tab simply has no badge instead of a fabricated zero.
+ */
+function useChangeCount(): number | null {
+  const projectId = store.currentProjectId.value;
+  const running = store.chat.value.running;
+  const [count, setCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (running) return;
+    const controller = new AbortController();
+    getGitStatus(projectId, { signal: controller.signal })
+      .then((status) => {
+        if (controller.signal.aborted) return;
+        setCount(status.is_repo ? status.files.length : null);
+      })
+      .catch(() => {
+        // The Changes panel owns the loud error; the tab just stays unbadged.
+      });
+    return () => controller.abort();
+  }, [projectId, running]);
+
+  return count;
+}
+
 export function ChatView(): JSX.Element {
   const session = store.activeSession.value;
   const currentId = store.currentSessionId.value;
   const chat = store.chat.value;
+  const [view, setView] = useState<WorkspaceView>('chat');
+  // Lazy panel: Changes mounts its git probe only after the user asks for it.
+  const [changesMounted, setChangesMounted] = useState(false);
+
+  const selectView = (next: WorkspaceView): void => {
+    setView(next);
+    if (next === 'changes') setChangesMounted(true);
+  };
 
   const lastItem = chat.items[chat.items.length - 1];
   let tailSize = 0;
@@ -240,85 +337,113 @@ export function ChatView(): JSX.Element {
     '';
 
   return (
-    <main class="chat-main" id="chat-main" aria-label="Conversation" tabIndex={-1}>
-      <SessionHeader />
-      <div class="chat-body">
-        {scroller.showJump ? (
-          <button type="button" class="jump-latest" onClick={scroller.jumpToLatest}>
-            <ChevronDownIcon size={14} />
-            Jump to latest
-          </button>
-        ) : null}
+    <main class="chat-main" id="chat-main" aria-label="Workspace" tabIndex={-1}>
+      <SessionHeader view={view} />
+      <WorkspaceTabs view={view} onChange={selectView} />
+
+      <div class="center-body">
         <div
-          class="chat-scroll"
-          ref={scroller.scrollRef}
-          tabIndex={0}
-          role="region"
-          aria-label="Transcript"
+          class="center-panel chat-panel"
+          id="workspace-panel-chat"
+          role="tabpanel"
+          aria-labelledby="workspace-tab-chat"
+          hidden={view !== 'chat'}
         >
-          <div class="chat-inner">
-            <ConnectionBanner />
-            <ProviderBanner />
+          <div class="chat-body">
+            {scroller.showJump ? (
+              <button type="button" class="jump-latest" onClick={scroller.jumpToLatest}>
+                <ChevronDownIcon size={14} />
+                Jump to latest
+              </button>
+            ) : null}
+            <div class="chat-scroll" ref={scroller.scrollRef} tabIndex={0} role="region" aria-label="Transcript">
+              <div class="chat-inner">
+                <ConnectionBanner />
+                <ProviderBanner />
 
-            {showLoading ? <ChatSkeleton /> : null}
+                {showLoading ? <ChatSkeleton /> : null}
 
-            {!showLoading && store.chatError.value ? (
-              <div class="run-error-banner" role="alert">
-                <div class="run-error-head">
-                  <span class="run-error-kicker">
-                    <AlertIcon size={14} /> Could not load this session
-                  </span>
-                </div>
-                <p class="run-error-message">{store.chatError.value}</p>
-                <button
-                  type="button"
-                  class="button button-small"
-                  onClick={() => currentId && void actions.openSession(currentId, { silent: false, force: true })}
-                >
-                  <RefreshIcon size={13} /> Retry
-                </button>
+                {!showLoading && store.chatError.value ? (
+                  <div class="run-error-banner" role="alert">
+                    <div class="run-error-head">
+                      <span class="run-error-kicker">
+                        <AlertIcon size={14} /> Could not load this session
+                      </span>
+                    </div>
+                    <p class="run-error-message">{store.chatError.value}</p>
+                    <button
+                      type="button"
+                      class="button button-small"
+                      onClick={() => currentId && void actions.openSession(currentId, { silent: false, force: true })}
+                    >
+                      <RefreshIcon size={13} /> Retry
+                    </button>
+                  </div>
+                ) : null}
+
+                {!showLoading && !store.chatError.value ? (
+                  currentId === null ? (
+                    // Nothing open: the same mock empty state, but a prompt opens
+                    // the session first before filling the composer.
+                    <EmptyState variant="no-session" />
+                  ) : hasItems ? (
+                    <ChatTranscript
+                      items={chat.items}
+                      resolvingApprovals={store.resolvingApprovals.value}
+                      onApprovalDecision={(id, decision) => void actions.resolveApproval(id, decision)}
+                    />
+                  ) : chat.running ? (
+                    // A live run with nothing persisted yet is not an empty session:
+                    // the starter prompts would invite a second message mid-turn.
+                    <ChatSkeleton />
+                  ) : (
+                    <EmptyState variant="empty" />
+                  )
+                ) : null}
+
+                <RunErrorBanner />
+
+                {session && hasItems && workspace ? (
+                  <p class="transcript-foot">
+                    Working in <span title={workspace}>{workspace}</span>
+                  </p>
+                ) : null}
               </div>
-            ) : null}
+            </div>
+          </div>
 
-            {!showLoading && !store.chatError.value ? (
-              currentId === null ? (
-                <NoSessionState />
-              ) : hasItems ? (
-                <ChatTranscript
-                  items={chat.items}
-                  resolvingApprovals={store.resolvingApprovals.value}
-                  onApprovalDecision={(id, decision) => void actions.resolveApproval(id, decision)}
-                />
-              ) : (
-                <EmptySessionState />
-              )
-            ) : null}
-
-            <RunErrorBanner />
-
-            {session && hasItems && workspace ? (
-              <p class="transcript-foot">
-                Working in <span title={workspace}>{workspace}</span>
-              </p>
-            ) : null}
+          <div class="composer-wrap">
+            <div class="composer-inner">
+              <Composer
+                disabledReason={store.composerDisabledReason.value}
+                running={chat.running}
+                stopping={store.stopping.value}
+                status={store.activity.value}
+                onSend={actions.sendChatMessage}
+                onStop={() => void actions.stopRun()}
+                onOpenSettings={actions.openSettings}
+                focusTick={store.composerFocusTick.value}
+                usageLabel={totalUsage(chat)}
+              />
+            </div>
           </div>
         </div>
-      </div>
 
-      <div class="composer-wrap">
-        <div class="composer-inner">
-          <Composer
-            disabledReason={store.composerDisabledReason.value}
-            running={chat.running}
-            stopping={store.stopping.value}
-            status={store.activity.value}
-            onSend={actions.sendChatMessage}
-            onStop={() => void actions.stopRun()}
-            onOpenSettings={actions.openSettings}
-            focusTick={store.composerFocusTick.value}
-            usageLabel={totalUsage(chat)}
-          />
-        </div>
+        {changesMounted ? (
+          <div
+            class="center-panel workspace-view"
+            id="workspace-panel-changes"
+            role="tabpanel"
+            aria-labelledby="workspace-tab-changes"
+            hidden={view !== 'changes'}
+            tabIndex={0}
+          >
+            {/* The page variant owns the mock's `.secondary-panel` chrome
+                (kicker, title, description, actions, change cards). */}
+            <ChangesTab variant="page" />
+          </div>
+        ) : null}
+
       </div>
     </main>
   );

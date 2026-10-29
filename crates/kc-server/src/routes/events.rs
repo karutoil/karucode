@@ -5,10 +5,16 @@
 //! events keep their global ordering (session lifecycle events are published by
 //! the server through `Runtime::emit` for the same reason).
 //!
-//! Backpressure: events are pushed into a bounded channel with `try_send`. A
-//! client that stops reading fills the channel and is disconnected instead of
-//! blocking (or slowing) the agent loop. `: keepalive` comments go out every
-//! 15 seconds. Shutdown cancels the task so `axum::serve` can drain.
+//! Backpressure: events are pushed into a bounded channel. A client that cannot
+//! drain it within [`SLOW_CLIENT_GRACE`] is disconnected, but a momentary stall
+//! (the browser re-rendering a burst of deltas, a slow proxy hop) is waited out
+//! rather than turned into a dropped stream. The wait happens in this client's
+//! own pump task, so it never blocks or slows the agent loop. Because the pump
+//! stops consuming the runtime broadcast while it waits, a long stall degrades to
+//! a [`Event::StreamLagged`](kc_core::events::Event::StreamLagged) marker telling
+//! the client to refetch. `: keepalive` comments go out every 15 seconds, which is
+//! how a client can tell a quiet stream from a dead one. Shutdown cancels the task
+//! so `axum::serve` can drain.
 
 use crate::error::{ApiError, ApiResult};
 use crate::routes::{query_str, QueryMap};
@@ -27,8 +33,14 @@ use tokio::time::Instant;
 /// How long between `: keepalive` comments. Must stay below the common 30s
 /// reverse-proxy idle timeout.
 const KEEPALIVE: Duration = Duration::from_secs(15);
-/// Per-client buffer. A reader this far behind is effectively gone.
-const CLIENT_BUFFER: usize = 256;
+/// Per-client buffer. A reader this far behind is effectively gone, but the
+/// headroom absorbs a burst: one run can emit hundreds of deltas in a second
+/// while the browser is busy rendering the ones it already has.
+const CLIENT_BUFFER: usize = 1024;
+/// How long the pump waits for a full buffer to drain before giving up on the
+/// client. Long enough to survive a render hiccup, short enough that a dead
+/// socket does not hold a task forever.
+const SLOW_CLIENT_GRACE: Duration = Duration::from_secs(5);
 
 pub async fn stream(
     State(state): State<AppState>,
@@ -88,24 +100,19 @@ async fn pump(
                 },
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::debug!(skipped, "SSE client lagged; dropping events");
-                    // Tell the UI to resynchronise. The synthetic envelope is
-                    // stamped just after the last sequence this client saw so
-                    // the frontend's dedupe accepts it.
-                    last_seq = last_seq.wrapping_add(skipped).wrapping_add(1);
-                    let notice = EventEnvelope {
+                    // A `StreamLagged` marker rather than a synthetic `notice`: the
+                    // client keys off the type, so it cannot be picked up by text
+                    // matching, and it is exempt from the client's seq dedupe.
+                    last_seq = lagged_seq(last_seq, skipped);
+                    let marker = EventEnvelope {
                         seq: last_seq,
                         ts_ms: now_ms(),
                         session_id: filter.clone(),
                         run_id: None,
                         agent_id: None,
-                        event: Event::Notice {
-                            level: "warn".into(),
-                            message:
-                                "event stream lagged: some events were dropped. Refresh the session to resynchronise."
-                                    .into(),
-                        },
+                        event: Event::StreamLagged { skipped },
                     };
-                    match encode(&notice, &None) {
+                    match encode(&marker, &None) {
                         Some(chunk) => chunk,
                         None => continue,
                     }
@@ -114,12 +121,34 @@ async fn pump(
             },
         };
 
-        // A slow client must not backpressure the run loop.
-        if tx.try_send(chunk).is_err() {
-            tracing::debug!("SSE client could not keep up; closing the stream");
-            break;
+        // A slow client must not backpressure the run loop: the pump is per
+        // client, so waiting here only delays this one stream. Waiting beats
+        // disconnecting, because a dropped stream loses the rest of the run.
+        match tokio::time::timeout(SLOW_CLIENT_GRACE, tx.send(chunk)).await {
+            Ok(Ok(())) => {}
+            // The body stream was dropped: nobody is reading any more.
+            Ok(Err(_)) => break,
+            Err(_) => {
+                tracing::debug!(
+                    grace_secs = SLOW_CLIENT_GRACE.as_secs(),
+                    "SSE client stopped draining; closing the stream"
+                );
+                break;
+            }
         }
     }
+}
+
+/// The `seq` for a `StreamLagged` marker.
+///
+/// `last_seq` is the newest frame this client received and `skipped` how many the
+/// broadcast ring dropped, so the next live frame carries `last_seq + skipped + 1`.
+/// Stamping the marker with the last *dropped* seq keeps it newer than anything the
+/// client has seen while staying strictly below the next live frame: a marker
+/// stamped one higher would make the client discard that frame as a duplicate of
+/// itself, silently losing the event that unblocks it.
+fn lagged_seq(last_seq: u64, skipped: u64) -> u64 {
+    last_seq.saturating_add(skipped)
 }
 
 /// Serialise one envelope as an SSE frame, applying the optional session filter.
@@ -169,6 +198,32 @@ mod tests {
         assert_eq!(parsed["type"], "text_delta");
         assert_eq!(parsed["delta"], "hi");
         assert_eq!(parsed["session_id"], "s_1");
+    }
+
+    #[test]
+    fn a_lag_marker_never_takes_the_next_live_sequence() {
+        // Client saw seq 10; frames 11..=13 were dropped, so the next live frame is 14.
+        let marker = lagged_seq(10, 3);
+        assert_eq!(marker, 13);
+        assert!(
+            marker > 10,
+            "the client must accept the marker over last seen"
+        );
+        assert!(marker < 14, "and must not shadow the next live envelope");
+
+        // A second lag after the marker: last seen is 13, one frame dropped.
+        let second = lagged_seq(marker, 1);
+        assert_eq!(second, 14);
+        assert!(second > marker, "a later marker still has to be accepted");
+        assert!(
+            second < 15,
+            "and still must not shadow the next live envelope"
+        );
+    }
+
+    #[test]
+    fn lagged_seq_saturates_instead_of_wrapping() {
+        assert_eq!(lagged_seq(u64::MAX - 1, 5), u64::MAX);
     }
 
     #[test]

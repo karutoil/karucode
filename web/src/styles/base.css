@@ -1,3 +1,10 @@
+/* Global primitives.
+ *
+ * Colours come from `styles/tokens.css` only — never a literal hex here — so a
+ * Theme Studio change repaints buttons, badges and focus rings along with the
+ * shell. Radii come from `--radius*` for the same reason.
+ */
+
 *,
 *::before,
 *::after {
@@ -13,7 +20,7 @@ body,
 
 html {
   background: var(--bg);
-  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-color: var(--line-strong) transparent;
   scrollbar-width: thin;
 }
 
@@ -38,9 +45,10 @@ h2,
 h3,
 h4 {
   margin: 0;
-  font-weight: 560;
+  font-weight: 660;
   line-height: 1.3;
-  letter-spacing: -0.005em;
+  letter-spacing: -0.02em;
+  color: var(--text);
 }
 
 p {
@@ -70,12 +78,17 @@ button {
 
 button:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: 0.5;
+}
+
+svg {
+  display: block;
+  flex-shrink: 0;
 }
 
 a {
   color: var(--accent);
-  text-decoration-color: rgba(216, 166, 87, 0.4);
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
   text-underline-offset: 2px;
 }
 
@@ -94,34 +107,37 @@ code {
   font-size: 0.92em;
 }
 
-kbd {
+kbd,
+.keycap {
   display: inline-flex;
   align-items: center;
-  min-height: 17px;
-  padding: 0 4px;
-  border: 1px solid var(--border);
-  border-bottom-color: var(--border-strong);
-  border-radius: 3px;
-  background: var(--bg-sunken);
-  color: var(--text-muted);
-  font-size: 10.5px;
-  line-height: 1.4;
+  padding: 2px 4px;
+  border: 1px solid var(--line-keycap);
+  border-radius: calc(var(--radius) - 6px);
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  line-height: 1.1;
+  white-space: nowrap;
 }
 
+/* The mock's selection is an opaque warm brown (it used `color:white`); mixing
+   the send gold into the canvas keeps the same shade and stays readable in
+   light mode, where `--accent` is dark and the canvas is pale. */
 ::selection {
-  background: rgba(216, 166, 87, 0.3);
+  background: color-mix(in srgb, var(--gold-send) 55%, var(--bg));
   color: var(--text);
 }
 
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  box-shadow: 0 0 0 4px var(--accent-soft);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 *::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 
 *::-webkit-scrollbar-track {
@@ -129,15 +145,15 @@ kbd {
 }
 
 *::-webkit-scrollbar-thumb {
-  border: 3px solid transparent;
-  border-radius: 8px;
-  background: var(--border-strong);
-  background-clip: content-box;
+  border: 2px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--line-strong);
+  background-clip: padding-box;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background: #454950;
-  background-clip: content-box;
+  background: color-mix(in srgb, var(--line-hair) 72%, var(--muted));
+  background-clip: padding-box;
 }
 
 .sr-only {
@@ -160,7 +176,7 @@ kbd {
   padding: 8px 12px;
   border: 1px solid var(--accent);
   border-radius: var(--radius-sm);
-  background: var(--panel);
+  background: var(--surface);
   color: var(--text);
   font-size: var(--fs-small);
   transform: translateY(-160%);
@@ -172,18 +188,20 @@ kbd {
 }
 
 .eyebrow {
-  display: inline-flex;
+  display: flex;
+  width: fit-content;
   align-items: center;
   gap: 5px;
-  color: var(--text-faint);
+  margin: 0;
+  color: var(--meta-text);
   font-size: var(--fs-micro);
-  font-weight: 560;
-  letter-spacing: 0.08em;
+  font-weight: 720;
+  letter-spacing: 0.125em;
   text-transform: uppercase;
 }
 
 .muted {
-  color: var(--text-muted);
+  color: var(--muted);
 }
 
 .small {
@@ -195,19 +213,21 @@ kbd {
 }
 
 .meta-sep {
-  color: var(--text-faint);
+  color: var(--faint);
   padding: 0 4px;
 }
 
 .inline-path {
   padding: 1px 5px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-sunken);
-  color: var(--text-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--rail);
+  color: var(--muted);
   font-size: 0.9em;
   overflow-wrap: anywhere;
 }
+
+/* ---------- buttons ---------- */
 
 .button {
   display: inline-flex;
@@ -216,9 +236,9 @@ kbd {
   gap: 6px;
   height: 30px;
   padding: 0 11px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
-  background: var(--bg-raised);
+  background: var(--surface-raised);
   color: var(--text);
   font-size: var(--fs-small);
   white-space: nowrap;
@@ -229,61 +249,61 @@ kbd {
 }
 
 .button:hover:not(:disabled) {
-  border-color: #40444a;
-  background: #191b1d;
+  border-color: color-mix(in srgb, var(--line-strong) 70%, var(--text));
+  background: var(--surface);
 }
 
 .button-primary {
   border-color: var(--accent);
   background: var(--accent);
-  color: #19150d;
-  font-weight: 620;
+  color: var(--bg);
+  font-weight: 660;
 }
 
 .button-primary:hover:not(:disabled) {
-  border-color: #e2b464;
-  background: #e2b464;
+  border-color: var(--accent-hi);
+  background: var(--accent-hi);
 }
 
 .button-primary:disabled {
-  border-color: var(--border-strong);
-  background: var(--bg-raised);
-  color: var(--text-faint);
+  border-color: var(--line-strong);
+  background: var(--surface-raised);
+  color: var(--faint);
   opacity: 1;
 }
 
 .button-stop {
-  border-color: rgba(209, 105, 105, 0.45);
-  background: rgba(209, 105, 105, 0.1);
-  color: #e2a3a3;
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
 }
 
 .button-stop:hover:not(:disabled) {
   border-color: var(--danger);
-  background: rgba(209, 105, 105, 0.16);
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
 }
 
 .button-danger {
   border-color: var(--danger);
   background: var(--danger);
-  color: #1d1111;
-  font-weight: 620;
+  color: var(--bg);
+  font-weight: 660;
 }
 
 .button-danger:hover:not(:disabled) {
-  border-color: #dd7f7f;
-  background: #dd7f7f;
+  border-color: color-mix(in srgb, var(--danger) 85%, var(--text));
+  background: color-mix(in srgb, var(--danger) 85%, var(--text));
 }
 
 .button-danger-ghost {
-  border-color: rgba(209, 105, 105, 0.35);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   background: transparent;
-  color: #d99a9a;
+  color: var(--danger);
 }
 
 .button-danger-ghost:hover:not(:disabled) {
   border-color: var(--danger);
-  background: rgba(209, 105, 105, 0.08);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
 .button-small {
@@ -301,7 +321,7 @@ kbd {
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text-muted);
+  color: var(--muted);
   transition:
     background-color var(--transition-fast),
     color var(--transition-fast),
@@ -309,12 +329,12 @@ kbd {
 }
 
 .icon-button:hover:not(:disabled) {
-  background: var(--bg-raised);
+  background: var(--surface-raised);
   color: var(--text);
 }
 
 .icon-button[aria-expanded='true'] {
-  background: var(--bg-raised);
+  background: var(--surface-raised);
   color: var(--text);
 }
 
@@ -327,8 +347,8 @@ kbd {
   align-items: center;
   gap: 4px;
   padding: 1px 2px;
-  border-radius: 3px;
-  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
   font-size: 11.5px;
   text-align: left;
   transition: color var(--transition-fast);
@@ -338,13 +358,15 @@ kbd {
   color: var(--accent);
 }
 
+/* ---------- inputs ---------- */
+
 .input {
   width: 100%;
   height: 32px;
   padding: 0 9px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: var(--bg-sunken);
+  background: var(--rail);
   color: var(--text);
   font-size: var(--fs-small);
   transition:
@@ -359,7 +381,7 @@ input.mono {
 }
 
 .input:hover:not(:disabled) {
-  border-color: var(--border-strong);
+  border-color: var(--line-strong);
 }
 
 .input:focus-visible {
@@ -368,9 +390,11 @@ input.mono {
 }
 
 .input::placeholder {
-  color: var(--text-faint);
+  color: var(--muted);
   opacity: 1;
 }
+
+/* ---------- status, badges, chips ---------- */
 
 .status-dot {
   display: inline-block;
@@ -378,7 +402,7 @@ input.mono {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--text-faint);
+  background: var(--faint);
 }
 
 .status-dot.status-running {
@@ -387,7 +411,7 @@ input.mono {
 }
 
 .status-dot.status-ok {
-  background: var(--ok);
+  background: var(--success);
 }
 
 .status-dot.status-error,
@@ -405,7 +429,7 @@ input.mono {
 .status-dot.status-stopped,
 .status-dot.status-muted,
 .status-dot.status-idle {
-  background: var(--text-faint);
+  background: var(--faint);
 }
 
 .status-dot.status-tool,
@@ -419,36 +443,36 @@ input.mono {
   align-items: center;
   height: 18px;
   padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-sunken);
-  color: var(--text-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--rail);
+  color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
 
 .badge-warn {
-  border-color: rgba(217, 164, 65, 0.4);
-  background: rgba(217, 164, 65, 0.1);
-  color: #e0b567;
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--warn);
 }
 
 .badge-ok {
-  border-color: rgba(127, 176, 105, 0.35);
-  background: rgba(127, 176, 105, 0.1);
-  color: #9ccb8b;
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  color: var(--success);
 }
 
 .badge-danger {
-  border-color: rgba(209, 105, 105, 0.4);
-  background: rgba(209, 105, 105, 0.1);
-  color: #e0a0a0;
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
 }
 
 .badge-muted {
-  color: var(--text-faint);
+  color: var(--muted);
 }
 
 .chip {
@@ -457,10 +481,10 @@ input.mono {
   gap: 4px;
   height: 20px;
   padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-sunken);
-  color: var(--text-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--rail);
+  color: var(--muted);
   font-size: 10.5px;
   white-space: nowrap;
 }
@@ -470,39 +494,41 @@ input.mono {
 }
 
 .chip-ok {
-  border-color: rgba(127, 176, 105, 0.35);
-  color: #9ccb8b;
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+  color: var(--success);
 }
 
 .chip-warn {
-  border-color: rgba(217, 164, 65, 0.4);
-  color: #e0b567;
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  color: var(--warn);
 }
 
 .chip-danger {
-  border-color: rgba(209, 105, 105, 0.4);
-  color: #e0a0a0;
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  color: var(--danger);
 }
 
 .chip-running {
-  border-color: rgba(216, 166, 87, 0.35);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
   color: var(--accent);
 }
 
 .chip-muted {
-  color: var(--text-faint);
+  color: var(--muted);
 }
 
+/* ---------- loading & messages ---------- */
+
 .skeleton {
-  border: 1px solid var(--border);
+  border: 1px solid var(--line-soft);
   border-radius: var(--radius-sm);
-  background: var(--bg-raised);
+  background: var(--surface-raised);
   animation: skeleton-pulse 1.9s ease-in-out infinite;
 }
 
 .truncated-note {
   padding: 8px 12px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
   color: var(--warn);
   font-size: 11.5px;
 }
@@ -513,10 +539,10 @@ input.mono {
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  border: 1px solid rgba(209, 105, 105, 0.35);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
   border-radius: var(--radius-sm);
-  background: rgba(209, 105, 105, 0.07);
-  color: #e0b0b0;
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+  color: var(--danger);
   font-size: var(--fs-small);
 }
 
@@ -529,16 +555,18 @@ input.mono {
   align-items: flex-start;
   gap: 8px;
   padding: 10px 12px;
-  border: 1px solid rgba(217, 164, 65, 0.3);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
   border-radius: var(--radius-sm);
-  background: rgba(217, 164, 65, 0.07);
-  color: #ddb36a;
+  background: color-mix(in srgb, var(--warn) 7%, transparent);
+  color: var(--warn);
   font-size: var(--fs-small);
 }
 
 .spin {
   animation: spin 1s linear infinite;
 }
+
+/* ---------- motion ---------- */
 
 @keyframes pulse-dot {
   0%,
@@ -612,6 +640,7 @@ input.mono {
   }
 }
 
+/* Layouts that slide/fade in must not animate for motion-sensitive readers. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
