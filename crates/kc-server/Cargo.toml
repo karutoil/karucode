@@ -21,6 +21,7 @@ kc-provider.workspace = true
 kc-tools.workspace = true
 kc-runtime.workspace = true
 kc-plugin-host.workspace = true
+kc-plugin-sdk.workspace = true
 kc-mcp.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true

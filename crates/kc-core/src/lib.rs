@@ -19,6 +19,14 @@ pub mod settings;
 pub mod store;
 pub mod tool;
 
+/// Source text of [`plugin`], so tooling can emit a dependency-free copy of the
+/// protocol types (`karucode plugin init`).
+///
+/// It lives here rather than inside `plugin.rs` on purpose: an `include_str!` in
+/// that file would be copied along with it and would then try to include itself
+/// in the generated module.
+pub const PLUGIN_PROTOCOL_SOURCE: &str = include_str!("plugin.rs");
+
 pub use error::{Error, Result};
 pub use events::{Event, EventEnvelope, EventSink};
 pub use ids::{AgentId, ApprovalId, RunId, SessionId};

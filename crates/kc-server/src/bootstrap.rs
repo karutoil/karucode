@@ -5,6 +5,123 @@
 //! in use, bad workspace, unreadable config), and exits non-zero through
 //! `main`'s `anyhow::Result`.
 
+// @kc-doc: run-server
+// @kc-title: Build, run and stop the server
+// @kc-summary: Build the UI and the binary, start it against a workspace, and know what each CLI flag and startup failure means.
+// @kc-tags: install, build, run, cli, startup, server
+// @kc-applies-to: cmd:karucode, cmd:--workspace, cmd:--port, cmd:--host, cmd:--data-dir, cmd:--config, cmd:--help, env:KARUCODE_HOST, env:KARUCODE_PORT, env:KARUCODE_WORKSPACE, env:KARUCODE_DATA_DIR, env:KARUCODE_AUTH_TOKEN, env:KARUCODE_LOG, env:KARUCODE_WEB_DIR, env:KARUCODE_ALLOWED_HOSTS, env:KARUCODE_SKIP_WEB_BUILD, env:KARUCODE_WEB_DIST, env:KARUCODE_NPM, cmd:npm run build, cmd:npm ci, route:GET /api/health, file:web/dist, file:crates/kc-server/build.rs
+//
+// # Build and run
+//
+// ```bash
+// cargo run --release -p kc-server -- --workspace /path/to/your/project
+// # open http://127.0.0.1:8787
+// ```
+//
+// That is the whole build. `crates/kc-server/build.rs` runs `npm ci` (only when
+// the dependency tree is missing or the lockfile moved) and `npm run build` when
+// the frontend sources are newer than `web/dist`, and `rust-embed` then compiles
+// `web/dist` into the binary. Debug and release builds both embed it, so the
+// resulting `karucode` file runs on its own: no `web/dist` directory, no Node, no
+// `KARUCODE_WEB_DIR`. Node.js 20+ is a *build-time* dependency, and only when you
+// build the frontend from source.
+//
+// No Node on the build host, or a bundle built elsewhere?
+//
+// ```bash
+// KARUCODE_WEB_DIST=/path/to/web/dist cargo build --release  # embed a prebuilt bundle
+// KARUCODE_SKIP_WEB_BUILD=1 cargo build -p kc-server          # Rust only, placeholder page
+// cargo build --release -p kc-server --no-default-features    # no UI embedded at all
+// ```
+//
+// `KARUCODE_NPM=/path/to/npm` overrides the npm binary and `KARUCODE_WEB_DIST`
+// replaces `web/dist` with the bundle you point at. A frontend build that fails
+// fails `cargo build`, and a missing `web/dist` with no npm to rebuild it stops
+// with the four options above instead of shipping a UI-less binary.
+//
+// While you are changing the UI, skip that round trip: `npm run dev` in `web/`
+// serves Vite on :5173 and proxies `/api` to :8787, and
+// `KARUCODE_WEB_DIR=web/dist` makes the server read the folder from disk instead
+// of the embedded snapshot.
+//
+// # Flags
+//
+// | Flag | Default | Meaning |
+// | --- | --- | --- |
+// | `--workspace <PATH>` | current dir | default workspace root; sessions without a project run here |
+// | `--host <ADDR>` | `127.0.0.1` | bind address; a non-loopback bind requires `KARUCODE_AUTH_TOKEN` |
+// | `--port <PORT>` | `8787` | listen port |
+// | `--data-dir <PATH>` | `~/.local/share/karucode` | SQLite database and plugin data, forced to `0700` |
+// | `--config <PATH>` | `$KARUCODE_CONFIG` or `~/.config/karucode/config.toml` | config file; must exist |
+// | `--no-open` | - | accepted for compatibility; the server never opens a browser |
+// | `-h`, `--version` | - | usage and version, handled before touching the filesystem |
+//
+// Every flag has an environment equivalent (`KARUCODE_HOST`, `KARUCODE_PORT`,
+// `KARUCODE_WORKSPACE`, `KARUCODE_DATA_DIR`, `KARUCODE_CONFIG`); flags win for the
+// process they start. `KARUCODE_LOG` sets the tracing filter
+// (`info,karucode=debug`) and `KARUCODE_WEB_DIR` serves the UI from disk instead
+// of the embedded copy, which is what you want while editing the frontend.
+//
+// # Subcommands
+//
+// `karucode plugin init <dir> [--name <name>] [--force]` writes a plugin project
+// whose SDK is vendored, so it depends on nothing from karucode; see the
+// `plugins` topic for the layout and the next steps. `karucode plugin sdk <dir>
+// [--check]` refreshes that vendored copy after a karucode upgrade, and `--check`
+// exits non-zero on drift so a plugin's CI can guard it.
+//
+// Neither subcommand starts the server, reads the config file or touches the
+// data directory, and an existing file is never overwritten without `--force`.
+//
+// # Startup order
+//
+// Config -> data dir (`0700`) -> SQLite (`<data_dir>/karucode.db`, WAL) ->
+// settings -> provider factory -> plugin host and MCP servers (concurrently) ->
+// project registry -> recovery of interrupted runs -> bind -> serve. The single
+// startup log line reports the URL, workspace, model, tool count, plugin/MCP
+// status, auth mode, recovery counts and where the UI came from.
+//
+// # Health check
+//
+// ```bash
+// curl -s localhost:8787/api/health | jq
+// ```
+//
+// It answers before any model is configured, which makes it the right probe for a
+// supervisor or container healthcheck.
+//
+// # Stopping
+//
+// `SIGINT`/`SIGTERM` cancel runs, expire pending approvals, shut plugins and MCP
+// children down and checkpoint SQLite. Graceful drain is bounded at 10 s so a
+// stuck keep-alive connection cannot hold the process forever. On the next start,
+// leftover `running` runs and agents are marked `interrupted` and pending
+// approvals `expired`; nothing is silently retried.
+//
+// # Startup failures you will actually see
+//
+// * `workspace ... is not usable` - pass an existing directory.
+// * `refusing to bind ... without KARUCODE_AUTH_TOKEN` - remote binds need a
+//   token of at least 16 characters.
+// * `could not open the database at ...` - permissions or a corrupt/foreign
+//   file; move it aside to start fresh.
+// * `port ... in use` - another instance is running (plugin/MCP children are
+//   stopped before exiting).
+//
+// # Gotchas
+//
+// * There is no built-in TLS. Bind loopback, or put a reverse proxy in front and
+//   set `KARUCODE_ALLOWED_HOSTS` for its host names.
+// * `--workspace` sets the *default* workspace; projects created in the UI have
+//   their own directories.
+// * The UI embed is a compile-time snapshot in debug builds too: after changing
+//   the frontend, run `cargo build -p kc-server` again, or serve the folder
+//   live with `KARUCODE_WEB_DIR=web/dist`.
+// * `KARUCODE_WEB_DIR` is tried first but never required: if it points at a
+//   directory with no `index.html`, the embedded copy is still served.
+//
+// Full reference: `README.md` (Quick start, Configuration).
+
 use crate::settings::SettingsHandle;
 use crate::state::{base_tool_registry, AppState, AppStateDeps, PluginHooks, ProjectRegistry};
 use crate::static_ui::WebAssets;
@@ -46,6 +163,10 @@ pub enum CliAction {
     Help,
     Version,
     Run(Cli),
+    /// `karucode plugin init <dir> [--name <name>] [--force]`
+    PluginInit(crate::scaffold::PluginInitArgs),
+    /// `karucode plugin sdk <dir> [--check]`
+    PluginSdk(crate::scaffold::PluginSdkArgs),
 }
 
 impl Cli {
@@ -63,6 +184,11 @@ Options:
       --no-open            Accepted for compatibility; the server never opens a browser
   -h, --help               Print this help and exit
   -V, --version            Print the version and exit
+
+Commands:
+  plugin init <dir>        Scaffold a plugin project; the SDK is vendored, so it
+                           depends on nothing from karucode
+  plugin sdk <dir>         Refresh a plugin's vendored SDK (--check exits 1 on drift)
 
 Environment: KARUCODE_CONFIG, KARUCODE_HOST, KARUCODE_PORT, KARUCODE_WORKSPACE,
 KARUCODE_DATA_DIR, KARUCODE_AUTH_TOKEN, KARUCODE_LOCK_SETTINGS, KARUCODE_LOG,
@@ -85,6 +211,15 @@ comma-separated list; entries are host, host:port or *.example.com."
         I: IntoIterator<Item = OsString>,
     {
         let args: Vec<OsString> = args.into_iter().collect();
+        // `karucode plugin ...` is a subcommand, not a server flag: dispatch it
+        // before the flag loop so the two grammars never mix.
+        if args
+            .first()
+            .map(|a| a.to_string_lossy() == "plugin")
+            .unwrap_or(false)
+        {
+            return parse_plugin(&args[1..]);
+        }
         let mut cli = Cli::default();
         let mut i = 0usize;
         while i < args.len() {
@@ -144,6 +279,151 @@ comma-separated list; entries are host, host:port or *.example.com."
         }
         Ok(CliAction::Run(cli))
     }
+}
+
+/// Split `--flag=value` into its parts; `--flag value` is handled by
+/// [`take_value`].
+fn split_flag(word: &str) -> (String, Option<String>) {
+    match word.split_once('=') {
+        Some((flag, value)) => (flag.to_string(), Some(value.to_string())),
+        None => (word.to_string(), None),
+    }
+}
+
+/// Value of a flag, either inline (`--name=x`) or the next word (`--name x`).
+fn take_value(
+    flag: &str,
+    inline: Option<String>,
+    words: &[String],
+    i: &mut usize,
+) -> anyhow::Result<String> {
+    match inline {
+        Some(value) if !value.is_empty() => Ok(value),
+        Some(_) => bail!("`{flag}` requires a non-empty value"),
+        None => {
+            *i += 1;
+            let value = words
+                .get(*i)
+                .ok_or_else(|| anyhow!("`{flag}` requires a value\n\n{}", Cli::usage()))?;
+            Ok(value.clone())
+        }
+    }
+}
+
+/// `karucode plugin <command> ...`: scaffolding only, never server startup, and
+/// never touching the config file or the data directory.
+fn parse_plugin(args: &[OsString]) -> anyhow::Result<CliAction> {
+    let mut words = args.iter().map(|a| a.to_string_lossy().to_string());
+    let command = match words.next() {
+        Some(command) => command,
+        None => bail!(
+            "`karucode plugin` needs a command: `plugin init <dir>` or `plugin sdk <dir>`\n\n{}",
+            Cli::usage()
+        ),
+    };
+    if command == "-h" || command == "--help" || command == "help" {
+        return Ok(CliAction::Help);
+    }
+    let words: Vec<String> = words.collect();
+    match command.as_str() {
+        "init" => {
+            let (dir, name, force) = parse_plugin_init(&words)?;
+            Ok(CliAction::PluginInit(crate::scaffold::PluginInitArgs {
+                dir,
+                name,
+                force,
+            }))
+        }
+        "sdk" => {
+            let (dir, check) = parse_plugin_sdk(&words)?;
+            Ok(CliAction::PluginSdk(crate::scaffold::PluginSdkArgs {
+                dir,
+                check,
+            }))
+        }
+        other => bail!(
+            "unknown `plugin` command `{other}`; expected `init` or `sdk`\n\n{}",
+            Cli::usage()
+        ),
+    }
+}
+
+fn parse_plugin_init(words: &[String]) -> anyhow::Result<(PathBuf, Option<String>, bool)> {
+    let mut dir: Option<PathBuf> = None;
+    let mut name: Option<String> = None;
+    let mut force = false;
+    let mut i = 0usize;
+    while i < words.len() {
+        let (flag, inline) = split_flag(&words[i]);
+        match flag.as_str() {
+            "--name" => name = Some(take_value("--name", inline, words, &mut i)?),
+            "--force" | "-f" => {
+                if inline.is_some() {
+                    bail!("`--force` does not take a value");
+                }
+                force = true;
+            }
+            other if other.starts_with('-') => {
+                bail!("unknown option `{other}`\n\n{}", Cli::usage())
+            }
+            _ => {
+                if dir.is_some() {
+                    bail!(
+                        "`plugin init` takes exactly one target directory; `{}` is extra\n\n{}",
+                        words[i],
+                        Cli::usage()
+                    );
+                }
+                dir = Some(PathBuf::from(&words[i]));
+            }
+        }
+        i += 1;
+    }
+    let dir = dir.ok_or_else(|| {
+        anyhow!(
+            "`plugin init` needs a target directory, e.g. `karucode plugin init ./my-plugin`\n\n{}",
+            Cli::usage()
+        )
+    })?;
+    Ok((dir, name, force))
+}
+
+fn parse_plugin_sdk(words: &[String]) -> anyhow::Result<(PathBuf, bool)> {
+    let mut dir: Option<PathBuf> = None;
+    let mut check = false;
+    let mut i = 0usize;
+    while i < words.len() {
+        let (flag, inline) = split_flag(&words[i]);
+        match flag.as_str() {
+            "--check" => {
+                if inline.is_some() {
+                    bail!("`--check` does not take a value");
+                }
+                check = true;
+            }
+            other if other.starts_with('-') => {
+                bail!("unknown option `{other}`\n\n{}", Cli::usage())
+            }
+            _ => {
+                if dir.is_some() {
+                    bail!(
+                        "`plugin sdk` takes exactly one plugin directory; `{}` is extra\n\n{}",
+                        words[i],
+                        Cli::usage()
+                    );
+                }
+                dir = Some(PathBuf::from(&words[i]));
+            }
+        }
+        i += 1;
+    }
+    let dir = dir.ok_or_else(|| {
+        anyhow!(
+            "`plugin sdk` needs the plugin directory, e.g. `karucode plugin sdk ./my-plugin`\n\n{}",
+            Cli::usage()
+        )
+    })?;
+    Ok((dir, check))
 }
 
 /// Load config, apply CLI overrides, validate, then start the server.
@@ -510,94 +790,25 @@ fn host_for_url(host: &str, port: u16) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn project_name_for(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Project".to_string())
+}
 
-    fn parse(args: &[&str]) -> anyhow::Result<CliAction> {
-        Cli::parse(args.iter().map(OsString::from))
+fn unique_project_name(existing: &[Project], base: String) -> String {
+    if !existing.iter().any(|project| project.name == base) {
+        return base;
     }
-
-    #[test]
-    fn help_and_version_short_circuit() {
-        assert!(matches!(parse(&["--help"]).unwrap(), CliAction::Help));
-        assert!(matches!(parse(&["-h"]).unwrap(), CliAction::Help));
-        assert!(matches!(parse(&["--version"]).unwrap(), CliAction::Version));
-        assert!(matches!(parse(&["-V"]).unwrap(), CliAction::Version));
+    for suffix in 2..1000 {
+        let candidate = format!("{base} ({suffix})");
+        if !existing.iter().any(|project| project.name == candidate) {
+            return candidate;
+        }
     }
-
-    #[test]
-    fn options_override_in_both_forms() {
-        let CliAction::Run(cli) = parse(&[
-            "--config",
-            "/tmp/c.toml",
-            "--port=9001",
-            "--host",
-            "0.0.0.0",
-            "--workspace=/tmp/ws",
-            "--data-dir",
-            "/tmp/data",
-            "--no-open",
-        ])
-        .unwrap() else {
-            panic!("expected run");
-        };
-        assert_eq!(cli.config, Some(PathBuf::from("/tmp/c.toml")));
-        assert_eq!(cli.port, Some(9001));
-        assert_eq!(cli.host.as_deref(), Some("0.0.0.0"));
-        assert_eq!(cli.workspace, Some(PathBuf::from("/tmp/ws")));
-        assert_eq!(cli.data_dir, Some(PathBuf::from("/tmp/data")));
-    }
-
-    #[test]
-    fn bad_input_is_rejected_with_usage() {
-        let err = parse(&["--port", "zero"]).unwrap_err();
-        assert!(err.to_string().contains("--port"));
-        let err = parse(&["--wat"]).unwrap_err();
-        assert!(err.to_string().contains("unknown option"));
-        let err = parse(&["positional"]).unwrap_err();
-        assert!(err.to_string().contains("positional"));
-        assert!(parse(&["--port"]).is_err());
-        assert!(parse(&["--no-open=1"]).is_err());
-    }
-
-    #[test]
-    fn remote_bind_needs_a_token() {
-        let config = Config {
-            host: "0.0.0.0".into(),
-            auth_token: None,
-            ..Config::default()
-        };
-        let err = validate_config(&config).unwrap_err();
-        assert!(err.to_string().contains("AUTH_TOKEN"));
-
-        let config = Config {
-            host: "0.0.0.0".into(),
-            auth_token: Some("0123456789abcdef".into()),
-            ..Config::default()
-        };
-        assert!(validate_config(&config).is_ok());
-    }
-
-    #[test]
-    fn short_tokens_and_zero_port_are_rejected() {
-        let config = Config {
-            auth_token: Some("short".into()),
-            ..Config::default()
-        };
-        assert!(validate_config(&config).is_err());
-        let config = Config {
-            port: 0,
-            ..Config::default()
-        };
-        assert!(validate_config(&config).is_err());
-    }
-
-    #[test]
-    fn ipv6_hosts_are_bracketed() {
-        assert_eq!(host_for_url("::1", 8787), "[::1]:8787");
-        assert_eq!(host_for_url("127.0.0.1", 8787), "127.0.0.1:8787");
-    }
+    // Unreachable in practice (1000 same-named projects); still unique.
+    format!("{base} ({})", crate::state::now_ms())
 }
 
 /// Make sure every session has a project and the registry knows every project.
@@ -689,23 +900,181 @@ async fn seed_projects(
     Ok(())
 }
 
-fn project_name_for(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().trim().to_string())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "Project".to_string())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn unique_project_name(existing: &[Project], base: String) -> String {
-    if !existing.iter().any(|project| project.name == base) {
-        return base;
+    fn parse(args: &[&str]) -> anyhow::Result<CliAction> {
+        Cli::parse(args.iter().map(OsString::from))
     }
-    for suffix in 2..1000 {
-        let candidate = format!("{base} ({suffix})");
-        if !existing.iter().any(|project| project.name == candidate) {
-            return candidate;
-        }
+
+    #[test]
+    fn help_and_version_short_circuit() {
+        assert!(matches!(parse(&["--help"]).unwrap(), CliAction::Help));
+        assert!(matches!(parse(&["-h"]).unwrap(), CliAction::Help));
+        assert!(matches!(parse(&["--version"]).unwrap(), CliAction::Version));
+        assert!(matches!(parse(&["-V"]).unwrap(), CliAction::Version));
     }
-    // Unreachable in practice (1000 same-named projects); still unique.
-    format!("{base} ({})", crate::state::now_ms())
+
+    #[test]
+    fn plugin_init_parses_both_value_forms() {
+        let CliAction::PluginInit(args) = parse(&["plugin", "init", "/tmp/wordy"]).unwrap() else {
+            panic!("expected a plugin init action");
+        };
+        assert_eq!(args.dir, PathBuf::from("/tmp/wordy"));
+        assert_eq!(args.name, None, "the directory name is the default");
+        assert!(!args.force);
+
+        let CliAction::PluginInit(args) =
+            parse(&["plugin", "init", "wordy", "--name=greeter", "--force"]).unwrap()
+        else {
+            panic!("expected a plugin init action");
+        };
+        assert_eq!(args.name.as_deref(), Some("greeter"));
+        assert!(args.force);
+
+        let CliAction::PluginInit(args) =
+            parse(&["plugin", "init", "wordy", "--name", "greeter", "-f"]).unwrap()
+        else {
+            panic!("expected a plugin init action");
+        };
+        assert_eq!(args.name.as_deref(), Some("greeter"));
+        assert!(args.force);
+    }
+
+    #[test]
+    fn plugin_sdk_parses_and_check_is_opt_in() {
+        let CliAction::PluginSdk(args) = parse(&["plugin", "sdk", "/tmp/wordy"]).unwrap() else {
+            panic!("expected a plugin sdk action");
+        };
+        assert_eq!(args.dir, PathBuf::from("/tmp/wordy"));
+        assert!(!args.check);
+
+        let CliAction::PluginSdk(args) =
+            parse(&["plugin", "sdk", "--check", "/tmp/wordy"]).unwrap()
+        else {
+            panic!("expected a plugin sdk action");
+        };
+        assert!(args.check);
+    }
+
+    #[test]
+    fn plugin_usage_errors_name_the_fix() {
+        let err = parse(&["plugin"]).unwrap_err().to_string();
+        assert!(err.contains("needs a command"), "{err}");
+
+        let err = parse(&["plugin", "deploy", "x"]).unwrap_err().to_string();
+        assert!(err.contains("unknown `plugin` command `deploy`"), "{err}");
+        assert!(err.contains("expected `init` or `sdk`"), "{err}");
+
+        let err = parse(&["plugin", "init"]).unwrap_err().to_string();
+        assert!(err.contains("needs a target directory"), "{err}");
+
+        let err = parse(&["plugin", "init", "a", "b"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exactly one target directory"), "{err}");
+
+        let err = parse(&["plugin", "init", "a", "--name"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`--name` requires a value"), "{err}");
+
+        let err = parse(&["plugin", "sdk", "a", "--bogus"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown option `--bogus`"), "{err}");
+    }
+
+    #[test]
+    fn plugin_help_is_help() {
+        assert!(matches!(
+            parse(&["plugin", "--help"]).unwrap(),
+            CliAction::Help
+        ));
+        assert!(matches!(
+            parse(&["plugin", "help"]).unwrap(),
+            CliAction::Help
+        ));
+    }
+
+    #[test]
+    fn the_usage_text_lists_the_subcommands() {
+        let usage = Cli::usage();
+        assert!(usage.contains("plugin init <dir>"), "{usage}");
+        assert!(usage.contains("plugin sdk <dir>"), "{usage}");
+    }
+
+    #[test]
+    fn options_override_in_both_forms() {
+        let CliAction::Run(cli) = parse(&[
+            "--config",
+            "/tmp/c.toml",
+            "--port=9001",
+            "--host",
+            "0.0.0.0",
+            "--workspace=/tmp/ws",
+            "--data-dir",
+            "/tmp/data",
+            "--no-open",
+        ])
+        .unwrap() else {
+            panic!("expected run");
+        };
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/c.toml")));
+        assert_eq!(cli.port, Some(9001));
+        assert_eq!(cli.host.as_deref(), Some("0.0.0.0"));
+        assert_eq!(cli.workspace, Some(PathBuf::from("/tmp/ws")));
+        assert_eq!(cli.data_dir, Some(PathBuf::from("/tmp/data")));
+    }
+
+    #[test]
+    fn bad_input_is_rejected_with_usage() {
+        let err = parse(&["--port", "zero"]).unwrap_err();
+        assert!(err.to_string().contains("--port"));
+        let err = parse(&["--wat"]).unwrap_err();
+        assert!(err.to_string().contains("unknown option"));
+        let err = parse(&["positional"]).unwrap_err();
+        assert!(err.to_string().contains("positional"));
+        assert!(parse(&["--port"]).is_err());
+        assert!(parse(&["--no-open=1"]).is_err());
+    }
+
+    #[test]
+    fn remote_bind_needs_a_token() {
+        let config = Config {
+            host: "0.0.0.0".into(),
+            auth_token: None,
+            ..Config::default()
+        };
+        let err = validate_config(&config).unwrap_err();
+        assert!(err.to_string().contains("AUTH_TOKEN"));
+
+        let config = Config {
+            host: "0.0.0.0".into(),
+            auth_token: Some("0123456789abcdef".into()),
+            ..Config::default()
+        };
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn short_tokens_and_zero_port_are_rejected() {
+        let config = Config {
+            auth_token: Some("short".into()),
+            ..Config::default()
+        };
+        assert!(validate_config(&config).is_err());
+        let config = Config {
+            port: 0,
+            ..Config::default()
+        };
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn ipv6_hosts_are_bracketed() {
+        assert_eq!(host_for_url("::1", 8787), "[::1]:8787");
+        assert_eq!(host_for_url("127.0.0.1", 8787), "127.0.0.1:8787");
+    }
 }

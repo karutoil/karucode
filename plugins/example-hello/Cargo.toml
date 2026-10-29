@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# This example is a workspace member, so it uses the SDK crate by relative path.
+# A plugin that lives anywhere else must NOT copy this manifest: its `path` only
+# resolves from inside this checkout. Create one with `karucode plugin init
+# <dir>`, which vendors the SDK into the project instead.
 [[bin]]
 name = "example-hello"
 path = "src/main.rs"

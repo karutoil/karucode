@@ -46,6 +46,145 @@
 //! [`PluginBuilder`] implements the loop for you; [`Plugin::handle_request`] is
 //! available if you want to embed the protocol in your own runtime.
 
+// @kc-doc: plugins
+// @kc-title: Write and install a plugin
+// @kc-summary: Build an out-of-process plugin that adds tools and hooks, register it, and debug it when it fails to start.
+// @kc-tags: plugins, extension, sdk, tools, hooks, jsonrpc
+// @kc-applies-to: config:[[plugins]], file:~/.local/share/karucode/plugins/<name>/plugin.toml, dir:plugins/example-hello, tool:plugin__<plugin>__<tool>, cmd:cargo build -p example-hello, cmd:karucode plugin init, cmd:karucode plugin sdk, cmd:karucode plugin sdk --check, file:src/sdk.rs, file:src/protocol.rs, doc:docs/PLUGINS.md, env:KARUCODE_PLUGIN_NAME, env:KARUCODE_PLUGIN_PROTOCOL, env:KARUCODE_PLUGIN_PERMISSIONS, env:KARUCODE_PLUGIN_SETTINGS
+//
+// A plugin is a separate executable that speaks newline-delimited JSON-RPC 2.0 on
+// stdin/stdout, protocol version `1`. It never links the harness, so it can be
+// written in Rust with this SDK, in Python, in Go or in shell. The host spawns,
+// supervises and restarts it; a crash or hang fails that plugin only.
+//
+// # 1. Write it with the Rust SDK
+//
+// ```bash
+// karucode plugin init ./wordy     # the name comes from the directory
+// karucode plugin init ./wordy --name wordy        # explicit name
+// karucode plugin init ./wordy --force             # replace an existing scaffold
+// cd wordy && cargo build --release
+// ```
+//
+// The scaffolder writes the SDK **into** the plugin (`src/sdk.rs` and
+// `src/protocol.rs` are copies of this build), so a Rust plugin depends on
+// nothing from karucode: there is no path into a checkout and no published crate
+// to wait for. Edit `src/main.rs`:
+//
+// ```rust
+// use sdk::{PluginBuilder, PluginToolResult, PluginToolResultExt, ToolRequest};
+// use serde_json::json;
+//
+// fn main() -> std::io::Result<()> {
+//     PluginBuilder::new("wordy", "0.1.0")
+//         .description("Counts words")
+//         .tool(
+//             "count",
+//             "Count the words in `text`.",
+//             json!({"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}),
+//             |req: ToolRequest| {
+//                 let text = req.str_arg("text");
+//                 if text.is_empty() {
+//                     return PluginToolResult::err("`text` is required");
+//                 }
+//                 PluginToolResult::ok(format!("{} words", text.split_whitespace().count()))
+//             },
+//         )
+//         .hook(sdk::hooks::BEFORE_PROMPT, |_payload| json!("The wordy plugin is active."))
+//         .run()
+// }
+// ```
+//
+// Add a tool with `.tool(…)`, a hook with `.hook(hooks::BEFORE_PROMPT, …)`, and
+// declare what it touches with `.permission(permissions::FILES_WRITE)`. After
+// upgrading karucode, refresh the vendored copy with `karucode plugin sdk <dir>`;
+// `--check` exits non-zero when it is stale, writes nothing and starts no server,
+// so a plugin's CI can guard it.
+//
+// Inside this repository `plugins/example-hello` is a workspace member and uses
+// `kc-plugin-sdk` by relative path (`cargo build -p example-hello`). Copy its
+// sources if you like, never its `Cargo.toml`: that path only resolves from
+// inside this checkout.
+//
+// # 2. Register it
+//
+// Either in the config file:
+//
+// ```toml
+// [[plugins]]
+// name = "example-hello"            # must match the plugin's manifest name
+// command = ["/abs/path/to/target/release/example-hello"]
+// enabled = true
+// permissions = ["files.read"]
+// env = { RUST_LOG = "debug" }
+// settings = { greeting = "hi" }
+// ```
+//
+// or as a manifest the host discovers on disk at
+// `<data_dir>/plugins/<name>/plugin.toml` (same keys, `command` required). A
+// duplicate name fails the slot with an error naming both sources instead of
+// silently running one of them.
+//
+// # 3. Run and inspect
+//
+// ```bash
+// curl -s localhost:8787/api/plugins | jq        # status, tools, error, restart_count
+// curl -s -X POST localhost:8787/api/plugins/example-hello/enable \
+//      -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' -d '{"enabled":true}'
+// ```
+//
+// Status is `stopped`, `starting`, `ready`, `failed` or `disabled`. Enabling resets
+// the restart budget.
+//
+// # 4. Debug it without the server
+//
+// The protocol is just lines of JSON, so drive it by hand:
+//
+// ```bash
+// printf '%s\n' \
+//   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol":"1"}}' \
+//   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+//   | ./target/release/example-hello
+// ```
+//
+// # Permissions
+//
+// `permissions` is a declarative list (`files.read`, `files.write`, `shell`,
+// `network`, `session.read`, or free-form). The **config entry is authoritative**:
+// a manifest cannot grant itself a permission the operator did not list. A
+// `mutating` tool without `files.write`, or a `shell` tool without `shell`, is not
+// exposed at all.
+//
+// It is **not** a sandbox. The plugin runs with the server's OS permissions and
+// can do anything that user can do. Install plugins you trust, exactly like shell
+// scripts.
+//
+// # Gotchas
+//
+// * stdout is the protocol. Anything else printed there is logged and ignored;
+//   logs belong on stderr.
+// * `initialize` must report the configured name and protocol `"1"`, or the
+//   plugin fails with an error naming both values.
+// * A dead process is restarted once per failed call, at most three times per
+//   plugin per server lifetime; after that calls fail with an explanatory message
+//   until you fix it or restart the server.
+// * There is no hot reload: replacing the binary requires disabling and enabling
+//   the plugin (or a server restart).
+// * Results are truncated and rendered as text; a plugin cannot inject UI.
+//
+// Full reference: `docs/PLUGINS.md` (wire protocol, hooks, timeouts, error codes).
+
+// Everything below the marker is copied verbatim into a scaffolded plugin by
+// `karucode plugin init` (see `src/embed.rs`). Keep it free of harness-only
+// dependencies, and refer to the wire types as `kc_core::plugin` — the emitter
+// rewrites that path to the plugin's own `crate::protocol` module.
+mod embed;
+pub use embed::{
+    files, name_from_path, protocol_source, sdk_source, validate_name, EmbedError,
+    SDK_SOURCE_MARKER,
+};
+
+// ---- BEGIN EMBEDDED SDK SOURCE ----
 pub use kc_core::plugin::*;
 
 use serde_json::{json, Value};
@@ -78,9 +217,9 @@ impl ToolRequest {
 
 /// Constructors for [`PluginToolResult`].
 ///
-/// `PluginToolResult` lives in `kc_core` (the wire type is shared with the host),
-/// so the ergonomic constructors arrive as an extension trait instead of inherent
-/// methods. Bring it into scope (`use kc_plugin_sdk::PluginToolResultExt;`) and
+/// `PluginToolResult` is a wire type shared with the host, so the ergonomic
+/// constructors arrive as an extension trait instead of inherent methods. Bring
+/// it into scope (`use kc_plugin_sdk::PluginToolResultExt;`) and
 /// `PluginToolResult::ok("done")` works.
 pub trait PluginToolResultExt: Sized {
     /// Successful result.
