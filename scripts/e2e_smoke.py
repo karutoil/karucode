@@ -277,6 +277,13 @@ def main():
                 "KARUCODE_APPROVAL_MODE": "ask",
                 "KARUCODE_LOG": "warn",
                 "RUST_LOG": "warn",
+                # The suite must not sit through the production retry budgets: a
+                # scripted `[fail]` would otherwise be retried ~50 times with a
+                # 30s ceiling before it surfaces as a failed run.
+                "KARUCODE_RETRY_MAX_RETRIES": "2",
+                "KARUCODE_RETRY_BASE_DELAY_MS": "50",
+                "KARUCODE_RETRY_MAX_DELAY_MS": "200",
+                "KARUCODE_RETRY_MAX_STREAM_RESTARTS": "3",
             }
         )
         if args.web_dir:
@@ -478,6 +485,49 @@ def main():
         fin = events.wait(lambda e: e.get("type") == "run_finished" and e.get("run_id") == slow_run, timeout=20, label="cancel")
         check("run cancels promptly", lambda: (
             _assert(fin["status"] == "cancelled", fin["status"]), "cancelled"
+        )[-1])
+
+        print("\n== mid-stream restart ==", flush=True)
+        # Regression: the gateway cut the body after it had started streaming
+        # (`error decoding response body`). The partial attempt must be thrown
+        # away and the turn restarted, not failed.
+        out = client.ok(
+            "POST",
+            f"/api/sessions/{sid}/messages",
+            {"content": "[die] survive a stream that dies mid-answer"},
+            expect=202,
+        )
+        dead_run = out["run_id"]
+        retry = events.wait(
+            lambda e: e.get("type") == "stream_retry" and e.get("run_id") == dead_run,
+            timeout=60,
+            label="stream_retry",
+        )
+        fin = events.wait(
+            lambda e: e.get("type") == "run_finished" and e.get("run_id") == dead_run,
+            timeout=60,
+            label="restarted run finish",
+        )
+        check("a stream that dies mid-answer is restarted, not fatal", lambda: (
+            _assert(retry["attempt"] == 1, retry),
+            _assert(retry["max_attempts"] >= 2, retry),
+            _assert(bool(retry.get("reason")), "retry carried no reason"),
+            _assert(fin["status"] == "completed", fin["status"]),
+            f"attempt {retry['attempt']}/{retry['max_attempts']}",
+        )[-1])
+        time.sleep(0.2)
+        detail = client.ok("GET", f"/api/sessions/{sid}")
+        check("only the restart's answer is persisted", lambda: (
+            _assert(
+                any(m["role"] == "assistant" and "Recovered" in (m.get("content") or "")
+                    and m.get("run_id") == dead_run for m in detail["messages"]),
+                "the recovered answer is missing",
+            ),
+            _assert(
+                not any("half an answer" in (m.get("content") or "") for m in detail["messages"]),
+                "the abandoned attempt leaked into history",
+            ),
+            "one answer",
         )[-1])
 
         print("\n== subagents ==", flush=True)

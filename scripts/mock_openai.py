@@ -23,6 +23,11 @@ Prompt hints (in the user message):
   [tool:plugin]          call the example-hello plugin tool
   [tool:mcp]             call an MCP tool from the mock MCP server
   [text]                 reply with plain text only (no tools)
+  [die]                  first time: stream a reasoning delta and half an
+                         answer, then cut the connection mid-body (the shape of
+                         a dying aggregator channel); every later request for
+                         the same prompt answers normally, so a retrying client
+                         recovers
   [fail]                 return HTTP 500
   [slow]                 sleep 30s before answering (cancellation tests)
 
@@ -89,6 +94,9 @@ def decide(messages):
 
     if "[fail]" in last_user:
         return ("fail", None)
+
+    if "[die]" in last_user:
+        return ("text", "Recovered after the stream was cut mid-answer.")
 
     if has_tool_result or "[text]" in last_user:
         return (
@@ -250,12 +258,59 @@ class Handler(BaseHTTPRequestHandler):
 
     def _stream(self, model, mode, payload, messages):
         try:
-            self._stream_inner(model, mode, payload)
+            self._stream_inner(model, mode, payload, messages)
         except ClientGone:
             # The agent cancelled the run and hung up; expected in tests.
             pass
 
-    def _stream_inner(self, model, mode, payload):
+    def _die_mid_body(self, model, payload):
+        """Stream a little, then drop the connection the way a dying channel does.
+
+        No terminating chunk and no `[DONE]`, so the client's body decoder
+        fails with `error decoding response body` - the exact failure that used
+        to end a run instead of being restarted.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+        def send(obj):
+            data = f"data: {json.dumps(obj)}\n\n".encode()
+            self.wfile.write(hex(len(data))[2:].encode() + b"\r\n" + data + b"\r\n")
+            self.wfile.flush()
+
+        def base(delta, finish=None):
+            return {
+                "id": "chatcmpl-mock",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+
+        send(base({"role": "assistant", "content": ""}))
+        send(base({"reasoning_content": "thinking about the answer"}))
+        send(base({"content": "half an answer "}))
+        time.sleep(0.05)
+        # Abrupt close: the client never sees a finish_reason or [DONE].
+        self.close_connection = True
+        try:
+            self.connection.close()
+        except OSError:
+            pass
+
+    def _stream_inner(self, model, mode, payload, messages):
+        last_user = ""
+        for message in messages:
+            if message.get("role") == "user":
+                last_user = textual_content(message)
+        if "[die]" in last_user and not DIED_ONCE.is_set():
+            DIED_ONCE.set()
+            self._die_mid_body(model, payload)
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -338,6 +393,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 ARGS = argparse.Namespace(log=None, require_key=None, verbose=False)
+# First `[die]` request dies mid-body; the retry is served normally. Process-wide
+# so one turn's restart cannot consume another turn's failure.
+DIED_ONCE = threading.Event()
 
 
 def main() -> int:

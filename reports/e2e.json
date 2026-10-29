@@ -20,6 +20,8 @@
     "unknown tool fails visibly, run continues",
     "provider failure is visible",
     "run cancels promptly",
+    "a stream that dies mid-answer is restarted, not fatal",
+    "only the restart's answer is persisted",
     "subagent runs and reports",
     "plugin tool requires approval",
     "plugin tool is callable",
@@ -39,7 +41,7 @@
   ],
   "failed": [],
   "skipped": [],
-  "events": 223,
-  "server_log": "/tmp/kc-e2e-n13hewym/server.log",
-  "mock_requests": 22
+  "events": 239,
+  "server_log": "/tmp/kc-e2e-caepnfer/server.log",
+  "mock_requests": 34
 }
