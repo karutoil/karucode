@@ -1,0 +1,880 @@
+/* Theme Studio drawer.
+ *
+ * Every colour, radius, font and border here comes from the live theme tokens,
+ * so the studio repaints itself while you edit it. Layout is a fixed right-hand
+ * drawer that becomes near-full-width on phones.
+ */
+
+.theme-studio-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+}
+
+.theme-shade {
+  position: absolute;
+  inset: 0;
+  /* Neutral scrim: the drawer dims the app, it does not tint it. */
+  background: var(--scrim);
+  backdrop-filter: blur(3px);
+  animation: theme-studio-fade 160ms ease-out;
+}
+
+.theme-studio {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  width: min(580px, calc(100% - 58px));
+  display: flex;
+  flex-direction: column;
+  background: var(--sidebar);
+  border-left: 1px solid var(--line-strong);
+  box-shadow: -22px 0 90px var(--theme-shadow);
+  color: var(--text);
+  /* The mock's global 13px/1.5 body rhythm applies to the whole drawer. */
+  font-size: var(--fs-body);
+  line-height: 1.5;
+  animation: theme-studio-slide 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  outline: none;
+}
+
+@keyframes theme-studio-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes theme-studio-slide {
+  from {
+    transform: translateX(25px);
+    opacity: 0.7;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.theme-studio *,
+.theme-studio *::before,
+.theme-studio *::after {
+  box-sizing: border-box;
+}
+
+/* `base.css` tightens heading line-height to 1.3; the mock's drawer headings
+ * keep the drawer's 1.5 rhythm. */
+.theme-studio :is(h1, h2, h3, h4) {
+  line-height: 1.5;
+}
+
+.theme-studio :is(button, input, textarea, select, summary):focus-visible,
+.theme-studio [role='button']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* `:where()` keeps this reset at element specificity so component rules
+ * (`.theme-btn`, `.theme-preset`, …) can style their own background/border/font
+ * — the mock's global `button` reset is unbounded by class rules. */
+.theme-studio :where(button) {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.theme-studio :where(button):disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ---------- header ----------------------------------------------------- */
+
+.theme-studio-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 25px 28px 23px;
+  border-bottom: 1px solid var(--line);
+}
+
+.theme-studio-head {
+  flex: 1;
+  min-width: 0;
+}
+
+.theme-top-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.theme-top-eyebrow svg {
+  color: var(--accent);
+}
+
+.theme-head-badge {
+  font: 9px var(--font-mono);
+  padding: 3px 5px;
+  border-radius: 4px;
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.theme-studio-title {
+  margin: 8px 0 3px;
+  font-size: 24px;
+  font-weight: 710;
+  letter-spacing: -0.95px;
+}
+
+.theme-studio-subtitle {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.theme-close {
+  flex: 0 0 auto;
+  width: 31px;
+  height: 31px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.theme-close:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* ---------- scroll region + sections ----------------------------------- */
+
+.theme-studio-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 28px 27px;
+  scrollbar-gutter: stable;
+  /* base.css sets `thin`/`scrollbar-color`, which supersedes the 8px
+   * ::-webkit-scrollbar width and reserves ~15px; the mock reserves 8px. */
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+
+.theme-section {
+  padding: 23px 0 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.theme-section:last-child {
+  border-bottom: 0;
+}
+
+.theme-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.theme-section h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.1px;
+}
+
+.theme-description {
+  margin: 0 0 15px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.theme-mini-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px;
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 600;
+  border-radius: 5px;
+}
+
+.theme-mini-action:hover {
+  color: var(--accent-hi);
+}
+
+/* ---------- theme gallery ---------------------------------------------- */
+
+.theme-gallery {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.theme-gallery > li {
+  display: flex;
+  min-width: 0;
+}
+
+.theme-preset {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 9px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease;
+}
+
+.theme-preset:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.theme-preset.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-bg);
+}
+
+.theme-preset-demo {
+  position: relative;
+  display: flex;
+  height: 62px;
+  overflow: hidden;
+  border: 1px solid var(--scrim-soft);
+  border-radius: 6px;
+  background: var(--preset-bg);
+}
+
+.theme-mini-rail {
+  width: 12%;
+  height: 100%;
+  border-right: 1px solid color-mix(in srgb, var(--preset-text) 14%, transparent);
+  background: var(--preset-rail);
+}
+
+.theme-mini-sidebar {
+  width: 24%;
+  height: 100%;
+  padding: 8px 4px;
+  border-right: 1px solid color-mix(in srgb, var(--preset-text) 14%, transparent);
+  background: var(--preset-sidebar);
+}
+
+.theme-mini-main {
+  flex: 1;
+  min-width: 0;
+  padding: 9px;
+}
+
+.theme-mini-sidebar i,
+.theme-mini-main i {
+  display: block;
+  height: 4px;
+  margin-bottom: 6px;
+  border-radius: 5px;
+  background: var(--preset-text);
+  opacity: 0.8;
+}
+
+.theme-mini-sidebar i:first-child {
+  width: 70%;
+  height: 6px;
+}
+
+.theme-mini-sidebar i:nth-child(2),
+.theme-mini-sidebar i:nth-child(3),
+.theme-mini-main i:nth-child(2) {
+  background: var(--preset-muted);
+}
+
+.theme-mini-main i:first-child {
+  width: 55%;
+  height: 5px;
+}
+
+.theme-mini-main i:nth-child(2) {
+  width: 84%;
+}
+
+.theme-mini-main i:nth-child(3) {
+  width: 66%;
+}
+
+.theme-mini-accent {
+  position: absolute;
+  left: 43%;
+  bottom: 8px;
+  width: 32%;
+  height: 7px;
+  border-radius: 3px;
+  background: var(--preset-accent);
+}
+
+.theme-preset-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  padding: 9px 2px 2px;
+}
+
+.theme-preset-name {
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.theme-preset.selected .theme-preset-name {
+  color: var(--accent);
+}
+
+.theme-preset-mode {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font: 9px var(--font-mono);
+}
+
+/* ---------- inline create / confirmation ------------------------------- */
+
+.theme-inline-create {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.theme-inline-create .theme-name-input {
+  flex: 1 1 160px;
+}
+
+.theme-inline-create .theme-btn {
+  padding: 11px 13px;
+}
+
+.theme-delete-confirm {
+  margin: 0 0 12px;
+  padding: 12px 13px;
+  border: 1px solid var(--danger);
+  border-radius: 9px;
+  background: var(--danger-bg);
+}
+
+.theme-delete-confirm p {
+  margin: 0 0 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.theme-delete-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---------- colour fields ---------------------------------------------- */
+
+.theme-colors {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.theme-color-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.theme-color-cell:focus-within {
+  border-color: var(--accent);
+}
+
+.theme-color-swatch {
+  position: relative;
+  flex: 0 0 31px;
+  width: 31px;
+  height: 31px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
+  border-radius: 7px;
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--theme-bg) 40%, transparent);
+}
+
+.theme-color-swatch input {
+  position: absolute;
+  inset: -6px;
+  width: calc(100% + 12px);
+  height: calc(100% + 12px);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.theme-color-swatch:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.theme-color-info {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.theme-color-name {
+  /* Stays inline like the mock, which keeps the label and hex field on two
+   * 19.5px lines and therefore the cell's 59px height. */
+  margin-bottom: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.theme-color-hex {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--muted);
+  font: 10px var(--font-mono);
+  text-transform: uppercase;
+}
+
+.theme-color-hex.invalid {
+  color: var(--danger);
+}
+
+/* ---------- interface settings ----------------------------------------- */
+
+.theme-setting-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.theme-field {
+  display: block;
+  min-width: 0;
+}
+
+.theme-field-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.theme-studio select,
+.theme-name-input {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  outline: none;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  appearance: none;
+}
+
+.theme-studio select {
+  /* base.css resets `font` on <select>, which hands them the drawer's 1.5
+   * line-height; the mock leaves selects on their native line box (34px). */
+  line-height: normal;
+  cursor: pointer;
+}
+
+.theme-studio ::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.85;
+}
+
+.theme-studio select:focus {
+  border-color: var(--accent);
+}
+
+.theme-studio option {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.theme-segments {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.theme-segment {
+  flex: 1;
+  padding: 7px;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.theme-segment:hover {
+  color: var(--text);
+}
+
+.theme-segment.selected {
+  color: var(--text);
+  background: var(--surface-hover);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--theme-bg) 35%, transparent);
+}
+
+.theme-range-row {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  margin-top: 15px;
+}
+
+.theme-range-label {
+  flex: 0 0 90px;
+  width: 90px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+.theme-range-row input[type='range'] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.theme-range-value {
+  flex: 0 0 auto;
+  min-width: 31px;
+  text-align: right;
+  font: 10px var(--font-mono);
+  color: var(--text-secondary);
+}
+
+/* ---------- advanced: custom CSS --------------------------------------- */
+
+.theme-advanced {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.theme-advanced summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 13px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.theme-advanced summary::-webkit-details-marker {
+  display: none;
+}
+
+.theme-advanced summary svg {
+  color: var(--muted);
+}
+
+.theme-advanced[open] summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.theme-advanced-content {
+  padding: 14px;
+}
+
+.theme-advanced-help {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.theme-advanced-help code {
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: inherit;
+}
+
+.theme-code-editor {
+  width: 100%;
+  min-height: 120px;
+  max-height: 250px;
+  padding: 12px;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  outline: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 11px/1.65 var(--font-mono);
+  tab-size: 2;
+}
+
+.theme-code-editor:focus {
+  border-color: var(--accent);
+}
+
+.theme-advanced-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.theme-code-hint {
+  color: var(--muted);
+  font: 10px var(--font-mono);
+}
+
+/* ---------- footer ------------------------------------------------------ */
+
+.theme-studio-foot {
+  flex: 0 0 auto;
+  padding: 15px 28px 19px;
+  border-top: 1px solid var(--line);
+  background: var(--sidebar);
+}
+
+.theme-studio-foot-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 11px;
+}
+
+.theme-autosave {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.theme-autosave .theme-dot {
+  flex: 0 0 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.theme-autosave strong {
+  overflow: hidden;
+  max-width: 170px;
+  color: inherit;
+  font-weight: 700;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.theme-contrast {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font: 10px var(--font-mono);
+}
+
+.theme-contrast.warning {
+  color: var(--danger);
+}
+
+.theme-foot-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-foot-buttons .spacer {
+  margin-left: auto;
+}
+
+.theme-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 620;
+  white-space: nowrap;
+  transition:
+    border-color 140ms ease,
+    color 140ms ease,
+    background 140ms ease;
+}
+
+.theme-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.theme-btn.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-gold);
+  font-weight: 750;
+}
+
+.theme-btn.primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  color: var(--on-gold);
+}
+
+.theme-btn.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.theme-btn.danger:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.theme-studio-import {
+  display: none;
+}
+
+/* ---------- motion preferences ----------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .theme-shade,
+  .theme-studio {
+    animation: none;
+  }
+
+  .theme-preset,
+  .theme-btn {
+    transition: none;
+  }
+
+  .theme-preset:hover {
+    transform: none;
+  }
+}
+
+/* ---------- responsive -------------------------------------------------- */
+
+/* The mock never narrows the drawer at tablet widths: it keeps the 580px
+ * desktop geometry until 620px, then becomes a near-full-width sheet. */
+@media (max-width: 620px) {
+  .theme-studio {
+    width: calc(100% - 56px);
+  }
+
+  .theme-studio-top {
+    padding: 17px 16px;
+  }
+
+  .theme-studio-title {
+    font-size: 21px;
+  }
+
+  .theme-studio-scroll {
+    padding: 0 15px 25px;
+  }
+
+  .theme-studio-foot {
+    padding: 12px 15px;
+  }
+
+  .theme-gallery {
+    gap: 7px;
+  }
+
+  .theme-preset {
+    padding: 6px;
+  }
+
+  .theme-colors {
+    gap: 7px;
+  }
+
+  .theme-color-cell {
+    padding: 7px;
+    gap: 6px;
+  }
+
+  .theme-color-swatch {
+    flex-basis: 27px;
+    width: 27px;
+    height: 27px;
+  }
+
+  .theme-setting-grid {
+    gap: 8px;
+  }
+
+  .theme-foot-buttons {
+    flex-wrap: wrap;
+  }
+
+  .theme-btn {
+    flex: 1;
+    padding: 9px 7px;
+  }
+
+  .theme-studio-foot-top {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+}

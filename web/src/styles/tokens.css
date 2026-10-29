@@ -1,33 +1,310 @@
+/* Design tokens — the ONLY place raw colour values live.
+ *
+ * `src/theme/engine.ts` rewrites the `--theme-*` block at runtime (and sets
+ * `data-theme`, `data-mode`, `data-density` on <html>). Everything else in
+ * `src/styles` reads the public aliases below, so a theme can repaint the whole
+ * workspace without touching a component.
+ *
+ * The defaults below are the built-in **Ember** theme, so the first paint is
+ * correct before the engine runs.
+ *
+ * Rules for new CSS:
+ *   - never hardcode a colour; use a `--theme-*` token or a public alias;
+ *   - never hardcode a corner radius; use `--radius`, `--radius-sm`, `--radius-lg`;
+ *   - text/font sizes come from `--fs-*`; spacing from the `--space-*` scale.
+ */
+
 :root {
   color-scheme: dark;
 
-  --bg: #0f1011;
-  --bg-raised: #151617;
-  --bg-sunken: #0b0c0d;
-  --panel: #131415;
-  --border: #24262a;
-  --border-strong: #33363b;
-  --text: #e7e5e0;
-  --text-muted: #969a93;
-  --text-faint: #6b6f6a;
-  --accent: #d8a657;
-  --accent-soft: rgba(216, 166, 87, 0.14);
-  --ok: #7fb069;
-  --warn: #d9a441;
-  --danger: #d16969;
-  --code-bg: #101113;
+  /* ---- surfaces -------------------------------------------------------- */
+  --theme-bg: #111213; /* app canvas */
+  --theme-rail: #141516; /* project rail */
+  --theme-sidebar: #18191a; /* session sidebar */
+  --theme-inspector: #171819; /* right inspector */
+  --theme-surface: #1c1d1f; /* cards, panels, inputs */
+  --theme-raised: #222326; /* elevated surface */
+  --theme-hover: #27292b; /* hover surface */
 
-  --font-ui: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
-    'Noto Sans', sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  /* ---- lines ----------------------------------------------------------- */
+  --theme-line: #2a2c2f;
+  --theme-line-soft: #242628;
+  --theme-line-strong: #343638;
 
-  --fs-body: 14.5px;
-  --lh-body: 1.65;
-  --fs-small: 12.5px;
-  --fs-micro: 11px;
+  /* ---- text ------------------------------------------------------------ */
+  --theme-text: #eae9e5;
+  --theme-text-secondary: #b4b3ae;
+  --theme-muted: #8b8d8c;
+  --theme-faint: #676b6b;
 
-  --radius: 8px;
-  --radius-sm: 6px;
+  /* ---- accents & status ------------------------------------------------ */
+  --theme-accent: #dfb680;
+  --theme-accent-hi: #f1c691;
+  --theme-accent-bg: #32291e;
+  --theme-accent-line: #58452e;
+  --theme-success: #88baa0;
+  --theme-success-bg: #1b3029;
+  --theme-warn: #d9a441;
+  --theme-danger: #e49e91;
+  --theme-danger-bg: #38241f;
+  --theme-info: #92b3d8;
+
+  /* ---- code ------------------------------------------------------------ */
+  --theme-syntax-keyword: #dfb680;
+  --theme-syntax-string: #a5cbb4;
+  --theme-syntax-comment: #878e88;
+  --theme-shadow: rgba(0, 0, 0, 0.48);
+
+  /* ---- fidelity roles --------------------------------------------------
+     Each of these is a real role the v3 mock uses (input box, inset card,
+     menu, diff row, rail glyph, …). Values are the mock's own literals for
+     Ember; `src/theme/roles.ts` recomputes them for every other theme and
+     for light mode, so components never hardcode a shade. */
+--surface-input: #1e2021;
+  --line-input: #3c3d3d;
+  --focus-input: #866c50;
+  --input-ink: #e4e5df;
+  --input-placeholder: #898d89;
+  --surface-plus-hover: #2e3031;
+  --surface-hover-strong: #303233;
+  --line-hair: #3c3e3d;
+  --gold-send: #b88b53;
+  --gold-send-hover: #e3b47c;
+  --on-gold: #181714;
+  --foot-ink: #6f7670;
+  --foot-strong: #989e96;
+  --ring-fill: #c69e6e;
+  --ring-track: #494b4b;
+  --chip-surface: #242627;
+  --chip-line: #3a3b3a;
+  --chip-ink: #acb5b0;
+  --surface-menu: #252628;
+  --line-menu: #434547;
+  --text-menu-title: #848a87;
+  --text-menu-item: #c9c9c5;
+  --text-menu-meta: #8b908c;
+  --row-accent-bg: #33302b;
+  --row-accent-ink: #e9d7be;
+  --surface-inset: #202223;
+  --line-inset: #303334;
+  --line-card: #363838;
+  --line-divider: #2b2e30;
+  --line-keycap: #393b3c;
+  --line-overlay: #4a4c4c;
+  --text-caption: #a2a69f;
+  --text-subtle: #777d76;
+  --text-kicker: #808781;
+  --text-kicker-panel: #9c9d97;
+  --tab-active-text: #e9cfab;
+  --tab-hover: #dedbd5;
+  --row-selected-bg: #343027;
+  --row-selected-text: #f1d8b4;
+  --surface-preview: #1e2020;
+  --line-preview: #343633;
+  --icon-folder: #c5a57b;
+  --icon-rust: #d8a178;
+  --icon-file: #a8a38b;
+  --icon-md: #9badbf;
+  --icon-path: #ad9d81;
+  --icon-quiet: #8a8e8b;
+  --icon-pill-down: #777c77;
+  --btn-accent-bg: #2a2722;
+  --btn-accent-bg-hover: #403222;
+  --btn-accent-line: #4b3c2c;
+  --btn-accent-text: #d7bb94;
+  --toggle-track: #454847;
+  --toggle-knob: #aeb2ae;
+  --toggle-on-track: #917451;
+  --toggle-on-knob: #f8e2c6;
+  --surface-card: #1b1d1e;
+  --line-card-strong: #313436;
+  --surface-command: #202222;
+  --line-command: #363838;
+  --surface-command-hover: #282929;
+  --surface-command-output: #181a1b;
+  --text-command: #bdc4bb;
+  --text-command-output: #8eac97;
+  --surface-symbol: #272b2b;
+  --line-symbol: #3a3e3c;
+  --text-symbol: #9eb6a6;
+  --text-output: #8e9b95;
+  --text-output-num: #6e7672;
+  --text-expand: #babdb7;
+  --text-body: #bfc1bc;
+  --text-date: #686e6b;
+  --text-user: #dadbd6;
+  --surface-user: #212224;
+  --surface-avatar: #2d302d;
+  --line-avatar: #444945;
+  --text-avatar: #d7dcd7;
+  --surface-avatar-agent: #302a24;
+  --line-avatar-agent: #5a4630;
+  --surface-diff: #1a1c1d;
+  --line-diff: #353737;
+  --line-diff-head: #2d3030;
+  --surface-diff-add: #1d3027;
+  --surface-diff-del: #362626;
+  --surface-diff-ctx: #1b1d1f;
+  --text-review: #e3c39d;
+  --surface-review: #362c20;
+  --surface-review-hi: #4c3925;
+  --text-empty-title: #eae8e4;
+  --text-empty-copy: #909590;
+  --text-empty-symbol: #e5b67d;
+  --surface-toast: #292b2a;
+  --line-toast: #54544c;
+  --text-toast: #dfdfd7;
+  --rail-glyph-text: #9c9e9f;
+  --rail-add-line: #3e4141;
+  --rail-add-line-hover: #6e655b;
+  --rail-avatar-bg: #31352f;
+  --rail-avatar-line: #475144;
+  --rail-avatar-text: #cfdfcd;
+  --accent-faint: #484038;
+  --accent-surface: #27241f;
+  --accent-text-soft: #f0d5ac;
+  --accent-hint: #ab987a;
+  --field-focus-line: #655038;
+  --item-active-to: #252321;
+  --meta-text: #858983;
+  --rail-glyph-line: rgb(255 255 255 / 8%); /* light: rgb(0 0 0 / 10%) */
+  --inset-hairline: rgb(255 255 255 / 3%); /* light: rgb(255 255 255 / 60%) */
+  --scrim: rgb(0 0 0 / 47%);
+  --scrim-soft: rgb(0 0 0 / 13%);
+  --shadow-composer: 0 12px 34px rgb(0 0 0 / 10%);
+  --shadow-menu: 0 20px 60px rgb(0 0 0 / 60%); /* light: 0 20px 60px rgb(15 23 42 / 14%) */
+  --shadow-overlay: 0 30px 90px rgb(0 0 0 / 69%); /* light: 0 30px 90px rgb(15 23 42 / 18%) */
+
+  /* ===================================================================== */
+  /* Public aliases — use these in component CSS.                          */
+  /* ===================================================================== */
+
+  /* surfaces */
+  --bg: var(--theme-bg);
+  --rail: var(--theme-rail);
+  --sidebar: var(--theme-sidebar);
+  --inspector: var(--theme-inspector);
+  --surface: var(--theme-surface);
+  --surface-raised: var(--theme-raised);
+  --surface-hover: var(--theme-hover);
+
+  /* lines */
+  --line: var(--theme-line);
+  --line-soft: var(--theme-line-soft);
+  --line-strong: var(--theme-line-strong);
+
+  /* text */
+  --text: var(--theme-text);
+  --text-secondary: var(--theme-text-secondary);
+  --muted: var(--theme-muted);
+  --faint: var(--theme-faint);
+
+  /* accents & status */
+  --accent: var(--theme-accent);
+  --accent-hi: var(--theme-accent-hi);
+  --accent-bg: var(--theme-accent-bg);
+  --accent-line: var(--theme-accent-line);
+  --success: var(--theme-success);
+  --success-bg: var(--theme-success-bg);
+  --warn: var(--theme-warn);
+  --danger: var(--theme-danger);
+  --danger-bg: var(--theme-danger-bg);
+  --info: var(--theme-info);
+
+  /* code */
+  --syntax-keyword: var(--theme-syntax-keyword);
+  --syntax-string: var(--theme-syntax-string);
+  --syntax-comment: var(--theme-syntax-comment);
+  --code-bg: var(--theme-inspector);
+
+  --shadow-lg: var(--theme-shadow);
+
+  /* ---- legacy aliases -------------------------------------------------- */
+  /* Kept so untouched CSS keeps rendering during the restyle. New code must
+     use the names above; these will disappear once the migration is done. */
+  --bg-raised: var(--surface-raised);
+  --bg-sunken: var(--rail);
+  --panel: var(--surface);
+  --border: var(--line);
+  --border-strong: var(--line-strong);
+  --text-muted: var(--text-secondary);
+  --text-faint: var(--muted);
+  --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+  --ok: var(--success);
+
+  /* ---- typography ------------------------------------------------------ */
+  --font-ui:
+    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, 'Noto Sans', sans-serif;
+  --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, ui-monospace, monospace;
+
+  --fs-body: 13px;
+  --fs-small: 11.5px;
+  --fs-micro: 10px;
+  --lh-body: 1.5;
+  /* message copy is denser than UI copy in the mock */
+  --fs-message: 12.5px;
+  --lh-message: 1.72;
+
+  /* ---- shape & motion -------------------------------------------------- */
+  --radius: 10px;
+  --radius-sm: 7px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+  /* geometry the mock fixes regardless of the theme's rounding */
+  --radius-input: 12px;
+  --radius-prompt: 9px;
+
+  /* spacing scale used by the restyled shell/cards */
+  --space-1: 4px;
+  --space-2: 7px;
+  --space-3: 10px;
+  --space-4: 14px;
+  --space-5: 18px;
+  --space-6: 24px;
+  --space-7: 30px;
+
   --transition: 160ms ease-out;
   --transition-fast: 120ms ease-out;
+
+  /* ---- frame metrics --------------------------------------------------- */
+  --rail-w: 64px;
+  --sidebar-w: 258px;
+  --inspector-w: 342px;
+  --header-h: 66px;
+  --tabs-h: 44px;
+  --content-max: 820px;
+}
+
+/* Density is a theme setting (`data-density` on <html>). Components that own
+ * vertical rhythm scale their own padding with these selectors. */
+:root[data-density='compact'] {
+  --header-h: 54px;
+  --tabs-h: 36px;
+}
+
+:root[data-density='spacious'] {
+  --header-h: 76px;
+  --tabs-h: 51px;
+}
+
+@media (max-width: 1350px) {
+  :root {
+    --sidebar-w: 234px;
+    --inspector-w: 305px;
+  }
+}
+
+@media (max-width: 1100px) {
+  :root {
+    --sidebar-w: 222px;
+    --inspector-w: 300px;
+  }
+}
+
+@media (max-width: 1023px) {
+  :root {
+    --sidebar-w: 0px;
+    --rail-w: 56px;
+  }
 }
