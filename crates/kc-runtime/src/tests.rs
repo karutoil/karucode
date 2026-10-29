@@ -13,7 +13,7 @@ use crate::tests_support::{
 };
 use crate::{ActiveRun, RecoveryReport, Runtime, RuntimeDeps};
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, ApprovalRequest};
-use kc_core::config::{ApprovalMode, ApprovalPolicy, Limits, SubagentConfig};
+use kc_core::config::{ApprovalMode, ApprovalPolicy, Limits, ModelConfig, SubagentConfig};
 use kc_core::error::Error;
 use kc_core::events::{Event, EventEnvelope};
 use kc_core::hooks::NoHooks;
@@ -36,11 +36,13 @@ fn event_kind(event: &Event) -> &'static str {
     match event {
         Event::SessionCreated { .. } => "session_created",
         Event::SessionRenamed { .. } => "session_renamed",
+        Event::SessionModelChanged { .. } => "session_model_changed",
         Event::SessionDeleted { .. } => "session_deleted",
         Event::RunStarted { .. } => "run_started",
         Event::RunFinished { .. } => "run_finished",
         Event::RunCancelled { .. } => "run_cancelled",
         Event::IterationStarted { .. } => "iteration_started",
+        Event::StreamRetry { .. } => "stream_retry",
         Event::TextDelta { .. } => "text_delta",
         Event::ReasoningDelta { .. } => "reasoning_delta",
         Event::Usage { .. } => "usage",
@@ -55,6 +57,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::AgentProgress { .. } => "agent_progress",
         Event::AgentFinished { .. } => "agent_finished",
         Event::Notice { .. } => "notice",
+        Event::StreamLagged { .. } => "stream_lagged",
         Event::Error { .. } => "error",
     }
 }
@@ -189,6 +192,82 @@ async fn plain_text_run_persists_messages_and_completes() {
     assert!(h.runtime.events_emitted() > 3);
     assert!(h.wait_idle().await.is_empty());
     assert!(!h.runtime.is_running(h.session()));
+}
+
+#[tokio::test]
+async fn a_session_run_uses_its_own_model_selection() {
+    let mut h = HarnessBuilder::new(vec![Script::text("done")])
+        .build()
+        .await;
+
+    // No selection: the install-wide default model is used (baseline).
+    let _ = h.run_to_finish("first").await;
+    assert_eq!(h.factory.requests()[0].model, "fake-model");
+
+    // Pin *this* session to another model, then run again in the same session.
+    let selection = kc_core::config::SessionModelSelection {
+        provider: "gateway".into(),
+        model: "big-model".into(),
+        reasoning_effort: Some("high".into()),
+    };
+    h.store
+        .set_session_model(h.session(), Some(&selection))
+        .await
+        .expect("pin the session model");
+
+    let _ = h.run_to_finish("second").await;
+    let requests = h.factory.requests();
+    assert_eq!(
+        requests[1].model, "big-model",
+        "the session selection must reach the provider"
+    );
+    // The reasoning effort rides in `extra_body`, which the provider forwards.
+    assert_eq!(
+        requests[1].extra_body.get("reasoning_effort"),
+        Some(&serde_json::Value::String("high".into()))
+    );
+
+    // The run record names the model that actually ran.
+    let runs = h.store.runs();
+    assert_eq!(runs.last().map(|run| run.model.as_str()), Some("big-model"));
+
+    // Clearing the override goes back to the default for the next run.
+    h.store
+        .set_session_model(h.session(), None)
+        .await
+        .expect("clear the session model");
+    let _ = h.run_to_finish("third").await;
+    assert_eq!(h.factory.requests()[2].model, "fake-model");
+}
+
+#[tokio::test]
+async fn a_subagent_inherits_the_sessions_model_selection() {
+    let mut h = HarnessBuilder::new(vec![
+        spawn_call("child work", None, false),
+        Script::text("child summary"),
+        Script::text("parent done"),
+    ])
+    .build()
+    .await;
+
+    let selection = kc_core::config::SessionModelSelection {
+        provider: "gateway".into(),
+        model: "pinned-model".into(),
+        reasoning_effort: None,
+    };
+    h.store
+        .set_session_model(h.session(), Some(&selection))
+        .await
+        .expect("pin the session model");
+
+    let _ = h.run_to_finish("delegate").await;
+    let requests = h.factory.requests();
+    assert_eq!(requests[0].model, "pinned-model", "the parent run");
+    assert_eq!(
+        requests[1].model, "pinned-model",
+        "the subagent inherits the session selection"
+    );
+    assert_eq!(h.store.agents()[0].model, "pinned-model");
 }
 
 #[tokio::test]
@@ -945,6 +1024,8 @@ async fn cancelling_mid_stream_marks_the_run_cancelled() {
 async fn iteration_limit_stops_the_run_with_limit_reached() {
     let limits = Limits {
         max_iterations: 2,
+        // One-shot budget: the pre-long-horizon behaviour, kept as an option.
+        auto_continue: false,
         ..Default::default()
     };
     let mut h = HarnessBuilder::new(vec![
@@ -974,6 +1055,55 @@ async fn iteration_limit_stops_the_run_with_limit_reached() {
         "the third script must not be consumed"
     );
     assert_eq!(h.store.runs()[0].status, "limit_reached");
+}
+
+#[tokio::test]
+async fn iteration_budget_is_a_checkpoint_not_a_finish_line() {
+    // Three segments of two turns: the run must survive two checkpoints and
+    // finish on the model's own terms instead of dying at the first budget.
+    let limits = Limits {
+        max_iterations: 2,
+        max_continues: 2,
+        auto_continue: true,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "echo", "{}")]),
+        Script::call(&[("call_2", "echo", "{}")]),
+        Script::call(&[("call_3", "echo", "{}")]),
+        Script::call(&[("call_4", "echo", "{}")]),
+        Script::call(&[("call_5", "echo", "{}")]),
+        Script::text("finished the long job"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .settings(FakeSettings::default().with_limits(limits))
+    .build()
+    .await;
+
+    let events = h
+        .run_to_finish("a job that needs more than one budget")
+        .await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(count(&events, "iteration_started"), 6);
+    assert_eq!(h.factory.requests().len(), 6, "every script was used");
+    let checkpoints = events
+        .iter()
+        .filter(|e| {
+            matches!(&e.event, Event::Notice { message, .. }
+                if message.contains("continuing automatically"))
+        })
+        .count();
+    assert_eq!(checkpoints, 2, "one notice per refreshed segment");
+
+    // The checkpoint is persisted, so the next run's transcript explains the
+    // jump instead of hiding it.
+    let messages = h.session_messages().await;
+    let nudges = messages
+        .iter()
+        .filter(|m| m.role == "user" && m.content.contains("[runtime checkpoint]"))
+        .count();
+    assert_eq!(nudges, 2);
+    assert_eq!(h.store.runs()[0].status, "completed");
 }
 
 #[tokio::test]
@@ -1014,6 +1144,10 @@ async fn provider_failure_marks_the_run_failed_with_a_visible_error() {
 
 #[tokio::test]
 async fn provider_error_chunk_keeps_the_partial_assistant_text() {
+    // With mid-stream restarts switched off, a turn that dies after streaming
+    // text fails honestly and keeps what the user already saw. (With the
+    // default budget the same failure is restarted instead - see
+    // `a_stream_that_dies_mid_answer_is_restarted_instead_of_failing`.)
     let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![
         ProviderChunk::Text("half an answer".into()),
         ProviderChunk::Error {
@@ -1021,12 +1155,14 @@ async fn provider_error_chunk_keeps_the_partial_assistant_text() {
             retryable: true,
         },
     ])])
+    .model(restarts(0))
     .build()
     .await;
 
     let events = h.run_to_finish("fail partially").await;
     assert_eq!(finished_status(&events), "failed");
     assert!(count(&events, "error") == 1);
+    assert_eq!(count(&events, "stream_retry"), 0);
 
     let messages = h.session_messages().await;
     let assistant = messages
@@ -1035,6 +1171,188 @@ async fn provider_error_chunk_keeps_the_partial_assistant_text() {
         .expect("partial text");
     assert_eq!(assistant.content, "half an answer");
     assert!(assistant.tool_calls.is_empty());
+}
+
+/// Model config with a small restart budget and a millisecond backoff, so a
+/// restart test never sleeps through the production delays.
+fn restarts(max_restarts: u32) -> ModelConfig {
+    ModelConfig {
+        retry_max_stream_restarts: max_restarts,
+        retry_base_delay_ms: 1,
+        retry_max_delay_ms: 2,
+        ..ModelConfig::default()
+    }
+}
+
+/// The failure this feature exists for: the gateway streams some reasoning and
+/// then the body dies (`error decoding response body`). Nothing of the answer
+/// was persisted, so the turn must be re-issued instead of failing the run.
+#[tokio::test]
+async fn a_stream_that_dies_mid_answer_is_restarted_instead_of_failing() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::ChunksThenFail(
+            vec![ProviderChunk::Reasoning("let me think about it".into())],
+            "provider error: invalid response body from http://gateway/v1/chat/completions: \
+             error decoding response body"
+                .into(),
+        ),
+        Script::text("the answer"),
+    ])
+    .model(restarts(3))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("keep going").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(count(&events, "error"), 0);
+
+    let (attempt, max_attempts, reason) = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::StreamRetry {
+                attempt,
+                max_attempts,
+                reason,
+            } => Some((*attempt, *max_attempts, reason.clone())),
+            _ => None,
+        })
+        .expect("a stream_retry event so the client can drop the partial attempt");
+    assert_eq!(attempt, 1, "the first attempt died");
+    assert_eq!(max_attempts, 4, "one try plus three restarts");
+    assert!(
+        reason.contains("decoding response body"),
+        "the reason must name the real failure: {reason}"
+    );
+
+    assert_eq!(
+        h.factory.requests().len(),
+        2,
+        "the identical request must be re-issued exactly once"
+    );
+    let assistants: Vec<_> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|m| m.role == "assistant")
+        .collect();
+    assert_eq!(assistants.len(), 1, "only the successful attempt persists");
+    assert_eq!(assistants[0].content, "the answer");
+}
+
+#[tokio::test]
+async fn a_restarted_attempt_discards_its_partial_tool_calls() {
+    // Tool-call deltas of the abandoned attempt must not be dispatched or
+    // persisted: the fresh attempt starts from the same history.
+    let mut h = HarnessBuilder::new(vec![
+        Script::ChunksThenFail(
+            vec![ProviderChunk::ToolCallDelta {
+                index: 0,
+                id: Some("call_abandoned".into()),
+                name: Some("no_such_tool".into()),
+                arguments_delta: Some("{}".into()),
+            }],
+            "provider error: connection reset by peer".into(),
+        ),
+        Script::text("answered without tools"),
+    ])
+    .model(restarts(1))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("answer").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(count(&events, "tool_call_started"), 0);
+    let messages = h.session_messages().await;
+    assert!(messages.iter().all(|m| m.role != "tool"));
+    assert!(messages
+        .iter()
+        .any(|m| m.role == "assistant" && m.content == "answered without tools"));
+}
+
+#[tokio::test]
+async fn mid_stream_restarts_are_bounded_and_the_last_error_is_reported() {
+    let scripts: Vec<Script> = (0..3)
+        .map(|i| {
+            Script::ChunksThenFail(
+                vec![ProviderChunk::Text(format!("attempt {i}"))],
+                "provider error: invalid response body: error decoding response body".into(),
+            )
+        })
+        .collect();
+    let mut h = HarnessBuilder::new(scripts)
+        .model(restarts(2))
+        .build()
+        .await;
+
+    let events = h.run_to_finish("answer").await;
+    assert_eq!(finished_status(&events), "failed");
+    assert_eq!(h.factory.requests().len(), 3, "one try plus two restarts");
+    assert_eq!(count(&events, "stream_retry"), 2, "one event per restart");
+
+    let error = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("the exhausted turn reports why it failed");
+    assert!(error.contains("decoding response body"), "{error}");
+
+    // The last attempt's partial text is what the user keeps, and no duplicate
+    // from the abandoned attempts is persisted.
+    let assistants: Vec<_> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|m| m.role == "assistant")
+        .collect();
+    assert_eq!(assistants.len(), 1);
+    assert_eq!(assistants[0].content, "attempt 2");
+}
+
+#[tokio::test]
+async fn a_rejected_request_is_not_restarted() {
+    // A request-level error chunk (context too long, unsupported model) cannot
+    // be fixed by asking again, so the restart budget must stay untouched.
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![ProviderChunk::Error {
+        message: "provider error: this model's maximum context length is 4096 tokens".into(),
+        retryable: false,
+    }])])
+    .model(restarts(3))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("too much context").await;
+    assert_eq!(finished_status(&events), "failed");
+    assert_eq!(count(&events, "stream_retry"), 0);
+    assert_eq!(h.factory.requests().len(), 1, "no second request");
+}
+
+#[tokio::test]
+async fn a_body_that_stops_without_a_finish_reason_is_restarted() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::Chunks(vec![ProviderChunk::Text("one and a half".into())]),
+        Script::text("one and a half plus the rest"),
+    ])
+    .model(restarts(1))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("answer").await;
+    assert_eq!(finished_status(&events), "completed");
+    let reason = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::StreamRetry { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+        .expect("a restart for the cut body");
+    assert!(reason.contains("finish_reason"), "{reason}");
+    assert!(h
+        .session_messages()
+        .await
+        .iter()
+        .any(|m| m.role == "assistant" && m.content == "one and a half plus the rest"));
 }
 
 #[tokio::test]
@@ -1079,10 +1397,12 @@ async fn finish_reason_length_is_reported_and_not_success() {
 
 #[tokio::test]
 async fn a_stream_that_ends_without_a_finish_reason_fails_visibly() {
-    // No Finish chunk: the provider closed the stream without saying why.
+    // No Finish chunk: the provider closed the stream without saying why. With
+    // restarts disabled that is a visible failure, and the partial text is kept.
     let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![ProviderChunk::Text(
         "partial".into(),
     )])])
+    .model(restarts(0))
     .build()
     .await;
 
@@ -1292,21 +1612,31 @@ async fn old_history_is_trimmed_but_system_and_last_user_survive() {
     assert!(sent[0].content.contains("You are karucode"));
     let trim_notice = sent
         .iter()
-        .find(|m| m.content.starts_with("[earlier conversation trimmed:"))
-        .expect("trim notice in the request");
+        .find(|m| m.content.starts_with("[compacted earlier conversation:"))
+        .expect("compaction notice in the request");
     assert_eq!(trim_notice.role, Role::Assistant);
+    // The load itself is now bounded by the char budget (`history::trim_front_to_chars`),
+    // so only the newest old messages are ever in memory; the notice counts what
+    // was dropped from that window, not the whole stored transcript.
     assert!(
-        trim_notice.content.contains("24 messages"),
+        trim_notice.content.contains("messages omitted"),
         "notice should count dropped messages: {}",
         trim_notice.content
     );
     assert_eq!(sent.last().unwrap().role, Role::User);
     assert_eq!(sent.last().unwrap().content, "the current question");
-    // The system prompt is bigger than the whole budget, so everything that may
-    // be dropped was dropped: only the system prompt, the notice and the last
-    // user turn survive.
+    // Only the system prompt, the digest and the last user turn survive: the
+    // budget is smaller than everything else that was loaded.
     assert_eq!(sent.len(), 3, "unexpected survivors: {sent:?}");
-    assert!(!sent.iter().any(|m| m.content.contains("old question")));
+    // The digest may name what was dropped, but it may never smuggle the
+    // transcript back in: the notice is a summary, bounded with the budget.
+    let digest_lines = trim_notice.content.lines().count();
+    assert!(
+        trim_notice.content.chars().count() <= 400,
+        "digest must scale down with a small budget: {} chars",
+        trim_notice.content.chars().count()
+    );
+    assert!(digest_lines <= 8, "digest kept {digest_lines} lines");
     let body: usize = sent.iter().skip(1).map(|m| m.content.chars().count()).sum();
     assert!(body <= 600, "droppable content over budget: {body}");
 }
@@ -1544,6 +1874,121 @@ async fn subagent_failure_is_isolated_from_the_parent_run() {
 }
 
 #[tokio::test]
+async fn a_subagent_outlives_its_first_segment_instead_of_dying_at_the_budget() {
+    // The reported bug: a delegated coding task burned a batch of tool calls per
+    // turn, hit `subagents.max_iterations` in a couple of minutes and came back
+    // as `failed` while the work was still in flight. A segment is a checkpoint
+    // for a subagent exactly as it is for a run.
+    let subagents = SubagentConfig {
+        max_concurrent: 1,
+        max_iterations: 2,
+        max_continues: 2,
+        allow_recursive: false,
+        max_depth: 1,
+        timeout_secs: 60,
+    };
+    let mut h = HarnessBuilder::new(vec![
+        spawn_call("a long job", None, false),
+        // Three segments of two turns, then the child's own final answer.
+        Script::call(&[("c1", "echo", "{}")]),
+        Script::call(&[("c2", "echo", "{}")]),
+        Script::call(&[("c3", "echo", "{}")]),
+        Script::call(&[("c4", "echo", "{}")]),
+        Script::call(&[("c5", "echo", "{}")]),
+        Script::text("child finished the long job"),
+        Script::text("parent done"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .settings(FakeSettings::default().with_subagents(subagents))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("delegate a long job").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(h.factory.requests().len(), 8, "every script was used");
+
+    let agents = h.store.agents();
+    assert_eq!(agents.len(), 1);
+    let agent = &agents[0];
+    assert_eq!(
+        agent.status, "completed",
+        "the child must survive its checkpoints: {:?}",
+        agent.error
+    );
+    assert_eq!(agent.iterations, 6, "one iteration per model round-trip");
+    assert!(agent.summary.contains("child finished the long job"));
+    assert!(agent.error.is_none(), "{:?}", agent.error);
+
+    // Every checkpoint is persisted on the child transcript, so the transcript
+    // explains the jump instead of hiding it.
+    let child_messages = h.store.messages_for_agent(&agent.id);
+    let checkpoints = child_messages
+        .iter()
+        .filter(|m| m.role == "user" && m.content.contains("[runtime checkpoint]"))
+        .count();
+    assert_eq!(checkpoints, 2, "one per refreshed segment");
+
+    // The child was told its own budget, not the run's.
+    let child_request = h
+        .factory
+        .requests()
+        .into_iter()
+        .find(|r| r.messages[0].content.contains("You are a focused subagent"))
+        .expect("a child request");
+    assert!(
+        child_request.messages[0]
+            .content
+            .contains("2 model turns per segment"),
+        "{}",
+        child_request.messages[0].content
+    );
+
+    let tool_message = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "tool" && m.agent_id.is_none())
+        .expect("parent tool message");
+    assert!(tool_message.content.contains("completed"));
+    assert!(!tool_message.content.contains("max_iterations"));
+}
+
+#[tokio::test]
+async fn a_subagent_without_continuation_still_stops_at_its_budget() {
+    // `max_continues = 0` is the documented one-shot budget: a delegated task
+    // that wants the old behaviour must still stop dead at `max_iterations`.
+    let subagents = SubagentConfig {
+        max_concurrent: 1,
+        max_iterations: 2,
+        max_continues: 0,
+        allow_recursive: false,
+        max_depth: 1,
+        timeout_secs: 60,
+    };
+    let mut h = HarnessBuilder::new(vec![
+        spawn_call("a job with a hard budget", None, false),
+        Script::call(&[("c1", "echo", "{}")]),
+        Script::call(&[("c2", "echo", "{}")]),
+        Script::text("must never be reached"),
+        Script::text("parent done"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .settings(FakeSettings::default().with_subagents(subagents))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("delegate").await;
+    assert_eq!(finished_status(&events), "completed", "the parent survives");
+    let agents = h.store.agents();
+    assert_eq!(agents[0].status, "failed");
+    assert_eq!(agents[0].iterations, 2);
+    let error = agents[0].error.clone().unwrap_or_default();
+    assert!(error.contains("settings.subagents.max_iterations"), "{error}");
+    assert!(error.contains("max_continues"), "{error}");
+    assert_eq!(h.factory.requests().len(), 4, "the child stopped at two turns");
+}
+
+#[tokio::test]
 async fn recursive_subagents_are_disabled_by_default() {
     let mut h = HarnessBuilder::new(vec![
         spawn_call("outer task", None, false),
@@ -1585,6 +2030,7 @@ async fn recursion_is_allowed_when_enabled_and_depth_allows() {
     let subagents = SubagentConfig {
         max_concurrent: 2,
         max_iterations: 4,
+        max_continues: 0,
         allow_recursive: true,
         max_depth: 2,
         timeout_secs: 30,
@@ -1617,6 +2063,7 @@ async fn subagent_depth_limit_stops_further_nesting() {
     let subagents = SubagentConfig {
         max_concurrent: 2,
         max_iterations: 4,
+        max_continues: 0,
         allow_recursive: true,
         max_depth: 1,
         timeout_secs: 30,
@@ -1778,6 +2225,7 @@ async fn subagent_timeout_marks_the_agent_failed_but_not_the_parent() {
     let subagents = SubagentConfig {
         max_concurrent: 1,
         max_iterations: 8,
+        max_continues: 0,
         allow_recursive: false,
         max_depth: 1,
         timeout_secs: 1,
@@ -1974,6 +2422,7 @@ async fn subagent_timeout_cancels_inflight_tool_before_dropping_the_loop() {
     let subagents = SubagentConfig {
         max_concurrent: 1,
         max_iterations: 8,
+        max_continues: 0,
         allow_recursive: false,
         max_depth: 1,
         timeout_secs: 1,
@@ -2335,4 +2784,63 @@ async fn read_only_denies_external_tools_even_without_approval() {
         "{}",
         finished[0].2
     );
+}
+
+#[tokio::test]
+async fn a_reused_tool_call_id_does_not_grow_the_transcript() {
+    // Some OpenAI-compatible gateways (and scripted mocks) reuse the same
+    // tool_call_id for every turn. Keying results by call id alone made the
+    // repair synthesize a placeholder for every turn on every load: the store is
+    // append-only, so a 200-call session grew to 20k rows. Matching the first
+    // unused result *after* the call keeps repeated loads idempotent.
+    let mut h = HarnessBuilder::new(vec![Script::text("ok"); 4])
+        .build()
+        .await;
+
+    for turn in 0..3 {
+        let mut assistant = crate::tests_support::new_message(h.session(), "assistant", "");
+        assistant.run_id = Some(format!("r_{turn}"));
+        assistant.tool_calls = vec![ToolCall {
+            id: "call_repeated".into(),
+            name: "echo".into(),
+            arguments: "{}".into(),
+        }];
+        h.store.append_message(&assistant).await.unwrap();
+
+        let mut result =
+            crate::tests_support::new_message(h.session(), "tool", &format!("result {turn}"));
+        result.tool_call_id = Some("call_repeated".into());
+        result.name = Some("echo".into());
+        h.store.append_message(&result).await.unwrap();
+    }
+    let seeded = h.store.messages().len();
+
+    // Four loads, the way four follow-up runs would reload the session.
+    for i in 0..4 {
+        let events = h.run_to_finish(&format!("question {i}")).await;
+        assert_eq!(finished_status(&events), "completed");
+    }
+
+    let messages = h.store.messages();
+    let synthesized = messages
+        .iter()
+        .filter(|m| m.content == crate::history::MISSING_TOOL_RESULT)
+        .count();
+    assert_eq!(synthesized, 0, "no placeholder may be invented");
+    // 4 runs x (user + assistant text) on top of the 6 seeded rows.
+    assert_eq!(
+        messages.len(),
+        seeded + 4 * 2,
+        "the transcript grew by exactly what the four runs added"
+    );
+
+    // Every turn still sees all three results, in order.
+    let requests = h.factory.requests();
+    let sent = &requests.last().unwrap().messages;
+    let results: Vec<&str> = sent
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(results, vec!["result 0", "result 1", "result 2"]);
 }

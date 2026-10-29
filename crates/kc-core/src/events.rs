@@ -1,4 +1,5 @@
 use crate::approval::{ApprovalDecision, ApprovalRequest};
+use crate::config::SessionModelSelection;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -13,6 +14,12 @@ pub enum Event {
     SessionRenamed {
         session_id: String,
         title: String,
+    },
+    /// A session's per-session model selection was set or cleared. `model` is
+    /// `null` when the session went back to the install-wide default.
+    SessionModelChanged {
+        session_id: String,
+        model: Option<SessionModelSelection>,
     },
     SessionDeleted {
         session_id: String,
@@ -32,6 +39,19 @@ pub enum Event {
     },
     IterationStarted {
         iteration: u32,
+    },
+    /// The provider stream died after it had started delivering, and the
+    /// runtime is throwing that partial attempt away before re-issuing the
+    /// identical request. Everything already streamed for this turn belongs to
+    /// the abandoned attempt and must be dropped by the client.
+    StreamRetry {
+        /// Upstream attempts made for this turn, including the one that just
+        /// failed (1 = the first attempt failed and one restart is next).
+        attempt: u32,
+        /// Total attempts this turn may make (`retry_max_stream_restarts + 1`).
+        max_attempts: u32,
+        /// Why the attempt died, for display and for the run log.
+        reason: String,
     },
     TextDelta {
         delta: String,
@@ -107,6 +127,14 @@ pub enum Event {
         message: String,
         #[serde(default)]
         kind: Option<String>,
+    },
+    /// The SSE pump could not keep up with this client and dropped frames.
+    ///
+    /// Emitted by `kc-server` rather than the runtime: it describes the transport,
+    /// not the agent. A client must treat it as "refetch the session", and must
+    /// *not* use its `seq` as a dedupe watermark (see `routes::events`).
+    StreamLagged {
+        skipped: u64,
     },
 }
 

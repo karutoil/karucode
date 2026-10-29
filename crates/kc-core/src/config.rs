@@ -540,13 +540,27 @@ impl Default for Limits {
 pub struct SubagentConfig {
     #[serde(default = "d_sub_concurrency")]
     pub max_concurrent: usize,
+    /// Model round-trips allowed in one *segment* of a subagent.
+    ///
+    /// A delegated task is a whole piece of work, not a single answer, so the
+    /// same rule applies here as to a top-level run: the segment is a checkpoint,
+    /// not a finish line. See [`SubagentConfig::max_continues`].
     #[serde(default = "d_sub_iterations")]
     pub max_iterations: u32,
+    /// How many times a subagent may refresh its iteration budget before it must
+    /// report back. `0` restores the old one-shot behaviour: the subagent stops
+    /// dead at `max_iterations`.
+    ///
+    /// The effective ceiling is `(max_continues + 1) * max_iterations` model
+    /// turns, minus whatever `timeout_secs` cuts short. A subagent is also
+    /// stopped by `limits.auto_continue = false`, the install-wide off switch.
+    #[serde(default = "d_sub_continues")]
+    pub max_continues: u32,
     #[serde(default)]
     pub allow_recursive: bool,
     #[serde(default = "d_sub_depth")]
     pub max_depth: u8,
-    /// Wall-clock limit for one subagent task.
+    /// Wall-clock limit for one subagent task, across every segment.
     #[serde(default = "d_sub_timeout")]
     pub timeout_secs: u64,
 }
@@ -555,13 +569,16 @@ fn d_sub_concurrency() -> usize {
     3
 }
 fn d_sub_iterations() -> u32 {
-    16
+    200
+}
+fn d_sub_continues() -> u32 {
+    60
 }
 fn d_sub_depth() -> u8 {
     1
 }
 fn d_sub_timeout() -> u64 {
-    900
+    14_400
 }
 
 impl Default for SubagentConfig {
@@ -569,6 +586,7 @@ impl Default for SubagentConfig {
         Self {
             max_concurrent: d_sub_concurrency(),
             max_iterations: d_sub_iterations(),
+            max_continues: d_sub_continues(),
             allow_recursive: false,
             max_depth: d_sub_depth(),
             timeout_secs: d_sub_timeout(),
@@ -949,6 +967,12 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_SUBAGENT_MAX_ITERATIONS") {
             cfg.subagents.max_iterations = v;
         }
+        if let Some(v) = env_parse("KARUCODE_SUBAGENT_MAX_CONTINUES") {
+            cfg.subagents.max_continues = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_SUBAGENT_TIMEOUT_SECS") {
+            cfg.subagents.timeout_secs = v;
+        }
         if let Some(v) = env_parse("KARUCODE_ALLOW_RECURSIVE_SUBAGENTS") {
             cfg.subagents.allow_recursive = v;
         }
@@ -1143,11 +1167,28 @@ mod tests {
     fn defaults_are_sane() {
         let l = Limits::default();
         assert!(l.max_iterations >= 8);
+        // Long-horizon defaults: a run may chain many segments inside one day.
+        assert!(l.auto_continue);
+        assert!(l.max_continues >= 1);
+        assert!(l.max_run_secs >= 3600);
+        assert!(l.max_tool_calls_per_turn >= 8);
         assert!(l.command_timeout_secs > 0);
         assert!(l.max_tool_output_bytes > 0);
         let s = SubagentConfig::default();
         assert!(!s.allow_recursive);
         assert!(s.max_concurrent >= 1);
+        assert!(
+            s.max_iterations >= 32,
+            "a subagent must outlive one small edit"
+        );
+        // A delegated task that takes hours must not die at its first budget:
+        // the segment is a checkpoint, and the wall clock is the real bound.
+        assert!(s.max_continues >= 1, "subagents continue like a run does");
+        assert!(s.timeout_secs >= 3600);
+        assert!(
+            u64::from(s.max_iterations) * u64::from(s.max_continues + 1) >= 1_000,
+            "a long-horizon subagent must be able to reach four figures of turns"
+        );
     }
 
     #[test]

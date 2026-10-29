@@ -14,6 +14,7 @@ use crate::approvals::{ApprovalScope, RuntimeApprovalGate};
 use crate::context;
 use crate::events::EmitCtx;
 use crate::history::repair_history;
+use crate::restart::StreamRestarts;
 use crate::{RunHandle, RunState, Runtime, RuntimeInner, HISTORY_LIMIT};
 use futures_util::{FutureExt, StreamExt};
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView};
@@ -23,6 +24,7 @@ use kc_core::events::Event;
 use kc_core::ids::{AgentId, RunId, SessionId};
 use kc_core::message::{Message, ToolCall};
 use kc_core::paths::Workspace;
+use kc_core::prompt::Budget;
 use kc_core::provider::{ChatRequest, ProviderChunk, ProviderStream};
 use kc_core::store::{NewMessage, RunStatus};
 use kc_core::tool::{
@@ -47,10 +49,12 @@ pub(crate) struct LoopSpec {
     pub agent_id: Option<AgentId>,
     pub depth: u8,
     pub is_subagent: bool,
-    pub max_iterations: u32,
-    /// Wall-clock budget that produced `deadline`, used for operator-facing
-    /// messages only.
-    pub time_budget_secs: u64,
+    /// Segment size, continuation count and wall clock, all in one place so the
+    /// loop's arithmetic and the system prompt can never disagree about what
+    /// this loop is allowed to do. A subagent gets
+    /// [`Budget::for_subagent`], a run [`Budget::for_run`].
+    pub budget: Budget,
+    /// Wall-clock deadline derived from `budget.wall_secs` at construction.
     pub deadline: Instant,
     pub model: ModelConfig,
     pub limits: Limits,
@@ -105,7 +109,14 @@ enum StreamEnd {
     Complete,
     Cancelled,
     TimedOut,
-    Failed(String),
+    /// The turn's answer did not arrive in full. `transient` says whether
+    /// another attempt could plausibly land on a healthy channel: a body that
+    /// died mid-flight or a stream that stopped without a `finish_reason` is
+    /// worth restarting, a request the endpoint rejected is not.
+    Failed {
+        message: String,
+        transient: bool,
+    },
 }
 
 /// Start a user-initiated run.
@@ -136,7 +147,13 @@ pub(crate) async fn start_run(
         .workspaces
         .workspace_for(session.project_id.as_deref())?;
 
-    let model = inner.deps.settings.model().await;
+    // The session's own selection (or the install-wide default) decides the
+    // model, so several sessions can run different models concurrently.
+    let model = inner
+        .deps
+        .settings
+        .resolve_model(session.model.as_ref())
+        .await;
     let run_id = RunId::new();
     let state = Arc::new(RunState::new(
         run_id.clone(),
@@ -265,6 +282,7 @@ async fn begin_run(
     prompt: &str,
 ) -> Result<Vec<Message>> {
     let store = &inner.deps.store;
+    let limits = inner.deps.settings.limits().await;
     store
         .create_run(&state.run_id.0, &state.session_id.0, &model.model, prompt)
         .await?;
@@ -275,8 +293,15 @@ async fn begin_run(
 
     // The new user message is already persisted; repair the whole window now so
     // a slice boundary or an earlier interrupted tool call cannot make the
-    // request invalid for the provider.
-    let mut history = repair_history(store, &state.session_id.0, HISTORY_LIMIT).await?;
+    // request invalid for the provider. The char cap keeps a session with
+    // thousands of tool calls from loading (and cloning) its entire transcript.
+    let mut history = repair_history(
+        store,
+        &state.session_id.0,
+        HISTORY_LIMIT,
+        limits.context_max_chars,
+    )
+    .await?;
     if history.is_empty() {
         history.push(user);
     }
@@ -325,8 +350,7 @@ pub(crate) async fn run_top_level(
         agent_id: None,
         depth: 0,
         is_subagent: false,
-        max_iterations: limits.max_iterations.max(1),
-        time_budget_secs: limits.max_run_secs.max(1),
+        budget: Budget::for_run(&limits),
         deadline: Instant::now() + Duration::from_secs(limits.max_run_secs.max(1)),
         model,
         limits,
@@ -410,7 +434,16 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, spec: LoopSpec) -> LoopOu
 async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOutcome {
     let ctx = spec.emit_ctx(&inner);
     let mut history = std::mem::take(&mut spec.history);
+    // `iterations` counts every model round-trip in the loop; `segment_iterations`
+    // only the current budget window. The loop stops on the segment budget only
+    // when it may not continue (`auto_continue` off, `max_continues` reached) or
+    // when the wall clock is gone. A subagent follows the same rule with its own
+    // numbers - a delegated task that needs hours must not die at its first
+    // segment while the run that spawned it keeps going.
     let mut iterations = 0u32;
+    let mut segment_iterations = 0u32;
+    let mut continues = 0u32;
+    let max_segments = spec.budget.max_continues.saturating_add(1);
     let mut last_text = String::new();
 
     loop {
@@ -418,30 +451,74 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
             ctx.notice("info", "run cancelled");
             return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
         }
-        if iterations >= spec.max_iterations {
+        if segment_iterations >= spec.budget.max_iterations {
             let message = if spec.is_subagent {
-                format!("subagent stopped after {iterations} iterations (settings.subagents.max_iterations)")
+                format!(
+                    "subagent stopped after {iterations} iterations (settings.subagents.max_iterations \
+is {} per segment, settings.subagents.max_continues is {})",
+                    spec.budget.max_iterations, spec.budget.max_continues
+                )
             } else {
-                format!("stopped after {iterations} iterations (limits.max_iterations)")
+                format!(
+                    "stopped after {iterations} iterations (limits.max_iterations is {} per \
+segment, limits.max_continues is {})",
+                    spec.budget.max_iterations, spec.budget.max_continues
+                )
             };
-            ctx.notice("warn", message.clone());
-            let error = if spec.is_subagent {
-                Some(message)
+            // A budget that runs out mid-task is a checkpoint, not a finish
+            // line: the previous turn asked for tools, so the work is still in
+            // flight. Refresh the window and keep the same session, run and
+            // transcript, bounded by `max_continues` and the wall clock.
+            let can_continue = spec.budget.auto_continue
+                && continues < spec.budget.max_continues
+                && Instant::now() < spec.deadline
+                && !spec.cancel.is_cancelled();
+            if can_continue {
+                continues += 1;
+                segment_iterations = 0;
+                let note = continuation_nudge(continues, max_segments, &spec);
+                let message = Message::user(note);
+                // Persist the checkpoint so the next run's transcript shows why
+                // the conversation jumped, instead of a silent gap.
+                if let Err(e) = persist(
+                    &inner,
+                    &spec.session_id,
+                    &spec.run_id,
+                    spec.agent_id.as_ref(),
+                    &message,
+                )
+                .await
+                {
+                    ctx.error("store", format!("could not persist the checkpoint: {e}"));
+                }
+                history.push(message);
+                ctx.notice(
+                    "info",
+                    format!(
+                        "iteration budget refreshed after {iterations} iterations - continuing automatically (segment {}/{max_segments}, limits.auto_continue)",
+                        continues + 1
+                    ),
+                );
             } else {
-                None
-            };
-            return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
+                ctx.notice("warn", message.clone());
+                let error = if spec.is_subagent {
+                    Some(message)
+                } else {
+                    None
+                };
+                return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
+            }
         }
         if Instant::now() >= spec.deadline {
             let message = if spec.is_subagent {
                 format!(
                     "subagent timed out after {}s (settings.subagents.timeout_secs)",
-                    spec.time_budget_secs
+                    spec.budget.wall_secs
                 )
             } else {
                 format!(
                     "stopped: the run exceeded the {}s wall-clock limit (limits.max_run_secs)",
-                    spec.time_budget_secs
+                    spec.budget.wall_secs
                 )
             };
             ctx.notice("warn", message.clone());
@@ -454,6 +531,7 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
         }
 
         iterations += 1;
+        segment_iterations += 1;
         if let Some(state) = &spec.run_state {
             state.iterations.store(iterations, Ordering::Relaxed);
         }
@@ -481,8 +559,7 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
             &spec.workspace.root().to_string_lossy(),
             &tool_specs,
             &spec.approval_mode,
-            &spec.limits,
-            spec.is_subagent,
+            &spec.budget,
             &extra,
         );
         let mut messages = Vec::with_capacity(history.len() + 1);
@@ -528,23 +605,76 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
                 return LoopOutcome::new(RunStatus::Failed, Some(message), last_text, iterations);
             }
         };
-        let stream = match provider.stream_chat(request, spec.cancel.clone()).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                // A cancel that lands before the request completes is still a
-                // cancellation, not a provider failure.
-                if spec.cancel.is_cancelled() {
-                    ctx.notice("info", "run cancelled");
-                    return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
+
+        // One turn, at most `retry_max_stream_restarts + 1` stream attempts. A
+        // stream that dies *after* it started delivering cannot be retried one
+        // level down (the provider layer hands chunks straight to the UI and
+        // replaying them would duplicate the answer), so it is handled here:
+        // the partial attempt is discarded - nothing was persisted for it - the
+        // client is told to drop what it rendered, and the identical request is
+        // re-issued. See `crate::restart`.
+        let restarts = StreamRestarts::from_config(&spec.model);
+        let mut attempt: u32 = 0;
+        let (text, calls, end, finish_reason) = loop {
+            attempt = attempt.saturating_add(1);
+            let stream = match provider
+                .stream_chat(request.clone(), spec.cancel.clone())
+                .await
+            {
+                Ok(stream) => stream,
+                Err(e) => {
+                    // A cancel that lands before the request completes is still a
+                    // cancellation, not a provider failure.
+                    if spec.cancel.is_cancelled() {
+                        ctx.notice("info", "run cancelled");
+                        return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
+                    }
+                    let message = format!("provider request failed: {e}");
+                    ctx.error("provider", message.clone());
+                    return LoopOutcome::new(
+                        RunStatus::Failed,
+                        Some(message),
+                        last_text,
+                        iterations,
+                    );
                 }
-                let message = format!("provider request failed: {e}");
-                ctx.error("provider", message.clone());
-                return LoopOutcome::new(RunStatus::Failed, Some(message), last_text, iterations);
+            };
+
+            let outcome = consume(&ctx, &spec.cancel, spec.deadline, stream).await;
+            let restart = match &outcome.2 {
+                StreamEnd::Failed { message, transient } => {
+                    *transient
+                        && !spec.cancel.is_cancelled()
+                        && attempt < restarts.max_attempts()
+                        && tokio::time::Instant::now() < spec.deadline
+                        && {
+                            tracing::warn!(
+                                attempt,
+                                max_attempts = restarts.max_attempts(),
+                                error = %message,
+                                "provider stream died mid-answer; restarting it"
+                            );
+                            ctx.emit(Event::StreamRetry {
+                                attempt,
+                                max_attempts: restarts.max_attempts(),
+                                reason: message.clone(),
+                            });
+                            true
+                        }
+                }
+                _ => false,
+            };
+            if !restart {
+                break outcome;
+            }
+
+            let delay = restarts.delay(attempt.saturating_sub(1));
+            tokio::select! {
+                biased;
+                _ = spec.cancel.cancelled() => {}
+                _ = tokio::time::sleep(delay) => {}
             }
         };
-
-        let (text, calls, end, finish_reason) =
-            consume(&ctx, &spec.cancel, spec.deadline, stream).await;
 
         if !text.is_empty() {
             last_text = text.clone();
@@ -575,12 +705,12 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
                 let message = if spec.is_subagent {
                     format!(
                         "subagent timed out after {}s (settings.subagents.timeout_secs)",
-                        spec.time_budget_secs
+                        spec.budget.wall_secs
                     )
                 } else {
                     format!(
                         "stopped: the run exceeded the {}s wall-clock limit (limits.max_run_secs)",
-                        spec.time_budget_secs
+                        spec.budget.wall_secs
                     )
                 };
                 ctx.notice("warn", message.clone());
@@ -591,7 +721,7 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
                 };
                 return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
             }
-            StreamEnd::Failed(message) => {
+            StreamEnd::Failed { message, .. } => {
                 if spec.cancel.is_cancelled() {
                     if !text.is_empty() {
                         persist_assistant_text(&inner, &spec, &ctx, &text).await;
@@ -707,7 +837,32 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
             ctx.notice("info", "run cancelled");
             return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
         }
+
+        // Bound the in-memory working set: a long session must not keep (and
+        // re-clone, every iteration) a transcript far past the request budget.
+        // The dropped turns survive in the persisted transcript and in the
+        // digest notice, so nothing is lost, only unbounded memory growth.
+        context::compact_run_window(&mut history, spec.limits.context_max_chars);
     }
+}
+
+/// The synthetic user turn that carries a run across an iteration-budget
+/// boundary. It is persisted, so the transcript explains the jump, and it tells
+/// the model exactly what to do next instead of leaving it to guess.
+fn continuation_nudge(continues: u32, max_segments: u32, spec: &LoopSpec) -> String {
+    let remaining = spec
+        .deadline
+        .saturating_duration_since(Instant::now())
+        .as_secs();
+    format!(
+        "[runtime checkpoint] Iteration budget refreshed (segment {}/{max_segments}). \
+This is not a new request: the task is still in progress and you have {remaining}s of \
+wall clock left. Continue exactly where you stopped. Do not repeat work you already \
+did, do not re-read files whose contents you already know, and do not restate your plan. \
+If the remaining work is large, keep a short plan in a file so a later segment can pick \
+it up. Stop only when the task is complete, verified, or genuinely blocked.",
+        continues + 1
+    )
 }
 
 async fn persist_assistant_text(
@@ -1015,7 +1170,13 @@ async fn consume(
                     }
                     Ok(ProviderChunk::Error { message, retryable }) => {
                         let suffix = if retryable { " (retryable)" } else { "" };
-                        end = StreamEnd::Failed(format!("provider stream error: {message}{suffix}"));
+                        end = StreamEnd::Failed {
+                            message: format!("provider stream error: {message}{suffix}"),
+                            // The provider already decided whether this error
+                            // kind is worth another attempt (rate limit,
+                            // overloaded, 5xx ... versus a rejected request).
+                            transient: retryable,
+                        };
                         break;
                     }
                     Err(e) => {
@@ -1023,7 +1184,14 @@ async fn consume(
                             end = StreamEnd::Cancelled;
                             break;
                         }
-                        end = StreamEnd::Failed(format!("provider stream failed: {e}"));
+                        // Transport death mid-body: a decode error, a reset
+                        // connection, a read timeout. Another attempt can land
+                        // on a healthy channel; a configuration error cannot.
+                        let transient = matches!(e, Error::Provider(_) | Error::Timeout(_));
+                        end = StreamEnd::Failed {
+                            message: format!("provider stream failed: {e}"),
+                            transient,
+                        };
                         break;
                     }
                 }
@@ -1032,11 +1200,14 @@ async fn consume(
     }
 
     // A clean EOF without any finish_reason is not success: the stream was cut
-    // before the provider told us why it stopped.
+    // before the provider told us why it stopped. The body died mid-flight, so
+    // it is exactly the failure class a restart is for.
     if matches!(end, StreamEnd::Complete) && finish_reason.is_none() {
-        end = StreamEnd::Failed(
-            "provider stream ended without a finish_reason; the response is incomplete".into(),
-        );
+        end = StreamEnd::Failed {
+            message: "provider stream ended without a finish_reason; the response is incomplete"
+                .into(),
+            transient: true,
+        };
     }
 
     (text, accumulator.finish(), end, finish_reason)

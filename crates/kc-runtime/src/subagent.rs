@@ -6,8 +6,9 @@
 //! * a fresh message history (system prompt marked `is_subagent`, task as the
 //!   user turn) persisted with the agent id so it never pollutes the parent
 //!   conversation;
-//! * iterations bounded by `settings.subagents.max_iterations` and wall clock by
-//!   `timeout_secs` (with a hard backstop on top of the in-loop deadline);
+//! * iterations bounded by `settings.subagents.max_iterations` per segment and
+//!   refreshed up to `settings.subagents.max_continues` times, with wall clock by
+//!   `timeout_secs` (plus a hard backstop on top of the in-loop deadline);
 //! * a tool set that excludes `spawn_agent` unless recursion is explicitly
 //!   enabled *and* the depth budget allows it;
 //! * approvals that keep the parent policy but carry the agent id;
@@ -15,6 +16,89 @@
 //!
 //! A subagent failure is reported as a failed tool result; it never fails the
 //! parent run. Cancelling the parent cancels children through a child token.
+
+// @kc-doc: subagents
+// @kc-title: Delegate work to subagents
+// @kc-summary: How spawn_agent works, the limits it runs under, and when delegation helps instead of hurting.
+// @kc-tags: subagents, delegation, agents, parallel, spawn_agent, long-running
+// @kc-applies-to: tool:spawn_agent, config:[subagents], config:subagents.max_iterations, config:subagents.max_continues, config:subagents.timeout_secs, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_MAX_CONTINUES, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, route:GET /api/sessions/:id, ui:AgentsTab
+//
+// The model can call `spawn_agent` with a self-contained task and a list of
+// `owned_paths`. A subagent is a **nested, bounded agent loop**: it gets a fresh
+// history (system prompt marked as subagent, the task as the user turn), its own
+// run id and agent id, and the same tool set minus `spawn_agent` unless recursion
+// is explicitly allowed.
+//
+// You do not configure a subagent per task: you write the task, and the agent
+// decides. To steer it, ask for delegation explicitly - "use a subagent to map
+// the call sites while you fix the parser".
+//
+// # Limits
+//
+// ```toml
+// [subagents]
+// max_concurrent = 3       # KARUCODE_SUBAGENT_CONCURRENCY
+// max_iterations = 200     # turns per segment; KARUCODE_SUBAGENT_MAX_ITERATIONS
+// max_continues = 60       # segment refreshes;   KARUCODE_SUBAGENT_MAX_CONTINUES
+// allow_recursive = false  # KARUCODE_ALLOW_RECURSIVE_SUBAGENTS
+// max_depth = 1
+// timeout_secs = 14400     # 4h wall clock;      KARUCODE_SUBAGENT_TIMEOUT_SECS
+// ```
+//
+// Concurrency is enforced by a semaphore, iterations and wall clock per subagent,
+// and a hard backstop on top of the in-loop deadline. Cancelling the parent cancels
+// children through a child token.
+//
+// # A subagent runs as long as the task needs
+//
+// A delegated task is a whole piece of work, so a subagent uses the same
+// checkpoint rule as a top-level run: when a segment's `max_iterations` is used
+// up, the runtime appends a `[runtime checkpoint]` turn and keeps going, in the
+// same transcript, up to `max_continues` refreshes. The effective ceiling is
+// about `(max_continues + 1) * max_iterations` model turns (12,200 with the
+// defaults), or `timeout_secs`, whichever comes first - whichever way a long
+// task ends, it ends because time ran out, not because a counter did.
+//
+// Set `max_continues = 0` to restore the old one-shot behaviour: the subagent
+// stops dead at `max_iterations` and reports what it has. `limits.auto_continue
+// = false` is the install-wide off switch and wins over this section.
+//
+// The subagent is told its real budget in its system prompt (segment size,
+// refreshes, wall clock), so it plans against the numbers it actually gets.
+//
+// # What it inherits and what it does not
+//
+// Inherits: workspace, approval policy, settings, the session's model pin (the
+// call's own `model` argument still overrides just that child). Does not inherit:
+// the parent's conversation, its tool results, or its claims. Transcripts are
+// persisted with the agent id so the parent chat stays clean; the UI shows
+// progress and the final result per agent.
+//
+// # Failure handling
+//
+// A subagent failure is a failed tool result for the parent - it never fails the
+// parent run. A timeout, a provider error and a cancelled task all come back with
+// an explanatory message.
+//
+// # Gotchas
+//
+// * There is no separate worktree or checkout: subagents edit the same files. Two
+//   subagents editing one file will conflict; that is what `owned_paths` is for,
+//   and it is advisory only.
+// * Recursion is off by default; enabling it without a depth budget turns one
+//   question into an expensive fan-out.
+// * Subagent runs cost tokens and time. Delegating a one-file read is slower than
+//   reading the file.
+// * Tool calls inside a turn execute in order, so "parallel" subagents mostly
+//   overlap on provider latency, not local work.
+// * A subagent runs on its session's pinned model, not the install-wide default:
+//   pinning a session to a small model makes its subagents cheap too.
+// * A subagent that keeps working without progress burns tokens until
+//   `timeout_secs`. Keep it pointed at one task; split unrelated work into
+//   separate subagents instead of widening one.
+//
+// Full reference: `README.md` (Subagents). `GET /api/sessions/:id` returns the
+// session's `agents` array alongside its messages and runs.
 
 use crate::agent::{LoopOutcome, LoopSpec};
 use crate::approvals::RuntimeApprovalGate;
@@ -247,15 +331,33 @@ async fn run_subagent(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{role}-{short_id}"));
-    let mut model = inner.deps.settings.model().await;
+    let store = inner.deps.store.clone();
+    let session_id = ctx.approvals.session_id.clone();
+    let parent_run_id = ctx.approvals.run_id.clone();
+    // A subagent works inside its parent session, so it inherits that session's
+    // model selection (the explicit `model` argument still wins for this one
+    // agent). A missing session is not fatal: fall back to the default model.
+    let session_selection = match store.get_session(&session_id.0).await {
+        Ok(session) => session.and_then(|session| session.model),
+        Err(e) => {
+            tracing::warn!(
+                session = %session_id.0,
+                error = %e,
+                "could not read the session model selection; using the default model"
+            );
+            None
+        }
+    };
+    let mut model = inner
+        .deps
+        .settings
+        .resolve_model(session_selection.as_ref())
+        .await;
     if let Some(override_model) = &model_override {
         model.model = override_model.clone();
     }
     let limits = inner.deps.settings.limits().await;
     let policy = inner.deps.settings.approval_policy().await;
-    let store = inner.deps.store.clone();
-    let session_id = ctx.approvals.session_id.clone();
-    let parent_run_id = ctx.approvals.run_id.clone();
 
     let mut record = AgentRecord {
         id: agent_id.0.clone(),
@@ -377,8 +479,7 @@ async fn run_subagent(
         agent_id: Some(agent_id.clone()),
         depth: child_depth,
         is_subagent: true,
-        max_iterations: cfg.max_iterations.max(1),
-        time_budget_secs: timeout_secs,
+        budget: kc_core::prompt::Budget::for_subagent(&limits, &cfg),
         deadline: Instant::now() + Duration::from_secs(timeout_secs),
         model: model.clone(),
         limits,

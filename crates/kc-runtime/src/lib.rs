@@ -34,6 +34,7 @@ pub mod approvals;
 pub mod context;
 pub mod events;
 pub(crate) mod history;
+mod restart;
 pub mod subagent;
 
 #[cfg(test)]
@@ -42,7 +43,14 @@ mod tests;
 mod tests_support;
 
 /// How many stored messages a new run loads as conversation history.
-pub const HISTORY_LIMIT: usize = 400;
+///
+/// This is a *paging* bound, not a context bound: the character budget
+/// (`limits.context_max_chars`) is what actually decides how much the model
+/// sees. It used to be 400, which silently dropped the beginning of a long
+/// session - exactly the failure a long-horizon harness must not have. The
+/// value is now high enough that a day of work fits; a session that somehow
+/// exceeds it still keeps its newest turns and the trim notice names the cut.
+pub const HISTORY_LIMIT: usize = 20_000;
 
 /// Broadcast channel capacity: a slow SSE consumer lags and is skipped rather
 /// than blocking the run.
@@ -265,8 +273,9 @@ impl Runtime {
         // A crash can leave an assistant turn whose tool result was never
         // persisted. Repair every session's transcript before serving requests,
         // so the first run after a restart does not replay an invalid exchange.
+        let max_chars = self.inner.deps.settings.limits().await.context_max_chars;
         for session in store.list_sessions().await? {
-            history::repair_history(store, &session.id, HISTORY_LIMIT).await?;
+            history::repair_history(store, &session.id, HISTORY_LIMIT, max_chars).await?;
         }
 
         let pending = store.list_pending_approvals(None).await?;

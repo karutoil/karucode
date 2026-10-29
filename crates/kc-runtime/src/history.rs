@@ -20,7 +20,7 @@
 use kc_core::error::Result;
 use kc_core::message::{Message, Role, ToolCall};
 use kc_core::store::{NewMessage, Store, StoredMessage};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Content of a synthesized tool result. Also used to recognise rows created by
@@ -44,6 +44,7 @@ pub(crate) async fn repair_history(
     store: &Arc<dyn Store>,
     session_id: &str,
     limit: usize,
+    max_chars: usize,
 ) -> Result<Vec<Message>> {
     let stored = store.list_messages(session_id, limit).await?;
     let stored: Vec<StoredMessage> = stored
@@ -53,7 +54,13 @@ pub(crate) async fn repair_history(
         .filter(|m| m.agent_id.is_none() && m.role != Role::System.as_str())
         .collect();
 
-    let (messages, synthesized) = repair_rows(&stored);
+    let (mut messages, synthesized) = repair_rows(&stored);
+
+    // A count-only window is not a memory bound: 20_000 messages of 24 KB tool
+    // output is half a gigabyte. Keep the newest exchanges that fit the budget
+    // the request will use, so loading a month-old session costs the same as a
+    // fresh one.
+    trim_front_to_chars(&mut messages, max_chars);
 
     // Persist the repair so a restart does not resurrect the broken transcript.
     // The store is append-only, so a missing result that is not at the tail is
@@ -75,10 +82,39 @@ pub(crate) async fn repair_history(
     Ok(messages)
 }
 
+/// Drop the oldest messages until the slice fits `max_chars`.
+///
+/// The cut is moved forward to a message that is not a `tool` result, so the
+/// window never *starts* with an orphaned result; the exchange that owned it is
+/// dropped as a whole (the repair above guarantees call-then-results order). The
+/// newest message is always kept, so a single oversized result cannot empty the
+/// window.
+pub(crate) fn trim_front_to_chars(messages: &mut Vec<Message>, max_chars: usize) {
+    let chars = |m: &Message| m.content.chars().count();
+    let mut total: usize = messages.iter().map(chars).sum();
+    let mut start = 0usize;
+    while total > max_chars && start + 1 < messages.len() {
+        total = total.saturating_sub(chars(&messages[start]));
+        start += 1;
+    }
+    // Never begin the window with a tool result whose call was dropped.
+    while start + 1 < messages.len() && messages[start].role == Role::Tool {
+        start += 1;
+    }
+    if start > 0 {
+        messages.drain(..start);
+    }
+}
+
 /// Structural repair of an ordered (oldest-first) transcript slice.
 fn repair_rows(stored: &[StoredMessage]) -> (Vec<Message>, Vec<Synthesized>) {
-    // All tool results by call id. A real result wins over a synthesized one.
-    let mut results: HashMap<String, &StoredMessage> = HashMap::new();
+    // Every tool result grouped by call id, oldest first. A call id can repeat
+    // across turns (`call_0` from a cheap gateway, or the same id in a replayed
+    // request), so a result is matched to the first *unused* row that comes after
+    // the call that asked for it - never to a single global "the" row, which made
+    // every repeat synthesize a fresh placeholder and grow the transcript by one
+    // row per turn, forever (the store is append-only).
+    let mut results: HashMap<&str, Vec<&StoredMessage>> = HashMap::new();
     for row in stored {
         if row.role != Role::Tool.as_str() {
             continue;
@@ -86,20 +122,10 @@ fn repair_rows(stored: &[StoredMessage]) -> (Vec<Message>, Vec<Synthesized>) {
         let Some(id) = row.tool_call_id.as_deref() else {
             continue; // a tool row without an id cannot be attached to anything
         };
-        match results.get(id) {
-            None => {
-                results.insert(id.to_string(), row);
-            }
-            Some(existing)
-                if existing.content == MISSING_TOOL_RESULT
-                    && row.content != MISSING_TOOL_RESULT =>
-            {
-                results.insert(id.to_string(), row);
-            }
-            Some(_) => {}
-        }
+        results.entry(id).or_default().push(row);
     }
 
+    let mut used: HashSet<i64> = HashSet::new();
     let mut messages = Vec::with_capacity(stored.len());
     let mut synthesized = Vec::new();
     for row in stored {
@@ -112,11 +138,24 @@ fn repair_rows(stored: &[StoredMessage]) -> (Vec<Message>, Vec<Synthesized>) {
                 // for them. Anything that does not belong to this assistant is
                 // skipped when its own row is reached.
                 for call in calls {
-                    match results.get(&call.id) {
+                    // The smallest unused id after the call wins: a real result is
+                    // appended right after its call, while a synthesized one is
+                    // appended at the tail, so a real result is always preferred
+                    // without needing to inspect its content.
+                    let candidate = results.get(call.id.as_str()).and_then(|rows| {
+                        rows.iter()
+                            .filter(|r| r.id > row.id && !used.contains(&r.id))
+                            .min_by_key(|r| r.id)
+                            .copied()
+                    });
+                    match candidate {
                         // A result that predates the call cannot answer it; treat
                         // it as missing rather than attaching it backwards.
-                        Some(result) if result.id > row.id => messages.push(result.to_message()),
-                        _ => {
+                        Some(result) => {
+                            used.insert(result.id);
+                            messages.push(result.to_message());
+                        }
+                        None => {
                             messages.push(Message::tool_result(
                                 call.id.clone(),
                                 call.name.clone(),
