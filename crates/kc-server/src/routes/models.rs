@@ -11,6 +11,11 @@
 //! `200 {ok:false,...}` when there is nothing cached (the settings screen shows
 //! the message and the user can still type a model id by hand), and a 404 when
 //! the provider id itself is wrong.
+//!
+//! `GET /api/models/lookup?model=<id>` finds the best catalog entry for one
+//! arbitrary model id, stripping gateway routing prefixes (`a6api/model`,
+//! `a6api/upstream/model`) until a suffix matches. `match` is `null` when the
+//! catalog simply does not carry the model — an ordinary result, not an error.
 
 use crate::error::{ApiError, ApiResult};
 use crate::routes::{query_bool, query_str, QueryMap};
@@ -77,6 +82,47 @@ pub async fn catalog(
         "ok": true,
         "providers": providers,
         "models": [],
+        "fetched_at_ms": outcome.fetched_at_ms,
+        "stale": outcome.stale,
+        "error": error,
+    })))
+}
+
+/// `GET /api/models/lookup?model=<id>` — metadata detection for one id.
+///
+/// Same availability contract as [`catalog`]: when the catalog cannot be
+/// reached at all the answer is `200 {ok:false, match:null, error}` and the
+/// caller falls back to adding the id without metadata.
+pub async fn lookup(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+) -> ApiResult<Json<Value>> {
+    let model = query_str(&query, "model")
+        .ok_or_else(|| ApiError::bad_request("query parameter `model` is required"))?;
+    let outcome = match state.catalog().get(false).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Ok(Json(json!({
+                "ok": false,
+                "match": Value::Null,
+                "fetched_at_ms": 0,
+                "stale": false,
+                "error": state.redact(&error),
+            })));
+        }
+    };
+    let error = outcome.error.as_deref().map(|e| state.redact(e));
+    let found = outcome.catalog.lookup(model);
+    Ok(Json(json!({
+        "ok": true,
+        "match": match &found {
+            Some(found) => json!({
+                "provider": found.provider,
+                "matched_id": found.matched_id,
+                "model": found.model,
+            }),
+            None => Value::Null,
+        },
         "fetched_at_ms": outcome.fetched_at_ms,
         "stale": outcome.stale,
         "error": error,

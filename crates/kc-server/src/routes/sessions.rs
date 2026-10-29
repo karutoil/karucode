@@ -1,13 +1,14 @@
 //! Session CRUD, message submission and cancellation.
 
 use crate::error::{ApiError, ApiResult};
-use crate::routes::{parse_required, query_str, QueryMap};
+use crate::routes::{parse_required, query_str, query_usize, QueryMap};
 use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use kc_core::config::SessionModelSelection;
 use kc_core::events::Event;
 use kc_core::ids::SessionId;
 use kc_core::store::Session;
@@ -26,6 +27,10 @@ const DEFAULT_SESSION_TITLE: &str = "New session";
 const MAX_AUTO_TITLE_CHARS: usize = 60;
 /// History returned by `GET /api/sessions/:id` (tail, most recent last).
 const MESSAGE_LIMIT: usize = 5000;
+/// Upper bound for `?messages=`, so one request cannot ask for a 100k-message
+/// transcript (tens of megabytes of JSON). Older history beyond the returned
+/// window is in the database and reachable with a larger `messages`.
+const MESSAGE_LIMIT_MAX: usize = 50_000;
 const RUN_LIMIT: usize = 200;
 
 #[derive(Debug, Default, Deserialize)]
@@ -37,6 +42,75 @@ struct TitleBody {
     /// (and no project), which is what an older client sends.
     #[serde(default)]
     project: Option<String>,
+    /// Per-session model selection. Absent leaves the session's selection
+    /// alone; `null` clears it (the session follows the install-wide default);
+    /// an object pins this session to that profile + model.
+    #[serde(default, deserialize_with = "double_option")]
+    model: Option<Option<SessionModelBody>>,
+}
+
+/// One session's model pin, as sent by the browser.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionModelBody {
+    provider: String,
+    model: String,
+    /// `minimal|low|medium|high`; omitted leaves the endpoint default.
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+}
+
+impl SessionModelBody {
+    fn to_selection(&self) -> SessionModelSelection {
+        SessionModelSelection {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+        }
+        .normalized()
+    }
+}
+
+/// Body of `PATCH /api/sessions/:id/model`.
+///
+/// The browser sends the selection itself, and `{}` (or `null` fields) means
+/// "clear the pin and follow the install-wide default again". A half-filled
+/// selection is rejected by [`SessionModelSelection::validate_shape`].
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionModelPinBody {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+}
+
+impl SessionModelPinBody {
+    fn into_selection(self) -> Option<SessionModelSelection> {
+        if self.provider.is_none() && self.model.is_none() && self.reasoning_effort.is_none() {
+            return None;
+        }
+        Some(
+            SessionModelSelection {
+                provider: self.provider.unwrap_or_default(),
+                model: self.model.unwrap_or_default(),
+                reasoning_effort: self.reasoning_effort,
+            }
+            .normalized(),
+        )
+    }
+}
+
+/// Distinguishes "field absent" (`None`) from "present and null" (`Some(None)`),
+/// which is how a PATCH clears a session's model pin.
+fn double_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -67,9 +141,20 @@ pub async fn list_sessions(
 pub async fn create_session(State(state): State<AppState>, body: Bytes) -> ApiResult<Json<Value>> {
     let body: TitleBody = crate::routes::parse_body(&body)?;
     let title = normalize_title(body.title)?;
+    // Validate the pin before creating anything, so a bad request cannot leave a
+    // half-created session behind.
+    let selection = match body.model.as_ref() {
+        Some(Some(model)) => {
+            let selection = model.to_selection();
+            crate::settings::validate_session_model(&state.settings().snapshot(), &selection)
+                .map_err(ApiError::from)?;
+            Some(selection)
+        }
+        _ => None,
+    };
     let id = SessionId::new();
     let workspace = state.workspace_for_project(body.project.as_deref())?;
-    let session = state
+    let created = state
         .store()
         .create_session(
             id.as_str(),
@@ -78,6 +163,16 @@ pub async fn create_session(State(state): State<AppState>, body: Bytes) -> ApiRe
             body.project.as_deref(),
         )
         .await?;
+    let session = match selection {
+        Some(selection) => {
+            state
+                .store()
+                .set_session_model(id.as_str(), Some(&selection))
+                .await?;
+            session_or_404(&state, id.as_str()).await?
+        }
+        None => created,
+    };
     // Runtime-stamped so the SSE `seq` stays monotonic for all clients.
     state.runtime().emit(
         Some(session.id.as_str()),
@@ -88,6 +183,17 @@ pub async fn create_session(State(state): State<AppState>, body: Bytes) -> ApiRe
             title: session.title.clone(),
         },
     );
+    if let Some(model) = &session.model {
+        state.runtime().emit(
+            Some(session.id.as_str()),
+            None,
+            None,
+            Event::SessionModelChanged {
+                session_id: session.id.clone(),
+                model: Some(model.clone()),
+            },
+        );
+    }
     Ok(Json(
         serde_json::to_value(session).map_err(|e| ApiError::internal(e.to_string()))?,
     ))
@@ -96,10 +202,22 @@ pub async fn create_session(State(state): State<AppState>, body: Bytes) -> ApiRe
 pub async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<QueryMap>,
 ) -> ApiResult<Json<Value>> {
     let session = session_or_404(&state, &id).await?;
     let store = state.store();
-    let messages = store.list_messages(&session.id, MESSAGE_LIMIT).await?;
+    // A long session (thousands of tool calls) has more messages than the
+    // default window, and the window is the *newest* messages: without a signal
+    // the browser would silently show a transcript whose beginning is missing.
+    let limit = query_usize(&query, "messages")?.unwrap_or(MESSAGE_LIMIT);
+    let limit = limit.clamp(1, MESSAGE_LIMIT_MAX);
+    let mut messages = store.list_messages(&session.id, limit + 1).await?;
+    let messages_truncated = messages.len() > limit;
+    if messages_truncated {
+        // `list_messages` returns the tail; drop the overflowing oldest row.
+        let excess = messages.len() - limit;
+        messages.drain(..excess);
+    }
     let runs = store.list_runs(&session.id, RUN_LIMIT).await?;
     let agents = store.list_agents(&session.id).await?;
     let approvals = store.list_pending_approvals(Some(&session.id)).await?;
@@ -108,6 +226,8 @@ pub async fn get_session(
     Ok(Json(json!({
         "session": session,
         "messages": messages,
+        "messages_truncated": messages_truncated,
+        "messages_limit": limit,
         "runs": runs,
         "agents": agents,
         "approvals": approvals,
@@ -123,21 +243,62 @@ pub async fn rename_session(
 ) -> ApiResult<Json<Value>> {
     let _ = session_or_404(&state, &id).await?;
     let body: TitleBody = parse_required(&body, "PATCH /api/sessions/:id")?;
-    let Some(raw) = body.title else {
-        return Err(ApiError::bad_request("title is required"));
+    let title = match body.title {
+        Some(raw) => Some(normalize_title(Some(raw))?),
+        None => None,
     };
-    let title = normalize_title(Some(raw))?;
-    state.store().rename_session(&id, &title).await?;
+    if title.is_none() && body.model.is_none() {
+        return Err(ApiError::bad_request(
+            "title or model is required (send `model: null` to follow the default model)",
+        ));
+    }
+
+    if let Some(title) = &title {
+        state.store().rename_session(&id, title).await?;
+    }
+
+    // `Some(Some(..))` pins the session, `Some(None)` clears the pin.
+    let changed_model = match body.model {
+        Some(Some(model)) => {
+            let selection = model.to_selection();
+            crate::settings::validate_session_model(&state.settings().snapshot(), &selection)
+                .map_err(ApiError::from)?;
+            state
+                .store()
+                .set_session_model(&id, Some(&selection))
+                .await?;
+            Some(Some(selection))
+        }
+        Some(None) => {
+            state.store().set_session_model(&id, None).await?;
+            Some(None)
+        }
+        None => None,
+    };
+
     let session = session_or_404(&state, &id).await?;
-    state.runtime().emit(
-        Some(&id),
-        None,
-        None,
-        Event::SessionRenamed {
-            session_id: id.clone(),
-            title: session.title.clone(),
-        },
-    );
+    if title.is_some() {
+        state.runtime().emit(
+            Some(&id),
+            None,
+            None,
+            Event::SessionRenamed {
+                session_id: id.clone(),
+                title: session.title.clone(),
+            },
+        );
+    }
+    if let Some(model) = changed_model {
+        state.runtime().emit(
+            Some(&id),
+            None,
+            None,
+            Event::SessionModelChanged {
+                session_id: id.clone(),
+                model,
+            },
+        );
+    }
     Ok(Json(
         serde_json::to_value(session).map_err(|e| ApiError::internal(e.to_string()))?,
     ))
@@ -215,6 +376,41 @@ pub async fn send_message(
         })),
     )
         .into_response())
+}
+
+/// `PATCH /api/sessions/:id/model` — pin this session to a provider + model, or
+/// clear the pin with an empty body so it follows the install-wide default.
+///
+/// This is the endpoint the model switcher calls; the session PATCH accepts the
+/// same selection as a `model` field for clients that prefer one request.
+pub async fn set_session_model(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let _ = session_or_404(&state, &id).await?;
+    let selection = crate::routes::parse_body::<SessionModelPinBody>(&body)?.into_selection();
+    if let Some(selection) = &selection {
+        crate::settings::validate_session_model(&state.settings().snapshot(), selection)
+            .map_err(ApiError::from)?;
+    }
+    state
+        .store()
+        .set_session_model(&id, selection.as_ref())
+        .await?;
+    let session = session_or_404(&state, &id).await?;
+    state.runtime().emit(
+        Some(&id),
+        None,
+        None,
+        Event::SessionModelChanged {
+            session_id: id.clone(),
+            model: selection,
+        },
+    );
+    Ok(Json(
+        serde_json::to_value(session).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
 }
 
 pub async fn cancel_run(

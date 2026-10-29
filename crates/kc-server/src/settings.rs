@@ -11,11 +11,139 @@
 //! the rows were persisted. The API key is write-only: it is stored in the
 //! database, kept in memory, and never returned by any getter used for JSON.
 
+// @kc-doc: configuration
+// @kc-title: Change karucode's configuration
+// @kc-summary: The four config layers, which settings apply live, and how secrets and invalid values are handled.
+// @kc-tags: config, settings, configuration, toml, env
+// @kc-applies-to: file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_AUTO_CONTINUE, env:KARUCODE_MAX_CONTINUES, env:KARUCODE_CONTEXT_MAX_CHARS, config:[model], config:[limits], config:[approvals], config:[subagents], config:[[plugins]], config:[[mcp_servers]], route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings
+//
+// # Where the settings come from
+//
+// Highest priority first:
+//
+// 1. **UI / database overrides** - what the Settings screen saved, in the
+//    SQLite `settings` table.
+// 2. **Environment** - `KARUCODE_*` variables (and `OPENAI_*` for the key).
+// 3. **Config file** - `$KARUCODE_CONFIG`,
+//    default `~/.config/karucode/config.toml`.
+// 4. **Built-in defaults**.
+//
+// Command-line flags (`--host`, `--port`, `--workspace`, `--data-dir`,
+// `--config`) are applied on top for the process they start. Start from
+// `config.example.toml` in the repository - it lists every key with a comment.
+//
+// # Pinning a deployment
+//
+// Set `KARUCODE_LOCK_SETTINGS=1` to remove layer 1 entirely: the UI becomes
+// read-only for settings and `PATCH /api/config` answers `403`. This is how you
+// run karucode where the operator, not the browser, owns the model and keys.
+//
+// # What applies without a restart
+//
+// The runtime reads settings through one handle on every step, so a successful
+// `PATCH /api/config` hot-swaps model, sampling, limits, approvals and subagent
+// budgets for the next run. These are process-level and need a restart: `host`,
+// `port`, `workspace` (the default workspace), `data_dir`, `auth_token`,
+// `log_level`, plugin and MCP definitions (those are read at startup; enabling a
+// plugin from the UI restarts that one process).
+//
+// # Secrets
+//
+// API keys are stored in the database and kept in memory, but every getter used
+// for JSON and logging reports `api_key_set: true` instead of the value. The same
+// rule applies to MCP `headers`. Never put a key in a command line: it shows up
+// in `ps`.
+//
+// # Invalid values
+//
+// Validation runs before the value is persisted. A bad `PATCH /api/config`
+// returns `400 bad_request` naming the field (`providers[0].base_url`, ...) and
+// nothing is written, so the running configuration cannot be half-updated.
+//
+// # Long-horizon runs
+//
+// A run is not allowed to die just because it used up its first budget of model
+// turns. The iteration budget belongs to a *segment*, and when a segment ends
+// mid-task the runtime refreshes it and keeps going in the same session, run and
+// transcript - it emits a notice, appends a `[runtime checkpoint]` user turn so
+// the transcript explains the jump, and resets the counter.
+//
+// ```toml
+// [limits]
+// max_iterations = 200   # model turns per segment
+// max_run_secs = 86400   # hard wall clock for the whole run (24h)
+// auto_continue = true   # refresh the budget instead of stopping
+// max_continues = 50     # how many refreshes one run may chain
+// ```
+//
+// The effective ceiling for one run is about
+// `(max_continues + 1) * max_iterations` model turns, or `max_run_secs`,
+// whichever comes first. Set `auto_continue = false` (or `max_continues = 0`) to
+// restore one-shot budgets; the run then stops with status `limit_reached`.
+//
+// Environment: `KARUCODE_MAX_ITERATIONS`, `KARUCODE_MAX_RUN_SECS`,
+// `KARUCODE_AUTO_CONTINUE` (`1/0`, `true/false`, `yes/no`, `on/off`),
+// `KARUCODE_MAX_CONTINUES`, `KARUCODE_CONTEXT_MAX_CHARS`.
+//
+// A budget that runs out is never a reason to re-send the prompt: the work is
+// still in the transcript, and the checkpoint tells the model to continue rather
+// than restart. Subagents follow the same rule with their own numbers:
+// `subagents.max_iterations` per segment, refreshed up to
+// `subagents.max_continues` times, inside `subagents.timeout_secs`.
+//
+// ```toml
+// [subagents]
+// max_iterations = 200    # model turns per subagent segment
+// max_continues = 60      # about 12,200 turns before it must report back
+// timeout_secs = 14400    # 4h wall clock for one delegated task
+// ```
+//
+// `max_continues = 0` restores the one-shot budget (the subagent stops at
+// `max_iterations`), and `limits.auto_continue = false` switches continuation off
+// for runs and subagents alike. Environment:
+// `KARUCODE_SUBAGENT_MAX_ITERATIONS`, `KARUCODE_SUBAGENT_MAX_CONTINUES`,
+// `KARUCODE_SUBAGENT_TIMEOUT_SECS`.
+//
+// `limits.context_max_chars` decides how much conversation is sent to the model.
+// When it overflows, the oldest exchanges are replaced by one compaction notice
+// that keeps a one-line digest of what they said; the persisted transcript keeps
+// every message. `limits.max_tool_calls_per_turn` is a runaway-batch guard, not a
+// work budget - calls past it are skipped with a placeholder result.
+//
+// # Minimal config
+//
+// ```toml
+// host = "127.0.0.1"
+// port = 8787
+// workspace = "/home/me/project"
+//
+// [model]
+// base_url = "http://127.0.0.1:4000/v1"
+// model = "gpt-4o-mini"
+//
+// [approvals]
+// mode = "ask"
+// allow_commands = ["rg", "git status", "cargo test"]
+// ```
+//
+// # Gotchas
+//
+// * Environment beats the config file, so an exported `KARUCODE_MODEL` silently
+//   wins over `[[providers]]`. `GET /api/config` shows the effective value.
+// * The data directory is forced to mode `0700` at startup because the database
+//   holds keys.
+// * `limits.context_max_chars` compacts old turns into a digest; the persisted
+//   transcript is untouched and nothing is sent to the model to summarise.
+// * The settings file is TOML. A malformed file stops startup with the path and
+//   the parse error rather than falling back to defaults.
+//
+// Full reference: `config.example.toml`, `.env.example`, `docs/API.md`.
+
 use crate::error::ApiError;
 use async_trait::async_trait;
 use kc_core::config::{
     ApprovalMode, ApprovalPolicy, Config, Limits, ModelConfig, ModelEntry, ProviderProfile,
-    SubagentConfig,
+    SessionModelSelection, SubagentConfig,
 };
 use kc_core::error::{Error, Result};
 use kc_core::settings::Settings;
@@ -45,6 +173,8 @@ mod keys {
 
     pub const LIMITS_MAX_ITERATIONS: &str = "limits.max_iterations";
     pub const LIMITS_MAX_RUN_SECS: &str = "limits.max_run_secs";
+    pub const LIMITS_AUTO_CONTINUE: &str = "limits.auto_continue";
+    pub const LIMITS_MAX_CONTINUES: &str = "limits.max_continues";
     pub const LIMITS_MAX_TOOL_OUTPUT_BYTES: &str = "limits.max_tool_output_bytes";
     pub const LIMITS_MAX_COMMAND_OUTPUT_BYTES: &str = "limits.max_command_output_bytes";
     pub const LIMITS_COMMAND_TIMEOUT_SECS: &str = "limits.command_timeout_secs";
@@ -61,6 +191,7 @@ mod keys {
 
     pub const SUBAGENTS_MAX_CONCURRENT: &str = "subagents.max_concurrent";
     pub const SUBAGENTS_MAX_ITERATIONS: &str = "subagents.max_iterations";
+    pub const SUBAGENTS_MAX_CONTINUES: &str = "subagents.max_continues";
     pub const SUBAGENTS_ALLOW_RECURSIVE: &str = "subagents.allow_recursive";
     pub const SUBAGENTS_MAX_DEPTH: &str = "subagents.max_depth";
     pub const SUBAGENTS_TIMEOUT_SECS: &str = "subagents.timeout_secs";
@@ -103,6 +234,8 @@ pub struct ModelPatch {
 pub struct LimitsPatch {
     pub max_iterations: Option<u32>,
     pub max_run_secs: Option<u64>,
+    pub auto_continue: Option<bool>,
+    pub max_continues: Option<u32>,
     pub max_tool_output_bytes: Option<usize>,
     pub max_command_output_bytes: Option<usize>,
     pub command_timeout_secs: Option<u64>,
@@ -127,6 +260,7 @@ pub struct ApprovalsPatch {
 pub struct SubagentsPatch {
     pub max_concurrent: Option<usize>,
     pub max_iterations: Option<u32>,
+    pub max_continues: Option<u32>,
     pub allow_recursive: Option<bool>,
     pub max_depth: Option<u8>,
     pub timeout_secs: Option<u64>,
@@ -381,6 +515,10 @@ impl Settings for SettingsHandle {
         self.read().effective_model()
     }
 
+    async fn resolve_model(&self, selection: Option<&SessionModelSelection>) -> ModelConfig {
+        resolve_session_model(&self.snapshot(), selection)
+    }
+
     async fn limits(&self) -> Limits {
         self.read().limits.clone()
     }
@@ -392,6 +530,89 @@ impl Settings for SettingsHandle {
     async fn subagent_config(&self) -> SubagentConfig {
         self.read().subagents.clone()
     }
+}
+
+/// Resolve a session's model selection against the current profiles.
+///
+/// `None` is the install-wide default. A selection whose profile (or model) was
+/// deleted after it was saved falls back to the default / the profile's first
+/// model with a warning instead of failing the run: settings can change while a
+/// session sits idle, and a stale pin must not make the session unusable.
+pub fn resolve_session_model(
+    config: &Config,
+    selection: Option<&SessionModelSelection>,
+) -> ModelConfig {
+    let Some(selection) = selection else {
+        return config.effective_model();
+    };
+    let provider_id = selection.provider.trim();
+    let Some(profile) = config
+        .providers
+        .iter()
+        .find(|profile| profile.id == provider_id)
+    else {
+        warn!(
+            provider = provider_id,
+            "the session's provider profile no longer exists; using the install-wide default model"
+        );
+        return config.effective_model();
+    };
+
+    let mut model = config.model_for_profile(profile);
+    let model_id = selection.model.trim();
+    let known =
+        profile.models.is_empty() || profile.models.iter().any(|entry| entry.id == model_id);
+    if known {
+        model.model = model_id.to_string();
+    } else {
+        warn!(
+            provider = %profile.id,
+            model = model_id,
+            "the session's model is no longer offered by its provider; using the provider's default model"
+        );
+    }
+
+    if let Some(effort) = selection
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+    {
+        // The provider forwards `extra_body` verbatim, which is how every
+        // OpenAI-compatible endpoint spells per-request reasoning effort.
+        model.extra_body.insert(
+            "reasoning_effort".to_string(),
+            serde_json::Value::String(effort.to_string()),
+        );
+    }
+    model
+}
+
+/// Validate a session's model selection against the live provider profiles.
+///
+/// Runs at the HTTP boundary so an unknown profile or a model the profile does
+/// not offer is a `400 bad_request` naming the field, not a run that silently
+/// uses something else.
+pub fn validate_session_model(config: &Config, selection: &SessionModelSelection) -> Result<()> {
+    selection.validate_shape()?;
+    let provider_id = selection.provider.trim();
+    let profile = config
+        .providers
+        .iter()
+        .find(|profile| profile.id == provider_id)
+        .ok_or_else(|| {
+            Error::BadRequest(format!(
+                "model.provider `{provider_id}` does not match any configured provider"
+            ))
+        })?;
+    let model_id = selection.model.trim();
+    if !profile.models.is_empty() && !profile.models.iter().any(|entry| entry.id == model_id) {
+        return Err(Error::BadRequest(format!(
+            "model.model `{model_id}` is not in the model list of provider `{}`",
+            profile.id
+        )));
+    }
+    Ok(())
 }
 
 /// Browser-safe model view. Rounds the f32 tunables so `0.2f32` does not appear
@@ -593,6 +814,12 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         if let Some(v) = limits.max_run_secs {
             config.limits.max_run_secs = v;
         }
+        if let Some(v) = limits.auto_continue {
+            config.limits.auto_continue = v;
+        }
+        if let Some(v) = limits.max_continues {
+            config.limits.max_continues = v;
+        }
         if let Some(v) = limits.max_tool_output_bytes {
             config.limits.max_tool_output_bytes = v;
         }
@@ -645,6 +872,9 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         }
         if let Some(v) = subagents.max_iterations {
             config.subagents.max_iterations = v;
+        }
+        if let Some(v) = subagents.max_continues {
+            config.subagents.max_continues = v;
         }
         if let Some(v) = subagents.allow_recursive {
             config.subagents.allow_recursive = v;
@@ -906,7 +1136,7 @@ fn validate_model_entry(provider_id: &str, model: &ModelEntry) -> Result<()> {
         ("cost_output", model.cost_output),
     ] {
         if let Some(value) = value {
-            if !value.is_finite() || value < 0.0 || value > MAX_MODEL_COST {
+            if !value.is_finite() || !(0.0..=MAX_MODEL_COST).contains(&value) {
                 return Err(Error::BadRequest(format!(
                     "provider `{provider_id}` model `{id}` {field} must be between 0 and {MAX_MODEL_COST} USD per million tokens (got {value})"
                 )));
@@ -1058,17 +1288,19 @@ const LIMITS_BOUNDS: &[(&str, u64, u64)] = &[
     ("limits.max_tool_output_bytes", 256, 1_000_000),
     ("limits.max_command_output_bytes", 256, 1_000_000),
     ("limits.context_max_chars", 10_000, 4_000_000),
-    ("limits.max_iterations", 1, 500),
-    ("limits.max_run_secs", 10, 86_400),
+    ("limits.max_iterations", 1, 10_000),
+    ("limits.max_run_secs", 10, 604_800),
+    ("limits.max_continues", 0, 1_000),
     ("limits.command_timeout_secs", 1, 3_600),
     ("limits.max_command_timeout_secs", 1, 3_600),
     ("limits.search_max_results", 1, 2_000),
-    ("limits.max_tool_calls_per_turn", 1, 32),
+    ("limits.max_tool_calls_per_turn", 1, 256),
 ];
 
 const SUBAGENT_BOUNDS: &[(&str, u64, u64)] = &[
     ("subagents.max_concurrent", 1, 16),
-    ("subagents.max_iterations", 1, 100),
+    ("subagents.max_iterations", 1, 10_000),
+    ("subagents.max_continues", 0, 1_000),
     ("subagents.max_depth", 0, 4),
 ];
 
@@ -1082,7 +1314,7 @@ fn check_bounds(name: &str, value: u64, min: u64, max: u64) -> Result<()> {
 }
 
 fn validate_limits(limits: &Limits) -> Result<()> {
-    let values: [(&str, u64); 10] = [
+    let values: [(&str, u64); 11] = [
         (
             "limits.max_file_read_bytes",
             limits.max_file_read_bytes as u64,
@@ -1098,6 +1330,7 @@ fn validate_limits(limits: &Limits) -> Result<()> {
         ("limits.context_max_chars", limits.context_max_chars as u64),
         ("limits.max_iterations", u64::from(limits.max_iterations)),
         ("limits.max_run_secs", limits.max_run_secs),
+        ("limits.max_continues", u64::from(limits.max_continues)),
         ("limits.command_timeout_secs", limits.command_timeout_secs),
         (
             "limits.max_command_timeout_secs",
@@ -1131,12 +1364,17 @@ fn validate_approvals(policy: &ApprovalPolicy) -> Result<()> {
 }
 
 fn validate_subagents(subagents: &SubagentConfig) -> Result<()> {
-    // `max_depth = 0` is meaningful: it forbids delegation entirely.
-    let values: [(&str, u64); 3] = [
+    // `max_depth = 0` is meaningful: it forbids delegation entirely, and
+    // `max_continues = 0` is the one-shot budget (stop at `max_iterations`).
+    let values: [(&str, u64); 4] = [
         ("subagents.max_concurrent", subagents.max_concurrent as u64),
         (
             "subagents.max_iterations",
             u64::from(subagents.max_iterations),
+        ),
+        (
+            "subagents.max_continues",
+            u64::from(subagents.max_continues),
         ),
         ("subagents.max_depth", u64::from(subagents.max_depth)),
     ];
@@ -1144,11 +1382,9 @@ fn validate_subagents(subagents: &SubagentConfig) -> Result<()> {
         debug_assert_eq!(*name, *expected, "bounds table and values disagree");
         check_bounds(name, *value, *min, *max)?;
     }
-    if subagents.timeout_secs == 0 {
-        return Err(Error::BadRequest(
-            "subagents.timeout_secs must be at least 1".into(),
-        ));
-    }
+    // A subagent may run for hours (a whole coding task), so the ceiling is a
+    // week, not an hour: the realistic bound is `timeout_secs` itself.
+    check_bounds("subagents.timeout_secs", subagents.timeout_secs, 1, 604_800)?;
     Ok(())
 }
 
@@ -1256,6 +1492,8 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
         limits.max_iterations.to_string(),
     );
     rows.insert(keys::LIMITS_MAX_RUN_SECS, limits.max_run_secs.to_string());
+    rows.insert(keys::LIMITS_AUTO_CONTINUE, limits.auto_continue.to_string());
+    rows.insert(keys::LIMITS_MAX_CONTINUES, limits.max_continues.to_string());
     rows.insert(
         keys::LIMITS_MAX_TOOL_OUTPUT_BYTES,
         limits.max_tool_output_bytes.to_string(),
@@ -1312,6 +1550,10 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
     rows.insert(
         keys::SUBAGENTS_MAX_ITERATIONS,
         subagents.max_iterations.to_string(),
+    );
+    rows.insert(
+        keys::SUBAGENTS_MAX_CONTINUES,
+        subagents.max_continues.to_string(),
     );
     rows.insert(
         keys::SUBAGENTS_ALLOW_RECURSIVE,
@@ -1444,6 +1686,16 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
                 config.limits.max_run_secs = v;
             }
         }
+        keys::LIMITS_AUTO_CONTINUE => {
+            if let Some(v) = parse_bool(key, value) {
+                config.limits.auto_continue = v;
+            }
+        }
+        keys::LIMITS_MAX_CONTINUES => {
+            if let Some(v) = parse_value(key, value) {
+                config.limits.max_continues = v;
+            }
+        }
         keys::LIMITS_MAX_TOOL_OUTPUT_BYTES => {
             if let Some(v) = parse_value(key, value) {
                 config.limits.max_tool_output_bytes = v;
@@ -1518,6 +1770,11 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
                 config.subagents.max_iterations = v;
             }
         }
+        keys::SUBAGENTS_MAX_CONTINUES => {
+            if let Some(v) = parse_value(key, value) {
+                config.subagents.max_continues = v;
+            }
+        }
         keys::SUBAGENTS_ALLOW_RECURSIVE => {
             if let Some(v) = parse_bool(key, value) {
                 config.subagents.allow_recursive = v;
@@ -1586,12 +1843,13 @@ mod tests {
             ("limits.max_tool_output_bytes", 255, 1_000_001),
             ("limits.max_command_output_bytes", 255, 1_000_001),
             ("limits.context_max_chars", 9_999, 4_000_001),
-            ("limits.max_iterations", 0, 501),
-            ("limits.max_run_secs", 9, 86_401),
+            ("limits.max_iterations", 0, 10_001),
+            ("limits.max_run_secs", 9, 604_801),
+            ("limits.max_continues", 1_001, 1_001),
             ("limits.command_timeout_secs", 0, 3_601),
             ("limits.max_command_timeout_secs", 0, 3_601),
             ("limits.search_max_results", 0, 2_001),
-            ("limits.max_tool_calls_per_turn", 0, 33),
+            ("limits.max_tool_calls_per_turn", 0, 257),
         ];
         for (field, low, high) in cases {
             for value in [low, high] {
@@ -1616,14 +1874,19 @@ mod tests {
             ("subagents.max_concurrent", 0),
             ("subagents.max_concurrent", 17),
             ("subagents.max_iterations", 0),
-            ("subagents.max_iterations", 101),
+            ("subagents.max_iterations", 10_001),
+            ("subagents.max_continues", 1_001),
             ("subagents.max_depth", 5),
+            ("subagents.timeout_secs", 0),
+            ("subagents.timeout_secs", 604_801),
         ];
         for (field, value) in cases {
             let mut cfg = Config::default();
             match field {
                 "subagents.max_concurrent" => cfg.subagents.max_concurrent = value as usize,
                 "subagents.max_iterations" => cfg.subagents.max_iterations = value as u32,
+                "subagents.max_continues" => cfg.subagents.max_continues = value as u32,
+                "subagents.timeout_secs" => cfg.subagents.timeout_secs = value,
                 _ => cfg.subagents.max_depth = value as u8,
             }
             let error = validate_settings(&cfg).unwrap_err().to_string();
@@ -1633,6 +1896,14 @@ mod tests {
         let mut cfg = Config::default();
         cfg.subagents.max_depth = 0;
         assert!(validate_settings(&cfg).is_ok(), "max_depth = 0 is valid");
+
+        // `max_continues = 0` is the documented one-shot budget, not an error.
+        let mut cfg = Config::default();
+        cfg.subagents.max_continues = 0;
+        assert!(
+            validate_settings(&cfg).is_ok(),
+            "max_continues = 0 restores the one-shot behaviour"
+        );
     }
 
     #[test]
@@ -1650,6 +1921,7 @@ mod tests {
             "limits.context_max_chars" => cfg.limits.context_max_chars = value as usize,
             "limits.max_iterations" => cfg.limits.max_iterations = value as u32,
             "limits.max_run_secs" => cfg.limits.max_run_secs = value,
+            "limits.max_continues" => cfg.limits.max_continues = value as u32,
             "limits.command_timeout_secs" => cfg.limits.command_timeout_secs = value,
             "limits.max_command_timeout_secs" => cfg.limits.max_command_timeout_secs = value,
             "limits.search_max_results" => cfg.limits.search_max_results = value as usize,
@@ -1695,7 +1967,11 @@ mod tests {
             ],
             true,
         );
-        assert_eq!(cfg.limits.max_iterations, 32, "invalid row ignored");
+        assert_eq!(
+            cfg.limits.max_iterations,
+            Limits::default().max_iterations,
+            "invalid row ignored"
+        );
         assert_eq!(cfg.model.base_url, base_url, "invalid row ignored");
         assert!((cfg.model.temperature - 0.5).abs() < f32::EPSILON);
         assert_eq!(cfg.limits.search_max_results, 7);
@@ -2044,6 +2320,115 @@ mod tests {
         assert!(err.contains("active.model"), "{err}");
     }
 
+    fn selection(provider: &str, model: &str, effort: Option<&str>) -> SessionModelSelection {
+        SessionModelSelection {
+            provider: provider.into(),
+            model: model.into(),
+            reasoning_effort: effort.map(str::to_string),
+        }
+    }
+
+    fn two_profile_config() -> Config {
+        let mut cfg = test_config();
+        cfg.model.temperature = 0.4;
+        cfg.providers = vec![
+            ProviderProfile {
+                id: "gateway".into(),
+                base_url: "https://gw.example/v1".into(),
+                api_key: Some("sk-gateway".into()),
+                models: vec![ModelEntry::new("model-a"), ModelEntry::new("model-b")],
+                ..ProviderProfile::default()
+            },
+            ProviderProfile {
+                id: "local".into(),
+                base_url: "http://127.0.0.1:8000/v1".into(),
+                models: vec![ModelEntry::new("tiny")],
+                ..ProviderProfile::default()
+            },
+        ];
+        cfg.active_provider = Some("gateway".into());
+        cfg.active_model = Some("model-a".into());
+        cfg.normalize_providers();
+        cfg
+    }
+
+    #[test]
+    fn no_selection_is_the_install_wide_default() {
+        let cfg = two_profile_config();
+        let resolved = resolve_session_model(&cfg, None);
+        assert_eq!(resolved.model, "model-a");
+        assert_eq!(resolved.base_url, "https://gw.example/v1");
+        assert_eq!(resolved.api_key.as_deref(), Some("sk-gateway"));
+        // Sampling stays global for every session.
+        assert!((resolved.temperature - 0.4).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_session_selection_resolves_to_its_own_profile_and_model() {
+        let cfg = two_profile_config();
+        // The other profile, which is not the install-wide active one.
+        let resolved = resolve_session_model(&cfg, Some(&selection("local", "tiny", None)));
+        assert_eq!(resolved.model, "tiny");
+        assert_eq!(resolved.base_url, "http://127.0.0.1:8000/v1");
+        assert!(resolved.api_key.is_none());
+        // Selecting another model on the active profile does not touch the
+        // install-wide active selection.
+        let resolved = resolve_session_model(&cfg, Some(&selection("gateway", "model-b", None)));
+        assert_eq!(resolved.model, "model-b");
+        assert_eq!(cfg.active_model.as_deref(), Some("model-a"));
+    }
+
+    #[test]
+    fn reasoning_effort_rides_in_extra_body() {
+        let cfg = two_profile_config();
+        let resolved = resolve_session_model(&cfg, Some(&selection("local", "tiny", Some("high"))));
+        assert_eq!(
+            resolved.extra_body.get("reasoning_effort"),
+            Some(&serde_json::Value::String("high".into()))
+        );
+        // A blank effort means "use the endpoint default", not `""`.
+        let resolved = resolve_session_model(&cfg, Some(&selection("local", "tiny", Some("  "))));
+        assert!(!resolved.extra_body.contains_key("reasoning_effort"));
+    }
+
+    #[test]
+    fn a_stale_selection_falls_back_instead_of_failing_the_run() {
+        let cfg = two_profile_config();
+        // Profile deleted after the selection was saved.
+        let resolved = resolve_session_model(&cfg, Some(&selection("gone", "model-x", None)));
+        assert_eq!(resolved.model, "model-a", "falls back to the default");
+        assert_eq!(resolved.base_url, "https://gw.example/v1");
+        // Model removed from an existing profile: use that profile's default.
+        let resolved = resolve_session_model(&cfg, Some(&selection("gateway", "removed", None)));
+        assert_eq!(resolved.model, "model-a");
+        assert_eq!(resolved.base_url, "https://gw.example/v1");
+    }
+
+    #[test]
+    fn session_selection_validation_names_the_field() {
+        let cfg = two_profile_config();
+        assert!(validate_session_model(&cfg, &selection("local", "tiny", Some("high"))).is_ok());
+
+        let err = validate_session_model(&cfg, &selection("nope", "tiny", None))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("model.provider"), "{err}");
+
+        let err = validate_session_model(&cfg, &selection("local", "model-b", None))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("model.model"), "{err}");
+
+        let err = validate_session_model(&cfg, &selection("local", "tiny", Some("extreme")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reasoning_effort"), "{err}");
+
+        let mut blank = selection("local", "tiny", None);
+        blank.provider = "  ".into();
+        assert!(validate_session_model(&cfg, &blank).is_err());
+    }
+
     #[test]
     fn api_key_is_cleared_and_never_in_public_config() {
         let mut cfg = test_config();
@@ -2100,7 +2485,7 @@ mod tests {
             ],
         );
         assert_eq!(cfg.model.temperature, 0.2);
-        assert_eq!(cfg.limits.max_iterations, 32);
+        assert_eq!(cfg.limits.max_iterations, Limits::default().max_iterations);
         assert_eq!(cfg.approvals.mode, ApprovalMode::Ask);
         assert_eq!(cfg.model.api_key.as_deref(), Some("sk-x"));
     }

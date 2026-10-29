@@ -59,7 +59,9 @@ async fn health_and_config_roundtrip() {
     );
     assert_eq!(body["model"]["model"], "test-model");
     assert_eq!(body["model"]["api_key_set"], false);
-    assert_eq!(body["limits"]["max_iterations"], 32);
+    assert_eq!(body["limits"]["max_iterations"], 200);
+    assert_eq!(body["limits"]["auto_continue"], true);
+    assert_eq!(body["limits"]["max_continues"], 50);
     assert_eq!(body["approvals"]["mode"], "ask");
     assert_eq!(body["subagents"]["max_concurrent"], 3);
     assert!(body["plugins"].as_array().unwrap().is_empty());
@@ -163,6 +165,283 @@ async fn sessions_crud() {
         assert_eq!(response.status, StatusCode::NOT_FOUND, "{method} {path}");
         assert_eq!(response.error_code(), "not_found");
     }
+}
+
+/// `PATCH /api/sessions/:id { model }` pins one session without touching the
+/// install-wide selection, and each session's run reaches the provider with the
+/// model it selected.
+#[tokio::test]
+async fn session_model_selection_is_per_session() {
+    let h = HarnessBuilder::new(vec![text("first done"), text("second done")])
+        .build()
+        .await;
+
+    let patched = h
+        .patch(
+            "/api/config",
+            json!({
+                "providers": {
+                    "upsert": [
+                        {
+                            "id": "gateway",
+                            "name": "Gateway",
+                            "base_url": "http://127.0.0.1:9/v1",
+                            "models": [{ "id": "model-a" }, { "id": "model-b" }]
+                        },
+                        {
+                            "id": "local",
+                            "name": "Local",
+                            "base_url": "http://127.0.0.1:9/v1",
+                            "models": [{ "id": "tiny" }]
+                        }
+                    ]
+                },
+                "active": { "provider": "gateway", "model": "model-a" }
+            }),
+        )
+        .await;
+    assert_eq!(patched.status, StatusCode::OK, "{}", patched.text());
+
+    let first = h.create_session(Some("first")).await;
+    let second = h.create_session(Some("second")).await;
+
+    // Pin only the first session to the other profile.
+    let pinned = h
+        .patch(
+            &format!("/api/sessions/{first}"),
+            json!({
+                "model": { "provider": "local", "model": "tiny", "reasoning_effort": "high" }
+            }),
+        )
+        .await;
+    assert_eq!(pinned.status, StatusCode::OK, "{}", pinned.text());
+    let body = pinned.json();
+    assert_eq!(body["model"]["provider"], "local");
+    assert_eq!(body["model"]["model"], "tiny");
+    assert_eq!(body["model"]["reasoning_effort"], "high");
+
+    // The other session has no pin, and the install-wide default did not move.
+    let second_detail = h.get(&format!("/api/sessions/{second}")).await.json();
+    assert!(second_detail["session"].get("model").is_none());
+    let config = h.get("/api/config").await.json();
+    assert_eq!(
+        config["active"],
+        json!({ "provider": "gateway", "model": "model-a" })
+    );
+
+    // The rail summary carries the pin, so a second tab shows the right label.
+    let list = h.get("/api/sessions").await.json();
+    let summary = list["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .find(|session| session["id"] == json!(first))
+        .cloned()
+        .expect("the pinned session is listed");
+    assert_eq!(summary["model"]["model"], "tiny");
+
+    // Each session's own run names the pinned model, not the default.
+    let sent = h
+        .post(
+            &format!("/api/sessions/{first}/messages"),
+            json!({ "content": "[text] hi" }),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.text());
+    h.wait_until_idle(&first).await;
+    let sent = h
+        .post(
+            &format!("/api/sessions/{second}/messages"),
+            json!({ "content": "[text] hi" }),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.text());
+    h.wait_until_idle(&second).await;
+
+    let first_detail = h.get(&format!("/api/sessions/{first}")).await.json();
+    assert_eq!(first_detail["runs"][0]["model"], "tiny");
+    let second_detail = h.get(&format!("/api/sessions/{second}")).await.json();
+    assert_eq!(second_detail["runs"][0]["model"], "model-a");
+
+    // Clearing the pin returns the session to the default model.
+    let cleared = h
+        .patch(&format!("/api/sessions/{first}"), json!({ "model": null }))
+        .await;
+    assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.text());
+    assert!(cleared.json().get("model").is_none());
+
+    // A title PATCH still works and leaves the pin alone.
+    let renamed = h
+        .patch(
+            &format!("/api/sessions/{first}"),
+            json!({ "title": "renamed" }),
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK);
+    assert_eq!(renamed.json()["title"], "renamed");
+    assert!(renamed.json().get("model").is_none());
+}
+
+#[tokio::test]
+async fn session_model_selection_is_validated() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let id = h.create_session(Some("pinned")).await;
+
+    // The default harness config synthesizes one `default` profile serving
+    // `test-model`.
+    for (body, needle) in [
+        (
+            json!({ "model": { "provider": "nope", "model": "test-model" } }),
+            "model.provider",
+        ),
+        (
+            json!({ "model": { "provider": "default", "model": "other" } }),
+            "model.model",
+        ),
+        (
+            json!({ "model": { "provider": "default", "model": "test-model", "reasoning_effort": "extreme" } }),
+            "reasoning_effort",
+        ),
+        (
+            json!({ "model": { "provider": "", "model": "test-model" } }),
+            "model.provider",
+        ),
+    ] {
+        let response = h.patch(&format!("/api/sessions/{id}"), body).await;
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            response.text()
+        );
+        assert_eq!(response.error_code(), "bad_request");
+        let message = response.json()["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(message.contains(needle), "{message}");
+    }
+
+    // A PATCH that changes nothing is a 400, not a silent no-op.
+    let empty = h.patch(&format!("/api/sessions/{id}"), json!({})).await;
+    assert_eq!(empty.status, StatusCode::BAD_REQUEST);
+    assert_eq!(empty.error_code(), "bad_request");
+
+    // Creating a session with a pin validates before anything is written, and
+    // the pin is part of the created session.
+    let bad_create = h
+        .post(
+            "/api/sessions",
+            json!({ "model": { "provider": "nope", "model": "test-model" } }),
+        )
+        .await;
+    assert_eq!(bad_create.status, StatusCode::BAD_REQUEST);
+    let created = h
+        .post(
+            "/api/sessions",
+            json!({ "model": { "provider": "default", "model": "test-model", "reasoning_effort": "low" } }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.text());
+    assert_eq!(created.json()["model"]["provider"], "default");
+    assert_eq!(created.json()["model"]["reasoning_effort"], "low");
+}
+
+#[tokio::test]
+async fn session_model_change_is_broadcast_on_the_stream() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let id = h.create_session(Some("pinned")).await;
+
+    let (status, _, body) = h.open_events("", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let pinned = h
+        .patch(
+            &format!("/api/sessions/{id}"),
+            json!({ "model": { "provider": "default", "model": "test-model", "reasoning_effort": "low" } }),
+        )
+        .await;
+    assert_eq!(pinned.status, StatusCode::OK);
+    let events = collect_events_until(body, "session_model_changed").await;
+    let changed = events
+        .iter()
+        .find(|event| event["type"] == "session_model_changed")
+        .expect("session_model_changed event");
+    assert_eq!(changed["session_id"], id);
+    assert_eq!(changed["model"]["provider"], "default");
+    assert_eq!(changed["model"]["model"], "test-model");
+    assert_eq!(changed["model"]["reasoning_effort"], "low");
+
+    // Clearing is broadcast with `model: null` so every tab drops the badge.
+    let (_, _, body) = h.open_events("", &[]).await;
+    let cleared = h
+        .patch(&format!("/api/sessions/{id}"), json!({ "model": null }))
+        .await;
+    assert_eq!(cleared.status, StatusCode::OK);
+    let events = collect_events_until(body, "session_model_changed").await;
+    let changed = events
+        .iter()
+        .find(|event| event["type"] == "session_model_changed")
+        .expect("clear event");
+    assert_eq!(changed["model"], Value::Null);
+}
+
+/// The model switcher calls `PATCH /api/sessions/:id/model` with the selection
+/// itself; an empty body clears the pin.
+#[tokio::test]
+async fn session_model_subroute_pins_and_clears() {
+    let h = HarnessBuilder::new(vec![text("done")]).build().await;
+    let id = h.create_session(Some("pinned")).await;
+
+    let pinned = h
+        .patch(
+            &format!("/api/sessions/{id}/model"),
+            json!({ "provider": "default", "model": "test-model", "reasoning_effort": "none" }),
+        )
+        .await;
+    assert_eq!(pinned.status, StatusCode::OK, "{}", pinned.text());
+    assert_eq!(pinned.json()["model"]["provider"], "default");
+    assert_eq!(pinned.json()["model"]["model"], "test-model");
+    assert_eq!(pinned.json()["model"]["reasoning_effort"], "none");
+
+    // The pin is what the next run in this session uses.
+    let sent = h
+        .post(
+            &format!("/api/sessions/{id}/messages"),
+            json!({ "content": "[text] hi" }),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.text());
+    h.wait_until_idle(&id).await;
+    let detail = h.get(&format!("/api/sessions/{id}")).await.json();
+    assert_eq!(detail["runs"][0]["model"], "test-model");
+
+    // An empty body clears the pin.
+    let cleared = h
+        .patch(&format!("/api/sessions/{id}/model"), json!({}))
+        .await;
+    assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.text());
+    assert!(cleared.json().get("model").is_none());
+
+    // Half a selection is rejected, not half-applied.
+    let half = h
+        .patch(
+            &format!("/api/sessions/{id}/model"),
+            json!({ "provider": "default" }),
+        )
+        .await;
+    assert_eq!(half.status, StatusCode::BAD_REQUEST);
+    assert_eq!(half.error_code(), "bad_request");
+
+    // An unknown session is a 404 on this route too.
+    let missing = h
+        .patch(
+            "/api/sessions/s_missing/model",
+            json!({ "provider": "default", "model": "test-model" }),
+        )
+        .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    assert_eq!(missing.error_code(), "not_found");
 }
 
 #[tokio::test]
@@ -363,7 +642,10 @@ async fn projects_scope_sessions_workspace_and_runs() {
         ))
         .await;
     assert_eq!(file.status, StatusCode::OK, "{}", file.text());
-    assert!(file.json()["content"].as_str().unwrap().contains("hello from two"));
+    assert!(file.json()["content"]
+        .as_str()
+        .unwrap()
+        .contains("hello from two"));
     let file_default = h
         .get(&format!(
             "/api/workspace/file?path=made-by-project-run.txt&project={default_id}"
@@ -867,7 +1149,7 @@ async fn provider_profiles_can_be_saved_selected_and_probed() {
 
     // The selection and profiles survive a restart (persisted rows).
     let config = h.get("/api/config").await.json();
-    assert!(config["providers"].as_array().unwrap().len() >= 1);
+    assert!(!config["providers"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -920,6 +1202,54 @@ async fn models_catalog_lists_providers_and_filters_one() {
 
     let bad_query = h.get("/api/models/catalog?refresh=maybe").await;
     assert_eq!(bad_query.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn models_lookup_resolves_gateway_prefixed_ids() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let catalog = kc_server::catalog::parse_catalog(&json!({
+        "deepseek": {
+            "id": "deepseek", "name": "DeepSeek",
+            "models": {
+                "deepseek-v4.1-flash-1017": {
+                    "id": "deepseek-v4.1-flash-1017", "name": "DeepSeek V4.1 Flash",
+                    "tool_call": true,
+                    "limit": {"context": 128000, "output": 8192},
+                    "cost": {"input": 0.07, "output": 0.28}
+                }
+            }
+        }
+    }))
+    .unwrap();
+    h.state.catalog().seed(catalog);
+
+    // provider/model and provider/upstream/model both resolve to the bare id.
+    for gateway_id in [
+        "deepseek-v4.1-flash-1017",
+        "a6api/deepseek-v4.1-flash-1017",
+        "a6api/ali/deepseek-v4.1-flash-1017",
+    ] {
+        let response = h
+            .get(&format!("/api/models/lookup?model={gateway_id}"))
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{gateway_id}");
+        let body = response.json();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["match"]["provider"], "deepseek", "{gateway_id}");
+        assert_eq!(body["match"]["matched_id"], "deepseek-v4.1-flash-1017");
+        assert_eq!(body["match"]["model"]["context_window"], 128000);
+        assert_eq!(body["match"]["model"]["cost_output"], 0.28);
+    }
+
+    // An unknown id is an ordinary miss, not an error.
+    let miss = h.get("/api/models/lookup?model=a6api/ali/nope-9000").await;
+    assert_eq!(miss.status, StatusCode::OK);
+    assert_eq!(miss.json()["ok"], true);
+    assert_eq!(miss.json()["match"], Value::Null);
+
+    // The parameter itself is required.
+    let bare = h.get("/api/models/lookup").await;
+    assert_eq!(bare.status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -1534,7 +1864,7 @@ async fn a_bearer_token_disables_the_host_restriction() {
 async fn out_of_range_settings_are_rejected_with_the_bounds() {
     let h = HarnessBuilder::new(Vec::new()).build().await;
 
-    let cases: [(&str, Value); 14] = [
+    let cases: [(&str, Value); 16] = [
         (
             "limits.max_file_read_bytes",
             json!({ "limits": { "max_file_read_bytes": 4_000_000_000u64 } }),
@@ -1553,7 +1883,11 @@ async fn out_of_range_settings_are_rejected_with_the_bounds() {
         ),
         (
             "limits.max_iterations",
-            json!({ "limits": { "max_iterations": 501 } }),
+            json!({ "limits": { "max_iterations": 10_001 } }),
+        ),
+        (
+            "limits.max_continues",
+            json!({ "limits": { "max_continues": 1_001 } }),
         ),
         (
             "limits.max_run_secs",
@@ -1573,7 +1907,7 @@ async fn out_of_range_settings_are_rejected_with_the_bounds() {
         ),
         (
             "limits.max_tool_calls_per_turn",
-            json!({ "limits": { "max_tool_calls_per_turn": 33 } }),
+            json!({ "limits": { "max_tool_calls_per_turn": 257 } }),
         ),
         (
             "subagents.max_concurrent",
@@ -1581,7 +1915,11 @@ async fn out_of_range_settings_are_rejected_with_the_bounds() {
         ),
         (
             "subagents.max_iterations",
-            json!({ "subagents": { "max_iterations": 101 } }),
+            json!({ "subagents": { "max_iterations": 10_001 } }),
+        ),
+        (
+            "subagents.max_continues",
+            json!({ "subagents": { "max_continues": 1_001 } }),
         ),
         (
             "subagents.max_depth",
@@ -1617,7 +1955,7 @@ async fn out_of_range_settings_are_rejected_with_the_bounds() {
     // Rejections are no-ops: the OOM-enabling value never took effect.
     let config = h.get("/api/config").await.json();
     assert_eq!(config["limits"]["max_file_read_bytes"], 200_000);
-    assert_eq!(config["limits"]["max_iterations"], 32);
+    assert_eq!(config["limits"]["max_iterations"], 200);
     assert_eq!(config["subagents"]["max_depth"], 1);
 
     // The bounds themselves are inclusive.
@@ -1631,14 +1969,16 @@ async fn out_of_range_settings_are_rejected_with_the_bounds() {
                     "max_tool_output_bytes": 1_000_000,
                     "max_command_output_bytes": 1_000_000,
                     "context_max_chars": 10_000,
-                    "max_iterations": 500,
-                    "max_run_secs": 86_400,
+                    "max_iterations": 10_000,
+                    "max_run_secs": 604_800,
+                    "auto_continue": false,
+                    "max_continues": 1_000,
                     "command_timeout_secs": 3_600,
                     "max_command_timeout_secs": 3_600,
                     "search_max_results": 2_000,
-                    "max_tool_calls_per_turn": 32
+                    "max_tool_calls_per_turn": 256
                 },
-                "subagents": { "max_concurrent": 16, "max_iterations": 100, "max_depth": 0 }
+                "subagents": { "max_concurrent": 16, "max_iterations": 500, "max_depth": 0 }
             }),
         )
         .await;
@@ -1831,7 +2171,7 @@ async fn a_corrupt_persisted_row_cannot_prevent_startup() {
         config.model.base_url, configured_base_url,
         "the file/env base_url must stay in force"
     );
-    assert_eq!(config.limits.max_iterations, 32, "invalid row ignored");
+    assert_eq!(config.limits.max_iterations, 200, "invalid row ignored");
     assert_eq!(config.limits.search_max_results, 7, "valid row applied");
     // (The skip is logged at WARN with the key; `apply_rows_resilient`'s unit
     // test covers the policy itself, this covers the startup path.)
@@ -2001,4 +2341,42 @@ async fn an_auto_title_is_announced_on_the_event_stream() {
     );
 
     h.wait_until_idle(&id).await;
+}
+
+#[tokio::test]
+async fn session_detail_pages_the_transcript_and_says_when_it_is_truncated() {
+    let h = HarnessBuilder::new(vec![text("hello")]).build().await;
+    let session = h
+        .post("/api/sessions", json!({ "title": "long" }))
+        .await
+        .json();
+    let id = session["id"].as_str().unwrap().to_string();
+    h.post(
+        &format!("/api/sessions/{id}/messages"),
+        json!({ "content": "[text] hi" }),
+    )
+    .await;
+    h.wait_until_idle(&id).await;
+
+    // Default window: everything, and the client is told nothing is missing.
+    let full = h.get(&format!("/api/sessions/{id}")).await.json();
+    let all = full["messages"].as_array().unwrap();
+    assert_eq!(all.len(), 2, "user + assistant: {all:?}");
+    assert_eq!(full["messages_truncated"], false);
+    assert_eq!(full["messages_limit"], 5000);
+
+    // A smaller window returns the NEWEST messages and says so, so a client can
+    // offer "load older" instead of pretending the session starts there.
+    let tail = h
+        .get(&format!("/api/sessions/{id}?messages=1"))
+        .await
+        .json();
+    assert_eq!(tail["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(tail["messages"][0]["role"], "assistant");
+    assert_eq!(tail["messages_truncated"], true);
+    assert_eq!(tail["messages_limit"], 1);
+
+    // A non-numeric window is a 400, not a silent default.
+    let bad = h.get(&format!("/api/sessions/{id}?messages=lots")).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
 }

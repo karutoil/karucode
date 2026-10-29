@@ -67,6 +67,18 @@ pub struct Catalog {
     providers: BTreeMap<String, CatalogProvider>,
 }
 
+/// The best catalog entry for an arbitrary model id, found by [`Catalog::lookup`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CatalogMatch {
+    /// models.dev provider id the match came from.
+    pub provider: String,
+    /// The suffix of the queried id that matched (always equals `model.id`);
+    /// shorter than the query when routing prefixes were stripped.
+    pub matched_id: String,
+    #[serde(flatten)]
+    pub model: CatalogModel,
+}
+
 impl Catalog {
     pub fn providers(&self) -> impl Iterator<Item = &CatalogProvider> {
         self.providers.values()
@@ -82,6 +94,67 @@ impl Catalog {
 
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
+    }
+
+    /// Find metadata for a model id that may carry gateway routing prefixes.
+    ///
+    /// Gateways fronting several providers expose ids like `a6api/model` or
+    /// `a6api/upstream/model`, while models.dev keys models under its own
+    /// provider ids with (usually) bare ids. So the whole id is tried first
+    /// (catalog ids can themselves contain slashes, e.g. OpenRouter's
+    /// `openai/gpt-4o`), then leading `segment/` prefixes are stripped one at
+    /// a time until something matches: longest surviving suffix wins.
+    ///
+    /// Matching is case-insensitive. When several catalog providers carry the
+    /// winning suffix, a provider whose id appears as a segment of the queried
+    /// id is preferred (`a6api/azure/gpt-4o` favours the `azure` entry over
+    /// the `openai` one); ties break alphabetically so the answer is stable.
+    pub fn lookup(&self, model_id: &str) -> Option<CatalogMatch> {
+        let query = model_id.trim().to_lowercase();
+        if query.is_empty() {
+            return None;
+        }
+        // Candidate suffixes, longest first: the id itself, then everything
+        // after the 1st, 2nd, ... slash.
+        let mut candidates = vec![query.as_str()];
+        candidates.extend(query.match_indices('/').map(|(at, _)| &query[at + 1..]));
+
+        // Segments of the original id, for the provider-id tie-break.
+        let segments: Vec<&str> = query.split('/').collect();
+
+        for candidate in candidates {
+            if candidate.is_empty() {
+                continue;
+            }
+            let mut hits: Vec<(&CatalogProvider, &CatalogModel)> = self
+                .providers
+                .values()
+                .filter_map(|provider| {
+                    provider
+                        .models
+                        .iter()
+                        .find(|model| model.id.eq_ignore_ascii_case(candidate))
+                        .map(|model| (provider, model))
+                })
+                .collect();
+            if hits.is_empty() {
+                continue;
+            }
+            // BTreeMap values iterate in id order, so ties are already
+            // deterministic; the segment bonus just reorders stably.
+            hits.sort_by_key(|(provider, _)| {
+                !segments
+                    .iter()
+                    .any(|segment| provider.id.eq_ignore_ascii_case(segment))
+            });
+            let (provider, model) = hits[0];
+            return Some(CatalogMatch {
+                provider: provider.id.clone(),
+                matched_id: model.id.clone(),
+                model: model.clone(),
+            });
+        }
+        None
     }
 }
 
@@ -486,6 +559,120 @@ mod tests {
         assert_eq!(model.max_output_tokens, None, "negative limits are dropped");
         assert_eq!(model.cost_input, None, "negative costs are dropped");
         assert_eq!(model.cost_output, None);
+    }
+
+    fn lookup_catalog() -> Catalog {
+        parse_catalog(&json!({
+            "deepseek": {
+                "id": "deepseek",
+                "name": "DeepSeek",
+                "models": {
+                    "deepseek-v4.1-flash-1017": {
+                        "id": "deepseek-v4.1-flash-1017",
+                        "name": "DeepSeek V4.1 Flash",
+                        "limit": {"context": 128000, "output": 8192}
+                    }
+                }
+            },
+            "openrouter": {
+                "id": "openrouter",
+                "name": "OpenRouter",
+                "models": {
+                    "openai/gpt-4o": {"id": "openai/gpt-4o", "name": "GPT-4o (OR)"}
+                }
+            },
+            "openai": {
+                "id": "openai",
+                "name": "OpenAI",
+                "models": {
+                    "gpt-4o": {
+                        "id": "gpt-4o",
+                        "name": "GPT-4o",
+                        "limit": {"context": 128000}
+                    },
+                    "gpt-4o-mini": {"id": "gpt-4o-mini", "name": "GPT-4o mini"}
+                }
+            },
+            "azure": {
+                "id": "azure",
+                "name": "Azure",
+                "models": {
+                    "gpt-4o": {"id": "gpt-4o", "name": "GPT-4o (Azure)"},
+                    "gpt-4o-mini": {"id": "gpt-4o-mini", "name": "GPT-4o mini (Azure)"}
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn lookup_matches_bare_and_exact_ids() {
+        let catalog = lookup_catalog();
+        let hit = catalog.lookup("deepseek-v4.1-flash-1017").unwrap();
+        assert_eq!(hit.provider, "deepseek");
+        assert_eq!(hit.matched_id, "deepseek-v4.1-flash-1017");
+        assert_eq!(hit.model.context_window, Some(128_000));
+        // A catalog id that itself contains a slash matches whole.
+        let hit = catalog.lookup("openai/gpt-4o").unwrap();
+        assert_eq!(hit.provider, "openrouter", "exact id beats suffixes");
+        assert_eq!(hit.matched_id, "openai/gpt-4o");
+    }
+
+    #[test]
+    fn lookup_strips_gateway_prefixes() {
+        let catalog = lookup_catalog();
+        // provider/model
+        let hit = catalog.lookup("a6api/deepseek-v4.1-flash-1017").unwrap();
+        assert_eq!(hit.provider, "deepseek");
+        assert_eq!(hit.matched_id, "deepseek-v4.1-flash-1017");
+        // provider/upstream/model
+        let hit = catalog
+            .lookup("a6api/ali/deepseek-v4.1-flash-1017")
+            .unwrap();
+        assert_eq!(hit.provider, "deepseek");
+        assert_eq!(hit.model.name, "DeepSeek V4.1 Flash");
+        // Deeper routing keeps working.
+        let hit = catalog
+            .lookup("gw/region/ali/deepseek-v4.1-flash-1017")
+            .unwrap();
+        assert_eq!(hit.provider, "deepseek");
+    }
+
+    #[test]
+    fn lookup_is_case_insensitive_and_prefers_the_longest_suffix() {
+        let catalog = lookup_catalog();
+        let hit = catalog
+            .lookup("  A6API/ALI/DeepSeek-V4.1-Flash-1017 ")
+            .unwrap();
+        assert_eq!(hit.provider, "deepseek");
+        // `gpt-4o` exists bare (openai, azure) and under a slash (openrouter):
+        // the longer suffix `openai/gpt-4o` wins for a gateway id ending in it.
+        let hit = catalog.lookup("a6api/openai/gpt-4o").unwrap();
+        assert_eq!(hit.provider, "openrouter");
+        assert_eq!(hit.matched_id, "openai/gpt-4o");
+    }
+
+    #[test]
+    fn lookup_breaks_ties_with_a_provider_segment() {
+        let catalog = lookup_catalog();
+        // `gpt-4o-mini` exists under both azure and openai. Alphabetical order
+        // would pick azure; a segment naming openai overrides that.
+        let hit = catalog.lookup("a6api/openai/gpt-4o-mini").unwrap();
+        assert_eq!(hit.provider, "openai");
+        assert_eq!(hit.matched_id, "gpt-4o-mini");
+        // No segment names a catalog provider: the tie breaks alphabetically,
+        // so the answer is deterministic.
+        let hit = catalog.lookup("a6api/east/gpt-4o-mini").unwrap();
+        assert_eq!(hit.provider, "azure");
+    }
+
+    #[test]
+    fn lookup_reports_nothing_for_unknown_or_empty_ids() {
+        let catalog = lookup_catalog();
+        assert!(catalog.lookup("a6api/ali/no-such-model").is_none());
+        assert!(catalog.lookup("").is_none());
+        assert!(catalog.lookup("   ").is_none());
+        assert!(catalog.lookup("/").is_none());
     }
 
     #[tokio::test]

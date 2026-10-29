@@ -30,6 +30,7 @@ pub fn api_router() -> Router<AppState> {
         )
         .route("/provider/test", post(config::provider_test))
         .route("/models/catalog", get(models::catalog))
+        .route("/models/lookup", get(models::lookup))
         .route("/stats", get(config::stats))
         .route(
             "/sessions",
@@ -44,6 +45,10 @@ pub fn api_router() -> Router<AppState> {
         .route("/sessions/:id/messages", post(sessions::send_message))
         .route("/sessions/:id/cancel", post(sessions::cancel_run))
         .route(
+            "/sessions/:id/model",
+            axum::routing::patch(sessions::set_session_model),
+        )
+        .route(
             "/projects",
             get(projects::list_projects).post(projects::create_project),
         )
@@ -55,6 +60,9 @@ pub fn api_router() -> Router<AppState> {
         .route("/approvals/:id", post(approvals::resolve_approval))
         .route("/workspace/tree", get(workspace::tree))
         .route("/workspace/file", get(workspace::file))
+        // The upload body is the raw file, not JSON, so its size is enforced by
+        // the handler (`MAX_UPLOAD_BYTES`) instead of axum's 2 MB default limit.
+        .route("/workspace/upload", post(workspace::upload))
         .route("/git/status", get(git::status))
         .route("/git/diff", get(git::diff))
         .route("/plugins", get(plugins::list_plugins))
