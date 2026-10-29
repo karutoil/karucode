@@ -293,9 +293,14 @@ impl StreamState {
 
     fn fail(&mut self, message: String) {
         let message = redact(&message, &self.secrets);
+        // A stream that ends inside an SSE event arrives here: the body was cut
+        // mid-frame by a dying upstream or a proxy, so the next attempt can
+        // land on a healthy channel. Nothing in this path is a rejected
+        // request (those come back as an HTTP status or an `error` payload),
+        // so it is always worth another attempt.
         self.queue.push_back(Ok(ProviderChunk::Error {
             message,
-            retryable: false,
+            retryable: true,
         }));
         self.failed = true;
         self.input_done = true;
@@ -505,6 +510,25 @@ mod tests {
         assert_eq!(items.len(), 1);
         match items[0].as_ref().unwrap() {
             ProviderChunk::Error { retryable, .. } => assert!(*retryable),
+            other => panic!("unexpected chunk: {other:?}"),
+        }
+    }
+
+    // A body that stops in the middle of an event is what a dying upstream
+    // channel or a cut proxy connection looks like, so the error must stay
+    // restartable instead of being reported as a rejected request.
+    #[tokio::test]
+    async fn a_truncated_event_is_a_retryable_error() {
+        let items = drain(state_with_chunks(vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":\"half an ans",
+        ]))
+        .await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        match items[0].as_ref().unwrap() {
+            ProviderChunk::Error { message, retryable } => {
+                assert!(*retryable, "a cut body must be retryable: {message}");
+                assert!(message.contains("malformed JSON"), "{message}");
+            }
             other => panic!("unexpected chunk: {other:?}"),
         }
     }

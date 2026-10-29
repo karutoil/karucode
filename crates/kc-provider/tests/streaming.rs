@@ -249,7 +249,11 @@ async fn malformed_sse_chunk_emits_error_chunk_and_ends_stream() {
     match &chunks[1] {
         ProviderChunk::Error { message, retryable } => {
             assert!(message.contains("malformed JSON"), "{message}");
-            assert!(!retryable);
+            // A frame that cannot be parsed is a body cut or corrupted in
+            // flight, not a rejected request: the attempt is worth repeating
+            // (the provider layer re-opens the stream pre-content, the runtime
+            // restarts it mid-answer).
+            assert!(retryable, "a corrupt frame must stay retryable");
         }
         other => panic!("expected Error chunk, got {other:?}"),
     }
