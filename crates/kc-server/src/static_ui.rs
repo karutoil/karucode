@@ -4,7 +4,10 @@
 //! * `KARUCODE_WEB_DIR` (or `Config::web_dir`) is consulted first so `npm run
 //!   dev`/a rebuilt `dist` can be served without recompiling.
 //! * otherwise the `web/dist` folder embedded at compile time (`embed-ui`
-//!   feature, on by default) is used.
+//!   feature, on by default) is used. `build.rs` refreshes that folder from the
+//!   frontend sources, and rust-embed's `debug-embed` feature makes dev builds
+//!   embed it as well instead of reading the folder at runtime — so a debug
+//!   `karucode` is as self-contained as a release one.
 //! * if neither has a file, non-`/api` paths fall back to `index.html` (SPA
 //!   routing) and finally to a placeholder page that explains how to build the
 //!   UI. A missing `web/dist` is therefore not a build error.
