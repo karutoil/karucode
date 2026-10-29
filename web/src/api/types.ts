@@ -21,6 +21,7 @@ export type ErrorCode =
   | 'plugin'
   | 'timeout'
   | 'path_escape'
+  | 'payload_too_large'
   | 'internal';
 
 export interface ApiErrorBody {
@@ -139,6 +140,24 @@ export interface CatalogResponse {
   error: string | null;
 }
 
+/** The best catalog entry for an arbitrary (possibly gateway-prefixed) id. */
+export interface CatalogLookupMatch {
+  /** models.dev provider id the metadata came from. */
+  provider: string;
+  /** The suffix of the queried id that matched; equals `model.id`. */
+  matched_id: string;
+  model: CatalogModel;
+}
+
+export interface CatalogLookupResponse {
+  ok: boolean;
+  /** Null when the catalog does not carry the model (an ordinary miss). */
+  match: CatalogLookupMatch | null;
+  fetched_at_ms: number;
+  stale: boolean;
+  error: string | null;
+}
+
 export interface ProviderTestRequest {
   profile?: string;
   base_url?: string;
@@ -162,6 +181,8 @@ export interface PublicModelConfig {
 export interface Limits {
   max_iterations: number;
   max_run_secs: number;
+  auto_continue: boolean;
+  max_continues: number;
   max_tool_output_bytes: number;
   max_command_output_bytes: number;
   command_timeout_secs: number;
@@ -184,6 +205,7 @@ export interface ApprovalPolicy {
 export interface SubagentConfig {
   max_concurrent: number;
   max_iterations: number;
+  max_continues: number;
   allow_recursive: boolean;
   max_depth: number;
   timeout_secs: number;
@@ -271,10 +293,20 @@ export type RunStatus =
   | 'interrupted'
   | 'limit_reached';
 
+/** Per-session model pin: provider + model, optionally a reasoning effort. */
+export interface SessionModelSelection {
+  provider: string;
+  model: string;
+  /** `none|minimal|low|medium|high|max`; absent follows the endpoint default. */
+  reasoning_effort?: string | null;
+}
+
 export interface Session {
   id: string;
   title: string;
   workspace: string;
+  /** Per-session model pin; unset follows the install-wide default. */
+  model?: SessionModelSelection | null;
   /** Project the session runs in (null for a session created without one). */
   project_id: string | null;
   created_at: number;
@@ -410,6 +442,48 @@ export interface WorkspaceTree {
   entries: WorkspaceEntry[];
 }
 
+/**
+ * `POST /api/workspace/upload?session=<id>&name=<file>[&project=<id>]`.
+ *
+ * The request body is the raw file bytes (no base64, no multipart) with
+ * `Content-Type: application/octet-stream`; the server stores the bytes
+ * verbatim under `<project>/.karucode/attachments/<session>/` so the
+ * workspace-confined file tools can read them back.
+ */
+export interface AttachmentUploadRequest {
+  /** Original file name, without directories (`<=160` bytes). */
+  name: string;
+  /** Raw bytes, at most 8 MiB. */
+  data: Blob | ArrayBuffer | Uint8Array;
+  /** MIME type; omit for the contract's `application/octet-stream`. */
+  contentType?: string;
+}
+
+/**
+ * `201` response of `POST /api/workspace/upload`.
+ *
+ * Only these three fields are guaranteed by the contract. The server may send
+ * more (`session`, `content_type`, `workspace`, `deduplicated`) — read them only
+ * as hints.
+ */
+export interface AttachmentUploadResponse {
+  /** Workspace-relative path — usable in an @mention or a tool argument. */
+  path: string;
+  /**
+   * Name actually written, which can differ from the requested one on a
+   * collision (`report.pdf` → `report-1.pdf`). Compose references from `path`.
+   */
+  name: string;
+  /** Bytes written. */
+  size: number;
+  session?: string;
+  content_type?: string;
+  /** Absolute project root the file was written under (hint). */
+  workspace?: string;
+  /** True when the requested name was already taken (hint). */
+  deduplicated?: boolean;
+}
+
 export interface WorkspaceFile {
   path: string;
   content: string;
@@ -488,6 +562,7 @@ export type KnownEvent = EventEnvelope &
   (
     | { type: 'session_created'; session_id: string; title: string }
     | { type: 'session_renamed'; session_id: string; title: string }
+    | { type: 'session_model_changed'; session_id: string; model: SessionModelSelection | null }
     | { type: 'session_deleted'; session_id: string }
     | { type: 'run_started'; run_id: string; prompt: string }
     | { type: 'run_finished'; run_id: string; status: RunStatus; error?: string | null }
@@ -544,7 +619,11 @@ export type KnownEvent = EventEnvelope &
         summary: string;
         error?: string | null;
       }
+    | { type: 'stream_retry'; attempt: number; max_attempts: number; reason: string }
     | { type: 'notice'; level: string; message: string }
+    // Transport marker, not a session event: the SSE pump dropped frames for this
+    // client. Exempt from the `seq` dedupe (see api/events.ts).
+    | { type: 'stream_lagged'; skipped: number }
     | { type: 'error'; message: string; kind?: string | null }
   );
 
@@ -556,7 +635,14 @@ export interface RawEvent extends EventEnvelope {
   [key: string]: unknown;
 }
 
-export type ConnectionState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'unauthorized';
+export type ConnectionState =
+  | 'idle'
+  | 'connecting'
+  | 'open'
+  | 'reconnecting'
+  | 'unauthorized'
+  /** The server refused this origin (Host allowlist): retrying cannot help. */
+  | 'blocked';
 
 export interface Toast {
   id: number;

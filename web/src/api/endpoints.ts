@@ -2,6 +2,9 @@ import { apiRequest, withQuery } from './client';
 import type {
   ApprovalDecision,
   ApprovalRecord,
+  AttachmentUploadRequest,
+  AttachmentUploadResponse,
+  CatalogLookupResponse,
   CatalogResponse,
   Config,
   ConfigPatch,
@@ -16,6 +19,7 @@ import type {
   ProviderTestResult,
   Session,
   SessionDetail,
+  SessionModelSelection,
   SessionSummary,
   Stats,
   WorkspaceFile,
@@ -63,6 +67,21 @@ export function getModelsCatalog(
       provider: params.provider,
       refresh: params.refresh ? 'true' : undefined,
     }),
+    options,
+  );
+}
+
+/**
+ * models.dev metadata for one model id. Gateway routing prefixes
+ * (`a6api/model`, `a6api/upstream/model`) are stripped server-side until a
+ * suffix matches; `match` is null when the catalog does not carry the model.
+ */
+export function lookupModelMetadata(
+  model: string,
+  options: CallOptions = {},
+): Promise<CatalogLookupResponse> {
+  return apiRequest<CatalogLookupResponse>(
+    withQuery('/api/models/lookup', { model }),
     options,
   );
 }
@@ -151,6 +170,22 @@ export function renameSession(id: string, title: string, options: CallOptions = 
   });
 }
 
+/**
+ * Pin this session to a provider + model (optionally with a reasoning effort),
+ * or pass null to follow the install-wide default again.
+ */
+export function setSessionModel(
+  id: string,
+  selection: SessionModelSelection | null,
+  options: CallOptions = {},
+): Promise<Session> {
+  return apiRequest<Session>(`/api/sessions/${encodeURIComponent(id)}/model`, {
+    ...options,
+    method: 'PATCH',
+    body: selection ?? {},
+  });
+}
+
 export function deleteSession(id: string, options: CallOptions = {}): Promise<{ deleted: boolean }> {
   return apiRequest<{ deleted: boolean }>(`/api/sessions/${encodeURIComponent(id)}`, {
     ...options,
@@ -214,6 +249,42 @@ export function getWorkspaceFile(
   return apiRequest<WorkspaceFile>(
     withQuery('/api/workspace/file', { path, project: project ?? undefined }),
     options,
+  );
+}
+
+/** Scope for an upload: the session owns the directory, the project the root. */
+export interface UploadAttachmentParams {
+  session: string;
+  project?: string | null;
+}
+
+/**
+ * Store a local file in the workspace so the agent can open it.
+ *
+ * `POST /api/workspace/upload?session=<id>&name=<file>[&project=<id>]` takes
+ * the raw bytes as the request body and answers `201` with the workspace-relative
+ * path under `.karucode/attachments/<session>/` that the message must reference.
+ * Names are never overwritten, so the response may report `report-1.pdf` where
+ * `report.pdf` was sent: always compose the reference from the RESPONSE, never
+ * from the local `File.name`.
+ */
+export function uploadAttachment(
+  file: AttachmentUploadRequest,
+  params: UploadAttachmentParams,
+  options: CallOptions = {},
+): Promise<AttachmentUploadResponse> {
+  return apiRequest<AttachmentUploadResponse>(
+    withQuery('/api/workspace/upload', {
+      session: params.session,
+      name: file.name,
+      project: params.project ?? undefined,
+    }),
+    {
+      ...options,
+      method: 'POST',
+      rawBody: file.data,
+      contentType: file.contentType,
+    },
   );
 }
 
