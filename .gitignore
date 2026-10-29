@@ -10,3 +10,7 @@ web/dist/
 # generated evidence is committed
 exports/
 .cache/
+
+# local design mock: a single-file reference the theme engine was derived from,
+# not a build input (the values live in web/src/theme/builtins.ts)
+karucode-v3-themes.html
