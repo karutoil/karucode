@@ -3,6 +3,68 @@
 //!
 //! [`AppState`] is a cheap `Arc` clone so axum can hand it to every handler.
 
+// @kc-doc: projects
+// @kc-title: Work on more than one project
+// @kc-summary: How projects map to directories, how sessions are confined to one, and what happens when a project's directory moves or is deleted.
+// @kc-tags: projects, sessions, workspace, directories
+// @kc-applies-to: route:GET /api/projects, route:POST /api/projects, route:PATCH /api/projects/:id, route:DELETE /api/projects/:id, route:GET /api/sessions, route:PATCH /api/sessions/:id/model, config:workspace, env:KARUCODE_WORKSPACE, cmd:--workspace, ui:ProjectRail, concept:session workspace
+//
+// A **project** is a canonical directory plus a display name. It is not a git
+// repository, a branch or a worktree - just the root every run in its sessions is
+// confined to.
+//
+// # The default project
+//
+// On first start karucode creates one project for the configured workspace
+// (`--workspace` / `KARUCODE_WORKSPACE`, default: the directory the server was
+// started in). Sessions from before projects existed are attached to the project
+// matching their recorded directory, created if necessary.
+//
+// # Creating and switching
+//
+// Use the project rail in the UI, or:
+//
+// ```bash
+// curl -s -X POST localhost:8787/api/projects \
+//   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+//   -d '{"path":"/home/me/other-repo","name":"other-repo"}'
+// ```
+//
+// Creating a project does not move or copy files. Switching project changes which
+// sessions are listed and which directory workspace, git and file requests answer
+// for (`?project=<id>` on those routes).
+//
+// # Confinement
+//
+// A run's file tools resolve paths inside its session's project directory only:
+// `..`, absolute paths outside it and symlink escapes are refused. Subagents
+// inherit the workspace of the run that spawned them. The workspace explorer and
+// `/api/workspace/*` use the same rule.
+//
+// # Deleting
+//
+// Deleting a project removes its rows from SQLite and never touches files on
+// disk. It is refused while the project still has sessions unless you pass
+// `?force=true`, in which case those sessions (messages, runs, agents, approvals,
+// claims) are deleted with it; a session with a run in flight is never killed, so
+// stop it first. This is deliberate: a misclick must not delete source code.
+//
+// # Gotchas
+//
+// * Deleting a directory outside karucode leaves the project row in place; it
+//   keeps its history and fails to resolve with a message naming the path. Point
+//   it at a new directory or delete the project.
+// * The active model is install-wide by default, not per project: every project
+//   shares it unless a session is pinned. A per-session pin
+//   (`PATCH /api/sessions/:id/model`) travels with the session, not the project,
+//   so two sessions in one project can run different models.
+// * There is no per-session workspace override: the project (or the default
+//   workspace) decides.
+// * Symlinked project roots are canonicalised on insert, so the stored path is the
+//   real one.
+//
+// Full reference: `README.md` (Projects), `docs/API.md` (projects).
+
 use crate::catalog::CatalogCache;
 use crate::host::HostAllowlist;
 use crate::settings::SettingsHandle;

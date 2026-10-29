@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+kc-docs.workspace = true
 async-trait.workspace = true
 futures-core.workspace = true
 serde.workspace = true

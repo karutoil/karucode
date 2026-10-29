@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 kc-core.workspace = true
+kc-docs.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 globset.workspace = true

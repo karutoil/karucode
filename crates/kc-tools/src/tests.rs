@@ -1135,7 +1135,7 @@ async fn git_status_and_diff_work_in_a_temp_repo() {
 #[tokio::test]
 async fn builtin_tools_are_complete_and_read_only_by_default() {
     let tools = builtin_tools();
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 9);
     let names: Vec<String> = tools.iter().map(|t| t.spec().name).collect();
     assert_eq!(
         names,
@@ -1147,7 +1147,8 @@ async fn builtin_tools_are_complete_and_read_only_by_default() {
             "edit_file",
             "run_command",
             "git_status",
-            "git_diff"
+            "git_diff",
+            "karucode_docs"
         ]
     );
     for tool in &tools {
@@ -1164,6 +1165,7 @@ async fn builtin_tools_are_complete_and_read_only_by_default() {
     assert_eq!(get("write_file"), kc_core::tool::ToolClass::Mutating);
     assert_eq!(get("edit_file"), kc_core::tool::ToolClass::Mutating);
     assert_eq!(get("run_command"), kc_core::tool::ToolClass::Shell);
+    assert_eq!(get("karucode_docs"), kc_core::tool::ToolClass::ReadOnly);
     assert_eq!(get("git_diff"), kc_core::tool::ToolClass::ReadOnly);
 }
 

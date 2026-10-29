@@ -763,6 +763,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-core",
+ "kc-docs",
  "serde",
  "serde_json",
  "thiserror",
@@ -770,6 +771,13 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "kc-docs"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -856,6 +864,7 @@ dependencies = [
  "kc-core",
  "kc-mcp",
  "kc-plugin-host",
+ "kc-plugin-sdk",
  "kc-provider",
  "kc-runtime",
  "kc-store",
@@ -898,6 +907,7 @@ dependencies = [
  "globset",
  "ignore",
  "kc-core",
+ "kc-docs",
  "libc",
  "regex",
  "serde",

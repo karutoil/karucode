@@ -9,6 +9,7 @@ members = [
   "crates/kc-plugin-sdk",
   "crates/kc-plugin-host",
   "crates/kc-mcp",
+  "crates/kc-docs",
   "crates/kc-server",
   "plugins/example-hello",
 ]
@@ -28,6 +29,7 @@ kc-runtime = { path = "crates/kc-runtime" }
 kc-plugin-sdk = { path = "crates/kc-plugin-sdk" }
 kc-plugin-host = { path = "crates/kc-plugin-host" }
 kc-mcp = { path = "crates/kc-mcp" }
+kc-docs = { path = "crates/kc-docs" }
 
 anyhow = "1"
 async-trait = "0.1"
