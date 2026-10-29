@@ -397,16 +397,39 @@ so a future capability negotiation can be additive.
 
 ## 9. Writing a plugin
 
-### Rust, with `kc-plugin-sdk`
+### Rust: `karucode plugin init`
+
+There is no published karucode crate and nothing to point a relative `path` at.
+The `karucode` binary writes the SDK **into** the plugin instead, so a Rust
+plugin depends on nothing from karucode: it builds in any directory, offline, and
+keeps working after the harness is upgraded because the wire protocol is the only
+contract between them.
+
+```bash
+karucode plugin init ./wordy                 # the name comes from the directory
+karucode plugin init ./wordy --name wordy-2  # explicit name (must be a legal crate name)
+karucode plugin init ./wordy --force         # replace an existing scaffold
+cd wordy && cargo build --release
+```
+
+Four files, nothing hidden:
+
+| File | Contents |
+| --- | --- |
+| `Cargo.toml` | `serde` + `serde_json` only — no karucode dependency of any kind |
+| `src/main.rs` | a starter plugin with one `echo` tool — this file is yours |
+| `src/protocol.rs` | the wire types, copied from the build that generated it |
+| `src/sdk.rs` | the SDK body (`PluginBuilder`, `Plugin::run`, `PluginToolResultExt`) |
+
+The starter's `main` is the whole surface a plugin usually needs:
 
 ```rust
-use kc_plugin_sdk::{hooks, permissions, PluginBuilder, PluginToolResult, PluginToolResultExt, ToolRequest};
+use sdk::{PluginBuilder, PluginToolResult, PluginToolResultExt, ToolRequest};
 use serde_json::json;
 
 fn main() -> std::io::Result<()> {
     PluginBuilder::new("wordy", "0.1.0")
         .description("Counts words")
-        .permission(permissions::FILES_READ)
         .tool(
             "count",
             "Count the words in `text`.",
@@ -417,34 +440,37 @@ fn main() -> std::io::Result<()> {
                     return PluginToolResult::err("`text` is required");
                 }
                 PluginToolResult::ok(format!("{} words", text.split_whitespace().count()))
-                    .with_meta(json!({"words": text.split_whitespace().count()}))
             },
         )
         .tool_with_class("index", "Rebuild the index.", json!({}), Some("mutating"), |_req| {
             PluginToolResult::ok("index rebuilt")   // needs files.write
         })
-        .hook(hooks::BEFORE_PROMPT, |_payload| json!("The wordy plugin is active."))
+        .hook(sdk::hooks::BEFORE_PROMPT, |_payload| json!("The wordy plugin is active."))
         .run()
 }
 ```
 
-`Cargo.toml`:
+`PluginBuilder` handles the protocol; `Plugin::handle_request` / `Plugin::run`
+are there if you want to embed it differently. `PluginToolResult` constructors
+(`ok`, `err`, `content`, `with_meta`) come from `PluginToolResultExt`.
 
-```toml
-[package]
-name = "wordy"
-version = "0.1.0"
-edition = "2021"
+**Keeping the copy current.** The vendored SDK is the one that generated the
+project. After upgrading karucode:
 
-[dependencies]
-kc-plugin-sdk = { path = "../../crates/kc-plugin-sdk" }
-serde_json = "1"
+```bash
+karucode plugin sdk ./wordy           # rewrite src/sdk.rs and src/protocol.rs
+karucode plugin sdk ./wordy --check   # exit 1 when stale; use it in the plugin's CI
 ```
 
-`PluginBuilder` handles the protocol; `Plugin::handle_request` /
-`Plugin::run` are there if you want to embed it differently. `PluginToolResult`
-constructors (`ok`, `err`, `content`, `with_meta`) come from
-`PluginToolResultExt` — the wire type itself lives in `kc_core`.
+`--check` compares byte-for-byte and never touches `src/main.rs`, so it is safe
+in a pre-commit hook. It writes nothing and starts no server.
+
+**Inside the karucode repository**, `plugins/example-hello` is a workspace member
+and therefore uses `kc-plugin-sdk.workspace = true`, i.e. a relative path into
+`crates/`. That manifest only resolves from inside this checkout: a plugin living
+anywhere else must be created with `karucode plugin init` (or copy the example's
+*sources*, never its `Cargo.toml`).
+
 
 ### Any language
 

@@ -25,6 +25,19 @@ temperature = 0.2
 request_timeout_secs = 300
 parallel_tool_calls = true
 
+# Retry budget (global: it applies to every provider profile). A failed attempt
+# is retried for EVERY failure class — connection resets, timeouts, any HTTP
+# error status, an empty or unreadable body, and a stream that dies before its
+# first byte of content — because aggregator gateways fail transiently in
+# arbitrary ways (a rotated upstream key answers 401, a mid-failover channel
+# 404, a broken proxy 200 with an HTML splash). Retries stop as soon as real
+# content has been streamed, so nothing is ever duplicated.
+# retry_max_retries = 50      # attempts = retries + 1; 0 disables retries
+# retry_base_delay_ms = 500   # first delay; doubles per attempt (jittered)
+# retry_max_delay_ms = 30000  # backoff ceiling; bounds the total wait
+# Env equivalents: KARUCODE_RETRY_MAX_RETRIES, KARUCODE_RETRY_BASE_DELAY_MS,
+# KARUCODE_RETRY_MAX_DELAY_MS.
+
 # [model.extra_headers]
 # "X-Gateway-Project" = "karucode"
 
@@ -33,7 +46,9 @@ parallel_tool_calls = true
 # [[providers]] table present, the connection fields of [model] (provider,
 # base_url, model, api_key, request_timeout_secs, extra_headers, extra_body) are
 # ignored and the active profile supplies them. Sampling (temperature,
-# max_tokens, top_p, parallel_tool_calls) still comes from [model].
+# max_tokens, top_p, parallel_tool_calls) and the retry budgets
+# (retry_max_retries, retry_base_delay_ms, retry_max_delay_ms,
+# retry_max_stream_restarts) still come from [model].
 #
 # KARUCODE_MODEL / KARUCODE_BASE_URL / KARUCODE_API_KEY (or OPENAI_BASE_URL /
 # OPENAI_API_KEY) override this whole section: they become the active "env"
@@ -79,8 +94,16 @@ parallel_tool_calls = true
 #   tool_call = true
 
 [limits]
-max_iterations = 32
-max_run_secs = 1800
+# Model turns in one segment of a run. A segment is a checkpoint, not a
+# finish line: when it runs out the run continues automatically (below).
+max_iterations = 200
+# Hard wall-clock ceiling for the whole run, across every segment (24h).
+max_run_secs = 86400
+# Keep going when a segment's iteration budget runs out instead of ending the
+# run after a few dozen turns. Set false to restore one-shot budgets.
+auto_continue = true
+# How many times max_iterations may be refreshed in one run (0 = never).
+max_continues = 50
 max_tool_output_bytes = 24000
 max_command_output_bytes = 32000
 command_timeout_secs = 120
@@ -88,7 +111,8 @@ max_command_timeout_secs = 600
 max_file_read_bytes = 200000
 search_max_results = 200
 context_max_chars = 240000
-max_tool_calls_per_turn = 8
+# Safety valve against a runaway tool batch, not a work budget.
+max_tool_calls_per_turn = 32
 
 [approvals]
 # ask | ask_commands | auto | read_only
@@ -101,10 +125,17 @@ timeout_secs = 300
 
 [subagents]
 max_concurrent = 3
-max_iterations = 16
+# Model turns in one segment of a subagent. Like a run, a subagent treats this as
+# a checkpoint: a delegated coding task is a whole piece of work, not one answer.
+max_iterations = 200
+# How many times a subagent may refresh its segment before reporting back
+# (0 = stop dead at max_iterations). The effective ceiling is
+# (max_continues + 1) * max_iterations turns, bounded by timeout_secs.
+max_continues = 60
 allow_recursive = false
 max_depth = 1
-timeout_secs = 900
+# Wall clock for one delegated task, across every segment (4h).
+timeout_secs = 14400
 
 # Out-of-process plugins (JSON-RPC over stdio).
 # [[plugins]]

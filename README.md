@@ -68,7 +68,10 @@ allowlists, per-path auto-approval, `ask_commands`, `auto` and `read_only` modes
 **Subagents**: bounded concurrent delegation with a semaphore, inherited model
 and settings (optional model override), nested transcripts persisted with
 `agent_id`, progress + result in the UI, cancellation propagates, recursion off by
-default, advisory `owned_paths` claims.
+default, advisory `owned_paths` claims. A subagent runs under the same
+checkpoint rule as a run: `subagents.max_iterations` per segment, refreshed up to
+`subagents.max_continues` times inside `subagents.timeout_secs` (4h by default),
+so a delegated coding task survives its first budget instead of dying at it.
 
 **UI**: streaming Markdown chat with code blocks and safe rendering, tool activity
 cards, command output panel, approval cards, workspace explorer + file viewer,
@@ -80,6 +83,13 @@ isolated, versioned protocol v1, capability/permission declarations, hooks) with
 working example plugin; MCP client for stdio and streamable-HTTP servers with
 namespaced `mcp__<server>__<tool>` tools. See [docs/PLUGINS.md](docs/PLUGINS.md)
 and [docs/MCP.md](docs/MCP.md).
+
+**Self-documentation**: the facts a user needs about karucode itself are written as
+`@kc-doc` comments next to the code that implements them and compiled into the
+binary, so they cannot drift from the build. The model searches and reads them
+through the read-only `karucode_docs` tool; the same entries are mirrored to
+[docs/internal](docs/internal/) for humans. See [docs/INTERNAL-DOCS.md](docs/INTERNAL-DOCS.md)
+and the contribution contract in [AGENTS.md](AGENTS.md).
 
 ## Prerequisites
 
@@ -206,6 +216,23 @@ Extra headers and body fields are supported in the config file
 hints. Provider settings can be changed live in the UI (Settings), which writes to
 SQLite; the API key is write-only and never returned to the browser.
 
+A failed provider attempt is retried, by default 50 times with an exponential
+backoff that grows from 500 ms to a 30 s ceiling (`retry_max_retries`,
+`retry_base_delay_ms`, `retry_max_delay_ms` under `[model]`, or
+`KARUCODE_RETRY_MAX_RETRIES` / `KARUCODE_RETRY_BASE_DELAY_MS` /
+`KARUCODE_RETRY_MAX_DELAY_MS`). That covers every failure class — resets,
+timeouts, any HTTP error status, an empty or unreadable body, and a stream that
+dies before its first chunk — because a gateway fails transiently in arbitrary
+ways.
+
+A stream that dies *after* it started streaming cannot be replayed without
+duplicating what you already saw, so it is handled separately: the partial
+attempt is discarded, the browser is told to drop it (`stream_retry`), and the
+same request is re-issued. That budget is `retry_max_stream_restarts` (default 3,
+`KARUCODE_RETRY_MAX_STREAM_RESTARTS`); each restart is a full generation, and `0`
+makes a mid-answer death fail the turn instead. When a restart succeeds, only the
+successful attempt is persisted.
+
 ### Provider profiles and the model library
 
 Instead of — or in addition to — the flat `[model]` table, a config file can
@@ -273,9 +300,18 @@ The same data can be edited at runtime: `PATCH /api/config` takes
 `providers: { upsert: [...], delete: [...] }` and `active: { provider, model }`,
 persists them in SQLite and hot-swaps the configuration for the next run. The
 legacy flat `model.*` patch still works and is mirrored onto the active profile.
-The settings screen edits profiles and their model lists this way, and the chat
-header shows the active profile/model and switches them with the same call — no
-restart is needed for either.
+The settings screen edits profiles and their model lists this way; each model
+row also offers **Edit** (custom metadata values) and **Refresh** (re-read its
+models.dev entry, keeping your custom label).
+
+The composer at the bottom of the chat holds the model selector and a
+reasoning-effort selector. Both pin the **current session**
+(`PATCH /api/sessions/:id/model`), so two sessions can run different models at
+the same time; a session without a pin follows the install-wide default, and the
+selector's footer resets to it. Reasoning effort is `none` (off), `minimal`,
+`low`, `medium`, `high` or `max` and is sent as the `reasoning_effort` request
+field — the selector hides for models whose metadata says they cannot reason.
+No restart is needed for any of this.
 
 Model metadata can be prefilled from [models.dev](https://models.dev) instead of
 typed by hand. The server fetches the catalog itself (`GET /api/models/catalog`),
@@ -292,6 +328,13 @@ A failed fetch with nothing cached answers `ok: false` with the reason; no other
 part of the settings path depends on the catalog. Prefilled values are stored in
 the profile and stay editable, because a gateway may serve the same model id with
 different limits.
+
+Model ids typed by hand get the same prefill: `GET /api/models/lookup?model=<id>`
+finds the closest catalog entry, stripping gateway routing prefixes until a
+suffix matches — `a6api/deepseek-v4.1-flash-1017` (provider/model) and
+`a6api/ali/deepseek-v4.1-flash-1017` (provider/upstream/model) both resolve to
+the catalog's `deepseek-v4.1-flash-1017`. When nothing matches, the id is added
+without metadata, as before.
 
 ## Plugins and MCP
 
@@ -350,6 +393,15 @@ npm run typecheck
 npm run build                    # emits web/dist (embedded on the next cargo build)
 ```
 
+Documentation about karucode itself is compiled from `@kc-doc` blocks in the
+source. After changing a feature, a config key, a route or a tool:
+
+```bash
+cargo run -p kc-docs -- --write   # regenerate docs/internal (commit it)
+cargo run -p kc-docs -- --check   # CI gate: stale docs and invalid blocks fail
+cargo test -p kc-docs
+```
+
 End-to-end without credentials — the mock provider streams real SSE, including
 split tool-call deltas:
 
@@ -377,6 +429,12 @@ really ends up green), history continuity, cancellation, subagent delegation and
 restart persistence. Pass `--config file.toml` instead of `--db` to use explicit
 settings.
 
+Self-documentation end to end (scripted provider, no credentials):
+
+```bash
+python3 scripts/e2e_docs.py           # the model calls karucode_docs and gets the MCP doc back
+```
+
 Performance:
 
 ```bash
@@ -400,9 +458,10 @@ promised: measurements for this machine are in that report.
 | `crates/kc-plugin-host` / `kc-plugin-sdk` | plugin supervision + SDK |
 | `crates/kc-mcp` | MCP client |
 | `crates/kc-server` | axum API, SSE, static UI, wiring |
+| `crates/kc-docs` | `@kc-doc` parser, build-time generator, search and the `kc-docs` CLI |
 | `web/` | Preact + Vite frontend |
 | `plugins/example-hello` | working example plugin |
-| `docs/` | API, architecture, plugins, MCP, security |
+| `docs/` | API, architecture, plugins, MCP, security, internal-documentation format |
 | `scripts/` | mock provider, deterministic e2e gate, real-provider e2e gate, benchmark |
 
 Architecture details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). HTTP contract:

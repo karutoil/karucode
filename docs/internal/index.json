@@ -1,0 +1,439 @@
+{
+  "count": 14,
+  "generated_by": "cargo run -p kc-docs -- --write",
+  "topics": [
+    {
+      "applies_to": [
+        "config:[approvals]",
+        "config:mode",
+        "config:allow_commands",
+        "config:auto_approve_paths",
+        "config:timeout_secs",
+        "env:KARUCODE_APPROVAL_MODE",
+        "env:KARUCODE_ALLOW_COMMANDS",
+        "env:KARUCODE_APPROVAL_TIMEOUT_SECS",
+        "route:GET /api/approvals",
+        "route:POST /api/approvals/:id",
+        "tool:run_command",
+        "tool:write_file",
+        "tool:edit_file"
+      ],
+      "path": "approvals.md",
+      "slug": "approvals",
+      "source": "crates/kc-core/src/approval.rs:1",
+      "summary": "The four approval modes, the allowlists behind them, and how a pending approval is answered or times out.",
+      "tags": [
+        "approvals",
+        "permissions",
+        "safety",
+        "policy",
+        "mode"
+      ],
+      "title": "Control what the agent may do without asking"
+    },
+    {
+      "applies_to": [
+        "tool:read_file",
+        "tool:list_dir",
+        "tool:search_files",
+        "tool:write_file",
+        "tool:edit_file",
+        "tool:run_command",
+        "tool:git_status",
+        "tool:git_diff",
+        "tool:karucode_docs",
+        "config:[limits]"
+      ],
+      "path": "builtin-tools.md",
+      "slug": "builtin-tools",
+      "source": "crates/kc-tools/src/lib.rs:7",
+      "summary": "What each first-party tool does, how it is gated, and the limits and gotchas that shape its output.",
+      "tags": [
+        "tools",
+        "agent",
+        "files",
+        "search",
+        "shell",
+        "git"
+      ],
+      "title": "The built-in tools the agent can call"
+    },
+    {
+      "applies_to": [
+        "file:~/.config/karucode/config.toml",
+        "env:KARUCODE_CONFIG",
+        "env:KARUCODE_LOCK_SETTINGS",
+        "env:KARUCODE_MAX_ITERATIONS",
+        "env:KARUCODE_MAX_RUN_SECS",
+        "env:KARUCODE_AUTO_CONTINUE",
+        "env:KARUCODE_MAX_CONTINUES",
+        "env:KARUCODE_CONTEXT_MAX_CHARS",
+        "config:[model]",
+        "config:[limits]",
+        "config:[approvals]",
+        "config:[subagents]",
+        "config:[[plugins]]",
+        "config:[[mcp_servers]]",
+        "route:GET /api/config",
+        "route:PATCH /api/config",
+        "route:GET /api/stats",
+        "cmd:--config",
+        "cmd:--data-dir",
+        "ui:Settings"
+      ],
+      "path": "configuration.md",
+      "slug": "configuration",
+      "source": "crates/kc-server/src/settings.rs:14",
+      "summary": "The four config layers, which settings apply live, and how secrets and invalid values are handled.",
+      "tags": [
+        "config",
+        "settings",
+        "configuration",
+        "toml",
+        "env"
+      ],
+      "title": "Change karucode's configuration"
+    },
+    {
+      "applies_to": [
+        "file:AGENTS.md",
+        "file:docs/INTERNAL-DOCS.md",
+        "tool:karucode_docs",
+        "cmd:cargo run -p kc-docs -- --write"
+      ],
+      "path": "documentation.md",
+      "slug": "documentation",
+      "source": "crates/kc-docs/src/lib.rs:33",
+      "summary": "Doc blocks in the code compile into the built-in docs the agent reads; add, update and delete them with the code.",
+      "tags": [
+        "docs",
+        "contributing",
+        "agents",
+        "meta"
+      ],
+      "title": "How karucode's own documentation works"
+    },
+    {
+      "applies_to": [
+        "route:GET /api/health",
+        "route:GET /api/config",
+        "route:PATCH /api/config",
+        "route:POST /api/provider/test",
+        "route:GET /api/models/catalog",
+        "route:GET /api/models/lookup",
+        "route:GET /api/stats",
+        "route:GET /api/projects",
+        "route:POST /api/projects",
+        "route:GET /api/sessions",
+        "route:POST /api/sessions",
+        "route:GET /api/sessions/:id",
+        "route:PATCH /api/sessions/:id",
+        "route:PATCH /api/sessions/:id/model",
+        "route:POST /api/sessions/:id/messages",
+        "route:POST /api/sessions/:id/cancel",
+        "route:GET /api/approvals",
+        "route:POST /api/approvals/:id",
+        "route:GET /api/workspace/tree",
+        "route:GET /api/workspace/file",
+        "route:POST /api/workspace/upload",
+        "route:GET /api/git/status",
+        "route:GET /api/git/diff",
+        "route:GET /api/plugins",
+        "route:POST /api/plugins/:name/enable",
+        "route:GET /api/mcp",
+        "route:GET /api/events",
+        "header:X-Karucode-Client",
+        "env:KARUCODE_AUTH_TOKEN",
+        "doc:docs/API.md"
+      ],
+      "path": "http-api.md",
+      "slug": "http-api",
+      "source": "crates/kc-server/src/lib.rs:21",
+      "summary": "Authenticate, send the CSRF header, and find the endpoint for sessions, config, approvals, files, git, plugins, MCP and the event stream.",
+      "tags": [
+        "api",
+        "http",
+        "rest",
+        "sse",
+        "curl",
+        "endpoints"
+      ],
+      "title": "Call the HTTP API"
+    },
+    {
+      "applies_to": [
+        "config:[[mcp_servers]]",
+        "config:require_approval",
+        "config:transport",
+        "route:GET /api/mcp",
+        "tool:mcp__<server>__<tool>",
+        "doc:docs/MCP.md"
+      ],
+      "path": "mcp.md",
+      "slug": "mcp",
+      "source": "crates/kc-mcp/src/lib.rs:18",
+      "summary": "Add stdio or streamable-HTTP MCP servers to the config and use their tools through the same approval policy.",
+      "tags": [
+        "mcp",
+        "tools",
+        "servers",
+        "stdio",
+        "http",
+        "setup"
+      ],
+      "title": "Connect MCP servers"
+    },
+    {
+      "applies_to": [
+        "config:[[plugins]]",
+        "file:~/.local/share/karucode/plugins/<name>/plugin.toml",
+        "dir:plugins/example-hello",
+        "tool:plugin__<plugin>__<tool>",
+        "cmd:cargo build -p example-hello",
+        "cmd:karucode plugin init",
+        "cmd:karucode plugin sdk",
+        "cmd:karucode plugin sdk --check",
+        "file:src/sdk.rs",
+        "file:src/protocol.rs",
+        "doc:docs/PLUGINS.md",
+        "env:KARUCODE_PLUGIN_NAME",
+        "env:KARUCODE_PLUGIN_PROTOCOL",
+        "env:KARUCODE_PLUGIN_PERMISSIONS",
+        "env:KARUCODE_PLUGIN_SETTINGS"
+      ],
+      "path": "plugins.md",
+      "slug": "plugins",
+      "source": "crates/kc-plugin-sdk/src/lib.rs:49",
+      "summary": "Build an out-of-process plugin that adds tools and hooks, register it, and debug it when it fails to start.",
+      "tags": [
+        "plugins",
+        "extension",
+        "sdk",
+        "tools",
+        "hooks",
+        "jsonrpc"
+      ],
+      "title": "Write and install a plugin"
+    },
+    {
+      "applies_to": [
+        "route:GET /api/projects",
+        "route:POST /api/projects",
+        "route:PATCH /api/projects/:id",
+        "route:DELETE /api/projects/:id",
+        "route:GET /api/sessions",
+        "route:PATCH /api/sessions/:id/model",
+        "config:workspace",
+        "env:KARUCODE_WORKSPACE",
+        "cmd:--workspace",
+        "ui:ProjectRail",
+        "concept:session workspace"
+      ],
+      "path": "projects.md",
+      "slug": "projects",
+      "source": "crates/kc-server/src/state.rs:6",
+      "summary": "How projects map to directories, how sessions are confined to one, and what happens when a project's directory moves or is deleted.",
+      "tags": [
+        "projects",
+        "sessions",
+        "workspace",
+        "directories"
+      ],
+      "title": "Work on more than one project"
+    },
+    {
+      "applies_to": [
+        "env:KARUCODE_BASE_URL",
+        "env:KARUCODE_API_KEY",
+        "env:KARUCODE_MODEL",
+        "env:OPENAI_BASE_URL",
+        "env:OPENAI_API_KEY",
+        "env:KARUCODE_TEMPERATURE",
+        "env:KARUCODE_MAX_TOKENS",
+        "env:KARUCODE_REQUEST_TIMEOUT_SECS",
+        "env:KARUCODE_MODELS_DEV_URL",
+        "env:KARUCODE_RETRY_MAX_RETRIES",
+        "env:KARUCODE_RETRY_BASE_DELAY_MS",
+        "env:KARUCODE_RETRY_MAX_DELAY_MS",
+        "env:KARUCODE_RETRY_MAX_STREAM_RESTARTS",
+        "config:[[providers]]",
+        "config:active_provider",
+        "config:active_model",
+        "config:[model]",
+        "config:retry_max_retries",
+        "config:retry_base_delay_ms",
+        "config:retry_max_delay_ms",
+        "config:retry_max_stream_restarts",
+        "event:stream_retry",
+        "route:GET /api/config",
+        "route:PATCH /api/config",
+        "route:POST /api/provider/test",
+        "route:GET /api/models/catalog",
+        "ui:Settings"
+      ],
+      "path": "provider-profiles.md",
+      "slug": "provider-profiles",
+      "source": "crates/kc-provider/src/lib.rs:8",
+      "summary": "Point karucode at any OpenAI-compatible endpoint, by environment or as named profiles, and choose the active model.",
+      "tags": [
+        "provider",
+        "model",
+        "config",
+        "setup",
+        "gateway",
+        "llm"
+      ],
+      "title": "Configure a model provider"
+    },
+    {
+      "applies_to": [
+        "cmd:karucode",
+        "cmd:--workspace",
+        "cmd:--port",
+        "cmd:--host",
+        "cmd:--data-dir",
+        "cmd:--config",
+        "cmd:--help",
+        "env:KARUCODE_HOST",
+        "env:KARUCODE_PORT",
+        "env:KARUCODE_WORKSPACE",
+        "env:KARUCODE_DATA_DIR",
+        "env:KARUCODE_AUTH_TOKEN",
+        "env:KARUCODE_LOG",
+        "env:KARUCODE_WEB_DIR",
+        "env:KARUCODE_ALLOWED_HOSTS",
+        "env:KARUCODE_SKIP_WEB_BUILD",
+        "env:KARUCODE_WEB_DIST",
+        "env:KARUCODE_NPM",
+        "cmd:npm run build",
+        "cmd:npm ci",
+        "route:GET /api/health",
+        "file:web/dist",
+        "file:crates/kc-server/build.rs"
+      ],
+      "path": "run-server.md",
+      "slug": "run-server",
+      "source": "crates/kc-server/src/bootstrap.rs:8",
+      "summary": "Build the UI and the binary, start it against a workspace, and know what each CLI flag and startup failure means.",
+      "tags": [
+        "install",
+        "build",
+        "run",
+        "cli",
+        "startup",
+        "server"
+      ],
+      "title": "Build, run and stop the server"
+    },
+    {
+      "applies_to": [
+        "env:KARUCODE_AUTH_TOKEN",
+        "env:KARUCODE_ALLOWED_HOSTS",
+        "header:X-Karucode-Client",
+        "header:Authorization",
+        "config:auth_token",
+        "doc:docs/SECURITY.md",
+        "concept:approvals",
+        "concept:workspace containment"
+      ],
+      "path": "security.md",
+      "slug": "security",
+      "source": "crates/kc-server/src/app.rs:11",
+      "summary": "What karucode protects by default, what it explicitly does not, and the recipe for safe remote access.",
+      "tags": [
+        "security",
+        "auth",
+        "csrf",
+        "sandbox",
+        "remote",
+        "trust"
+      ],
+      "title": "Understand the security model"
+    },
+    {
+      "applies_to": [
+        "tool:spawn_agent",
+        "config:[subagents]",
+        "config:subagents.max_iterations",
+        "config:subagents.max_continues",
+        "config:subagents.timeout_secs",
+        "env:KARUCODE_SUBAGENT_CONCURRENCY",
+        "env:KARUCODE_SUBAGENT_MAX_ITERATIONS",
+        "env:KARUCODE_SUBAGENT_MAX_CONTINUES",
+        "env:KARUCODE_SUBAGENT_TIMEOUT_SECS",
+        "env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS",
+        "route:GET /api/sessions/:id",
+        "ui:AgentsTab"
+      ],
+      "path": "subagents.md",
+      "slug": "subagents",
+      "source": "crates/kc-runtime/src/subagent.rs:20",
+      "summary": "How spawn_agent works, the limits it runs under, and when delegation helps instead of hurting.",
+      "tags": [
+        "subagents",
+        "delegation",
+        "agents",
+        "parallel",
+        "spawn_agent",
+        "long-running"
+      ],
+      "title": "Delegate work to subagents"
+    },
+    {
+      "applies_to": [
+        "ui:ThemeStudio",
+        "storage:karucode.theme-studio.v3",
+        "file:web/src/theme/engine.ts",
+        "file:web/src/components/ThemeStudio.tsx",
+        "cmd:npm run dev"
+      ],
+      "path": "themes.md",
+      "slug": "themes",
+      "source": "web/src/theme/engine.ts:1",
+      "summary": "Built-in palettes, live colour and density editing, fonts and custom CSS, saved in the browser and shareable as a theme JSON file.",
+      "tags": [
+        "theme",
+        "themes",
+        "appearance",
+        "colors",
+        "density",
+        "fonts",
+        "css",
+        "customization",
+        "ui"
+      ],
+      "title": "Theme the workspace"
+    },
+    {
+      "applies_to": [
+        "ui:ProjectRail",
+        "ui:SessionsRail",
+        "ui:ChatView",
+        "ui:Composer",
+        "ui:Inspector",
+        "ui:SettingsSheet",
+        "ui:CommandPalette",
+        "ui:FileViewer",
+        "route:GET /api/workspace/tree",
+        "route:POST /api/workspace/upload",
+        "cmd:npm run dev",
+        "cmd:npm run build",
+        "file:web/dist",
+        "env:KARUCODE_WEB_DIR"
+      ],
+      "path": "web-ui.md",
+      "slug": "web-ui",
+      "source": "web/src/app.tsx:1",
+      "summary": "Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary.",
+      "tags": [
+        "ui",
+        "web",
+        "frontend",
+        "panels",
+        "shortcuts",
+        "preact"
+      ],
+      "title": "Use the browser workspace"
+    }
+  ]
+}

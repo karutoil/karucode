@@ -7,7 +7,8 @@ All responses are JSON unless noted. Errors use:
 ```
 
 Codes: `bad_request`, `not_found`, `permission_denied`, `unauthorized`, `config`,
-`provider`, `tool`, `store`, `plugin`, `timeout`, `path_escape`, `internal`.
+`provider`, `tool`, `store`, `plugin`, `timeout`, `path_escape`,
+`payload_too_large`, `internal`.
 
 ## Auth and CSRF
 
@@ -61,15 +62,17 @@ directory. `provider_configured` is computed from the effective model (below).
                     "cost_output": 1.5, "catalog_provider": "openai" } ],
       "request_timeout_secs": 300, "api_key_set": true } ],
   "active": { "provider": "gateway", "model": "coder" },
-  "limits": { "max_iterations": 32, "max_run_secs": 1800,
+  "limits": { "max_iterations": 200, "max_run_secs": 86400,
+              "auto_continue": true, "max_continues": 50,
               "max_tool_output_bytes": 24000, "max_command_output_bytes": 32000,
               "command_timeout_secs": 120, "max_command_timeout_secs": 600,
               "max_file_read_bytes": 200000, "search_max_results": 200,
-              "context_max_chars": 240000, "max_tool_calls_per_turn": 8 },
+              "context_max_chars": 240000, "max_tool_calls_per_turn": 32 },
   "approvals": { "mode": "ask", "allow_commands": [], "auto_approve_paths": [],
                  "timeout_secs": 300 },
-  "subagents": { "max_concurrent": 3, "max_iterations": 16,
-                 "allow_recursive": false, "max_depth": 1, "timeout_secs": 900 },
+  "subagents": { "max_concurrent": 3, "max_iterations": 200,
+                 "max_continues": 60, "allow_recursive": false,
+                 "max_depth": 1, "timeout_secs": 14400 },
   "plugins": [ { "name": "example-hello", "version": "0.1.0", "status": "ready",
                  "tools": ["plugin__example-hello__hello"], "error": null,
                  "permissions": ["files.read"] } ],
@@ -236,6 +239,35 @@ with no models are left out, and models are sorted by display name then id.
   fetch itself failed there is no catalog to look the id up in, so the `ok:false`
   body above is returned instead.
 
+### Model metadata lookup
+
+`GET /api/models/lookup?model=<id>` finds the best catalog entry for one
+arbitrary model id — the metadata detector behind "add a model id by hand".
+Gateways fronting several providers expose ids with routing prefixes
+(`a6api/deepseek-v4.1-flash-1017`, or `a6api/ali/deepseek-v4.1-flash-1017` with
+an upstream segment), so the whole id is tried first (catalog ids can
+themselves contain slashes, like OpenRouter's `openai/gpt-4o`), then leading
+`segment/` prefixes are stripped one at a time until a suffix matches. Matching
+is case-insensitive; when several providers carry the winning suffix, a
+provider whose id appears as a segment of the queried id wins, then ties break
+alphabetically.
+
+```json
+{ "ok": true,
+  "match": { "provider": "deepseek",
+             "matched_id": "deepseek-v4.1-flash-1017",
+             "model": { "id": "deepseek-v4.1-flash-1017",
+                        "name": "DeepSeek V4.1 Flash",
+                        "context_window": 128000 } },
+  "fetched_at_ms": 1710000000000, "stale": false, "error": null }
+```
+
+* A missing `model` parameter is `400 bad_request`.
+* A model the catalog does not carry is an ordinary miss: `200 {ok: true,
+  match: null}` — the caller adds the id without metadata.
+* Same availability contract as the catalog endpoint: an unreachable catalog
+  with nothing cached answers `200 {ok: false, match: null, error: "..."}`.
+
 `GET /api/stats`
 ```json
 { "uptime_secs": 42, "rss_kb": 38211, "sessions": 3, "active_runs": 1,
@@ -292,11 +324,12 @@ longer than 80 characters or contains control characters.
 
 ### Scoping a request to a project
 
-`GET /api/workspace/tree`, `GET /api/workspace/file`, `GET /api/git/status` and
-`GET /api/git/diff` accept `?project=<id>` and resolve paths inside that project's
-canonical directory. An unknown id is `404 not_found`; so is a project whose
-directory has since been removed (the message says the directory may be gone).
-Omitting the parameter uses the default workspace.
+`GET /api/workspace/tree`, `GET /api/workspace/file`, `POST /api/workspace/upload`,
+`GET /api/git/status` and `GET /api/git/diff` accept `?project=<id>` and resolve
+paths inside that project's canonical directory. An unknown id is `404
+not_found`; so is a project whose directory has since been removed (the message
+says the directory may be gone). Omitting the parameter uses the default
+workspace; for the upload it falls back to the session's own project.
 
 ## Sessions
 
@@ -304,15 +337,18 @@ Omitting the parameter uses the default workspace.
 ```json
 { "id": "s_ab12", "title": "Fix login bug", "workspace": "/w",
   "project_id": "p_ab12",
+  "model": { "provider": "local", "model": "qwen3-coder" },
   "created_at": 1710000000000, "updated_at": 1710000001000,
   "message_count": 12, "last_run_status": "completed", "running": false }
 ```
 `project=<id>` filters to one project; an unknown id is `404 not_found` (not an
 empty list). `project_id` is `null` for a session that is not attached to a
-project; `workspace` is the directory the session records.
+project; `workspace` is the directory the session records. `model` is the
+per-session model pin (see below) and is **absent** when the session follows the
+install-wide default.
 
-`POST /api/sessions` body `{ "title": "optional", "project": "p_ab12" }` →
-`Session`
+`POST /api/sessions` body `{ "title": "optional", "project": "p_ab12",
+"model": { … } }` → `Session`
 ```json
 { "id": "s_ab12", "title": "New session", "workspace": "/w",
   "project_id": "p_ab12", "created_at": 1710000000000,
@@ -321,7 +357,8 @@ project; `workspace` is the directory the session records.
 The body may be empty, which is what a client that predates projects sends:
 title defaults to `"New session"` and the session is created in the default
 workspace with no project. An unknown `project` is `404 not_found`; `workspace` is
-that project's directory.
+that project's directory. The optional `model` pins the new session immediately
+(it is validated before anything is written; a bad pin is `400 bad_request`).
 
 `GET /api/sessions/:id`
 ```json
@@ -337,7 +374,41 @@ When the model asks for more tool calls than `limits.max_tool_calls_per_turn` in
 one turn, the extra calls are not executed: each one gets a `tool` message
 `[skipped: per-turn tool call limit reached …]` and a `notice` event is emitted.
 
-`PATCH /api/sessions/:id` `{ "title": "..." }` → `Session`  
+`PATCH /api/sessions/:id` `{ "title": "..." }` → `Session`
+
+### Per-session model selection
+
+A session can be **pinned** to a provider profile + model, so sessions running at
+the same time use different models. The install-wide default (`active.provider` /
+`active.model`) still applies to every unpinned session and to new sessions;
+pinning one session never changes another.
+
+```json
+"model": { "provider": "local", "model": "qwen3-coder", "reasoning_effort": "high" }
+```
+
+* `reasoning_effort` is optional: `none`, `minimal`, `low`, `medium`, `high` or
+  `max`. It is sent as the `reasoning_effort` body field of every model request
+  for that session, and the endpoint decides what it supports.
+* The pin is validated against the live provider profiles: an unknown `provider`,
+  a model the profile does not list, or an unknown effort is `400 bad_request`
+  naming the field.
+* If the pinned profile or model is deleted later, the run falls back to the
+  install-wide default (or that profile's first model) instead of failing.
+* Subagents spawned from a session inherit its pin (the `spawn_agent` tool's own
+  `model` argument still overrides the model id for that one child).
+
+Two equivalent ways to set or clear it, both returning the updated `Session` and
+emitting `session_model_changed`:
+
+`PATCH /api/sessions/:id/model` — the body **is** the selection, `{}` clears it:
+```json
+{ "provider": "local", "model": "qwen3-coder", "reasoning_effort": "high" }
+```
+
+`PATCH /api/sessions/:id` — `{ "model": { … } }` sets, `{ "model": null }`
+clears; `title` and `model` may be sent in one request. A request with neither is
+`400 bad_request`.  
 `DELETE /api/sessions/:id` → `{ "deleted": true }`
 
 `POST /api/sessions/:id/messages` `{ "content": "..." }`
@@ -412,8 +483,13 @@ missing key the same as `null`.
   { "name": "src", "path": "src", "kind": "dir", "size": 0 },
   { "name": "Cargo.toml", "path": "Cargo.toml", "kind": "file", "size": 812 } ] }
 ```
-`depth` is clamped to 1–6 and the listing stops at 2000 entries. `project`
-selects the directory (see [Scoping a request to a project](#scoping-a-request-to-a-project)).
+`depth` is clamped to 1–6 and the listing stops at 2000 entries. Directories that
+are never useful in a UI (`node_modules`, `.git`, `target`, `dist`, `.next`,
+`.turbo`, `.venv`, `venv`, `__pycache__`, `.pytest_cache`, `.mypy_cache`,
+`coverage`, `.idea`) are skipped before the entry budget is spent, so a listing
+of a real project is not consumed by its build output or Git internals. They are
+still reachable by naming one explicitly (`?path=.git`) and by the file tools.
+`project` selects the directory (see [Scoping a request to a project](#scoping-a-request-to-a-project)).
 
 `GET /api/workspace/file?path=src/main.rs[&project=<id>]` →
 ```json
@@ -423,6 +499,53 @@ selects the directory (see [Scoping a request to a project](#scoping-a-request-t
 `404` for missing files, `400 path_escape` outside the workspace. `project`
 selects the directory, so a file opened from a project's tree is read from that
 project (see [Scoping a request to a project](#scoping-a-request-to-a-project)).
+
+### Attaching a file
+
+`POST /api/workspace/upload?session=<id>&name=<file name>[&project=<id>]` takes
+the **raw file bytes** as the body — not JSON, not `multipart/form-data` — and
+answers `201`:
+
+```bash
+curl -s -X POST "localhost:8787/api/workspace/upload?session=s_ab12&name=report.pdf" \
+  -H 'X-Karucode-Client: web' -H 'Content-Type: application/pdf' \
+  --data-binary @report.pdf
+```
+```json
+{ "session": "s_ab12", "name": "report-1.pdf",
+  "path": ".karucode/attachments/s_ab12/report-1.pdf", "size": 214233,
+  "content_type": "application/pdf", "workspace": "/home/me/project",
+  "deduplicated": true }
+```
+
+This is how the composer hands the agent a file it can actually read: the bytes
+are written under the session's project in `.karucode/attachments/<session>/`, and
+`path` is workspace-relative, so it can be passed straight back to
+`GET /api/workspace/file?path=...` or `@`-mentioned in a prompt. The echoed
+`content_type` comes from the request header with its parameters dropped, and is
+`application/octet-stream` when the request had none.
+
+Rules:
+
+* `session` must be a real session and match `[A-Za-z0-9_-]{1,64}`; it also picks
+the project when `project` is omitted. A malformed id is `400 bad_request`, an
+unknown one `404 not_found`.
+* `name` is one path segment: no `/`, `\`, `..`, control characters, empty
+string, or more than 160 bytes. Spaces and unicode are fine. Anything else is
+`400 bad_request` and nothing is written.
+* An existing name is never overwritten: the file becomes `report-1.pdf`,
+`report-2.pdf`, … and `deduplicated` is `true`. Two concurrent uploads of the
+same name both survive (the create is `O_EXCL`). The endpoint is not idempotent:
+retrying after a timeout stores a second copy rather than replacing the first.
+* The body must be non-empty and at most **8 MiB**; larger is
+`413 payload_too_large` (checked against `Content-Length` when present, and
+while reading otherwise), empty is `400 bad_request`.
+* A `multipart/form-data` or `application/x-www-form-urlencoded` body is
+`400 bad_request` — it would be stored verbatim — and a malformed `Content-Type`
+is rejected the same way.
+* If `.karucode` or `.karucode/attachments` is a symlink that resolves outside
+the project, the upload is `400 path_escape`. On Unix the session directory is
+created `0700` and the file `0600`.
 
 ## Git
 
@@ -477,15 +600,40 @@ A `: keepalive` comment is sent every 15 seconds. The envelope always has
 `seq`, `ts_ms`, and optional `session_id`, `run_id`, `agent_id`; the event fields
 are flattened alongside `type`.
 
+There is no replay cursor, so the client has to notice what it missed:
+
+* `seq` is monotonic within one server process (it starts again at 1 with the
+  process, which is why dedupe is scoped to a connection). A jump means frames
+  were dropped - refetch the session with `GET /api/sessions/:id` (messages, runs
+  and agents are persisted). On a stream opened with `?session=`, holes are
+  normal: other sessions' frames are stamped and then filtered out, so only treat
+  a hole as loss on an unfiltered stream.
+* The server also says so explicitly: a `stream_lagged` event carries `skipped`,
+  the number of frames this client lost. Its `seq` is the last *dropped* one, so
+  it is newer than anything the client has seen and older than the next live
+  frame - it never shadows a real event. Treat the marker as "refetch now"; it
+  describes the transport, not the session, and is exempt from `seq` dedupe.
+* Keepalives count as traffic. A connection that delivers no byte for ~45 s is
+  dead even though the socket never errored (sleep, Wi-Fi change, proxy or server
+  restart without a FIN); reconnect instead of waiting.
+* A client that cannot drain its buffer for 5 s is disconnected rather than
+  slowing the agent loop. Reconnecting is the documented recovery.
+* A refetch must not replace a transcript that is still streaming: the session
+  snapshot only contains persisted messages, so replacing the view mid-answer
+  deletes what has not been saved yet. Keep the live view and refetch again when
+  the run settles.
+
 | `type` | extra fields |
 | --- | --- |
 | `session_created` | `session_id`, `title` |
 | `session_renamed` | `session_id`, `title` |
+| `session_model_changed` | `session_id`, `model` (the new pin, or `null` when cleared) |
 | `session_deleted` | `session_id` |
 | `run_started` | `run_id`, `prompt` |
 | `run_finished` | `run_id`, `status`, `error` |
 | `run_cancelled` | `run_id` |
 | `iteration_started` | `iteration` |
+| `stream_retry` | `attempt`, `max_attempts`, `reason` — the provider stream died mid-answer; everything streamed for this turn so far belongs to the abandoned attempt and must be dropped (see `retry_max_stream_restarts`) |
 | `text_delta` | `delta` |
 | `reasoning_delta` | `delta` |
 | `usage` | `input_tokens`, `output_tokens` |
@@ -500,6 +648,7 @@ are flattened alongside `type`.
 | `agent_progress` | `agent_id`, `iterations`, `note` |
 | `agent_finished` | `agent_id`, `status`, `summary`, `error` |
 | `notice` | `level`, `message` |
+| `stream_lagged` | `skipped` - the SSE pump dropped frames for this client; refetch the session (emitted by the server, not the runtime) |
 | `error` | `message`, `kind` |
 
 ## Frontend build/dev
