@@ -99,6 +99,34 @@ pub struct ModelConfig {
     pub top_p: Option<f32>,
     #[serde(default = "default_request_timeout")]
     pub request_timeout_secs: u64,
+    /// How many times a failed provider attempt is retried before the run
+    /// gives up. Every upstream failure is retried — connection resets,
+    /// timeouts, every HTTP error status, an empty or unreadable body, and a
+    /// stream that dies before its first content — because the
+    /// OpenAI-compatible gateways this talks to surface transient channel
+    /// death as arbitrary answers (a rotated key gives 401, a mid-failover
+    /// channel 404, a broken proxy 200 with an HTML splash). Zero disables
+    /// retries. See `kc-provider`'s `retry` module for the exact contract.
+    #[serde(default = "default_retry_max_retries")]
+    pub retry_max_retries: u32,
+    /// First retry delay; doubles per attempt (equal-jittered into [d/2, d])
+    /// until it reaches `retry_max_delay_ms`.
+    #[serde(default = "default_retry_base_delay_ms")]
+    pub retry_base_delay_ms: u64,
+    /// Ceiling for the exponential retry backoff. With the 50-attempt default
+    /// this cap — not the attempt count — bounds the total wait.
+    #[serde(default = "default_retry_max_delay_ms")]
+    pub retry_max_delay_ms: u64,
+    /// How many times one turn may restart its stream *after* the answer
+    /// started arriving. `retry_max_retries` only covers attempts that died
+    /// before the first chunk, because replaying a started answer would
+    /// duplicate it; a stream that dies mid-answer is handled one level up,
+    /// where the partial attempt can be thrown away and the request re-issued.
+    /// Each restart is a real generation, so the budget is small on purpose,
+    /// and it shares `retry_base_delay_ms` / `retry_max_delay_ms` for backoff.
+    /// Zero disables mid-stream restarts.
+    #[serde(default = "default_retry_max_stream_restarts")]
+    pub retry_max_stream_restarts: u32,
     #[serde(default)]
     pub extra_headers: BTreeMap<String, String>,
     #[serde(default)]
@@ -123,6 +151,18 @@ fn default_temperature() -> f32 {
 fn default_request_timeout() -> u64 {
     300
 }
+fn default_retry_max_retries() -> u32 {
+    50
+}
+fn default_retry_base_delay_ms() -> u64 {
+    500
+}
+fn default_retry_max_delay_ms() -> u64 {
+    30_000
+}
+fn default_retry_max_stream_restarts() -> u32 {
+    3
+}
 fn default_parallel_tool_calls() -> bool {
     true
 }
@@ -138,6 +178,10 @@ impl Default for ModelConfig {
             max_tokens: None,
             top_p: None,
             request_timeout_secs: default_request_timeout(),
+            retry_max_retries: default_retry_max_retries(),
+            retry_base_delay_ms: default_retry_base_delay_ms(),
+            retry_max_delay_ms: default_retry_max_delay_ms(),
+            retry_max_stream_restarts: default_retry_max_stream_restarts(),
             extra_headers: BTreeMap::new(),
             extra_body: BTreeMap::new(),
             parallel_tool_calls: default_parallel_tool_calls(),
@@ -295,14 +339,121 @@ pub const DEFAULT_PROFILE_ID: &str = "default";
 /// Reserved profile id used when the legacy `KARUCODE_*` model variables are set.
 pub const ENV_PROFILE_ID: &str = "env";
 
+/// Accepted `reasoning_effort` values. The set is what current OpenAI-compatible
+/// endpoints use; anything else risks a 400 only at run time, so it is rejected
+/// where the selection is saved instead. `none` turns reasoning off on endpoints
+/// that support it, `max` asks for the largest budget on those that do.
+pub const REASONING_EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "max"];
+
+/// Per-session model selection stored on a session.
+///
+/// A session with no selection follows the install-wide default
+/// (`active.provider` / `active.model`). A selection pins *this session* to one
+/// profile + model, optionally with a reasoning effort; other sessions are
+/// untouched, which is what lets several sessions run different models at the
+/// same time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionModelSelection {
+    /// Provider profile id; must match a configured profile when saved.
+    pub provider: String,
+    /// Model id; must be offered by that profile when the profile lists models.
+    pub model: String,
+    /// `reasoning_effort` body parameter (`minimal|low|medium|high`). `None`
+    /// leaves the endpoint's default in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+impl SessionModelSelection {
+    /// Field-level checks that do not depend on the configured profiles: both
+    /// ids non-empty and bounded, no control characters, effort in the accepted
+    /// set. Whether the profile/model actually exist is checked by the server
+    /// against the live config when the selection is saved.
+    pub fn validate_shape(&self) -> Result<()> {
+        let provider = self.provider.trim();
+        if provider.is_empty() {
+            return Err(Error::BadRequest("model.provider may not be empty".into()));
+        }
+        if provider.len() > MAX_SELECTION_ID_CHARS {
+            return Err(Error::BadRequest(format!(
+                "model.provider is longer than {MAX_SELECTION_ID_CHARS} characters"
+            )));
+        }
+        let model = self.model.trim();
+        if model.is_empty() {
+            return Err(Error::BadRequest("model.model may not be empty".into()));
+        }
+        if model.len() > MAX_SELECTION_MODEL_CHARS {
+            return Err(Error::BadRequest(format!(
+                "model.model is longer than {MAX_SELECTION_MODEL_CHARS} characters"
+            )));
+        }
+        for id in [provider, model] {
+            if id.chars().any(char::is_control) {
+                return Err(Error::BadRequest(
+                    "model.provider and model.model may not contain control characters".into(),
+                ));
+            }
+        }
+        if let Some(effort) = self.reasoning_effort.as_deref() {
+            let effort = effort.trim();
+            if !effort.is_empty() && !REASONING_EFFORTS.contains(&effort) {
+                return Err(Error::BadRequest(format!(
+                    "model.reasoning_effort must be one of {} (got `{effort}`)",
+                    REASONING_EFFORTS.join(", ")
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Trimmed copy with an empty reasoning effort normalised to `None`.
+    pub fn normalized(&self) -> Self {
+        Self {
+            provider: self.provider.trim().to_string(),
+            model: self.model.trim().to_string(),
+            reasoning_effort: self
+                .reasoning_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+                .map(str::to_string),
+        }
+    }
+}
+
+/// Bound on the profile id and model id a session selection may carry.
+const MAX_SELECTION_ID_CHARS: usize = 64;
+const MAX_SELECTION_MODEL_CHARS: usize = 200;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Limits {
-    /// Maximum model round-trips per run before the agent must stop.
+    /// Model round-trips allowed in one *segment* of a run.
+    ///
+    /// A segment is a checkpoint, not a finish line: when it is exhausted the
+    /// run continues automatically (see [`Limits::auto_continue`]) unless the
+    /// wall-clock ceiling or `max_continues` says otherwise. The effective
+    /// ceiling for one run is therefore roughly
+    /// `(max_continues + 1) * max_iterations` model round-trips.
     #[serde(default = "d_iterations")]
     pub max_iterations: u32,
-    /// Maximum wall-clock time for one run.
+    /// Hard wall-clock ceiling for the whole run, across every segment.
     #[serde(default = "d_run_secs")]
     pub max_run_secs: u64,
+    /// Keep going when a segment's iteration budget runs out instead of ending
+    /// the run with `limit_reached`.
+    ///
+    /// Long-horizon work (migrations, refactors, debugging a failing suite) does
+    /// not fit in one budget, and silently stopping after a few dozen turns is
+    /// the one failure mode an agent harness must not have. With this on, the
+    /// runtime emits a notice, resets the iteration counter and continues in the
+    /// same session, run and transcript.
+    #[serde(default = "d_true")]
+    pub auto_continue: bool,
+    /// How many times `max_iterations` may be refreshed in one run. `0` restores
+    /// the old one-shot behaviour; the run then stops at `max_iterations`.
+    #[serde(default = "d_continues")]
+    pub max_continues: u32,
     /// Bytes of a single tool result kept for the model (rest is truncated).
     #[serde(default = "d_tool_output")]
     pub max_tool_output_bytes: usize,
@@ -326,15 +477,20 @@ pub struct Limits {
     #[serde(default = "d_context_chars")]
     pub context_max_chars: usize,
     /// Maximum number of tool calls executed from a single assistant message.
+    /// Calls beyond this are skipped with a placeholder result, so the cap is a
+    /// safety valve against a runaway batch, not a work budget: leave it high.
     #[serde(default = "d_parallel_calls")]
     pub max_tool_calls_per_turn: usize,
 }
 
 fn d_iterations() -> u32 {
-    32
+    200
 }
 fn d_run_secs() -> u64 {
-    1800
+    86_400
+}
+fn d_continues() -> u32 {
+    50
 }
 fn d_tool_output() -> usize {
     24_000
@@ -358,7 +514,7 @@ fn d_context_chars() -> usize {
     240_000
 }
 fn d_parallel_calls() -> usize {
-    8
+    32
 }
 
 impl Default for Limits {
@@ -366,6 +522,8 @@ impl Default for Limits {
         Self {
             max_iterations: d_iterations(),
             max_run_secs: d_run_secs(),
+            auto_continue: d_true(),
+            max_continues: d_continues(),
             max_tool_output_bytes: d_tool_output(),
             max_command_output_bytes: d_cmd_output(),
             command_timeout_secs: d_cmd_timeout(),
@@ -582,6 +740,16 @@ fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
     env_str(name).and_then(|v| v.trim().parse::<T>().ok())
 }
 
+/// Boolean environment flag. Accepts `1/0`, `true/false`, `yes/no`, `on/off` so
+/// a shell export cannot silently disagree with the documented spelling.
+fn env_bool(name: &str) -> Option<bool> {
+    match env_str(name)?.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 impl Config {
     /// Load configuration from file + environment. Network bind errors are not
     /// validated here; the server does that when it binds.
@@ -719,12 +887,30 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_REQUEST_TIMEOUT_SECS") {
             cfg.model.request_timeout_secs = v;
         }
+        if let Some(v) = env_parse("KARUCODE_RETRY_MAX_RETRIES") {
+            cfg.model.retry_max_retries = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_RETRY_BASE_DELAY_MS") {
+            cfg.model.retry_base_delay_ms = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_RETRY_MAX_DELAY_MS") {
+            cfg.model.retry_max_delay_ms = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_RETRY_MAX_STREAM_RESTARTS") {
+            cfg.model.retry_max_stream_restarts = v;
+        }
 
         if let Some(v) = env_parse("KARUCODE_MAX_ITERATIONS") {
             cfg.limits.max_iterations = v;
         }
         if let Some(v) = env_parse("KARUCODE_MAX_RUN_SECS") {
             cfg.limits.max_run_secs = v;
+        }
+        if let Some(v) = env_bool("KARUCODE_AUTO_CONTINUE") {
+            cfg.limits.auto_continue = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_MAX_CONTINUES") {
+            cfg.limits.max_continues = v;
         }
         if let Some(v) = env_parse("KARUCODE_MAX_TOOL_OUTPUT_BYTES") {
             cfg.limits.max_tool_output_bytes = v;
@@ -922,6 +1108,12 @@ impl Config {
             max_tokens: self.model.max_tokens,
             top_p: self.model.top_p,
             request_timeout_secs: profile.request_timeout_secs,
+            // The retry policy is global, like sampling: it says how patient
+            // the client is with ANY endpoint, not one profile's connection.
+            retry_max_retries: self.model.retry_max_retries,
+            retry_base_delay_ms: self.model.retry_base_delay_ms,
+            retry_max_delay_ms: self.model.retry_max_delay_ms,
+            retry_max_stream_restarts: self.model.retry_max_stream_restarts,
             extra_headers: profile.extra_headers.clone(),
             extra_body: profile.extra_body.clone(),
             parallel_tool_calls: self.model.parallel_tool_calls,
@@ -1034,10 +1226,12 @@ mod tests {
 
     #[test]
     fn normalize_repairs_a_stale_selection() {
-        let mut cfg = Config::default();
-        cfg.providers = vec![profile("gateway", &["model-a"])];
-        cfg.active_provider = Some("deleted".into());
-        cfg.active_model = Some("also-gone".into());
+        let mut cfg = Config {
+            providers: vec![profile("gateway", &["model-a"])],
+            active_provider: Some("deleted".into()),
+            active_model: Some("also-gone".into()),
+            ..Config::default()
+        };
         cfg.normalize_providers();
 
         assert_eq!(cfg.active_provider.as_deref(), Some("gateway"));
@@ -1145,5 +1339,171 @@ allow_commands = ["cargo test"]
         assert_eq!(m.base_url, "http://localhost:1234/v1");
         assert_eq!(m.model, "qwen");
         assert_eq!(f.approvals.unwrap().mode, ApprovalMode::Auto);
+    }
+
+    #[test]
+    fn retry_budget_defaults_and_overrides_parse() {
+        // Defaults are the documented budget: 50 retries, 500ms first delay,
+        // 30s ceiling.
+        let m = ModelConfig::default();
+        assert_eq!(m.retry_max_retries, 50);
+        assert_eq!(m.retry_base_delay_ms, 500);
+        assert_eq!(m.retry_max_delay_ms, 30_000);
+        assert_eq!(
+            m.retry_max_stream_restarts, 3,
+            "mid-stream restarts default to a small budget: each one is a fresh generation"
+        );
+
+        // Absent keys keep the defaults ...
+        let f: ConfigFile = toml::from_str("[model]\nmodel = \"qwen\"\n").unwrap();
+        let m = f.model.unwrap();
+        assert_eq!(m.retry_max_retries, 50);
+        assert_eq!(m.retry_max_delay_ms, 30_000);
+        assert_eq!(m.retry_max_stream_restarts, 3);
+
+        // ... and present ones override them.
+        let text = r#"
+[model]
+model = "qwen"
+retry_max_retries = 3
+retry_base_delay_ms = 100
+retry_max_delay_ms = 2000
+retry_max_stream_restarts = 0
+"#;
+        let f: ConfigFile = toml::from_str(text).unwrap();
+        let m = f.model.unwrap();
+        assert_eq!(m.retry_max_retries, 3);
+        assert_eq!(m.retry_base_delay_ms, 100);
+        assert_eq!(m.retry_max_delay_ms, 2000);
+        assert_eq!(m.retry_max_stream_restarts, 0);
+    }
+
+    #[test]
+    fn retry_budget_stays_global_across_profiles() {
+        // The retry policy describes how patient the client is with ANY
+        // endpoint, so deriving the live config from a profile must carry it
+        // over instead of resetting it to defaults.
+        let mut cfg = Config::default();
+        cfg.model.retry_max_retries = 7;
+        cfg.model.retry_base_delay_ms = 42;
+        cfg.model.retry_max_delay_ms = 999;
+        cfg.model.retry_max_stream_restarts = 2;
+        cfg.normalize_providers();
+        let effective = cfg.effective_model();
+        assert_eq!(effective.retry_max_retries, 7);
+        assert_eq!(effective.retry_base_delay_ms, 42);
+        assert_eq!(effective.retry_max_delay_ms, 999);
+        assert_eq!(effective.retry_max_stream_restarts, 2);
+    }
+
+    #[test]
+    fn retry_budget_env_overrides_win() {
+        // Only this test reads these variables, so setting them cannot perturb
+        // another test's expectations; they are removed before asserting so a
+        // failure cannot leak into the rest of the binary.
+        std::env::set_var("KARUCODE_RETRY_MAX_RETRIES", "3");
+        std::env::set_var("KARUCODE_RETRY_BASE_DELAY_MS", "25");
+        std::env::set_var("KARUCODE_RETRY_MAX_DELAY_MS", "250");
+        std::env::set_var("KARUCODE_RETRY_MAX_STREAM_RESTARTS", "1");
+        let cfg = Config::from_parts(ConfigFile::default(), None);
+        std::env::remove_var("KARUCODE_RETRY_MAX_RETRIES");
+        std::env::remove_var("KARUCODE_RETRY_BASE_DELAY_MS");
+        std::env::remove_var("KARUCODE_RETRY_MAX_DELAY_MS");
+        std::env::remove_var("KARUCODE_RETRY_MAX_STREAM_RESTARTS");
+
+        let cfg = cfg.expect("config loads");
+        assert_eq!(cfg.model.retry_max_retries, 3);
+        assert_eq!(cfg.model.retry_base_delay_ms, 25);
+        assert_eq!(cfg.model.retry_max_delay_ms, 250);
+        assert_eq!(cfg.model.retry_max_stream_restarts, 1);
+        assert_eq!(
+            cfg.effective_model().retry_max_retries,
+            3,
+            "an env override must survive profile resolution"
+        );
+    }
+
+    #[test]
+    fn session_model_selection_validates_its_shape() {
+        let selection = SessionModelSelection {
+            provider: "gateway".into(),
+            model: "model-b".into(),
+            reasoning_effort: Some("high".into()),
+        };
+        assert!(selection.validate_shape().is_ok());
+
+        // Every reasoning effort value must be one of the four the wire format
+        // agrees on; anything else is rejected where it is saved.
+        for effort in REASONING_EFFORTS {
+            let mut candidate = selection.clone();
+            candidate.reasoning_effort = Some((*effort).into());
+            assert!(candidate.validate_shape().is_ok(), "{effort}");
+        }
+        let mut bad_effort = selection.clone();
+        bad_effort.reasoning_effort = Some("extreme".into());
+        let err = bad_effort.validate_shape().unwrap_err().to_string();
+        assert!(err.contains("reasoning_effort"), "{err}");
+
+        let mut blank_provider = selection.clone();
+        blank_provider.provider = "   ".into();
+        assert!(blank_provider.validate_shape().is_err());
+
+        let mut blank_model = selection.clone();
+        blank_model.model = String::new();
+        assert!(blank_model.validate_shape().is_err());
+
+        let mut control = selection.clone();
+        control.model = "m\u{0}".into();
+        assert!(control.validate_shape().is_err());
+
+        let mut long = selection.clone();
+        long.provider = "p".repeat(65);
+        assert!(long.validate_shape().is_err());
+    }
+
+    #[test]
+    fn session_model_selection_normalizes_whitespace() {
+        let selection = SessionModelSelection {
+            provider: "  gateway ".into(),
+            model: " model-b\n".into(),
+            reasoning_effort: Some("  low  ".into()),
+        };
+        let normalized = selection.normalized();
+        assert_eq!(normalized.provider, "gateway");
+        assert_eq!(normalized.model, "model-b");
+        assert_eq!(normalized.reasoning_effort.as_deref(), Some("low"));
+
+        let mut blank_effort = selection.clone();
+        blank_effort.reasoning_effort = Some("   ".into());
+        assert!(blank_effort.normalized().reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn session_model_selection_serializes_minimally() {
+        let with_effort = SessionModelSelection {
+            provider: "gateway".into(),
+            model: "model-b".into(),
+            reasoning_effort: Some("low".into()),
+        };
+        let json = serde_json::to_value(&with_effort).unwrap();
+        assert_eq!(json["provider"], serde_json::json!("gateway"));
+        assert_eq!(json["model"], serde_json::json!("model-b"));
+        assert_eq!(json["reasoning_effort"], serde_json::json!("low"));
+
+        let plain = SessionModelSelection {
+            reasoning_effort: None,
+            ..with_effort.clone()
+        };
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(
+            json.get("reasoning_effort").is_none(),
+            "an absent effort is omitted, not null"
+        );
+
+        // Round trip through the stored form.
+        let parsed: SessionModelSelection =
+            serde_json::from_str(r#"{"provider":"local","model":"tiny"}"#).unwrap();
+        assert_eq!(parsed.provider, "local");
+        assert!(parsed.reasoning_effort.is_none());
     }
 }

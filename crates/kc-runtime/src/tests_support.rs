@@ -11,7 +11,7 @@ use crate::subagent::SubagentLimiter;
 use crate::{ActiveRun, Runtime, RuntimeDeps, RuntimeInner};
 use async_trait::async_trait;
 use kc_core::approval::ApprovalKind;
-use kc_core::config::{ApprovalPolicy, Limits, ModelConfig, SubagentConfig};
+use kc_core::config::{ApprovalPolicy, Limits, ModelConfig, SessionModelSelection, SubagentConfig};
 use kc_core::error::{Error, Result};
 use kc_core::events::EventEnvelope;
 use kc_core::hooks::NoHooks;
@@ -168,6 +168,7 @@ impl Store for FakeStore {
             title: title.to_string(),
             workspace: workspace.to_string(),
             project_id: project_id.map(str::to_string),
+            model: None,
             created_at: now,
             updated_at: now,
         };
@@ -185,6 +186,7 @@ impl Store for FakeStore {
                 title: s.title.clone(),
                 workspace: s.workspace.clone(),
                 project_id: s.project_id.clone(),
+                model: s.model.clone(),
                 created_at: s.created_at,
                 updated_at: s.updated_at,
                 message_count: 0,
@@ -212,6 +214,22 @@ impl Store for FakeStore {
         match db.sessions.iter_mut().find(|s| s.id == id) {
             Some(s) => {
                 s.title = title.to_string();
+                s.updated_at = now_ms();
+                Ok(())
+            }
+            None => Err(Error::NotFound(format!("session {id}"))),
+        }
+    }
+
+    async fn set_session_model(
+        &self,
+        id: &str,
+        model: Option<&SessionModelSelection>,
+    ) -> Result<()> {
+        let mut db = self.db();
+        match db.sessions.iter_mut().find(|s| s.id == id) {
+            Some(s) => {
+                s.model = model.cloned();
                 s.updated_at = now_ms();
                 Ok(())
             }
@@ -600,6 +618,9 @@ impl Store for FakeStore {
 pub(crate) enum Script {
     /// Stream these chunks, then end the stream normally.
     Chunks(Vec<ProviderChunk>),
+    /// Stream these chunks, then die the way a dropped gateway connection does
+    /// (`error decoding response body`, a truncated SSE frame, a reset).
+    ChunksThenFail(Vec<ProviderChunk>, String),
     /// Emit these chunks and then never finish (used for cancellation tests).
     Hang(Vec<ProviderChunk>),
     /// Fail the request itself.
@@ -670,6 +691,12 @@ impl Provider for ScriptedProvider {
             Some(Script::Chunks(chunks)) => Ok(Box::pin(futures_util::stream::iter(
                 chunks.into_iter().map(Ok),
             ))),
+            Some(Script::ChunksThenFail(chunks, message)) => {
+                use futures_util::StreamExt;
+                let head = futures_util::stream::iter(chunks.into_iter().map(Ok));
+                let tail = futures_util::stream::iter(vec![Err(Error::Provider(message))]);
+                Ok(Box::pin(head.chain(tail)))
+            }
             Some(Script::Hang(chunks)) => {
                 use futures_util::StreamExt;
                 let head = futures_util::stream::iter(chunks.into_iter().map(Ok));
@@ -763,6 +790,23 @@ impl FakeSettings {
 impl Settings for FakeSettings {
     async fn model(&self) -> ModelConfig {
         self.model.clone()
+    }
+
+    /// Mirrors the server's resolution closely enough to prove the runtime
+    /// *uses* a session's selection: the selected model id wins, everything else
+    /// stays whatever the fake config says.
+    async fn resolve_model(&self, selection: Option<&SessionModelSelection>) -> ModelConfig {
+        let mut model = self.model.clone();
+        if let Some(selection) = selection {
+            model.model = selection.model.clone();
+            if let Some(effort) = &selection.reasoning_effort {
+                model.extra_body.insert(
+                    "reasoning_effort".to_string(),
+                    serde_json::Value::String(effort.clone()),
+                );
+            }
+        }
+        model
     }
 
     async fn limits(&self) -> Limits {
@@ -1084,6 +1128,12 @@ impl HarnessBuilder {
 
     pub(crate) fn settings(mut self, settings: FakeSettings) -> Self {
         self.settings = settings;
+        self
+    }
+
+    /// Replace the model config (sampling + retry budgets) the runtime sees.
+    pub(crate) fn model(mut self, model: ModelConfig) -> Self {
+        self.settings.model = model;
         self
     }
 

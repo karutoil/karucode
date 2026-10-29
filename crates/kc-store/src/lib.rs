@@ -4,6 +4,7 @@
 //! queries run on the blocking pool so the async runtime is never blocked.
 
 use async_trait::async_trait;
+use kc_core::config::SessionModelSelection;
 use kc_core::error::{Error, Result};
 use kc_core::message::ToolCall;
 use kc_core::store::*;
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Schema v1. Every statement is `IF NOT EXISTS` so a partially applied
 /// migration can be re-run safely; the whole batch runs in one transaction.
@@ -122,6 +123,13 @@ ALTER TABLE sessions ADD COLUMN project_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_sessions_project_id ON sessions(project_id);
 "#;
 
+/// Schema v3: per-session model selection. NULL follows the install-wide
+/// default; otherwise a JSON [`SessionModelSelection`] (`{provider, model,
+/// reasoning_effort?}`) pins this session to a profile + model.
+const MIGRATION_3: &str = r#"
+ALTER TABLE sessions ADD COLUMN model TEXT;
+"#;
+
 pub struct SqliteStore {
     conn: Arc<Mutex<rusqlite::Connection>>,
     path: PathBuf,
@@ -188,12 +196,29 @@ fn json_value(raw: Option<String>, column: &str) -> serde_json::Value {
     }
 }
 
+/// Decode a nullable JSON object column, falling back to `None` on NULL/garbage.
+/// A corrupt per-session selection degrades to the install-wide default instead
+/// of failing the whole row.
+fn json_opt<T: serde::de::DeserializeOwned>(raw: Option<String>, column: &str) -> Option<T> {
+    match raw {
+        Some(raw) if !raw.trim().is_empty() => match serde_json::from_str(&raw) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(column, error = %e, "malformed json column; using default");
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
 fn map_session(row: &Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
         id: row.get("id")?,
         title: row.get("title")?,
         workspace: row.get("workspace")?,
         project_id: row.get("project_id")?,
+        model: json_opt(row.get("model")?, "sessions.model"),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -216,6 +241,7 @@ fn map_session_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         title: row.get("title")?,
         workspace: row.get("workspace")?,
         project_id: row.get("project_id")?,
+        model: json_opt(row.get("model")?, "sessions.model"),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         message_count: row.get("message_count")?,
@@ -228,7 +254,8 @@ fn summarize_sessions(
     conn: &rusqlite::Connection,
     project_id: Option<&str>,
 ) -> Result<Vec<SessionSummary>> {
-    let base = "SELECT s.id, s.title, s.workspace, s.project_id, s.created_at, s.updated_at,
+    let base =
+        "SELECT s.id, s.title, s.workspace, s.project_id, s.model, s.created_at, s.updated_at,
                        (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
                        (SELECT r.status FROM runs r
                          WHERE r.session_id = s.id
@@ -447,6 +474,9 @@ impl SqliteStore {
                     2 => tx
                         .execute_batch(MIGRATION_2)
                         .map_err(|e| db_err("migration v2", e))?,
+                    3 => tx
+                        .execute_batch(MIGRATION_3)
+                        .map_err(|e| db_err("migration v3", e))?,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -485,7 +515,7 @@ impl Store for SqliteStore {
             )
             .map_err(|e| db_err("create_session", e))?;
             conn.query_row(
-                "SELECT id, title, workspace, project_id, created_at, updated_at
+                "SELECT id, title, workspace, project_id, model, created_at, updated_at
                    FROM sessions WHERE id = ?1",
                 params![id],
                 map_session,
@@ -509,7 +539,7 @@ impl Store for SqliteStore {
         let id = id.to_string();
         self.with(move |conn| {
             let mut stmt = conn
-                .prepare("SELECT id, title, workspace, project_id, created_at, updated_at FROM sessions WHERE id = ?1")
+                .prepare("SELECT id, title, workspace, project_id, model, created_at, updated_at FROM sessions WHERE id = ?1")
                 .map_err(|e| db_err("get_session prepare", e))?;
             let mut rows = stmt.query_map(params![id], map_session).map_err(|e| db_err("get_session query", e))?;
             match rows.next() {
@@ -531,6 +561,35 @@ impl Store for SqliteStore {
                     params![id, title, now],
                 )
                 .map_err(|e| db_err("rename_session", e))?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("session {id}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn set_session_model(
+        &self,
+        id: &str,
+        model: Option<&SessionModelSelection>,
+    ) -> Result<()> {
+        let id = id.to_string();
+        let json = match model {
+            Some(selection) => Some(
+                serde_json::to_string(selection)
+                    .map_err(|e| Error::Store(format!("session model selection: {e}")))?,
+            ),
+            None => None,
+        };
+        self.with(move |conn| {
+            let now = now_ms();
+            let n = conn
+                .execute(
+                    "UPDATE sessions SET model = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, json, now],
+                )
+                .map_err(|e| db_err("set_session_model", e))?;
             if n == 0 {
                 return Err(Error::NotFound(format!("session {id}")));
             }
@@ -1375,6 +1434,123 @@ mod tests {
         assert!(store.get_session("s_1").await.expect("get").is_none());
         // Deleting again is a no-op, not an error.
         store.delete_session("s_1").await.expect("delete again");
+    }
+
+    #[tokio::test]
+    async fn session_model_selection_round_trips() {
+        let db = TempDb::new("session-model");
+        let store = db.open().await;
+
+        let created = store
+            .create_session("s_1", "First", "/workspace", None)
+            .await
+            .expect("create");
+        assert!(
+            created.model.is_none(),
+            "a new session follows the install-wide default"
+        );
+
+        let selection = SessionModelSelection {
+            provider: "gateway".into(),
+            model: "model-b".into(),
+            reasoning_effort: Some("high".into()),
+        };
+        store
+            .set_session_model("s_1", Some(&selection))
+            .await
+            .expect("set model");
+
+        let session = store.get_session("s_1").await.unwrap().expect("some");
+        assert_eq!(session.model.as_ref(), Some(&selection));
+        // The rail summary must carry the same selection, so a second tab shows
+        // the right label without loading the session detail.
+        let summaries = store.list_sessions().await.expect("list");
+        assert_eq!(summaries[0].model.as_ref(), Some(&selection));
+
+        // A selection without an effort stays without one.
+        let plain = SessionModelSelection {
+            provider: "local".into(),
+            model: "tiny".into(),
+            reasoning_effort: None,
+        };
+        store
+            .set_session_model("s_1", Some(&plain))
+            .await
+            .expect("set plain model");
+        let session = store.get_session("s_1").await.unwrap().expect("some");
+        assert_eq!(session.model.as_ref(), Some(&plain));
+
+        // Clearing restores the install-wide default.
+        store
+            .set_session_model("s_1", None)
+            .await
+            .expect("clear model");
+        assert!(store
+            .get_session("s_1")
+            .await
+            .unwrap()
+            .expect("some")
+            .model
+            .is_none());
+
+        // An unknown session is a NotFound, not a silent no-op.
+        assert!(matches!(
+            store.set_session_model("s_missing", Some(&selection)).await,
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn migration_from_v2_keeps_sessions_and_defaults_the_model() {
+        let db = TempDb::new("migrate-v2");
+        std::fs::create_dir_all(db.path.parent().expect("parent")).expect("data dir");
+        {
+            // A database written by the previous build: v1 + v2, no model column.
+            let conn = rusqlite::Connection::open(&db.path).expect("raw open");
+            conn.execute_batch(MIGRATION_1).expect("v1");
+            conn.execute_batch(MIGRATION_2).expect("v2");
+            conn.pragma_update(None, "user_version", 2)
+                .expect("version");
+            conn.execute(
+                "INSERT INTO sessions (id, title, workspace, created_at, updated_at)
+                 VALUES ('s_old', 'Old', '/w', 1, 2)",
+                [],
+            )
+            .expect("insert v2 session");
+        }
+
+        let store = db.open().await;
+        let session = store
+            .get_session("s_old")
+            .await
+            .expect("get")
+            .expect("the v2 session survives the upgrade");
+        assert_eq!(session.title, "Old");
+        assert!(
+            session.model.is_none(),
+            "an upgraded session follows the install-wide default"
+        );
+
+        // The new column is writable after the migration.
+        let selection = SessionModelSelection {
+            provider: "gateway".into(),
+            model: "model-b".into(),
+            reasoning_effort: None,
+        };
+        store
+            .set_session_model("s_old", Some(&selection))
+            .await
+            .expect("set on upgraded row");
+        assert_eq!(
+            store
+                .get_session("s_old")
+                .await
+                .unwrap()
+                .expect("some")
+                .model
+                .as_ref(),
+            Some(&selection)
+        );
     }
 
     #[tokio::test]
@@ -2319,7 +2495,6 @@ mod tests {
 #[cfg(test)]
 mod project_tests {
     use super::tests::TempDb;
-    use super::*;
     use kc_core::store::Store;
 
     #[tokio::test]

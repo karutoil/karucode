@@ -1,3 +1,4 @@
+use crate::config::SessionModelSelection;
 use crate::error::Result;
 use crate::message::Message;
 use crate::message::ToolCall;
@@ -88,6 +89,10 @@ pub struct Session {
     /// a project at startup.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Per-session model selection. `None` follows the install-wide default,
+    /// so several sessions can run different models at the same time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<SessionModelSelection>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -113,6 +118,9 @@ pub struct SessionSummary {
     pub workspace: String,
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Per-session model selection (`None` = install-wide default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<SessionModelSelection>,
     pub created_at: i64,
     pub updated_at: i64,
     pub message_count: i64,
@@ -263,6 +271,13 @@ pub trait Store: Send + Sync {
     async fn list_sessions_for_project(&self, project_id: &str) -> Result<Vec<SessionSummary>>;
     async fn get_session(&self, id: &str) -> Result<Option<Session>>;
     async fn rename_session(&self, id: &str, title: &str) -> Result<()>;
+    /// Set (`Some`) or clear (`None`) a session's per-session model selection.
+    /// The next run in the session resolves its model from the new value.
+    async fn set_session_model(
+        &self,
+        id: &str,
+        model: Option<&SessionModelSelection>,
+    ) -> Result<()>;
     async fn delete_session(&self, id: &str) -> Result<()>;
     async fn touch_session(&self, id: &str) -> Result<()>;
     /// Attach a session (typically one created before projects existed) to a
