@@ -1,4 +1,4 @@
-import { useId } from 'preact/hooks';
+import { useEffect, useId, useRef } from 'preact/hooks';
 import type { JSX } from 'preact';
 
 export interface TabItem<T extends string> {
@@ -29,6 +29,11 @@ export interface TabsProps<T extends string> {
 /**
  * Keyboard-operable tablist: automatic activation, arrow keys move selection,
  * Home/End jump to the ends, and only the selected tab is in the tab order.
+ *
+ * The strip scrolls once plugins add more tabs than fit (see `.tabs` in
+ * inspector.css), so the selected tab is also kept in view: a tab can be
+ * activated without a pointer - arrow key, `Ctrl+J` restore, a plugin panel
+ * arriving - and it must never be selected off-screen.
  */
 export function Tabs<T extends string>({
   items,
@@ -41,6 +46,21 @@ export function Tabs<T extends string>({
   const generated = useId();
   const prefix = idPrefix ?? generated;
   const workspace = variant === 'workspace';
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // Measured by hand rather than with `scrollIntoView`, which would also scroll
+  // the page and the inspector around the strip. A tab that already fits leaves
+  // `scrollLeft` untouched, so selecting a visible tab never nudges the strip;
+  // jsdom reports zero rects, which makes this a no-op there.
+  useEffect(() => {
+    const list = listRef.current;
+    const tab = document.getElementById(`${prefix}-tab-${active}`);
+    if (!list || !tab || !list.contains(tab)) return;
+    const listBox = list.getBoundingClientRect();
+    const tabBox = tab.getBoundingClientRect();
+    if (tabBox.left < listBox.left) list.scrollLeft -= listBox.left - tabBox.left;
+    else if (tabBox.right > listBox.right) list.scrollLeft += tabBox.right - listBox.right;
+  }, [active, prefix, items.length]);
 
   const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
     const index = items.findIndex((item) => item.id === active);
@@ -61,6 +81,7 @@ export function Tabs<T extends string>({
 
   return (
     <div
+      ref={listRef}
       class={workspace ? 'workspace-tabs' : 'tabs'}
       role="tablist"
       aria-label={label}

@@ -44,6 +44,9 @@ function setProjects(projects: Project[], currentId: string | null, loading = fa
   store.projectsLoading.value = loading;
   store.currentProjectId.value = currentId;
   store.projectSheetOpen.value = false;
+  // The rail reads the icon map; the default in every test is "no favicon", which
+  // is also the common case in a real project list.
+  store.projectIcons.value = {};
 }
 
 function renderRail() {
@@ -98,6 +101,31 @@ describe('ProjectRail', () => {
     // Initials per project (max two characters), rendered inside the square icon.
     expect(items[0]?.querySelector('.project-rail-avatar')?.textContent).toBe('K');
     expect(items[1]?.querySelector('.project-rail-avatar')?.textContent).toBe('DS');
+  });
+
+  it('draws a project favicon instead of its initials, and keeps initials as the fallback', () => {
+    setProjects([mainProject, docsProject], mainProject.id);
+    // A project with an icon: the square becomes an image.
+    store.projectIcons.value = { [mainProject.id]: 'blob:icon' };
+    const { container } = renderRail();
+
+    const iconTile = container.querySelector('.project-rail-avatar.has-icon');
+    expect(iconTile).not.toBeNull();
+    const image = iconTile?.querySelector('img.project-rail-icon') as HTMLImageElement | null;
+    expect(image?.getAttribute('src')).toBe('blob:icon');
+    // Decorative: the button keeps the accessible name, the image adds none.
+    expect(image?.getAttribute('alt')).toBe('');
+    expect(iconTile?.getAttribute('aria-hidden')).toBe('true');
+
+    // The project without one still shows initials.
+    const tiles = container.querySelectorAll('.project-rail-avatar');
+    expect(tiles).toHaveLength(2);
+    expect(tiles[1]?.hasAttribute('has-icon')).toBe(false);
+    expect(tiles[1]?.querySelector('img')).toBeNull();
+    expect(tiles[1]?.textContent).toBe('DS');
+
+    // The accessible name never changes because of the icon.
+    expect(screen.getByRole('button', { name: 'Switch to KaruCode (/home/me/karucode)' })).not.toBeNull();
   });
 
   it('marks the active project, shows its left pill and exposes actions on it only', () => {

@@ -2,6 +2,7 @@ import { ApiError, getAuthToken, onUnauthorized, setAuthToken, toErrorMessage } 
 import * as api from '../api/endpoints';
 import { startEventStream, type EventStreamHandle } from '../api/events';
 import type {
+  AgentSummary,
   ApprovalDecision,
   Config,
   ConfigPatch,
@@ -13,11 +14,14 @@ import type {
   ProviderTestResult,
   RawEvent,
   Session,
+  SessionDetail,
   SessionSummary,
 } from '../api/types';
 import { isNarrowViewport } from '../lib/dom';
-import { emptyChatState, seedChatState, type MessageItem } from './chat';
+import { emptyChatState, seedChatState, type ChatState, type MessageItem } from './chat';
+import * as agentConsole from './agentConsole';
 import { applyEventToChat, applyEventToSessions, markUserRun, sessionAgentFromRecord } from './eventReducer';
+import { syncProjectIcons } from './projectIcons';
 import { summaryFromDetail } from './selectors';
 import * as store from './store';
 
@@ -175,6 +179,41 @@ function hasLiveAnswer(sessionId: string): boolean {
 }
 
 /**
+ * Splice the answer that is still streaming back into a freshly seeded
+ * transcript.
+ *
+ * `seedChatState` rebuilds everything the server knows - persisted messages,
+ * tool cards, pending approvals, notices - but it cannot know the text arriving
+ * right now, because an assistant turn is only persisted once it completes.
+ * Reseeding alone would delete that text; skipping the reseed (what this used to
+ * do) loses every card whose frame was one of the dropped ones. Merging keeps
+ * both: the snapshot supplies the cards, the live state supplies the prose.
+ */
+function mergeLiveAnswer(candidate: ChatState, live: ChatState): ChatState {
+  const streaming = live.items.filter(
+    (item): item is MessageItem =>
+      item.kind === 'message' && item.streaming && (item.content !== '' || item.reasoning !== ''),
+  );
+  if (streaming.length === 0) return candidate;
+
+  // The seed adds an empty placeholder for the in-flight run; the real message
+  // replaces it, so drop every streaming item before appending the live ones.
+  const items = candidate.items.filter((item) => !(item.kind === 'message' && item.streaming));
+
+  // A subagent that spawned before the hole may not be in the snapshot yet.
+  const known = new Set(candidate.agents.map((agent) => agent.id));
+  const agents = [...candidate.agents, ...live.agents.filter((agent) => !known.has(agent.id))];
+
+  return {
+    ...candidate,
+    items: [...items, ...streaming],
+    agents,
+    running: true,
+    runStatus: 'running',
+  };
+}
+
+/**
  * Repair the open session after the event stream lost frames (server lag, a
  * stalled proxy hop, a connection that had to be re-established, or a lag marker
  * from the pump). This is what the *reload the page* workaround used to do by
@@ -205,6 +244,10 @@ function handleRawEvent(raw: RawEvent): void {
   // The payload shape is validated by parseEventPayload; unknown `type` values
   // are ignored by the reducers.
   const event = raw as unknown as KarucodeEvent;
+
+  // Subagent frames are handled before the current-session filter below: the tab
+  // shows agents running anywhere in the project, not only in the open session.
+  handleAgentEvent(event);
 
   const wasKnown = store.sessions.value.some((session) => session.id === event.session_id);
   store.sessions.value = applyEventToSessions(store.sessions.value, event);
@@ -249,6 +292,60 @@ function applyChatEvent(event: KarucodeEvent): void {
   store.chat.value = applyEventToChat(store.chat.value, event);
 }
 
+/**
+ * Accumulate one agent-scoped frame into the workspace-wide agent view.
+ *
+ * Lifecycle events update the registry; text/tool/approval events update that
+ * agent's transcript only. The chat reducer deliberately drops subagent text and
+ * tool frames (they belong to another conversation), so this is where they land.
+ */
+function handleAgentEvent(event: KarucodeEvent): void {
+  const agentId = agentConsole.agentEventId(event);
+  if (!agentId) return;
+  const inScope = store.sessions.value.some((session) => session.id === event.session_id);
+  if (agentConsole.isAgentLifecycleEvent(event)) {
+    store.agentsAll.value = agentConsole.applyAgentRegistry(
+      store.agentsAll.value,
+      event,
+      store.sessions.value,
+    );
+  }
+  if (!inScope) return;
+  const current = store.agentActivities.value[agentId] ?? agentConsole.emptyActivity();
+  const next = agentConsole.applyAgentEvent(current, event);
+  if (next === current) return;
+  store.agentActivities.value = { ...store.agentActivities.value, [agentId]: next };
+}
+
+/**
+ * Seed the workspace list and live transcripts from a session snapshot.
+ *
+ * The snapshot carries every message, subagent rows included, so opening a
+ * session fills in the history of agents that ran before this page loaded
+ * without a request per agent.
+ */
+function seedAgentState(detail: SessionDetail): void {
+  const incoming = detail.agents.map((agent) => ({
+    ...sessionAgentFromRecord(agent),
+    session_title: detail.session.title,
+    workspace: detail.session.workspace,
+    project_id: detail.session.project_id ?? null,
+  }));
+  store.agentsAll.value = agentConsole.mergeAgentList(store.agentsAll.value, incoming);
+
+  if (incoming.length === 0) return;
+  const next = { ...store.agentActivities.value };
+  let changed = false;
+  for (const agent of detail.agents) {
+    const seeded = agentConsole.activityFromMessages(detail.messages, agent.id);
+    if (seeded.items.length === 0) continue;
+    const live = next[agent.id];
+    next[agent.id] = live ? agentConsole.mergeActivities(seeded, live) : seeded;
+    changed = true;
+  }
+  if (changed) store.agentActivities.value = next;
+}
+
 function drainRefreshQueue(settled = false): void {
   const queued = refreshQueue;
   refreshQueue = [];
@@ -277,6 +374,9 @@ async function doRefreshSessions(): Promise<void> {
     const list = await api.listSessions(store.currentProjectId.value);
     store.sessions.value = list;
     store.sessionsLoading.value = false;
+    // Agents belong to sessions: a deleted or renamed session changes both the
+    // list and the labels the Agents view groups by.
+    void refreshAgents();
     const current = store.currentSessionId.value;
     if (current && !list.some((session) => session.id === current)) {
       const next = list[0] ?? null;
@@ -330,6 +430,9 @@ export async function bootstrap(force = false): Promise<void> {
       store.config.value = config;
       store.projects.value = projectList.projects;
       store.projectsLoading.value = false;
+      // Per-project icons are fetched in the background: the rail draws initials
+      // first and swaps in a favicon when one arrives, so this never delays boot.
+      syncProjectIcons(projectList.projects);
       // Keep the remembered project when it still exists, otherwise open the
       // first one (the bootstrap-created default).
       const remembered = store.readLastProjectId();
@@ -342,6 +445,7 @@ export async function bootstrap(force = false): Promise<void> {
       const list = await api.listSessions(project?.id ?? null);
       store.sessions.value = list;
       store.sessionsLoading.value = false;
+      await refreshAgents();
       store.authError.value = null;
       store.connection.value = {
         api: 'online',
@@ -413,18 +517,15 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
     const detail = await api.getSession(id);
     if (generation !== sessionGeneration) return false;
     if (options.preserveLive && detail.running && hasLiveAnswer(id)) {
-      // Never delete an answer that is still streaming. Refresh what the server
-      // does know (agents, live status) and let the next reseed rebuild the items.
-      store.chat.value = {
-        ...store.chat.value,
-        agents: detail.agents.map(sessionAgentFromRecord),
-        running: true,
-        runStatus: 'running',
-      };
+      // Never delete an answer that is still streaming - but do not throw the
+      // snapshot away either. It is the only thing that can restore a tool card,
+      // an approval or a notice whose frame was one of the lost ones.
+      store.chat.value = mergeLiveAnswer(seedChatState(detail, store.chat.value), store.chat.value);
     } else {
       store.chat.value = seedChatState(detail, store.chat.value);
       settled = !detail.running;
     }
+    seedAgentState(detail);
     mergeSummary(summaryFromDetail(detail));
     store.chatLoading.value = false;
     store.chatError.value = null;
@@ -863,6 +964,7 @@ export async function refreshProjects(): Promise<void> {
     const result = await api.listProjects();
     store.projects.value = result.projects;
     store.projectsLoading.value = false;
+    syncProjectIcons(result.projects);
     const current = store.currentProjectId.value;
     if (!result.projects.some((project) => project.id === current)) {
       const next = result.projects[0] ?? null;
@@ -895,8 +997,17 @@ export async function switchProject(id: string): Promise<void> {
   store.projectSheetOpen.value = false;
   store.mobileSheet.value = null;
   store.inspectorTab.value = 'workspace';
+  // Panel payloads are project-scoped: the previous project's answers must not
+  // be shown against the new one.
+  resetPluginPanelData();
   store.sessions.value = [];
   store.sessionsLoading.value = true;
+  // The Agents view is project-scoped: drop the previous project's agents and
+  // transcripts instead of showing them until the first refresh lands.
+  store.agentsAll.value = [];
+  store.agentActivities.value = {};
+  store.selectedAgentId.value = null;
+  store.agentFilter.value = 'all';
   store.fileViewerPath.value = null;
   clearSelection();
   await refreshSessions();
@@ -908,6 +1019,7 @@ export async function createProject(name: string, path: string): Promise<Project
   try {
     const project = await api.createProject(path, name.trim() || undefined);
     store.projects.value = [...store.projects.value, project];
+    syncProjectIcons(store.projects.value);
     store.pushToast(`Added ${project.name}.`, 'success');
     await switchProject(project.id);
     return project;
@@ -940,6 +1052,9 @@ export async function deleteProjectById(id: string, force = false): Promise<bool
     const result = await api.deleteProject(id, force);
     const remaining = store.projects.value.filter((project) => project.id !== id);
     store.projects.value = remaining;
+    // Drop the deleted project's icon (and revoke its object URL) instead of
+    // leaving it in memory for the rest of the page's life.
+    syncProjectIcons(remaining);
     store.pushToast(
       result.deleted_sessions > 0
         ? `Project deleted with ${result.deleted_sessions} session(s).`
@@ -975,6 +1090,91 @@ export async function refreshSessionAgents(): Promise<void> {
   }
 }
 
+/**
+ * Reload the workspace-wide agent list.
+ *
+ * Only the list comes from the server; each agent's live feed keeps streaming in
+ * over SSE, so a refresh corrects membership and status without touching the
+ * transcript already on screen.
+ */
+export async function refreshAgents(): Promise<void> {
+  store.agentsLoading.value = true;
+  try {
+    const list = await api.listAgents({ project: store.currentProjectId.value });
+    store.agentsAll.value = list;
+    store.agentsError.value = null;
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+      return;
+    }
+    store.agentsError.value = toErrorMessage(error);
+  } finally {
+    store.agentsLoading.value = false;
+  }
+}
+
+export function setAgentScope(scope: store.AgentScope): void {
+  if (store.agentScope.value === scope) return;
+  store.agentScope.value = scope;
+  // A status filter chosen in one scope can be empty in the other; reset it so
+  // switching scope shows agents instead of "no matches".
+  store.agentFilter.value = 'all';
+  if (scope === 'workspace') void refreshAgents();
+}
+
+export function setAgentFilter(filter: store.AgentFilter): void {
+  store.agentFilter.value = filter;
+}
+
+export function closeAgentDetail(): void {
+  store.selectedAgentId.value = null;
+  store.agentDetailError.value = null;
+}
+
+/**
+ * Open one agent's transcript.
+ *
+ * The stored transcript fills in everything from before this page loaded; live
+ * frames keep appending on top (merged by stable item id, never duplicated).
+ */
+export async function openAgentDetail(id: string): Promise<void> {
+  store.selectedAgentId.value = id;
+  store.agentDetailError.value = null;
+  store.mobileSheet.value = null;
+  store.agentDetailLoading.value = true;
+  try {
+    const detail = await api.getAgent(id);
+    if (store.selectedAgentId.value !== id) return;
+    store.agentsAll.value = agentConsole.mergeAgentList(store.agentsAll.value, [detail.agent]);
+    const seeded = agentConsole.activityFromMessages(detail.messages, id);
+    if (seeded.items.length > 0) {
+      const live = store.agentActivities.value[id];
+      store.agentActivities.value = {
+        ...store.agentActivities.value,
+        [id]: live ? agentConsole.mergeActivities(seeded, live) : seeded,
+      };
+    }
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+      return;
+    }
+    store.agentDetailError.value = toErrorMessage(error);
+  } finally {
+    store.agentDetailLoading.value = false;
+  }
+}
+
+/** Jump from an agent to the session it belongs to (switching projects if needed). */
+export async function openAgentSession(agent: AgentSummary): Promise<void> {
+  if (agent.project_id && agent.project_id !== store.currentProjectId.value) {
+    await switchProject(agent.project_id);
+  }
+  store.selectedAgentId.value = null;
+  await openSession(agent.session_id);
+}
+
 export function dismissRunError(): void {
   store.chat.value = { ...store.chat.value, runError: null };
 }
@@ -1005,6 +1205,78 @@ export function closeSheets(): void {
 
 export function selectInspectorTab(tab: store.InspectorTab): void {
   store.inspectorTab.value = tab;
+  // A plugin tab reads its payload when it is opened, not before: most sessions
+  // never look at one, and a poll would cost a plugin call for nothing.
+  const pluginTab = store.pluginPanelTabs.value.find((panel) => panel.hosted_id === tab);
+  if (pluginTab) void refreshPluginPanel(pluginTab);
+}
+
+/**
+ * Read one plugin panel's payload.
+ *
+ * The route is scoped by project and session like every other project route, so
+ * a workspace-scoped plugin is asked about the project the user is looking at
+ * rather than about whichever project last ran a prompt.
+ *
+ * Concurrent calls for the same panel are coalesced: a poll interval and a
+ * manual refresh can easily overlap, and a plugin should not be asked twice.
+ */
+const pluginPanelInFlight = new Map<string, Promise<void>>();
+
+export function refreshPluginPanel(panel: store.PluginPanelTab): Promise<void> {
+  const existing = pluginPanelInFlight.get(panel.hosted_id);
+  if (existing) return existing;
+  const run = (async () => {
+    const current = store.pluginPanelData.value[panel.hosted_id];
+    store.pluginPanelData.value = {
+      ...store.pluginPanelData.value,
+      [panel.hosted_id]: {
+        loading: true,
+        // Keep the last payload visible while refreshing: a plugin that is slow
+        // or briefly down must not blank the tab the user is reading.
+        data: current?.data ?? null,
+        title: current?.title ?? null,
+        fetchedAt: current?.fetchedAt ?? null,
+        error: null,
+      },
+    };
+    try {
+      const result = await api.getPluginPanel(panel.plugin, panel.id, {
+        project: store.currentProjectId.value,
+        session: store.currentSessionId.value,
+      });
+      store.pluginPanelData.value = {
+        ...store.pluginPanelData.value,
+        [panel.hosted_id]: {
+          loading: false,
+          data: result.data,
+          title: result.title || panel.title,
+          fetchedAt: result.fetched_ms || Date.now(),
+          error: null,
+        },
+      };
+    } catch (error) {
+      store.pluginPanelData.value = {
+        ...store.pluginPanelData.value,
+        [panel.hosted_id]: {
+          loading: false,
+          data: current?.data ?? null,
+          title: current?.title ?? null,
+          fetchedAt: current?.fetchedAt ?? null,
+          error: toErrorMessage(error),
+        },
+      };
+    } finally {
+      pluginPanelInFlight.delete(panel.hosted_id);
+    }
+  })();
+  pluginPanelInFlight.set(panel.hosted_id, run);
+  return run;
+}
+
+/** Drop every cached panel payload (a project or session change invalidates them). */
+export function resetPluginPanelData(): void {
+  store.pluginPanelData.value = {};
 }
 
 export function openSettings(): void {
@@ -1069,6 +1341,14 @@ export function closeFileViewer(): void {
   store.fileViewerPath.value = null;
 }
 
+/**
+ * Tell the workspace explorer that a file changed on disk from the UI itself, so
+ * its cached listing (sizes, and a file the editor just created) catches up.
+ */
+export function noteWorkspaceFileChanged(_path: string): void {
+  store.workspaceRefreshTick.value += 1;
+}
+
 export function switchSession(id: string): void {
   store.mobileSheet.value = null;
   store.paletteOpen.value = false;
@@ -1095,6 +1375,7 @@ export function resetRuntimeForTests(): void {
   resyncInFlight = false;
   resyncAgain = false;
   resyncFailures = 0;
+  pluginPanelInFlight.clear();
   if (gapResyncTimer !== null) {
     window.clearTimeout(gapResyncTimer);
     gapResyncTimer = null;

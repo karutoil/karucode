@@ -33,15 +33,61 @@
    * Theme Studio rounding: the mock's rounding override list never reshapes the
    * composer. */
   border-radius: var(--radius-input);
-  background: var(--surface-input);
+  /* Translucent so the transcript stays readable underneath. The fill keeps
+   * `--surface-input`'s own contrast in light and dark themes; `--dock-opacity`
+   * is the knob the scrolled state turns down (see below). */
+  background: color-mix(in srgb, var(--surface-input) calc(var(--dock-opacity, 100) * 1%), transparent);
   box-shadow:
     var(--shadow-composer),
+    var(--shadow-dock),
     0 1px var(--inset-hairline) inset;
-  transition: border-color var(--transition-fast);
+  transition:
+    border-color var(--transition-fast),
+    background-color var(--transition),
+    box-shadow var(--transition);
+  /* The dock floats; the box itself is still a real target. */
+  pointer-events: auto;
 }
 
 .composer:focus-within {
   border-color: var(--focus-input);
+}
+
+/* ---------- scrolled away: step back so the text behind shows through ----------
+ *
+ * `data-translucent` is put on `.chat-panel` by ChatView while the reader is
+ * reading history rather than following the run. The dock then thins out, blurs
+ * what is behind it, and the footnote — chrome, not content — steps aside, so
+ * what is left over the transcript is one pale box. Focus inside it brings the
+ * real surface back: a control in use is never see-through.
+ *
+ * `backdrop-filter` is declared only here, never on the base rule: a filter makes
+ * the box a stacking context, and the `@`-mention popover and the dropup model
+ * menus escape the box by `z-index` today.
+ */
+.chat-panel[data-translucent='true'] .composer {
+  --dock-opacity: 42;
+  --dock-blur: 3px;
+  backdrop-filter: blur(var(--dock-blur)) saturate(140%);
+}
+
+.chat-panel[data-translucent='true'] .composer:focus-within {
+  --dock-opacity: 92;
+  --dock-blur: 2px;
+}
+
+/* The footnote steps aside only while the reader is *not* in the box: the moment
+ * they click into it, the status line and the shortcut hints are part of the
+ * control they are using and come back with the surface. */
+.chat-panel[data-translucent='true'] .composer-wrap:not(:focus-within) .compose-foot {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(3px);
+  /* Hide only *after* the fade, so the out-transition runs with the dock. */
+  transition:
+    opacity var(--transition),
+    transform var(--transition),
+    visibility 0s linear var(--transition);
 }
 
 /* ---------- input row ---------- */
@@ -49,17 +95,17 @@
 .compose-top {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 15px 16px 0;
+  gap: 8px;
+  padding: 9px 11px 0 12px;
 }
 
 .compose-plus {
   display: grid;
   flex: 0 0 auto;
   place-items: center;
-  width: 26px;
-  height: 26px;
-  margin-top: 1px;
+  width: 24px;
+  height: 24px;
+  margin-top: 0;
   padding: 0;
   border: 1px solid transparent;
   border-radius: 7px;
@@ -91,10 +137,12 @@
 .composer-input {
   display: block;
   width: 100%;
-  min-height: 47px;
+  /* One line at rest — the dock should not reserve a paragraph's worth of empty
+   * space — and it grows with the draft (Composer.tsx measures scrollHeight). */
+  min-height: 26px;
   /* The mock caps the textarea at 150px (Composer.tsx MAX_TEXTAREA_HEIGHT). */
   max-height: 150px;
-  padding: 3px 0 0;
+  padding: 1px 0 0;
   overflow-y: auto;
   border: 0;
   background: transparent;
@@ -128,7 +176,7 @@
   flex-wrap: wrap;
   gap: 5px;
   margin: 0;
-  padding: 8px 15px 1px;
+  padding: 6px 11px 1px 12px;
   list-style: none;
 }
 
@@ -224,8 +272,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 43px;
-  padding: 0 11px 10px 15px;
+  min-height: 34px;
+  padding: 0 9px 7px 11px;
 }
 
 /* The mock separates the model and reasoning pills with a 1x16 hairline. Both
@@ -386,6 +434,71 @@
   color: var(--danger);
 }
 
+/* ---------- context window pill ---------- */
+
+/* Sits between the spacer and Send: how full the context window is, as a
+ * percentage over a hairline meter. Both halves are the provider's own numbers
+ * (see `contextUsage`), so the pill is absent rather than approximate until the
+ * session's first model call reports usage. */
+.context-pill {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--text-body);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.context-pill:hover {
+  background: var(--surface-hover-strong);
+}
+
+/* A 3px track, 34px long: a gauge, not a bar chart. The fill width is set inline
+ * as a percentage, floored at 2% in the component so a nearly-empty window still
+ * shows a dot rather than an empty track. */
+.context-pill-meter {
+  display: block;
+  width: 34px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line-hair);
+}
+
+.context-pill-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width var(--transition);
+}
+
+/* Fill bands. `warn` is where a long session starts compacting often; `hot` is
+ * where the next big tool result may not fit, which is the point of the pill. */
+.context-pill[data-tone='warn'] .context-pill-fill {
+  background: var(--warn);
+}
+
+.context-pill[data-tone='warn'] {
+  color: var(--warn);
+}
+
+.context-pill[data-tone='hot'] .context-pill-fill {
+  background: var(--danger);
+}
+
+.context-pill[data-tone='hot'] {
+  color: var(--danger);
+}
+
 /* ---------- popovers (the mock's `.dropdown` surface) ---------- */
 
 .compose-bottom .model-switcher {
@@ -479,11 +592,17 @@
   gap: 4px 12px;
   width: 100%;
   max-width: var(--content-max);
-  margin: 8px auto 0;
+  margin: 6px auto 0;
   padding: 0 2px;
   color: var(--foot-ink);
   font-size: 10px;
   line-height: 1.5;
+  /* Floating chrome: clickable, but the row itself must not swallow a wheel or
+   * drag over the transcript behind it. */
+  pointer-events: auto;
+  transition:
+    opacity var(--transition),
+    transform var(--transition);
 }
 
 .compose-foot-main {
@@ -750,6 +869,21 @@
     display: none;
   }
 
+  /* Keep the row on one line at the widths where it fits: the send button wraps
+   * under the pills only when the viewport is genuinely too narrow. The pills
+   * shrink (their labels ellipsize) rather than pushing Send onto a second row on
+   * a phone, where that row is 35px of the visible transcript. */
+  .compose-bottom .composer-controls {
+    flex: 1 1 auto;
+    flex-wrap: nowrap;
+  }
+
+  .compose-bottom .button-send,
+  .compose-bottom .button-stop {
+    order: 0;
+    margin-left: 0;
+  }
+
   /* Once the row wraps to two lines, a box-anchored menu would cover its own
    * trigger, so it goes back to hugging the pill. */
   .compose-bottom .model-switcher {
@@ -784,19 +918,17 @@
     display: none;
   }
 
+  /* The mock breaks this row in two at this width with a full-width spacer. On a
+   * floating dock that is 35px of pure height for no width reason — the pills and
+   * Send fit one line well past 800px — so the break is no longer forced: the
+   * row's own `flex-wrap` moves Send down only when it genuinely cannot fit. */
   .composer-spacer {
-    flex: 1 0 100%;
+    flex: 1 1 auto;
     height: 0;
   }
 
   .char-count {
     order: 2;
-  }
-
-  .compose-bottom .button-send,
-  .compose-bottom .button-stop {
-    order: 3;
-    margin-left: auto;
   }
 
   .compose-foot {
@@ -811,13 +943,58 @@
   .composer-input {
     font-size: 16px;
   }
+
+  /* A narrow dock has no room for a wrapped footnote: the status line, the
+   * shortcut hints and the approval policy used to stack into a two-line block
+   * that floated over the transcript. Keep the live status (it is the only place
+   * a blocked or failing composer explains itself) and drop the rest, which are
+   * shortcuts and a policy reminder already in Settings → Approvals. */
+  .composer-hint,
+  .compose-approvals {
+    display: none;
+  }
+
+  .compose-foot {
+    font-size: 9.5px;
+  }
+
+  /* Squeeze the pills before the row wraps: the pill is `padding + chevron +
+   * label`, so the label cap alone is not enough. */
+  .compose-bottom .model-switcher-button {
+    max-width: 108px;
+  }
+
+  .compose-bottom .reasoning-selector .model-switcher-button {
+    max-width: 92px;
+  }
+
+  .compose-bottom .model-switcher-model {
+    max-width: 60px;
+  }
+
+  .compose-bottom .reasoning-selector .model-switcher-model {
+    max-width: 44px;
+  }
+
+  /* The meter is the first thing to go on a phone: the number still says
+   * everything, and the row has to stay one line (see the pill caps above). */
+  .context-pill {
+    padding: 0 4px;
+  }
+
+  .context-pill-meter {
+    display: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .composer,
   .compose-plus,
+  .compose-foot,
   .attachment-chip-remove,
-  .composer-input {
+  .composer-input,
+  .context-pill-fill,
+  .chat-panel[data-translucent='true'] .composer-wrap:not(:focus-within) .compose-foot {
     transition: none;
   }
 

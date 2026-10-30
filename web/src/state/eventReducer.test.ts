@@ -165,6 +165,43 @@ describe('applyEventToChat', () => {
     });
   });
 
+  it('keeps the images a tool attached so the chat can preview them', () => {
+    const image = { media_type: 'image/png', data: 'iVBORw0KGgo=', bytes: 8, name: 'shot.png' };
+    let current = applyEventToChat(
+      state(),
+      event(1, 'tool_call_started', { call_id: 'call_img', name: 'read_file', arguments: { path: 'shot.png' } }),
+    );
+    current = applyEventToChat(
+      current,
+      event(2, 'tool_call_finished', {
+        call_id: 'call_img',
+        name: 'read_file',
+        ok: true,
+        output: 'shot.png — image/png',
+        truncated: false,
+        duration_ms: 7,
+        images: [image],
+      }),
+    );
+    const tool = current.items.find((item) => item.kind === 'tool');
+    expect(tool?.kind === 'tool' ? tool.images : []).toEqual([image]);
+
+    // A duplicate finish event that carries no images must not blank the preview.
+    current = applyEventToChat(
+      current,
+      event(3, 'tool_call_finished', {
+        call_id: 'call_img',
+        name: 'read_file',
+        ok: true,
+        output: 'shot.png — image/png',
+        truncated: false,
+        duration_ms: 7,
+      }),
+    );
+    const after = current.items.find((item) => item.kind === 'tool');
+    expect(after?.kind === 'tool' ? after.images : []).toEqual([image]);
+  });
+
   it('upgrades a run_command tool card into a streaming command card', () => {
     let current = applyEventToChat(
       state(),
@@ -294,6 +331,59 @@ describe('applyEventToChat', () => {
       envelope(3, { agent_id: 'a_1', type: 'text_delta', delta: 'subagent output' } as Partial<KarucodeEvent>),
     );
     expect(current).toBe(before);
+  });
+
+  it('accumulates cached prompt tokens so the hit rate is visible', () => {
+    let current = applyEventToChat(
+      state(),
+      event(1, 'usage', { input_tokens: 100, output_tokens: 4, cached_tokens: 90 }),
+    );
+    current = applyEventToChat(
+      current,
+      event(2, 'usage', { input_tokens: 100, output_tokens: 2, cached_tokens: 98 }),
+    );
+    expect(current.usage).toEqual({ input_tokens: 200, output_tokens: 6, cached_tokens: 188 });
+  });
+
+  it('keeps the newest call prompt size apart from the running total', () => {
+    // The context pill needs one request's prompt size; the HUD needs the cost of
+    // every call so far. Summing one into the other is how a 900k-token run would
+    // claim to be 700% through a 128k window.
+    let current = applyEventToChat(state(), event(1, 'usage', { input_tokens: 40_000, output_tokens: 4 }));
+    expect(current.lastPromptTokens).toBe(40_000);
+    current = applyEventToChat(current, event(2, 'usage', { input_tokens: 100_000, output_tokens: 2 }));
+    expect(current.lastPromptTokens).toBe(100_000);
+    expect(current.usage?.input_tokens).toBe(140_000);
+  });
+
+  it('ignores a zero prompt count instead of blanking the pill mid-run', () => {
+    // Some gateways omit `prompt_tokens` on the final chunk; that is "not
+    // reported", not "an empty context".
+    let current = applyEventToChat(state(), event(1, 'usage', { input_tokens: 40_000, output_tokens: 4 }));
+    current = applyEventToChat(current, event(2, 'usage', { input_tokens: 0, output_tokens: 2 }));
+    expect(current.lastPromptTokens).toBe(40_000);
+  });
+
+  it('leaves the prompt size unset until a call reports one', () => {
+    expect(state().lastPromptTokens).toBeNull();
+    const current = applyEventToChat(
+      state(),
+      envelope(1, { type: 'usage', input_tokens: 9_000, output_tokens: 1, agent_id: 'a_1' } as Partial<KarucodeEvent>),
+    );
+    // A subagent's usage says nothing about the main conversation's window.
+    expect(current.lastPromptTokens).toBeNull();
+  });
+
+  it('leaves the hit rate unknown when the provider does not report it', () => {
+    let current = applyEventToChat(state(), event(1, 'usage', { input_tokens: 10, output_tokens: 1 }));
+    current = applyEventToChat(
+      current,
+      event(2, 'usage', { input_tokens: 10, output_tokens: 1, cached_tokens: 5 }),
+    );
+    expect(current.usage?.cached_tokens).toBe(5);
+    // A later call that reports nothing must not reset the accumulated figure.
+    current = applyEventToChat(current, event(3, 'usage', { input_tokens: 10, output_tokens: 1 }));
+    expect(current.usage?.cached_tokens).toBe(5);
   });
 
   it('tracks subagent lifecycle events', () => {
@@ -493,5 +583,34 @@ describe('seedChatState', () => {
     const command = current.items.find((item) => item.kind === 'command');
     expect(command?.kind === 'command' ? command.command : '').toBe('ls');
     expect(command?.kind === 'command' ? command.output : '').toContain('Cargo.toml');
+  });
+
+  it('says so at the head of the transcript when the server truncated history', () => {
+    const current = seedChatState({
+      ...detailFixture,
+      messages_truncated: true,
+      messages_limit: 5000,
+    });
+
+    const first = current.items[0];
+    expect(first?.kind).toBe('notice');
+    expect(first?.kind === 'notice' ? first.message : '').toBe(
+      'Showing the last 5,000 messages; earlier history is not loaded.',
+    );
+    // The notice leads the transcript; the real messages follow it.
+    expect(current.items.filter((item) => item.kind === 'message')).toHaveLength(3);
+  });
+
+  it('adds no truncation notice when the whole history fits', () => {
+    const current = seedChatState({ ...detailFixture, messages_truncated: false, messages_limit: 5000 });
+    expect(current.items.some((item) => item.kind === 'notice' && item.id === 'notice:history-truncated')).toBe(false);
+  });
+
+  it('still explains the truncation when the server omits the window size', () => {
+    const current = seedChatState({ ...detailFixture, messages_truncated: true });
+    const first = current.items[0];
+    expect(first?.kind === 'notice' ? first.message : '').toBe(
+      'Showing the most recent messages; earlier history is not loaded.',
+    );
   });
 });

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionDetail } from '../api/types';
-import { NOW, detailFixture, jsonResponse, resetAppState, summaryFixture } from '../test/fixtures';
+import { NOW, detailFixture, jsonResponse, resetAppState, storedMessage, summaryFixture } from '../test/fixtures';
 import { emptyChatState } from './chat';
 import * as actions from './actions';
 import * as store from './store';
@@ -58,6 +58,36 @@ function runningDetail(): SessionDetail {
     // knows the earlier preamble.
     runs: run ? [{ ...run, status: 'running', finished_at: null }] : [],
     running: true,
+  };
+}
+
+/**
+ * The same mid-answer snapshot, but the server has already persisted a tool call
+ * whose `tool_call_started` frame was one of the dropped ones.
+ */
+function runningDetailWithGapTool(): SessionDetail {
+  const base = runningDetail();
+  return {
+    ...base,
+    messages: [
+      ...base.messages,
+      storedMessage({
+        id: 5,
+        role: 'assistant',
+        content: '',
+        run_id: 'r_x',
+        created_at: NOW - 80_000,
+        tool_calls: [{ id: 'call_gap', name: 'read_file', arguments: '{"path":"src/gap.rs"}' }],
+      }),
+      storedMessage({
+        id: 6,
+        role: 'tool',
+        content: 'contents of the file read during the hole',
+        tool_call_id: 'call_gap',
+        name: 'read_file',
+        created_at: NOW - 79_000,
+      }),
+    ],
   };
 }
 
@@ -125,5 +155,27 @@ describe('stream recovery', () => {
     push({ seq: 8, ts_ms: NOW, session_id: 's_ab12', run_id: 'r_x', type: 'text_delta', delta: 'y' });
 
     await vi.waitFor(() => expect(getSessionCalls).toBeGreaterThan(callsBefore), { timeout: 3000 });
+  });
+
+  it('surfaces a tool card that arrived during the hole without losing the live answer', async () => {
+    // The hole swallowed `tool_call_started`/`tool_call_finished` for `call_gap`.
+    // The server has the call persisted; the client never saw the frames.
+    detailToReturn = runningDetailWithGapTool();
+    await openRun();
+    const callsBefore = getSessionCalls;
+
+    push({ seq: 6, ts_ms: NOW, session_id: null, type: 'stream_lagged', skipped: 2 });
+
+    await vi.waitFor(() => expect(getSessionCalls).toBeGreaterThan(callsBefore), { timeout: 3000 });
+
+    // The card the lost frames would have added is back…
+    const gapTool = store.chat.value.items.find(
+      (item) => item.kind === 'tool' && item.callId === 'call_gap',
+    );
+    expect(gapTool).toBeDefined();
+    expect(gapTool?.kind === 'tool' ? gapTool.output : '').toContain('read during the hole');
+    // …and the answer that is still streaming was not deleted to get it.
+    expect(transcriptText()).toContain('the streamed answer');
+    expect(store.chat.value.running).toBe(true);
   });
 });

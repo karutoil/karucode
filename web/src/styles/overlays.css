@@ -476,6 +476,195 @@
   outline-offset: -2px;
 }
 
+/* ---------- file viewer: view tabs, preview, editor --------------------- */
+
+.file-tabbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line-card);
+  background: var(--surface-preview);
+}
+
+.file-view-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line-keycap);
+  border-radius: var(--radius-sm);
+  background: var(--surface-menu);
+}
+
+.file-view-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: none;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.file-view-tab:hover {
+  color: var(--text-secondary);
+}
+
+.file-view-tab.is-active {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.file-view-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The rendered half: one scrolling surface shared by every preview kind. */
+.file-preview-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 18px 22px;
+  overflow: auto;
+  background: var(--surface-preview);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+/* Media previews centre their subject instead of stretching it. */
+.file-preview-media {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.file-preview-image {
+  max-width: 100%;
+  max-height: 100%;
+  border: 1px solid var(--line-preview);
+  border-radius: var(--radius-sm);
+  /* A transparent PNG reads as a `broken image` on a dark surface otherwise. */
+  background: repeating-conic-gradient(var(--surface-menu) 0 25%, var(--surface-preview) 0 50%) 0 0 / 16px 16px;
+  object-fit: contain;
+}
+
+.file-preview-html,
+.file-preview-pdf {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 320px;
+  border: 1px solid var(--line-preview);
+  border-radius: var(--radius-sm);
+  /* No background here: the framed document paints its own `Canvas` colour, and
+     a white box behind a dark-themed page would flash through. */
+  background: transparent;
+}
+
+.file-preview-html {
+  min-height: 360px;
+}
+
+.file-preview-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+/* Markdown inside the preview is the chat's renderer, so it inherits `.markdown`
+   and only needs the surface it sits on. */
+.file-preview-markdown {
+  max-width: 78ch;
+  color: var(--text-secondary);
+}
+
+.file-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  margin: 0;
+  padding: 12px;
+  border: 0;
+  border-radius: 0;
+  background: var(--surface-preview);
+  color: var(--text-user);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 20px;
+  tab-size: 2;
+  resize: none;
+  /* `wrap="off"` keeps source lines intact; the textarea scrolls instead. */
+  white-space: pre;
+  overflow: auto;
+}
+
+.file-editor:focus {
+  outline: none;
+}
+
+.file-editor:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.file-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+  margin: 10px 14px 0;
+  padding: 9px 11px;
+  border: 1px solid var(--line-keycap);
+  border-radius: var(--radius-sm);
+  background: var(--surface-menu);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+
+.file-confirm-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.file-save-error {
+  margin: 10px 14px 0;
+}
+
+.file-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border-top: 1px solid var(--line-card);
+  background: var(--surface-menu);
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.file-statusbar-hint {
+  min-width: 0;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- toasts ----------------------------------------------------- */
 
 /* The mock's stack is content-sized: each toast hugs its message. */

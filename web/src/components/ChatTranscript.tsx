@@ -1,4 +1,5 @@
 import type { JSX } from 'preact';
+import { useMemo, useState } from 'preact/hooks';
 import type {
   ApprovalItem,
   ChatItem,
@@ -7,16 +8,39 @@ import type {
   ToolItem,
 } from '../state/chat';
 import type { ApprovalView } from '../state/chat';
+import {
+  countCalls,
+  countDuration,
+  foldTurn,
+  turnFoldable,
+  turnOutputChars,
+  turnRows,
+  turnWorking,
+  type Turn,
+  type TurnRow,
+} from '../state/transcriptLayout';
+import { formatDuration } from '../lib/format';
+import { activeTheme, type ThemeGrouping, type ThemeThinking, type ThemeToolStyle } from '../theme';
 import { ApprovalCard } from './ApprovalCard';
 import { CommandCard } from './CommandCard';
 import { Markdown } from './Markdown';
 import { ThinkingBlock } from './ThinkingBlock';
 import { ToolCard } from './ToolCard';
+import { ToolGroup } from './ToolGroup';
+import { TpsBadge } from './TpsBadge';
+import { ChevronDownIcon } from './icons';
 
 export interface ChatTranscriptProps {
   items: ChatItem[];
   resolvingApprovals: Record<string, boolean>;
   onApprovalDecision: (approvalId: string, decision: 'allow_once' | 'allow_session' | 'deny') => void;
+}
+
+/** The transcript view options, read once per render from the theme. */
+interface ViewOptions {
+  toolStyle: ThemeToolStyle;
+  grouping: ThemeGrouping;
+  thinking: ThemeThinking;
 }
 
 const DAY_MS = 86_400_000;
@@ -50,24 +74,21 @@ function dayLabel(at: number, now: number = Date.now()): string {
   return pretty;
 }
 
-/**
- * Everything the assistant did between two user messages is one turn in the
- * mock: a single avatar, one author line, then prose, tool cards, diffs and
- * approvals flowing inside the same body column.
- */
-interface Turn {
-  key: string;
-  at: number;
-  parts: ChatItem[];
-}
-
 function isStreamingPart(part: ChatItem): boolean {
   return part.kind === 'message' && part.streaming;
 }
 
-/** The status chip after the author name — the mock's "Completed" tag. */
-function turnTag(turn: Turn): JSX.Element | null {
-  if (turn.parts.some(isStreamingPart)) {
+/**
+ * The status chip after the author name — the mock's "Completed" tag.
+ *
+ * It uses the same "is this turn still doing something" test as the throughput
+ * badge and the fold: a turn whose prose has finished but whose tool call is
+ * still running is *working*, not completed, and claiming otherwise put a
+ * "Completed" chip beside a live token counter.
+ */
+function turnTag(parts: readonly ChatItem[]): JSX.Element | null {
+  const turn: Turn = { key: 'tag', at: 0, parts: [...parts] };
+  if (turnWorking(turn)) {
     return (
       <span class="tag tag-live">
         <span class="tag-dot" aria-hidden="true" />
@@ -75,10 +96,10 @@ function turnTag(turn: Turn): JSX.Element | null {
       </span>
     );
   }
-  if (turn.parts.some((part) => part.kind === 'error')) {
+  if (parts.some((part) => part.kind === 'error')) {
     return <span class="tag tag-failed">Failed</span>;
   }
-  if (turn.parts.some((part) => part.kind === 'interrupted')) {
+  if (parts.some((part) => part.kind === 'interrupted')) {
     return <span class="tag tag-stopped">Interrupted</span>;
   }
   return (
@@ -89,11 +110,15 @@ function turnTag(turn: Turn): JSX.Element | null {
   );
 }
 
-function MessageBody({ item }: { item: MessageItem }): JSX.Element {
+function MessageBody({ item, options }: { item: MessageItem; options: ViewOptions }): JSX.Element {
   return (
     <>
       {item.reasoning ? (
-        <ThinkingBlock reasoning={item.reasoning} streaming={item.streaming && item.content === ''} />
+        <ThinkingBlock
+          reasoning={item.reasoning}
+          streaming={item.streaming && item.content === ''}
+          mode={options.thinking}
+        />
       ) : null}
       {item.content ? <Markdown text={item.content} /> : null}
       {item.streaming && item.content !== '' ? (
@@ -113,24 +138,35 @@ function MessageBody({ item }: { item: MessageItem }): JSX.Element {
   );
 }
 
-function TurnPart({
-  part,
-  onApprovalDecision,
-  resolvingApprovals,
-}: {
-  part: ChatItem;
+interface PartProps {
+  item: ChatItem;
+  /** Prose that is followed by more work is the agent narrating, not answering. */
+  narration: boolean;
+  options: ViewOptions;
   onApprovalDecision: ChatTranscriptProps['onApprovalDecision'];
   resolvingApprovals: ChatTranscriptProps['resolvingApprovals'];
-}): JSX.Element | null {
-  switch (part.kind) {
+}
+
+function TurnPart({
+  item,
+  narration,
+  options,
+  onApprovalDecision,
+  resolvingApprovals,
+}: PartProps): JSX.Element | null {
+  switch (item.kind) {
     case 'message':
-      return <MessageBody item={part} />;
+      return (
+        <div class={narration ? 'narration' : undefined}>
+          <MessageBody item={item} options={options} />
+        </div>
+      );
     case 'tool':
-      return <ToolCard item={part as ToolItem} />;
+      return <ToolCard item={item as ToolItem} variant={options.toolStyle === 'rows' ? 'row' : 'card'} />;
     case 'command':
-      return <CommandCard item={part as CommandItem} defaultOpen={part.status === 'running'} />;
+      return <CommandCard item={item as CommandItem} defaultOpen={item.status === 'running'} />;
     case 'approval': {
-      const approval: ApprovalView = (part as ApprovalItem).approval;
+      const approval: ApprovalView = (item as ApprovalItem).approval;
       return (
         <ApprovalCard
           approval={approval}
@@ -142,25 +178,173 @@ function TurnPart({
     case 'interrupted':
       return (
         <div class="notice notice-interrupted" role="status">
-          <strong>Interrupted.</strong> {part.message} Send a new message to continue.
+          <strong>Interrupted.</strong> {item.message} Send a new message to continue.
         </div>
       );
     case 'error':
       return (
         <div class="run-error" role="alert">
           <p class="run-error-title">Error</p>
-          <p class="run-error-message">{part.message}</p>
+          <p class="run-error-message">{item.message}</p>
         </div>
       );
     case 'notice':
       return (
-        <p class={`notice notice-${part.level}`} role={part.level === 'error' ? 'alert' : 'status'}>
-          {part.message}
+        <p class={`notice notice-${item.level}`} role={item.level === 'error' ? 'alert' : 'status'}>
+          {item.message}
         </p>
       );
     default:
       return null;
   }
+}
+
+/** One rendered row: a single part, or a run of calls folded into a group. */
+function Row({
+  row,
+  options,
+  onApprovalDecision,
+  resolvingApprovals,
+}: {
+  row: TurnRow;
+  options: ViewOptions;
+  onApprovalDecision: ChatTranscriptProps['onApprovalDecision'];
+  resolvingApprovals: ChatTranscriptProps['resolvingApprovals'];
+}): JSX.Element {
+  if (row.kind === 'group') {
+    return (
+      <ToolGroup calls={row.parts} variant={options.toolStyle === 'rows' ? 'row' : 'card'} />
+    );
+  }
+  return (
+    <TurnPart
+      item={row.part}
+      narration={row.narration}
+      options={options}
+      onApprovalDecision={onApprovalDecision}
+      resolvingApprovals={resolvingApprovals}
+    />
+  ) as JSX.Element;
+}
+
+/**
+ * The disclosure that stands in for a finished turn's working steps. It names
+ * what is behind it, so folding the work away does not hide *what* the agent did
+ * — only how long the cards are.
+ */
+function ProcessFold({
+  open,
+  calls,
+  durationMs,
+  onToggle,
+  id,
+}: {
+  open: boolean;
+  calls: number;
+  durationMs: number;
+  onToggle: () => void;
+  id: string;
+}): JSX.Element {
+  const duration = formatDuration(durationMs);
+  const work = calls === 1 ? '1 tool call' : `${calls} tool calls`;
+  return (
+    <button
+      type="button"
+      class="process-fold"
+      aria-expanded={open}
+      aria-controls={id}
+      onClick={onToggle}
+    >
+      <span class="process-fold-label">{open ? 'Hide the working' : 'Show the working'}</span>
+      <span class="process-fold-meta">
+        {calls > 0 ? work : 'working notes'}
+        {duration ? ` · ${duration}` : ''}
+      </span>
+      <span class="disclosure" aria-hidden="true">
+        <ChevronDownIcon size={12} />
+      </span>
+    </button>
+  );
+}
+
+/**
+ * One assistant turn: prose, tool calls, commands, approvals and notices in the
+ * order they happened, laid out according to the theme's transcript options.
+ *
+ * The fold is per turn (this component owns its own `open` state), so opening one
+ * turn's working steps leaves the others alone.
+ */
+function AssistantTurn({
+  turnKey,
+  parts,
+  options,
+  onApprovalDecision,
+  resolvingApprovals,
+}: {
+  turnKey: string;
+  parts: ChatItem[];
+  options: ViewOptions;
+  onApprovalDecision: ChatTranscriptProps['onApprovalDecision'];
+  resolvingApprovals: ChatTranscriptProps['resolvingApprovals'];
+}): JSX.Element {
+  const rows = useMemo(() => turnRows(parts, options.grouping), [parts, options.grouping]);
+  const [processOpen, setProcessOpen] = useState(false);
+  const bodyId = `turn-body-${turnKey}`;
+
+  // Folding a whole turn only applies to `turns` grouping, and only once the turn
+  // has settled (`turnFoldable` keeps running work, approvals and failures open).
+  const fold =
+    options.grouping === 'turns' && turnFoldable({ key: turnKey, at: 0, parts })
+      ? foldTurn(rows)
+      : null;
+
+  const renderRow = (row: TurnRow): JSX.Element => (
+    <Row
+      key={row.kind === 'group' ? row.key : `part:${row.part.id}`}
+      row={row}
+      options={options}
+      onApprovalDecision={onApprovalDecision}
+      resolvingApprovals={resolvingApprovals}
+    />
+  );
+
+  let body: JSX.Element[];
+  if (fold && !processOpen) {
+    body = [
+      // Anything the reader must act on was lifted out of the fold rather than
+      // hidden behind it, and keeps its place above the summary.
+      ...fold.pinned.map(renderRow),
+      <ProcessFold
+        key="fold"
+        id={bodyId}
+        open={false}
+        calls={countCalls(fold.hidden)}
+        durationMs={countDuration(fold.hidden)}
+        onToggle={() => setProcessOpen(true)}
+      />,
+      ...fold.shown.map(renderRow),
+    ];
+  } else {
+    body = [
+      ...(fold ? [
+        <ProcessFold
+          key="fold"
+          id={bodyId}
+          open
+          calls={countCalls(fold.hidden)}
+          durationMs={countDuration(fold.hidden)}
+          onToggle={() => setProcessOpen(false)}
+        />,
+      ] : []),
+      ...rows.map(renderRow),
+    ];
+  }
+
+  return (
+    <div class={fold && !processOpen ? 'msg-body is-folded' : 'msg-body'} id={bodyId}>
+      {body}
+    </div>
+  );
 }
 
 /** A user message: avatar, author, time and the question in a raised bubble. */
@@ -187,80 +371,36 @@ function UserRow({ item }: { item: MessageItem }): JSX.Element {
   );
 }
 
-/**
- * The conversation log, laid out like the mock: a date marker, user rows, and
- * one assistant row per turn whose body holds the prose and every card it
- * produced (tool, command, diff-bearing approval, errors).
- */
-export function ChatTranscript({
-  items,
-  resolvingApprovals,
-  onApprovalDecision,
-}: ChatTranscriptProps): JSX.Element {
-  const rows: JSX.Element[] = [];
-  let lastDay: number | null = null;
-  let turn: Turn | null = null;
+/** The rows the transcript renders, in order: date markers, user rows, turns. */
+type Entry =
+  | { kind: 'day'; key: string; at: number }
+  | { kind: 'user'; key: string; item: MessageItem }
+  | { kind: 'turn'; key: string; at: number; parts: ChatItem[] };
 
-  const flushTurn = (): void => {
+function buildEntries(items: readonly ChatItem[]): Entry[] {
+  const entries: Entry[] = [];
+  let lastDay: number | null = null;
+  let turn: { key: string; at: number; parts: ChatItem[] } | null = null;
+
+  const flush = (): void => {
     if (!turn) return;
-    const current = turn;
+    entries.push({ kind: 'turn', key: turn.key, at: turn.at, parts: turn.parts });
     turn = null;
-    const streaming = current.parts.some(isStreamingPart);
-    rows.push(
-      <article
-        class={`msg msg-assistant${streaming ? ' is-streaming' : ''}`}
-        key={current.key}
-        aria-label="karucode response"
-      >
-        <span class="msg-avatar agent" aria-hidden="true">
-          k.
-        </span>
-        <div class="msg-col">
-          <div class="msg-top">
-            <span class="msg-author">karucode</span>
-            {validAt(current.at) ? (
-              <time class="msg-time" dateTime={new Date(current.at).toISOString()}>
-                {clockTime(current.at)}
-              </time>
-            ) : null}
-            {turnTag(current)}
-          </div>
-          <div class="msg-body">
-            {current.parts.map((part, index) =>
-              part.kind === 'message' ? (
-                <MessageBody key={part.id ?? index} item={part} />
-              ) : (
-                <TurnPart
-                  key={part.id ?? index}
-                  part={part}
-                  onApprovalDecision={onApprovalDecision}
-                  resolvingApprovals={resolvingApprovals}
-                />
-              ),
-            )}
-          </div>
-        </div>
-      </article>,
-    );
   };
 
   for (const item of items) {
     if (validAt(item.at)) {
       const day = dayStart(item.at);
       if (day !== lastDay) {
-        flushTurn();
+        flush();
         lastDay = day;
-        rows.push(
-          <p class="date-marker" key={`day-${day}`}>
-            {dayLabel(item.at)}
-          </p>,
-        );
+        entries.push({ kind: 'day', key: `day-${day}`, at: item.at });
       }
     }
 
     if (item.kind === 'message' && item.role === 'user') {
-      flushTurn();
-      rows.push(<UserRow item={item} key={item.id} />);
+      flush();
+      entries.push({ kind: 'user', key: item.id, item });
       continue;
     }
 
@@ -269,7 +409,79 @@ export function ChatTranscript({
     if (!turn) turn = { key: `turn:${item.id}`, at: item.at, parts: [] };
     turn.parts.push(item);
   }
-  flushTurn();
+  flush();
+  return entries;
+}
 
-  return <div class="transcript">{rows}</div>;
+/**
+ * The conversation log, laid out like the mock: a date marker, user rows, and
+ * one assistant row per turn whose body holds the prose and every card it
+ * produced (tool, command, diff-bearing approval, errors).
+ *
+ * The theme decides how much of that work is shown at once: `toolStyle` picks
+ * cards or one-line rows, `grouping` folds runs of calls and whole turns, and
+ * `thinking` decides how much reasoning is visible.
+ */
+export function ChatTranscript({
+  items,
+  resolvingApprovals,
+  onApprovalDecision,
+}: ChatTranscriptProps): JSX.Element {
+  const theme = activeTheme.value;
+  const options: ViewOptions = {
+    toolStyle: theme.toolStyle,
+    grouping: theme.grouping,
+    thinking: theme.thinking,
+  };
+  const entries = buildEntries(items);
+
+  return (
+    <div class="transcript">
+      {entries.map((entry) => {
+        if (entry.kind === 'day') {
+          return (
+            <p class="date-marker" key={entry.key}>
+              {dayLabel(entry.at)}
+            </p>
+          );
+        }
+        if (entry.kind === 'user') return <UserRow item={entry.item} key={entry.key} />;
+
+        const streaming = entry.parts.some(isStreamingPart);
+        // The same "is this turn still doing something" test the transcript uses
+        // to keep a turn unfolded, so the badge and the Working chip agree.
+        const turn = { key: entry.key, at: entry.at, parts: entry.parts };
+        return (
+          <article
+            class={`msg msg-assistant${streaming ? ' is-streaming' : ''}`}
+            key={entry.key}
+            aria-label="karucode response"
+          >
+            <span class="msg-avatar agent" aria-hidden="true">
+              k.
+            </span>
+            <div class="msg-col">
+              <div class="msg-top">
+                <span class="msg-author">karucode</span>
+                {validAt(entry.at) ? (
+                  <time class="msg-time" dateTime={new Date(entry.at).toISOString()}>
+                    {clockTime(entry.at)}
+                  </time>
+                ) : null}
+                {turnTag(entry.parts)}
+                <TpsBadge chars={turnOutputChars(turn)} working={turnWorking(turn)} />
+              </div>
+              <AssistantTurn
+                turnKey={entry.key}
+                parts={entry.parts}
+                options={options}
+                onApprovalDecision={onApprovalDecision}
+                resolvingApprovals={resolvingApprovals}
+              />
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  );
 }

@@ -12,7 +12,16 @@ import { WorkspaceTab } from './WorkspaceTab';
 import { ChangesTab } from './ChangesTab';
 import { CommandsTab } from './CommandsTab';
 import { AgentsTab } from './AgentsTab';
-import { BranchIcon, CircleCheckIcon, CloseIcon, PanelIcon } from './icons';
+import { PluginPanelView } from './PluginPanelView';
+import { BranchIcon, CircleCheckIcon, CloseIcon, PanelIcon, pluginPanelIcon } from './icons';
+
+/**
+ * Refresh a plugin panel when the user asks for it. Kept next to the tabs so the
+ * tab strip has a single place that knows a plugin tab is not a built-in one.
+ */
+function isPluginTab(id: InspectorTab): boolean {
+  return id.startsWith('plugin__');
+}
 
 /**
  * Bottom git strip. It only renders when the server reports a real repository
@@ -70,6 +79,7 @@ export function Inspector(): JSX.Element {
   const isNarrow = store.narrowViewport.value;
   const inspectorRef = useRef<HTMLElement>(null);
   useFocusTrap(inspectorRef, isNarrow && isSheetOpen, actions.closeSheets);
+  const pluginTabs = store.pluginPanelTabs.value;
   const items: TabItem<InspectorTab>[] = [
     { id: 'workspace', label: 'Files' },
     { id: 'changes', label: 'Changes' },
@@ -78,8 +88,24 @@ export function Inspector(): JSX.Element {
       label: 'Commands',
       count: store.chat.value.items.filter((item) => item.kind === 'command').length,
     },
-    { id: 'agents', label: 'Agents', count: store.chat.value.agents.length },
+    { id: 'agents', label: 'Agents', count: store.runningAgents.value },
+    // One tab per panel a plugin declared. The plugin supplies a data payload,
+    // never markup: see `pluginPanels.ts` for why that matters.
+    ...pluginTabs.map((panel) => ({
+      id: panel.hosted_id,
+      label: panel.title,
+      icon: pluginPanelIcon(panel.icon, { size: 13 }),
+    })),
   ];
+
+  // A panel that disappears (its plugin was disabled, or the tab list arrived
+  // after a boot) must not leave the inspector pointing at nothing.
+  useEffect(() => {
+    if (!isPluginTab(active)) return;
+    if (!pluginTabs.some((panel) => panel.hosted_id === active)) {
+      store.inspectorTab.value = 'workspace';
+    }
+  }, [active, pluginTabs]);
 
   return (
     <aside
@@ -127,6 +153,16 @@ export function Inspector(): JSX.Element {
         <TabPanel idPrefix="inspector" id="agents" active={active === 'agents'}>
           <AgentsTab />
         </TabPanel>
+        {pluginTabs.map((panel) => (
+          <TabPanel
+            key={panel.hosted_id}
+            idPrefix="inspector"
+            id={panel.hosted_id}
+            active={active === panel.hosted_id}
+          >
+            <PluginPanelView panel={panel} />
+          </TabPanel>
+        ))}
 
         <BranchFooter />
       </div>

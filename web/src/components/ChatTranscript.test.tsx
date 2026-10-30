@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/preact';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen } from '@testing-library/preact';
 import { ChatTranscript } from './ChatTranscript';
 import type { ApprovalView, ChatItem, CommandItem, MessageItem, ToolItem } from '../state/chat';
 import { approvalFixture, NOW } from '../test/fixtures';
+import { resetTheme, updateTheme } from '../theme';
 
 function message(overrides: Partial<MessageItem> = {}): MessageItem {
   return {
@@ -145,6 +146,40 @@ describe('ChatTranscript', () => {
     expect(document.querySelector('.stream-caret')).not.toBeNull();
   });
 
+  describe('throughput badge', () => {
+    it('appears beside the Working chip while the turn produces text', () => {
+      renderTranscript([user(), message({ streaming: true, content: 'x'.repeat(8_000) })]);
+      const badge = document.querySelector('.msg-assistant .tps-badge');
+      expect(badge, 'the badge is mounted').not.toBeNull();
+      // 8 000 characters at four chars per token, sampled on mount. Exact below
+      // 10k, so the count reads as itself rather than a rounded "2k".
+      expect(badge?.querySelector('.tps-badge-count')?.textContent).toBe('2000');
+    });
+
+    it('stays while the turn is running a tool call', () => {
+      // The prose is finished but the turn is not: the count is still the only
+      // evidence of what the model produced, so the badge stays.
+      renderTranscript([
+        user(),
+        message({ content: 'Running the suite.' }),
+        tool({ status: 'running' }),
+      ]);
+      expect(document.querySelector('.msg-assistant .tps-badge')).not.toBeNull();
+      // …and the turn is not reported as finished while a call is in flight.
+      expect(document.querySelector('.msg-assistant .tag')?.textContent).toContain('Working');
+    });
+
+    it('is gone once the turn has settled', () => {
+      renderTranscript([user(), message(), tool()]);
+      expect(document.querySelector('.tps-badge')).toBeNull();
+    });
+
+    it('is absent from the user row', () => {
+      renderTranscript([user('hello')]);
+      expect(document.querySelector('.msg-user .tps-badge')).toBeNull();
+    });
+  });
+
   it('reports a failed turn instead of claiming it completed', () => {
     renderTranscript([
       user(),
@@ -202,5 +237,171 @@ describe('ChatTranscript', () => {
     renderTranscript([]);
     expect(document.querySelectorAll('.msg')).toHaveLength(0);
     expect(document.querySelector('.date-marker')).toBeNull();
+  });
+});
+
+describe('ChatTranscript view options', () => {
+  function assistantWithReasoning(overrides: Partial<MessageItem> = {}): MessageItem {
+    return message({
+      id: 'mr',
+      content: '',
+      reasoning: 'The config lives in settings.rs.',
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    localStorage.clear();
+    resetTheme();
+  });
+
+  afterEach(() => {
+    resetTheme();
+  });
+
+  function setOptions(patch: { toolStyle?: 'cards' | 'rows'; grouping?: 'none' | 'tools' | 'turns'; thinking?: 'collapsed' | 'preview' | 'expanded' }) {
+    act(() => {
+      updateTheme(patch);
+    });
+  }
+
+  it('draws tool calls as cards by default', () => {
+    renderTranscript([user(), tool()]);
+    expect(document.querySelector('.msg-body .tool-card')).not.toBeNull();
+    expect(document.querySelector('.tool-row')).toBeNull();
+  });
+
+  it('draws tool calls as compact rows when the theme asks for it', () => {
+    setOptions({ toolStyle: 'rows' });
+    renderTranscript([user(), tool()]);
+
+    expect(document.querySelector('.tool-card')).toBeNull();
+    expect(document.querySelector('.msg-body .tool-row')).not.toBeNull();
+    // The row still exposes its output behind the same disclosure contract.
+    const head = document.querySelector('.tool-row-head');
+    expect(head?.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('leaves consecutive calls alone with grouping off', () => {
+    renderTranscript([user(), tool({ id: 't1' }), tool({ id: 't2', callId: 'c2' }), message()]);
+    expect(document.querySelectorAll('.tool-group')).toHaveLength(0);
+    expect(document.querySelectorAll('.tool-card')).toHaveLength(2);
+  });
+
+  it('folds a run of consecutive calls into one line', () => {
+    setOptions({ grouping: 'tools' });
+    renderTranscript([
+      user(),
+      tool({ id: 't1', name: 'read_file' }),
+      tool({ id: 't2', callId: 'c2', name: 'grep' }),
+      message({ id: 'a2' }),
+    ]);
+
+    const group = document.querySelector('.tool-group');
+    expect(group).not.toBeNull();
+    expect(group?.querySelector('.tool-group-summary')?.textContent).toContain('read_file');
+    expect(group?.querySelector('.tool-group-count')?.textContent).toBe('2 calls');
+    // Collapsed by default because nothing is running and nothing failed.
+    expect(group?.querySelector('.tool-group-head')?.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('marks prose between calls as narration, and the final answer as not', () => {
+    renderTranscript([
+      user(),
+      message({ id: 'n1', content: 'Let me read the config.' }),
+      tool(),
+      message({ id: 'fin', content: 'The pool size is 16.' }),
+    ]);
+
+    const narrated = document.querySelectorAll('.narration');
+    expect(narrated).toHaveLength(1);
+    expect(narrated[0]?.textContent).toContain('Let me read the config.');
+    expect(screen.getByText('The pool size is 16.').closest('.narration')).toBeNull();
+  });
+
+  it('folds a finished turn behind a summary of what it did', () => {
+    setOptions({ grouping: 'turns' });
+    renderTranscript([
+      user(),
+      message({ id: 'n1', content: 'Reading the config.' }),
+      tool({ id: 't1' }),
+      tool({ id: 't2', callId: 'c2', name: 'grep' }),
+      message({ id: 'fin', content: 'The pool size is 16.' }),
+    ]);
+
+    const fold = document.querySelector('.process-fold');
+    expect(fold).not.toBeNull();
+    expect(fold?.getAttribute('aria-expanded')).toBe('false');
+    expect(fold?.textContent).toContain('2 tool calls');
+    // The answer survives the fold; the working steps do not.
+    expect(screen.getByText('The pool size is 16.')).not.toBeNull();
+    expect(screen.queryByText('Reading the config.')).toBeNull();
+    expect(document.querySelector('.tool-group')).toBeNull();
+    expect(document.querySelector('.tool-card')).toBeNull();
+  });
+
+  it('opens the folded turn from its summary line', () => {
+    setOptions({ grouping: 'turns' });
+    renderTranscript([
+      user(),
+      message({ id: 'n1', content: 'Reading the config.' }),
+      tool(),
+      message({ id: 'fin', content: 'The pool size is 16.' }),
+    ]);
+
+    fireEvent.click(document.querySelector('.process-fold') as Element);
+    expect(screen.getByText('Reading the config.')).not.toBeNull();
+    expect(document.querySelector('.tool-row, .tool-card')).not.toBeNull();
+    expect(document.querySelector('.process-fold')?.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('never folds a turn that is still working', () => {
+    setOptions({ grouping: 'turns' });
+    renderTranscript([
+      user(),
+      tool(),
+      message({ id: 'fin', content: 'Working on it', streaming: true }),
+    ]);
+    expect(document.querySelector('.process-fold')).toBeNull();
+    expect(document.querySelector('.tool-row, .tool-card')).not.toBeNull();
+  });
+
+  it('never folds a turn that is waiting on an approval', () => {
+    setOptions({ grouping: 'turns' });
+    renderTranscript([
+      user(),
+      tool(),
+      message({ id: 'fin', content: 'I need permission.' }),
+      { kind: 'approval', id: 'ap', at: NOW, approval: approvalView() },
+    ]);
+    expect(document.querySelector('.process-fold')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Allow once' })).not.toBeNull();
+  });
+
+  it('keeps a notice visible above the fold instead of hiding it', () => {
+    setOptions({ grouping: 'turns' });
+    renderTranscript([
+      user(),
+      { kind: 'notice', id: 'n1', at: NOW, level: 'warn', message: 'Context is nearly full.' },
+      tool(),
+      message({ id: 'fin', content: 'Done, with caveats.' }),
+    ]);
+    expect(document.querySelector('.process-fold')).not.toBeNull();
+    expect(screen.getByRole('status').textContent).toContain('Context is nearly full.');
+  });
+
+  it('passes the thinking mode to the reasoning block', () => {
+    setOptions({ thinking: 'preview' });
+    renderTranscript([user(), assistantWithReasoning()]);
+
+    const preview = document.querySelector('.thinking-preview');
+    expect(document.querySelector('.thinking')?.getAttribute('data-mode')).toBe('preview');
+    expect(preview?.textContent).toContain('The config lives in settings.rs.');
+  });
+
+  it('shows reasoning open when the theme asks for it', () => {
+    setOptions({ thinking: 'expanded' });
+    renderTranscript([user(), assistantWithReasoning()]);
+    expect(document.querySelector('.thinking')?.hasAttribute('open')).toBe(true);
   });
 });

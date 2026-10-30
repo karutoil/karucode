@@ -11,6 +11,7 @@ import {
   draftEdited,
   exportThemeJSON,
   initTheme,
+  parseThemeFile,
   resetTheme,
   saveThemeAsNew,
 } from '../theme';
@@ -220,6 +221,85 @@ describe('interface settings', () => {
     const contrast = screen.getByTestId('theme-contrast');
     expect(contrast.textContent).toMatch(/Contrast \d+\.\d:1/);
     expect(contrast.classList.contains('warning')).toBe(false);
+  });
+});
+
+describe('transcript settings', () => {
+  it('offers the three view options with the defaults selected', () => {
+    renderOpen();
+
+    for (const [testId, value] of [
+      ['theme-tool-style', 'cards'],
+      ['theme-grouping', 'none'],
+      ['theme-thinking', 'collapsed'],
+    ] as const) {
+      expect(screen.getByTestId(`${testId}-${value}`).getAttribute('aria-pressed')).toBe('true');
+    }
+  });
+
+  it('applies each option to <html>, the preview and storage', () => {
+    renderOpen();
+
+    fireEvent.click(screen.getByTestId('theme-tool-style-rows'));
+    expect(document.documentElement.dataset.toolStyle).toBe('rows');
+    // The miniature follows: the one-line row is shown, the card is not.
+    expect((document.querySelector('.theme-preview-row') as HTMLElement).hidden).toBe(false);
+    expect((document.querySelector('.theme-preview-card') as HTMLElement).hidden).toBe(true);
+
+    fireEvent.click(screen.getByTestId('theme-grouping-turns'));
+    expect(document.documentElement.dataset.grouping).toBe('turns');
+    expect(document.querySelector('.theme-preview-narration')?.getAttribute('data-on')).toBe('folded');
+
+    fireEvent.click(screen.getByTestId('theme-thinking-preview'));
+    expect(document.documentElement.dataset.thinking).toBe('preview');
+    expect(document.querySelector('.theme-preview-thought')?.textContent).toContain('view options');
+
+    expect(persisted().draft).toMatchObject({
+      toolStyle: 'rows',
+      grouping: 'turns',
+      thinking: 'preview',
+    });
+  });
+
+  it('explains the selected option rather than only naming it', () => {
+    renderOpen();
+    const groupingHint = () =>
+      document
+        .querySelector('[data-testid="theme-grouping"]')
+        ?.parentElement?.querySelector('.theme-field-hint')?.textContent ?? '';
+
+    // "None" is selected by default, and says what none means.
+    expect(groupingHint()).toBe('Show every call where it happened.');
+
+    fireEvent.click(screen.getByTestId('theme-grouping-tools'));
+    expect(groupingHint()).toContain('summary line');
+
+    fireEvent.click(screen.getByTestId('theme-grouping-turns'));
+    expect(groupingHint()).toContain('finished turn');
+  });
+
+  it('restores the options after a reload', () => {
+    renderOpen();
+    fireEvent.click(screen.getByTestId('theme-tool-style-rows'));
+    fireEvent.click(screen.getByTestId('theme-grouping-turns'));
+
+    initTheme();
+    expect(document.documentElement.dataset.toolStyle).toBe('rows');
+    expect(document.documentElement.dataset.grouping).toBe('turns');
+    expect(document.documentElement.dataset.thinking).toBe('collapsed');
+  });
+
+  it('carries the options through export and import so a shared theme arrives the same', () => {
+    const json = exportThemeJSON({
+      ...DEFAULT_THEME,
+      toolStyle: 'rows',
+      grouping: 'tools',
+      thinking: 'expanded',
+    });
+    const imported = parseThemeFile(json);
+    expect(imported.toolStyle).toBe('rows');
+    expect(imported.grouping).toBe('tools');
+    expect(imported.thinking).toBe('expanded');
   });
 });
 

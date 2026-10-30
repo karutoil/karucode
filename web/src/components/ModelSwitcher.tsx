@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { formatCount } from '../lib/format';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
+import type { ModelSelection } from '../state/store';
 import { CheckIcon, ChevronDownIcon, CpuIcon, SparkIcon } from './icons';
 
 /**
@@ -24,28 +25,15 @@ const REASONING_OPTIONS: { value: string; label: string; description: string }[]
   { value: 'max', label: 'Max', description: 'reasoning_effort: max — only some endpoints offer it.' },
 ];
 
-interface EffectiveSelection {
-  providerId: string | null;
-  modelId: string | null;
-  /** True when the session carries its own pin instead of following the default. */
-  pinned: boolean;
-  /** The pinned reasoning effort (`null` = endpoint default). */
-  effort: string | null;
-}
-
-/** The selection a run of the current session would use right now. */
-function effectiveSelection(): EffectiveSelection {
-  const config = store.config.value;
-  const pin = store.activeSession.value?.model ?? null;
-  if (pin) {
-    return { providerId: pin.provider, modelId: pin.model, pinned: true, effort: pin.reasoning_effort ?? null };
-  }
-  return {
-    providerId: config?.active.provider ?? config?.providers[0]?.id ?? null,
-    modelId: config?.active.model ?? config?.providers[0]?.models[0]?.id ?? null,
-    pinned: false,
-    effort: null,
-  };
+/**
+ * The selection a run of the current session would use right now.
+ *
+ * Delegates to `store.modelSelection`, which the composer's context pill reads
+ * too: the model named here and the window the percentage is drawn against must
+ * be the same model.
+ */
+function effectiveSelection(): ModelSelection {
+  return store.modelSelection.value;
 }
 
 /** Close a popover on outside pointer-down or Escape. */

@@ -19,9 +19,12 @@ import {
   setCustomCSS,
   setDensity,
   setFont,
+  setGrouping,
   setMono,
   setRounding,
   setThemeMode,
+  setThinking,
+  setToolStyle,
   themeContrast,
   themeLibrary,
   updateColors,
@@ -141,6 +144,45 @@ describe('editing a draft', () => {
     expect(token('--font-mono')).toContain('Courier New');
     expect(document.getElementById('kc-theme-custom-css')?.textContent).toContain('blur(6px)');
     expect(persisted()?.draft?.density).toBe('compact');
+  });
+
+  it('applies and persists the transcript view options', () => {
+    initTheme();
+    expect(root().dataset.toolStyle).toBe('cards');
+    expect(root().dataset.grouping).toBe('none');
+    expect(root().dataset.thinking).toBe('collapsed');
+
+    setToolStyle('rows');
+    setGrouping('turns');
+    setThinking('preview');
+
+    expect(root().dataset.toolStyle).toBe('rows');
+    expect(root().dataset.grouping).toBe('turns');
+    expect(root().dataset.thinking).toBe('preview');
+    expect(persisted()?.draft).toMatchObject({
+      toolStyle: 'rows',
+      grouping: 'turns',
+      thinking: 'preview',
+    });
+  });
+
+  it('keeps a theme saved before the view options working', () => {
+    // A stored selection with no view options must load and paint the defaults.
+    localStorage.setItem(
+      THEME_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        selected: 'forest',
+        baseId: 'forest',
+        custom: [],
+        draft: null,
+      }),
+    );
+    initTheme();
+    expect(root().dataset.theme).toBe('forest');
+    expect(root().dataset.toolStyle).toBe('cards');
+    expect(root().dataset.grouping).toBe('none');
+    expect(root().dataset.thinking).toBe('collapsed');
   });
 
   it('re-bases the palette when the mode flips but keeps the accent', () => {

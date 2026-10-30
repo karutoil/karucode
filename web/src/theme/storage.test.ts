@@ -67,6 +67,45 @@ describe('sanitizeTheme', () => {
     // Missing colours are completed from the light defaults.
     expect(theme?.colors.bg).toBe('#f7f8fb');
   });
+
+  it('accepts the transcript view options', () => {
+    const theme = sanitizeTheme({
+      ...customTheme(),
+      toolStyle: 'rows',
+      grouping: 'turns',
+      thinking: 'expanded',
+    });
+    expect(theme?.toolStyle).toBe('rows');
+    expect(theme?.grouping).toBe('turns');
+    expect(theme?.thinking).toBe('expanded');
+  });
+
+  it('loads a theme saved before the view options existed', () => {
+    // Every saved theme in every browser predates these three keys; dropping the
+    // whole theme (or throwing) would take the user's palette with it.
+    const legacy = { ...customTheme() };
+    delete (legacy as Record<string, unknown>).toolStyle;
+    delete (legacy as Record<string, unknown>).grouping;
+    delete (legacy as Record<string, unknown>).thinking;
+
+    const theme = sanitizeTheme(legacy);
+    expect(theme).not.toBeNull();
+    expect(theme?.toolStyle).toBe('cards');
+    expect(theme?.grouping).toBe('none');
+    expect(theme?.thinking).toBe('collapsed');
+  });
+
+  it('falls back on an unknown view option instead of rejecting the theme', () => {
+    const theme = sanitizeTheme({
+      ...customTheme(),
+      toolStyle: 'holographic',
+      grouping: 42,
+      thinking: null,
+    });
+    expect(theme?.toolStyle).toBe('cards');
+    expect(theme?.grouping).toBe('none');
+    expect(theme?.thinking).toBe('collapsed');
+  });
 });
 
 describe('import and export', () => {

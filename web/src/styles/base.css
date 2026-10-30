@@ -168,6 +168,58 @@ kbd,
   border: 0;
 }
 
+/* The error boundary's card: a render threw, so say what and offer a way out. */
+.crash-card {
+  display: flex;
+  max-width: 560px;
+  flex-direction: column;
+  gap: 8px;
+  margin: 32px auto;
+  padding: 20px 22px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line-strong));
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.crash-kicker {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.125em;
+  text-transform: uppercase;
+}
+
+.crash-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-body);
+  font-weight: 660;
+}
+
+.crash-message {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  overflow-wrap: anywhere;
+}
+
+.crash-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-small);
+}
+
+.crash-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 .skip-link {
   position: fixed;
   top: 10px;

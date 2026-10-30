@@ -1,5 +1,8 @@
-import { apiRequest, withQuery } from './client';
+import { ApiError, apiRequest, apiRequestBlob, withQuery } from './client';
 import type {
+  AgentDetail,
+  AgentStatus,
+  AgentSummary,
   ApprovalDecision,
   ApprovalRecord,
   AttachmentUploadRequest,
@@ -13,6 +16,8 @@ import type {
   Health,
   McpServer,
   PluginDiagnostics,
+  PluginPanelData,
+  PluginRescanResponse,
   Project,
   ProjectListResponse,
   ProviderTestRequest,
@@ -22,7 +27,11 @@ import type {
   SessionModelSelection,
   SessionSummary,
   Stats,
+  Terminal,
+  TerminalCreateRequest,
+  TerminalList,
   WorkspaceFile,
+  WorkspaceFileWrite,
   WorkspaceTree,
 } from './types';
 
@@ -158,6 +167,38 @@ export function deleteProject(
   );
 }
 
+/** How large an icon the rail is willing to draw. */
+export const MAX_PROJECT_ICON_BYTES = 512 * 1024;
+
+/**
+ * The icon bytes for a project, or `null` when it ships none.
+ *
+ * The bytes are fetched through the shared client rather than drawn from an
+ * `<img src>`: an `<img>` cannot send the `Authorization` header, so it would
+ * break on a deployment with `KARUCODE_AUTH_TOKEN` set (only `/api/events`
+ * accepts the token in the query string). A `null` result is the normal case —
+ * most projects have no favicon — and is not an error.
+ */
+export async function getProjectIcon(
+  id: string,
+  options: CallOptions = {},
+): Promise<Blob | null> {
+  try {
+    return await apiRequestBlob(
+      withQuery(`/api/projects/${encodeURIComponent(id)}/favicon`, {
+        max_bytes: MAX_PROJECT_ICON_BYTES,
+      }),
+      options,
+    );
+  } catch (error) {
+    // `204 No Content` is the server's quiet "this project ships no icon" — the
+    // normal case, which the rail answers with initials. A 404 is accepted too so
+    // an older server keeps working.
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  }
+}
+
 export function getSession(id: string, options: CallOptions = {}): Promise<SessionDetail> {
   return apiRequest<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`, options);
 }
@@ -211,6 +252,43 @@ export function cancelRun(sessionId: string, options: CallOptions = {}): Promise
   );
 }
 
+// ---------------------------------------------------------------------------
+// Subagents
+// ---------------------------------------------------------------------------
+
+/**
+ * Every agent the server knows about, newest first.
+ *
+ * `project` scopes the list to one workspace; `session` and `statuses` narrow
+ * it further. This is what lets the Agents view show a subagent running in a
+ * session the user is not currently looking at.
+ */
+export function listAgents(
+  params: { project?: string | null; session?: string | null; statuses?: AgentStatus[] } = {},
+  options: CallOptions = {},
+): Promise<AgentSummary[]> {
+  return apiRequest<{ agents: AgentSummary[] }>(
+    withQuery('/api/agents', {
+      project: params.project ?? undefined,
+      session: params.session ?? undefined,
+      status: params.statuses && params.statuses.length > 0 ? params.statuses.join(',') : undefined,
+    }),
+    options,
+  ).then((r) => r.agents);
+}
+
+/** One agent plus the transcript it wrote (its own messages only). */
+export function getAgent(
+  id: string,
+  params: { messages?: number } = {},
+  options: CallOptions = {},
+): Promise<AgentDetail> {
+  return apiRequest<AgentDetail>(
+    withQuery(`/api/agents/${encodeURIComponent(id)}`, { messages: params.messages }),
+    options,
+  );
+}
+
 export function listApprovals(sessionId: string, options: CallOptions = {}): Promise<ApprovalRecord[]> {
   return apiRequest<{ approvals: ApprovalRecord[] }>(
     withQuery('/api/approvals', { session: sessionId }),
@@ -250,6 +328,53 @@ export function getWorkspaceFile(
     withQuery('/api/workspace/file', { path, project: project ?? undefined }),
     options,
   );
+}
+
+/**
+ * Save a workspace file from the viewer's editor.
+ *
+ * `PUT /api/workspace/file?path=<file>[&project=][&create=][&force=]` takes the
+ * **whole** new contents as JSON. `expectedSize` is optimistically checked by the
+ * server: when the file changed on disk since it was loaded the save is refused
+ * with `409` and nothing is written, unless `force` is set — which is the user's
+ * answer to that prompt, so only pass it after asking.
+ */
+export function saveWorkspaceFile(
+  path: string,
+  content: string,
+  params: {
+    project?: string | null;
+    /** Size the editor loaded; omit to save without a staleness check. */
+    expectedSize?: number;
+    /** Create the file if it does not exist (the viewer's "new file" path). */
+    create?: boolean;
+    /** Overwrite even when the file changed on disk. */
+    force?: boolean;
+  } = {},
+  options: CallOptions = {},
+): Promise<WorkspaceFileWrite> {
+  return apiRequest<WorkspaceFileWrite>(
+    withQuery('/api/workspace/file', {
+      path,
+      project: params.project ?? undefined,
+      create: params.create ? 'true' : undefined,
+      force: params.force ? 'true' : undefined,
+    }),
+    { ...options, method: 'PUT', body: { content, expected_size: params.expectedSize } },
+  );
+}
+
+/**
+ * URL for one workspace file's raw bytes (`GET /api/workspace/raw`).
+ *
+ * The text endpoint answers JSON, which an `<img>` or `<iframe>` cannot render,
+ * so the viewer points those elements at this URL. It is read-only and confined
+ * like every other workspace path.
+ */
+export function workspaceRawUrl(path: string, project?: string | null): string {
+  const query = new URLSearchParams({ path });
+  if (project) query.set('project', project);
+  return `/api/workspace/raw?${query.toString()}`;
 }
 
 /** Scope for an upload: the session owns the directory, the project the root. */
@@ -320,6 +445,125 @@ export function listPlugins(options: CallOptions = {}): Promise<PluginDiagnostic
   return apiRequest<{ plugins: PluginDiagnostics[] }>('/api/plugins', options).then((r) => r.plugins);
 }
 
+/**
+ * Re-read every plugin source and apply it: new plugins are started, removed
+ * ones are dropped and changed ones are replaced, without restarting the server.
+ *
+ * The body carries the report plus the live diagnostics, so one call is enough
+ * to update a list.
+ */
+export function rescanPlugins(options: CallOptions = {}): Promise<PluginRescanResponse> {
+  return apiRequest<PluginRescanResponse>('/api/plugins/reload', {
+    ...options,
+    method: 'POST',
+    body: {},
+  });
+}
+
+/** Replace one plugin's process (the "I rebuilt it" path). */
+export function reloadPlugin(
+  name: string,
+  options: CallOptions = {},
+): Promise<PluginDiagnostics> {
+  return apiRequest<PluginDiagnostics>(`/api/plugins/${encodeURIComponent(name)}/reload`, {
+    ...options,
+    method: 'POST',
+    body: {},
+  });
+}
+
+/** Start or stop one plugin's process without restarting the server. */
+export function setPluginEnabled(
+  name: string,
+  enabled: boolean,
+  options: CallOptions = {},
+): Promise<PluginDiagnostics> {
+  return apiRequest<PluginDiagnostics>(`/api/plugins/${encodeURIComponent(name)}/enable`, {
+    ...options,
+    method: 'POST',
+    body: { enabled },
+  });
+}
+
+/**
+ * Read one plugin panel's payload.
+ *
+ * The payload is opaque JSON declared by a plugin: render it with a registered
+ * component (see `components/pluginPanels.ts`) or as read-only JSON, never as
+ * HTML. `project`/`session` scope the read exactly like the other project-scoped
+ * routes, and an unknown id is a 404 rather than an empty panel.
+ */
+export function getPluginPanel(
+  plugin: string,
+  panel: string,
+  params: { project?: string | null; session?: string | null } = {},
+  options: CallOptions = {},
+): Promise<PluginPanelData> {
+  return apiRequest<PluginPanelData>(
+    withQuery(
+      `/api/plugins/${encodeURIComponent(plugin)}/panels/${encodeURIComponent(panel)}`,
+      { project: params.project ?? undefined, session: params.session ?? undefined },
+    ),
+    options,
+  );
+}
+
 export function listMcpServers(options: CallOptions = {}): Promise<McpServer[]> {
   return apiRequest<{ servers: McpServer[] }>('/api/mcp', options).then((r) => r.servers);
+}
+
+// ---- terminals ------------------------------------------------------------
+//
+// The durable half of the terminal tab: the rows that make the same tabs appear
+// in every browser and after a restart. Attaching to a shell is a websocket,
+// which `state/terminalSocket.ts` owns.
+
+export function listTerminals(options: CallOptions = {}): Promise<TerminalList> {
+  return apiRequest<TerminalList>('/api/terminals', options);
+}
+
+export function createTerminal(
+  body: TerminalCreateRequest = {},
+  options: CallOptions = {},
+): Promise<{ terminal: Terminal }> {
+  return apiRequest<{ terminal: Terminal }>('/api/terminals', {
+    ...options,
+    method: 'POST',
+    body,
+  });
+}
+
+/** Rename a terminal. `null` restores the derived default title. */
+export function renameTerminal(
+  id: string,
+  title: string | null,
+  options: CallOptions = {},
+): Promise<{ terminal: Terminal }> {
+  return apiRequest<{ terminal: Terminal }>(`/api/terminals/${encodeURIComponent(id)}`, {
+    ...options,
+    method: 'PATCH',
+    body: { title },
+  });
+}
+
+export function deleteTerminal(id: string, options: CallOptions = {}): Promise<{ deleted: string }> {
+  return apiRequest<{ deleted: string }>(`/api/terminals/${encodeURIComponent(id)}`, {
+    ...options,
+    method: 'DELETE',
+  });
+}
+
+/** Kill the shell and start a new one, keeping the id, title and position. */
+export function restartTerminal(
+  id: string,
+  params: { cols?: number; rows?: number } = {},
+  options: CallOptions = {},
+): Promise<{ terminal: Terminal }> {
+  return apiRequest<{ terminal: Terminal }>(
+    withQuery(`/api/terminals/${encodeURIComponent(id)}/restart`, {
+      cols: params.cols,
+      rows: params.rows,
+    }),
+    { ...options, method: 'POST', body: {} },
+  );
 }

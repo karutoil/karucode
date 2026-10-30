@@ -494,3 +494,105 @@ describe('ChatView workspace tabs', () => {
     expect(toggle().querySelector('svg')?.getAttribute('width')).toBe('15');
   });
 });
+
+describe('ChatView composer dock', () => {
+  beforeEach(() => {
+    resetAppState();
+    ResizeObserverStub.reset();
+    vi.stubGlobal('ResizeObserver', ResizeObserverStub);
+  });
+
+  afterEach(() => {
+    resetAppState();
+    ResizeObserverStub.reset();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const panel = (): HTMLElement => {
+    const element = document.getElementById('workspace-panel-chat');
+    if (!element) throw new Error('#workspace-panel-chat not rendered');
+    return element;
+  };
+
+  it('keeps the composer inside the chat panel, not in its own band', () => {
+    const { container } = renderChat();
+    const wrap = container.querySelector('.composer-wrap');
+    const body = container.querySelector('.chat-body');
+    expect(wrap).not.toBeNull();
+    // The dock is a sibling of the scroller inside the panel that positions it;
+    // it used to be a third flex row of `.chat-panel` (the attached band).
+    expect(wrap?.parentElement).toBe(panel());
+    expect(panel().contains(body)).toBe(true);
+    // The scroll host no longer contains the composer: it floats over it.
+    expect(body?.contains(wrap)).toBe(false);
+  });
+
+  it('is opaque while the reader is at the newest message', () => {
+    const { element } = renderChat();
+    fakeScrollBox(element, { scrollHeight: 1600, clientHeight: VIEWPORT });
+    element.scrollTop = 1600 - VIEWPORT;
+    fireEvent.scroll(element);
+
+    expect(panel().getAttribute('data-translucent')).toBe('false');
+  });
+
+  it('goes translucent when the reader scrolls into history', async () => {
+    const { element } = renderChat();
+    fakeScrollBox(element, { scrollHeight: 1600, clientHeight: VIEWPORT });
+
+    await scrollTo(element, 200);
+
+    // This attribute is what `.composer` keys its 42%-opacity + backdrop-blur
+    // state off (styles/composer.test.ts pins the CSS side).
+    expect(panel().getAttribute('data-translucent')).toBe('true');
+  });
+
+  it('turns opaque again when the reader returns to the bottom', async () => {
+    const { element } = renderChat();
+    const box: Box = { scrollHeight: 1600, clientHeight: VIEWPORT };
+    fakeScrollBox(element, box);
+
+    await scrollTo(element, 200);
+    expect(panel().getAttribute('data-translucent')).toBe('true');
+
+    await scrollTo(element, box.scrollHeight - box.clientHeight);
+    expect(panel().getAttribute('data-translucent')).toBe('false');
+  });
+
+  it('reports the dock height so the transcript can reserve room for it', async () => {
+    // jsdom has no layout: give the dock a height and let the observer fire.
+    Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains('composer-wrap') ? 148 : 0;
+      },
+    });
+    try {
+      const { container } = renderChat();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      const host = panel();
+      expect(host.style.getPropertyValue('--composer-h')).toBe('148px');
+      // The scroller's `padding-bottom: calc(var(--composer-h, 0px) + 18px)` and
+      // the jump button's `bottom` both read it from this element.
+      expect(container.querySelector('.composer-wrap')).not.toBeNull();
+    } finally {
+      Reflect.deleteProperty(HTMLElement.prototype, 'offsetHeight');
+    }
+  });
+
+  it('keeps the jump-to-latest button available while translucent', async () => {
+    const { element } = renderChat();
+    fakeScrollBox(element, { scrollHeight: 1600, clientHeight: VIEWPORT });
+
+    await scrollTo(element, 200);
+
+    // The two states share a condition: a reader in history gets both the
+    // see-through dock and the way back to the newest message.
+    expect(panel().getAttribute('data-translucent')).toBe('true');
+    expect(jumpButton()).not.toBeNull();
+  });
+});

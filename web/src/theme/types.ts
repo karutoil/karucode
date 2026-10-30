@@ -12,6 +12,28 @@ export type ThemeDensity = 'compact' | 'comfortable' | 'spacious';
 export type ThemeFont = 'system' | 'modern' | 'rounded' | 'humanist' | 'classic';
 export type ThemeMono = 'default' | 'system' | 'classic';
 
+/**
+ * How a tool call is drawn in the transcript.
+ *
+ * `cards` is the roomy card (icon, arguments, 112px output preview, footer);
+ * `rows` is a single quiet line per call that expands into the same output, so a
+ * turn with twenty calls reads as a list instead of twenty blocks.
+ */
+export type ThemeToolStyle = 'cards' | 'rows';
+/**
+ * What gets folded in the transcript. `none` shows every call, `tools` folds
+ * runs of consecutive tool calls into one summary line, and `turns` also folds
+ * the intermediate work of a finished turn behind a "worked for …" line, so a
+ * long run leaves its narration and its answer.
+ *
+ * Nothing is ever folded away while it can still change what you must do: a
+ * running call, a pending approval, an error, a notice and the last answer of a
+ * turn always stay on screen.
+ */
+export type ThemeGrouping = 'none' | 'tools' | 'turns';
+/** How much of the model's reasoning is visible before it is opened. */
+export type ThemeThinking = 'collapsed' | 'preview' | 'expanded';
+
 export const THEME_MODES: readonly ThemeMode[] = ['dark', 'light'];
 export const THEME_DENSITIES: readonly ThemeDensity[] = ['compact', 'comfortable', 'spacious'];
 export const THEME_FONTS: readonly ThemeFont[] = [
@@ -22,6 +44,41 @@ export const THEME_FONTS: readonly ThemeFont[] = [
   'classic',
 ];
 export const THEME_MONO_FONTS: readonly ThemeMono[] = ['default', 'system', 'classic'];
+export const THEME_TOOL_STYLES: readonly ThemeToolStyle[] = ['cards', 'rows'];
+export const THEME_GROUPINGS: readonly ThemeGrouping[] = ['none', 'tools', 'turns'];
+export const THEME_THINKING_MODES: readonly ThemeThinking[] = ['collapsed', 'preview', 'expanded'];
+
+/** One option in a Theme Studio segmented control. */
+export interface ThemeChoice<T extends string> {
+  value: T;
+  label: string;
+  hint: string;
+}
+
+/**
+ * Transcript view options, described once so the studio controls, the default
+ * treatment and the docs cannot drift apart.
+ */
+export const THEME_TOOL_STYLE_CHOICES: readonly ThemeChoice<ThemeToolStyle>[] = [
+  { value: 'cards', label: 'Cards', hint: 'The full card: arguments, output preview and footer.' },
+  { value: 'rows', label: 'Rows', hint: 'One quiet line per call; the same output on demand.' },
+];
+
+export const THEME_GROUPING_CHOICES: readonly ThemeChoice<ThemeGrouping>[] = [
+  { value: 'none', label: 'None', hint: 'Show every call where it happened.' },
+  { value: 'tools', label: 'Tool calls', hint: 'Fold a run of calls into one summary line.' },
+  {
+    value: 'turns',
+    label: 'Turns',
+    hint: 'Also fold a finished turn’s working steps.',
+  },
+];
+
+export const THEME_THINKING_CHOICES: readonly ThemeChoice<ThemeThinking>[] = [
+  { value: 'collapsed', label: 'Hidden', hint: 'A chip that opens to the reasoning.' },
+  { value: 'preview', label: 'Preview', hint: 'The first line, with the rest behind a click.' },
+  { value: 'expanded', label: 'Open', hint: 'Reasoning shown in full as it streams.' },
+];
 
 /** The editable palette. Everything else in `ResolvedPalette` is derived. */
 export interface ThemeColors {
@@ -92,6 +149,10 @@ export interface Theme {
   rounding: number;
   colors: ThemeColors;
   customCSS: string;
+  /** Transcript view options (see `ThemeToolStyle` and friends). */
+  toolStyle: ThemeToolStyle;
+  grouping: ThemeGrouping;
+  thinking: ThemeThinking;
 }
 
 /** A theme ready to paint: palette inputs plus every derived token. */
@@ -131,6 +192,9 @@ export interface ThemeOptionsPatch {
   rounding?: number;
   customCSS?: string;
   colors?: ThemeColorsPatch;
+  toolStyle?: ThemeToolStyle;
+  grouping?: ThemeGrouping;
+  thinking?: ThemeThinking;
 }
 
 /** A colour control in the Theme Studio. */

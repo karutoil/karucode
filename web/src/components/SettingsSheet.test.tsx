@@ -6,6 +6,8 @@ import type {
   CatalogResponse,
   Config,
   ConfigPatch,
+  PluginDiagnostics,
+  PluginRescanReport,
   ProviderTestResult,
 } from '../api/types';
 import { configFixture, jsonResponse, resetAppState } from '../test/fixtures';
@@ -52,6 +54,9 @@ function twoProfileConfig(): Config {
             max_output_tokens: 8192,
             tool_call: true,
             reasoning: true,
+            // Not declared: the install-wide default applies. The edit dialog is
+            // where a user makes this explicit.
+            vision: null,
             cost_input: null,
             cost_output: null,
           },
@@ -86,6 +91,8 @@ const CATALOG_MODELS: CatalogResponse = {
       max_output_tokens: 8192,
       tool_call: true,
       reasoning: true,
+      // A vision model, so the picker's prefill is observable in the saved patch.
+      vision: true,
       cost_input: 0.1,
       cost_output: 0.4,
     },
@@ -96,6 +103,7 @@ const CATALOG_MODELS: CatalogResponse = {
       max_output_tokens: 16384,
       tool_call: false,
       reasoning: true,
+      vision: false,
       cost_input: 0.55,
       cost_output: 2.19,
     },
@@ -117,6 +125,7 @@ const LOOKUP_HITS: Record<string, CatalogLookupResponse['match']> = {
       max_output_tokens: 16384,
       tool_call: true,
       reasoning: true,
+      vision: true,
       cost_input: 0.2,
       cost_output: 0.6,
     },
@@ -131,6 +140,8 @@ const LOOKUP_HITS: Record<string, CatalogLookupResponse['match']> = {
       max_output_tokens: 8192,
       tool_call: true,
       reasoning: false,
+      // A text-only match: proves a refresh does not invent vision.
+      vision: false,
       cost_input: 0.07,
       cost_output: 0.28,
     },
@@ -187,8 +198,15 @@ function applyPatches(config: Config, patch: ConfigPatch): Config {
   return next;
 }
 
-function installFetch(config: Config, options: { testResult?: ProviderTestResult } = {}) {
+function installFetch(
+  config: Config,
+  options: { testResult?: ProviderTestResult; plugins?: PluginDiagnostics[] } = {},
+) {
   const patches: ConfigPatch[] = [];
+  /** POST paths the sheet sent to the plugin lifecycle routes, in order. */
+  const pluginPosts: string[] = [];
+  let pluginListCalls = 0;
+  let plugins = options.plugins ?? [];
   let current = config;
   const testResult: ProviderTestResult = options.testResult ?? {
     ok: true,
@@ -208,7 +226,35 @@ function installFetch(config: Config, options: { testResult?: ProviderTestResult
       current = applyPatches(current, body);
       return jsonResponse(current);
     }
-    if (url === '/api/plugins') return jsonResponse({ plugins: [] });
+    if (url === '/api/plugins') {
+      pluginListCalls += 1;
+      return jsonResponse({ plugins });
+    }
+    if (url.startsWith('/api/plugins/') && method === 'POST') {
+      pluginPosts.push(url);
+      if (url === '/api/plugins/reload') {
+        const report: PluginRescanReport = {
+          added: [],
+          removed: [],
+          restarted: [],
+          unchanged: plugins.map((plugin) => plugin.name),
+        };
+        return jsonResponse({ report, plugins });
+      }
+      const name = decodeURIComponent(url.split('/')[3] ?? '');
+      const found = plugins.find((plugin) => plugin.name === name);
+      if (!found) {
+        return jsonResponse(
+          { error: { code: 'not_found', message: `no plugin ${name}` } },
+          404,
+        );
+      }
+      // A reload replaces the process, so the pid the row was showing is stale.
+      plugins = plugins.map((plugin) =>
+        plugin.name === name ? { ...plugin, pid: 9999, status: 'ready' } : plugin,
+      );
+      return jsonResponse(plugins.find((plugin) => plugin.name === name));
+    }
     if (url === '/api/mcp') return jsonResponse({ servers: [] });
     if (url === '/api/health') {
       return jsonResponse({
@@ -239,7 +285,12 @@ function installFetch(config: Config, options: { testResult?: ProviderTestResult
     return jsonResponse({ error: { code: 'not_found', message: `unmocked ${method} ${url}` } }, 404);
   });
   vi.stubGlobal('fetch', fetchMock);
-  return { fetchMock, patches };
+  return {
+    fetchMock,
+    patches,
+    pluginPosts,
+    pluginListCalls: () => pluginListCalls,
+  };
 }
 
 function renderSheet(config: Config) {
@@ -392,6 +443,8 @@ describe('SettingsSheet providers', () => {
       max_output_tokens: 8192,
       tool_call: true,
       reasoning: true,
+      // models.dev says this one takes images, so the picker prefills it.
+      vision: true,
       cost_input: 0.1,
       cost_output: 0.4,
       catalog_provider: 'openrouter',
@@ -402,6 +455,8 @@ describe('SettingsSheet providers', () => {
     const updatedGateway = await profileCard('Gateway');
     expect(within(updatedGateway).getAllByText('Qwen3 32B')).toHaveLength(2);
     expect(within(updatedGateway).getByText('qwen/qwen3-32b')).not.toBeNull();
+    // The prefilled vision flag is what the row shows.
+    expect(within(updatedGateway).getByText('vision')).not.toBeNull();
   });
 
   it('detects metadata when adding a gateway-prefixed model id by hand', async () => {
@@ -424,6 +479,7 @@ describe('SettingsSheet providers', () => {
       max_output_tokens: 8192,
       tool_call: true,
       reasoning: false,
+      vision: false,
       cost_input: 0.07,
       cost_output: 0.28,
       catalog_provider: 'deepseek',
@@ -433,6 +489,8 @@ describe('SettingsSheet providers', () => {
     expect(within(updatedGateway).getByText('DeepSeek V4.1 Flash')).not.toBeNull();
     expect(within(updatedGateway).getByText('a6api/ali/deepseek-v4.1-flash-1017')).not.toBeNull();
     expect(within(updatedGateway).getByText('via deepseek')).not.toBeNull();
+    // The prefilled per-model answer is visible on the row, not just in the patch.
+    expect(within(updatedGateway).getByText('no images')).not.toBeNull();
   });
 
   it('refreshes one model’s metadata from the catalog, keeping the custom name', async () => {
@@ -453,6 +511,7 @@ describe('SettingsSheet providers', () => {
       max_output_tokens: 16384,
       tool_call: true,
       reasoning: true,
+      vision: true,
       cost_input: 0.2,
       cost_output: 0.6,
       catalog_provider: 'alibaba',
@@ -489,6 +548,11 @@ describe('SettingsSheet providers', () => {
     fireEvent.input(within(dialog).getByLabelText('Context window'), { target: { value: '128000' } });
     fireEvent.input(within(dialog).getByLabelText('Output cost / M tokens'), { target: { value: '0.9' } });
     fireEvent.change(within(dialog).getByLabelText('Reasoning'), { target: { value: 'false' } });
+    // The per-model image flag is editable here; this is the switch that makes
+    // read_file show the model a picture.
+    fireEvent.change(within(dialog).getByLabelText('Image input (vision)'), {
+      target: { value: 'true' },
+    });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save model' }));
 
     await waitFor(() => expect(patches).toHaveLength(1));
@@ -499,11 +563,29 @@ describe('SettingsSheet providers', () => {
       max_output_tokens: 8192,
       tool_call: true,
       reasoning: false,
+      vision: true,
       cost_input: null,
       cost_output: 0.9,
       catalog_provider: null,
     });
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit qwen3-32b' })).toBeNull());
+  });
+
+  it('leaves the per-model image flag undeclared when the dialog is left alone', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    const gateway = await profileCard('Gateway');
+    fireEvent.click(within(gateway).getByRole('button', { name: 'Edit Qwen3 32B on Gateway' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Edit qwen3-32b' });
+    // Untouched, the field must stay "unknown" rather than silently becoming a
+    // text-only declaration that would override the install-wide default.
+    expect((within(dialog).getByLabelText('Image input (vision)') as HTMLSelectElement).value).toBe('');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save model' }));
+
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.providers?.upsert?.[0]?.models?.[0]?.vision).toBeNull();
   });
 
   it('rejects an out-of-range context window before saving', async () => {
@@ -604,6 +686,66 @@ describe('SettingsSheet controls', () => {
     expect(patches[0]?.model?.parallel_tool_calls).toBe(false);
   });
 
+  it('saves the install-wide image default from its own switch', async () => {
+    const config = twoProfileConfig();
+    config.model.supports_images = false;
+    const { patches } = installFetch(config);
+    renderSheet(config);
+
+    const images = await screen.findByRole('switch', { name: 'Send images to models' });
+    expect(images.getAttribute('aria-checked')).toBe('false');
+    // The description has to explain the interaction with a model's own flag,
+    // otherwise "off" looks like it disables a vision model too.
+    const describedBy = images.getAttribute('aria-describedby');
+    expect(document.getElementById(describedBy!)?.textContent).toContain('overrides it');
+
+    fireEvent.click(images);
+    expect(images.getAttribute('aria-checked')).toBe('true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.model?.supports_images).toBe(true);
+  });
+
+  it('does not send a temperature unless the toggle is on', async () => {
+    // An invented sampling value pushed a reasoning model into repeating itself
+    // instead of acting, so the field is opt-in and an empty box must not block
+    // saving. Default: not sent at all.
+    const config = twoProfileConfig();
+    const { patches } = installFetch(config);
+    const { container } = renderSheet(config);
+
+    const toggle = await screen.findByRole('switch', { name: 'Send a temperature' });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    const input = container.querySelector('#temperature') as HTMLInputElement;
+    expect(input.disabled, 'the number box is inert while the toggle is off').toBe(true);
+
+    // An empty box is fine while nothing is sent.
+    fireEvent.input(input, { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.model?.send_temperature).toBe(false);
+    expect('temperature' in (patches[0]?.model ?? {})).toBe(false);
+  });
+
+  it('sends the temperature when the toggle is on', async () => {
+    const config = twoProfileConfig();
+    config.model.send_temperature = true;
+    const { patches } = installFetch(config);
+    const { container } = renderSheet(config);
+
+    const toggle = await screen.findByRole('switch', { name: 'Send a temperature' });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    const input = container.querySelector('#temperature') as HTMLInputElement;
+    expect(input.disabled).toBe(false);
+
+    fireEvent.input(input, { target: { value: '0.4' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.model?.send_temperature).toBe(true);
+    expect(patches[0]?.model?.temperature).toBe(0.4);
+  });
+
   it('keeps the settings sheet on the mock’s chrome classes', async () => {
     installFetch(twoProfileConfig());
     const { container } = renderSheet(twoProfileConfig());
@@ -644,5 +786,93 @@ describe('SettingsSheet appearance', () => {
     // The appearance control is type="button" inside the settings form, so it
     // must never submit a config patch.
     expect(patches).toHaveLength(0);
+  });
+});
+/* ------------------------------------------------------------------ *
+ * Plugin lifecycle: reload, enable/disable and rescan without a restart.
+ * ------------------------------------------------------------------ */
+
+function pluginDiagnostics(name: string, status = 'ready'): PluginDiagnostics {
+  return {
+    name,
+    status,
+    manifest: { name, version: '0.1.0', protocol: '1' },
+    tools: [],
+    error: null,
+    pid: 4242,
+    restart_count: 0,
+  };
+}
+
+describe('SettingsSheet plugins', () => {
+  beforeEach(() => {
+    resetAppState();
+  });
+
+  afterEach(() => {
+    resetAppState();
+    vi.unstubAllGlobals();
+  });
+
+  it('reloads one plugin and re-reads the diagnostics', async () => {
+    const plugins = [pluginDiagnostics('wordy')];
+    const { pluginPosts, pluginListCalls } = installFetch(twoProfileConfig(), { plugins });
+    renderSheet(twoProfileConfig());
+
+    const row = (await screen.findByText('wordy')).closest('.diagnostics-row');
+    if (!(row instanceof HTMLElement)) throw new Error('no plugin row');
+    const before = pluginListCalls();
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Reload' }));
+
+    // Exactly the one plugin is reloaded, through its own route.
+    await waitFor(() => expect(pluginPosts).toEqual(['/api/plugins/wordy/reload']));
+    // The list is fetched again: the row must not keep showing the old process.
+    await waitFor(() => expect(pluginListCalls()).toBeGreaterThan(before));
+  });
+
+  it('rescans every plugin source with one call', async () => {
+    const { pluginPosts } = installFetch(twoProfileConfig(), {
+      plugins: [pluginDiagnostics('wordy')],
+    });
+    renderSheet(twoProfileConfig());
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Rescan plugins' }));
+
+    await waitFor(() => expect(pluginPosts).toEqual(['/api/plugins/reload']));
+  });
+
+  it('disables a running plugin and enables a disabled one', async () => {
+    const { pluginPosts } = installFetch(twoProfileConfig(), {
+      plugins: [pluginDiagnostics('wordy'), pluginDiagnostics('muted', 'disabled')],
+    });
+    renderSheet(twoProfileConfig());
+
+    const running = (await screen.findByText('wordy')).closest('.diagnostics-row');
+    const stopped = screen.getByText('muted').closest('.diagnostics-row');
+    if (!(running instanceof HTMLElement) || !(stopped instanceof HTMLElement)) {
+      throw new Error('plugin rows did not render');
+    }
+
+    fireEvent.click(within(running).getByRole('button', { name: 'Disable' }));
+    await waitFor(() => expect(pluginPosts).toEqual(['/api/plugins/wordy/enable']));
+
+    // A disabled plugin offers the opposite action, never "Reload" by itself.
+    fireEvent.click(within(stopped).getByRole('button', { name: 'Enable' }));
+    await waitFor(() =>
+      expect(pluginPosts).toEqual([
+        '/api/plugins/wordy/enable',
+        '/api/plugins/muted/enable',
+      ]),
+    );
+  });
+
+  it('reports the watcher state so an operator knows whether to click', async () => {
+    installFetch({ ...twoProfileConfig(), plugins_watch: true, plugins_watch_secs: 3 });
+    renderSheet({ ...twoProfileConfig(), plugins_watch: true, plugins_watch_secs: 3 });
+
+    expect(
+      await screen.findByText(/Plugin sources are watched every 3s; edits apply without a click\./),
+    ).not.toBeNull();
   });
 });

@@ -1,7 +1,7 @@
 import type { ComponentChildren, JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { ApiError, toErrorMessage } from '../api/client';
-import { listMcpServers, listPlugins } from '../api/endpoints';
+import { listMcpServers, listPlugins, reloadPlugin, rescanPlugins, setPluginEnabled } from '../api/endpoints';
 import type {
   ApprovalMode,
   CatalogModel,
@@ -26,11 +26,15 @@ import { AlertIcon, CheckIcon, EditIcon, PaletteIcon, PlusIcon, RefreshIcon } fr
 type NumericLimitKey = Exclude<keyof Limits, 'auto_continue'>;
 
 interface FormState {
+  /** Whether a temperature is sent at all; when off, the field is not sent. */
+  sendTemperature: boolean;
   temperature: string;
   maxTokens: string;
   topP: string;
   requestTimeout: string;
   parallelToolCalls: boolean;
+  /** Install-wide default for image input; a per-model `vision` wins. */
+  supportsImages: boolean;
   approvalMode: ApprovalMode;
   allowCommands: string[];
   autoApprovePaths: string[];
@@ -55,7 +59,7 @@ const LIMIT_FIELDS: { key: NumericLimitKey; label: string }[] = [
   { key: 'max_command_timeout_secs', label: 'Max command timeout (s)' },
   { key: 'max_file_read_bytes', label: 'Max file read (bytes)' },
   { key: 'search_max_results', label: 'Search results' },
-  { key: 'context_max_chars', label: 'Context budget (chars)' },
+  { key: 'context_max_chars', label: 'Context budget (chars, 0 = from the model)' },
   { key: 'max_tool_calls_per_turn', label: 'Tool calls per turn' },
 ];
 
@@ -84,11 +88,13 @@ const APPROVAL_MODES: { value: ApprovalMode; label: string; description: string 
 
 function formFromConfig(config: Config): FormState {
   return {
+    sendTemperature: config.model.send_temperature,
     temperature: String(config.model.temperature),
     maxTokens: config.model.max_tokens === null ? '' : String(config.model.max_tokens),
     topP: config.model.top_p === null ? '' : String(config.model.top_p),
     requestTimeout: String(config.model.request_timeout_secs),
     parallelToolCalls: config.model.parallel_tool_calls,
+    supportsImages: config.model.supports_images,
     approvalMode: config.approvals.mode,
     allowCommands: [...config.approvals.allow_commands],
     autoApprovePaths: [...config.approvals.auto_approve_paths],
@@ -121,9 +127,11 @@ function integerAtLeast(value: string, min: number, max: number): boolean {
 function validate(form: FormState): Record<string, string> {
   const errors: Record<string, string> = {};
 
-  const temperature = numberValue(form.temperature);
-  if (temperature === null || temperature < 0 || temperature > 2) {
-    errors.temperature = 'Temperature must be between 0 and 2.';
+  if (form.sendTemperature) {
+    const temperature = numberValue(form.temperature);
+    if (temperature === null || temperature < 0 || temperature > 2) {
+      errors.temperature = 'Temperature must be between 0 and 2.';
+    }
   }
   if (form.maxTokens.trim() !== '') {
     const tokens = numberValue(form.maxTokens);
@@ -140,8 +148,14 @@ function validate(form: FormState): Record<string, string> {
   }
 
   for (const field of LIMIT_FIELDS) {
-    if (!integerAtLeast(form.limits[field.key], 1, 100_000_000)) {
-      errors[`limits.${field.key}`] = `${field.label} must be a positive integer.`;
+    // `context_max_chars: 0` is meaningful: derive the budget from the model's
+    // own context window. Every other limit needs a positive value.
+    const min = field.key === 'context_max_chars' ? 0 : 1;
+    if (!integerAtLeast(form.limits[field.key], min, 100_000_000)) {
+      errors[`limits.${field.key}`] =
+        min === 0
+          ? `${field.label} must be 0 or a positive integer.`
+          : `${field.label} must be a positive integer.`;
     }
   }
   if (
@@ -183,11 +197,15 @@ function buildPatch(form: FormState): ConfigPatch {
     // Connection details live on provider profiles now; only the sampling
     // tunables (which are install-wide) stay in the flat model section.
     model: {
-      temperature: Number(form.temperature),
+      // Off by default: an invented sampling value can push a reasoning model
+      // into repeating itself instead of acting. Only send one when asked.
+      send_temperature: form.sendTemperature,
+      ...(form.sendTemperature ? { temperature: Number(form.temperature) } : {}),
       max_tokens: form.maxTokens.trim() === '' ? null : Number(form.maxTokens),
       top_p: form.topP.trim() === '' ? null : Number(form.topP),
       request_timeout_secs: Number(form.requestTimeout),
       parallel_tool_calls: form.parallelToolCalls,
+      supports_images: form.supportsImages,
     },
     approvals: {
       mode: form.approvalMode,
@@ -501,6 +519,7 @@ function ModelEditDialog({ profile, model, onSave, onClose }: ModelEditDialogPro
   const [costOutput, setCostOutput] = useState(model.cost_output?.toString() ?? '');
   const [toolCall, setToolCall] = useState<TriState>(triStateOf(model.tool_call));
   const [reasoning, setReasoning] = useState<TriState>(triStateOf(model.reasoning));
+  const [vision, setVision] = useState<TriState>(triStateOf(model.vision));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
@@ -531,6 +550,7 @@ function ModelEditDialog({ profile, model, onSave, onClose }: ModelEditDialogPro
       max_output_tokens: output ?? null,
       tool_call: triStateValue(toolCall),
       reasoning: triStateValue(reasoning),
+      vision: triStateValue(vision),
       cost_input: inputCost ?? null,
       cost_output: outputCost ?? null,
       catalog_provider: model.catalog_provider ?? null,
@@ -623,6 +643,29 @@ function ModelEditDialog({ profile, model, onSave, onClose }: ModelEditDialogPro
             <option value="">Unknown</option>
             <option value="true">Supported</option>
             <option value="false">Not supported</option>
+          </select>
+        </Field>
+        <Field
+          id="model-edit-vision"
+          label="Image input (vision)"
+          hint={
+            vision === ''
+              ? 'Not declared: the install-wide “Send images to models” default applies.'
+              : vision === 'true'
+                ? 'read_file attaches a PNG/JPEG/GIF/WebP for this model to look at.'
+                : 'read_file refuses images and says the model cannot see them.'
+          }
+        >
+          <select
+            id="model-edit-vision"
+            class="input"
+            value={vision}
+            onChange={(event) => setVision(event.currentTarget.value as TriState)}
+            aria-describedby="model-edit-vision-hint"
+          >
+            <option value="">Unknown (use the default)</option>
+            <option value="true">Accepted</option>
+            <option value="false">Text only</option>
           </select>
         </Field>
       </div>
@@ -720,6 +763,9 @@ function CatalogPickerDialog({ profile, existingIds, onAdd, onClose }: CatalogPi
       max_output_tokens: model.max_output_tokens ?? null,
       tool_call: model.tool_call ?? null,
       reasoning: model.reasoning ?? null,
+      // models.dev is the source of truth for "does this model take images", so
+      // the picker prefills the per-model flag instead of making the user find it.
+      vision: model.vision ?? null,
       cost_input: model.cost_input ?? null,
       cost_output: model.cost_output ?? null,
       catalog_provider: provider?.id ?? null,
@@ -891,6 +937,11 @@ function CatalogPickerDialog({ profile, existingIds, onAdd, onClose }: CatalogPi
                       {added ? <span class="chip chip-muted">added</span> : null}
                       {!added && model.tool_call ? <span class="chip">tools</span> : null}
                       {!added && model.reasoning ? <span class="chip">reasoning</span> : null}
+                      {!added && model.vision ? (
+                        <span class="chip chip-ok" title="Takes image input; added with vision enabled">
+                          vision
+                        </span>
+                      ) : null}
                     </label>
                   </li>
                 );
@@ -1073,6 +1124,7 @@ function ProvidersSection({ disabled }: { disabled: boolean }): JSX.Element | nu
           max_output_tokens: detected.model.max_output_tokens ?? null,
           tool_call: detected.model.tool_call ?? null,
           reasoning: detected.model.reasoning ?? null,
+          vision: detected.model.vision ?? null,
           cost_input: detected.model.cost_input ?? null,
           cost_output: detected.model.cost_output ?? null,
           catalog_provider: detected.provider,
@@ -1113,6 +1165,7 @@ function ProvidersSection({ disabled }: { disabled: boolean }): JSX.Element | nu
               max_output_tokens: detected.model.max_output_tokens ?? null,
               tool_call: detected.model.tool_call ?? null,
               reasoning: detected.model.reasoning ?? null,
+              vision: detected.model.vision ?? null,
               cost_input: detected.model.cost_input ?? null,
               cost_output: detected.model.cost_output ?? null,
               catalog_provider: detected.provider,
@@ -1510,6 +1563,22 @@ function ProvidersSection({ disabled }: { disabled: boolean }): JSX.Element | nu
                             {meta.length > 0 ? <span>{meta.join(' · ')}</span> : <span>metadata unknown</span>}
                             {model.tool_call ? <span class="chip">tools</span> : null}
                             {model.reasoning ? <span class="chip">reasoning</span> : null}
+                            {model.vision === true ? (
+                              <span class="chip chip-ok" title="read_file attaches an image for this model">
+                                vision
+                              </span>
+                            ) : model.vision === false ? (
+                              <span class="chip chip-muted" title="Text only: read_file refuses images">
+                                no images
+                              </span>
+                            ) : (
+                              <span
+                                class="chip chip-muted"
+                                title="Not declared: the install-wide image default applies"
+                              >
+                                images: default
+                              </span>
+                            )}
                           </div>
                           <div class="model-actions">
                             <button
@@ -1764,6 +1833,33 @@ export function SettingsSheet(): JSX.Element | null {
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
   const [configReloadKey, setConfigReloadKey] = useState(0);
   const [diagnosticsKey, setDiagnosticsKey] = useState(0);
+  const [pluginBusy, setPluginBusy] = useState<string | null>(null);
+  const [pluginActionError, setPluginActionError] = useState<string | null>(null);
+
+  /**
+   * Run one plugin lifecycle action and re-read the diagnostics afterwards.
+   *
+   * Reloading is a POST that replaces processes, so the list on screen is stale
+   * the moment it returns; bumping `diagnosticsKey` is what makes the row show
+   * the new status and pid instead of the old one.
+   */
+  const runPluginAction = (
+    name: string,
+    action: 'reload' | 'enable' | 'disable' | 'rescan',
+  ): void => {
+    setPluginBusy(`${action}:${name}`);
+    setPluginActionError(null);
+    const request =
+      action === 'rescan'
+        ? rescanPlugins()
+        : action === 'reload'
+          ? reloadPlugin(name)
+          : setPluginEnabled(name, action === 'enable');
+    request
+      .then(() => setDiagnosticsKey((key) => key + 1))
+      .catch((cause: unknown) => setPluginActionError(toErrorMessage(cause)))
+      .finally(() => setPluginBusy(null));
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -1952,7 +2048,11 @@ export function SettingsSheet(): JSX.Element | null {
                   id="temperature"
                   label="Temperature"
                   error={errors.temperature}
-                  hint="0–2. Lower is more deterministic."
+                  hint={
+                    form.sendTemperature
+                      ? '0–2. Lower is more deterministic.'
+                      : 'Not sent: the endpoint uses the model’s own default.'
+                  }
                 >
                   <input
                     id="temperature"
@@ -1962,12 +2062,19 @@ export function SettingsSheet(): JSX.Element | null {
                     min="0"
                     max="2"
                     value={form.temperature}
-                    disabled={disabled}
+                    disabled={disabled || !form.sendTemperature}
                     onInput={(event) => update({ temperature: event.currentTarget.value })}
                     aria-invalid={errors.temperature ? 'true' : undefined}
                     aria-describedby={errors.temperature ? 'temperature-error' : 'temperature-hint'}
                   />
                 </Field>
+                <Toggle
+                  label="Send a temperature"
+                  description="Off by default. An invented sampling value can make a reasoning model repeat itself instead of acting; leave it off unless the endpoint asks for one."
+                  checked={form.sendTemperature}
+                  disabled={disabled}
+                  onChange={(checked) => update({ sendTemperature: checked })}
+                />
                 <Field id="max-tokens" label="Max tokens" error={errors.maxTokens} hint="Empty means the provider default.">
                   <input
                     id="max-tokens"
@@ -2026,6 +2133,15 @@ export function SettingsSheet(): JSX.Element | null {
                     checked={form.parallelToolCalls}
                     disabled={disabled}
                     onChange={(checked) => update({ parallelToolCalls: checked })}
+                  />
+                </div>
+                <div class="field field-toggle">
+                  <Toggle
+                    label="Send images to models"
+                    description="Install-wide default for read_file on an image. A model's own “Image input (vision)” setting overrides it, so a vision model still works while this is off. models.dev fills that in when you add a model."
+                    checked={form.supportsImages}
+                    disabled={disabled}
+                    onChange={(checked) => update({ supportsImages: checked })}
                   />
                 </div>
               </div>
@@ -2276,22 +2392,42 @@ export function SettingsSheet(): JSX.Element | null {
             <section class="settings-section" aria-labelledby="settings-plugins">
               <div class="settings-section-head">
                 <h3 id="settings-plugins">Plugins &amp; MCP</h3>
-                <button
-                  type="button"
-                  class="button button-small"
-                  onClick={() => setDiagnosticsKey((key) => key + 1)}
-                  disabled={diagnosticsLoading}
-                >
-                  <RefreshIcon size={13} class={diagnosticsLoading ? 'spin' : undefined} /> Refresh status
-                </button>
+                <div class="settings-section-actions">
+                  <button
+                    type="button"
+                    class="button button-small"
+                    onClick={() => runPluginAction('all', 'rescan')}
+                    disabled={pluginBusy !== null}
+                    title="Re-read every plugin source: start new plugins, drop removed ones, replace changed ones"
+                  >
+                    {pluginBusy === 'rescan:all' ? 'Rescanning…' : 'Rescan plugins'}
+                  </button>
+                  <button
+                    type="button"
+                    class="button button-small"
+                    onClick={() => setDiagnosticsKey((key) => key + 1)}
+                    disabled={diagnosticsLoading}
+                  >
+                    <RefreshIcon size={13} class={diagnosticsLoading ? 'spin' : undefined} /> Refresh status
+                  </button>
+                </div>
               </div>
               <p class="settings-section-note">
-                Read-only diagnostics. Plugins and MCP servers run as separate processes with the server's OS
-                permissions.
+                Plugins and MCP servers run as separate processes with the server's OS permissions.
+                {/* Say whether a reload happens on its own: an operator who just
+                    rebuilt a plugin needs to know whether to click or to wait. */}
+                {store.config.value?.plugins_watch
+                  ? ` Plugin sources are watched every ${store.config.value.plugins_watch_secs ?? 2}s; edits apply without a click.`
+                  : ' Reload or rescan after changing a plugin. Nothing is applied automatically.'}
               </p>
               {diagnosticsError ? (
                 <div class="inline-error" role="alert">
                   <p>{diagnosticsError}</p>
+                </div>
+              ) : null}
+              {pluginActionError ? (
+                <div class="inline-error" role="alert">
+                  <p>{pluginActionError}</p>
                 </div>
               ) : null}
               <div class="diagnostics-grid">
@@ -2310,6 +2446,31 @@ export function SettingsSheet(): JSX.Element | null {
                           {plugin.tools.length} tool{plugin.tools.length === 1 ? '' : 's'}
                         </span>
                         {plugin.error ? <span class="diagnostics-error">{plugin.error}</span> : null}
+                        <span class="diagnostics-actions">
+                          <button
+                            type="button"
+                            class="button button-small"
+                            onClick={() => runPluginAction(plugin.name, 'reload')}
+                            disabled={pluginBusy !== null}
+                            title="Restart this plugin's process (pick up a rebuilt binary or an edited manifest)"
+                          >
+                            {pluginBusy === `reload:${plugin.name}` ? 'Reloading…' : 'Reload'}
+                          </button>
+                          <button
+                            type="button"
+                            class="button button-small"
+                            onClick={() =>
+                              runPluginAction(
+                                plugin.name,
+                                plugin.status === 'disabled' ? 'enable' : 'disable',
+                              )
+                            }
+                            disabled={pluginBusy !== null}
+                            title="Start or stop this plugin without restarting the server"
+                          >
+                            {plugin.status === 'disabled' ? 'Enable' : 'Disable'}
+                          </button>
+                        </span>
                       </li>
                     ))}
                   </ul>

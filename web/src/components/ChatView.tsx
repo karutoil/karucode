@@ -1,18 +1,23 @@
 import type { JSX } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { ChatItem } from '../state/chat';
 import { copyText } from '../lib/clipboard';
+import { useHeightVariable } from '../lib/dockHeight';
 import { modKey } from '../lib/platform';
 import { useStickyBottom } from '../lib/stickyBottom';
 import { getGitStatus } from '../api/endpoints';
 import * as actions from '../state/actions';
+import * as terminalState from '../state/terminals';
 import { totalUsage } from '../state/selectors';
 import * as store from '../state/store';
 import { ChangesTab } from './ChangesTab';
 import { ChatTranscript } from './ChatTranscript';
 import { Composer } from './Composer';
 import { EmptyState } from './EmptyState';
+import { ErrorBoundary } from './ErrorBoundary';
+import { LiveAnnouncer } from './LiveAnnouncer';
 import { Tabs, type TabItem } from './Tabs';
+import { TerminalTab } from './TerminalTab';
 import {
   AlertIcon,
   ChatIcon,
@@ -25,11 +30,18 @@ import {
   PanelIcon,
   RefreshIcon,
   SearchIcon,
+  TerminalIcon,
 } from './icons';
 import { activeThemeName } from '../theme/engine';
 
-/** The three centre-pane views of the workspace (the mock's workspace tabs). */
-export type WorkspaceView = 'chat' | 'changes';
+/**
+ * The centre-pane views of the workspace (the mock's workspace tabs).
+ *
+ * `terminal` is the odd one out: it is a real shell, not a view over the
+ * session, so it works with no session open and its state belongs to the server
+ * rather than to the conversation.
+ */
+export type WorkspaceView = 'chat' | 'changes' | 'terminal';
 
 /**
  * Plain-text transcript for the "Copy" header action: speaker, message text,
@@ -147,9 +159,11 @@ function SessionHeader({ view }: { view: WorkspaceView }): JSX.Element {
   const title =
     view === 'changes'
       ? 'Review changes'
-      : session
-        ? session.title || 'Untitled session'
-        : 'karucode';
+      : view === 'terminal'
+        ? 'Terminal'
+        : session
+          ? session.title || 'Untitled session'
+          : 'karucode';
   const activityWord = activity.kind === 'idle' ? 'ready' : activity.kind;
 
   const copyConversation = async (): Promise<void> => {
@@ -220,7 +234,7 @@ function SessionHeader({ view }: { view: WorkspaceView }): JSX.Element {
           type="button"
           class="head-btn accent-head"
           onClick={() => void copyConversation()}
-          disabled={store.chat.value.items.length === 0}
+          disabled={store.chat.value.items.length === 0 || view !== 'chat'}
           title="Copy this conversation as Markdown"
         >
           <CopyIcon size={15} />
@@ -249,6 +263,16 @@ function WorkspaceTabs({ view, onChange }: { view: WorkspaceView; onChange: (nex
     { id: 'chat', label: 'Conversation', icon: <ChatIcon size={15} /> },
     { id: 'changes', label: 'Changes', icon: <GitIcon size={15} />, count: changeCount ?? undefined },
   ];
+  // The terminal is only offered when the server has it enabled: hiding the tab
+  // is the UI half of `KARUCODE_TERMINALS=0`.
+  if (terminalState.terminalsEnabled.value) {
+    items.push({
+      id: 'terminal',
+      label: 'Terminal',
+      icon: <TerminalIcon size={15} />,
+      count: terminalState.terminals.value.length || undefined,
+    });
+  }
   const note = activity.kind === 'idle' ? 'Ready to work' : activity.label;
 
   return (
@@ -309,11 +333,25 @@ export function ChatView(): JSX.Element {
   const [view, setView] = useState<WorkspaceView>('chat');
   // Lazy panel: Changes mounts its git probe only after the user asks for it.
   const [changesMounted, setChangesMounted] = useState(false);
+  // The terminal list is needed to decide whether the tab exists at all, so it
+  // is fetched on mount rather than on first selection. It is one small GET.
+  const [terminalMounted, setTerminalMounted] = useState(false);
+
+  useEffect(() => {
+    void terminalState.loadTerminals();
+  }, []);
 
   const selectView = (next: WorkspaceView): void => {
     setView(next);
     if (next === 'changes') setChangesMounted(true);
+    if (next === 'terminal') setTerminalMounted(true);
   };
+
+  // A tab that disappears (the server disabled the terminal while this page was
+  // open) must not leave the pane pointing at a view that no longer exists.
+  useEffect(() => {
+    if (view === 'terminal' && !terminalState.terminalsEnabled.value) setView('chat');
+  }, [view, terminalState.terminalsEnabled.value]);
 
   const lastItem = chat.items[chat.items.length - 1];
   let tailSize = 0;
@@ -326,6 +364,12 @@ export function ChatView(): JSX.Element {
     contentKey: `${chat.items.length}:${tailSize}`,
     sentMessageTick: store.sentMessageTick.value,
   });
+
+  // The dock floats over the transcript, so the scroller reserves its real
+  // height: measured, because the box grows with the draft and the chip row.
+  const panelRef = useRef<HTMLDivElement>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
+  useHeightVariable({ ref: dockRef, target: panelRef, name: 'composer-h' });
 
   const showLoading = store.chatLoading.value && currentId !== null;
   const hasItems = chat.items.length > 0;
@@ -348,6 +392,10 @@ export function ChatView(): JSX.Element {
           role="tabpanel"
           aria-labelledby="workspace-tab-chat"
           hidden={view !== 'chat'}
+          ref={panelRef}
+          /* Scrolled into history: the dock thins out so the transcript shows
+           * through it. Typing (focus inside the box) restores it in CSS. */
+          data-translucent={scroller.scrolledAway ? 'true' : 'false'}
         >
           <div class="chat-body">
             {scroller.showJump ? (
@@ -358,6 +406,8 @@ export function ChatView(): JSX.Element {
             ) : null}
             <div class="chat-scroll" ref={scroller.scrollRef} tabIndex={0} role="region" aria-label="Transcript">
               <div class="chat-inner">
+                {/* Always mounted so it can speak the transitions, not just the state. */}
+                <LiveAnnouncer chat={chat} />
                 <ConnectionBanner />
                 <ProviderBanner />
 
@@ -387,11 +437,15 @@ export function ChatView(): JSX.Element {
                     // the session first before filling the composer.
                     <EmptyState variant="no-session" />
                   ) : hasItems ? (
-                    <ChatTranscript
-                      items={chat.items}
-                      resolvingApprovals={store.resolvingApprovals.value}
-                      onApprovalDecision={(id, decision) => void actions.resolveApproval(id, decision)}
-                    />
+                    // A malformed item that slipped past the reducer must not take
+                    // the composer and the rails down with it.
+                    <ErrorBoundary scope="This conversation">
+                      <ChatTranscript
+                        items={chat.items}
+                        resolvingApprovals={store.resolvingApprovals.value}
+                        onApprovalDecision={(id, decision) => void actions.resolveApproval(id, decision)}
+                      />
+                    </ErrorBoundary>
                   ) : chat.running ? (
                     // A live run with nothing persisted yet is not an empty session:
                     // the starter prompts would invite a second message mid-turn.
@@ -412,7 +466,7 @@ export function ChatView(): JSX.Element {
             </div>
           </div>
 
-          <div class="composer-wrap">
+          <div class="composer-wrap" ref={dockRef}>
             <div class="composer-inner">
               <Composer
                 disabledReason={store.composerDisabledReason.value}
@@ -441,6 +495,18 @@ export function ChatView(): JSX.Element {
             {/* The page variant owns the mock's `.secondary-panel` chrome
                 (kicker, title, description, actions, change cards). */}
             <ChangesTab variant="page" />
+          </div>
+        ) : null}
+
+        {terminalMounted ? (
+          <div
+            class="center-panel terminal-panel"
+            id="workspace-panel-terminal"
+            role="tabpanel"
+            aria-labelledby="workspace-tab-terminal"
+            hidden={view !== 'terminal'}
+          >
+            <TerminalTab />
           </div>
         ) : null}
 

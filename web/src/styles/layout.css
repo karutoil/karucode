@@ -922,6 +922,13 @@
   min-height: 0;
 }
 
+/* The conversation panel is the dock's containing block: `.chat-body` owns the
+ * scroll, `.composer-wrap` is absolutely placed against the panel's bottom edge
+ * so it paints over the transcript instead of shortening it. */
+.chat-panel {
+  position: relative;
+}
+
 /* `hidden` must win over the flex display above. */
 .center-panel[hidden] {
   display: none;
@@ -960,7 +967,9 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  scroll-padding-bottom: 24px;
+  /* Keep "Jump to latest" (and anything else the browser scrolls into view)
+   * clear of the floating dock. */
+  scroll-padding-bottom: var(--composer-h, 24px);
 }
 
 .chat-scroll:focus-visible {
@@ -974,17 +983,30 @@
   width: 100%;
   margin: 0 auto;
   padding: 30px 26px 18px;
+  /* The dock covers the bottom of the scroller, so the transcript ends with a
+   * band exactly its height: the last message stops above the box instead of
+   * hiding under it, and a reader at the bottom still sees everything. */
+  padding-bottom: calc(var(--composer-h, 0px) + 18px);
 }
 
+/* The composer is a dock, not a band: it floats over the bottom of the
+ * transcript so the conversation keeps the full height of the pane instead of
+ * ending at a border. The transcript reserves this element's real height at its
+ * end (`--composer-h`, published on `.chat-panel` by `lib/dockHeight.ts`), so
+ * content scrolls clear of the dock rather than behind it at rest.
+ *
+ * `pointer-events: none` is what makes it *float*: the gutter either side of the
+ * box, and the gap between the box and the footnote, stay part of the scroller,
+ * so a wheel or drag there scrolls the transcript. The box and the footnote take
+ * their pointer events back below (composer.css). */
 .composer-wrap {
-  flex: 0 0 auto;
-  padding: 12px 27px 19px;
-  border-top: 1px solid var(--line-soft);
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--bg) 92%, transparent) 0%,
-    var(--bg) 55%
-  );
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 6;
+  padding: 10px 27px 12px;
+  pointer-events: none;
 }
 
 .composer-inner {
@@ -993,11 +1015,12 @@
   margin: 0 auto;
 }
 
-/* Sticky-bottom affordance: pill above the composer, centred on the transcript. */
+/* Sticky-bottom affordance: pill above the composer, centred on the transcript.
+ * It rides on top of the dock's height, so it never lands under the box. */
 .jump-latest {
   position: absolute;
   left: 50%;
-  bottom: 10px;
+  bottom: calc(var(--composer-h, 0px) + 10px);
   z-index: 5;
   display: inline-flex;
   align-items: center;
@@ -1120,6 +1143,8 @@
     padding-left: 18px;
   }
 
+  /* The dock's gutter tracks the transcript's, so the box lines up with the
+   * conversation at every width. */
   .composer-wrap {
     padding-right: 18px;
     padding-left: 18px;
@@ -1264,13 +1289,16 @@
   }
 
   .chat-inner {
-    padding: 22px 14px 12px;
+    /* Longhands, so the dock's reserved band (base rule) survives the tier. */
+    padding-top: 22px;
+    padding-right: 14px;
+    padding-left: 14px;
   }
 
   .composer-wrap {
     /* The mock's narrow-viewport composer region (`<=800` in the mock; our
        compact mode starts at 1023, where the rail becomes a sheet). */
-    padding: 11px 10px 13px;
+    padding: 9px 10px 11px;
   }
 
   .mobile-toolbar {
@@ -1335,6 +1363,7 @@
 @media (max-width: 460px) {
   .chat-inner {
     padding: 16px 12px 10px;
+    padding-bottom: calc(var(--composer-h, 0px) + 10px);
   }
 
   .composer-wrap {

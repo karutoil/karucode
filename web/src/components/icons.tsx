@@ -371,3 +371,64 @@ export function EyeIcon(props: IconProps): JSX.Element {
     </svg>
   );
 }
+
+export function LayersIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="m12 3 9 5-9 5-9-5 9-5Z" />
+      <path d="m3 12 9 5 9-5" />
+      <path d="m3 16 9 5 9-5" />
+    </svg>
+  );
+}
+
+/**
+ * The icons a plugin may name in its manifest's panel `icon` field.
+ *
+ * A fixed, first-party set on purpose: a plugin supplies a *name*, the app
+ * decides what that draws. An arbitrary SVG from a plugin would be untrusted
+ * markup in the app's origin, which is exactly what the panel design avoids.
+ * An unknown name draws `LayersIcon`, so a plugin from a newer version still
+ * gets a tab rather than a missing glyph.
+ */
+const PLUGIN_PANEL_ICONS: Record<string, (props: IconProps) => JSX.Element> = {
+  check: CheckIcon,
+  'circle-check': CircleCheckIcon,
+  clipboard: EditIcon,
+  copy: CopyIcon,
+  layers: LayersIcon,
+  list: LayersIcon,
+  listbox: EditIcon,
+  eye: EyeIcon,
+  search: SearchIcon,
+  spark: SparkIcon,
+  folder: FolderIcon,
+  'folder-open': FolderOpenIcon,
+  file: FileIcon,
+  'file-code': FileCodeIcon,
+  git: GitIcon,
+  branch: BranchIcon,
+  terminal: TerminalIcon,
+  agents: AgentsIcon,
+  bolt: BoltIcon,
+  cpu: CpuIcon,
+  chat: ChatIcon,
+  lock: LockIcon,
+  alert: AlertIcon,
+  upload: UploadIcon,
+  download: DownloadIcon,
+  thumb: ThumbUpIcon,
+};
+
+/** Every icon name a plugin may use, for the `plugins` doc and settings UI. */
+export const PLUGIN_PANEL_ICON_NAMES: readonly string[] = Object.keys(PLUGIN_PANEL_ICONS).sort();
+
+/** Resolve a plugin's icon name, falling back to a neutral glyph. */
+export function pluginPanelIcon(
+  name: string | null | undefined,
+  props: IconProps = {},
+): JSX.Element {
+  const Icon =
+    (name ? PLUGIN_PANEL_ICONS[name.trim().toLowerCase()] : undefined) ?? LayersIcon;
+  return <Icon {...props} />;
+}

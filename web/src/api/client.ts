@@ -2,6 +2,12 @@ import type { ApiErrorBody, ErrorCode } from './types';
 
 const TOKEN_KEY = 'karucode.token';
 
+/**
+ * Every request gets a deadline. A hung `GET /api/sessions/:id` would otherwise
+ * leave the chat skeleton up forever with no error and no retry.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 function readStoredToken(): string | null {
   try {
     return typeof localStorage === 'undefined' ? null : localStorage.getItem(TOKEN_KEY);
@@ -138,30 +144,7 @@ function toBodyInit(body: PerformOptions['body']): BodyInit | undefined {
 }
 
 async function performRequest<T>(path: string, options: PerformOptions): Promise<T> {
-  const method = options.method;
-  const headers: Record<string, string> = { Accept: 'application/json', ...options.headers };
-  if (method !== 'GET') headers['X-Karucode-Client'] = 'web';
-  const token = options.token !== undefined ? options.token : authToken;
-  if (token) headers.Authorization = `Bearer ${token}`;
-
-  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
-  let response: Response;
-  try {
-    response = await fetchImpl(path, {
-      method,
-      headers,
-      body: toBodyInit(options.body),
-      signal: options.signal,
-      credentials: 'same-origin',
-    });
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') throw error;
-    throw new ApiError(
-      error instanceof Error ? `Could not reach karucode: ${error.message}` : 'Could not reach karucode',
-      0,
-      'network',
-    );
-  }
+  const response = await fetchResponse(path, options);
 
   const text = await response.text();
   let parsed: unknown = undefined;
@@ -169,23 +152,101 @@ async function performRequest<T>(path: string, options: PerformOptions): Promise
     try {
       parsed = JSON.parse(text) as unknown;
     } catch {
+      if (response.ok) {
+        throw new ApiError(
+          `Unexpected non-JSON response from ${path} (HTTP ${response.status})`,
+          response.status,
+          'unknown',
+        );
+      }
+    }
+  }
+
+  if (!response.ok) throw responseError(response, parsed, path);
+  return parsed as T;
+}
+
+/**
+ * The same request as [`apiRequest`], but the success body is read as bytes.
+ *
+ * Used for binary endpoints (a project's favicon) where a JSON body is not even
+ * possible. Errors are still the documented JSON shape, so a failure is an
+ * `ApiError` with the server's message rather than an opaque blob.
+ */
+export async function apiRequestBlob(path: string, options: RequestOptions = {}): Promise<Blob> {
+  const response = await fetchResponse(path, {
+    method: options.method ?? 'GET',
+    headers: options.headers ?? {},
+    signal: options.signal,
+    token: options.token,
+    fetchImpl: options.fetchImpl,
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    let parsed: unknown = undefined;
+    if (text.trim() !== '') {
+      try {
+        parsed = JSON.parse(text) as unknown;
+      } catch {
+        // A non-JSON error body is handled by `responseError` below.
+      }
+    }
+    throw responseError(response, parsed, path);
+  }
+  return response.blob();
+}
+
+/** The documented error for a failed response, from its JSON body when there is one. */
+function responseError(response: Response, parsed: unknown, path: string): ApiError {
+  if (response.status === 401) unauthorizedHandler?.();
+  if (isErrorBody(parsed)) {
+    return new ApiError(parsed.error.message, response.status, parsed.error.code);
+  }
+  return new ApiError(`Request failed with HTTP ${response.status} (${path})`, response.status, 'unknown');
+}
+
+/** Fetch with the bearer token, the CSRF header and the request deadline. */
+async function fetchResponse(path: string, options: PerformOptions): Promise<Response> {
+  const method = options.method;
+  const headers: Record<string, string> = { Accept: 'application/json', ...options.headers };
+  if (method !== 'GET') headers['X-Karucode-Client'] = 'web';
+  const token = options.token !== undefined ? options.token : authToken;
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  // A hung request must not leave the caller waiting forever: `openSession`
+  // would keep `chatLoading` true and the skeleton up with no way out. The
+  // caller's own signal still wins, so an explicit abort stays an AbortError.
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  try {
+    return await fetchImpl(path, {
+      method,
+      headers,
+      body: toBodyInit(options.body),
+      signal,
+      credentials: 'same-origin',
+    });
+  } catch (error) {
+    // The caller's own abort is a deliberate cancellation, not a failure: let it
+    // through untouched so callers can keep ignoring it.
+    if (options.signal?.aborted) throw error;
+    // A timeout surfaces as a TimeoutError (or an AbortError on older engines);
+    // say what actually happened instead of blaming the network.
+    if (timeout.aborted) {
       throw new ApiError(
-        `Unexpected non-JSON response from ${path} (HTTP ${response.status})`,
-        response.status,
-        'unknown',
+        `The server did not answer within ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s (${path}).`,
+        0,
+        'timeout',
       );
     }
+    if (error instanceof DOMException && error.name === 'AbortError') throw error;
+    throw new ApiError(
+      error instanceof Error ? `Could not reach karucode: ${error.message}` : 'Could not reach karucode',
+      0,
+      'network',
+    );
   }
-
-  if (!response.ok) {
-    if (response.status === 401) unauthorizedHandler?.();
-    if (isErrorBody(parsed)) {
-      throw new ApiError(parsed.error.message, response.status, parsed.error.code);
-    }
-    throw new ApiError(`Request failed with HTTP ${response.status}`, response.status, 'unknown');
-  }
-
-  return parsed as T;
 }
 
 export function toErrorMessage(error: unknown): string {

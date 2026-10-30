@@ -19,34 +19,34 @@
 
   /* ---- surfaces -------------------------------------------------------- */
   --theme-bg: #111213; /* app canvas */
-  --theme-rail: #141516; /* project rail */
-  --theme-sidebar: #18191a; /* session sidebar */
-  --theme-inspector: #171819; /* right inspector */
-  --theme-surface: #1c1d1f; /* cards, panels, inputs */
-  --theme-raised: #222326; /* elevated surface */
-  --theme-hover: #27292b; /* hover surface */
+  --theme-rail: #191a1c; /* project rail */
+  --theme-sidebar: #202223; /* session sidebar */
+  --theme-inspector: #27282a; /* right inspector */
+  --theme-surface: #2c2d31; /* cards, panels, inputs */
+  --theme-raised: #313337; /* elevated surface */
+  --theme-hover: #36393b; /* hover surface */
 
   /* ---- lines ----------------------------------------------------------- */
-  --theme-line: #2a2c2f;
-  --theme-line-soft: #242628;
-  --theme-line-strong: #343638;
+  --theme-line: #35373a;
+  --theme-line-soft: #313236;
+  --theme-line-strong: #3a3d3f;
 
   /* ---- text ------------------------------------------------------------ */
   --theme-text: #eae9e5;
-  --theme-text-secondary: #b4b3ae;
-  --theme-muted: #8b8d8c;
-  --theme-faint: #676b6b;
+  --theme-text-secondary: #cfcfcc;
+  --theme-muted: #a6a8a7;
+  --theme-faint: #7c7e7e;
 
   /* ---- accents & status ------------------------------------------------ */
   --theme-accent: #dfb680;
-  --theme-accent-hi: #f1c691;
-  --theme-accent-bg: #32291e;
-  --theme-accent-line: #58452e;
+  --theme-accent-hi: #e1c196;
+  --theme-accent-bg: #544128;
+  --theme-accent-line: #84735c;
   --theme-success: #88baa0;
-  --theme-success-bg: #1b3029;
+  --theme-success-bg: #34483d;
   --theme-warn: #d9a441;
   --theme-danger: #e49e91;
-  --theme-danger-bg: #38241f;
+  --theme-danger-bg: #542e27;
   --theme-info: #92b3d8;
 
   /* ---- code ------------------------------------------------------------ */
@@ -172,6 +172,10 @@
   --scrim: rgb(0 0 0 / 47%);
   --scrim-soft: rgb(0 0 0 / 13%);
   --shadow-composer: 0 12px 34px rgb(0 0 0 / 10%);
+  /* A floating dock needs a lift the old attached band did not: a tight
+   * contact shadow plus a wide, soft one, so the box reads as *above* the
+   * transcript rather than painted onto it. */
+  --shadow-dock: 0 18px 44px rgb(0 0 0 / 38%), 0 2px 8px rgb(0 0 0 / 26%);
   --shadow-menu: 0 20px 60px rgb(0 0 0 / 60%); /* light: 0 20px 60px rgb(15 23 42 / 14%) */
   --shadow-overlay: 0 30px 90px rgb(0 0 0 / 69%); /* light: 0 30px 90px rgb(15 23 42 / 18%) */
 

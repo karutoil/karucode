@@ -30,6 +30,12 @@ import { formatBytes } from '../lib/format';
 import { FileMentionMenu, mentionOptionId } from './FileMentionMenu';
 import { ModelControls } from './ModelSwitcher';
 import { AlertIcon, ArrowRightIcon, CloseIcon, FileIcon, LockIcon, PlusIcon, StopIcon } from './icons';
+import {
+  contextTone,
+  contextUsage,
+  formatContextPercent,
+  type ContextUsage,
+} from '../state/selectors';
 
 /** Short footnote label for the active approval policy. */
 const APPROVAL_FOOT_LABEL: Record<ApprovalMode, string> = {
@@ -74,6 +80,38 @@ function describeApprovals(config: Config | null): { label: string; title: strin
 export interface UploadContext {
   session: string | null;
   project: string | null;
+}
+
+/**
+ * `57.4%` of the context window, with a hairline meter in its background.
+ *
+ * It sits in the composer because that is where the user decides what to send
+ * next: the one moment "am I about to overflow this" is actionable is right
+ * before typing another message. Both sides of the percentage are real numbers —
+ * the provider's prompt tokens and the model's declared window — so the pill
+ * renders nothing at all when either is missing rather than inventing a
+ * plausible-looking figure.
+ */
+function ContextPill({ usage }: { usage: ContextUsage }): JSX.Element {
+  const text = formatContextPercent(usage.fraction);
+  const tone = contextTone(usage.fraction);
+  const title =
+    `${usage.tokens.toLocaleString()} of ${usage.window.toLocaleString()} context tokens used (${text}) — ` +
+    'the prompt size the provider reported for the newest call. ' +
+    'karucode compacts the oldest turns when the request passes this model\'s window.';
+  return (
+    <span
+      class="context-pill"
+      data-tone={tone}
+      title={title}
+      aria-label={`Context window ${text} full: ${usage.tokens.toLocaleString()} of ${usage.window.toLocaleString()} tokens`}
+    >
+      <span class="context-pill-meter">
+        <span class="context-pill-fill" style={{ width: `${Math.max(2, usage.fraction * 100)}%` }} />
+      </span>
+      <span class="context-pill-text">{text}</span>
+    </span>
+  );
 }
 
 export interface ComposerProps {
@@ -174,6 +212,22 @@ export function Composer({
   const fileInput = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
 
+  // ---- draft, scoped to the session -------------------------------------
+  // The composer stays mounted across `switchSession`, so a half-written message
+  // for session A must not turn up in session B where it could be sent to the
+  // wrong conversation. Park each session's draft and restore it on return.
+  const sessionId = store.currentSessionId.value;
+  const drafts = useRef(new Map<string, string>());
+  const draftSession = useRef(sessionId);
+  useEffect(() => {
+    if (draftSession.current === sessionId) return;
+    drafts.current.set(draftSession.current ?? '', draft);
+    draftSession.current = sessionId;
+    const restored = drafts.current.get(sessionId ?? '') ?? '';
+    setDraft(restored);
+    setCaret(restored.length);
+  }, [sessionId]);
+
   // ---- @-mentions -------------------------------------------------------
   const [suggestions, setSuggestions] = useState<MentionCandidate[]>([]);
   const [activeOption, setActiveOption] = useState(0);
@@ -183,6 +237,18 @@ export function Composer({
   const indexedAt = useRef(0);
   const loadingIndex = useRef(false);
   const loadTree = loadMentionTree ?? defaultLoadTree;
+
+  // The index is per project. The TTL alone would keep the previous project's
+  // file list for up to a minute after a switch, and a mention could then name a
+  // path the agent cannot open.
+  const projectId = store.currentProjectId.value;
+  const indexedProject = useRef(projectId);
+  useEffect(() => {
+    if (indexedProject.current === projectId) return;
+    indexedProject.current = projectId;
+    indexedAt.current = 0;
+    setSuggestions([]);
+  }, [projectId]);
 
   const mention = activeMention(draft, caret);
   const mentionOpen = mention !== null && !dismissed;
@@ -376,11 +442,23 @@ export function Composer({
     setCaret(element.selectionStart ?? element.value.length);
   };
 
+  // Phones get a short placeholder: at 16px (the iOS no-zoom size) the desktop
+  // sentence wraps to two lines in a 390px column, and an empty dock would then
+  // stand two lines tall before the user has typed anything.
+  const narrowViewport =
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(max-width: 640px)').matches
+      : false;
+
   const placeholder = !canType
     ? (disabledReason ?? 'The composer is unavailable.')
     : running
-      ? 'The agent is working — draft the next message while you wait…'
-      : 'Ask karucode anything, or describe a change...';
+      ? narrowViewport
+        ? 'Working — draft your next message…'
+        : 'The agent is working — draft the next message while you wait…'
+      : narrowViewport
+        ? 'Ask karucode anything…'
+        : 'Ask karucode anything, or describe a change...';
 
   const attachTitle = !canType
     ? 'Attaching is unavailable until the composer is ready'
@@ -388,6 +466,12 @@ export function Composer({
 
   const approvals = describeApprovals(store.config.value);
   const usageTitle = usageLabel ? `Session usage: ${usageLabel}` : undefined;
+
+  // How full the context window is. Reported, never estimated: the provider's own
+  // prompt-token count for the newest call, against the window the selected model
+  // declares. Either side missing means no pill, because a percentage drawn from
+  // a guess is worse than an empty slot.
+  const context = contextUsage(store.chat.value, store.activeContextWindow.value);
 
   return (
     <>
@@ -457,7 +541,7 @@ export function Composer({
               id="composer-input"
               ref={textarea}
               class="composer-input"
-              rows={2}
+              rows={1}
               value={draft}
               placeholder={placeholder}
               disabled={!canType}
@@ -563,6 +647,8 @@ export function Composer({
         <div class="compose-bottom">
           <ModelControls />
           <div class="composer-spacer" />
+
+          {context ? <ContextPill usage={context} /> : null}
 
           {draft.length > CHAR_COUNTER_THRESHOLD ? (
             <span class={`char-count${draft.length > 12000 ? ' is-over' : ''}`}>

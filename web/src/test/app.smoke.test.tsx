@@ -35,8 +35,9 @@ function openEventStream(): Response {
 }
 
 function installFetch() {
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    void init;
     if (url.startsWith('/api/events')) return openEventStream();
     if (url === '/api/health') return jsonResponse(healthFixture);
     if (url === '/api/config') return jsonResponse(configFixture);
@@ -182,5 +183,36 @@ describe('Shell shortcuts', () => {
     composer.dispatchEvent(event);
     expect(event.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(composer);
+  });
+
+  it('creates a session with Ctrl/Cmd+N, but not while typing in the composer', async () => {
+    const fetchMock = installFetch();
+    render(<App />);
+    await waitFor(() => expect(store.boot.value).toBe('ready'));
+    await flushEffects();
+
+    const sessionPosts = (): number =>
+      fetchMock.mock.calls.filter(([input, init]) => {
+        const url = typeof input === 'string' ? input : String(input);
+        return url === '/api/sessions' && (init?.method ?? 'GET').toUpperCase() === 'POST';
+      }).length;
+
+    // Typing in the composer: Ctrl+N is a text-editing key, so it must be left
+    // alone — no session, and the browser default is not swallowed.
+    const composer = screen.getByLabelText('Message karucode');
+    composer.focus();
+    const typing = new KeyboardEvent('keydown', {
+      key: 'n',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    composer.dispatchEvent(typing);
+    expect(typing.defaultPrevented).toBe(false);
+    expect(sessionPosts()).toBe(0);
+
+    // Anywhere else it still creates one.
+    fireEvent.keyDown(window, { key: 'n', ctrlKey: true });
+    await waitFor(() => expect(sessionPosts()).toBe(1));
   });
 });

@@ -1,5 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="7" fill="#0f1011"/>
-  <rect x="10" y="10" width="12" height="12" rx="1.5" transform="rotate(45 16 16)" fill="#d8a657"/>
-  <rect x="14" y="14" width="4" height="4" rx="0.8" transform="rotate(45 16 16)" fill="#0f1011"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <title>karucode</title>
+  <rect width="48" height="48" rx="10" fill="#111213"/>
+  <g transform="translate(4.3 4.3) scale(.82)" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="5.6">
+    <path d="M14 10V38" stroke="#eae9e5"/>
+    <path d="M33 10L20 24L33 38" stroke="#dfb680"/>
+  </g>
 </svg>

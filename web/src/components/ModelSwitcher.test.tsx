@@ -13,10 +13,12 @@ function twoProfileConfig(): Config {
       base_url: 'https://gw.example/v1',
       model: 'model-b',
       temperature: 0.2,
+      send_temperature: false,
       max_tokens: null,
       top_p: null,
       request_timeout_secs: 300,
       parallel_tool_calls: true,
+      supports_images: false,
       api_key_set: true,
     },
     providers: [

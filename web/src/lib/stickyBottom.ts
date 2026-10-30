@@ -82,6 +82,18 @@ export interface StickyBottom {
   scrollRef: RefObject<HTMLDivElement>;
   /** True while the newest content is out of view and worth jumping to. */
   showJump: boolean;
+  /**
+   * True while the reader is away from the newest content — the dock's cue to
+   * step back so the transcript behind it shows through.
+   *
+   * It is the same condition as `showJump` and kept as a separate name because
+   * the two read differently at the call site: one decides whether to show a
+   * button, the other whether to fade chrome. Both want "the reader is reading
+   * history rather than following the run", and both must ignore a smooth scroll
+   * we started ourselves — measuring raw geometry would flicker the dock
+   * translucent halfway through an automatic scroll to the bottom.
+   */
+  scrolledAway: boolean;
   /** Scrolls to the newest content, re-pins and moves focus into the transcript. */
   jumpToLatest: () => void;
 }
@@ -230,5 +242,5 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
     pinToBottom('smooth');
   }, [sentMessageTick, pinToBottom]);
 
-  return { scrollRef, showJump, jumpToLatest };
+  return { scrollRef, showJump, scrolledAway: showJump, jumpToLatest };
 }

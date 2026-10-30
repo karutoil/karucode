@@ -13,14 +13,20 @@ import { clampRounding } from './tokens';
 import {
   THEME_DENSITIES,
   THEME_FONTS,
+  THEME_GROUPINGS,
   THEME_MONO_FONTS,
   THEME_COLOR_KEYS,
+  THEME_THINKING_MODES,
+  THEME_TOOL_STYLES,
   type Theme,
   type ThemeColors,
   type ThemeDensity,
   type ThemeFont,
+  type ThemeGrouping,
   type ThemeMode,
   type ThemeMono,
+  type ThemeThinking,
+  type ThemeToolStyle,
 } from './types';
 
 export const THEME_STORAGE_KEY = 'karucode.theme-studio.v3';
@@ -118,6 +124,11 @@ function readTheme(input: unknown, options: ReadOptions = {}): Theme | string {
   const density = oneOf<ThemeDensity>(input.density, THEME_DENSITIES, 'comfortable');
   const font = oneOf<ThemeFont>(input.font, THEME_FONTS, 'system');
   const mono = oneOf<ThemeMono>(input.mono, THEME_MONO_FONTS, 'default');
+  // Older saved themes and files predate the view options: an unknown or
+  // missing value falls back to the defaults instead of failing the theme.
+  const toolStyle = oneOf<ThemeToolStyle>(input.toolStyle, THEME_TOOL_STYLES, 'cards');
+  const grouping = oneOf<ThemeGrouping>(input.grouping, THEME_GROUPINGS, 'none');
+  const thinking = oneOf<ThemeThinking>(input.thinking, THEME_THINKING_MODES, 'collapsed');
   const rounding =
     typeof input.rounding === 'number' && Number.isFinite(input.rounding)
       ? clampRounding(input.rounding)
@@ -135,6 +146,9 @@ function readTheme(input: unknown, options: ReadOptions = {}): Theme | string {
     rounding,
     colors: completeColors(colors, mode),
     customCSS: sanitizeCustomCSS(input.customCSS),
+    toolStyle,
+    grouping,
+    thinking,
   };
   if (description) theme.description = description;
   return theme;
@@ -193,6 +207,9 @@ export function exportThemeJSON(theme: Theme): string {
     rounding: theme.rounding,
     colors: { ...theme.colors },
     customCSS: theme.customCSS,
+    toolStyle: theme.toolStyle,
+    grouping: theme.grouping,
+    thinking: theme.thinking,
   };
   return `${JSON.stringify(document, null, 2)}\n`;
 }

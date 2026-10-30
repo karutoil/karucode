@@ -598,6 +598,167 @@
   color: var(--text-secondary);
 }
 
+/* ---------- transcript section ----------
+ *
+ * The preview is a miniature of the real transcript drawn from the live theme, so
+ * choosing "Rows" or "Turns" shows the shape of the result instead of asking the
+ * reader to imagine it. Every colour here is a theme token: the miniature is
+ * repainted by the same palette as the chat it stands for.
+ */
+
+.theme-field-hint {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+/* The Reasoning control sits under the two-column grid rather than inside it,
+ * so it needs the same breathing room the grid's row gap gives its own cells. */
+.theme-setting-grid + .theme-field {
+  margin-top: 16px;
+}
+
+/* Inside the Transcript section a grid cell carries a hint paragraph under its
+ * control, which makes the row taller than the mock's 12px gap allows for; the
+ * extra room is scoped to this section so the Interface geometry is untouched. */
+.theme-transcript-grid {
+  gap: 16px 12px;
+  align-items: start;
+}
+
+.theme-transcript-note {
+  margin: 15px 0 0;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.theme-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0 0 15px;
+  padding: 11px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-card);
+}
+
+.theme-preview-narration {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-style: italic;
+}
+
+.theme-preview-narration[data-on='folded']::before {
+  content: '▸ ';
+  color: var(--faint);
+}
+
+.theme-preview-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 22px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  color: var(--text-command);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.theme-preview-row[hidden],
+.theme-preview-card[hidden] {
+  display: none;
+}
+
+.theme-preview-dot {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.theme-preview-name {
+  flex: 0 0 auto;
+  color: var(--text-command);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.theme-preview-args {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-preview-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.theme-preview-card {
+  border: 1px solid var(--line-card-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.theme-preview-card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line-divider);
+}
+
+.theme-preview-card-body {
+  display: block;
+  padding: 6px 8px;
+  color: var(--text-output);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.theme-preview-thought {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.theme-preview-thought::before {
+  content: '▸ ';
+  color: var(--faint);
+}
+
+.theme-preview-thought.is-collapsed {
+  color: var(--chip-ink);
+}
+
+.theme-preview-thought.is-collapsed::after {
+  content: '  Show reasoning';
+  padding: 0 5px;
+  border: 1px solid var(--chip-line);
+  border-radius: 4px;
+  background: var(--chip-surface);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+}
+
 /* ---------- advanced: custom CSS --------------------------------------- */
 
 .theme-advanced {

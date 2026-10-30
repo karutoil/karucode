@@ -124,6 +124,48 @@ describe('ChangesTab — changes view (page)', () => {
     expect(alert.textContent).toContain('git exploded');
     expect(within(alert).getByRole('button', { name: 'Retry' })).not.toBeNull();
   });
+
+  it('refetches when the project changes instead of showing the previous one', async () => {
+    // The page variant stays mounted across a project switch, so the effect has
+    // to depend on the project or the old files and diffs linger.
+    store.currentProjectId.value = 'p_one';
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('/api/git/status')) {
+        const project = new URL(url, 'http://x').searchParams.get('project');
+        return jsonResponse(
+          project === 'p_two'
+            ? {
+                is_repo: true,
+                branch: 'other-branch',
+                error: null,
+                files: [{ path: 'src/other.rs', status: 'M', staged: false }],
+              }
+            : STATUS,
+        );
+      }
+      if (url.startsWith('/api/git/diff')) return jsonResponse(DIFF);
+      return jsonResponse({ error: { code: 'not_found', message: url } }, 404);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { container } = render(<ChangesTab variant="page" />);
+    await waitFor(() => expect(container.querySelectorAll('.panel-change-file')).toHaveLength(3));
+    expect(screen.getByText('feat/plugin-lifecycle')).not.toBeNull();
+
+    // Switch project: the panel must follow, not keep the old working tree.
+    store.currentProjectId.value = 'p_two';
+
+    await waitFor(() => expect(screen.getByText('other-branch')).not.toBeNull());
+    expect(container.querySelectorAll('.panel-change-file')).toHaveLength(1);
+    expect(container.textContent).toContain('src/other.rs');
+    expect(container.textContent).not.toContain('src/plugins/loader.rs');
+
+    const statusCalls = fetchMock.mock.calls
+      .map(([input]) => String(input))
+      .filter((url) => url.startsWith('/api/git/status'));
+    expect(statusCalls.some((url) => url.includes('project=p_two'))).toBe(true);
+  });
 });
 
 describe('ChangesTab — inspector panel', () => {

@@ -5,6 +5,8 @@
 @import './chat.css';
 @import './composer.css';
 @import './inspector.css';
+@import './terminal.css';
+@import './todo.css';
 @import './overlays.css';
 @import './settings.css';
 @import './theme-studio.css';

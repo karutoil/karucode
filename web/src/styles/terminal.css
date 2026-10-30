@@ -1,0 +1,412 @@
+/* ---------- terminal tab ----------
+ *
+ * The workspace tab that runs a real shell. Two layers: a sub-tab strip (one
+ * chip per terminal, from the server) and the surface (xterm, filling the rest
+ * of the centre pane).
+ */
+
+.terminal-view {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* The tabpanel wrapper: like the chat panel, it is a flex host with no padding
+   of its own, so the surface gets every pixel the tab bar leaves. */
+.terminal-panel {
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* ---- sub-tab strip ---- */
+
+.terminal-strip {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 12px;
+  min-height: 34px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.terminal-chips {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  /* The strip scrolls once there are more tabs than fit; a hidden bar keeps the
+     header from jumping, and the `.terminal-chip.is-active` scroll-into-view in
+     the component keeps the selection reachable. */
+  scrollbar-width: none;
+}
+
+.terminal-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.terminal-chip {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  /* A tab must never shrink into an unreadable stub; the strip scrolls instead. */
+  max-width: 240px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  line-height: 1;
+  transition: background var(--transition-fast), color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.terminal-chip:hover {
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+}
+
+.terminal-chip.is-active {
+  border-color: var(--line-strong);
+  background: var(--surface-raised, var(--surface-hover));
+  color: var(--text);
+}
+
+.terminal-chip-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 4px 5px 8px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.terminal-chip-label {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The status dot: the shell this tab points at, right now. */
+.terminal-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-subtle);
+}
+
+.terminal-chip[data-status='open'] .terminal-dot {
+  background: var(--success);
+}
+
+.terminal-chip[data-status='connecting'] .terminal-dot,
+.terminal-chip[data-status='reconnecting'] .terminal-dot {
+  background: var(--warning, var(--accent));
+  animation: terminal-pulse 1.4s ease-in-out infinite;
+}
+
+.terminal-chip[data-status='failed'] .terminal-dot,
+.terminal-chip[data-status='closed'] .terminal-dot {
+  background: var(--danger);
+}
+
+@keyframes terminal-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.terminal-chip-badge {
+  flex: 0 0 auto;
+  padding: 1px 4px;
+  border: 1px solid var(--line-keycap);
+  border-radius: calc(var(--radius) - 8px);
+  color: var(--text-subtle);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.terminal-chip-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  margin-right: 2px;
+  border-radius: calc(var(--radius) - 7px);
+  color: var(--text-subtle);
+}
+
+.terminal-chip-action:hover {
+  background: var(--surface-hover-strong, var(--surface-hover));
+  color: var(--text);
+}
+
+.terminal-chip-action[aria-label^='Close']:hover {
+  color: var(--danger);
+}
+
+.terminal-chip.is-renaming {
+  padding: 0;
+  border-color: var(--accent);
+  background: var(--surface-input);
+}
+
+.terminal-rename-input {
+  width: 150px;
+  padding: 5px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  outline: none;
+}
+
+.terminal-new {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
+  padding: 5px 9px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.terminal-new:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.terminal-new:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.terminal-count {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+}
+
+/* ---- surface ---- */
+
+.terminal-surface {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg-sunken, var(--bg));
+}
+
+.terminal-meta {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line-divider, var(--line));
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+}
+
+.terminal-state {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  text-transform: lowercase;
+}
+
+.terminal-state::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.terminal-state.status-open {
+  color: var(--success);
+}
+
+.terminal-state.status-connecting,
+.terminal-state.status-reconnecting {
+  color: var(--warning, var(--accent));
+}
+
+.terminal-state.status-failed,
+.terminal-state.status-closed {
+  color: var(--danger);
+}
+
+.terminal-cwd {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* A long absolute path is the least important part of the header. */
+  direction: rtl;
+  text-align: left;
+}
+
+.terminal-meta-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.terminal-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: calc(var(--radius) - 7px);
+  color: var(--text-subtle);
+  font: inherit;
+}
+
+.terminal-action:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* The exit/notice bar: a shell that ended, or a socket the server closed. */
+.terminal-exit {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-divider, var(--line));
+  background: var(--danger-bg, color-mix(in srgb, var(--danger) 12%, transparent));
+  color: var(--text);
+  font-size: var(--fs-micro);
+}
+
+.terminal-exit > span {
+  flex: 1 1 auto;
+}
+
+/* The xterm host: it must be able to shrink below its content for the fit
+   addon to measure the *available* box rather than the last rendered one. */
+.terminal-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  padding: 6px 4px 4px 10px;
+  overflow: hidden;
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
+.terminal-host .xterm-viewport {
+  /* Themed, so a shell's own background does not punch a hole in the surface. */
+  background-color: transparent !important;
+  scrollbar-width: thin;
+}
+
+.terminal-host .xterm-screen {
+  height: 100%;
+}
+
+/* ---- empty / disabled states ---- */
+
+.terminal-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 32px 24px;
+}
+
+.terminal-empty-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 420px;
+  color: var(--text-subtle);
+  font-size: var(--fs-small, 13px);
+  line-height: 1.55;
+  text-align: center;
+}
+
+.terminal-empty-inner > svg {
+  color: var(--accent);
+}
+
+.terminal-empty-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.terminal-empty-inner p {
+  margin: 0;
+}
+
+.terminal-empty-inner code {
+  padding: 1px 4px;
+  border-radius: calc(var(--radius) - 8px);
+  background: var(--surface-inset);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.terminal-empty-hint {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+}
+
+/* Narrow viewports: the strip and the meta bar lose their decorations so the
+   shell keeps as many columns as possible. */
+@media (max-width: 1023px) {
+  .terminal-strip {
+    padding: 4px 8px;
+    gap: 8px;
+  }
+
+  .terminal-meta {
+    padding: 5px 8px;
+  }
+
+  .terminal-host {
+    padding: 4px 2px 2px 6px;
+  }
+
+  .terminal-count {
+    display: none;
+  }
+}

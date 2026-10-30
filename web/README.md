@@ -55,7 +55,8 @@ src/
               Theme Studio, settings, dialogs, states
   theme/      theme engine, built-in palettes, colour maths, storage/import/export
   lib/        markdown+DOMPurify, highlight.js registry, diff parser, format, focus,
-              @-mention index and ranking, attachment classification/formatting
+              @-mention index and ranking, attachment classification/formatting,
+              dock-height measuring for the floating composer
   styles/     tokens, base, layout, rail, chat, composer, inspector, overlays,
               settings, theme-studio
   test/       jsdom setup, fixtures, smoke render
@@ -67,17 +68,39 @@ src/
 `--theme-*` block plus public aliases (`--surface`, `--line`, `--accent`, …) and
 the frame metrics (`--rail-w`, `--header-h`, `--content-max`, …).
 `src/theme/engine.ts` rewrites the `--theme-*` block and sets `data-theme`,
-`data-mode` and `data-density` on `<html>`, so every component repaints from CSS
-custom properties with no React/Preact re-render.
+`data-mode`, `data-density`, `data-tool-style`, `data-grouping` and
+`data-thinking` on `<html>`, so every component repaints from CSS custom
+properties with no React/Preact re-render.
 
 Theme Studio (project-rail palette button, header theme button,
 `Ctrl/Cmd+Shift+T`, or Settings → Appearance) ships eight built-in themes and
-edits 18 palette colours, mode, density, fonts, corner radius and custom CSS.
-The selection, saved custom themes and the unsigned draft persist in
-`localStorage` under `karucode.theme-studio.v3`; a theme exports as
-`karucode-theme` version 1 JSON and imports back through a validating parser
+edits 18 palette colours, mode, density, fonts, corner radius, the transcript
+view options and custom CSS. The selection, saved custom themes and the unsigned
+draft persist in `localStorage` under `karucode.theme-studio.v3`; a theme exports
+as `karucode-theme` version 1 JSON and imports back through a validating parser
 (150 KB cap, hex/mode/density/font checks). See the `themes` topic in the
 `karucode_docs` tool for the user-facing version.
+
+### Transcript view options
+
+A theme also decides how much of the agent's work the conversation shows. The
+rules live in `src/state/transcriptLayout.ts` as pure functions over
+`ChatItem[]` (`splitTurns`, `isNarration`, `turnRows`, `turnFoldable`,
+`foldTurn`), so they are unit-tested without a DOM and `ChatTranscript.tsx` only
+renders what they return.
+
+| Option | Values | Effect |
+| --- | --- | --- |
+| `toolStyle` | `cards` (default), `rows` | `rows` is one ~26px line per call (`ToolCard variant="row"`) that expands into the same numbered output. |
+| `grouping` | `none` (default), `tools`, `turns` | `tools` folds a run of *consecutive* calls into one summary line (`ToolGroup`); `turns` also folds a finished turn's steps behind a `.process-fold` button. |
+| `thinking` | `collapsed` (default), `preview`, `expanded` | `preview` shows the first line of reasoning under a `Thought` label; `expanded` renders it open. A streaming model is always open. |
+
+The invariant that makes folding safe is enforced in `turnFoldable` and
+`foldTurn`: a streaming turn, a running call, a pending approval, an error, an
+interrupted run and a notice are never hidden, and a notice or error that fell
+before the answer is lifted out of the fold instead of being folded with the
+work. Assistant prose between tool calls is narration (`.narration`) and is
+always drawn quieter than the answer, in every view.
 
 ## Attachments
 
@@ -97,13 +120,17 @@ Agents tab).
 ## Included behaviour
 
 - Sessions: create, inline rename, delete confirm, running/failure dots, message
-  counts, relative time, empty state, Cmd/Ctrl+N.
+  counts, relative time, empty state, Cmd/Ctrl+N (ignored while the focus is in an
+  input, textarea or contenteditable, so it never steals a text-editing key).
 - Chat: streamed Markdown (raw HTML off + DOMPurify), code labels/copy/highlighting,
   collapsed reasoning, tool cards with durations/truncation, streaming command
   cards with stdout/stderr/exit codes, blocking approval cards, per-run error
   banners, interrupted notices.
 - Composer: auto-grow, Cmd/Ctrl+Enter send, Stop/Esc, disabled explanations,
-  character counter after 4000, live activity status.
+  character counter after 4000, live activity status. It is a floating dock over
+  the transcript (one line at rest, translucent and footnote-less while you read
+  history), reserving its measured height via `--composer-h` — see
+  `lib/dockHeight.ts` and `styles/composer.css`.
 - Composer: `@`-mentions over a real workspace index (files only, ranked by
   name → path → subsequence, keyboard-navigable), attachments from the picker,
   drag-and-drop or paste, inline/upload chips with per-file status, and a send
@@ -115,9 +142,18 @@ Agents tab).
   git data as the inspector (no terminal view — the server has no shell API).
 - Sessions: client-side session search (`/`), sessions grouped by day, running
   and failure state.
-- Inspector: Files / Changes / Commands / Agents tabs, lazy file tree,
-  line-numbered highlighted viewer, git status/diff with a branch footer,
-  per-session commands, live subagent cards.
+- Inspector: Files / Changes / Commands / Agents tabs, lazy file tree, and the
+  file viewer (below), git status/diff with a branch footer, per-session
+  commands, and an Agents console (project- or session-scoped, status filters,
+  live per-agent transcripts with drill-in).
+- File viewer: Markdown and HTML open on a rendered preview with a Preview/Source
+  toggle (HTML runs in a fully sandboxed iframe — no scripts, no same-origin
+  access, its own CSP), images and PDFs render from `GET /api/workspace/raw`, and
+  any complete text file can be edited and saved with `PUT /api/workspace/file`.
+  `Ctrl/Cmd+S` saves, the Preview follows the draft while you type, a save whose
+  `expected_size` no longer matches offers *Overwrite anyway* instead of
+  clobbering the agent's work, and closing with unsaved changes asks first.
+  Binary and server-truncated files are read-only and the Edit button says why.
 - Settings: provider fields, write-only API key with clear, provider test, approval
   mode/allowlists/timeouts, limits, subagent controls, read-only plugin/MCP status,
   lock notice and the shell-sandbox security note.
@@ -164,9 +200,12 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
    values. The settings sheet says so next to the button.
 8. **Approval timeout/404**: a 404 on decision marks the card expired; the server's
    `approval_resolved` event is still authoritative when it arrives.
-9. **History size**: there is no message pagination endpoint. The UI renders the
-   session detail it receives (the server caps history) and labels truncated command
-   output from the server's `truncated` flag.
+9. **History size**: there is no message pagination endpoint. `GET /api/sessions/:id`
+   returns the *newest* window (`messages_limit`, default 5 000) and sets
+   `messages_truncated`; when it is set the transcript opens with a notice —
+   "Showing the last N messages; earlier history is not loaded." — instead of
+   silently starting mid-conversation. Truncated command output is labelled from
+   the server's `truncated` flag.
 10. **Plugin/MCP status** is read-only in the UI by design; no enable toggles are
     exposed even though `POST /api/plugins/:name/enable` exists.
 11. **Auth token**: stored in `localStorage` (`karucode.token`) and sent as a bearer
@@ -189,8 +228,8 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
     binary attachment is referenced by path and opened by the agent's own tools.
 17. **Mention index**: `GET /api/workspace/tree?depth=6` is fetched once per
     project (2 000-entry server cap, noise directories skipped server-side) and
-    cached for the composer's lifetime; a mention can only name a path the agent
-    can actually open.
+    cached for 60 s; switching project invalidates it immediately, so a mention can
+    only name a path the agent can actually open.
 18. **Theme persistence** is per-browser `localStorage`, not the config file: a
     theme does not follow the user to another machine, and the API knows nothing
     about it.
@@ -209,7 +248,11 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
   events);
 - Markdown sanitisation (`<script>`, `<img onerror>`, `javascript:` links) and
   fenced-code labels/copy/highlighting;
-- composer send/stop/disabled/counter/live-region behaviour;
+- composer send/stop/disabled/counter/live-region behaviour, plus the floating
+  dock: it sits over the transcript rather than in its own row, goes translucent
+  when you scroll into history and solid again on focus, and publishes its
+  measured height so the transcript reserves room for it (`styles/composer.test.ts`,
+  `lib/dockHeight.test.tsx`, `components/ChatView.test.tsx`);
 - approval decisions and resolved/expired states;
 - session list rendering, inline rename, delete confirmation and empty/loading
   states;

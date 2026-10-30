@@ -4,6 +4,7 @@ import type { WorkspaceEntry, WorkspaceFile } from '../api/types';
 import { getWorkspaceFile, getWorkspaceTree } from '../api/endpoints';
 import { toErrorMessage } from '../api/client';
 import { copyText } from '../lib/clipboard';
+import { fileExtension, fileName } from '../lib/fileKind';
 import { formatBytes } from '../lib/format';
 import { highlightCode, languageLabel } from '../lib/highlight';
 import * as actions from '../state/actions';
@@ -31,15 +32,10 @@ function visibleEntries(entries: WorkspaceEntry[]): WorkspaceEntry[] {
   return entries.filter((entry) => !(entry.kind === 'dir' && HIDDEN_DIRS.has(entry.name)));
 }
 
-function fileName(path: string): string {
-  const index = path.lastIndexOf('/');
-  return index === -1 ? path : path.slice(index + 1);
-}
-
 function fileExt(path: string): string {
-  const name = fileName(path);
-  const index = name.lastIndexOf('.');
-  return index <= 0 ? 'file' : name.slice(index + 1);
+  // An extensionless or dotfile name has no extension: the whole name is the stem.
+  const extension = fileExtension(path);
+  return extension === '' ? 'file' : extension;
 }
 
 /** `rust` → `Rust`: the mock's preview footer names the language, capitalised. */
@@ -62,6 +58,7 @@ type PreviewState =
  */
 function QuickPreview({ path, onOpen }: { path: string | null; onOpen: () => void }): JSX.Element | null {
   const [state, setState] = useState<PreviewState>({ kind: 'idle' });
+  const refreshTick = store.workspaceRefreshTick.value;
 
   useEffect(() => {
     if (!path) {
@@ -83,7 +80,9 @@ function QuickPreview({ path, onOpen }: { path: string | null; onOpen: () => voi
         if (!controller.signal.aborted) setState({ kind: 'error' });
       });
     return () => controller.abort();
-  }, [path]);
+    // A save from the file viewer bumps the tick: this card must not keep showing
+    // the pre-save bytes.
+  }, [path, refreshTick]);
 
   const file = state.kind === 'ready' ? state.file : null;
   const lines = useMemo(() => {
@@ -161,7 +160,7 @@ function QuickPreview({ path, onOpen }: { path: string | null; onOpen: () => voi
                 <CheckIcon size={12} /> {formatBytes(file.size)}
               </>
             ) : (
-              'Read-only'
+              'On demand'
             )}
           </span>
         </div>
@@ -180,13 +179,17 @@ export function WorkspaceTab(): JSX.Element {
   const [refreshKey, setRefreshKey] = useState(0);
   const [lastOpened, setLastOpened] = useState<string | null>(null);
 
+  // Read the project into a local so the effect re-runs on a project switch;
+  // otherwise the previous project's tree would stay on screen.
+  const projectId = store.currentProjectId.value;
+
   useEffect(() => {
     const controller = new AbortController();
     setState('loading');
     setError(null);
     setChildren({});
     setExpanded(new Set());
-    getWorkspaceTree('.', 1, store.currentProjectId.value, { signal: controller.signal })
+    getWorkspaceTree('.', 1, projectId, { signal: controller.signal })
       .then((tree) => {
         if (controller.signal.aborted) return;
         setRootEntries(visibleEntries(tree.entries));
@@ -198,13 +201,15 @@ export function WorkspaceTab(): JSX.Element {
         setState('error');
       });
     return () => controller.abort();
-  }, [refreshKey]);
+    // `refreshKey` is the explicit button; `workspaceRefreshTick` is the viewer
+    // reporting a save it made itself.
+  }, [refreshKey, projectId, store.workspaceRefreshTick.value]);
 
   const loadChildren = async (path: string): Promise<void> => {
     if (children[path] || loadingPaths.has(path)) return;
     setLoadingPaths((current) => new Set(current).add(path));
     try {
-      const tree = await getWorkspaceTree(path, 1, store.currentProjectId.value);
+      const tree = await getWorkspaceTree(path, 1, projectId);
       setChildren((current) => ({ ...current, [path]: visibleEntries(tree.entries) }));
     } catch (cause) {
       store.pushToast(toErrorMessage(cause));

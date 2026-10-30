@@ -323,9 +323,18 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
       if (event.agent_id) return state;
       return {
         ...seen,
+        // The newest call's prompt size is the window fill; the running total is
+        // the cost. Keep both rather than deriving one from the other.
+        lastPromptTokens: event.input_tokens > 0 ? event.input_tokens : state.lastPromptTokens,
         usage: {
           input_tokens: (state.usage?.input_tokens ?? 0) + event.input_tokens,
           output_tokens: (state.usage?.output_tokens ?? 0) + event.output_tokens,
+          // Accumulated across the run, so the HUD shows the weighted hit rate
+          // rather than the last call's.
+          cached_tokens:
+            event.cached_tokens === undefined
+              ? state.usage?.cached_tokens
+              : (state.usage?.cached_tokens ?? 0) + event.cached_tokens,
         },
       };
 
@@ -354,6 +363,7 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
         truncated: false,
         durationMs: null,
         runId,
+        images: [],
       };
       return { ...seen, items: [...closeStreaming(state.items), item], running: true };
     }
@@ -463,6 +473,7 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
           truncated: event.truncated,
           durationMs: event.duration_ms,
           runId,
+          images: event.images ?? [],
         };
         return { ...seen, items: [...state.items, item] };
       }
@@ -480,12 +491,16 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
               stdout: item.stdout === '' ? output : item.stdout,
             };
           }
+          // A duplicate/refetch event without images must not erase the preview
+          // the card is already showing, so the old list survives an empty one.
+          const images = event.images && event.images.length > 0 ? event.images : item.kind === 'tool' ? item.images : undefined;
           return {
             ...item,
             status: event.ok ? 'ok' : 'error',
             output,
             truncated: event.truncated,
             durationMs: event.duration_ms,
+            ...(images ? { images } : {}),
           };
         },
       );

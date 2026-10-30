@@ -92,3 +92,42 @@ export function withAlpha(hex: string, alpha: number): string {
   const [r, g, b] = hexToRgb(hex);
   return `rgba(${r}, ${g}, ${b}, ${clamp(alpha, 0, 1).toFixed(2)})`;
 }
+
+/** HSL form of a colour. `h` in degrees, `s` and `l` in 0–1. */
+export interface HSL {
+  h: number;
+  s: number;
+  l: number;
+}
+
+export function rgbToHsl(hex: string): HSL {
+  const [r, g, b] = hexToRgb(hex).map((channel) => channel / 255) as [number, number, number];
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const delta = max - min;
+  if (delta === 0) return { h: 0, s: 0, l };
+  const s = l > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+  let h: number;
+  if (max === r) h = ((g - b) / delta + (g < b ? 6 : 0)) / 6;
+  else if (max === g) h = ((b - r) / delta + 2) / 6;
+  else h = ((r - g) / delta + 4) / 6;
+  return { h: h * 360, s, l };
+}
+
+/** HSL (degrees, 0–1, 0–1) back to `#rrggbb`. */
+export function hslToHex(h: number, s: number, l: number): string {
+  const hue = ((h % 360) + 360) % 360;
+  const sat = clamp(s, 0, 1);
+  const light = clamp(l, 0, 1);
+  const k = (n: number): number => (n + hue / 30) % 12;
+  const a = sat * Math.min(light, 1 - light);
+  const f = (n: number): number =>
+    light - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  return rgbToHex([f(0) * 255, f(8) * 255, f(4) * 255]);
+}
+
+/** Saturation of a colour, 0–1. Used to detect a washed-out tint. */
+export function saturationOf(hex: string): number {
+  return rgbToHsl(hex).s;
+}

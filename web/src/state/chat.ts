@@ -2,6 +2,7 @@ import type {
   AgentRecord,
   ApprovalDecision,
   ApprovalKind,
+  ImageAttachment,
   JsonValue,
   RunRecord,
   RunStatus,
@@ -51,6 +52,8 @@ export interface ToolItem {
   truncated: boolean;
   durationMs: number | null;
   runId: string | null;
+  /** Images the tool attached for the model; the chat shows them as previews. */
+  images?: ImageAttachment[];
 }
 
 export interface CommandItem {
@@ -129,6 +132,15 @@ export interface ChatState {
   runStatus: RunStatus | null;
   runError: RunError | null;
   usage: Usage | null;
+  /**
+   * Prompt tokens of the **newest** model call, which is how much of the context
+   * window a single request is spending.
+   *
+   * This is deliberately not derived from `usage`: that one is accumulated across
+   * every call for the cost HUD, and a sum answers "what has this session
+   * cost", not "how full is the window". `null` until a call reports usage.
+   */
+  lastPromptTokens: number | null;
   iteration: number;
   lastSeq: number;
 }
@@ -143,12 +155,14 @@ export function emptyChatState(sessionId: string | null = null): ChatState {
     runStatus: null,
     runError: null,
     usage: null,
+    lastPromptTokens: null,
     iteration: 0,
     lastSeq: 0,
   };
 }
 
-function parseArgs(raw: string): JsonValue {
+/** Tool-call arguments arrive as a JSON string; a parse failure is kept as text. */
+export function parseArgs(raw: string): JsonValue {
   if (raw.trim() === '') return {};
   try {
     return JSON.parse(raw) as JsonValue;
@@ -157,7 +171,7 @@ function parseArgs(raw: string): JsonValue {
   }
 }
 
-interface ParsedCommandReport {
+export interface ParsedCommandReport {
   stdout: string;
   stderr: string;
   exitCode: number | null;
@@ -173,7 +187,7 @@ interface ParsedCommandReport {
  * command cards keep their exit code; fall back to the raw text if it does not
  * match.
  */
-function parseStoredCommandReport(content: string): ParsedCommandReport {
+export function parseStoredCommandReport(content: string): ParsedCommandReport {
   const exitMatch = /^exit code:\s*(none|\d+)/m.exec(content);
   const durationMatch = /^duration:\s*([\d.]+)s/m.exec(content);
   const stdoutIndex = content.indexOf('--- stdout');
@@ -219,7 +233,7 @@ function parseStoredCommandReport(content: string): ParsedCommandReport {
   };
 }
 
-function stringArg(args: JsonValue, key: string): string {
+export function stringArg(args: JsonValue, key: string): string {
   if (typeof args === 'object' && args !== null && !Array.isArray(args)) {
     const value = args[key];
     if (typeof value === 'string') return value;
@@ -267,6 +281,7 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
         truncated: false,
         durationMs: null,
         runId: message.run_id ?? null,
+        images: [],
       };
       callItems.set(call.id, item);
       items.push(item);
@@ -320,6 +335,9 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
           }
         } else {
           target.output = message.content;
+          // The pixels are on the stored tool row, so a reloaded transcript still
+          // shows exactly what the model was shown.
+          target.images = message.images ?? [];
         }
       } else if (message.tool_call_id) {
         items.push({
@@ -334,6 +352,7 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
           truncated: false,
           durationMs: null,
           runId: message.run_id ?? null,
+          images: message.images ?? [],
         });
       }
     }
@@ -425,6 +444,22 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
     .map((item, index) => ({ item, index }))
     .sort((a, b) => (a.item.at === b.item.at ? a.index - b.index : a.item.at - b.item.at))
     .map((entry) => entry.item);
+
+  // The server returns the *newest* window of a long session. Say so at the head
+  // of the transcript, otherwise it just starts mid-conversation with no
+  // explanation of where the earlier history went.
+  if (detail.messages_truncated) {
+    const limit = detail.messages_limit;
+    const window = limit && limit > 0 ? `the last ${limit.toLocaleString()} messages` : 'the most recent messages';
+    ordered.unshift({
+      kind: 'notice',
+      id: 'notice:history-truncated',
+      at: ordered[0]?.at ?? 0,
+      level: 'info',
+      message: `Showing ${window}; earlier history is not loaded.`,
+    });
+  }
+
   if (livePlaceholder) ordered.push(livePlaceholder);
 
   return {
@@ -438,6 +473,8 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
     // Usage and iteration are state-only (never persisted), so a refetch of the
     // run that is still in flight must not reset the HUD mid-answer.
     usage: sameSession && previous.runId === lastRunId ? previous.usage : null,
+    lastPromptTokens:
+      sameSession && previous.runId === lastRunId ? previous.lastPromptTokens : null,
     iteration: sameSession && previous.runId === lastRunId ? previous.iteration : 0,
     lastSeq: 0,
   };

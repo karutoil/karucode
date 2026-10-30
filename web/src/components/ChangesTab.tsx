@@ -155,13 +155,18 @@ export function ChangesTab({ variant = 'panel' }: ChangesTabProps): JSX.Element 
   const [diffState, setDiffState] = useState<LoadState>('loading');
   const [diffError, setDiffError] = useState<string | null>(null);
 
+  // Read the project into a local so the effect re-runs when the user switches:
+  // this component stays mounted across a switch (the page variant is kept), so
+  // without it the previous project's files and diffs would linger.
+  const projectId = store.currentProjectId.value;
+
   useEffect(() => {
     const controller = new AbortController();
     setState('loading');
     setError(null);
     setSelected(null);
     setDiff(null);
-    getGitStatus(store.currentProjectId.value, { signal: controller.signal })
+    getGitStatus(projectId, { signal: controller.signal })
       .then((result) => {
         if (controller.signal.aborted) return;
         setStatus(result);
@@ -173,7 +178,7 @@ export function ChangesTab({ variant = 'panel' }: ChangesTabProps): JSX.Element 
         setState('error');
       });
     return () => controller.abort();
-  }, [refreshKey]);
+  }, [refreshKey, projectId]);
 
   useEffect(() => {
     if (!selected) {
@@ -183,7 +188,7 @@ export function ChangesTab({ variant = 'panel' }: ChangesTabProps): JSX.Element 
     const controller = new AbortController();
     setDiffState('loading');
     setDiffError(null);
-    getGitDiff(selected.path, selected.staged, undefined, store.currentProjectId.value, {
+    getGitDiff(selected.path, selected.staged, undefined, projectId, {
       signal: controller.signal,
     })
       .then((result) => {
@@ -197,7 +202,7 @@ export function ChangesTab({ variant = 'panel' }: ChangesTabProps): JSX.Element 
         setDiffState('error');
       });
     return () => controller.abort();
-  }, [selected]);
+  }, [selected, projectId]);
 
   const files = status?.files ?? [];
   const staged = files.filter((file) => file.staged).length;

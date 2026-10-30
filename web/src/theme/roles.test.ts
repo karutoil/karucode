@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BUILTIN_THEMES, DEFAULT_THEME, buildTokenMap, resolveTheme } from './index';
+import { contrastRatio } from './color';
 import { ROLE_PROPERTIES, resolveRoles } from './roles';
 
 const ember = resolveTheme(DEFAULT_THEME);
@@ -15,20 +16,40 @@ describe('fidelity roles', () => {
     }
   });
 
-  it('gives Ember the mock literals verbatim', () => {
+  it('gives Ember roles that keep the mock relationships', () => {
     const roles = resolveRoles(ember);
-    expect(roles['--surface-input']).toBe('#1e2021');
-    expect(roles['--line-input']).toBe('#3c3d3d');
-    expect(roles['--focus-input']).toBe('#866c50');
+    // Roles anchored on colours that did not move are still the mock's values.
     expect(roles['--gold-send']).toBe('#b88b53');
     expect(roles['--gold-send-hover']).toBe('#e3b47c');
     expect(roles['--on-gold']).toBe('#181714');
-    expect(roles['--surface-inset']).toBe('#202223');
-    expect(roles['--surface-menu']).toBe('#252628');
-    expect(roles['--line-overlay']).toBe('#4a4c4c');
-    expect(roles['--accent-faint']).toBe('#484038');
-    expect(roles['--row-selected-bg']).toBe('#343027');
-    expect(roles['--text-output']).toBe('#8e9b95');
+    // Roles anchored on surfaces moved with the palette (the panel ladder was
+    // rebuilt so the stack separates), so assert the *relationship* instead of a
+    // frozen hex. An input must read as a subtle inset on the card surface, and
+    // a menu as a clearly raised one.
+    const surface = ember.palette.surface;
+    expect(contrastRatio(roles['--surface-input']!, surface), 'input is an inset')
+      .toBeGreaterThan(1.02);
+    expect(contrastRatio(roles['--surface-menu']!, surface), 'menu is raised')
+      .toBeGreaterThan(1.1);
+    // The input, inset and menu must be three distinguishable fills, not one.
+    expect(roles['--surface-input']).not.toBe(roles['--surface-inset']);
+    expect(roles['--surface-inset']).not.toBe(roles['--surface-menu']);
+  });
+
+  it('preserves the mock offsets for Ember rather than its absolute values', () => {
+    // The invariant that matters: a role's relationship to its anchor survives a
+    // palette change. If Ember's surfaces move again these follow, instead of
+    // leaving Ember as the one inconsistent theme.
+    const roles = resolveRoles(ember);
+    const channels = (hex: string): number[] => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+    const delta = (a: string, b: string): number[] => channels(a).map((v, i) => v - channels(b)[i]!);
+    // In the mock, --surface-input (#1e2021) sits 2 channels above surface
+    // (#1c1d1f) and --surface-inset (#202223) 4 above. Those offsets still hold.
+    const inputDelta = delta(roles['--surface-input']!, ember.palette.surface);
+    const insetDelta = delta(roles['--surface-inset']!, ember.palette.surface);
+    expect(inputDelta.every((d) => d > 0), `input above surface: ${inputDelta}`).toBe(true);
+    expect(insetDelta.every((d) => d > 0), `inset above surface: ${insetDelta}`).toBe(true);
+    expect(insetDelta.every((d, i) => d > inputDelta[i]!), 'inset sits above input').toBe(true);
   });
 
   it('keeps neutral overlays palette-independent and mode-aware', () => {

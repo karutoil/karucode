@@ -1,8 +1,8 @@
 // @kc-doc: themes
 // @kc-title: Theme the workspace
-// @kc-summary: Built-in palettes, live colour and density editing, fonts and custom CSS, saved in the browser and shareable as a theme JSON file.
-// @kc-tags: theme, themes, appearance, colors, density, fonts, css, customization, ui
-// @kc-applies-to: ui:ThemeStudio, storage:karucode.theme-studio.v3, file:web/src/theme/engine.ts, file:web/src/components/ThemeStudio.tsx, cmd:npm run dev
+// @kc-summary: Built-in palettes, live colour and density editing, fonts and custom CSS, the transcript view options (cards or rows, grouped calls, folded turns), saved in the browser and shareable as a theme JSON file.
+// @kc-tags: theme, themes, appearance, colors, density, fonts, css, customization, ui, transcript, tool-calls, grouping, thinking
+// @kc-applies-to: ui:ThemeStudio, ui:ChatTranscript, ui:ToolCard, ui:ToolGroup, ui:ThinkingBlock, storage:karucode.theme-studio.v3, file:web/src/theme/engine.ts, file:web/src/theme/types.ts, file:web/src/state/transcriptLayout.ts, file:web/src/components/ThemeStudio.tsx, file:web/src/components/ChatTranscript.tsx, cmd:npm run dev
 //
 // # Open the Theme studio
 //
@@ -27,11 +27,46 @@
 //   density (spacing only), an interface font and a code font chosen from
 //   locally available stacks (nothing is downloaded), and a 0–22 px corner
 //   radius.
+// * **Transcript** — how much of the agent's work the conversation shows at
+//   once. See below; the defaults reproduce the original look, so nothing
+//   changes until you choose.
 // * **Advanced** — custom CSS applied live after the application stylesheet, for
 //   effects the controls do not cover.
 //
 // Every component reads CSS custom properties (`--theme-bg`, `--accent`, …), so
 // a theme repaints the UI without a reload.
+//
+// # Transcript view options
+//
+// Three settings, saved with the theme (so they export and import with it) and
+// applied as `data-tool-style`, `data-grouping` and `data-thinking` on `<html>`
+// next to `data-density`:
+//
+// * **Tool calls** — `cards` (default) draws the full card: symbol, arguments,
+//   a 112 px output preview and a footer with the duration. `rows` draws one
+//   quiet ~26 px line per call (symbol, name, arguments, duration, status) that
+//   expands into exactly the same numbered output. A turn with twenty calls
+//   reads as a list instead of twenty blocks.
+// * **Grouping** — `none` (default) shows every call where it happened. `tools`
+//   folds a run of *consecutive* calls into one summary line ("read_file, grep
+//   +1 more · 3 calls · 1.2 s") that opens to the individual calls. `turns` also
+//   folds a finished turn's working steps behind a "Show the working · N tool
+//   calls" line, leaving the narration and the answer.
+// * **Reasoning** — `collapsed` (default) is a `Thought` chip that opens to the
+//   reasoning. `preview` adds the first line of the thought, in italics, so a
+//   glance shows what the agent was working out. `expanded` shows it in full,
+//   and a running model is always shown open with a live dot.
+//
+// Nothing that can still change what you must do is ever folded: a streaming
+// turn, a running call, a pending approval, an error, an interrupted run and a
+// notice all stay on screen. `foldTurn` lifts a notice or error out of the fold
+// rather than hiding it, and a group opens itself while a member is running or
+// after a failure.
+//
+// Assistant prose written *between* tool calls is narration, not an answer, and
+// is always drawn quieter (muted, smaller) than the final answer so the
+// conclusion stands out. That is not optional: it is what makes a long turn
+// readable.
 //
 // # Saving, sharing and resetting
 //
@@ -42,8 +77,9 @@
 //
 // * **Save as new** stores the current draft under a name you type.
 // * **Export** downloads `karucode-theme.json` (`format: "karucode-theme"`,
-//   `version: 1`, plus `mode`, `density`, `font`, `mono`, `rounding`, `colors` and
-//   `customCSS`).
+//   `version: 1`, plus `mode`, `density`, `font`, `mono`, `rounding`, `colors`,
+//   `customCSS` and the three transcript options `toolStyle`, `grouping` and
+//   `thinking`).
 // * **Import** reads such a file (maximum 150 KB) and rejects it with a toast if
 //   a colour is not a 6-digit hex value, the mode/density/font is unknown, or the
 //   file is larger than the limit.
@@ -59,9 +95,17 @@
 // * A light theme sets `color-scheme: light`, which changes native form controls
 //   and scrollbars too; contrast is reported in the footer and warns below the
 //   4.5:1 AA ratio for body text.
-// * The engine writes `data-theme`, `data-mode` and `data-density` on `<html>`;
+// * The engine writes `data-theme`, `data-mode`, `data-density`,
+//   `data-tool-style`, `data-grouping` and `data-thinking` on `<html>`;
 //   component CSS may branch on those, so a theme with a broken value can look
 //   worse than the default without any error.
+// * The three transcript options are read at render time from `activeTheme`, and
+//   `web/src/state/transcriptLayout.ts` owns the rules. Changing a default there
+//   changes every user's transcript; the built-ins are the place to change what
+//   a *theme* starts with.
+// * A theme saved before these options existed still loads: `readTheme()` falls
+//   back per field, so an unknown or missing value becomes the default rather
+//   than rejecting the user's palette.
 
 /* Theme engine entry point.
  *
@@ -102,9 +146,12 @@ import type {
   ThemeColorsPatch,
   ThemeDensity,
   ThemeFont,
+  ThemeGrouping,
   ThemeMode,
   ThemeMono,
   ThemeOptionsPatch,
+  ThemeThinking,
+  ThemeToolStyle,
 } from './types';
 
 const CUSTOM_CSS_STYLE_ID = 'kc-theme-custom-css';
@@ -187,6 +234,11 @@ export function applyTheme(theme: Theme): void {
   root.dataset.theme = theme.id;
   root.dataset.mode = theme.mode;
   root.dataset.density = theme.density;
+  // Transcript view options ride the same mechanism as density: components CSS
+  // branches on the attribute, so switching a view repaints without a reload.
+  root.dataset.toolStyle = theme.toolStyle;
+  root.dataset.grouping = theme.grouping;
+  root.dataset.thinking = theme.thinking;
   root.style.colorScheme = theme.mode;
 
   const meta =
@@ -335,6 +387,18 @@ export function setRounding(rounding: number): void {
 
 export function setCustomCSS(customCSS: string): void {
   updateTheme({ customCSS });
+}
+
+export function setToolStyle(toolStyle: ThemeToolStyle): void {
+  updateTheme({ toolStyle });
+}
+
+export function setGrouping(grouping: ThemeGrouping): void {
+  updateTheme({ grouping });
+}
+
+export function setThinking(thinking: ThemeThinking): void {
+  updateTheme({ thinking });
 }
 
 /** Restore the palette of the theme the draft was derived from. */

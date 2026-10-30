@@ -1,8 +1,11 @@
 import type { JSX } from 'preact';
 import { useId, useState } from 'preact/hooks';
+import type { ImageAttachment } from '../api/types';
 import { formatDuration, jsonSummary } from '../lib/format';
+import { imageDataUrl, imageLabel } from '../lib/images';
 import type { ToolItem } from '../state/chat';
 import { toolStatusLabel } from '../state/selectors';
+import { Dialog } from './Dialog';
 import {
   AlertIcon,
   BoltIcon,
@@ -16,6 +19,12 @@ import {
 export interface ToolCardProps {
   item: ToolItem;
   defaultOpen?: boolean;
+  /**
+   * `card` is the roomy mock card; `row` is the compact one-line call that
+   * expands into the same output. The transcript picks it from the theme
+   * (`ThemeToolStyle`), so a long turn can read as a list.
+   */
+  variant?: 'card' | 'row';
 }
 
 /** Above this the numbered preview stops rendering lines; the tool was truncated anyway. */
@@ -57,21 +66,181 @@ function outputLines(output: string): string[] {
 }
 
 /**
- * A tool call in the assistant column: header (symbol, call, outcome), a
- * line-numbered output preview clamped to the mock's 112px, and a footer with
- * the duration and the Show output disclosure.
+ * The images a tool attached for the model.
+ *
+ * Shown between the header and the (clamped) output, so a screenshot the agent
+ * read is visible without expanding anything: that is the point of reading an
+ * image. A thumbnail opens a lightbox - the chat column is too narrow to judge
+ * a UI screenshot from a 160px-high card.
  */
-export function ToolCard({ item, defaultOpen = false }: ToolCardProps): JSX.Element {
-  const [open, setOpen] = useState(defaultOpen);
-  const bodyId = useId();
-  const detail = typeof item.args === 'string' ? item.args : JSON.stringify(item.args);
-  const summary = jsonSummary(item.args, 110);
-  const duration = formatDuration(item.durationMs);
+function ToolImages({ images, tool }: { images: ImageAttachment[]; tool: string }): JSX.Element {
+  const [enlarged, setEnlarged] = useState<number | null>(null);
+  const current = enlarged === null ? null : images[enlarged];
+  return (
+    <div
+      class="tool-images"
+      role="group"
+      aria-label={`${tool} returned ${images.length} ${images.length === 1 ? 'image' : 'images'}`}
+    >
+      {images.map((image, index) => {
+        const src = imageDataUrl(image);
+        const label = imageLabel(image);
+        return (
+          <figure class="tool-image" key={`${image.name ?? 'image'}-${index}`}>
+            {src ? (
+              <button
+                type="button"
+                class="tool-image-button"
+                onClick={() => setEnlarged(index)}
+                aria-label={`Enlarge ${label}`}
+              >
+                <img src={src} alt={label} loading="lazy" data-testid="tool-image" />
+              </button>
+            ) : (
+              <p class="muted small tool-image-note">
+                {image.media_type || 'image'} cannot be previewed here
+              </p>
+            )}
+            <figcaption class="tool-image-caption">{label}</figcaption>
+          </figure>
+        );
+      })}
+      <Dialog
+        open={current !== null}
+        title={current ? imageLabel(current) : 'Image'}
+        onClose={() => setEnlarged(null)}
+        class="image-dialog"
+      >
+        {current ? (
+          <img class="dialog-image" src={imageDataUrl(current) ?? ''} alt={imageLabel(current)} />
+        ) : null}
+      </Dialog>
+    </div>
+  );
+}
+
+/**
+ * The output body shared by both variants: numbered lines, clamped by CSS to the
+ * 112px preview, with the "no output"/"waiting" states spelled out.
+ */
+function ToolOutput({
+  item,
+  open,
+  bodyId,
+}: {
+  item: ToolItem;
+  open: boolean;
+  bodyId: string;
+}): JSX.Element {
   const lines = outputLines(item.output);
   const rendered = lines.slice(0, MAX_RENDERED_LINES);
   const hiddenLines = lines.length - rendered.length;
   const waiting = item.status === 'running' && lines.length === 0;
   const width = String(Math.max(rendered.length, 10)).length;
+
+  return (
+    <div
+      class="tool-body"
+      id={bodyId}
+      role="group"
+      aria-label={`${item.name} output`}
+      tabIndex={open ? 0 : -1}
+    >
+      {waiting ? (
+        <p class="muted small output-empty">Waiting for output…</p>
+      ) : lines.length === 0 ? (
+        <p class="muted small output-empty">No output.</p>
+      ) : (
+        <>
+          {rendered.map((line, index) => (
+            <div class="tool-line" key={index}>
+              <span class="num" aria-hidden="true">
+                {String(index + 1).padStart(width, '0')}
+              </span>
+              <span class="line-text">{line === '' ? '\u00a0' : line}</span>
+            </div>
+          ))}
+          {hiddenLines > 0 ? (
+            <p class="muted small output-empty">… {hiddenLines} more lines not shown</p>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A tool call in the assistant column: header (symbol, call, outcome), a
+ * line-numbered output preview clamped to the mock's 112px, and a footer with
+ * the duration and the Show output disclosure.
+ *
+ * With `variant="row"` the whole call is one line — symbol, name, arguments,
+ * outcome and duration — and the same output opens beneath it. That is the
+ * "Rows" transcript view: a turn with twenty calls reads as a list instead of
+ * twenty blocks, while every byte of output is still one click away.
+ */
+export function ToolCard({ item, defaultOpen = false, variant = 'card' }: ToolCardProps): JSX.Element {
+  const [open, setOpen] = useState(defaultOpen);
+  const bodyId = useId();
+  const detail = typeof item.args === 'string' ? item.args : JSON.stringify(item.args);
+  const summary = jsonSummary(item.args, variant === 'row' ? 90 : 110);
+  const duration = formatDuration(item.durationMs);
+  const lines = outputLines(item.output);
+  const hasOutput = lines.length > 0;
+
+  if (variant === 'row') {
+    return (
+      <section
+        class="tool-row"
+        data-status={item.status}
+        data-open={open ? 'true' : 'false'}
+        aria-label={`${item.name} tool call`}
+      >
+        <button
+          type="button"
+          class="tool-row-head"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          title={detail.length > 500 ? `${detail.slice(0, 500)}…` : detail}
+          onClick={() => setOpen((previous) => !previous)}
+        >
+          <span class="tool-row-symbol" aria-hidden="true">
+            <ToolSymbol name={item.name} />
+          </span>
+          <span class="tool-row-name">{item.name}</span>
+          {summary !== '' ? <span class="tool-row-args">{summary}</span> : null}
+          {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
+          <span class="tool-row-meta">
+            {duration ? <span class="tool-row-duration">{duration}</span> : null}
+            <span class={`tool-row-status tool-success-${item.status}`}>
+              <StatusGlyph status={item.status} />
+              {toolStatusLabel(item.status)}
+            </span>
+            <span class="disclosure" aria-hidden="true">
+              <ChevronDownIcon size={12} />
+            </span>
+          </span>
+        </button>
+
+        {item.images && item.images.length > 0 ? (
+          <ToolImages images={item.images} tool={item.name} />
+        ) : null}
+
+        {/* Mounted only while open: a collapsed row should cost nothing, and the
+            disclosure is wired to the same id the card variant uses. */}
+        {open ? (
+          <>
+            <ToolOutput item={item} open={open} bodyId={bodyId} />
+            {hasOutput ? (
+              <p class="tool-row-foot">
+                <span class="tool-duration">{footerNote(item, duration)}</span>
+              </p>
+            ) : null}
+          </>
+        ) : null}
+      </section>
+    );
+  }
 
   return (
     <section
@@ -95,33 +264,11 @@ export function ToolCard({ item, defaultOpen = false }: ToolCardProps): JSX.Elem
         </span>
       </header>
 
-      <div
-        class="tool-body"
-        id={bodyId}
-        role="group"
-        aria-label={`${item.name} output`}
-        tabIndex={open ? 0 : -1}
-      >
-        {waiting ? (
-          <p class="muted small output-empty">Waiting for output…</p>
-        ) : lines.length === 0 ? (
-          <p class="muted small output-empty">No output.</p>
-        ) : (
-          <>
-            {rendered.map((line, index) => (
-              <div class="tool-line" key={index}>
-                <span class="num" aria-hidden="true">
-                  {String(index + 1).padStart(width, '0')}
-                </span>
-                <span class="line-text">{line === '' ? '\u00a0' : line}</span>
-              </div>
-            ))}
-            {hiddenLines > 0 ? (
-              <p class="muted small output-empty">… {hiddenLines} more lines not shown</p>
-            ) : null}
-          </>
-        )}
-      </div>
+      {item.images && item.images.length > 0 ? (
+        <ToolImages images={item.images} tool={item.name} />
+      ) : null}
+
+      <ToolOutput item={item} open={open} bodyId={bodyId} />
 
       <div class="tool-foot">
         <span class="tool-duration">{footerNote(item, duration)}</span>

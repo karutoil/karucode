@@ -4,6 +4,7 @@ import { Composer, type ComposerProps } from './Composer';
 import type { Activity } from '../state/selectors';
 import type { WorkspaceTree } from '../api/types';
 import { configFixture, resetAppState } from '../test/fixtures';
+import { emptyChatState } from '../state/chat';
 import * as store from '../state/store';
 
 const idle: Activity = { kind: 'idle', label: 'Ready' };
@@ -49,6 +50,39 @@ function binaryFile(name: string, bytes: readonly number[] = [0, 1, 2]): File {
 }
 
 describe('Composer', () => {
+  it('uses a one-line placeholder on a phone so the empty dock stays one line', () => {
+    // At 16px (the iOS no-zoom size) the desktop sentence wraps to two lines in a
+    // ~390px column, which made an empty composer stand two lines tall.
+    const matchMedia = window.matchMedia;
+    try {
+      window.matchMedia = ((query: string) => ({
+        matches: query.includes('640px'),
+        media: query,
+        onchange: null,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        dispatchEvent: () => false,
+      })) as typeof window.matchMedia;
+
+      const { textarea } = renderComposer();
+      expect(textarea.getAttribute('placeholder')).toBe('Ask karucode anything…');
+      // The draft itself can still be long; only the hint is shortened.
+      fireEvent.input(textarea, { target: { value: 'Explain the build' } });
+      expect(textarea.value).toBe('Explain the build');
+    } finally {
+      window.matchMedia = matchMedia;
+    }
+  });
+
+  it('keeps the full placeholder on a desktop viewport', () => {
+    const { textarea } = renderComposer();
+    expect(textarea.getAttribute('placeholder')).toBe(
+      'Ask karucode anything, or describe a change...',
+    );
+  });
+
   it('sends with Cmd/Ctrl+Enter and clears the draft on success', async () => {
     const { props, textarea } = renderComposer();
     fireEvent.input(textarea, { target: { value: 'Explain the build' } });
@@ -159,6 +193,93 @@ describe('Composer', () => {
       const status = screen.getByRole('status');
       expect(status.textContent).not.toContain('1,234 tokens');
       expect(status.getAttribute('title')).toContain('1,234 tokens in · 567 out');
+    });
+
+    describe('context window pill', () => {
+      /** The composer's live state, as the store would hold it after a call. */
+      const withUsage = (lastPromptTokens: number | null) => {
+        store.chat.value = { ...emptyChatState('s_ab12'), lastPromptTokens };
+      };
+
+      it('shows the window fill in the bottom row once a call reports usage', () => {
+        store.config.value = configFixture;
+        withUsage(32_000);
+        const { container } = renderComposer();
+        const pill = container.querySelector('.context-pill') as HTMLElement;
+        expect(pill).not.toBeNull();
+        // configFixture's model declares context_window: 128_000.
+        expect(pill.textContent).toBe('25.0%');
+        expect(pill.getAttribute('title')).toContain('32,000 of 128,000 context tokens');
+        expect(pill.getAttribute('aria-label')).toContain('25.0% full');
+      });
+
+      it('renders nothing before the first call, rather than 0%', () => {
+        store.config.value = configFixture;
+        withUsage(null);
+        const { container } = renderComposer();
+        expect(container.querySelector('.context-pill')).toBeNull();
+      });
+
+      it('renders nothing when the model declares no window', () => {
+        store.config.value = {
+          ...configFixture,
+          providers: [
+            {
+              ...configFixture.providers[0]!,
+              models: [{ id: 'gpt-4o-mini', name: 'GPT-4o mini' }],
+            },
+          ],
+        };
+        withUsage(32_000);
+        const { container } = renderComposer();
+        expect(container.querySelector('.context-pill')).toBeNull();
+      });
+
+      it('follows the session pin, not the install default', () => {
+        // The pinned model is the one a run would use, so it owns the window.
+        store.config.value = {
+          ...configFixture,
+          providers: [
+            {
+              ...configFixture.providers[0]!,
+              models: [
+                { id: 'gpt-4o-mini', name: 'GPT-4o mini', context_window: 128_000 },
+                { id: 'big', name: 'Big', context_window: 1_000_000 },
+              ],
+            },
+          ],
+        };
+        store.sessions.value = [
+          {
+            id: 's_ab12',
+            title: 'Session',
+            workspace: '/home/me/project',
+            project_id: 'p_1',
+            model: { provider: 'default', model: 'big' },
+            created_at: 1,
+            updated_at: 2,
+            message_count: 0,
+            last_run_status: null,
+            running: false,
+          },
+        ];
+        store.currentSessionId.value = 's_ab12';
+        withUsage(250_000);
+        const { container } = renderComposer();
+        expect(container.querySelector('.context-pill')?.textContent).toBe('25.0%');
+      });
+
+      it('warns before the window is exhausted', () => {
+        store.config.value = configFixture;
+        withUsage(115_200); // 90% of 128k
+        const { container } = renderComposer();
+        expect(container.querySelector('.context-pill')?.getAttribute('data-tone')).toBe('hot');
+
+        withUsage(94_000); // 73%
+        const second = renderComposer();
+        expect(second.container.querySelector('.context-pill')?.getAttribute('data-tone')).toBe('warn');
+        second.unmount();
+      });
     });
 
     it('writes the shortcut hint as plain text, not keycaps', () => {
@@ -415,6 +536,68 @@ describe('Composer', () => {
 
       expect(await screen.findByText(/Larger than 8.0 MB/)).not.toBeNull();
       expect(uploadFile).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('per-session draft', () => {
+    it('does not carry a half-written message into another session', async () => {
+      store.currentSessionId.value = 's_ab12';
+      const { textarea } = renderComposer();
+
+      fireEvent.input(textarea, { target: { value: 'half-written for A' } });
+      expect(textarea.value).toBe('half-written for A');
+
+      // Switching sessions keeps the composer mounted, so the draft must be
+      // parked rather than shown in the other conversation.
+      await act(async () => {
+        store.currentSessionId.value = 's_cd34';
+      });
+      expect(textarea.value).toBe('');
+
+      // Coming back restores what was typed for that session.
+      await act(async () => {
+        store.currentSessionId.value = 's_ab12';
+      });
+      expect(textarea.value).toBe('half-written for A');
+    });
+
+    it('keeps each session draft separate', async () => {
+      store.currentSessionId.value = 's_ab12';
+      const { textarea } = renderComposer();
+
+      fireEvent.input(textarea, { target: { value: 'draft A' } });
+      await act(async () => {
+        store.currentSessionId.value = 's_cd34';
+      });
+      fireEvent.input(textarea, { target: { value: 'draft B' } });
+
+      await act(async () => {
+        store.currentSessionId.value = 's_ab12';
+      });
+      expect(textarea.value).toBe('draft A');
+
+      await act(async () => {
+        store.currentSessionId.value = 's_cd34';
+      });
+      expect(textarea.value).toBe('draft B');
+    });
+  });
+
+  describe('mention index invalidation', () => {
+    it('re-indexes the workspace after a project switch', async () => {
+      store.currentProjectId.value = 'p_one';
+      const loadMentionTree = vi.fn(async () => workspace);
+      const { textarea } = renderComposer({ loadMentionTree });
+
+      fireEvent.input(textarea, { target: { value: '@main' } });
+      await waitFor(() => expect(loadMentionTree).toHaveBeenCalledTimes(1));
+
+      // The index is per project: the 60 s TTL must not keep the old file list.
+      await act(async () => {
+        store.currentProjectId.value = 'p_two';
+      });
+
+      await waitFor(() => expect(loadMentionTree).toHaveBeenCalledTimes(2));
     });
   });
 });

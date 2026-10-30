@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { BUILTIN_THEMES, DEFAULT_THEME, completeColors } from './builtins';
 import { contrastRatio, normalizeHex } from './color';
 import { DENSITY_SCALES, buildTokenMap, clampRounding, resolvePalette } from './tokens';
@@ -54,11 +55,46 @@ describe('built-in themes', () => {
 
   it('uses the token stylesheet values for Ember (no first-paint shift)', () => {
     expect(DEFAULT_THEME.id).toBe('ember');
+    // `styles/tokens.css` paints the first frame before the engine runs, so the
+    // canvas and text it hardcodes must match the built-in exactly.
     expect(DEFAULT_THEME.colors.bg).toBe('#111213');
-    expect(DEFAULT_THEME.colors.surface).toBe('#1c1d1f');
     expect(DEFAULT_THEME.colors.text).toBe('#eae9e5');
     expect(DEFAULT_THEME.colors.accent).toBe('#dfb680');
     expect(DEFAULT_THEME.colors.syntaxString).toBe('#a5cbb4');
+    // Surfaces are asserted against the stylesheet itself below, so the two
+    // cannot drift apart.
+    expect(DEFAULT_THEME.colors.surface).toBe('#2c2d31');
+  });
+
+  it('keeps every Ember surface in sync with the first-paint stylesheet', () => {
+    // The real invariant: applying Ember must not repaint anything, which means
+    // every literal in tokens.css has to equal the built-in theme's value.
+    // `tokens.css` is only readable from node (jsdom reports an http URL), and
+    // the stylesheet contract lives in styles/theme-studio.test.ts.
+    const css = readFileSync('src/styles/tokens.css', 'utf8');
+    const declared: Record<string, string> = {};
+    for (const match of css.matchAll(/--theme-([a-z-]+):\s*(#[0-9a-f]{6});/g)) {
+      declared[match[1]!] = match[2]!;
+    }
+    const expected: Record<string, keyof typeof DEFAULT_THEME.colors> = {
+      bg: 'bg',
+      rail: 'rail',
+      sidebar: 'sidebar',
+      inspector: 'inspector',
+      surface: 'surface',
+      raised: 'raised',
+      hover: 'hover',
+      text: 'text',
+      muted: 'muted',
+      accent: 'accent',
+      success: 'success',
+      danger: 'danger',
+      info: 'info',
+      warn: 'warn',
+    };
+    for (const [token, key] of Object.entries(expected)) {
+      expect(declared[token], `--theme-${token} in tokens.css`).toBe(DEFAULT_THEME.colors[key]);
+    }
   });
 });
 

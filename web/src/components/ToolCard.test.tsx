@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/preact';
+import { cleanup, fireEvent, render, screen } from '@testing-library/preact';
 import { ToolCard } from './ToolCard';
 import type { ToolItem } from '../state/chat';
 import { NOW } from '../test/fixtures';
@@ -122,5 +122,125 @@ describe('ToolCard', () => {
     render(<ToolCard item={tool({ output: '<img src=x onerror=alert(1)>' })} defaultOpen />);
     expect(document.querySelector('.tool-body img')).toBeNull();
     expect(screen.getByText('<img src=x onerror=alert(1)>')).not.toBeNull();
+  });
+
+  it('previews the image a tool returned for the model', () => {
+    render(
+      <ToolCard
+        item={tool({
+          output: 'shot.png — image/png (8 B)',
+          images: [{ media_type: 'image/png', data: 'iVBORw0KGgo=', bytes: 8, name: 'shot.png' }],
+        })}
+      />,
+    );
+    const preview = screen.getByTestId('tool-image') as HTMLImageElement;
+    expect(preview.getAttribute('src')).toBe('data:image/png;base64,iVBORw0KGgo=');
+    expect(preview.getAttribute('alt')).toBe('shot.png · 8 B');
+    // The preview is visible without expanding the (clamped) output.
+    expect(card().getAttribute('data-open')).toBe('false');
+    expect(screen.getByText('shot.png · 8 B')).not.toBeNull();
+  });
+
+  it('opens a lightbox with the full image and closes it again', () => {
+    render(
+      <ToolCard
+        item={tool({
+          images: [{ media_type: 'image/jpeg', data: '/9j/4AAQ', bytes: 2048, name: 'ui/shot.jpg' }],
+        })}
+      />,
+    );
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enlarge ui/shot.jpg · 2.0 KB' }));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.textContent).toContain('ui/shot.jpg');
+    const full = dialog.querySelector('.dialog-image') as HTMLImageElement;
+    expect(full.getAttribute('src')).toBe('data:image/jpeg;base64,/9j/4AAQ');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('does not put a non-image media type into a data URL', () => {
+    render(
+      <ToolCard
+        item={tool({ images: [{ media_type: 'image/svg+xml', data: 'PHN2Zz4=', bytes: 8, name: 'x.svg' }] })}
+      />,
+    );
+    expect(screen.queryByTestId('tool-image')).toBeNull();
+    expect(screen.getByText('image/svg+xml cannot be previewed here')).not.toBeNull();
+  });
+});
+
+describe('ToolCard row variant', () => {
+  function row(): HTMLElement {
+    const element = document.querySelector('.tool-row');
+    if (!element) throw new Error('tool row did not render');
+    return element as HTMLElement;
+  }
+
+  it('is one line: name, argument, outcome and duration in the header', () => {
+    render(<ToolCard item={tool()} variant="row" />);
+
+    expect(document.querySelector('.tool-card')).toBeNull();
+    expect(row().querySelector('.tool-row-name')?.textContent).toBe('read_file');
+    expect(row().querySelector('.tool-row-args')?.textContent).toBe('src/main.rs');
+    expect(row().querySelector('.tool-row-status')?.textContent).toBe('Done');
+    expect(row().querySelector('.tool-row-duration')?.textContent).toBe('12ms');
+    expect(row().getAttribute('data-status')).toBe('ok');
+  });
+
+  it('collapses without rendering the output body at all', () => {
+    render(<ToolCard item={tool()} variant="row" />);
+    // A collapsed row costs nothing: no numbered lines, no preview.
+    expect(row().getAttribute('data-open')).toBe('false');
+    expect(document.querySelector('.tool-body')).toBeNull();
+    expect(screen.queryByText('fn main() {}')).toBeNull();
+  });
+
+  it('expands into the same numbered output the card shows', () => {
+    render(<ToolCard item={tool({ output: 'first\nsecond\nthird' })} variant="row" />);
+    const head = screen.getByRole('button', { name: /read_file/ });
+    expect(head.getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(head);
+    expect(row().getAttribute('data-open')).toBe('true');
+    expect(head.getAttribute('aria-expanded')).toBe('true');
+    const numbers = [...document.querySelectorAll('.tool-line .num')].map((node) => node.textContent);
+    expect(numbers).toEqual(['01', '02', '03']);
+    expect(screen.getByText('Finished in 12ms')).not.toBeNull();
+
+    // And it collapses again.
+    fireEvent.click(head);
+    expect(document.querySelector('.tool-body')).toBeNull();
+  });
+
+  it('keeps images visible without expanding the row', () => {
+    render(
+      <ToolCard
+        item={tool({
+          images: [{ media_type: 'image/png', data: 'iVBORw0KGgo=', bytes: 8, name: 'shot.png' }],
+        })}
+        variant="row"
+      />,
+    );
+    expect(screen.getByTestId('tool-image')).not.toBeNull();
+    expect(row().getAttribute('data-open')).toBe('false');
+  });
+
+  it('reports failure and a running call in the row itself', () => {
+    render(<ToolCard item={tool({ status: 'error', output: 'nope' })} variant="row" />);
+    expect(row().getAttribute('data-status')).toBe('error');
+    expect(row().querySelector('.tool-row-status')?.className).toContain('tool-success-error');
+
+    cleanup();
+    render(<ToolCard item={tool({ status: 'running', output: '', durationMs: null })} variant="row" />);
+    expect(row().querySelector('.tool-row-status')?.textContent).toBe('Running');
+    expect(row().querySelector('.tool-row-duration')).toBeNull();
+  });
+
+  it('shows "Waiting for output…" when a running row is opened', () => {
+    render(<ToolCard item={tool({ status: 'running', output: '', durationMs: null })} variant="row" defaultOpen />);
+    expect(document.querySelector('.tool-body')?.textContent).toContain('Waiting for output…');
   });
 });

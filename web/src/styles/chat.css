@@ -135,6 +135,92 @@
   overflow-wrap: anywhere;
 }
 
+/* ---------- narration ----------
+ *
+ * Prose the agent writes *between* tool calls is its running commentary, not the
+ * answer. It used to look exactly like an answer, so a turn read as though it had
+ * replied five times and the real conclusion got lost. Narration is now set
+ * quieter and tighter: same words, clearly a note rather than a result.
+ */
+
+.narration {
+  color: var(--muted);
+  font-size: var(--fs-small);
+  line-height: 1.62;
+}
+
+.narration .markdown p {
+  margin: 0 0 8px;
+}
+
+.narration .markdown strong {
+  color: var(--text-secondary);
+}
+
+.narration .markdown > :first-child {
+  margin-top: 0;
+}
+
+.narration .markdown > :last-child {
+  margin-bottom: 8px;
+}
+
+/* ---------- process fold (a finished turn's working steps) ----------
+ *
+ * Stands in for the calls and narration of a turn that has already finished, so a
+ * long session shows its answers and offers the work behind one click. It always
+ * says how much is behind it: a fold that hid the fact that work happened would
+ * be worse than the bulk it replaces.
+ */
+
+.process-fold {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 5px 9px;
+  border: 1px dashed var(--line-card-strong);
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-small);
+  text-align: left;
+  cursor: pointer;
+}
+
+.process-fold:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-card);
+  color: var(--text-secondary);
+}
+
+.process-fold-label {
+  flex: 0 0 auto;
+  font-weight: 560;
+}
+
+.process-fold-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-fold[aria-expanded='true'] .disclosure svg {
+  transform: rotate(180deg);
+}
+
+/* The last row of a folded body should sit tight against the fold button. */
+.msg-body.is-folded > :last-child {
+  margin-bottom: 0;
+}
+
 /* status chip: the mock's "Completed"/"Draft response" marker */
 .tag {
   display: inline-flex;
@@ -181,6 +267,87 @@
 .tag-stopped {
   color: var(--warn);
   border-color: color-mix(in srgb, var(--warn) 40%, var(--line-strong));
+}
+
+/* Live throughput beside the Working chip: how much the turn has produced and
+ * how fast it is arriving. Mounted only while the turn works, so it never
+ * outlives the run it describes.
+ *
+ * The count is mono and tabular so the badge does not jitter as digits change;
+ * the rate pill is painted by tone, which is a *speed* band, not a judgement.
+ * Colour comes from roles, never a literal, so every theme repaints it. */
+.tps-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 18px;
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.tps-badge-count {
+  color: var(--text-subtle);
+}
+
+/* The glyph is a downward arrow, as in the source UI: tokens *arriving*. */
+.tps-badge-count::before {
+  content: '↓';
+  margin-right: 3px;
+  opacity: 0.7;
+}
+
+.tps-badge-rate {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  padding: 1px 6px;
+  border: 1px solid var(--chip-line);
+  border-radius: 999px;
+  background: var(--chip-surface);
+  color: var(--chip-ink);
+  font-weight: 600;
+}
+
+.tps-badge-unit {
+  font-weight: 500;
+  opacity: 0.75;
+}
+
+/* Speed bands. `slow` stays neutral on purpose: a reasoning model that thinks
+ * before it writes is not a fault, and a red pill would say it is. */
+.tps-badge[data-tone='fast'] .tps-badge-rate {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--chip-line));
+  background: color-mix(in srgb, var(--success) 16%, var(--chip-surface));
+  color: var(--success);
+}
+
+.tps-badge[data-tone='steady'] .tps-badge-rate {
+  border-color: color-mix(in srgb, var(--info) 45%, var(--chip-line));
+  background: color-mix(in srgb, var(--info) 16%, var(--chip-surface));
+  color: var(--info);
+}
+
+.tps-badge[data-tone='slow'] .tps-badge-rate {
+  color: var(--chip-ink);
+}
+
+/* A phone has no room for both the chip and the rate. The chip says what the
+ * turn is doing; the rate is a desktop nicety, so it goes first. */
+@media (max-width: 640px) {
+  .tps-badge-rate {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tps-badge {
+    transition: none;
+  }
 }
 
 /* the caret after streaming prose */
@@ -487,39 +654,46 @@
   font-weight: 560;
 }
 
-/* ---------- thinking ---------- */
+/* ---------- thinking ----------
+ *
+ * The reasoning is the agent's own account of what it is doing, so it must be
+ * readable at a glance instead of hiding behind a 10px chip: a full-width row
+ * with an italic first line ("preview" mode), the whole thought on open, and the
+ * same row carrying a live dot while the model is still thinking.
+ */
 
 .thinking {
   margin: 0 0 13px;
 }
 
 .thinking-summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 8px 3px 7px;
-  border: 1px solid var(--chip-line);
-  border-radius: 5px;
-  background: var(--chip-surface);
-  color: var(--chip-ink);
-  font-size: var(--fs-micro);
-  font-weight: 540;
-  letter-spacing: 0.04em;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  min-height: 22px;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: var(--fs-small);
+  line-height: 1.55;
   cursor: pointer;
   list-style: none;
+  text-align: left;
 }
 
 .thinking-summary::-webkit-details-marker {
   display: none;
 }
 
-.thinking-summary:hover {
-  border-color: var(--line-strong);
-  color: var(--text);
+.thinking-summary:hover .thinking-label {
+  color: var(--text-secondary);
 }
 
 .thinking-summary::before {
   content: '▸';
+  flex: 0 0 auto;
   color: var(--faint);
   font-size: 9px;
   transition: transform var(--transition-fast);
@@ -529,7 +703,41 @@
   transform: rotate(90deg);
 }
 
+.thinking-label {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  transition: color var(--transition-fast);
+}
+
+/* The preview is the point of this block: the first line of the model's own
+   reasoning, quiet enough not to compete with the answer it explains. */
+.thinking-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-style: italic;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thinking-hint {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--chip-line);
+  border-radius: 4px;
+  background: var(--chip-surface);
+  color: var(--chip-ink);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+
 .thinking-live {
+  flex: 0 0 auto;
+  align-self: center;
   width: 5px;
   height: 5px;
   border-radius: 50%;
@@ -539,7 +747,7 @@
 
 .thinking-body {
   max-height: 280px;
-  margin-top: 8px;
+  margin-top: 2px;
   padding-left: 10px;
   border-left: 1px solid var(--line);
   overflow-y: auto;
@@ -674,6 +882,80 @@
   min-width: 0;
 }
 
+/* Images a tool returned: a real preview in the chat, not a base64 blob.
+   Rendered above the clamped output so a screenshot is visible without
+   expanding anything. */
+.tool-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line-divider);
+}
+
+.tool-image {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.tool-image-button {
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-preview);
+  border-radius: var(--radius-sm);
+  background: var(--surface-menu);
+  cursor: zoom-in;
+  line-height: 0;
+}
+
+.tool-image-button:hover {
+  border-color: var(--accent);
+}
+
+.tool-image-button img {
+  display: block;
+  max-width: 260px;
+  max-height: 170px;
+  /* Transparency reads as a broken image on a dark surface otherwise. */
+  background: repeating-conic-gradient(var(--surface-menu) 0 25%, var(--surface-preview) 0 50%) 0 0 / 16px 16px;
+  object-fit: contain;
+}
+
+.tool-image-caption {
+  max-width: 260px;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-image-note {
+  margin: 0;
+}
+
+/* The lightbox: the chat column is too narrow to judge a screenshot in a card. */
+.image-dialog {
+  width: min(92vw, 1100px);
+  max-width: min(92vw, 1100px);
+}
+
+.dialog-image {
+  display: block;
+  max-width: 100%;
+  max-height: 78vh;
+  margin: 0 auto;
+  border: 1px solid var(--line-preview);
+  border-radius: var(--radius-sm);
+  background: repeating-conic-gradient(var(--surface-menu) 0 25%, var(--surface-preview) 0 50%) 0 0 / 16px 16px;
+  object-fit: contain;
+}
+
 .tool-line .num {
   flex: 0 0 auto;
   min-width: 18px;
@@ -730,6 +1012,280 @@
 
 .tool-expand[aria-expanded='true'] svg {
   transform: rotate(180deg);
+}
+
+/* ---------- tool rows (the compact transcript view) ----------
+ *
+ * Same call, one line: the card's whole header collapsed into a single row that
+ * sits on the transcript instead of in a box. Output still opens beneath it, so
+ * the compact view removes bulk without removing information. Spacing is tight
+ * on purpose: consecutive rows must read as a list.
+ */
+
+.tool-row {
+  margin: 0 0 3px;
+  border-radius: var(--radius-sm);
+}
+
+.tool-row:last-child {
+  margin-bottom: 0;
+}
+
+.tool-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tool-row-head:hover {
+  border-color: var(--line-card-strong);
+  background: var(--surface-card);
+}
+
+.tool-row[data-status='error'] .tool-row-head:hover {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line-card-strong));
+}
+
+.tool-row-symbol {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  color: var(--text-symbol);
+}
+
+.tool-row[data-status='error'] .tool-row-symbol {
+  color: var(--danger);
+}
+
+.tool-row[data-status='running'] .tool-row-symbol {
+  color: var(--accent);
+}
+
+.tool-row-name {
+  flex: 0 0 auto;
+  max-width: 40%;
+  overflow: hidden;
+  color: var(--text-command);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-row-args {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-row-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.tool-row-duration {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-row-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--success);
+  font-size: var(--fs-micro);
+  white-space: nowrap;
+}
+
+.tool-row-head[aria-expanded='true'] .disclosure svg {
+  transform: rotate(180deg);
+}
+
+/* The opened output sits slightly in from the row, under the tool's symbol, so
+   it reads as belonging to the line above it. */
+.tool-row > .tool-body {
+  margin: 2px 0 6px 23px;
+  max-height: 240px;
+  padding: 9px 12px;
+  border: 1px solid var(--line-card-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-card);
+}
+
+.tool-row > .tool-body:focus-visible {
+  outline-offset: 1px;
+}
+
+/* A row's output is opened deliberately, so it scrolls instead of fading: the
+   112px preview clamp belongs to the card, which shows output unopened. */
+.tool-row[data-open='true'] > .tool-body {
+  max-height: 340px;
+  overflow: auto;
+}
+
+.tool-row > .tool-images {
+  margin: 2px 0 6px 23px;
+  padding: 8px 0;
+  border-top: 0;
+}
+
+.tool-row-foot {
+  display: flex;
+  align-items: center;
+  margin: 0 0 6px 23px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+}
+
+/* ---------- tool groups (a folded run of calls) ----------
+ *
+ * One line stands in for a run of consecutive calls: what ran, how many, how
+ * long, and whether anything failed. Opening it restores the calls themselves,
+ * each still individually disclosable.
+ */
+
+.tool-group {
+  margin: 0 0 6px;
+  border: 1px solid var(--line-card-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-card);
+  overflow: hidden;
+}
+
+.tool-group[data-tone='is-error'] {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line-card-strong));
+}
+
+.tool-group-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tool-group-head:hover {
+  background: var(--surface-command-hover);
+}
+
+.tool-group-glyph {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+
+.tool-group-glyph.is-ok {
+  color: var(--success);
+}
+
+.tool-group-glyph.is-error {
+  color: var(--danger);
+}
+
+.tool-group-glyph.is-running {
+  color: var(--accent);
+}
+
+.tool-group-glyph.is-stopped {
+  color: var(--muted);
+}
+
+.tool-group-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-command);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-group-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  white-space: nowrap;
+}
+
+.tool-group-failed {
+  color: var(--danger);
+}
+
+.tool-group-running {
+  color: var(--accent);
+}
+
+.tool-group-duration {
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-group-head[aria-expanded='true'] .disclosure svg {
+  transform: rotate(180deg);
+}
+
+.tool-group-body {
+  padding: 8px 10px 7px;
+  border-top: 1px solid var(--line-divider);
+}
+
+.tool-group-body[hidden] {
+  display: none;
+}
+
+.tool-group-body > .tool-card:first-child,
+.tool-group-body > .command-card:first-child {
+  margin-top: 0;
+}
+
+.tool-group-body > .tool-card:last-child,
+.tool-group-body > .command-card:last-child,
+.tool-group-body > .tool-row:last-child {
+  margin-bottom: 0;
+}
+
+.tool-group-body > .tool-card {
+  margin-bottom: 9px;
+}
+
+.tool-group-body > .command-card {
+  margin-bottom: 9px;
 }
 
 /* ---------- command cards ---------- */
@@ -1614,6 +2170,30 @@
 .skeleton-composer {
   height: 92px;
   margin-top: 36px;
+}
+
+/* ---------- transcript view options (theme settings on <html>) ----------
+ *
+ * `data-tool-style`, `data-grouping` and `data-thinking` are written by the theme
+ * engine next to `data-density`. Components already branch on them in JS (which
+ * component renders); these rules cover what only the stylesheet knows: how
+ * tightly a list of rows should sit and how much air a folded turn leaves.
+ */
+
+/* Rows are a list by definition: drop the paragraph gap the card rhythm carries. */
+:root[data-tool-style='rows'] .msg-body > .tool-row {
+  margin-bottom: 1px;
+}
+
+:root[data-tool-style='rows'] .msg-body > .tool-row + .command-card,
+:root[data-tool-style='rows'] .msg-body > .command-card + .tool-row {
+  margin-top: 3px;
+}
+
+/* Folding the work means what remains is answers: give them room to be read
+ * rather than letting them sit in the tight spacing of a list of steps. */
+:root[data-grouping='turns'] .msg-body.is-folded > .markdown {
+  margin-top: 2px;
 }
 
 /* ---------- density (theme setting on <html>) ---------- */

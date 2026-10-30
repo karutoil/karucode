@@ -25,8 +25,11 @@ import {
   THEME_DENSITIES,
   THEME_FONTS,
   THEME_FONT_LABELS,
+  THEME_GROUPING_CHOICES,
   THEME_MONO_FONTS,
   THEME_MONO_LABELS,
+  THEME_THINKING_CHOICES,
+  THEME_TOOL_STYLE_CHOICES,
   ThemeFileError,
   activeTheme,
   autosaveError,
@@ -42,19 +45,26 @@ import {
   setCustomCSS,
   setDensity,
   setFont,
+  setGrouping,
   setMono,
   setRounding,
   setThemeMode,
+  setThinking,
+  setToolStyle,
   themeContrast,
   themeFileSlug,
   themeLibrary,
   updateColors,
   type Theme,
+  type ThemeChoice,
   type ThemeColorKey,
   type ThemeColorsPatch,
   type ThemeDensity,
   type ThemeFont,
+  type ThemeGrouping,
   type ThemeMono,
+  type ThemeThinking,
+  type ThemeToolStyle,
 } from '../theme';
 import {
   CheckIcon,
@@ -76,6 +86,84 @@ const DENSITY_LABELS: Record<ThemeDensity, string> = {
 };
 
 const MODE_LABELS = { dark: 'Dark', light: 'Light' } as const;
+
+/**
+ * A segmented control for a transcript option. The hint below the row explains
+ * what the selected value will do to the conversation, because "Turns" on its own
+ * does not say what gets folded.
+ */
+function TranscriptChoice<T extends string>({
+  label,
+  value,
+  choices,
+  onChange,
+  testId,
+  describedBy,
+}: {
+  label: string;
+  value: T;
+  choices: readonly ThemeChoice<T>[];
+  onChange: (next: T) => void;
+  testId: string;
+  describedBy: string;
+}): JSX.Element {
+  const labelId = useId();
+  const selected = choices.find((choice) => choice.value === value);
+  return (
+    <div class="theme-field">
+      <span class="theme-field-label" id={labelId}>
+        {label}
+      </span>
+      <div class="theme-segments" role="group" aria-labelledby={labelId} data-testid={testId}>
+        {choices.map((choice) => (
+          <button
+            type="button"
+            key={choice.value}
+            class={`theme-segment${choice.value === value ? ' selected' : ''}`}
+            aria-pressed={choice.value === value}
+            title={choice.hint}
+            data-testid={`${testId}-${choice.value}`}
+            onClick={() => onChange(choice.value)}
+          >
+            {choice.label}
+          </button>
+        ))}
+      </div>
+      <p class="theme-field-hint" id={describedBy}>
+        {selected?.hint ?? ''}
+      </p>
+    </div>
+  );
+}
+
+/** A miniature of the real transcript, repainted by these very options. */
+function TranscriptPreview(): JSX.Element {
+  const theme = activeTheme.value;
+  return (
+    <div class="theme-preview" data-testid="theme-transcript-preview" aria-hidden="true">
+      <p class="theme-preview-narration" data-on={theme.grouping === 'turns' ? 'folded' : 'shown'}>
+        Reading the transcript layout…
+      </p>
+      <div class="theme-preview-row" hidden={theme.toolStyle === 'cards'}>
+        <span class="theme-preview-dot" />
+        <span class="theme-preview-name">read_file</span>
+        <span class="theme-preview-args">src/theme/types.ts</span>
+        <span class="theme-preview-meta">12ms</span>
+      </div>
+      <div class="theme-preview-card" hidden={theme.toolStyle === 'rows'}>
+        <span class="theme-preview-card-head">
+          <span class="theme-preview-dot" />
+          <span class="theme-preview-name">read_file</span>
+          <span class="theme-preview-args">src/theme/types.ts</span>
+        </span>
+        <span class="theme-preview-card-body">export type ThemeToolStyle = …</span>
+      </div>
+      <p class={`theme-preview-thought${theme.thinking === 'collapsed' ? ' is-collapsed' : ''}`}>
+        Thought{theme.thinking === 'preview' ? ' · The view options belong on the theme.' : ''}
+      </p>
+    </div>
+  );
+}
 
 /** Section copy is the mock's own wording; the engine keeps the canonical data. */
 const COLOR_GROUP_COPY: Record<string, { title: string; description: string }> = {
@@ -590,6 +678,51 @@ export function ThemeStudio(): JSX.Element | null {
                 {theme.rounding}px
               </output>
             </div>
+          </section>
+
+          <section class="theme-section" aria-labelledby={`${titleId}-transcript`}>
+            <div class="theme-section-title">
+              <h3 id={`${titleId}-transcript`}>Transcript</h3>
+            </div>
+            <p class="theme-description">
+              Decide how much of the agent’s work the conversation shows at once. Long sessions
+              stay readable without hiding anything: every folded step opens in a click.
+            </p>
+
+            <TranscriptPreview />
+
+            <div class="theme-setting-grid theme-transcript-grid">
+              <TranscriptChoice
+                label="Tool calls"
+                value={theme.toolStyle}
+                choices={THEME_TOOL_STYLE_CHOICES}
+                onChange={(next) => setToolStyle(next as ThemeToolStyle)}
+                testId="theme-tool-style"
+                describedBy={`${titleId}-tool-style-hint`}
+              />
+              <TranscriptChoice
+                label="Grouping"
+                value={theme.grouping}
+                choices={THEME_GROUPING_CHOICES}
+                onChange={(next) => setGrouping(next as ThemeGrouping)}
+                testId="theme-grouping"
+                describedBy={`${titleId}-grouping-hint`}
+              />
+            </div>
+
+            <TranscriptChoice
+              label="Reasoning"
+              value={theme.thinking}
+              choices={THEME_THINKING_CHOICES}
+              onChange={(next) => setThinking(next as ThemeThinking)}
+              testId="theme-thinking"
+              describedBy={`${titleId}-thinking-hint`}
+            />
+
+            <p class="theme-transcript-note">
+              The transcript keeps anything you must act on visible whatever you choose here: a
+              running call, a pending approval, an error and a notice are never folded.
+            </p>
           </section>
 
           <section class="theme-section" aria-labelledby={`${titleId}-advanced`}>

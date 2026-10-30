@@ -25,6 +25,32 @@ export function projectInitials(name: string, path = ''): string {
   return (letters === '' ? '?' : letters).toUpperCase();
 }
 
+/**
+ * The square glyph for one project: the project's own `favicon.ico` when it has
+ * one, otherwise its initials.
+ *
+ * The icon is an object URL owned by `state/projectIcons.ts` (the bytes were
+ * fetched with the bearer token, which an `<img src>` could not send). It is
+ * decorative either way: the button around it carries the accessible name, so the
+ * image is `aria-hidden`.
+ */
+function ProjectGlyph({ project }: { project: Project }): JSX.Element {
+  const iconUrl = store.projectIcons.value[project.id];
+  const initials = projectInitials(project.name, project.path);
+  if (!iconUrl) {
+    return (
+      <span class="project-rail-avatar" aria-hidden="true">
+        {initials}
+      </span>
+    );
+  }
+  return (
+    <span class="project-rail-avatar has-icon" aria-hidden="true">
+      <img class="project-rail-icon" src={iconUrl} alt="" draggable={false} decoding="async" />
+    </span>
+  );
+}
+
 function sessionLabel(count: number): string {
   return count === 1 ? '1 session' : `${count} sessions`;
 }
@@ -445,9 +471,7 @@ export function ProjectRail(): JSX.Element {
                       openMenu(project, event.currentTarget);
                     }}
                   >
-                    <span class="project-rail-avatar" aria-hidden="true">
-                      {projectInitials(project.name, project.path)}
-                    </span>
+                    <ProjectGlyph project={project} />
                   </button>
 
                   {active ? (

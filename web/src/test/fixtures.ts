@@ -8,6 +8,7 @@ import type {
 import { setAuthToken } from '../api/client';
 import * as actions from '../state/actions';
 import { emptyChatState } from '../state/chat';
+import { resetProjectIcons } from '../state/projectIcons';
 import * as store from '../state/store';
 
 export const NOW = 1_710_000_100_000;
@@ -19,10 +20,12 @@ export const configFixture: Config = {
     base_url: 'http://127.0.0.1:4000/v1',
     model: 'gpt-4o-mini',
     temperature: 0.2,
+    send_temperature: false,
     max_tokens: null,
     top_p: null,
     request_timeout_secs: 300,
     parallel_tool_calls: true,
+    supports_images: false,
     api_key_set: true,
   },
   providers: [
@@ -199,6 +202,7 @@ export const detailFixture: SessionDetail = {
 
 export function resetAppState(): void {
   actions.resetRuntimeForTests();
+  resetProjectIcons();
   setAuthToken(null);
   store.writeLastSessionId(null);
   store.boot.value = 'loading';
@@ -222,6 +226,16 @@ export function resetAppState(): void {
   store.fileViewerPath.value = null;
   store.resolvingApprovals.value = {};
   store.stopping.value = false;
+  store.agentsAll.value = [];
+  store.agentsLoading.value = false;
+  store.agentsError.value = null;
+  store.agentScope.value = 'workspace';
+  store.agentFilter.value = 'all';
+  store.selectedAgentId.value = null;
+  store.agentActivities.value = {};
+  store.agentDetailLoading.value = false;
+  store.agentDetailError.value = null;
+  actions.resetPluginPanelData();
   store.composerFocusTick.value = 0;
   store.sentMessageTick.value = 0;
   store.resetToastTimers();

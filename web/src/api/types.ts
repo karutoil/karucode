@@ -65,6 +65,14 @@ export interface ModelEntry {
   max_output_tokens?: number | null;
   tool_call?: boolean | null;
   reasoning?: boolean | null;
+  /**
+   * Whether the model accepts **image** input, so `read_file` may show it a
+   * PNG/JPEG/GIF/WebP. `null`/absent means "not declared": the install-wide
+   * `model.supports_images` default applies. Prefilled from models.dev
+   * (`modalities.input` containing `image`) and editable, because a gateway may
+   * serve a vision model under a text-only id or the other way round.
+   */
+  vision?: boolean | null;
   cost_input?: number | null;
   cost_output?: number | null;
   /** models.dev provider the metadata came from, when prefilled. */
@@ -119,6 +127,13 @@ export interface CatalogModel {
   max_output_tokens?: number;
   tool_call?: boolean;
   reasoning?: boolean;
+  /**
+   * Whether models.dev says this model takes **image** input. Present only when
+   * the document answers: a model whose inputs are `audio` or `pdf` alone is
+   * `false` even though it is an "attachment" model, because handing it a PNG
+   * fails the whole turn.
+   */
+  vision?: boolean;
   cost_input?: number;
   cost_output?: number;
 }
@@ -171,10 +186,17 @@ export interface PublicModelConfig {
   base_url: string;
   model: string;
   temperature: number;
+  /** Whether a temperature is sent at all (off by default). */
+  send_temperature: boolean;
   max_tokens: number | null;
   top_p: number | null;
   request_timeout_secs: number;
   parallel_tool_calls: boolean;
+  /**
+   * Install-wide default: may `read_file` show the model an image? A
+   * `[[providers.models]] vision` entry overrides it per model.
+   */
+  supports_images: boolean;
   api_key_set: boolean;
 }
 
@@ -220,6 +242,43 @@ export interface ConfigPluginSummary {
   permissions: string[];
 }
 
+/**
+ * One inspector panel a plugin contributes.
+ *
+ * `data` is not part of this: it is fetched per panel from
+ * `GET /api/plugins/:name/panels/:panel` and is opaque JSON, so it is typed as
+ * `unknown` at that boundary rather than here.
+ */
+export interface PluginPanelSummary {
+  id: string;
+  /** `plugin__<plugin>__<id>`: the tab id and the key for a renderer. */
+  hosted_id: string;
+  title: string;
+  icon: string | null;
+  /** `tool` or `static`. Both are read through `panels/read`. */
+  source: string;
+  /** Suggested poll interval in ms; 0 means "only on explicit refresh". */
+  refresh_ms: number;
+}
+
+/** Panels contributed by one plugin, in manifest order. */
+export interface PluginPanelGroup {
+  plugin: string;
+  version: string;
+  panels: PluginPanelSummary[];
+}
+
+/** `GET /api/plugins/:name/panels/:panel` — the payload the UI renders. */
+export interface PluginPanelData {
+  /** Title the plugin wants shown (its manifest's title when it omits one). */
+  title: string;
+  /** Opaque JSON. Untrusted: validate before reading any field. */
+  data: unknown;
+  /** Cache key; changes whenever a fresh read happened. */
+  version: number;
+  fetched_ms: number;
+}
+
 export interface ConfigMcpSummary {
   name: string;
   transport: string;
@@ -239,7 +298,18 @@ export interface Config {
   approvals: ApprovalPolicy;
   subagents: SubagentConfig;
   plugins: ConfigPluginSummary[];
+  /**
+   * Inspector panels contributed by ready plugins, grouped per plugin.
+   * Absent on an older server, which simply means "no plugin tabs".
+   */
+  plugin_panels?: PluginPanelGroup[];
   mcp_servers: ConfigMcpSummary[];
+  /**
+   * Whether the server re-reads plugin sources on a timer (`plugins_watch`), and
+   * how often. Absent on an older server, which never hot-reloads on its own.
+   */
+  plugins_watch?: boolean;
+  plugins_watch_secs?: number;
   settings_locked: boolean;
   /** Provider ids this server can actually build. Drives the settings selector. */
   available_providers?: string[];
@@ -251,10 +321,13 @@ export interface ModelConfigPatch {
   base_url?: string;
   model?: string;
   temperature?: number;
+  send_temperature?: boolean;
   max_tokens?: number | null;
   top_p?: number | null;
   request_timeout_secs?: number;
   parallel_tool_calls?: boolean;
+  /** Install-wide default for image input; a per-model `vision` wins. */
+  supports_images?: boolean;
   /** Write-only. Never rendered back. */
   api_key?: string | null;
   clear_api_key?: boolean;
@@ -337,7 +410,22 @@ export interface StoredMessage {
   tool_calls: ToolCall[] | null;
   tool_call_id: string | null;
   name: string | null;
+  /** Images the tool returned for a vision model (base64, no `data:` prefix). */
+  images?: ImageAttachment[] | null;
   created_at: number;
+}
+
+/**
+ * An image a tool handed the model, exactly as the server stores it. `data` is
+ * standard base64; the UI turns it into a data URL for `<img src>`. Only the
+ * media types the vision APIs accept are ever produced (`image/png`, `jpeg`,
+ * `gif`, `webp`).
+ */
+export interface ImageAttachment {
+  media_type: string;
+  data: string;
+  bytes: number;
+  name?: string | null;
 }
 
 export interface RunRecord {
@@ -370,6 +458,27 @@ export interface AgentRecord {
   created_at: number;
   updated_at: number;
   finished_at: number | null;
+}
+
+/**
+ * An agent plus the session context the workspace-wide Agents view needs.
+ *
+ * The server flattens the agent fields into the same object, so this extends
+ * `AgentRecord`; `session_title` and `workspace` are what a global list cannot
+ * derive on the client without one request per session.
+ */
+export interface AgentSummary extends AgentRecord {
+  session_title: string;
+  workspace: string;
+  project_id: string | null;
+}
+
+/** `GET /api/agents/:id`: the agent and the transcript it wrote. */
+export interface AgentDetail {
+  agent: AgentSummary;
+  messages: StoredMessage[];
+  messages_truncated: boolean;
+  messages_limit: number;
 }
 
 export type ApprovalKind =
@@ -423,6 +532,14 @@ export interface ClaimRecord {
 export interface SessionDetail {
   session: Session;
   messages: StoredMessage[];
+  /**
+   * True when the server returned only the newest `messages_limit` messages.
+   * The window is the *tail*: without this the transcript would silently start
+   * mid-conversation on a long session.
+   */
+  messages_truncated?: boolean;
+  /** The window size the server applied (default 5 000). */
+  messages_limit?: number;
   runs: RunRecord[];
   agents: AgentRecord[];
   approvals: ApprovalRecord[];
@@ -493,6 +610,21 @@ export interface WorkspaceFile {
   language: string | null;
 }
 
+/**
+ * `200` response of `PUT /api/workspace/file` — the editor's save.
+ *
+ * The body sent is `{ content, expected_size? }`; `created` says the save made a
+ * new file rather than replacing one.
+ */
+export interface WorkspaceFileWrite {
+  path: string;
+  /** Bytes written (`content.length` in UTF-8). */
+  size: number;
+  /** True when the file did not exist before this save. */
+  created: boolean;
+  language: string | null;
+}
+
 export interface GitFile {
   path: string;
   status: string;
@@ -536,6 +668,19 @@ export interface PluginDiagnostics {
   restart_count: number;
 }
 
+/** What one plugin rescan changed. Empty arrays mean "nothing to do". */
+export interface PluginRescanReport {
+  added: string[];
+  removed: string[];
+  restarted: string[];
+  unchanged: string[];
+}
+
+export interface PluginRescanResponse {
+  report: PluginRescanReport;
+  plugins: PluginDiagnostics[];
+}
+
 export interface McpServer {
   name: string;
   transport: string;
@@ -555,6 +700,11 @@ export interface EventEnvelope {
 export interface Usage {
   input_tokens: number;
   output_tokens: number;
+  /**
+   * Prompt tokens the provider served from its prefix cache. Absent when the
+   * endpoint does not report them - which is different from a 0% hit rate.
+   */
+  cached_tokens?: number;
 }
 
 /** Known server-sent events. Unknown event types are ignored by the reducer. */
@@ -564,13 +714,14 @@ export type KnownEvent = EventEnvelope &
     | { type: 'session_renamed'; session_id: string; title: string }
     | { type: 'session_model_changed'; session_id: string; model: SessionModelSelection | null }
     | { type: 'session_deleted'; session_id: string }
+    | { type: 'steer_applied'; steer_id: string; content: string }
     | { type: 'run_started'; run_id: string; prompt: string }
     | { type: 'run_finished'; run_id: string; status: RunStatus; error?: string | null }
     | { type: 'run_cancelled'; run_id: string }
     | { type: 'iteration_started'; iteration: number }
     | { type: 'text_delta'; delta: string }
     | { type: 'reasoning_delta'; delta: string }
-    | { type: 'usage'; input_tokens: number; output_tokens: number }
+    | { type: 'usage'; input_tokens: number; output_tokens: number; cached_tokens?: number }
     | {
         type: 'tool_call_started';
         call_id: string;
@@ -585,6 +736,8 @@ export type KnownEvent = EventEnvelope &
         output: string;
         truncated: boolean;
         duration_ms: number;
+        /** Images the tool attached for a vision model; absent when it refused. */
+        images?: ImageAttachment[];
       }
     | { type: 'command_started'; call_id: string; command: string; cwd: string }
     | {
@@ -649,3 +802,63 @@ export interface Toast {
   tone: 'info' | 'success' | 'error';
   message: string;
 }
+
+/**
+ * One browser terminal.
+ *
+ * `id`, `title`, `cwd` and `position` are the *durable* half, stored in SQLite:
+ * they come back in every browser and after every server restart. `running`,
+ * `pid` and `attached` are the *process* half and describe the shell this
+ * server has right now - a terminal with `running: false` is a tab that will
+ * start a fresh shell when opened.
+ */
+export interface Terminal {
+  id: string;
+  title: string;
+  /** Absolute directory the shell was started in. */
+  cwd: string;
+  /** The project it was created in, as a label only. */
+  project: string | null;
+  /** Sort key for the tab strip; ties break on `created_at`. */
+  position: number;
+  created_at: number;
+  updated_at: number;
+  last_used_at: number;
+  /** A live shell exists for this tab right now. */
+  running: boolean;
+  pid: number;
+  /** How many browsers are attached (0 or 1 in practice). */
+  attached: number;
+}
+
+export interface TerminalList {
+  /** False when the server has the terminal disabled; the tab is hidden then. */
+  enabled: boolean;
+  terminals: Terminal[];
+  /** `terminals.max_terminals`, so the UI can disable **New** at the cap. */
+  max_terminals?: number;
+  /** The resolved shell program, shown as a hint. */
+  shell?: string;
+  scrollback_bytes?: number;
+}
+
+export interface TerminalCreateRequest {
+  title?: string;
+  cwd?: string;
+  project?: string | null;
+  cols?: number;
+  rows?: number;
+}
+
+/**
+ * A control frame from the terminal websocket. Binary frames are raw PTY bytes;
+ * only text frames are JSON, so a program printing arbitrary bytes cannot forge
+ * one of these.
+ */
+export type TerminalControlFrame =
+  | { type: 'ready'; replay: boolean; replay_bytes: number; pid: number; running: boolean }
+  | { type: 'exit'; code: number | null }
+  | { type: 'lagged'; missed: number }
+  | { type: 'detached' }
+  | { type: 'error'; message: string }
+  | { type: 'pong' };

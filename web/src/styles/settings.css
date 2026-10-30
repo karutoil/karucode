@@ -907,6 +907,16 @@
   overflow-wrap: anywhere;
 }
 
+/* Lifecycle controls (reload / enable) sit under the row they act on, so the
+   name and status stay in the same columns they had when the list was read-only. */
+.diagnostics-actions {
+  display: flex;
+  grid-column: 2 / -1;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
 /* ---------- security note --------------------------------------------- */
 
 .security-note {

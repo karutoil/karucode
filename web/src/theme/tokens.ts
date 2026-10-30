@@ -7,7 +7,7 @@
  * can be unit-tested without a DOM.
  */
 
-import { contrastRatio, mix, readableTextOn } from './color';
+import { contrastRatio, hslToHex, mix, readableTextOn, rgbToHsl } from './color';
 import { resolveRoles } from './roles';
 import type {
   DensityScale,
@@ -64,12 +64,36 @@ function readableAccent(accent: string, text: string, backgrounds: readonly stri
 }
 
 /**
+ * A tinted background: the accent's *hue and chroma*, held at a surface-like
+ * lightness. Plain `mix()` is wrong for this — mixing a warm accent into a
+ * near-black surface drags the result toward the surface's own hue, so the tint
+ * washed out to a grey as soon as the surfaces were lifted. Selected rows,
+ * accent chips and status pills all paint with these, so they must keep their
+ * colour identity.
+ *
+ * `lift` is the lightness step off the surface (up in dark mode, down in light),
+ * and the chroma is a fraction of the accent's own saturation.
+ */
+function tint(surface: string, accent: string, chroma: number, lift: number): string {
+  const surfaceHsl = rgbToHsl(surface);
+  const accentHsl = rgbToHsl(accent);
+  const lightness = Math.min(1, Math.max(0, surfaceHsl.l + lift));
+  return hslToHex(accentHsl.h, accentHsl.s * chroma, lightness);
+}
+
+/**
  * Every non-editable token, derived from the palette input. Keeping this in one
  * function means a colour edit can never leave a stale divider or tint behind.
  */
 export function resolvePalette(theme: Theme): ResolvedPalette {
   const c = theme.colors;
-  const accentBg = mix(c.surface, c.accent, 0.17);
+  const dark = theme.mode === 'dark';
+  // The tint sits a step off the surface and carries most of the accent's
+  // chroma. Tuned so the result reads as a tinted surface (contrast ~1.2-1.3
+  // against the card) rather than a near-invisible wash (1.09) or a glow.
+  const step = dark ? 0.06 : -0.085;
+  const chroma = 0.6;
+  const accentBg = tint(c.surface, c.accent, chroma, step);
   // The accent becomes text (eyebrow, badge, selected card) and the fill of the
   // primary button. Both uses need AA, so nudge it toward text until it passes
   // on every surface it sits on — never mutate the user's editable colour.
@@ -91,8 +115,8 @@ export function resolvePalette(theme: Theme): ResolvedPalette {
     accentLine: mix(c.border, c.accent, 0.45),
     accentText,
     onAccent: readableTextOn(accentText),
-    successBg: mix(c.surface, c.success, 0.16),
-    dangerBg: mix(c.surface, c.danger, 0.16),
+    successBg: tint(c.surface, c.success, chroma, step),
+    dangerBg: tint(c.surface, c.danger, chroma, step),
     shadow: theme.mode === 'light' ? 'rgba(15, 23, 42, 0.16)' : 'rgba(0, 0, 0, 0.48)',
   };
 }
