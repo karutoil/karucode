@@ -7,7 +7,7 @@
 
 - **Slug:** `projects`
 - **Tags:** projects, sessions, workspace, directories
-- **Applies to:** `route:GET /api/projects`, `route:POST /api/projects`, `route:PATCH /api/projects/:id`, `route:DELETE /api/projects/:id`, `route:GET /api/sessions`, `route:PATCH /api/sessions/:id/model`, `config:workspace`, `env:KARUCODE_WORKSPACE`, `cmd:--workspace`, `ui:ProjectRail`, `concept:session workspace`
+- **Applies to:** `route:GET /api/projects`, `route:POST /api/projects`, `route:PATCH /api/projects/:id`, `route:DELETE /api/projects/:id`, `route:GET /api/projects/:id/favicon`, `route:GET /api/sessions`, `route:PATCH /api/sessions/:id/model`, `config:workspace`, `env:KARUCODE_WORKSPACE`, `cmd:--workspace`, `ui:ProjectRail`, `concept:session workspace`, `concept:favicon.ico`
 - **Source:** `crates/kc-server/src/state.rs:6`
 
 ---
@@ -44,6 +44,56 @@ A run's file tools resolve paths inside its session's project directory only:
 inherit the workspace of the run that spawned them. The workspace explorer and
 `/api/workspace/*` use the same rule.
 
+The one exception is the system temporary directory, which every workspace
+also allows (`allow_temp_dir`, on by default) so scratch files, build output
+and screenshots in `/tmp` are usable. It is an additional root, not a widening
+of the project's: `..` out of it and symlinks pointing elsewhere are still
+refused. `project_roots` below is a different setting - it decides where a
+project may be *created*, not what a run's tools may touch.
+
+## Which directories a project may be created in
+
+Any existing directory, except `/`. There is no allowlist by default: adding a
+second checkout that sits next to the workspace is the normal case and must not
+need an environment variable. `/` itself is refused, because a project's
+directory is the confinement root for its sessions and `/` would make every
+file tool able to read the whole disk.
+
+Pin the list with `project_roots` (`KARUCODE_PROJECT_ROOTS`, colon-separated)
+when the server is reachable by more than one person, or when you want the API
+unable to register a directory outside your projects. Paths are compared
+component-wise on canonical paths, so `/srv/app-evil` is not inside `/srv/app`.
+
+## The project rail icon
+
+Each square in the project rail draws the project's own `favicon.ico` when it
+has one, and its initials when it does not. The file is found by
+`GET /api/projects/:id/favicon`, which searches that project's directory:
+
+* only the name `favicon.ico`, matched case-insensitively (a `favicon.svg` or
+  `apple-touch-icon.png` is not considered);
+* `.gitignore` rules apply - the project's own, nested ones and
+  `.git/info/exclude` - even outside a git repository, so a favicon in ignored
+  build output or a vendored copy is skipped. Your *global* gitignore is not
+  read, so the answer does not depend on which machine serves the project;
+* hidden directories, `node_modules` and `target` are skipped, the walk stops
+  after 6 levels and 20000 entries, and the shallowest match wins
+  (`favicon.ico` beats `public/favicon.ico` beats `web/public/favicon.ico`);
+* a file over 512 KiB, a symlink pointing outside the project, and an empty
+  file are all treated as "no icon".
+
+No icon is an empty `204 No Content`, which is the normal case and is not an
+error: the rail falls back to initials. It is deliberately not a `404` - a
+browser logs every 4xx as `Failed to load resource`, so an expected absence
+would look like a broken deployment. An unknown project id is still a `404`,
+because that one is a caller mistake.
+
+Nothing is cached server-side, so replacing a favicon shows up on the next
+load of the page. The bytes are fetched with the bearer token (an `<img src>`
+cannot send one) and turned into an object URL, so this works on a deployment
+with `KARUCODE_AUTH_TOKEN` set - and it is why the page CSP must allow
+`blob:` in `img-src`.
+
 ## Deleting
 
 Deleting a project removes its rows from SQLite and never touches files on
@@ -66,4 +116,5 @@ stop it first. This is deliberate: a misclick must not delete source code.
 * Symlinked project roots are canonicalised on insert, so the stored path is the
   real one.
 
-Full reference: `README.md` (Projects), `docs/API.md` (projects).
+Full reference: `docs/ARCHITECTURE.md` (Workspace per run), `docs/API.md`
+(projects).

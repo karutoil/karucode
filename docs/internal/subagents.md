@@ -7,7 +7,7 @@
 
 - **Slug:** `subagents`
 - **Tags:** subagents, delegation, agents, parallel, spawn_agent, long-running
-- **Applies to:** `tool:spawn_agent`, `config:[subagents]`, `config:subagents.max_iterations`, `config:subagents.max_continues`, `config:subagents.timeout_secs`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_MAX_CONTINUES`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `route:GET /api/sessions/:id`, `ui:AgentsTab`
+- **Applies to:** `tool:spawn_agent`, `config:[subagents]`, `config:subagents.max_iterations`, `config:subagents.max_continues`, `config:subagents.timeout_secs`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_MAX_CONTINUES`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `route:GET /api/sessions/:id`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `ui:AgentsTab`
 - **Source:** `crates/kc-runtime/src/subagent.rs:20`
 
 ---
@@ -63,6 +63,23 @@ the parent's conversation, its tool results, or its claims. Transcripts are
 persisted with the agent id so the parent chat stays clean; the UI shows
 progress and the final result per agent.
 
+## Watching a subagent
+
+Open the **Agents** tab in the inspector. It lists agents for the whole project
+(not only the open session), so a review fan-out is visible while you work
+somewhere else. The status chips - Running, Done, Failed, Cancelled, Interrupted
+- carry counts and filter the list; switching to **This session** narrows it to
+the working session.
+
+Click an agent to open its drill-in view: the task it was given, its model and
+parent, and its live transcript - assistant text, thinking, each tool call with
+status and output, commands with exit codes, and approvals it is waiting on. The
+transcript keeps streaming while the agent runs and is backfilled from SQLite
+when you open an agent that finished before the page loaded.
+
+The same data is available over HTTP: `GET /api/agents?project=<id>` and
+`GET /api/agents/:id`. Both are documented in `docs/API.md`.
+
 ## Failure handling
 
 A subagent failure is a failed tool result for the parent - it never fails the
@@ -86,5 +103,6 @@ an explanatory message.
   `timeout_secs`. Keep it pointed at one task; split unrelated work into
   separate subagents instead of widening one.
 
-Full reference: `README.md` (Subagents). `GET /api/sessions/:id` returns the
-session's `agents` array alongside its messages and runs.
+Full reference: `docs/internal/subagents.md` (this page) and the
+`subagents` topic; `GET /api/sessions/:id` returns the session's `agents`
+array alongside its messages and runs.

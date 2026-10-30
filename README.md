@@ -1,198 +1,252 @@
-# karucode
+<p align="center">
+  <img src="branding/social/banner.png" alt="karucode — a self-hosted coding agent for long sessions" width="1280">
+</p>
 
-A small, self-hosted coding agent with a browser workspace. Rust backend, one
-binary, SQLite state, any OpenAI-compatible endpoint (including a local gateway),
-and a UI designed for long sessions rather than for a dashboard demo.
+<h1 align="center">karucode</h1>
 
+<p align="center">
+  <strong>A self-hosted coding agent for long sessions.</strong><br>
+  one Rust binary · SQLite state · any OpenAI-compatible endpoint · no Node at runtime
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-dfb680.svg" alt="MIT license"></a>
+  <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.82%2B-dfb680.svg" alt="Rust 1.82+"></a>
+  <a href="docs/API.md"><img src="https://img.shields.io/badge/API-v1-dfb680.svg" alt="API v1"></a>
+</p>
+
+---
+
+karucode reads your project, searches it, edits files, runs commands with streamed
+output, inspects git, delegates to subagents and keeps going through multi-step
+tasks until the work is done or you stop it. You answer approvals in a browser
+workspace built for a long session, not for a dashboard demo.
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│ browser (Preact UI, served by the same origin)          │
+└─────────────────────────────────────────────────────────┘
+      REST + SSE
+      ▼
+┌─────────────────────────────────────────────────────────┐
+│ karucode — one Rust binary                              │
+│                                                         │
+│ ├─ axum API + SSE .. embedded UI, same origin           │
+│ ├─ agent loop ...... approvals, subagents, budgets      │
+│ ├─ provider ........ any OpenAI-compatible endpoint     │
+│ ├─ tools ........... files, search, shell, git, docs    │
+│ ├─ plugins + MCP ... out of process, namespaced         │
+│ └─ SQLite (WAL) .... projects, sessions, runs, agents   │
+└─────────────────────────────────────────────────────────┘
 ```
-┌──────────────────────────────── browser (Preact) ────────────────────────────────┐
-│ sessions │                      chat / stream                    │ workspace     │
-└──────────┴───────────────────────────────────────────────────────┴───────────────┘
-                 REST + SSE  (same origin, no websocket server)
-┌──────────────────────────────── karucode (Rust) ─────────────────────────────────┐
-│ axum API  ·  agent runtime  ·  provider  ·  tools  ·  subagents  ·  plugins/MCP  │
-│ SQLite (WAL): projects, sessions, runs, agents, settings, claims                      │
-└──────────────────────────────────────────────────────────────────────────────────┘
-```
 
-It does the actual work: reads the project, searches it, edits files, runs
-commands with streamed output, inspects git, delegates to subagents, and keeps
-going through multi-step tasks until the work is done or you stop it. Every
-mutation that matters asks for approval by default.
+## Contents
 
-## What is implemented
+| | |
+| --- | --- |
+| [What it does](#what-it-does) | the runtime, tools, approvals, containment, crash recovery |
+| [Quick start](#quick-start) | build it and run a real task in two commands |
+| [Install](#install) | container or systemd, without a checkout |
+| [Configuration](#configuration) | precedence, the keys that matter, remote access |
+| [Providers](#providers) | gateways, named profiles, model metadata, retries |
+| [Plugins and MCP](#plugins-and-mcp) | add tools with a separate process or a server |
+| [Security](#security) | the trust boundaries, and the one that is missing |
+| [Development](#development) | tests, gates, the docs contract, repository layout |
+| [Known limitations](#known-limitations) | what it does not do, stated plainly |
+| [License](#license) | MIT, and where the brand rules live |
 
-**Agent runtime**
-- Multi-step loop: stream → tool calls → results → repeat, bounded by iterations,
-  wall-clock time, per-turn tool-call count and context budget.
-- Streaming text, reasoning and tool-call deltas; tool calls split across chunks
-  are reassembled.
-- Cancellation aborts the provider stream, kills shell process groups, expires
-  pending approvals and marks the run `cancelled`.
-- Restart recovery marks leftover `running` runs/agents as `interrupted` and
-  pending approvals as `expired`; history is durable in SQLite.
-- Bounded tool output with explicit truncation markers (never silent loss).
-- Practical system prompt, provider-agnostic, no model-specific assumptions.
+## What it does
 
-**Tools**: `read_file`, `list_dir`, `search_files` (ripgrep, pure-Rust fallback),
-`write_file`, `edit_file` (exact-match, ambiguity-safe), `run_command` (streamed,
-process group, timeout, output cap), `git_status`, `git_diff`, plus `spawn_agent`.
-
-**Workspace containment**: every file tool resolves through a confined workspace
-(no `..` escapes, no absolute paths outside, canonicalisation blocks symlink
-escapes, atomic writes). Shell commands are explicitly **not** sandboxed.
-
-**Projects**: a project is a canonical directory plus a display name; sessions can
-be grouped by project and each run is confined to its session's project directory
-(a session without a project uses the default directory).
-`--workspace` / `KARUCODE_WORKSPACE` is that default. On first start one project
-is created for the configured workspace, and sessions from before projects existed
-are attached to the project matching their recorded directory (creating it if
-needed); a workspace that has disappeared keeps its history and stays unattached.
-Subagents inherit the workspace of the run that spawned them. Deleting a project
-removes its rows, never files on disk. The web client lists and switches projects
-through `/api/projects` and the `?project=`-scoped session, workspace-file/tree and
-git requests.
-
-**Provider profiles**: a config file can declare several named OpenAI-compatible
-endpoints, each with its own key, timeout and curated model list; `active_provider`
-/ `active_model` (or the equivalent `PATCH /api/config`) select what every run
-uses. Model metadata (context window, output limit, tool calling, reasoning, cost)
-can be prefilled from the models.dev catalog, which the server fetches and caches.
-See [Provider profiles](#provider-profiles-and-the-model-library).
-
-**Approvals**: `ask` by default for shell + writes, with command prefix
-allowlists, per-path auto-approval, `ask_commands`, `auto` and `read_only` modes;
-`allow once` / `allow for session` / `deny` in the UI, persisted and audited.
-
-**Subagents**: bounded concurrent delegation with a semaphore, inherited model
-and settings (optional model override), nested transcripts persisted with
-`agent_id`, progress + result in the UI, cancellation propagates, recursion off by
-default, advisory `owned_paths` claims. A subagent runs under the same
-checkpoint rule as a run: `subagents.max_iterations` per segment, refreshed up to
-`subagents.max_continues` times inside `subagents.timeout_secs` (4h by default),
-so a delegated coding task survives its first budget instead of dying at it.
-
-**UI**: streaming Markdown chat with code blocks and safe rendering, tool activity
-cards, command output panel, approval cards, workspace explorer + file viewer,
-git changes/diff view, subagent panel, model/connection settings, keyboard
-shortcuts, responsive down to mobile, accessible controls.
-
-**Extensions**: out-of-process plugins (JSON-RPC over stdio, supervised, crash
-isolated, versioned protocol v1, capability/permission declarations, hooks) with a
-working example plugin; MCP client for stdio and streamable-HTTP servers with
-namespaced `mcp__<server>__<tool>` tools. See [docs/PLUGINS.md](docs/PLUGINS.md)
-and [docs/MCP.md](docs/MCP.md).
-
-**Self-documentation**: the facts a user needs about karucode itself are written as
-`@kc-doc` comments next to the code that implements them and compiled into the
-binary, so they cannot drift from the build. The model searches and reads them
-through the read-only `karucode_docs` tool; the same entries are mirrored to
-[docs/internal](docs/internal/) for humans. See [docs/INTERNAL-DOCS.md](docs/INTERNAL-DOCS.md)
-and the contribution contract in [AGENTS.md](AGENTS.md).
-
-## Prerequisites
-
-* Linux (primary target; other Unixes should work). Rust 1.82+ (built and tested
-  with 1.96).
-* Node.js 20+ **only for building the frontend**. Not needed at runtime: the
-  built UI is embedded in, or served by, the Rust process.
-* Optional: `ripgrep` (faster search; a pure-Rust fallback is built in), `git`.
+* **Long-horizon runs.** The iteration budget belongs to a *segment*: when it
+  runs out mid-task the runtime refreshes it and keeps going in the same session,
+  run and transcript. The ceiling is about
+  `(max_continues + 1) × max_iterations` turns — 10,200 with the defaults — or a
+  24 h wall clock, whichever comes first.
+* **Real tools, real side effects.** Read, search, write and edit files; run
+  shell commands with streamed output in their own process group; inspect git;
+  spawn subagents. Every tool result is bounded with an explicit truncation
+  marker, never silently dropped.
+* **Approvals before mutations.** `ask` by default for shell and writes, with
+  command-prefix allowlists, per-path auto-approval, `ask_commands`, `auto` and
+  `read_only` modes; allow-once / allow-for-session / deny in the UI, audited.
+* **Containment for file tools.** Every path resolves through a confined
+  workspace: no `..` escapes, no absolute paths outside, symlink escapes
+  canonicalised away, writes atomic. The system temp dir is an extra root by
+  default (`KARUCODE_ALLOW_TEMP_DIR`) so scratch files, build output and
+  screenshots work. Shell commands are explicitly **not** sandboxed — approvals
+  are the gate, not isolation.
+* **Crash-tolerant.** Cancellation aborts the provider stream, kills shell
+  process groups and marks the run `cancelled`. On restart, leftover `running`
+  runs become `interrupted` and pending approvals `expired`; nothing is silently
+  retried.
+* **Self-documenting.** The facts a user needs about karucode itself are written
+  as `@kc-doc` comments next to the code that implements them and compiled into
+  the binary, so they cannot drift from the build. The model reads them through
+  the read-only `karucode_docs` tool; humans read the mirror in
+  [docs/internal](docs/internal/).
 
 ## Quick start
 
+Prerequisites: Linux (primary target; other Unixes should work) and Rust 1.82+
+for the backend. Node.js 20+ is needed **only** to build the frontend — it is
+embedded into the binary and not needed at runtime. Optional: `ripgrep` (a
+pure-Rust fallback is built in) and `git`.
+
 ```bash
-git clone <repo> karucode && cd karucode
+git clone https://github.com/karutoil/karucode && cd karucode
 
-# 1. build the UI once
-cd web && npm ci && npm run build && cd ..
-
-# 2. build and run the server
 export KARUCODE_BASE_URL=http://127.0.0.1:4000/v1   # your gateway
 export KARUCODE_API_KEY=sk-...                     # if the gateway needs one
 export KARUCODE_MODEL=gpt-4o-mini
+
 cargo run --release -p kc-server -- --workspace /path/to/your/project
 ```
 
-Open <http://127.0.0.1:8787>. Create a session, type a task, approve the commands
-you want it to run.
+`cargo build` runs the frontend build itself (`npm ci` when the tree is missing
+or the lockfile moved, then `npm run build`) and embeds the result, so that is
+the whole build. Open <http://127.0.0.1:8787>, create a session, type a task,
+approve the commands you want it to run.
 
-Useful flags: `--help`, `--port`, `--host`, `--workspace`, `--data-dir`,
-`--config`. Flags override environment variables.
+Prefer not to build the UI? `KARUCODE_WEB_DIST=/path/to/web/dist` embeds a
+bundle built elsewhere, `KARUCODE_SKIP_WEB_BUILD=1` skips the frontend entirely
+(Rust-only iteration, placeholder page), and `KARUCODE_WEB_DIR=web/dist` serves
+the folder from disk while you edit it.
 
-Try it on the bundled demo (a Node project with a real bug):
+**Try it on a real bug.** `examples/demo-app` is a dependency-free Node project
+whose `add()` subtracts instead of adding, so two of its five tests fail:
 
 ```bash
 cargo run --release -p kc-server -- --workspace examples/demo-app
-# prompt: "Run the tests, find the failing cases, fix the bug in src/math.js, re-run the tests"
+# prompt: Run the tests, find the failing cases, fix the bug in src/math.js,
+#         and re-run the tests to prove it passes.
 ```
+
+Useful flags: `--help`, `--host`, `--port`, `--workspace`, `--data-dir`,
+`--config`. Flags beat environment variables for the process they start.
+
+## Install
+
+For a server rather than a checkout, [packaging/README.md](packaging/README.md)
+covers the operator side (proxy, backup, upgrade, uninstall). Short version:
+
+```bash
+# container: multi-stage, non-root, /data volume, healthcheck
+docker build -t karucode .
+docker run -d --name karucode -p 8787:8787 \
+  -e KARUCODE_AUTH_TOKEN=... -e KARUCODE_ADMIN_TOKEN=... \
+  -v karucode-data:/data -v /path/to/project:/workspace karucode
+
+# systemd: verified release tarball, binary + hardened unit
+sudo ./packaging/install.sh --workspace /srv/karucode/workspace
+# ... or install the build you already have, before any release exists:
+cargo build --release -p kc-server
+sudo ./packaging/install.sh --binary target/release/karucode --workspace /srv/karucode/workspace
+```
+
+`packaging/install.sh` downloads the release tarball, checks it against the
+release's `SHA256SUMS` and only then unpacks it. Nothing is piped from the
+network into a shell.
+
+`--workspace` is the directory the agent may read and edit; it is created and
+owned by the service user. It is not optional in practice: it is the writable
+path the unit is hardened around (`ProtectSystem=strict` plus `ReadWritePaths=`),
+and it goes into a drop-in at
+`/etc/systemd/system/karucode.service.d/10-install.conf` rather than into the
+unit file, so re-running the installer for an upgrade cannot lose it. The
+service is enabled at boot and started, and the installer waits until
+`/api/health` answers before it reports success. `--dry-run` prints every action
+without changing anything.
+
+Two things to set before exposing it beyond loopback: `KARUCODE_AUTH_TOKEN` (a
+non-loopback bind is refused without one, minimum 16 characters) and
+`KARUCODE_ADMIN_TOKEN` (so an ordinary API client cannot turn approvals off or
+repoint the provider). There is no TLS in the binary — put it behind a reverse
+proxy or an SSH tunnel.
 
 ## Configuration
 
 Precedence, highest first:
 
-1. overrides saved from the UI (SQLite `settings` table);
+1. overrides saved from the UI (the SQLite `settings` table);
 2. environment variables;
-3. config file (`KARUCODE_CONFIG`, default `~/.config/karucode/config.toml`);
+3. the config file — `KARUCODE_CONFIG`, default `~/.config/karucode/config.toml`;
 4. built-in defaults.
 
-`KARUCODE_LOCK_SETTINGS=1` removes layer 1, so a deployment can pin settings from
-the environment and reject browser edits with 403.
+`KARUCODE_LOCK_SETTINGS=1` removes layer 1, so a deployment can pin settings
+from the environment and reject browser edits with `403`.
 
-`[[providers]]` tables in the config file are part of layer 3. When any of
-`KARUCODE_MODEL`, `KARUCODE_BASE_URL`, `KARUCODE_API_KEY` (or `OPENAI_BASE_URL` /
-`OPENAI_API_KEY`) is set, the environment wins for the connection: the server
-expresses it as a reserved `env` profile and selects it, so the file's profiles
-stay defined but are not active.
-
-See [config.example.toml](config.example.toml) and [.env.example](.env.example) for
-every key. The important ones:
+The keys that matter most:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `KARUCODE_HOST` / `KARUCODE_PORT` | `127.0.0.1` / `8787` | bind address; non-loopback requires a token |
-| `KARUCODE_WORKSPACE` | cwd | default workspace root (for sessions without a project) |
-| `KARUCODE_DATA_DIR` | `~/.local/share/karucode` | SQLite + plugin data |
-| `KARUCODE_AUTH_TOKEN` | unset | Bearer token for remote access (≥16 chars) |
-| `KARUCODE_BASE_URL` | `http://127.0.0.1:4000/v1` | OpenAI-compatible base URL (wins over `[[providers]]`) |
+| `KARUCODE_HOST` / `KARUCODE_PORT` | `127.0.0.1` / `8787` | bind address; a non-loopback bind needs a token |
+| `KARUCODE_WORKSPACE` | cwd | default workspace root |
+| `KARUCODE_DATA_DIR` | `~/.local/share/karucode` | SQLite database + plugin data, mode `0700` |
+| `KARUCODE_AUTH_TOKEN` | unset | bearer token for remote access (≥16 chars) |
+| `KARUCODE_ADMIN_TOKEN` | unset | required to change approvals or the endpoint |
+| `KARUCODE_PROJECT_ROOTS` | unset (any dir) | colon-separated allowlist for where a project may be created |
+| `KARUCODE_ALLOW_TEMP_DIR` | `true` | let file tools also reach the system temp dir |
+| `KARUCODE_BASE_URL` | `http://127.0.0.1:4000/v1` | OpenAI-compatible base URL |
 | `KARUCODE_API_KEY` | unset | provider key (falls back to `OPENAI_API_KEY`) |
-| `KARUCODE_MODEL` | `gpt-4o-mini` | model id (wins over `[[providers]]`) |
-| `KARUCODE_TEMPERATURE` / `KARUCODE_MAX_TOKENS` | `0.2` / unset | sampling |
-| `KARUCODE_MODELS_DEV_URL` | `https://models.dev/api.json` | catalog source for the model library (read once at startup) |
+| `KARUCODE_MODEL` | `gpt-4o-mini` | model id |
 | `KARUCODE_APPROVAL_MODE` | `ask` | `ask`, `ask_commands`, `auto`, `read_only` |
-| `KARUCODE_ALLOW_COMMANDS` | empty | comma-separated command prefixes never prompted |
-| `KARUCODE_MAX_ITERATIONS` | `32` | model turns per run |
+| `KARUCODE_ALLOW_COMMANDS` | empty | command prefixes never prompted for |
+| `KARUCODE_MAX_ITERATIONS` | `200` | model turns per *segment* |
+| `KARUCODE_MAX_CONTINUES` | `50` | budget refreshes per run |
+| `KARUCODE_MAX_RUN_SECS` | `86400` | hard wall clock for a whole run |
 | `KARUCODE_COMMAND_TIMEOUT_SECS` | `120` | default shell timeout |
-| `KARUCODE_MAX_TOOL_OUTPUT_BYTES` | `24000` | output kept for the model |
-| `KARUCODE_CONTEXT_MAX_CHARS` | `240000` | conversation budget before trimming |
+| `KARUCODE_MAX_TOOL_OUTPUT_BYTES` | `24000` | tool result bytes kept for the model |
+| `KARUCODE_CONTEXT_MAX_CHARS` | `0` | `0` = derive from the model's window |
 | `KARUCODE_SUBAGENT_CONCURRENCY` | `3` | concurrent subagents |
-| `KARUCODE_ALLOW_RECURSIVE_SUBAGENTS` | `false` | allow nested delegation |
-| `KARUCODE_LOG` | `info` | tracing filter |
-| `KARUCODE_ALLOWED_HOSTS` | empty | extra `Host` names accepted by the loopback-only guard (see below) |
+| `KARUCODE_ALLOW_RECURSIVE_SUBAGENTS` | `false` | nested delegation |
+| `KARUCODE_LOG` | `info` | tracing filter, e.g. `info,karucode=debug` |
+| `KARUCODE_ALLOWED_HOSTS` | empty | extra `Host` names for the loopback guard |
+
+[config.example.toml](config.example.toml) and [.env.example](.env.example) list
+every key with its default and rationale.
+
+### Long-horizon runs
+
+A run is not allowed to die because it used its first budget of model turns.
+`max_iterations` belongs to a segment; when a segment ends mid-task the runtime
+emits a notice, appends a `[runtime checkpoint]` turn so the transcript explains
+the jump, resets the counter and continues in the same run:
+
+```toml
+[limits]
+max_iterations = 200   # model turns per segment
+max_run_secs = 86400   # hard wall clock for the whole run (24h)
+auto_continue = true   # refresh the budget instead of stopping
+max_continues = 50     # how many refreshes one run may chain
+```
+
+`auto_continue = false` (or `max_continues = 0`) restores a one-shot budget; the
+run then stops with status `limit_reached`. A budget that runs out is never a
+reason to re-send the prompt — the work is in the transcript, and the checkpoint
+tells the model to continue rather than restart.
 
 ### Loopback, the `Host` allowlist and reverse proxies
 
 When the server is bound to a loopback address **and** no `KARUCODE_AUTH_TOKEN`
-is set, requests are only served for `Host: 127.0.0.1`, `localhost` or `[::1]`
-(any port). This is the DNS-rebinding defence: a rebound attacker domain sends a
-matching `Origin` *and* `Host`, so comparing the two is not enough.
-
-`KARUCODE_ALLOWED_HOSTS` extends the list for reverse proxies, comma separated:
+is set, requests are served only for `Host: 127.0.0.1`, `localhost` or `[::1]`,
+any port. That is the DNS-rebinding defence: a rebound attacker domain sends a
+matching `Origin` *and* `Host`, so comparing the two is not enough by itself.
 
 ```bash
-# exact host (any port), exact host:port, or any subdomain of a domain
 KARUCODE_ALLOWED_HOSTS="karucode.example.com,karucode.example.com:8443,*.internal.example"
 ```
 
-`*.example.com` matches `a.example.com` and `a.b.example.com` but **not** the
-bare `example.com` — list it separately. A request with any other `Host` gets
-`403 permission_denied` naming the accepted hosts. With a token configured the
-`Host` check is skipped (the `Origin == Host` rule remains), so remote
-access over a proxy needs `KARUCODE_AUTH_TOKEN`, not this variable.
+Entries are an exact host (any port), an exact `host:port`, or `*.domain` —
+which matches `a.domain` and `a.b.domain` but **not** the bare `domain`; list it
+separately. Any other `Host` gets `403 permission_denied` naming the accepted
+ones. With a token configured the `Host` check is skipped (the `Origin == Host`
+rule remains), so remote access through a proxy needs `KARUCODE_AUTH_TOKEN`, not
+this variable.
 
-### Gateways
+## Providers
 
-Anything that speaks the OpenAI chat-completions API with streaming tool calls:
+Anything that speaks the OpenAI chat-completions API with streaming tool calls.
+Three environment variables are the fastest path:
 
 ```bash
 # LiteLLM proxy
@@ -211,33 +265,15 @@ KARUCODE_BASE_URL=http://127.0.0.1:8080/v1 KARUCODE_MODEL=local
 KARUCODE_BASE_URL=https://openrouter.ai/api/v1 KARUCODE_API_KEY=sk-or-... KARUCODE_MODEL=anthropic/claude-sonnet-4
 ```
 
-Extra headers and body fields are supported in the config file
-(`[model.extra_headers]`, `[model.extra_body]`) for gateways that need routing
-hints. Provider settings can be changed live in the UI (Settings), which writes to
-SQLite; the API key is write-only and never returned to the browser.
+`base_url` is a prefix, not a full URL: karucode appends `/chat/completions`.
+Extra headers and body fields (`[model.extra_headers]`, `[model.extra_body]`)
+cover gateways that want routing hints. Provider settings can be changed live in
+the UI; the API key is write-only and never returned to the browser.
 
-A failed provider attempt is retried, by default 50 times with an exponential
-backoff that grows from 500 ms to a 30 s ceiling (`retry_max_retries`,
-`retry_base_delay_ms`, `retry_max_delay_ms` under `[model]`, or
-`KARUCODE_RETRY_MAX_RETRIES` / `KARUCODE_RETRY_BASE_DELAY_MS` /
-`KARUCODE_RETRY_MAX_DELAY_MS`). That covers every failure class — resets,
-timeouts, any HTTP error status, an empty or unreadable body, and a stream that
-dies before its first chunk — because a gateway fails transiently in arbitrary
-ways.
+### Named profiles and the model library
 
-A stream that dies *after* it started streaming cannot be replayed without
-duplicating what you already saw, so it is handled separately: the partial
-attempt is discarded, the browser is told to drop it (`stream_retry`), and the
-same request is re-issued. That budget is `retry_max_stream_restarts` (default 3,
-`KARUCODE_RETRY_MAX_STREAM_RESTARTS`); each restart is a full generation, and `0`
-makes a mid-answer death fail the turn instead. When a restart succeeds, only the
-successful attempt is persisted.
-
-### Provider profiles and the model library
-
-Instead of — or in addition to — the flat `[model]` table, a config file can
-declare named endpoints. Each profile owns its base URL, key, timeout and a
-curated list of models; `active_provider` / `active_model` pick the one every run
+A config file can declare several endpoints, each with its own key, timeout and
+curated model list. `active_provider` / `active_model` pick the one every run
 uses:
 
 ```toml
@@ -262,12 +298,6 @@ request_timeout_secs = 300
   cost_input = 3.0             # USD per million input tokens
   cost_output = 15.0
 
-  [[providers.models]]
-  id = "qwen2.5-coder-32b"
-  name = "Qwen2.5 Coder 32B"
-  context_window = 131072
-  tool_call = true
-
 [[providers]]
 id = "local-vllm"
 name = "vLLM on this box"
@@ -279,73 +309,73 @@ base_url = "http://127.0.0.1:8000/v1"
   tool_call = true
 ```
 
-* `active_provider` / `active_model` are install-wide. `temperature`, `max_tokens`,
-  `top_p` and `parallel_tool_calls` stay global (read from `[model]`), so
-  switching profiles does not change sampling.
-* With `[[providers]]` present, the connection fields of `[model]` (`provider`,
-  `base_url`, `api_key`, `request_timeout_secs`, `extra_headers`, `extra_body`)
-  are not used — the active profile supplies them; `model` is only a fallback for
-  a profile that has no models yet. Without profiles, a `default` profile is
+* `active_provider` / `active_model` are install-wide. Sampling (`temperature`,
+  `max_tokens`, `top_p`, `parallel_tool_calls`) stays global, so switching
+  profiles does not change how a model samples.
+* With `[[providers]]` present, the connection fields of `[model]` are not used;
+  the active profile supplies them. Without profiles a `default` profile is
   synthesised from `[model]`, so both shapes work.
-* `KARUCODE_MODEL` / `KARUCODE_BASE_URL` / `KARUCODE_API_KEY` (and the `OPENAI_*`
-  fallbacks) win over this file: they become the active `env` profile.
-* Limits: 16 profiles, 64 models per profile, unique model ids within a profile,
-  `base_url` must be `http://` or `https://` and must not embed credentials, model
-  ids ≤200 characters. The same rules are enforced by `PATCH /api/config`, which
-  returns `400 bad_request` naming the field — see [docs/API.md](docs/API.md).
-* Keys are write-only: the browser and `GET /api/config` only ever see
-  `api_key_set`.
+* `KARUCODE_MODEL` / `KARUCODE_BASE_URL` / `KARUCODE_API_KEY` (and the
+  `OPENAI_*` fallbacks) win over the file and become the active `env` profile.
+* Limits: 16 profiles, 64 models per profile, unique ids within a profile,
+  `base_url` must be `http://` or `https://` with no embedded credentials, model
+  ids ≤200 characters. `PATCH /api/config` enforces the same rules and returns
+  `400 bad_request` naming the field.
 
-The same data can be edited at runtime: `PATCH /api/config` takes
+The same data is editable at runtime: `PATCH /api/config` takes
 `providers: { upsert: [...], delete: [...] }` and `active: { provider, model }`,
 persists them in SQLite and hot-swaps the configuration for the next run. The
-legacy flat `model.*` patch still works and is mirrored onto the active profile.
-The settings screen edits profiles and their model lists this way; each model
-row also offers **Edit** (custom metadata values) and **Refresh** (re-read its
-models.dev entry, keeping your custom label).
-
-The composer at the bottom of the chat holds the model selector and a
-reasoning-effort selector. Both pin the **current session**
+composer at the bottom of the chat holds the model and reasoning-effort
+selectors; both pin the **current session**
 (`PATCH /api/sessions/:id/model`), so two sessions can run different models at
-the same time; a session without a pin follows the install-wide default, and the
-selector's footer resets to it. Reasoning effort is `none` (off), `minimal`,
-`low`, `medium`, `high` or `max` and is sent as the `reasoning_effort` request
-field — the selector hides for models whose metadata says they cannot reason.
-No restart is needed for any of this.
+once. A session without a pin follows the install-wide default. Reasoning effort
+is `none`, `minimal`, `low`, `medium`, `high` or `max`, sent as
+`reasoning_effort`; the selector hides for models whose metadata says they
+cannot reason.
 
-Model metadata can be prefilled from [models.dev](https://models.dev) instead of
-typed by hand. The server fetches the catalog itself (`GET /api/models/catalog`),
-caches it for six hours and serves one provider's models at a time; `refresh=true`
-forces a refetch. Point it at a mirror or an air-gapped copy (read once at
-startup; it must be an `http(s)://` URL, otherwise every fetch fails with
-`ok: false`):
+### Model metadata without typing it
+
+Model metadata (context window, output limit, tool calling, reasoning, cost) can
+be prefilled from [models.dev](https://models.dev). The server fetches the
+catalog itself (`GET /api/models/catalog`), caches it for six hours and serves
+one provider's models at a time; `refresh=true` forces a refetch. Point it at a
+mirror or an air-gapped copy (read once at startup, `http(s)://` only):
 
 ```bash
 KARUCODE_MODELS_DEV_URL=https://mirror.internal/models-dev/api.json
 ```
 
-A failed fetch with nothing cached answers `ok: false` with the reason; no other
-part of the settings path depends on the catalog. Prefilled values are stored in
-the profile and stay editable, because a gateway may serve the same model id with
-different limits.
+Ids typed by hand get the same prefill: `GET /api/models/lookup?model=<id>`
+strips gateway routing prefixes until a suffix matches, so
+`a6api/ali/deepseek-v4.1-flash-1017` resolves to the catalog's
+`deepseek-v4.1-flash-1017`. When nothing matches, the id is added without
+metadata. Prefilled values stay editable, because a gateway may serve the same
+id with different limits.
 
-Model ids typed by hand get the same prefill: `GET /api/models/lookup?model=<id>`
-finds the closest catalog entry, stripping gateway routing prefixes until a
-suffix matches — `a6api/deepseek-v4.1-flash-1017` (provider/model) and
-`a6api/ali/deepseek-v4.1-flash-1017` (provider/upstream/model) both resolve to
-the catalog's `deepseek-v4.1-flash-1017`. When nothing matches, the id is added
-without metadata, as before.
+### Retries
+
+A provider attempt is retried by default 50 times with an exponential backoff
+from 500 ms to a 30 s ceiling, plus a 300 s wall-clock ceiling for the chain
+(`retry_max_retries`, `retry_base_delay_ms`, `retry_max_delay_ms`,
+`retry_max_total_secs` under `[model]`, or the `KARUCODE_RETRY_*`
+equivalents).
+
+A stream that dies *after* it started cannot be replayed without duplicating
+what you already saw, so it is handled one level up: the partial attempt is
+discarded, the browser is told to drop it (`stream_retry`), and the request is
+re-issued. That budget is `retry_max_stream_restarts` (default 3); each restart
+is a full generation, and `0` makes a mid-answer death fail the turn instead.
+When a restart succeeds, only the successful attempt is persisted.
 
 ## Plugins and MCP
 
-Plugins are **separate processes** that speak versioned JSON-RPC over stdio. The
+Plugins are **separate processes** speaking versioned JSON-RPC over stdio. The
 core supervises them: a crash, hang or protocol error produces a diagnostic and
-does not take the harness down. Plugins contribute tools and lifecycle hooks and
-declare capabilities/permissions; they are not OS-sandboxed (see the tradeoffs in
-[docs/PLUGINS.md](docs/PLUGINS.md)).
+never takes the harness down. Plugins contribute tools and lifecycle hooks and
+declare capabilities and permissions; they are not OS-sandboxed. Tools are
+namespaced `plugin__<plugin>__<tool>`.
 
 ```toml
-# ~/.config/karucode/config.toml
 [[plugins]]
 name = "example-hello"
 command = ["/absolute/path/to/target/release/example-hello"]
@@ -353,8 +383,9 @@ enabled = true
 permissions = ["files.read"]
 ```
 
-MCP servers (stdio or streamable HTTP) are configured the same way and their tools
-appear as `mcp__<server>__<tool>` with the same approval policy as external tools:
+MCP servers (stdio or streamable HTTP) are configured the same way, and their
+tools appear as `mcp__<server>__<tool>` under the same approval policy as
+external tools:
 
 ```toml
 [[mcp_servers]]
@@ -364,18 +395,25 @@ command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/me/pro
 require_approval = true
 ```
 
+Write a plugin: [docs/PLUGINS.md](docs/PLUGINS.md) — including
+`karucode plugin init <dir>`, which scaffolds a project with the SDK vendored so
+it depends on nothing from karucode. Connect a server: [docs/MCP.md](docs/MCP.md).
+
 ## Security
 
-Read [docs/SECURITY.md](docs/SECURITY.md) before exposing the server. Short version:
+Read [docs/SECURITY.md](docs/SECURITY.md) before exposing the server.
 
-* binds to loopback; remote binds require an auth token;
-* CSRF protection for browser clients (custom header + Origin/Host check);
-* file tools confined to the workspace (symlink escapes refused);
-* secrets never returned to the browser or written to logs;
-* Markdown rendered with raw HTML disabled and sanitised;
-* **shell commands are not sandboxed** — approvals are the gate, not isolation;
-* plugins/MCP servers are trusted code; subagents share the workspace (`owned_paths`
-  is advisory, not locking).
+* The server binds to loopback; a remote bind requires an auth token.
+* Browser clients are CSRF-protected (a custom header plus the Origin/Host check).
+* File tools are confined to the workspace — plus the temp dir, so scratch files
+  work — and symlink escapes are refused.
+* Child processes get a credential-free environment allowlist, so a
+  prompt-injected `curl` cannot exfiltrate the harness token or the provider key.
+* Secrets are never returned to the browser or written to logs.
+* Markdown is rendered with raw HTML disabled and then sanitised.
+* **Shell commands are not sandboxed** — approvals are the gate, not isolation.
+* Plugins and MCP servers are trusted code; subagents share the workspace, and
+  `owned_paths` is advisory, not locking.
 
 ## Development
 
@@ -393,6 +431,41 @@ npm run typecheck
 npm run build                    # emits web/dist (embedded on the next cargo build)
 ```
 
+### Gates
+
+End-to-end without credentials: `scripts/mock_openai.py` streams real SSE,
+including split tool-call deltas, and the harness starts the real binary and
+checks sessions, streaming, tool execution, approvals (allow and deny),
+cancellation, subagents, plugin and MCP tools, path confinement, CSRF, settings
+redaction, UI serving and restart/interrupted-state recovery. Results land in
+`reports/e2e.json`:
+
+```bash
+python3 scripts/e2e_smoke.py --build   # cargo build (debug) + example plugin, then run
+```
+
+Against a **real** endpoint (slow, non-deterministic, costs tokens — the gate for
+a deployment rather than for the harness). It copies the endpoint/model/key from
+your existing database and runs its own server, so your sessions are untouched:
+
+```bash
+python3 scripts/e2e_real.py --workspace /tmp/scratch-project
+```
+
+It checks the provider probe, real streaming, real tool selection, a multi-step
+"run the tests → fix the bug → prove they pass" task (asserting the workspace
+really ends up green), history continuity, cancellation, subagent delegation and
+restart persistence.
+
+Self-documentation end to end (`python3 scripts/e2e_docs.py`) proves the model can
+call `karucode_docs` and get a real doc back. Performance (`scripts/bench.py`)
+measures cold start, idle and peak RSS and binary size; the latest numbers and
+the exact methodology are in [reports/bench.md](reports/bench.md), the full
+verification record — including what was checked in a real browser — in
+[docs/REPORT.md](docs/REPORT.md). No memory target is promised.
+
+### The documentation contract
+
 Documentation about karucode itself is compiled from `@kc-doc` blocks in the
 source. After changing a feature, a config key, a route or a tool:
 
@@ -402,49 +475,8 @@ cargo run -p kc-docs -- --check   # CI gate: stale docs and invalid blocks fail
 cargo test -p kc-docs
 ```
 
-End-to-end without credentials — the mock provider streams real SSE, including
-split tool-call deltas:
-
-```bash
-python3 scripts/e2e_smoke.py --build
-```
-
-It starts the real binary, points it at `scripts/mock_openai.py`, and checks
-sessions, streaming, tool execution, approvals (allow + deny), cancellation,
-subagents, plugin and MCP tools, path confinement, CSRF, settings redaction, UI
-serving and restart/interrupted-state recovery. Results land in `reports/e2e.json`.
-
-Against a **real** endpoint (slow, non-deterministic, costs tokens — this is the
-gate for a given deployment rather than for the harness):
-
-```bash
-# copies endpoint/model/key from your existing karucode database, runs its own
-# server instance so your sessions are untouched
-python3 scripts/e2e_real.py --workspace /tmp/scratch-project
-```
-
-It checks the provider probe, real streaming, real tool selection, a multi-step
-"run the tests → fix the bug → prove they pass" task (asserting the workspace
-really ends up green), history continuity, cancellation, subagent delegation and
-restart persistence. Pass `--config file.toml` instead of `--db` to use explicit
-settings.
-
-Self-documentation end to end (scripted provider, no credentials):
-
-```bash
-python3 scripts/e2e_docs.py           # the model calls karucode_docs and gets the MCP doc back
-```
-
-Performance:
-
-```bash
-python3 scripts/bench.py --build     # startup, idle RSS, peak RSS under load
-```
-
-See [reports/bench.md](reports/bench.md) for the latest numbers and the exact
-methodology/host, and [docs/REPORT.md](docs/REPORT.md) for the full verification
-record (including what was checked in a real browser). No memory target is
-promised: measurements for this machine are in that report.
+[AGENTS.md](AGENTS.md) is the contract for a change; [docs/INTERNAL-DOCS.md](docs/INTERNAL-DOCS.md)
+explains the format.
 
 ### Repository layout
 
@@ -453,42 +485,46 @@ promised: measurements for this machine are in that report.
 | `crates/kc-core` | types, config, path confinement, event schema, trait contracts, plugin protocol |
 | `crates/kc-store` | SQLite persistence |
 | `crates/kc-provider` | OpenAI-compatible streaming provider |
-| `crates/kc-tools` | file/search/shell/git tools |
+| `crates/kc-tools` | file, search, shell and git tools |
 | `crates/kc-runtime` | agent loop, approvals, subagents, context budget |
-| `crates/kc-plugin-host` / `kc-plugin-sdk` | plugin supervision + SDK |
+| `crates/kc-plugin-host` / `kc-plugin-sdk` | plugin supervision + the crate plugins use |
 | `crates/kc-mcp` | MCP client |
 | `crates/kc-server` | axum API, SSE, static UI, wiring |
-| `crates/kc-docs` | `@kc-doc` parser, build-time generator, search and the `kc-docs` CLI |
+| `crates/kc-docs` | `@kc-doc` parser, generator, search and the `kc-docs` CLI |
 | `web/` | Preact + Vite frontend |
-| `plugins/example-hello` | working example plugin |
-| `docs/` | API, architecture, plugins, MCP, security, internal-documentation format |
-| `scripts/` | mock provider, deterministic e2e gate, real-provider e2e gate, benchmark |
+| `plugins/example-hello` | a working example plugin |
+| `examples/demo-app` | a buggy Node project for trying the agent |
+| `docs/` | API, architecture, plugins, MCP, security, production readiness |
+| `scripts/` | mock provider, e2e gates, benchmark, README checker |
+| `packaging/` | Dockerfile, systemd unit, install script |
 
-Architecture details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). HTTP contract:
+Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). HTTP contract:
 [docs/API.md](docs/API.md).
 
 ## Known limitations
 
-* **No shell sandbox.** Commands run as the server user. Use a container/VM for
-  untrusted code or unattended `auto` mode.
+* **No shell sandbox.** Commands run as the server user. Use a container or VM
+  for untrusted code or unattended `auto` mode.
 * **No per-subagent worktree.** Subagents share the workspace; path ownership is
   advisory conflict reporting.
-* **Sequential tool execution** within a turn (deterministic approvals/events);
-  parallel calls from the model are executed in order.
-* **MCP** supports stdio and streamable HTTP; SSE-only legacy transport is not
-  implemented. Resources/prompts are not surfaced — tools only.
-* **Plugins** are processes, not Wasm; no filesystem sandbox, no hot reload of
-  changed binaries (disable/enable restarts the process).
-* **One active model per install.** `active_provider` / `active_model` are
-  install-wide, not per project: every project shares the selected model. Sessions
-  are confined to their project directory, and per-session workspace overrides do
+* **Sequential tool execution** within a turn (deterministic approvals and
+  events): parallel calls from the model are executed in order.
+* **MCP** supports stdio and streamable HTTP; the legacy SSE-only transport is
+  not implemented, and resources/prompts are not surfaced — tools only.
+* **Plugins** are processes, not Wasm: no filesystem sandbox, and no hot reload
+  of a changed binary (disable/enable restarts the process).
+* **Providers are install-wide, not per project.** `active_provider` /
+  `active_model` are the default for every project; a *session* can pin its own
+  provider/model and reasoning effort (`PATCH /api/sessions/:id/model`), but
+  switching project does not switch model, and per-session workspace overrides do
   not exist.
 * **No built-in TLS.** Put a reverse proxy in front for remote access.
 * **Compaction is trimming**, not model-assisted summarisation: old turns are
-  dropped (with a notice) once the context budget is exceeded.
+  replaced by a digest once the context budget is exceeded, while the persisted
+  transcript keeps everything.
 * Token accounting is whatever the provider reports; absent usage is shown as
   unknown rather than invented.
 
 ## License
 
-MIT.
+MIT. Brand assets and their usage rules: [branding/BRAND.md](branding/BRAND.md).

@@ -22,7 +22,7 @@ whether that class is allowed, asked or denied.
 | `approvals.mode` | Shell | File write/edit | External (plugin/MCP) | Read-only tools |
 | --- | --- | --- | --- | --- |
 | `ask` (default) | ask | ask | ask | allow |
-| `ask_commands` | ask unless allowlisted | ask | ask | allow |
+| `ask_commands` | ask unless allowlisted | allow (workspace) | ask | allow |
 | `auto` | allow (audited) | allow (audited) | allow (audited) | allow |
 | `read_only` | deny | deny | deny | allow |
 

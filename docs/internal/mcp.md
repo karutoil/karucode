@@ -65,6 +65,20 @@ in `ask`/`ask_commands`, allowed and audited in `auto`, denied in `read_only`.
 is an operator choice, and the class stays `external`, so `read_only` still
 denies the call.
 
+## Environment
+
+A stdio server does **not** inherit karucode's environment. It gets a cleared
+environment plus an allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`,
+`LANG`, `LC_ALL`, `TERM`, `TMPDIR`, `PWD`, `TZ`, each only when set), then the
+server's own `[mcp_servers.env]` table, which wins over the allowlist.
+
+Inherited secrets are never passed on: `KARUCODE_*`, `AWS_*`, `OPENAI_*`,
+`ANTHROPIC_*`, `GITHUB_TOKEN`, `GH_TOKEN`, `NPM_TOKEN` and names ending in
+`_API_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD` are dropped. This matters because
+`npx` servers and their `postinstall` scripts run arbitrary code at startup.
+The `env` table is *not* filtered: a credential an operator configures for a
+specific server is intentional, and that is how a server receives its own key.
+
 ## Limits
 
 Connect plus handshake is capped at 15 s per server; one `tools/call` has 120 s.

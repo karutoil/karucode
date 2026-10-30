@@ -41,10 +41,42 @@ plus whatever `KARUCODE_ALLOWED_HOSTS` lists for a reverse proxy
 
 **Git panels (`GET /api/git/status`, `GET /api/git/diff`).** `git` is spawned
 with an argv array (never a shell), with `-c core.fsmonitor=false`,
-`-c diff.external=`, `-c core.pager=cat`, `--no-ext-diff` for diffs, and
+`-c diff.external=`, `-c core.pager=cat`, `-c core.attributesFile=/dev/null`,
+`--no-ext-diff` and `--no-textconv` for diffs, and
 `GIT_EXTERNAL_DIFF`/`GIT_PAGER`/`GIT_OPTIONAL_LOCKS`/`GIT_TERMINAL_PROMPT` pinned,
-and inherited `GIT_DIR`/`GIT_WORK_TREE` removed — a cloned repository cannot make
-these read-only endpoints execute code through its own `.git/config`.
+`GIT_CONFIG_NOSYSTEM`/`GIT_ATTR_NOSYSTEM` set, and inherited
+`GIT_DIR`/`GIT_WORK_TREE`/`GIT_CONFIG_COUNT` removed.
+
+`--no-ext-diff` and `--no-textconv` do **not** cover `filter.<driver>.clean`,
+`smudge` or `process`, which `git diff` runs to compute the working-tree side of a
+diff. Those are neutralised explicitly: every driver named in the repository's
+config is overridden to an empty command through `GIT_CONFIG_KEY_n`/`VALUE_n`
+(not `-c`, whose first-`=` split a driver name containing `=` can bypass), and
+`filter.<driver>.required` is forced to `false` so a neutralised diff does not
+fail. The HTTP route and the tool share one argv builder
+(`kc_tools::git::diff_args`), so the two cannot drift apart again. A cloned
+repository therefore cannot make these read-only endpoints execute code through
+its own `.git/config` or `.gitattributes`.
+
+**Project roots.** `POST /api/projects` accepts any existing directory, except
+`/`. A project's directory becomes the confinement root for every file tool in
+its sessions, and the default posture is a single operator on a loopback bind
+whose agent runs as the same user as the server — so an allowlist that left the
+default workspace as the only legal project was a limitation with no security
+value: the obvious second project is a sibling checkout. Set
+`project_roots` (`KARUCODE_PROJECT_ROOTS`, colon-separated) to turn project
+creation into an allowlist, compared component-wise on canonical paths, for a
+shared or remotely reachable deployment. `/` is refused either way: one request
+must not be able to make the whole filesystem the confinement root, which would
+make the confinement rules below meaningless.
+
+**Admin gate.** With `KARUCODE_ADMIN_TOKEN` set, a `PATCH /api/config` that
+changes `approvals`, `model.base_url`, `model.api_key`, `providers`,
+`active_provider` or `active_model` must also present
+`X-Karucode-Admin-Token` (constant-time compare, `403` otherwise). Without it,
+any holder of the ordinary token could turn approvals off and then repoint the
+provider at a host of its choosing. Every authorised change is logged with the
+field names that changed — never the values.
 
 **File tool confinement.** `read_file`, `list_dir`, `search_files`, `write_file`,
 `edit_file` and the workspace explorer resolve paths through `kc_core::Workspace`:
@@ -59,11 +91,48 @@ these read-only endpoints execute code through its own `.git/config`.
 
 Writes are atomic (temp file + rename) and carry a size cap.
 
+**A workspace has more than one root.** Besides the project directory, every
+workspace allows the system temporary directory (`TMPDIR` when set and absolute,
+otherwise `/tmp`) — `allow_temp_dir`, on by default, off with
+`KARUCODE_ALLOW_TEMP_DIR=0`. Every rule above is applied to the *set* of roots: a
+path is allowed when it is inside the project **or** the temp dir, `..` is
+measured from the root the path belongs to (`/tmp/../etc/passwd` is refused), and
+a symlink inside the temp dir that points elsewhere is refused. Only `/` is
+refused as an extra root — it would make every absolute path legal. A workspace
+that itself lives under `/tmp` (a scratch or CI checkout) keeps the temp root.
+
+This is not a weakening. `/tmp` is writable by every process on the host, and
+`run_command` is unsandboxed and runs as the server user, so a rule that stopped
+`write_file` reaching `/tmp` would stop nothing that a shell could not already
+do. What the confinement rules protect is the *model* leaving its project for
+`~/.ssh`, `/etc` or another repository, and that still holds: those are not roots.
+
+**Project roots.** `POST /api/projects` accepts any existing directory except
+`/`; `project_roots` (empty by default) narrows that to an allowlist, compared
+component-wise on canonical paths. `project_roots` governs where a project may be
+*created*; `allow_temp_dir` governs what a run's tools may *touch*. They are
+independent.
+
 **Secrets.** The API key is read from the environment, the config file or the
 settings table, and is never returned by the API: the browser only receives
 `api_key_set: true`. Errors and logs redact credentials; provider errors are
 truncated and stripped of the `Authorization` header. Plugin/MCP environment and
 headers are never serialised into diagnostics.
+
+Child processes do **not** inherit the server's environment. `run_command`,
+plugins and stdio MCP servers each get a cleared environment plus a fixed
+allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `TERM`,
+`TMPDIR`, `PWD`, `TZ`), and any name matching `KARUCODE_*`, `AWS_*`, `OPENAI_*`,
+`ANTHROPIC_*`, `GITHUB_TOKEN`, `GH_TOKEN`, `NPM_TOKEN`, `*_API_KEY`, `*_TOKEN`,
+`*_SECRET` or `*_PASSWORD` is dropped even if explicitly listed. Without this, a
+prompt-injected `curl`, a malicious `postinstall` script or an `npx`-launched MCP
+server would receive the harness bearer token and the provider API key.
+
+This is not the same as "the agent cannot read the key". The agent runs as the
+same OS user as the server, so its shell can read the config file and the SQLite
+database directly. The only real mitigation is OS-level isolation (a container, a
+separate user, or systemd `LoadCredential`); treat the key as readable by anything
+the agent can run.
 
 **Untrusted model output.** The UI renders Markdown with raw HTML disabled and
 sanitises the result (DOMPurify). Links are marked `rel="noopener noreferrer"`.

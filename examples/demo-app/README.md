@@ -5,7 +5,7 @@ dependencies: `node --test` is enough.
 
 ```bash
 cd examples/demo-app
-node --test          # 1 failing test: add(2, 3) returns -1 because of a typo
+node --test          # 2 of 5 tests fail: add(2, 3) returns -1 because of a typo
 ```
 
 Try a prompt such as:

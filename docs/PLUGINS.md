@@ -144,8 +144,67 @@ If a tool call finds the process dead, the host makes **one** restart attempt
 (spawn + handshake), up to **3 restarts per plugin per server lifetime**. Beyond
 that the call fails with
 `plugin `x` is not running (…) and has already been restarted 3 times; fix the
-plugin or restart the server`. Enabling the plugin again from the UI resets the
-budget. The `restart_count` field in `GET /api/plugins` shows the current count.
+plugin or reload it`. Enabling or reloading the plugin resets the budget. The
+`restart_count` field in `GET /api/plugins` shows the current count.
+
+### Installing, upgrading and removing without a restart
+
+The host re-reads its sources on demand, so none of these needs a server restart:
+
+| You want to… | Do this | Then |
+| --- | --- | --- |
+| install a plugin | write `<data_dir>/plugins/<name>/plugin.toml` (or add a `[[plugins]]` entry) | `POST /api/plugins/reload` |
+| upgrade one | rebuild the binary in place, or edit its manifest | `POST /api/plugins/:name/reload` |
+| remove one | delete its directory / `[[plugins]]` entry | `POST /api/plugins/reload` |
+| none of the above | — | leave it to `plugins_watch` |
+
+```bash
+curl -s -X POST localhost:8787/api/plugins/reload \
+  -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' -d '{}' | jq .report
+# { "added": ["wordy"], "removed": ["old"], "restarted": [], "unchanged": ["example-hello"] }
+```
+
+`PluginHost::rescan` diffs the entries it discovers against the slots it is
+running and does exactly one of four things per name:
+
+* **add** — new name: build a slot and start it (hot load);
+* **remove** — name gone from every source: send `shutdown`, kill, drop its tools
+  (hot unload);
+* **restart** — same name but a different config entry, a different manifest, or a
+  different **file** (hot reload);
+* **leave alone** — everything identical. A rescan of an unchanged tree does not
+touch a running process, so the watcher cannot churn a plugin's in-memory state
+by polling.
+
+File changes are detected by fingerprinting every command argument that resolves
+to a file (`mtime` + length) plus the manifest, which is what makes "recompile,
+then reload" work even though the command line is byte-identical. Replacing a
+**script** in a `command = ["python3", "plugin.py"]` plugin counts too: both
+arguments are fingerprinted.
+
+`enabled` is a runtime toggle once a slot exists, so a rescan never silently
+re-enables a plugin the operator switched off. The config file decides what a
+*new* plugin starts as.
+
+Both routes rebuild the runtime's tool registry before they answer, so the model
+sees the new tools on its next call. A run already in flight keeps the registry it
+started with: a call into a replaced plugin fails with `plugin `x` was stopped`
+rather than hanging, and the next run is clean.
+
+**Automatic reloads.** To skip the curl entirely:
+
+```toml
+# ~/.config/karucode/config.toml
+plugins_watch = true      # or KARUCODE_PLUGINS_WATCH=1
+plugins_watch_secs = 2    # or KARUCODE_PLUGINS_WATCH_SECS; clamped to 1..=600
+```
+
+It **polls** — one `read_dir` plus a `stat` per configured command per tick —
+rather than using inotify: no extra dependency, works on network filesystems and
+container bind mounts, and a write that lands while the server is busy is still
+applied on the next tick. Off by default, because a reload replaces processes and
+that should be an explicit choice. The stamp it compares also covers the config
+file, so editing `[[plugins]]` there is picked up as well.
 
 ---
 
@@ -191,7 +250,11 @@ Result: the **manifest**:
   "capabilities": ["tools"],
   "permissions": ["files.read"],
   "hooks": ["before_prompt"],
-  "tool_prefix": null
+  "tool_prefix": null,
+  "panels": [
+    {"id": "todo", "title": "Todo", "icon": "check", "source": "static",
+     "tool": null, "refresh_ms": 0}
+  ]
 }
 ```
 
@@ -201,6 +264,9 @@ Result: the **manifest**:
 * `hooks` lists the hooks the plugin wants (`hooks/run` is only sent for these).
 * `capabilities` and `permissions` are informational/declarative; the effective
   permission set is computed from the config entry (§6, §8).
+* `panels` is optional and **every field in it has a default**, so a manifest
+  that declares none (or omits the key entirely) behaves exactly as before —
+  this is additive and did not bump the protocol version. See §4.8 and §8.
 * Budget: **10 s** (`PluginTimeouts::handshake`).
 
 ### 4.2 `tools/list` (host → plugin)
@@ -243,6 +309,23 @@ Result: a [`PluginToolResult`](../crates/kc-core/src/plugin.rs):
 * Timeout: **60 s** (`PluginTimeouts::call`); cancellation of the run abandons
   the wait and the result is discarded.
 * Arguments are passed through untouched.
+* Since this revision the params also carry a `context` object, so a
+  workspace-scoped plugin knows which project the call belongs to instead of
+  remembering the most recent `before_prompt` (which cross-talks as soon as two
+  sessions run concurrently):
+
+  ```json
+  {"jsonrpc":"2.0","id":3,"method":"tools/call",
+   "params":{"name":"todo_list","arguments":{},
+             "context":{"session_id":"s_1","run_id":"r_1","agent_id":null,
+                        "workspace":"/home/me/project","project":null,"depth":0}}}
+  ```
+
+  This is additive: a plugin that ignores `params.context` behaves exactly as
+  before, and the SDK's `ToolRequest::context()` returns `None` on an older host.
+  `project` is `null` for a tool call because the run's workspace is already
+  canonically resolved; `GET /api/plugins/:name/panels/:panel?project=` does
+  populate it.
 
 ### 4.4 `hooks/run` (host → plugin)
 
@@ -289,6 +372,37 @@ without `id` never get a response.
 
 The host never sends `-32600`/`-32602` itself; the text of your `message` is
 surfaced in the tool failure, so write something actionable.
+
+### 4.8 `panels/read` (host → plugin)
+
+The host asks for the payload of a panel the manifest declared:
+
+```json
+{"jsonrpc":"2.0","id":12,"method":"panels/read",
+ "params":{"panel":"todo","session_id":"s_1","project":"p_1","workspace":"/w"}}
+```
+
+```json
+{"jsonrpc":"2.0","id":12,"result":{"title":"Todo","data":{"items":[]}}}
+```
+
+* `data` is **arbitrary JSON** and the host never interprets it: it is forwarded
+  to the browser verbatim and rendered with a component registered for that panel
+  type, or as read-only JSON. A plugin therefore cannot return markup, a URL to
+  navigate to, or script — which is what keeps the app's CSP and
+  `frame-ancestors 'none'` meaningful. Do not try to sneak HTML in; it is shown
+  as text.
+* `title` is optional; the manifest's `title` is used when it is missing.
+* `session_id`, `project` and `workspace` describe the scope the browser asked
+  about. `session_id` is `""` and `project` is `null` when the caller named none.
+* An unknown `panel` is `-32602` ("invalid params"). Any other error is shown to
+  the user next to the tab.
+* Budget: the **60 s** call timeout (`PluginTimeouts::call`).
+* **Fallback.** A plugin built before this method existed answers `-32601`
+  ("method not found"). The host then calls the panel's `tool` through
+  `tools/call` and uses its `meta` as the payload — that is what
+  `source = "tool"` documented before `panels/read`, so an old plugin keeps
+  working.
 
 ---
 
@@ -390,8 +504,40 @@ to pick up the new registry (the returned tools are cheap `Arc<dyn Tool>` values
 ## 8. Capabilities
 
 `capabilities` is informational metadata for the UI (`["tools"]`,
-`["tools", "hooks"]`, …). The host does not gate behaviour on it today; it exists
-so a future capability negotiation can be additive.
+`["tools", "hooks"]`, `["tools", "panels"]`, …). The host does not gate
+behaviour on it today; it exists so a future capability negotiation can be
+additive. The one convention worth keeping: declare `panels` when the manifest
+declares any panel (the SDK's `.panel(…)` does this for you), because the
+settings screen uses it to explain why a plugin has a tab.
+
+### Panels and the UI
+
+A panel is a tab in the web UI's inspector. The plugin supplies a `data` payload
+over `panels/read` (§4.8); the *frontend* decides how to draw it. There is no
+route mounting, no asset serving and no script execution for plugins, so a panel
+cannot add behaviour to the app — only content that a first-party renderer (or
+the generic JSON view) understands.
+
+Validation happens at the handshake, so a broken declaration is a readable
+`PluginDiagnostics.error` rather than a tab that fails every time it is clicked:
+
+| Declaration | Result |
+| --- | --- |
+| id with anything but `a-z0-9-_.` | handshake error naming the id |
+| the same `id` twice | handshake error ("declared twice") |
+| `source` other than `tool`/`static` | handshake error naming the source |
+| `source = "tool"` naming an unadvertised tool | handshake error naming the tool and `tools/list` |
+| blank `title` | accepted; the id becomes the label |
+| `refresh_ms` of 1–999 or over 300000 | accepted, clamped to 1000 / 300000 |
+| no `panels` key at all | accepted; the plugin contributes no tabs |
+
+Panel ids are hosted as `plugin__<plugin>__<id>`, so they cannot collide with the
+built-in inspector tabs (`workspace`, `changes`, `commands`, `agents`) or with
+another plugin's panel. The icon is a *name* from the app's own icon set
+(`check`, `circle-check`, `clipboard`, `copy`, `layers`, `list`, `eye`, `search`,
+`spark`, `folder`, `folder-open`, `file`, `file-code`, `git`, `branch`,
+`terminal`, `agents`, `bolt`, `cpu`, `chat`, `lock`, `alert`, `upload`,
+`download`, `thumb`); an unknown name draws a neutral glyph rather than failing.
 
 ---
 

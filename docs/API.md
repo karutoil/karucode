@@ -39,7 +39,9 @@ Codes: `bad_request`, `not_found`, `permission_denied`, `unauthorized`, `config`
   "auth_required": false, "provider_configured": true, "db": "ok" }
 ```
 `status` is `"ok"` when the database probe passes and `"degraded"` otherwise
-(the endpoint still returns 200 so a supervisor can see the reason). `workspace`
+(the endpoint still returns 200 so a supervisor can see the reason). When the
+store fails, `projects` is `[]` and a `db_error` field carries the message, so a
+supervisor sees *why* rather than a bare 500. `workspace`
 is the **default** workspace (the `--workspace` / `KARUCODE_WORKSPACE`
 directory), not a project path; `projects` is the same list `GET /api/projects`
 returns, so one request is enough to map a session's `project_id` to a
@@ -52,13 +54,14 @@ directory. `provider_configured` is computed from the effective model (below).
   "model": { "provider": "openai_compatible", "base_url": "http://127.0.0.1:4000/v1",
              "model": "gpt-4o-mini", "temperature": 0.2, "max_tokens": null,
              "top_p": null, "request_timeout_secs": 300,
-             "parallel_tool_calls": true, "api_key_set": false },
+             "parallel_tool_calls": true, "supports_images": false,
+             "api_key_set": false },
   "providers": [
     { "id": "gateway", "name": "Gateway", "provider": "openai_compatible",
       "base_url": "https://gw.example/v1",
       "models": [ { "id": "coder", "name": "Coder", "context_window": 128000,
                     "max_output_tokens": 16384, "tool_call": true,
-                    "reasoning": false, "cost_input": 0.25,
+                    "reasoning": false, "vision": true, "cost_input": 0.25,
                     "cost_output": 1.5, "catalog_provider": "openai" } ],
       "request_timeout_secs": 300, "api_key_set": true } ],
   "active": { "provider": "gateway", "model": "coder" },
@@ -76,6 +79,11 @@ directory. `provider_configured` is computed from the effective model (below).
   "plugins": [ { "name": "example-hello", "version": "0.1.0", "status": "ready",
                  "tools": ["plugin__example-hello__hello"], "error": null,
                  "permissions": ["files.read"] } ],
+  "plugin_panels": [ { "plugin": "kc-todo", "version": "0.2.0",
+                       "panels": [ { "id": "todo",
+                                     "hosted_id": "plugin__kc-todo__todo",
+                                     "title": "Todo", "icon": "check",
+                                     "source": "static", "refresh_ms": 0 } ] } ],
   "mcp_servers": [ { "name": "fs", "transport": "stdio", "status": "connected",
                      "tools": ["mcp__fs__read"], "error": null } ],
   "settings_locked": false,
@@ -99,6 +107,13 @@ every run: `provider` matches a profile id, `model` is the id sent with the
 request (normally an entry of that profile, or the flat `model.model` while a
 profile has no models yet).
 
+`supports_images` is the install-wide default for image input; `vision` on a
+model entry overrides it for that model. The runtime resolves the pair for the
+model the session will actually call, so a session pinned to a vision model can
+read images even when `supports_images` is `false` and the profile's first model
+is text-only. `GET /api/config` reports the effective value for the active
+selection; with no profiles it is the flat `[model] supports_images`.
+
 `PATCH /api/config` — any subset; returns the same shape as `GET /api/config`.
 
 ```json
@@ -113,6 +128,19 @@ profile has no models yet).
 
 Every section is optional and unknown fields are rejected (`400 bad_request`), so a
 misspelt key cannot silently do nothing.
+
+**Admin gate.** When `KARUCODE_ADMIN_TOKEN` is set, a patch that changes
+`approvals`, `model.base_url`, `model.api_key`, `providers`, `active_provider` or
+`active_model` must also send `X-Karucode-Admin-Token` with that value; otherwise
+the request is `403 permission_denied` and nothing is applied. Without the gate,
+any holder of the ordinary bearer token could turn approvals off and then repoint
+the provider at a host of its choosing. Changes to other sections (limits,
+subagents, plugins, MCP) need only the normal credential. Every authorised
+security change is logged with the field names that changed, never the values.
+
+**Body limits.** JSON routes accept up to 1 MiB + 64 KiB; the upload route accepts
+8 MiB + 64 KiB. A body over the limit is `413 payload_too_large` in the same JSON
+error shape as every other error, not a plain-text rejection.
 
 Write-only keys:
 
@@ -214,10 +242,17 @@ prefills:
   "provider": { "id": "openai", "name": "OpenAI", "model_count": 42 },
   "models": [ { "id": "gpt-4o-mini", "name": "GPT-4o mini",
                 "context_window": 128000, "max_output_tokens": 16384,
-                "tool_call": true, "reasoning": false,
+                "tool_call": true, "reasoning": false, "vision": true,
                 "cost_input": 0.15, "cost_output": 0.6 } ],
   "fetched_at_ms": 1710000000000, "stale": false, "error": null }
 ```
+
+`vision` answers "may `read_file` show this model an image?". It is `true` only
+when models.dev lists `image` in `modalities.input`, so an audio-only or
+pdf-only model is `false` even though models.dev also marks it `attachment:
+true`; the legacy `attachment` flag is used only when the document carries no
+`modalities` at all. This is what the settings screen prefills a model's
+`vision` field from.
 
 `provider` here is a **models.dev** provider id, not a karucode profile id.
 Optional model fields are omitted when models.dev does not report them; providers
@@ -301,8 +336,16 @@ canonical directory and is unique across projects.
   canonicalised before use — two spellings of the same directory, or a symlink and
   its target, are one project, and adding it twice is `400 bad_request` naming the
   existing project.
+* `path` must be an existing directory; `/` itself is refused explicitly.
+  Without that rule one request could make the whole filesystem the confinement
+  root for every file tool. There is **no allowlist by default** — any other
+  directory is a valid project. Set `KARUCODE_PROJECT_ROOTS` (colon-separated) or
+  `project_roots` in the config file to restrict creation to those roots,
+  compared component-wise on canonical paths; `project_roots` unset means every
+  directory is allowed.
 * `400 bad_request` for a missing body, a relative or non-existent path, a path
-  that is a file, or a 65th project (at most 64 are supported).
+  that is a file, a path outside the allowed roots, or a 65th project (at most 64
+  are supported).
 * `name` defaults to the directory's basename (`"Project"` when it has none). An
   empty, over-long (>80 characters) or control-character name is **not** rejected
   here: the basename is used instead. `PATCH` is the strict path.
@@ -322,14 +365,40 @@ longer than 80 characters or contains control characters.
   session is never killed by a project delete. Stop it first.
 * Files on disk are never touched — only rows are removed.
 
+`GET /api/projects/:id/favicon[?max_bytes=N]` → the project's own `favicon.ico`
+as `image/*` (`200`), or an empty `204 No Content` when it has none.
+
+* The body is the raw file, not JSON. `Content-Type` is sniffed from the bytes
+  (`image/x-icon`, `image/png`, `image/gif`, `image/jpeg`, `image/webp`,
+  `image/svg+xml`), so a PNG that is named `favicon.ico` still decodes.
+* The search: only the file name `favicon.ico`, matched case-insensitively;
+  `.gitignore` rules apply (the project's own, nested ones and
+  `.git/info/exclude`, honoured even outside a repository) while the operator's
+  global gitignore is not read; hidden directories, `node_modules` and `target`
+  are skipped; at most 6 levels and 20000 entries; the shallowest match wins.
+* Also `204` for a file over `max_bytes` (default and maximum 512 KiB, a
+  non-positive or non-numeric value is `400 bad_request`), an empty file, and a
+  symlink pointing outside the project. Two projects never share an icon: the
+  search never climbs above the project directory.
+* `204` rather than `404` on purpose: browsers log every 4xx as
+  `Failed to load resource`, so a project without a favicon — the common case —
+  would fill the console with errors. An **unknown project id is still
+  `404 not_found`**, because that one is a caller mistake.
+* This is what the rail draws on each project square; on `204` the rail uses the
+  project's initials. The bytes are fetched with the bearer token and rendered
+  from an object URL, so the page CSP's `img-src` must include `blob:`.
+  The endpoint is not cached server-side, so a replaced favicon appears on the
+  next load.
+
 ### Scoping a request to a project
 
-`GET /api/workspace/tree`, `GET /api/workspace/file`, `POST /api/workspace/upload`,
-`GET /api/git/status` and `GET /api/git/diff` accept `?project=<id>` and resolve
-paths inside that project's canonical directory. An unknown id is `404
-not_found`; so is a project whose directory has since been removed (the message
-says the directory may be gone). Omitting the parameter uses the default
-workspace; for the upload it falls back to the session's own project.
+`GET /api/workspace/tree`, `GET /api/workspace/file`, `PUT /api/workspace/file`,
+`GET /api/workspace/raw`, `POST /api/workspace/upload`, `GET /api/git/status` and
+`GET /api/git/diff` accept `?project=<id>` and resolve paths inside that
+project's canonical directory. An unknown id is `404 not_found`; so is a project
+whose directory has since been removed (the message says the directory may be
+gone). Omitting the parameter uses the default workspace; for the upload it falls
+back to the session's own project.
 
 ## Sessions
 
@@ -428,9 +497,19 @@ active (already finished or never started).
 { "id": 42, "session_id": "s_ab12", "run_id": "r_x", "agent_id": null,
   "role": "assistant", "content": "...", "tool_calls": [ { "id": "call_1",
   "name": "read_file", "arguments": "{\"path\":\"a\"}" } ],
-  "tool_call_id": null, "name": null, "created_at": 1710000000000 }
+  "tool_call_id": null, "name": null, "created_at": 1710000000000,
+  "images": [ { "media_type": "image/png",
+                "data": "iVBORw0KGgo...",
+                "bytes": 48213,
+                "name": "assets/shot.png" } ] }
 ```
 `role` ∈ `system|user|assistant|tool`.
+
+`images` is present only on a `tool` row whose tool attached an image for a
+vision model (`read_file` on a PNG/JPEG/GIF/WebP). `data` is **standard base64**
+with no `data:` prefix; the UI builds `data:${media_type};base64,${data}` for the
+preview. The same list is sent live on the `tool_call_finished` event, so a chat
+shows the image without refetching the transcript.
 
 **Optional fields are omitted, not sent as `null`.** Any field shown below as
 nullable (`error`, `finished_at`, `tool_call_id`, `name`, `agent_id`, …) is left
@@ -469,6 +548,49 @@ missing key the same as `null`.
   "mode": "write", "created_at": 0 }
 ```
 
+## Subagents
+
+Subagent messages are stored in the parent session with `agent_id` set, and the
+session transcript in the web UI deliberately hides them. These two routes expose
+the delegated work itself.
+
+`GET /api/agents?project=<id>&session=<id>&status=running,failed`
+```json
+{ "running": 2,
+  "agents": [ { "id": "a_x", "session_id": "s_ab12", "parent_run_id": "r_x",
+                "parent_agent_id": null, "name": "reviewer", "role": "reviewer",
+                "task": "Review the diff", "status": "running", "model": "gpt-4o-mini",
+                "iterations": 3, "summary": "", "error": null,
+                "owned_paths": ["crates/foo/**"], "created_at": 0, "updated_at": 0,
+                "finished_at": null, "session_title": "Review the harness",
+                "workspace": "/home/me/project", "project_id": "p_ab12" } ] }
+```
+* Agents are returned newest first, across every session in scope. `project`
+  narrows to one project; without it the list covers the whole server. `session`
+  narrows to one session and `status` accepts a comma-separated set of
+  `running|completed|failed|cancelled|interrupted`. An unknown status is
+  `400 bad_request`.
+* `running` is the number of agents with status `running` in the (filtered) list.
+* Each record is an `AgentRecord` with the session's `session_title`, `workspace`
+  and `project_id` flattened onto it, so a workspace-wide view needs one request,
+  not one per session.
+
+`GET /api/agents/:id?messages=N` → one agent and the transcript it wrote:
+```json
+{ "agent": AgentSummary, "messages": [StoredMessage],
+  "messages_truncated": false, "messages_limit": 2000 }
+```
+`messages` contains only rows whose `agent_id` matches, oldest first, tail-limited
+by `?messages=` (default 2000, max 50000). It is the same `StoredMessage` shape the
+session transcript uses, so the task turn, assistant text, thinking, tool calls and
+tool results are all present. An unknown id is `404 not_found`.
+
+Live activity arrives on the normal event stream, stamped with the agent's
+`agent_id`: `text_delta`, `reasoning_delta`, `tool_call_started/finished`,
+`command_started/output/finished`, `approval_requested/resolved`, plus the
+lifecycle events `agent_spawned`, `agent_progress` and `agent_finished`. One
+connection covers every agent in every session; there is no per-agent stream.
+
 ## Approvals
 
 `GET /api/approvals?session=s_ab12` → `{ "approvals": [ApprovalRecord] }` (pending only)  
@@ -499,6 +621,66 @@ still reachable by naming one explicitly (`?path=.git`) and by the file tools.
 `404` for missing files, `400 path_escape` outside the workspace. `project`
 selects the directory, so a file opened from a project's tree is read from that
 project (see [Scoping a request to a project](#scoping-a-request-to-a-project)).
+
+"Outside the workspace" means outside the project directory **and** outside the
+system temporary directory, which every workspace also allows
+(`allow_temp_dir`, on by default; `KARUCODE_ALLOW_TEMP_DIR=0` restricts it to the
+project). The temp dir is a second root, not a widened project: `..` out of it
+and a symlink inside it that points elsewhere are still `400 path_escape`.
+
+`binary` is a NUL-byte sniff over the first 8000 bytes, so it is `false` for a
+PDF or an SVG — both are ASCII. Treat the extension, not this flag, as the
+authority on how to display a file.
+
+### Saving a file
+
+`PUT /api/workspace/file?path=docs/guide.md[&create=true][&force=true][&project=<id>]`
+takes the **whole** new contents and answers `200`:
+
+```bash
+curl -s -X PUT "localhost:8787/api/workspace/file?path=docs/guide.md" \
+  -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+  -d '{"content":"# New title\n","expected_size":412}'
+```
+```json
+{ "path": "docs/guide.md", "size": 13, "created": false, "language": "markdown" }
+```
+
+Body: `{ "content": "<whole file>", "expected_size": <bytes, optional> }`.
+
+* `content` is UTF-8 text only, at most **2 MiB** (`413 payload_too_large`,
+  the same cap as the `write_file` tool). This endpoint never writes binary.
+* The path is confined exactly like the read: `..`, absolute paths outside the
+  workspace and symlink escapes are `400 path_escape`.
+* A missing file is `404 not_found`. `create=true` creates it (and its parent
+  directories) instead, and the response says `"created": true`.
+* `expected_size` is optimistic concurrency: when the file on disk is no longer
+  that size the save is `409` with the documented `bad_request` code and
+  **nothing is written**, so an editor cannot clobber what the agent wrote in the
+  meantime. `force=true` skips the check — it is the user's answer to that
+  prompt, not a default. A file that was deleted while it was open is the same
+  `409`, because saving would reverse somebody's deletion.
+* `approvals.mode = "read_only"` refuses every save with `403
+  permission_denied`. This is a user action, not an agent one, so it never
+  creates an approval request.
+* `POST`/`PATCH`/`DELETE` on this path is `405`; only `GET` and `PUT` exist.
+
+### Raw bytes (image and PDF previews)
+
+`GET /api/workspace/raw?path=assets/logo.png[&project=<id>]` returns the file's
+bytes with a guessed `Content-Type`, `Content-Disposition: inline` and
+`Cache-Control: no-store`:
+
+```bash
+curl -s -D- -o out.png "localhost:8787/api/workspace/raw?path=assets/logo.png"
+# 200, content-type: image/png, content-disposition: inline; filename="logo.png"
+```
+
+`GET /api/workspace/file` answers JSON, which an `<img>` or an embedded PDF
+cannot render, so the viewer points those elements here. The limit is **32 MiB**
+(`413 payload_too_large` above it), confinement and error codes are the same as
+the read endpoint, and `X-Content-Type-Options: nosniff` is always sent so a
+workspace HTML file served here cannot be sniffed into a script.
 
 ### Attaching a file
 
@@ -582,6 +764,61 @@ visible immediately.
 
 `POST /api/plugins/:name/enable` `{ "enabled": true }` → `PluginDiagnostics`
 
+`POST /api/plugins/reload` → `{ "report": PluginRescanReport, "plugins":
+[PluginDiagnostics] }`
+
+Re-reads every plugin source — the `[[plugins]]` entries in the config file plus
+`<data_dir>/plugins/*/plugin.toml` — and reconciles the running processes with it.
+No body. The report says what happened, in discovery order:
+
+```json
+{ "added": ["wordy"], "removed": ["old"], "restarted": [],
+  "unchanged": ["example-hello"] }
+```
+
+* `added` — a new name: process started, tools exposed.
+* `removed` — the name is gone from every source: process stopped, tools dropped.
+* `restarted` — same name, different config entry, manifest or **file**: the old
+  process was stopped and a new one started. A rebuilt binary counts, because
+every command argument that resolves to a file is fingerprinted (`mtime` + size).
+* `unchanged` — identical sources: the process was not touched.
+
+The tool registry is rebuilt before the response, so the model sees the new set on
+its next call; a run already in flight keeps the snapshot it started with. A
+runtime `enabled` toggle survives a rescan.
+
+`POST /api/plugins/:name/reload` → `PluginDiagnostics`
+
+Replaces one plugin's process (the "I rebuilt it" / "I edited its manifest" path).
+No body. A plugin that is disabled at runtime is rebuilt but not started. Errors:
+unknown name → `404 not_found`; a slot discovery already rejected → `400
+bad_request`. A plugin that fails to start is `200` with `status: "failed"` and
+the reason in `error`, exactly like `/enable`.
+
+With `plugins_watch = true` in the config file the server calls the rescan route's
+code path on a timer (`plugins_watch_secs`, clamped to 1..=600) whenever its plugin
+sources move, so none of this needs to be triggered by hand.
+
+`plugin_panels` in `GET /api/config` lists the inspector tabs the ready plugins
+declare, grouped per plugin. A panel is `{"id","hosted_id","title","icon",
+"source","refresh_ms"}` where `hosted_id` is `plugin__<plugin>__<id>`. A plugin
+that declares none contributes no entry and no error; the field is absent only on
+an older server.
+
+`GET /api/plugins/:name/panels/:panel[?project=<id>&session=<id>]` →
+```json
+{ "title": "Todo", "data": { "items": [] },
+  "version": 1793285052052, "fetched_ms": 1793285052052 }
+```
+`data` is **opaque JSON** produced by the plugin and never interpreted here: the
+browser renders it with a component registered for that panel type, or as
+read-only JSON, so a plugin cannot inject markup or script. `title` falls back to
+the manifest's; `version` equals `fetched_ms` and is a cache key. `?project=`
+selects the workspace root and `?session=` the session handed to the plugin.
+Errors: unknown plugin or panel → `404 not_found` (the message lists the panels
+the plugin does declare); disabled or unusable plugin → `400 bad_request`; a
+plugin that fails to answer → `502 plugin`.
+
 `GET /api/mcp` → `{ "servers": [ { "name": "fs", "transport": "stdio",
   "status": "connected|failed|disconnected", "tools": ["mcp__fs__read"],
   "error": null } ] }`
@@ -593,6 +830,7 @@ Use `fetch()` plus a `ReadableStream` reader (not `EventSource`, so the auth
 header travels). Each event is:
 
 ```
+id: 12
 data: {"seq":12,"ts_ms":1710000000123,"session_id":"s_x","run_id":"r_y","agent_id":null,"type":"text_delta","delta":"Hello"}\n\n
 ```
 
@@ -600,7 +838,14 @@ A `: keepalive` comment is sent every 15 seconds. The envelope always has
 `seq`, `ts_ms`, and optional `session_id`, `run_id`, `agent_id`; the event fields
 are flattened alongside `type`.
 
-There is no replay cursor, so the client has to notice what it missed:
+**Resume.** Every frame carries `id: {seq}` before its `data:` line, so a
+reconnect can send `Last-Event-ID: <seq>` (or `?last_event_id=<seq>`) and be
+handed the frames it missed instead of refetching the session. The server keeps
+the last 1000 envelopes per session in memory; a cursor older than that gets a
+`resync` frame (`{"type":"resync","requested_id":N,"oldest_available":M}`) rather
+than a silent skip, and the client should refetch once.
+
+When a resume is not possible, the client has to notice what it missed:
 
 * `seq` is monotonic within one server process (it starts again at 1 with the
   process, which is why dedupe is scoped to a connection). A jump means frames
@@ -638,7 +883,7 @@ There is no replay cursor, so the client has to notice what it missed:
 | `reasoning_delta` | `delta` |
 | `usage` | `input_tokens`, `output_tokens` |
 | `tool_call_started` | `call_id`, `name`, `arguments` (object; a **string** containing the raw text when the model emitted invalid JSON) |
-| `tool_call_finished` | `call_id`, `name`, `ok`, `output`, `truncated`, `duration_ms` |
+| `tool_call_finished` | `call_id`, `name`, `ok`, `output`, `truncated`, `duration_ms`, `images?` (`[{media_type, data, bytes, name}]`, standard base64 — present only when the tool attached an image for a vision model) |
 | `command_started` | `call_id`, `command`, `cwd` |
 | `command_output` | `call_id`, `stream` (`stdout`/`stderr`), `chunk` |
 | `command_finished` | `call_id`, `exit_code`, `duration_ms`, `truncated` |
@@ -656,3 +901,21 @@ There is no replay cursor, so the client has to notice what it missed:
 Vite dev server proxies `/api` to `KARUCODE_PORT` (default `8787`). In production
 the Rust server serves the built `web/dist` (embedded at compile time, or from
 `KARUCODE_WEB_DIR` when set).
+
+## Metrics
+
+`GET /metrics` — Prometheus text format (`text/plain; version=0.0.4`).
+
+This is an operator endpoint, not part of the `/api` surface, and it sits **inside**
+the auth layer: with `KARUCODE_AUTH_TOKEN` set, scraping it needs the bearer token.
+It names routes and counts, which is not something to hand to an unauthenticated
+caller on a non-loopback bind.
+
+Series include `karucode_requests_total{method,status_class}`,
+`karucode_sse_connections`, `karucode_runs_active`, `karucode_runs_started_total`,
+`karucode_runs_finished_total` and `karucode_uptime_seconds`.
+
+Every response also carries an `X-Request-Id` header (a fresh v4 id per request),
+and the same id appears in the access-log line for that request, so a log entry and
+a client report can be matched. The access log records method, path, status and
+latency — never the query string (which can carry `?token=`) and never a body.

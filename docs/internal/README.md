@@ -18,16 +18,20 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`approvals`](approvals.md) | The four approval modes, the allowlists behind them, and how a pending approval is answered or times out. | `crates/kc-core/src/approval.rs:1` |
 | [`builtin-tools`](builtin-tools.md) | What each first-party tool does, how it is gated, and the limits and gotchas that shape its output. | `crates/kc-tools/src/lib.rs:7` |
 | [`configuration`](configuration.md) | The four config layers, which settings apply live, and how secrets and invalid values are handled. | `crates/kc-server/src/settings.rs:14` |
+| [`deployment`](deployment.md) | Install the binary and a hardened unit, keep it enabled across reboots, and upgrade or roll back without losing the paths it needs. | `crates/kc-server/src/main.rs:6` |
 | [`documentation`](documentation.md) | Doc blocks in the code compile into the built-in docs the agent reads; add, update and delete them with the code. | `crates/kc-docs/src/lib.rs:33` |
 | [`http-api`](http-api.md) | Authenticate, send the CSRF header, and find the endpoint for sessions, config, approvals, files, git, plugins, MCP and the event stream. | `crates/kc-server/src/lib.rs:21` |
 | [`mcp`](mcp.md) | Add stdio or streamable-HTTP MCP servers to the config and use their tools through the same approval policy. | `crates/kc-mcp/src/lib.rs:18` |
-| [`plugins`](plugins.md) | Build an out-of-process plugin that adds tools and hooks, register it, and debug it when it fails to start. | `crates/kc-plugin-sdk/src/lib.rs:49` |
+| [`plugins`](plugins.md) | Build an out-of-process plugin that adds tools, hooks and inspector panels, register it, and debug it when it fails to start. | `crates/kc-plugin-sdk/src/lib.rs:49` |
 | [`projects`](projects.md) | How projects map to directories, how sessions are confined to one, and what happens when a project's directory moves or is deleted. | `crates/kc-server/src/state.rs:6` |
+| [`prompt-cache`](prompt-cache.md) | Why a long run can re-bill its whole context every turn, what karucode does to keep the cached prefix stable, and how to read the hit rate. | `crates/kc-runtime/src/context.rs:46` |
 | [`provider-profiles`](provider-profiles.md) | Point karucode at any OpenAI-compatible endpoint, by environment or as named profiles, and choose the active model. | `crates/kc-provider/src/lib.rs:8` |
 | [`run-server`](run-server.md) | Build the UI and the binary, start it against a workspace, and know what each CLI flag and startup failure means. | `crates/kc-server/src/bootstrap.rs:8` |
-| [`security`](security.md) | What karucode protects by default, what it explicitly does not, and the recipe for safe remote access. | `crates/kc-server/src/app.rs:11` |
+| [`security`](security.md) | What karucode protects by default, what it explicitly does not, and the recipe for safe remote access. | `crates/kc-server/src/app.rs:16` |
+| [`session-titles`](session-titles.md) | Sessions are titled from their first message; with `[titles]` on (the default) a model writes a short, plain-language title instead, using the session's own model or a cheaper one you pick. | `crates/kc-server/src/titles.rs:1` |
 | [`subagents`](subagents.md) | How spawn_agent works, the limits it runs under, and when delegation helps instead of hurting. | `crates/kc-runtime/src/subagent.rs:20` |
-| [`themes`](themes.md) | Built-in palettes, live colour and density editing, fonts and custom CSS, saved in the browser and shareable as a theme JSON file. | `web/src/theme/engine.ts:1` |
+| [`terminals`](terminals.md) | A real shell in the browser that survives a reload, another browser and a cleared cache - and the honest limit of what survives a restart. | `crates/kc-server/src/terminals.rs:1` |
+| [`themes`](themes.md) | Built-in palettes, live colour and density editing, fonts and custom CSS, the transcript view options (cards or rows, grouped calls, folded turns), saved in the browser and shareable as a theme JSON file. | `web/src/theme/engine.ts:1` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-14 topic(s).
+18 topic(s).

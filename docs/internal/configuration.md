@@ -7,7 +7,7 @@
 
 - **Slug:** `configuration`
 - **Tags:** config, settings, configuration, toml, env
-- **Applies to:** `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_AUTO_CONTINUE`, `env:KARUCODE_MAX_CONTINUES`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`
+- **Applies to:** `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_AUTO_CONTINUE`, `env:KARUCODE_MAX_CONTINUES`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`
 - **Source:** `crates/kc-server/src/settings.rs:14`
 
 ---
@@ -32,6 +32,77 @@ Command-line flags (`--host`, `--port`, `--workspace`, `--data-dir`,
 Set `KARUCODE_LOCK_SETTINGS=1` to remove layer 1 entirely: the UI becomes
 read-only for settings and `PATCH /api/config` answers `403`. This is how you
 run karucode where the operator, not the browser, owns the model and keys.
+
+## Which settings apply without a restart
+
+Model, sampling, limits, approvals and subagents are hot-swapped by a saved
+change. The plugin list is not part of `PATCH /api/config` - installing a
+plugin is not a settings tweak - so it has its own refresh:
+
+```toml
+plugins_watch = true      # KARUCODE_PLUGINS_WATCH=1
+plugins_watch_secs = 2    # KARUCODE_PLUGINS_WATCH_SECS, clamped to 1..=600
+```
+
+With `plugins_watch` on, the server re-reads `[[plugins]]` from this file and
+every `<data_dir>/plugins/*/plugin.toml` on a timer and applies additions,
+removals and rebuilt binaries without a restart. It is off by default because a
+reload replaces processes; `POST /api/plugins/reload` does the same thing on
+demand, and `POST /api/plugins/:name/reload` refreshes one plugin. Bind
+address, port, data directory and auth token still need a restart.
+
+## The admin gate
+
+`KARUCODE_LOCK_SETTINGS` is all-or-nothing. For the middle ground - the UI may
+tune limits and sampling, but not the security-relevant settings - set
+`KARUCODE_ADMIN_TOKEN` (or `admin_token` in the config file). A
+`PATCH /api/config` that changes any of these then also needs
+`X-Karucode-Admin-Token: <token>`:
+
+* `approvals` - the human gate itself;
+* `model.base_url`, `model.api_key` (including `clear_api_key`) - the endpoint
+  that receives every prompt and every command's output;
+* `providers` - the same, for every saved profile;
+* `active_provider`, `active_model` - which of those profiles is live.
+
+Everything else (`limits`, `subagents`, sampling) keeps working with the
+ordinary bearer token. A missing or wrong admin credential is
+`403 permission_denied`, and the change is not applied. The comparison is
+constant-time, and the token is never logged or echoed. Every authorised
+security change is logged at `info` with the field *names* only.
+
+With no admin token configured the gate is off and any API client can change
+those fields; the server logs a warning at startup when that is the case.
+
+## Project roots
+
+`project_roots` (`KARUCODE_PROJECT_ROOTS`, colon-separated) is an optional
+allowlist for where `POST /api/projects` may create a project. **Empty - the
+default - means no allowlist**: any existing directory is a valid project,
+which is what a single-operator install wants, since the obvious second
+project is a sibling checkout of the default workspace. Set it for a shared or
+remotely reachable deployment. Either way `/` itself is refused, so a request
+cannot make the whole filesystem the confinement root for every file tool.
+
+```toml
+project_roots = ["/home/me/projects", "/srv/code"]
+```
+
+## The temp directory
+
+`allow_temp_dir` (default `true`, or `KARUCODE_ALLOW_TEMP_DIR`) lets the file
+tools read and write the system temporary directory as well as the project.
+It is on by default because build output, screenshots, downloads and browser
+profiles land in `/tmp` and a path error there is noise, not protection. The
+root is `TMPDIR` when set and absolute, otherwise `/tmp`.
+
+```toml
+allow_temp_dir = false      # project-only confinement
+```
+
+This is unrelated to `project_roots`: that one gates where a project may be
+created, this one widens what a run's file tools may touch. Both are
+process-level, so changing either needs a restart.
 
 ## What applies without a restart
 
@@ -100,10 +171,55 @@ for runs and subagents alike. Environment:
 `KARUCODE_SUBAGENT_TIMEOUT_SECS`.
 
 `limits.context_max_chars` decides how much conversation is sent to the model.
-When it overflows, the oldest exchanges are replaced by one compaction notice
-that keeps a one-line digest of what they said; the persisted transcript keeps
-every message. `limits.max_tool_calls_per_turn` is a runaway-batch guard, not a
-work budget - calls past it are skipped with a placeholder result.
+Leave it at `0` (the default) and the budget is **derived from the resolved
+model**: its `context_window` minus the room its answer needs, at four
+characters per token. A non-zero value is an explicit ceiling for the whole
+install and can only lower that derived budget. When it overflows, the oldest
+exchanges are replaced by one compaction notice
+that keeps a one-line digest of what they said (including which files each
+turn read); the persisted transcript keeps every message. The original user
+turn and the exchange in flight are never compacted away. `limits.max_tool_calls_per_turn`
+is a runaway-batch guard, not a work budget - calls past it are skipped with a
+placeholder result. How compaction interacts with provider prompt caching is
+documented under `prompt-cache`.
+
+## Images (vision models)
+
+`read_file` can show a model an image, and this is the switch that decides
+whether it does. Nothing guesses it from the model id - an endpoint will
+accept a request carrying an image for a text-only model and either drop it or
+fail the whole turn, and a model that "read" an image it never saw will
+describe it confidently.
+
+```toml
+[model]
+supports_images = true        # KARUCODE_MODEL_SUPPORTS_IMAGES=1
+
+[limits]
+max_image_read_bytes = 4194304   # 4 MiB, base64'd into the transcript
+```
+
+With `supports_images` on, `read_file` on a PNG/JPEG/GIF/WebP base64-encodes
+the file and attaches it to the tool result. With it off, the tool refuses with
+a sentence the model is expected to repeat ("I cannot see images"), which is
+the whole point: a text-only model must say so rather than invent a
+description. A `vision = true|false` on a `[[providers.models]]` entry overrides
+the install-wide flag for that model, so one session can use a vision model
+while the default stays text-only. It is resolved for the model a session will
+actually call: pinning a session to a vision model is enough, even when the
+profile's default model is text-only. Formats the vision APIs reject (BMP, ICO,
+TIFF, AVIF, HEIC) are named in the refusal; SVG is text and is read as text.
+
+Both knobs are on the settings screen: "Send images to models" is the
+install-wide default, and each model row carries its own image setting
+(unknown / accepted / text only), prefilled from models.dev - `image` in
+`modalities.input` - whenever the model is picked from the catalog, added by
+id, or refreshed.
+
+The image bytes live in the persisted transcript and are resent on every later
+turn, which is why the cap exists. Count one image as about 8,000 characters of
+the context budget (`limits.context_max_chars`); the base64 length is not
+counted, because the provider bills the picture, not the encoding.
 
 ## Minimal config
 

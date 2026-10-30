@@ -3,11 +3,11 @@
 
 # Write and install a plugin
 
-> Build an out-of-process plugin that adds tools and hooks, register it, and debug it when it fails to start.
+> Build an out-of-process plugin that adds tools, hooks and inspector panels, register it, and debug it when it fails to start.
 
 - **Slug:** `plugins`
-- **Tags:** plugins, extension, sdk, tools, hooks, jsonrpc
-- **Applies to:** `config:[[plugins]]`, `file:~/.local/share/karucode/plugins/<name>/plugin.toml`, `dir:plugins/example-hello`, `tool:plugin__<plugin>__<tool>`, `cmd:cargo build -p example-hello`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin sdk --check`, `file:src/sdk.rs`, `file:src/protocol.rs`, `doc:docs/PLUGINS.md`, `env:KARUCODE_PLUGIN_NAME`, `env:KARUCODE_PLUGIN_PROTOCOL`, `env:KARUCODE_PLUGIN_PERMISSIONS`, `env:KARUCODE_PLUGIN_SETTINGS`
+- **Tags:** plugins, extension, sdk, tools, hooks, jsonrpc, panels
+- **Applies to:** `config:[[plugins]]`, `file:~/.local/share/karucode/plugins/<name>/plugin.toml`, `dir:plugins/example-hello`, `tool:plugin__<plugin>__<tool>`, `cmd:cargo build -p example-hello`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin sdk --check`, `file:src/sdk.rs`, `file:src/protocol.rs`, `doc:docs/PLUGINS.md`, `env:KARUCODE_PLUGIN_NAME`, `env:KARUCODE_PLUGIN_PROTOCOL`, `env:KARUCODE_PLUGIN_PERMISSIONS`, `env:KARUCODE_PLUGIN_SETTINGS`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `config:panels`, `config:plugins_watch`, `config:plugins_watch_secs`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `fn:PluginBuilder::panel`
 - **Source:** `crates/kc-plugin-sdk/src/lib.rs:49`
 
 ---
@@ -55,11 +55,11 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-Add a tool with `.tool(…)`, a hook with `.hook(hooks::BEFORE_PROMPT, …)`, and
-declare what it touches with `.permission(permissions::FILES_WRITE)`. After
-upgrading karucode, refresh the vendored copy with `karucode plugin sdk <dir>`;
-`--check` exits non-zero when it is stale, writes nothing and starts no server,
-so a plugin's CI can guard it.
+Add a tool with `.tool(…)`, a hook with `.hook(hooks::BEFORE_PROMPT, …)`, a
+panel with `.panel(…)`, and declare what it touches with
+`.permission(permissions::FILES_WRITE)`. After upgrading karucode, refresh the
+vendored copy with `karucode plugin sdk <dir>`; `--check` exits non-zero when it
+is stale, writes nothing and starts no server, so a plugin's CI can guard it.
 
 Inside this repository `plugins/example-hello` is a workspace member and uses
 `kc-plugin-sdk` by relative path (`cargo build -p example-hello`). Copy its
@@ -83,7 +83,8 @@ settings = { greeting = "hi" }
 or as a manifest the host discovers on disk at
 `<data_dir>/plugins/<name>/plugin.toml` (same keys, `command` required). A
 duplicate name fails the slot with an error naming both sources instead of
-silently running one of them.
+silently running one of them. Either source can be added while the server is
+running — see §4.
 
 ## 3. Run and inspect
 
@@ -96,7 +97,58 @@ curl -s -X POST localhost:8787/api/plugins/example-hello/enable \
 Status is `stopped`, `starting`, `ready`, `failed` or `disabled`. Enabling resets
 the restart budget.
 
-## 4. Debug it without the server
+## 4. Install, upgrade and remove a plugin without a restart
+
+The host re-reads its sources on demand, so none of the three needs a server
+restart:
+
+```bash
+# install: drop a manifest into the data dir, then apply it
+curl -s -X POST localhost:8787/api/plugins/reload -H 'X-Karucode-Client: web' \
+  -H 'Content-Type: application/json' -d '{}' | jq .report
+# { "added": ["wordy"], "removed": [], "restarted": [], "unchanged": ["example-hello"] }
+
+# upgrade: rebuild the binary in place, then replace just that process
+curl -s -X POST localhost:8787/api/plugins/wordy/reload -H 'X-Karucode-Client: web' \
+  -H 'Content-Type: application/json' -d '{}' | jq .status
+
+# remove: delete <data_dir>/plugins/wordy (or its [[plugins]] entry) and rescan
+curl -s -X POST localhost:8787/api/plugins/reload -H 'X-Karucode-Client: web' \
+  -H 'Content-Type: application/json' -d '{}' | jq .report.removed
+```
+
+`POST /api/plugins/reload` is a **rescan**: it re-reads the `[[plugins]]` entries
+from the config file plus every `<data_dir>/plugins/*/plugin.toml`, then adds new
+names, drops names that disappeared and replaces names whose config or files
+changed. Everything unchanged is left running untouched, so it is safe to call
+on a hunch. `POST /api/plugins/:name/reload` replaces one plugin's process and
+answers with its diagnostics.
+
+"Files changed" includes a **rebuilt binary**: the host fingerprints each
+command argument that resolves to a file, so a recompiled `target/release/wordy`
+with an identical command line still counts as an upgrade. A runtime
+enable/disable survives a rescan — the config file decides what a *new* plugin
+starts as, not whether an existing one that you switched off comes back.
+
+Both reload routes rebuild the tool registry before they answer, so the model
+sees the new tools on its very next call. A run that is already in flight keeps
+the registry snapshot it started with; a call to a replaced plugin fails with
+"was stopped" rather than hanging, and the next run is clean.
+
+To skip the curl entirely, let the server watch its own sources:
+
+```toml
+# ~/.config/karucode/config.toml
+plugins_watch = true     # or KARUCODE_PLUGINS_WATCH=1
+plugins_watch_secs = 2   # or KARUCODE_PLUGINS_WATCH_SECS, clamped to 1..=600
+```
+
+It polls (one `read_dir` plus a `stat` per command) instead of using inotify, so
+it also works over a network mount or a container bind mount, and a write that
+lands while the server is busy is still applied. Off by default: a reload
+replaces processes, so opting in is deliberate.
+
+## 5. Debug it without the server
 
 The protocol is just lines of JSON, so drive it by hand:
 
@@ -107,13 +159,93 @@ printf '%s\n' \
   | ./target/release/example-hello
 ```
 
+## Panels (a tab in the inspector)
+
+A plugin can contribute a tab to the web UI's inspector. It supplies **data**,
+never markup: the payload is opaque JSON the host forwards untouched, and the
+frontend renders it with a component registered for that panel type, or as
+read-only JSON when none is. That is what keeps a plugin from executing code
+in the app's origin, so the CSP and `frame-ancestors 'none'` keep their
+meaning.
+
+```rust
+use sdk::{PanelRequest, PluginBuilder};
+use serde_json::json;
+
+fn main() -> std::io::Result<()> {
+    PluginBuilder::new("wordy", "0.1.0")
+        .panel("words", "Words", |_req: PanelRequest| {
+            json!({ "words": 12, "files": ["src/main.rs"] })
+        })
+        .run()
+}
+```
+
+In a hand-written plugin, declare the panel in the manifest and answer
+`panels/read`:
+
+```json
+{"id":"words","title":"Words","icon":"list","source":"static","refresh_ms":5000}
+```
+
+```json
+{"jsonrpc":"2.0","id":9,"method":"panels/read",
+ "params":{"panel":"words","session_id":"s_1","project":"p_1","workspace":"/w"}}
+{"jsonrpc":"2.0","id":9,"result":{"title":"Words","data":{"words":12}}}
+```
+
+* the panel id is hosted as `plugin__<plugin>__<id>`, so it cannot collide with
+  a built-in tab or another plugin's panel. Ids are lowercase `a-z`, `0-9`,
+  `-`, `_`, `.`; anything else, a duplicate id, an unknown `source` or a `tool`
+  the plugin does not advertise in `tools/list` fails the handshake and shows
+  up in the plugin diagnostics;
+* `data` is any JSON. `title` is optional — the manifest's title is used when
+  it is missing;
+* `icon` is a *name* from the app's icon set (`check`, `list`, `eye`, `folder`,
+  `git`, `terminal`, `bolt`, `spark`, …); an unknown name draws a neutral
+  glyph. The app decides what the name looks like, which is why a plugin cannot
+  ship an SVG;
+* `refresh_ms` is a hint. 0 (the default) means "read when the tab is opened
+  or refreshed"; anything else is clamped to 1000..=300000 so a plugin cannot
+  make the UI hammer the server;
+* the payload is capped at 256 KiB when rendered. Do real work in a tool the
+  agent calls, not in a panel handler that runs every few seconds.
+
+The tab is listed in `GET /api/config` under `plugin_panels` and read over
+`GET /api/plugins/:name/panels/:panel?project=&session=`; a plugin that
+declares no panels changes nothing, which is why this is additive and did not
+bump the protocol version.
+
+## The call context
+
+Since this revision, `tools/call` also carries
+`context: {session_id, run_id, agent_id, workspace, project, depth}`, so a
+workspace-scoped plugin knows which project a call belongs to instead of
+remembering the last `before_prompt`. The SDK exposes it as
+`ToolRequest::context()`, `::workspace()` and `::session_id()`. A plugin from
+before this field simply ignores it; on an older host `context()` returns
+`None`.
+
 ## Permissions
 
 `permissions` is a declarative list (`files.read`, `files.write`, `shell`,
-`network`, `session.read`, or free-form). The **config entry is authoritative**:
-a manifest cannot grant itself a permission the operator did not list. A
-`mutating` tool without `files.write`, or a `shell` tool without `shell`, is not
-exposed at all.
+`network`, `session.read`, or free-form). It is **fail-closed**: an entry that
+lists no permissions grants none, whatever the manifest asks for. To honour the
+manifest's own declaration, opt in explicitly with `permissions = ["*"]` or
+`settings.trust = true`. A `mutating` tool without `files.write`, or a `shell`
+tool without `shell`, is not exposed at all.
+
+A tool's declared `class` is a **hint only**. Every plugin tool is exposed as
+`external`, so it always goes through the approval policy — a plugin cannot
+exempt itself by declaring `read_only`. To let a specific tool skip the prompt,
+list it in the plugin's `settings.read_only_tools = ["tool", …]`.
+
+The plugin process gets a **cleared environment** plus an allowlist (`PATH`,
+`HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `TERM`, `TMPDIR`, `PWD`, `TZ`), the
+`KARUCODE_PLUGIN_*` variables and your `env` table (which wins). Credentials
+such as `KARUCODE_AUTH_TOKEN`, `OPENAI_API_KEY`, `GITHUB_TOKEN` and anything
+matching `*_API_KEY`/`*_TOKEN`/`*_SECRET`/`*_PASSWORD`/`AWS_*` are never
+inherited; pass a plugin its own credential through `env` if it needs one.
 
 It is **not** a sandbox. The plugin runs with the server's OS permissions and
 can do anything that user can do. Install plugins you trust, exactly like shell
@@ -127,9 +259,25 @@ scripts.
   plugin fails with an error naming both values.
 * A dead process is restarted once per failed call, at most three times per
   plugin per server lifetime; after that calls fail with an explanatory message
-  until you fix it or restart the server.
-* There is no hot reload: replacing the binary requires disabling and enabling
-  the plugin (or a server restart).
-* Results are truncated and rendered as text; a plugin cannot inject UI.
+  until you fix it (or reload the plugin, which resets the budget).
+* A replaced binary or an edited manifest needs a reload, not a restart:
+  `POST /api/plugins/:name/reload`, or `plugins_watch = true` to have the server
+  notice on its own.
+* Results are truncated and rendered as text. A tool result still cannot
+  inject UI; a panel contributes **data** (rendered by a first-party
+  component, or as read-only JSON) and never markup or script.
+* A panel id that is not lowercase `a-z0-9-_.`, a duplicate id, an unknown
+  `source`, or a `source = "tool"` panel naming a tool the plugin does not
+  advertise all fail the handshake; the reason is in `PluginDiagnostics.error`
+  and `GET /api/plugins`.
+* Hook output is capped at 4 KiB per contribution and 16 KiB in total before it
+  reaches the system prompt; anything longer is cut with `[… truncated]`.
+* A plugin that breaks the framing contract (a line over 8 MiB, a read error) is
+  killed and marked `failed`; it is not left running.
+* `before_prompt` output is placed in the system prompt and re-requested on
+  **every model call**. Return the same text each time: a timestamp, counter
+  or random value there changes message 0 and makes the provider re-bill the
+  whole context instead of reading it from the prompt cache. Notes from several
+  plugins are joined in plugin order, not in the order the processes answer.
 
 Full reference: `docs/PLUGINS.md` (wire protocol, hooks, timeouts, error codes).
