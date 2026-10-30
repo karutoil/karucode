@@ -1,0 +1,13 @@
+{
+  "color": {
+    "ink": { "950": "#111213", "900": "#141516", "850": "#18191a", "800": "#1c1d1f", "700": "#2a2c2f" },
+    "paper": { "default": "#eae9e5", "2": "#b4b3ae", "muted": "#8b8d8c", "light": "#f6f4ef" },
+    "gold": { "default": "#dfb680", "hi": "#f1c691", "deep": "#8a5d24", "bg": "#32291e", "line": "#58452e" },
+    "signal": { "green": "#88baa0", "red": "#e49e91", "blue": "#92b3d8" }
+  },
+  "font": {
+    "sans": "Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    "mono": "'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace"
+  },
+  "radius": { "sm": "6px", "default": "10px", "lg": "14px" }
+}

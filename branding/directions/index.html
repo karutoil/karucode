@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>karucode — brand directions</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#e9e7e2;color:#1a1a1a;font:14px/1.5 Inter,ui-sans-serif,system-ui,sans-serif;padding:40px}
+h1{font-size:28px;margin:0 0 4px;letter-spacing:-.5px}
+.lede{color:#555;margin:0 0 32px;max-width:720px}
+.dir{border-radius:18px;padding:32px;margin-bottom:32px;display:grid;grid-template-columns:300px 1fr;gap:32px}
+.dir h2{margin:0;font-size:13px;letter-spacing:.12em;text-transform:uppercase;opacity:.6}
+.dir .name{font-size:24px;margin:4px 0 8px;font-weight:650}
+.dir p{margin:0 0 10px;opacity:.8}
+.dir ul{margin:0;padding-left:18px;opacity:.8}
+.board{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.tile{border-radius:12px;padding:20px;min-height:150px;display:flex;flex-direction:column;justify-content:center;gap:12px}
+.tile.wide{grid-column:span 3;min-height:0}
+.lbl{font-size:11px;letter-spacing:.1em;text-transform:uppercase;opacity:.55}
+.lockup{display:flex;align-items:center;gap:12px}
+.lockup img{width:44px;height:44px}
+.icons{display:flex;align-items:flex-end;gap:16px}
+.sw{display:flex;gap:8px}
+.sw div{flex:1;height:64px;border-radius:8px;display:flex;align-items:flex-end;padding:6px;font:11px ui-monospace,monospace}
+.ui{display:flex;gap:0;border-radius:10px;overflow:hidden;height:170px;font-size:12px}
+.ui .rail{width:48px;display:flex;justify-content:center;padding-top:12px}
+.ui .rail img{width:26px;height:26px}
+.ui .side{width:170px;padding:12px;display:flex;flex-direction:column;gap:6px}
+.ui .main{flex:1;padding:14px;display:flex;flex-direction:column;gap:8px}
+.ui .pill{padding:5px 8px;border-radius:6px}
+.ui .msg{padding:8px 10px;border-radius:8px;max-width:80%}
+.banner{border-radius:10px;padding:28px;display:flex;align-items:center;justify-content:space-between}
+
+/* A: Ember */
+.a{background:#111213;color:#eae9e5}
+.a .tile{background:#1c1d1f;border:1px solid #2a2c2f}
+.a .wm{font:700 30px/1 Inter,system-ui,sans-serif;letter-spacing:-1.2px}
+.a .wm span{color:#dfb680}
+
+/* B: Prompt */
+.b{background:#0b0d0c;color:#ecefe9}
+.b .tile{background:#121614;border:1px solid #1f2622}
+.b .wm{font:600 28px/1 "JetBrains Mono","SFMono-Regular",ui-monospace,monospace;letter-spacing:-.5px}
+.b .wm span{color:#7ee2a8}
+.b .wm i{font-style:normal;color:#7ee2a8;animation:blink 1.1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* C: Seal */
+.c{background:#f4f1ea;color:#1d1b18}
+.c .tile{background:#fffdf8;border:1px solid #e2dccf}
+.c .wm{font:600 32px/1 "Iowan Old Style","Palatino Linotype",Georgia,serif;letter-spacing:-.3px}
+.c .wm span{color:#d4462c}
+
+/* D: Loop */
+.d{background:#0e1320;color:#e6ecf7}
+.d .tile{background:#151c2e;border:1px solid #232c44}
+.d .wm{font:650 30px/1 "Nunito","Varela Round",ui-rounded,system-ui,sans-serif;letter-spacing:-.6px;background:linear-gradient(90deg,#5eead4,#8fb4ff);-webkit-background-clip:text;color:transparent}
+</style>
+</head>
+<body>
+<h1>karucode brand directions</h1>
+<p class="lede">Four candidate identities, each shown as mark, wordmark, app icon, palette, a slice of the web UI, and a README banner. Pick one (or mix: e.g. the B mark with the A palette) and the next step is to produce the final kit from it.</p>
+
+<!-- A -->
+<section class="dir a">
+  <div>
+    <h2>Direction A</h2>
+    <div class="name">Ember</div>
+    <p>Evolves what already ships: the gold diamond favicon and the warm charcoal UI from <code>karucode-v3-themes.html</code>. Lowest-risk option; no UI recolouring needed.</p>
+    <ul><li>Feel: calm, crafted, long-session</li><li>Type: Inter (UI), system mono</li><li>Mark: faceted diamond with a "cursor" cut-out</li><li>Risk: gold-on-dark is common among dev tools</li></ul>
+  </div>
+  <div class="board">
+    <div class="tile"><span class="lbl">Lockup</span><div class="lockup"><img src="a-ember/mark.svg" alt=""><span class="wm">karu<span>code</span></span></div></div>
+    <div class="tile"><span class="lbl">App icon</span><div class="icons"><img src="a-ember/app-icon.svg" width="72" alt=""><img src="a-ember/app-icon.svg" width="40" alt=""><img src="a-ember/app-icon.svg" width="20" alt=""></div></div>
+    <div class="tile"><span class="lbl">Palette</span><div class="sw"><div style="background:#111213;border:1px solid #2a2c2f">#111213</div><div style="background:#1c1d1f">#1c1d1f</div><div style="background:#dfb680;color:#111">#dfb680</div><div style="background:#88baa0;color:#111">#88baa0</div><div style="background:#eae9e5;color:#111">#eae9e5</div></div></div>
+    <div class="tile wide"><span class="lbl">In the product</span>
+      <div class="ui" style="background:#111213;border:1px solid #2a2c2f">
+        <div class="rail" style="background:#141516;border-right:1px solid #2a2c2f"><img src="a-ember/mark.svg" alt=""></div>
+        <div class="side" style="background:#18191a;color:#b4b3ae"><div class="pill" style="background:#32291e;color:#f1c691">Refactor provider</div><div class="pill">Fix SSE reconnect</div><div class="pill">Docs pass</div></div>
+        <div class="main"><div class="msg" style="background:#1c1d1f">Read <code>crates/kc-provider/src/lib.rs</code> and 3 more files</div><div class="msg" style="background:#32291e;color:#f1c691;align-self:flex-end">Approve <b>edit_file</b>?</div></div>
+      </div></div>
+    <div class="tile wide"><span class="lbl">README banner</span><div class="banner" style="background:linear-gradient(120deg,#111213,#24201a)"><div class="lockup"><img src="a-ember/mark.svg" alt=""><span class="wm">karu<span>code</span></span></div><span style="color:#b4b3ae">A self-hosted coding agent for long sessions.</span></div></div>
+  </div>
+</section>
+
+<!-- B -->
+<section class="dir b">
+  <div>
+    <h2>Direction B</h2>
+    <div class="name">Prompt</div>
+    <p>Terminal-native. The mark is a stylised <b>k</b> built from a bar and a chevron, which also reads as a prompt. Works in ASCII for the CLI and server banner.</p>
+    <ul><li>Feel: precise, hacker, fast</li><li>Type: JetBrains Mono everywhere</li><li>Mark: <code>|&lt;</code> glyph, blinking cursor in motion</li><li>Risk: looks like many CLI tools; weaker for non-developers</li></ul>
+  </div>
+  <div class="board">
+    <div class="tile"><span class="lbl">Lockup</span><div class="lockup"><img src="b-prompt/mark.svg" alt=""><span class="wm">karu<span>code</span><i>_</i></span></div></div>
+    <div class="tile"><span class="lbl">App icon</span><div class="icons"><img src="b-prompt/app-icon.svg" width="72" alt=""><img src="b-prompt/app-icon.svg" width="40" alt=""><img src="b-prompt/app-icon.svg" width="20" alt=""></div></div>
+    <div class="tile"><span class="lbl">Palette</span><div class="sw"><div style="background:#0b0d0c;border:1px solid #1f2622">#0b0d0c</div><div style="background:#121614">#121614</div><div style="background:#7ee2a8;color:#111">#7ee2a8</div><div style="background:#f2c46d;color:#111">#f2c46d</div><div style="background:#ecefe9;color:#111">#ecefe9</div></div></div>
+    <div class="tile wide"><span class="lbl">In the product</span>
+      <div class="ui" style="background:#0b0d0c;border:1px solid #1f2622;font-family:ui-monospace,monospace">
+        <div class="rail" style="background:#0f1211;border-right:1px solid #1f2622"><img src="b-prompt/mark.svg" alt=""></div>
+        <div class="side" style="background:#101312;color:#9aa39d"><div class="pill" style="background:#14261c;color:#7ee2a8">&gt; refactor-provider</div><div class="pill">fix-sse-reconnect</div><div class="pill">docs-pass</div></div>
+        <div class="main"><div class="msg" style="background:#121614">$ cargo test -p kc-docs <span style="color:#7ee2a8">ok</span></div><div class="msg" style="background:#2a2414;color:#f2c46d;align-self:flex-end">approve edit_file? [y/N]</div></div>
+      </div></div>
+    <div class="tile wide"><span class="lbl">README banner / server start</span><div class="banner" style="background:#0b0d0c;font-family:ui-monospace,monospace"><div class="lockup"><img src="b-prompt/mark.svg" alt=""><span class="wm">karu<span>code</span><i>_</i></span></div><span style="color:#9aa39d">listening on 127.0.0.1 · one binary · sqlite</span></div></div>
+  </div>
+</section>
+
+<!-- C -->
+<section class="dir c">
+  <div>
+    <h2>Direction C</h2>
+    <div class="name">Seal</div>
+    <p>Light, editorial, borrowed from the hanko stamp: a vermilion circle with the <b>k</b> pressed out of it. Stands apart from the sea of dark-gold and neon dev tools.</p>
+    <ul><li>Feel: trustworthy, deliberate, human</li><li>Type: serif wordmark (Iowan / Source Serif), Inter UI</li><li>Mark: stamp; doubles as an "approved" motif for approvals</li><li>Risk: needs a light theme; the current UI is dark-first</li></ul>
+  </div>
+  <div class="board">
+    <div class="tile"><span class="lbl">Lockup</span><div class="lockup"><img src="c-seal/mark.svg" alt=""><span class="wm">karu<span>code</span></span></div></div>
+    <div class="tile"><span class="lbl">App icon</span><div class="icons"><img src="c-seal/app-icon.svg" width="72" alt=""><img src="c-seal/app-icon.svg" width="40" alt=""><img src="c-seal/app-icon.svg" width="20" alt=""></div></div>
+    <div class="tile"><span class="lbl">Palette</span><div class="sw"><div style="background:#f4f1ea;border:1px solid #e2dccf">#f4f1ea</div><div style="background:#fffdf8;border:1px solid #e2dccf">#fffdf8</div><div style="background:#d4462c;color:#fff">#d4462c</div><div style="background:#2f6f5e;color:#fff">#2f6f5e</div><div style="background:#1d1b18;color:#fff">#1d1b18</div></div></div>
+    <div class="tile wide"><span class="lbl">In the product</span>
+      <div class="ui" style="background:#fffdf8;border:1px solid #e2dccf">
+        <div class="rail" style="background:#f4f1ea;border-right:1px solid #e2dccf"><img src="c-seal/mark.svg" alt=""></div>
+        <div class="side" style="background:#f8f5ee;color:#5b564d"><div class="pill" style="background:#fbe3dc;color:#a8321c">Refactor provider</div><div class="pill">Fix SSE reconnect</div><div class="pill">Docs pass</div></div>
+        <div class="main"><div class="msg" style="background:#f4f1ea">Read <code>crates/kc-provider/src/lib.rs</code> and 3 more files</div><div class="msg" style="background:#d4462c;color:#fff;align-self:flex-end">Approve edit_file</div></div>
+      </div></div>
+    <div class="tile wide"><span class="lbl">README banner</span><div class="banner" style="background:#f4f1ea;border:1px solid #e2dccf"><div class="lockup"><img src="c-seal/mark.svg" alt=""><span class="wm">karu<span>code</span></span></div><span style="color:#5b564d;font-family:Georgia,serif;font-style:italic">Every change, signed off.</span></div></div>
+  </div>
+</section>
+
+<!-- D -->
+<section class="dir d">
+  <div>
+    <h2>Direction D</h2>
+    <div class="name">Loop</div>
+    <p>About the agent loop itself: stream → tool → result → repeat. An open ring with a node marks "the step it is on". Friendlier and more product-like.</p>
+    <ul><li>Feel: alive, modern, approachable</li><li>Type: rounded sans (Nunito / SF Rounded)</li><li>Mark: ring + node; animates as a spinner while a run is active</li><li>Risk: gradients date quickly; abstract mark says less about "code"</li></ul>
+  </div>
+  <div class="board">
+    <div class="tile"><span class="lbl">Lockup</span><div class="lockup"><img src="d-loop/mark.svg" alt=""><span class="wm">karucode</span></div></div>
+    <div class="tile"><span class="lbl">App icon</span><div class="icons"><img src="d-loop/app-icon.svg" width="72" alt=""><img src="d-loop/app-icon.svg" width="40" alt=""><img src="d-loop/app-icon.svg" width="20" alt=""></div></div>
+    <div class="tile"><span class="lbl">Palette</span><div class="sw"><div style="background:#0e1320;border:1px solid #232c44">#0e1320</div><div style="background:#151c2e">#151c2e</div><div style="background:#5eead4;color:#111">#5eead4</div><div style="background:#8fb4ff;color:#111">#8fb4ff</div><div style="background:#e6ecf7;color:#111">#e6ecf7</div></div></div>
+    <div class="tile wide"><span class="lbl">In the product</span>
+      <div class="ui" style="background:#0e1320;border:1px solid #232c44">
+        <div class="rail" style="background:#111829;border-right:1px solid #232c44"><img src="d-loop/mark.svg" alt=""></div>
+        <div class="side" style="background:#121a2b;color:#9aa6bf"><div class="pill" style="background:#17303a;color:#5eead4">Refactor provider</div><div class="pill">Fix SSE reconnect</div><div class="pill">Docs pass</div></div>
+        <div class="main"><div class="msg" style="background:#151c2e">Step 4 of loop · read 3 files</div><div class="msg" style="background:#1b2a4d;color:#b9cdff;align-self:flex-end">Approve edit_file?</div></div>
+      </div></div>
+    <div class="tile wide"><span class="lbl">README banner</span><div class="banner" style="background:radial-gradient(circle at 15% 50%,#17303a,#0e1320 60%)"><div class="lockup"><img src="d-loop/mark.svg" alt=""><span class="wm">karucode</span></div><span style="color:#9aa6bf">Keeps going until the work is done.</span></div></div>
+  </div>
+</section>
+</body>
+</html>
