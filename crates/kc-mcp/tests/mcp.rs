@@ -97,6 +97,7 @@ fn ctx(root: &Path, cancel: CancellationToken) -> ToolCtx {
         events: kc_core::events::noop_sink(),
         settings: Arc::new(TestSettings),
         depth: 0,
+        supports_images: false,
     }
 }
 

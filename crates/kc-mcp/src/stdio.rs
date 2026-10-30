@@ -135,6 +135,62 @@ impl Inner {
     }
 }
 
+/// Environment variables an MCP stdio server inherits from karucode.
+///
+/// The child gets a **cleared** environment plus this allowlist: the karucode
+/// process holds `KARUCODE_AUTH_TOKEN` and the operator's provider API key, and
+/// an `npx`-launched server (or its `postinstall` script) must not receive them.
+/// Everything listed here is what ordinary tooling needs to start at all.
+const ENV_ALLOWLIST: &[&str] = &[
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR", "PWD", "TZ",
+];
+
+/// Whether an environment variable name looks like it carries a credential.
+///
+/// Defence in depth on top of [`ENV_ALLOWLIST`]. Matching is case-insensitive
+/// and anchored on `_` boundaries, so `MY_TOKENIZER` is not mistaken for a token
+/// while `GITHUB_TOKEN` and `OPENAI_API_KEY` are caught.
+///
+/// Duplicated from `kc-tools/src/command.rs` on purpose: the two crates share no
+/// module, and `kc-core` exposes no equivalent helper. Keep the two copies in
+/// step (both have the same unit tests).
+fn is_secret_like(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    const SECRET_PREFIXES: &[&str] = &["KARUCODE_", "AWS_", "OPENAI_", "ANTHROPIC_"];
+    const SECRET_NAMES: &[&str] = &["GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN"];
+    const SECRET_SUFFIXES: &[&str] = &["_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD"];
+
+    SECRET_PREFIXES.iter().any(|p| upper.starts_with(p))
+        || SECRET_NAMES.contains(&upper.as_str())
+        || SECRET_SUFFIXES.iter().any(|s| upper.ends_with(s))
+}
+
+/// Clear the inherited environment, add the allowlist, then the server's own
+/// configured `env` table.
+///
+/// The configured table is applied last so it wins over the allowlist, and it is
+/// **not** filtered by [`is_secret_like`]: a variable an operator explicitly
+/// configured for that server is an intentional choice (that is how a server
+/// receives its own credentials), unlike an inherited one.
+///
+/// Unlike `run_command`, `LC_ALL` is not forced to `C`: an MCP server is a
+/// long-lived protocol peer, and pinning its locale is not needed to stop the
+/// leak.
+fn apply_env(command: &mut Command, configured: &BTreeMap<String, String>) {
+    command.env_clear();
+    for name in ENV_ALLOWLIST {
+        if is_secret_like(name) {
+            continue;
+        }
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    for (name, value) in configured {
+        command.env(name, value);
+    }
+}
+
 impl StdioTransport {
     pub(crate) fn new(name: String, command: Vec<String>, env: BTreeMap<String, String>) -> Self {
         Self {
@@ -168,9 +224,9 @@ impl Transport for StdioTransport {
         }
         let mut command = Command::new(&self.command[0]);
         command.args(&self.command[1..]);
-        for (k, v) in &self.env {
-            command.env(k, v);
-        }
+        // The server must not inherit karucode's environment (bearer token,
+        // provider API key): allowlist plus the server's own configured `env`.
+        apply_env(&mut command, &self.env);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -466,5 +522,180 @@ mod tests {
             "{}",
             err.describe()
         );
+    }
+
+    /// Sets a variable in the *process* environment for the duration of a test.
+    ///
+    /// Environment mutation is process-global and the test harness runs tests in
+    /// parallel threads, so every test that uses this must pick a name no other
+    /// test touches (the names below are unique to this module) and must restore
+    /// the previous value even when the test panics.
+    struct EnvGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    fn env_of(command: &Command) -> Vec<(String, Option<String>)> {
+        command
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn is_secret_like_flags_credentials() {
+        for name in [
+            "KARUCODE_AUTH_TOKEN",
+            "KARUCODE_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_ACCESS_KEY_ID",
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "NPM_TOKEN",
+            "MY_SERVICE_TOKEN",
+            "DB_PASSWORD",
+            "SIGNING_SECRET",
+            "openai_api_key",
+        ] {
+            assert!(is_secret_like(name), "{name} must be treated as a secret");
+        }
+    }
+
+    #[test]
+    fn is_secret_like_ignores_ordinary_names() {
+        for name in [
+            "PATH",
+            "HOME",
+            "TERM",
+            "LANG",
+            "TMPDIR",
+            "MY_TOKENIZER",
+            "TOKEN_COUNT",
+            "PASSWORD_FILE_NAME",
+            "AWSOME_THING",
+        ] {
+            assert!(
+                !is_secret_like(name),
+                "{name} must not be treated as a secret"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_env_clears_the_inherited_environment() {
+        let _guard = EnvGuard::set("KARUCODE_TEST_MCP_ALLOWLIST_TOKEN", "leak-me");
+        let mut command = Command::new("sh");
+        apply_env(&mut command, &BTreeMap::new());
+
+        let env = env_of(&command);
+        let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(
+            !names.contains(&"KARUCODE_TEST_MCP_ALLOWLIST_TOKEN"),
+            "a secret-like variable must never be inherited: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| is_secret_like(n)),
+            "no secret-like name may survive the allowlist: {names:?}"
+        );
+        assert!(names.contains(&"PATH"), "{names:?}");
+        for name in ["CARGO_HOME", "RUSTUP_HOME", "KARUCODE_CONFIG"] {
+            assert!(
+                !names.contains(&name),
+                "{name} must not be inherited: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_env_wins_over_the_allowlist() {
+        let mut configured = BTreeMap::new();
+        configured.insert("PATH".to_string(), "/configured/bin".to_string());
+        // An operator-configured credential is intentional and must be applied.
+        configured.insert("SERVER_API_KEY".to_string(), "server-key".to_string());
+        let mut command = Command::new("sh");
+        apply_env(&mut command, &configured);
+
+        let env = env_of(&command);
+        let get = |name: &str| {
+            env.iter()
+                .find(|(k, _)| k == name)
+                .and_then(|(_, v)| v.clone())
+        };
+        assert_eq!(get("PATH").as_deref(), Some("/configured/bin"));
+        assert_eq!(get("SERVER_API_KEY").as_deref(), Some("server-key"));
+    }
+
+    #[tokio::test]
+    async fn a_secret_in_the_parent_environment_does_not_reach_the_server() {
+        // The failure this fixes: an `npx`-launched server (and its postinstall
+        // script) used to inherit karucode's bearer token and provider key.
+        let _guard = EnvGuard::set("KARUCODE_TEST_MCP_LEAK_TOKEN", "leak-me");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("kc-mcp-stdio-env-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("env.txt");
+        let script = format!(
+            "echo \"token=${{KARUCODE_TEST_MCP_LEAK_TOKEN:-ABSENT}}\" > '{}'; \
+             echo \"path=${{PATH:+PATH-SET}}\" >> '{}'; sleep 30",
+            out.display(),
+            out.display()
+        );
+        let t = StdioTransport::new(
+            "env-probe".into(),
+            vec!["sh".into(), "-c".into(), script],
+            BTreeMap::new(),
+        );
+        t.open().await.expect("the probe server should start");
+
+        let mut text = String::new();
+        for _ in 0..200 {
+            if let Ok(read) = std::fs::read_to_string(&out) {
+                if read.contains("path=") {
+                    text = read;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        t.close().await;
+
+        assert!(
+            text.contains("token=ABSENT"),
+            "the parent's secret leaked into the MCP server: {text:?}"
+        );
+        assert!(
+            text.contains("path=PATH-SET"),
+            "PATH must still be passed through: {text:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

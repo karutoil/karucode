@@ -23,8 +23,9 @@
 
 use kc_core::config::PluginConfig;
 use kc_core::plugin::{
-    methods, PluginDiagnostics, PluginError, PluginManifest, PluginStatus, PluginToolDef,
-    PLUGIN_PROTOCOL_VERSION,
+    methods, valid_panel_id, PluginDiagnostics, PluginError, PluginManifest, PluginPanel,
+    PluginPanelData, PluginStatus, PluginToolDef, PluginToolResult, ToolCallContext,
+    PANEL_SOURCE_STATIC, PANEL_SOURCE_TOOL, PLUGIN_PROTOCOL_VERSION,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -36,6 +37,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::PluginTimeouts;
@@ -99,6 +101,29 @@ fn millis(d: Duration) -> u64 {
     d.as_millis().min(u64::MAX as u128) as u64
 }
 
+/// JSON-RPC "method not found", the conventional answer for an unimplemented
+/// method (the SDK and every example plugin use it).
+pub(crate) const METHOD_NOT_FOUND: i32 = -32601;
+
+/// One panel payload, ready to be serialised for the HTTP route.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanelPayload {
+    pub title: String,
+    /// Opaque JSON. The host never reads it; the browser renders it.
+    pub data: Value,
+}
+
+impl PanelPayload {
+    /// A payload built by the host itself (for example after the plugin died).
+    #[allow(dead_code)]
+    pub fn empty(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            data: Value::Null,
+        }
+    }
+}
+
 /// Failure of a JSON-RPC interaction with a plugin.
 #[derive(Debug)]
 pub(crate) enum RpcError {
@@ -110,6 +135,8 @@ pub(crate) enum RpcError {
     Remote(PluginError),
     /// No answer within the configured budget.
     Timeout(Duration),
+    /// The caller cancelled the request (run cancelled, tool aborted).
+    Cancelled,
 }
 
 impl RpcError {
@@ -122,6 +149,7 @@ impl RpcError {
                 code => format!("{} (code {code})", e.message),
             },
             RpcError::Timeout(d) => format!("timed out after {}s", fmt_secs(*d)),
+            RpcError::Cancelled => "cancelled".to_string(),
         }
     }
 
@@ -147,6 +175,10 @@ impl RpcError {
                  still running; retry with a narrower request or raise the timeout.",
                 fmt_secs(*d),
                 fmt_secs(budget)
+            ),
+            RpcError::Cancelled => format!(
+                "plugin tool `{tool}` was cancelled before it answered; the plugin `{plugin}` \
+                 keeps running but the result was discarded."
             ),
         }
     }
@@ -179,9 +211,11 @@ struct Inner {
     status: PluginStatus,
     manifest: Option<PluginManifest>,
     tools: Vec<PluginToolDef>,
+    /// Panels the manifest declared, already validated and de-duplicated.
+    panels: Vec<PluginPanel>,
     error: Option<String>,
     pid: Option<u32>,
-    out: Option<mpsc::UnboundedSender<String>>,
+    out: Option<mpsc::Sender<String>>,
     pending: HashMap<u64, oneshot::Sender<Reply>>,
     kill: Option<oneshot::Sender<()>>,
     supervisor: Option<JoinHandle<()>>,
@@ -189,6 +223,38 @@ struct Inner {
     /// reported as `stopped` instead of `failed`.
     shutting_down: bool,
     restart_count: u32,
+}
+
+/// Map a failed `try_send` onto the error the caller sees.
+///
+/// `Full` is the bounded-queue case: the plugin stopped reading its stdin, so
+/// the writer task is blocked in `write_all` and the queue is full. Buffering
+/// more would grow without limit, so the request fails instead.
+fn queue_error(plugin: &str, e: mpsc::error::TrySendError<String>) -> RpcError {
+    match e {
+        mpsc::error::TrySendError::Full(_) => {
+            RpcError::Transport(format!("plugin `{plugin}` is not reading its stdin"))
+        }
+        mpsc::error::TrySendError::Closed(_) => {
+            RpcError::Transport(format!("plugin `{plugin}` closed its stdin"))
+        }
+    }
+}
+
+/// Removes a request id from `Inner::pending` when it goes out of scope.
+///
+/// Every exit path of [`PluginShared::request_cancellable`] — including a
+/// dropped future — runs this `Drop`, so a cancelled or abandoned call cannot
+/// leave a dead waiter behind.
+struct PendingGuard<'a> {
+    shared: &'a PluginShared,
+    id: u64,
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.shared.lock().pending.remove(&self.id);
+    }
 }
 
 /// State shared between the host, the tool objects and the per-process tasks.
@@ -220,6 +286,7 @@ impl PluginShared {
                 status,
                 manifest: None,
                 tools: Vec::new(),
+                panels: Vec::new(),
                 error: None,
                 pid: None,
                 out: None,
@@ -253,8 +320,25 @@ impl PluginShared {
         self.lock().tools.clone()
     }
 
+    /// The validated panels this plugin declared, in manifest order.
+    pub(crate) fn panel_defs(&self) -> Vec<PluginPanel> {
+        self.lock().panels.clone()
+    }
+
+    /// One declared panel by its bare (un-namespaced) id.
+    pub(crate) fn panel_def(&self, panel: &str) -> Option<PluginPanel> {
+        self.lock().panels.iter().find(|p| p.id == panel).cloned()
+    }
+
     pub(crate) fn config(&self) -> PluginConfig {
         self.config.clone()
+    }
+
+    /// Number of in-flight requests. Test-only: the pending map must not grow
+    /// when calls are cancelled, timed out or answered.
+    #[cfg(test)]
+    pub(crate) fn pending_len(&self) -> usize {
+        self.lock().pending.len()
     }
 
     pub(crate) fn diagnostics(&self) -> PluginDiagnostics {
@@ -293,6 +377,7 @@ impl PluginShared {
         inner.status = PluginStatus::Failed;
         inner.error = Some(message);
         inner.tools.clear();
+        inner.panels.clear();
         inner.manifest = None;
         inner.pid = None;
         inner.out = None;
@@ -304,6 +389,23 @@ impl PluginShared {
         method: &str,
         params: Value,
         timeout: Duration,
+    ) -> Result<Value, RpcError> {
+        self.request_cancellable(method, params, timeout, None)
+            .await
+    }
+
+    /// [`request`](Self::request), but abandoned as soon as `cancel` fires.
+    ///
+    /// The pending entry is removed on **every** exit path — response, remote
+    /// error, transport error, timeout, cancellation and future-drop — by
+    /// [`PendingGuard`]. Without that, a cancelled call would leave a dead
+    /// `oneshot::Sender` in `Inner::pending` forever.
+    pub(crate) async fn request_cancellable(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        cancel: Option<&CancellationToken>,
     ) -> Result<Value, RpcError> {
         let (tx, rx) = oneshot::channel();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
@@ -327,27 +429,34 @@ impl PluginShared {
             })
             .to_string();
             inner.pending.insert(id, tx);
-            if sender.send(line).is_err() {
+            if let Err(e) = sender.try_send(line) {
                 inner.pending.remove(&id);
-                return Err(RpcError::Transport(format!(
-                    "plugin `{}` closed its stdin",
-                    self.name
-                )));
+                return Err(queue_error(&self.name, e));
             }
         }
 
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(Reply::Ok(v))) => Ok(v),
-            Ok(Ok(Reply::Remote(e))) => Err(RpcError::Remote(e)),
-            Ok(Ok(Reply::Transport(m))) => Err(RpcError::Transport(m)),
-            Ok(Err(_)) => Err(RpcError::Transport(format!(
-                "plugin `{}` dropped the response for `{method}`",
-                self.name
-            ))),
-            Err(_) => {
-                self.lock().pending.remove(&id);
-                Err(RpcError::Timeout(timeout))
+        // From here on the entry is removed by the guard, whatever happens.
+        let _guard = PendingGuard { shared: self, id };
+
+        let wait = async {
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(Reply::Ok(v))) => Ok(v),
+                Ok(Ok(Reply::Remote(e))) => Err(RpcError::Remote(e)),
+                Ok(Ok(Reply::Transport(m))) => Err(RpcError::Transport(m)),
+                Ok(Err(_)) => Err(RpcError::Transport(format!(
+                    "plugin `{}` dropped the response for `{method}`",
+                    self.name
+                ))),
+                Err(_) => Err(RpcError::Timeout(timeout)),
             }
+        };
+        match cancel {
+            Some(token) => tokio::select! {
+                biased;
+                _ = token.cancelled() => Err(RpcError::Cancelled),
+                reply = wait => reply,
+            },
+            None => wait.await,
         }
     }
 
@@ -385,6 +494,102 @@ impl PluginShared {
                 debug!(plugin = %self.name, hook, "hook failed: {}", e.describe());
                 None
             }
+        }
+    }
+
+    /// Ask the plugin for a panel payload.
+    ///
+    /// The plugin answers `panels/read` with `{"title": "...", "data": <any
+    /// JSON>}`; the host never interprets `data`. A plugin that does not declare
+    /// `panels/read` support falls back to running the panel's `tool` through
+    /// `tools/call` and using its `meta` — that is what `source = "tool"` meant
+    /// before this method existed, so an older plugin keeps working. Errors are
+    /// returned (not swallowed): the caller shows them to the user.
+    pub(crate) async fn panel_output(
+        self: &Arc<Self>,
+        panel: &PluginPanel,
+        context: &ToolCallContext,
+    ) -> Result<PanelPayload, RpcError> {
+        let params = json!({
+            "panel": panel.id,
+            "session_id": context.session_id,
+            "project": context.project,
+            "workspace": context.workspace,
+        });
+        let reply = self
+            .request(methods::PANELS_READ, params, self.timeouts.call())
+            .await;
+        match reply {
+            Ok(value) => {
+                let parsed: PluginPanelData = serde_json::from_value(value).map_err(|e| {
+                    RpcError::Transport(format!(
+                        "plugin `{}` answered `panels/read` for `{}` with something that is not \
+                         {{\"title\", \"data\"}}: {e}",
+                        self.name, panel.id
+                    ))
+                })?;
+                Ok(PanelPayload {
+                    title: parsed
+                        .title
+                        .filter(|t| !t.trim().is_empty())
+                        .unwrap_or_else(|| panel.title.clone()),
+                    data: parsed.data,
+                })
+            }
+            // An older plugin answers `-32601: unknown method`. If the panel named
+            // a tool, fall back to calling it: that is exactly what `source =
+            // "tool"` documented before `panels/read` existed.
+            Err(RpcError::Remote(e)) if e.code == METHOD_NOT_FOUND => {
+                self.panel_via_tool(panel, context).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn panel_via_tool(
+        self: &Arc<Self>,
+        panel: &PluginPanel,
+        context: &ToolCallContext,
+    ) -> Result<PanelPayload, RpcError> {
+        let Some(tool) = panel.tool.as_deref() else {
+            return Err(RpcError::Remote(PluginError::new(
+                METHOD_NOT_FOUND,
+                format!(
+                    "the plugin does not implement `panels/read` and panel `{}` names no tool to \
+                     fall back to; reinstall it with a karucode build that supports panels",
+                    panel.id
+                ),
+            )));
+        };
+        let params = json!({
+            "name": tool,
+            "arguments": {},
+            "context": context,
+        });
+        match self
+            .request(methods::TOOLS_CALL, params, self.timeouts.call())
+            .await
+        {
+            Ok(value) => {
+                let result: PluginToolResult = serde_json::from_value(value).map_err(|e| {
+                    RpcError::Transport(format!(
+                        "plugin `{}` returned an invalid `tools/call` result for the panel tool \
+                         `{tool}`: {e}",
+                        self.name
+                    ))
+                })?;
+                if !result.ok {
+                    return Err(RpcError::Remote(PluginError::new(
+                        0,
+                        format!("the panel tool `{tool}` failed: {}", result.content),
+                    )));
+                }
+                Ok(PanelPayload {
+                    title: panel.title.clone(),
+                    data: result.meta.unwrap_or(Value::Null),
+                })
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -458,6 +663,7 @@ impl PluginShared {
         inner.status = final_status;
         inner.error = None;
         inner.tools.clear();
+        inner.panels.clear();
         inner.manifest = None;
         inner.pid = None;
     }
@@ -507,6 +713,10 @@ impl PluginShared {
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         let mut command = Command::new(&cfg.command[0]);
         command.args(&cfg.command[1..]);
+        // The child gets a cleared environment plus an allowlist: the server
+        // process holds `KARUCODE_AUTH_TOKEN` and the operator's provider API
+        // keys, and a plugin must not inherit them.
+        apply_env_allowlist(&mut command);
         command.env("KARUCODE_PLUGIN_NAME", &self.name);
         command.env("KARUCODE_PLUGIN_PROTOCOL", PLUGIN_PROTOCOL_VERSION);
         if !cfg.permissions.is_empty() {
@@ -517,6 +727,8 @@ impl PluginShared {
                 command.env("KARUCODE_PLUGIN_SETTINGS", settings);
             }
         }
+        // Applied last so the operator's explicit table wins over everything
+        // above, including the `KARUCODE_PLUGIN_*` variables.
         for (k, v) in &cfg.env {
             command.env(k, v);
         }
@@ -561,13 +773,14 @@ impl PluginShared {
         };
         let stderr = child.stderr.take();
 
-        let (out_tx, out_rx) = mpsc::unbounded_channel::<String>();
+        let (out_tx, out_rx) = mpsc::channel::<String>(OUT_QUEUE_DEPTH);
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
         {
             let mut inner = self.lock();
             inner.status = PluginStatus::Starting;
             inner.error = None;
             inner.tools.clear();
+            inner.panels.clear();
             inner.manifest = None;
             inner.pid = pid;
             inner.out = Some(out_tx);
@@ -624,15 +837,24 @@ impl PluginShared {
             .await
             .map_err(|e| format!("`tools/list` failed: {}", e.describe()))?;
         let tools = parse_tools(&self.name, list)?;
+        // Panels are validated against the tools that actually exist, so a
+        // declaration that names an unknown tool is a discovery error the
+        // operator can read in `PluginDiagnostics.error`, not a crash and not a
+        // tab that fails every time it is opened.
+        let panels = parse_panels(&self.name, &manifest, &tools)?;
         let mut inner = self.lock();
-        inner.manifest = Some(manifest);
+        inner.manifest = Some(PluginManifest {
+            panels: panels.clone(),
+            ..manifest
+        });
+        inner.panels = panels;
         inner.tools = tools;
         inner.status = PluginStatus::Ready;
         inner.error = None;
         Ok(())
     }
 
-    fn spawn_writer(&self, mut rx: mpsc::UnboundedReceiver<String>, mut stdin: ChildStdin) {
+    fn spawn_writer(&self, mut rx: mpsc::Receiver<String>, mut stdin: ChildStdin) {
         let name = self.name.clone();
         tokio::spawn(async move {
             while let Some(line) = rx.recv().await {
@@ -669,10 +891,14 @@ impl PluginShared {
         tokio::spawn(async move {
             let result =
                 pump_lines(stdout, MAX_PROTOCOL_LINE, |line| shared.handle_line(line)).await;
-            if let Err(e) = result {
-                warn!(plugin = %shared.name, "reading plugin stdout stopped: {e}");
-            }
-            shared.on_stdout_closed(epoch);
+            let protocol_error = match result {
+                Ok(()) => None,
+                Err(e) => {
+                    warn!(plugin = %shared.name, "reading plugin stdout stopped: {e}");
+                    Some(format!("plugin `{}` broke the protocol: {e}", shared.name))
+                }
+            };
+            shared.on_stdout_closed(epoch, protocol_error);
         });
     }
 
@@ -751,18 +977,42 @@ impl PluginShared {
     /// write side immediately, then give the supervisor a short grace period to
     /// reap the child so pending requests can report the real exit status. If the
     /// process is still alive after the grace period, fail what is left.
-    fn on_stdout_closed(self: &Arc<Self>, epoch: u64) {
+    ///
+    /// `protocol_error` is `Some` when the reader stopped because the plugin
+    /// broke the framing contract (an over-long line, a read error) rather than
+    /// because it exited. Such a plugin is not usable, so the kill sender is
+    /// fired and the supervisor reaps it — mirroring `fail_protocol` in the MCP
+    /// stdio transport. Without this the process would linger forever.
+    fn on_stdout_closed(self: &Arc<Self>, epoch: u64, protocol_error: Option<String>) {
         if self.epoch.load(Ordering::SeqCst) != epoch {
             return;
         }
-        self.lock().out = None;
+        let kill = {
+            let mut inner = self.lock();
+            inner.out = None;
+            if let Some(message) = &protocol_error {
+                inner.error = Some(message.clone());
+            }
+            // Only a protocol violation kills the child here; a plain EOF means
+            // the process is already on its way out and the supervisor will see
+            // the exit on its own.
+            if protocol_error.is_some() {
+                inner.kill.take()
+            } else {
+                None
+            }
+        };
+        if let Some(tx) = kill {
+            let _ = tx.send(());
+        }
         let shared = Arc::clone(self);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(250)).await;
             if shared.epoch.load(Ordering::SeqCst) != epoch {
                 return;
             }
-            let msg = format!("plugin `{}` closed its stdout", shared.name);
+            let msg = protocol_error
+                .unwrap_or_else(|| format!("plugin `{}` closed its stdout", shared.name));
             let pending_left = {
                 let mut inner = shared.lock();
                 if inner.shutting_down {
@@ -772,6 +1022,7 @@ impl PluginShared {
                     inner.status = PluginStatus::Failed;
                     inner.error = Some(msg.clone());
                     inner.tools.clear();
+                    inner.panels.clear();
                     inner.manifest = None;
                 }
                 inner.pending.is_empty()
@@ -800,18 +1051,24 @@ impl PluginShared {
             inner.pid = None;
             inner.supervisor = None;
             inner.tools.clear();
+            inner.panels.clear();
             inner.manifest = None;
             if inner.shutting_down {
                 inner.status = PluginStatus::Stopped;
             } else {
                 inner.status = PluginStatus::Failed;
-                inner.error = Some(match &status {
-                    Ok(s) => match s.code() {
-                        Some(code) => format!("plugin process exited with exit code {code}"),
-                        None => format!("plugin process was terminated by a signal ({s})"),
-                    },
-                    Err(e) => format!("could not wait for the plugin process: {e}"),
-                });
+                // Keep a more specific earlier error (e.g. the protocol
+                // violation that caused the kill) instead of replacing it with
+                // the generic exit message.
+                if inner.error.is_none() {
+                    inner.error = Some(match &status {
+                        Ok(s) => match s.code() {
+                            Some(code) => format!("plugin process exited with exit code {code}"),
+                            None => format!("plugin process was terminated by a signal ({s})"),
+                        },
+                        Err(e) => format!("could not wait for the plugin process: {e}"),
+                    });
+                }
             }
             std::mem::take(&mut inner.pending)
         };
@@ -865,6 +1122,138 @@ fn parse_tools(plugin: &str, value: Value) -> Result<Vec<PluginToolDef>, String>
         }
     }
     Ok(defs)
+}
+
+/// Validate the panel declarations of a manifest.
+///
+/// Rejected (as a handshake error, so it lands in `PluginDiagnostics.error`):
+///
+/// * a panel id that is empty or contains characters unusable in a URL path
+///   segment or a DOM id;
+/// * two panels that collide after namespacing — the same `id` twice (Rust
+///   would silently keep one, and the tab order would depend on serde);
+/// * a `source` that is neither `tool` nor `static`;
+/// * `source = "tool"` naming a tool that `tools/list` did not advertise.
+///
+/// A panel whose `title` is blank is *not* an error: the host falls back to the
+/// id, because a missing label is cosmetic while the other cases are a broken
+/// tab.
+pub(crate) fn parse_panels(
+    plugin: &str,
+    manifest: &PluginManifest,
+    tools: &[PluginToolDef],
+) -> Result<Vec<PluginPanel>, String> {
+    let mut out: Vec<PluginPanel> = Vec::with_capacity(manifest.panels.len());
+    for panel in &manifest.panels {
+        if !valid_panel_id(&panel.id) {
+            return Err(format!(
+                "plugin `{plugin}` declared the panel `{}`; a panel id must be non-empty and may \
+                 contain only lowercase ASCII letters, digits, `-`, `_` and `.`",
+                panel.id
+            ));
+        }
+        if out.iter().any(|existing| existing.id == panel.id) {
+            return Err(format!(
+                "plugin `{plugin}` declared the panel id `{}` twice; panel ids must be unique \
+                 within a plugin (they are hosted as `plugin__{plugin}__<id>`)",
+                panel.id
+            ));
+        }
+        let source = panel.source.trim();
+        if source != PANEL_SOURCE_TOOL && source != PANEL_SOURCE_STATIC {
+            return Err(format!(
+                "plugin `{plugin}` declared panel `{}` with source `{source}`; the supported \
+                 sources are `{PANEL_SOURCE_TOOL}` and `{PANEL_SOURCE_STATIC}`",
+                panel.id
+            ));
+        }
+        if source == PANEL_SOURCE_TOOL {
+            match panel.tool.as_deref().map(str::trim) {
+                None | Some("") => {
+                    // No tool is fine: `panels/read` is the primary path and an
+                    // empty payload is better than refusing to show the tab.
+                }
+                Some(tool) => {
+                    if !tools.iter().any(|def| def.name == tool) {
+                        return Err(format!(
+                            "plugin `{plugin}` declared panel `{}` with tool `{tool}`, which it \
+                             does not advertise in `tools/list`; declare the tool or point the \
+                             panel at `source = \"{PANEL_SOURCE_STATIC}\"`",
+                            panel.id
+                        ));
+                    }
+                }
+            }
+        }
+        out.push(PluginPanel {
+            title: if panel.title.trim().is_empty() {
+                panel.id.clone()
+            } else {
+                panel.title.clone()
+            },
+            refresh_ms: kc_core::plugin::clamp_refresh_ms(panel.refresh_ms),
+            ..panel.clone()
+        });
+    }
+    Ok(out)
+}
+
+/// How many outgoing protocol lines may be queued for the writer task.
+///
+/// Bounded on purpose: a plugin that stops reading its stdin fills the OS pipe
+/// buffer, the writer blocks in `write_all`, and an unbounded queue would then
+/// grow until the server runs out of memory. When the queue is full the request
+/// fails with `RpcError::Transport("plugin is not reading its stdin")` instead.
+const OUT_QUEUE_DEPTH: usize = 64;
+
+/// Environment variables a plugin inherits from karucode.
+///
+/// The child gets a **cleared** environment plus this allowlist. The server
+/// process holds `KARUCODE_AUTH_TOKEN` and the operator's provider API keys, and
+/// a plugin (or a `postinstall` script of something it launches) must not
+/// receive them. Everything listed here is what ordinary tooling needs to start
+/// at all; the `KARUCODE_PLUGIN_*` variables and the configured `env` table are
+/// added separately by the caller.
+const ENV_ALLOWLIST: &[&str] = &[
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR", "PWD", "TZ",
+];
+
+/// Whether an environment variable name looks like it carries a credential.
+///
+/// Defence in depth on top of [`ENV_ALLOWLIST`]. Matching is case-insensitive
+/// and anchored on `_` boundaries, so `MY_TOKENIZER` is not mistaken for a token
+/// while `GITHUB_TOKEN` and `OPENAI_API_KEY` are caught.
+///
+/// Duplicated from `kc-mcp/src/stdio.rs` on purpose: the two crates share no
+/// module and `kc-core` exposes no equivalent helper. Keep the copies in step.
+fn is_secret_like(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    const SECRET_PREFIXES: &[&str] = &["KARUCODE_", "AWS_", "OPENAI_", "ANTHROPIC_"];
+    const SECRET_NAMES: &[&str] = &["GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN"];
+    const SECRET_SUFFIXES: &[&str] = &["_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD"];
+
+    SECRET_PREFIXES.iter().any(|p| upper.starts_with(p))
+        || SECRET_NAMES.contains(&upper.as_str())
+        || SECRET_SUFFIXES.iter().any(|s| upper.ends_with(s))
+}
+
+/// Clear the inherited environment and add only the allowlisted variables.
+///
+/// The configured `env` table is applied by the caller *after* this, so it wins
+/// over the allowlist and is deliberately **not** filtered by
+/// [`is_secret_like`]: a variable an operator explicitly configured for that
+/// plugin is an intentional choice (that is how a plugin receives its own
+/// credentials), unlike an inherited one.
+fn apply_env_allowlist(command: &mut Command) {
+    command.env_clear();
+    for name in ENV_ALLOWLIST {
+        if is_secret_like(name) {
+            continue;
+        }
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
 }
 
 /// Largest protocol line the host will buffer from a plugin. A plugin that
@@ -984,5 +1373,187 @@ mod tests {
         let e = parse_error(&json!({"code": -1}));
         assert_eq!(e.code, -1);
         assert!(e.message.contains("unspecified"));
+    }
+
+    fn shared_with_queue() -> (Arc<PluginShared>, mpsc::Receiver<String>) {
+        let config = PluginConfig {
+            name: "p".into(),
+            enabled: true,
+            command: vec!["true".into()],
+            env: Default::default(),
+            permissions: Vec::new(),
+            settings: Default::default(),
+        };
+        let shared = PluginShared::new(
+            config,
+            Arc::new(TimeoutRefs::default()),
+            PluginStatus::Ready,
+        );
+        let (tx, rx) = mpsc::channel(OUT_QUEUE_DEPTH);
+        shared.lock().out = Some(tx);
+        (shared, rx)
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_request_leaves_no_pending_entry() {
+        let (shared, _rx) = shared_with_queue();
+        let token = CancellationToken::new();
+        let waiter = {
+            let shared = Arc::clone(&shared);
+            let token = token.clone();
+            tokio::spawn(async move {
+                shared
+                    .request_cancellable(
+                        methods::TOOLS_CALL,
+                        json!({}),
+                        Duration::from_secs(30),
+                        Some(&token),
+                    )
+                    .await
+            })
+        };
+        // Let the request register itself, then cancel it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(shared.pending_len(), 1, "the request must be in flight");
+        token.cancel();
+        let result = waiter.await.unwrap();
+        assert!(matches!(result, Err(RpcError::Cancelled)), "{result:?}");
+        assert_eq!(
+            shared.pending_len(),
+            0,
+            "a cancelled call must not leave a dead waiter behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_request_future_leaves_no_pending_entry() {
+        let (shared, _rx) = shared_with_queue();
+        // `timeout` drops the inner future, which is what the old
+        // `tokio::select!` in `PluginTool::invoke` did on cancellation.
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            shared.request(methods::TOOLS_CALL, json!({}), Duration::from_secs(30)),
+        )
+        .await;
+        assert!(result.is_err(), "the outer timeout must fire");
+        assert_eq!(
+            shared.pending_len(),
+            0,
+            "dropping the future must remove the pending entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_request_leaves_no_pending_entry() {
+        let (shared, _rx) = shared_with_queue();
+        let result = shared
+            .request(methods::TOOLS_CALL, json!({}), Duration::from_millis(20))
+            .await;
+        assert!(matches!(result, Err(RpcError::Timeout(_))), "{result:?}");
+        assert_eq!(shared.pending_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_full_outgoing_queue_fails_instead_of_buffering() {
+        let (shared, _rx) = shared_with_queue();
+        // Fill the queue without ever draining it: the writer is "blocked".
+        for _ in 0..OUT_QUEUE_DEPTH {
+            shared
+                .request(methods::TOOLS_CALL, json!({}), Duration::from_millis(1))
+                .await
+                .ok();
+        }
+        let result = shared
+            .request(methods::TOOLS_CALL, json!({}), Duration::from_millis(1))
+            .await;
+        match result {
+            Err(RpcError::Transport(m)) => {
+                assert!(m.contains("not reading its stdin"), "{m}");
+            }
+            other => panic!("expected a transport error, got {other:?}"),
+        }
+        // The failed request must not be left in the map either.
+        assert_eq!(shared.pending_len(), 0);
+    }
+
+    #[test]
+    fn queue_errors_name_the_actual_problem() {
+        let (tx, rx) = mpsc::channel::<String>(1);
+        tx.try_send("x".into()).unwrap();
+        let full = tx.try_send("y".into()).unwrap_err();
+        let e = queue_error("p", full);
+        assert!(e.describe().contains("not reading its stdin"), "{e:?}");
+        drop(rx);
+        let closed = tx.try_send("z".into()).unwrap_err();
+        let e = queue_error("p", closed);
+        assert!(e.describe().contains("closed its stdin"), "{e:?}");
+    }
+
+    #[test]
+    fn secret_like_names_are_recognised() {
+        for name in [
+            "KARUCODE_AUTH_TOKEN",
+            "KARUCODE_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "MY_TOKEN",
+            "DB_PASSWORD",
+            "SIGNING_SECRET",
+        ] {
+            assert!(is_secret_like(name), "{name} must be treated as a secret");
+        }
+        for name in ["PATH", "HOME", "LANG", "MY_TOKENIZER", "TERM"] {
+            assert!(!is_secret_like(name), "{name} must not be filtered");
+        }
+    }
+
+    #[test]
+    fn the_env_allowlist_contains_no_secrets() {
+        for name in ENV_ALLOWLIST {
+            assert!(!is_secret_like(name), "{name} must not be allowlisted");
+        }
+        assert!(ENV_ALLOWLIST.contains(&"PATH"));
+        assert!(!ENV_ALLOWLIST.contains(&"KARUCODE_AUTH_TOKEN"));
+    }
+
+    #[tokio::test]
+    async fn a_protocol_violation_fires_the_kill_sender() {
+        let (shared, _rx) = shared_with_queue();
+        let (kill_tx, kill_rx) = oneshot::channel::<()>();
+        shared.lock().kill = Some(kill_tx);
+
+        shared.on_stdout_closed(
+            0,
+            Some("plugin `p` broke the protocol: line exceeds 8388608 bytes".into()),
+        );
+
+        // The supervisor reaps the child when this fires; without it the plugin
+        // process would linger forever after a framing violation.
+        tokio::time::timeout(Duration::from_secs(1), kill_rx)
+            .await
+            .expect("the kill sender must fire on a protocol violation")
+            .expect("the kill sender must not be dropped");
+        assert!(
+            shared.lock().kill.is_none(),
+            "the kill sender must be consumed"
+        );
+        let err = shared.lock().error.clone().unwrap_or_default();
+        assert!(err.contains("broke the protocol"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_plain_eof_does_not_kill_the_child() {
+        let (shared, _rx) = shared_with_queue();
+        let (kill_tx, mut kill_rx) = oneshot::channel::<()>();
+        shared.lock().kill = Some(kill_tx);
+
+        // A plain EOF means the process is already on its way out; the
+        // supervisor sees the exit on its own and must not be raced by a kill.
+        shared.on_stdout_closed(0, None);
+
+        assert!(kill_rx.try_recv().is_err(), "no kill on a plain EOF");
+        assert!(shared.lock().kill.is_some());
     }
 }

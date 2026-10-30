@@ -304,6 +304,58 @@ mod tests {
         assert!(!sdk.contains("@kc-applies-to"));
     }
 
+    /// The emitted copy has to keep working for the panel and context paths, not
+    /// just for tools: a generated plugin is the only place a plugin author ever
+    /// reads this API, so a rewrite that dropped it would be invisible until
+    /// their build failed.
+    #[test]
+    fn the_emitted_sdk_carries_the_panel_and_context_api() {
+        let sdk = sdk_source().unwrap();
+        for needle in [
+            "pub struct PanelRequest",
+            "pub struct ToolRequest",
+            "pub fn panel(",
+            "pub fn panel_with(",
+            "pub fn context(&self)",
+            "pub fn workspace(&self)",
+            "pub fn session_id(&self)",
+            "methods::PANELS_READ",
+            "PANEL_SOURCE_STATIC",
+        ] {
+            assert!(
+                sdk.contains(needle),
+                "the emitted SDK is missing `{needle}`"
+            );
+        }
+        // The wire types it refers to are re-exported from the sibling module,
+        // which is what the `kc_core::plugin` -> `crate::protocol` rewrite
+        // assumes.
+        let protocol = protocol_source();
+        for needle in [
+            "pub struct PluginPanel",
+            "pub struct PluginPanelData",
+            "pub struct ToolCallContext",
+            "pub const PANELS_READ",
+        ] {
+            assert!(
+                protocol.contains(needle),
+                "the emitted protocol is missing `{needle}`"
+            );
+        }
+    }
+
+    /// A scaffolded plugin that says nothing about panels must keep scaffolding
+    /// exactly as before: the starter `main.rs` is unchanged and declares none.
+    #[test]
+    fn the_scaffolded_entry_point_declares_no_panels() {
+        let files = files("wordy", "0.1.0").unwrap();
+        let main = &files[1].1;
+        assert!(!main.contains(".panel("));
+        // But the vendored SDK it compiles against does.
+        let sdk = &files[3].1;
+        assert!(sdk.contains("pub fn panel("));
+    }
+
     #[test]
     fn the_emitted_protocol_keeps_its_module_docs_and_gets_a_header() {
         let protocol = protocol_source();
@@ -321,7 +373,10 @@ mod tests {
     fn generated_files_are_named_after_the_plugin() {
         let files = files("wordy", "0.2.1").unwrap();
         let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
-        assert_eq!(paths, ["Cargo.toml", "src/main.rs", "src/protocol.rs", "src/sdk.rs"]);
+        assert_eq!(
+            paths,
+            ["Cargo.toml", "src/main.rs", "src/protocol.rs", "src/sdk.rs"]
+        );
         let manifest = &files[0].1;
         assert!(manifest.contains("name = \"wordy\""));
         assert!(manifest.contains("version = \"0.2.1\""));
@@ -341,7 +396,10 @@ mod tests {
     fn names_are_validated_before_anything_is_written() {
         assert!(validate_name("wordy-2").is_ok());
         assert!(validate_name("wordy_2").is_ok());
-        assert_eq!(validate_name(""), Err(EmbedError::InvalidName("it is empty")));
+        assert_eq!(
+            validate_name(""),
+            Err(EmbedError::InvalidName("it is empty"))
+        );
         assert!(matches!(
             validate_name("Wordy"),
             Err(EmbedError::InvalidName(_))
