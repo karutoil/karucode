@@ -15,8 +15,12 @@ without a real provider:
 Prompt hints (in the user message):
   [tool:list_dir]        call list_dir on "."
   [tool:read_file]       call read_file on README.md
+  [tool:image]           call read_file on assets/shot.png (needs a vision model)
   [tool:run]             call run_command "echo karucode-e2e"
   [tool:multi]           call list_dir + git_status in one turn
+  [tool:dsml]            write a list_dir call as DeepSeek DSML *text* instead of
+                         tool_calls, the way DeepSeek-V4 does when the endpoint
+                         does not convert it (the bug this covers)
   [tool:bad]             call a tool that does not exist
   [tool:crash]           call run_command "sleep 5" (cancellation/timeout)
   [tool:agent]           spawn a subagent through the delegate tool
@@ -124,6 +128,12 @@ def decide(messages):
         return ("tools", [call("call_run_1", "run_command", {"command": "echo karucode-e2e"})])
     if "[tool:read_file]" in last_user:
         return ("tools", [call("call_read_1", "read_file", {"path": "README.md", "limit": 20})])
+    if "[tool:image]" in last_user:
+        # A vision read: the runtime attaches the pixels only when the model says
+        # it accepts images, which is what this marker exercises end to end.
+        return ("tools", [call("call_image_1", "read_file", {"path": "assets/shot.png"})])
+    if "[tool:dsml]" in last_user:
+        return ("dsml", None)
     if "[tool:bad]" in last_user:
         return ("tools", [call("call_bad_1", "definitely_not_a_tool", {})])
     if "[tool:crash]" in last_user:
@@ -238,7 +248,16 @@ class Handler(BaseHTTPRequestHandler):
     def _complete(self, model, mode, payload, messages):
         message = {"role": "assistant", "content": None}
         finish = "stop"
-        if mode == "tools":
+        if mode == "dsml":
+            message["content"] = (
+                'Looking at the workspace.'
+                '<||DSML||tool_calls>'
+                '<||DSML||invoke name="list_dir">'
+                '<||DSML||parameter name="path" string="true">.</||DSML||parameter>'
+                '</||DSML||invoke>'
+                '</||DSML||tool_calls>'
+            )
+        elif mode == "tools":
             message["content"] = "Working on it."
             message["tool_calls"] = payload
             finish = "tool_calls"
@@ -338,7 +357,24 @@ class Handler(BaseHTTPRequestHandler):
 
         send(base({"role": "assistant", "content": ""}))
 
-        if mode == "tools":
+        if mode == "dsml":
+            # DeepSeek-V4 writes its native tool-call markup into `content`, and
+            # an endpoint that does not parse it forwards the markup as prose.
+            # The provider has to recover the call from the text or the tool
+            # never runs - which is the whole bug.
+            markup = (
+                'Looking at the workspace.'
+                '<||DSML||tool_calls>'
+                '<||DSML||invoke name="list_dir">'
+                '<||DSML||parameter name="path" string="true">.</||DSML||parameter>'
+                '</||DSML||invoke>'
+                '</||DSML||tool_calls>'
+            )
+            # Split mid-marker on purpose: the network does not respect tags.
+            for i in range(0, len(markup), 11):
+                send(base({"content": markup[i : i + 11]}))
+            send(base({}, "stop"))
+        elif mode == "tools":
             # Text first, then tool calls split across chunks on purpose.
             for token in ["Working", " on", " it."]:
                 send(base({"content": token}))

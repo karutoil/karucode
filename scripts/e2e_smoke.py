@@ -355,9 +355,15 @@ def main():
         check("cross-origin mutation is rejected", lambda: (
             _assert(status == 403, f"expected 403 got {status}"), "403"
         )[-1])
-        status, _ = client.get("/api/workspace/file?path=../../etc/passwd")
+        # Escape must be *refused*, not merely fail. `../..` from a workspace under
+        # the temp dir now lands inside the allowed temp root (allow_temp_dir is on
+        # by default), so that spelling answers 404 "no such file" - which is the
+        # correct answer, and not a containment failure. Walk far enough up to be
+        # outside every allowed root so this asserts the containment check itself.
+        status, body = client.get("/api/workspace/file?path=../../../../../../etc/passwd")
         check("path traversal is rejected", lambda: (
-            _assert(status in (400, 403), f"expected 400/403 got {status}"), str(status)
+            _assert(status in (400, 403), f"expected 400/403 got {status}"),
+            f"{status} {body.get('error', {}).get('code', '')}".strip(),
         )[-1])
 
         # Regression guard: the server once wrapped its whole serve future in a
@@ -466,6 +472,31 @@ def main():
             _assert(len(events.for_run(rid, "tool_call_finished")) >= 2, [e.get("name") for e in events.for_run(rid, "tool_call_finished")]),
             "2 tools",
         )[-1])
+        # Regression: DeepSeek-V4 writes its DSML tool-call markup into the text
+        # channel and an endpoint that does not parse it forwards the markup as
+        # prose, so the call never ran and the model looked broken. The markup
+        # must be recovered into a real call - and must not reach the answer.
+        rid = run_prompt("[tool:dsml] look at the workspace")
+        check("a tool call written as DSML text is executed", lambda: (
+            _assert(
+                [e.get("name") for e in events.for_run(rid, "tool_call_finished")].count("list_dir") == 1,
+                [e.get("name") for e in events.for_run(rid, "tool_call_finished")],
+            ),
+            _assert(
+                all(e["ok"] for e in events.for_run(rid, "tool_call_finished")),
+                [(e["name"], e["ok"]) for e in events.for_run(rid, "tool_call_finished")],
+            ),
+            "list_dir ran from text markup",
+        )[-1])
+        detail = client.ok("GET", f"/api/sessions/{sid}")
+        check("DSML markup never reaches the transcript", lambda: (
+            _assert(
+                not any("DSML" in (m.get("content") or "") for m in detail["messages"]),
+                [m.get("content", "")[:200] for m in detail["messages"] if "DSML" in (m.get("content") or "")],
+            ),
+            "no markup in the transcript",
+        )[-1])
+
         rid = run_prompt("[tool:bad] call a missing tool")
         check("unknown tool fails visibly, run continues", lambda: (
             _assert(any(not e["ok"] for e in events.for_run(rid, "tool_call_finished")), "unknown tool reported ok"),

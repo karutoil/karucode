@@ -17,6 +17,8 @@
     "approved command runs and streams output",
     "denied command is not executed",
     "parallel tool calls in one turn both execute",
+    "a tool call written as DSML text is executed",
+    "DSML markup never reaches the transcript",
     "unknown tool fails visibly, run continues",
     "provider failure is visible",
     "run cancels promptly",
@@ -41,7 +43,7 @@
   ],
   "failed": [],
   "skipped": [],
-  "events": 239,
-  "server_log": "/tmp/kc-e2e-caepnfer/server.log",
-  "mock_requests": 34
+  "events": 281,
+  "server_log": "/tmp/kc-e2e-4mdyvyq4/server.log",
+  "mock_requests": 36
 }
