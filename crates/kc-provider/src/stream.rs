@@ -5,12 +5,13 @@
 //! live HTTP stream promptly; dropping the returned stream drops the response and
 //! stops the work because no background task is spawned.
 
+use crate::dsml::{DsmlScanner, DsmlTools, Step};
 use crate::errors::{map_reqwest_error, redact, truncate_chars};
 use crate::sse::{SseEvent, SseParser};
 use bytes::Bytes;
 use futures_util::stream::{self, BoxStream, StreamExt};
 use kc_core::error::{Error, Result};
-use kc_core::provider::{ProviderChunk, ProviderStream};
+use kc_core::provider::{ProviderChunk, ProviderStream, MAX_TOOL_CALLS};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -20,14 +21,30 @@ use tokio_util::sync::CancellationToken;
 /// broken or hostile upstream.
 pub(crate) const MAX_SSE_EVENT_BYTES: usize = 8 * 1024 * 1024;
 
+/// Tool-call indices reserved for calls recovered from DSML markup.
+///
+/// A turn that mixes the two paths must not merge them: the native deltas are
+/// numbered from zero by the endpoint, and the accumulator keys on `index`, so a
+/// recovered call handed index 0 would append its arguments to the endpoint's
+/// first call. The second half of the accumulator's range is reserved instead,
+/// and a turn that exhausts *that* has already lost to
+/// `limits.max_tool_calls_per_turn`.
+const DSML_INDEX_BASE: usize = MAX_TOOL_CALLS / 2;
+
 type ByteStream = BoxStream<'static, reqwest::Result<Bytes>>;
 
+/// Translate one streaming response.
+///
+/// `tool_names` is what makes DSML recovery safe: a block of DeepSeek markup in
+/// the text channel is only executed when every invoke names a tool this run
+/// could actually call (see [`crate::dsml`]).
 pub(crate) fn stream_from_response(
     bytes: ByteStream,
     cancel: CancellationToken,
     url: String,
     timeout: Duration,
     secrets: Vec<String>,
+    tool_names: Vec<String>,
 ) -> ProviderStream {
     let state = StreamState {
         bytes,
@@ -38,6 +55,8 @@ pub(crate) fn stream_from_response(
         parser: SseParser::new(),
         decoder: Utf8Decoder::default(),
         queue: VecDeque::new(),
+        dsml: DsmlTools::new(tool_names).map(DsmlScanner::new),
+        dsml_calls: 0,
         saw_event: false,
         saw_finish: false,
         input_done: false,
@@ -59,6 +78,10 @@ struct StreamState {
     parser: SseParser,
     decoder: Utf8Decoder,
     queue: VecDeque<Result<ProviderChunk>>,
+    /// DeepSeek markup recovery, when this request had tools to recover for.
+    dsml: Option<DsmlScanner>,
+    /// Recovered calls handed out so far, for their reserved indices.
+    dsml_calls: usize,
     /// At least one JSON payload was understood.
     saw_event: bool,
     /// A `finish_reason` was delivered, so no synthetic Finish is needed.
@@ -100,8 +123,10 @@ impl StreamState {
                 }
                 if !self.saw_finish {
                     // The stream ended without an explicit finish_reason. Report
-                    // that honestly instead of claiming a clean stop; the runtime
-                    // turns `eof` into a "may be incomplete" notice.
+                    // that honestly as `eof` rather than claiming a clean stop:
+                    // the provider does not know whether the answer was
+                    // complete, and the runtime treats `eof` as an incomplete
+                    // stream (it does not synthesise a successful finish).
                     self.saw_finish = true;
                     return Some(Ok(ProviderChunk::Finish {
                         reason: "eof".into(),
@@ -124,6 +149,10 @@ impl StreamState {
                         if let Some(event) = self.parser.finish() {
                             self.handle_event(event);
                         }
+                        // The message is over: whatever the DSML scanner still
+                        // holds is text, and must reach the queue before the
+                        // synthetic `Finish` below.
+                        self.flush_text();
                     }
                     Some(Err(err)) => {
                         self.finished = true;
@@ -165,6 +194,7 @@ impl StreamState {
         }
         if data == "[DONE]" {
             self.input_done = true;
+            self.flush_text();
             return;
         }
         match serde_json::from_str::<Value>(data) {
@@ -207,6 +237,10 @@ impl StreamState {
             .iter()
             .any(|needle| kind.contains(needle));
             let message = redact(&format!("provider error: {message}"), &self.secrets);
+            // The message is over. Anything the DSML scanner still holds is
+            // text, and it has to be queued ahead of the error so the partial
+            // answer is not lost with it.
+            self.flush_text();
             self.queue
                 .push_back(Ok(ProviderChunk::Error { message, retryable }));
             self.failed = true;
@@ -225,6 +259,7 @@ impl StreamState {
                 self.queue.push_back(Ok(ProviderChunk::Usage {
                     input_tokens: input.unwrap_or(0),
                     output_tokens: output.unwrap_or(0),
+                    cached_tokens: cached_tokens(usage),
                 }));
             }
         }
@@ -241,7 +276,7 @@ impl StreamState {
         if let Some(delta) = choice.get("delta").filter(|v| v.is_object()) {
             if let Some(text) = delta_text(delta.get("content")) {
                 if !text.is_empty() {
-                    self.queue.push_back(Ok(ProviderChunk::Text(text)));
+                    self.text(text);
                 }
             }
             // Some endpoints use `reasoning`, others `reasoning_content`.
@@ -291,6 +326,56 @@ impl StreamState {
         }
     }
 
+    /// Route model text through DSML recovery.
+    ///
+    /// DeepSeek-V4 sometimes writes its native tool-call markup into `content`
+    /// instead of `tool_calls`, and an endpoint that does not understand it hands
+    /// the markup back as prose: the call never runs and the model looks broken.
+    /// The scanner holds back text that may still be the start of a marker, so
+    /// nothing of it is shown and then retracted.
+    fn text(&mut self, delta: String) {
+        let Some(scanner) = self.dsml.as_mut() else {
+            self.queue.push_back(Ok(ProviderChunk::Text(delta)));
+            return;
+        };
+        let step = scanner.push(&delta);
+        self.emit_step(step);
+    }
+
+    /// Everything still held by the scanner is text now: the message ended.
+    fn flush_text(&mut self) {
+        let Some(mut scanner) = self.dsml.take() else {
+            return;
+        };
+        let step = scanner.finish();
+        self.emit_step(step);
+    }
+
+    fn emit_step(&mut self, step: Step) {
+        if !step.text.is_empty() {
+            self.queue.push_back(Ok(ProviderChunk::Text(step.text)));
+        }
+        for call in step.calls {
+            let index = DSML_INDEX_BASE.saturating_add(self.dsml_calls);
+            self.dsml_calls = self.dsml_calls.saturating_add(1);
+            if index >= MAX_TOOL_CALLS {
+                tracing::warn!(
+                    tool = %call.name,
+                    "ignoring a recovered DSML tool call: the turn already filled every slot"
+                );
+                continue;
+            }
+            self.queue.push_back(Ok(ProviderChunk::ToolCallDelta {
+                index,
+                // No id on the wire: the accumulator invents one, exactly as it
+                // does for an endpoint that omits it.
+                id: None,
+                name: Some(call.name),
+                arguments_delta: Some(call.arguments),
+            }));
+        }
+    }
+
     fn fail(&mut self, message: String) {
         let message = redact(&message, &self.secrets);
         // A stream that ends inside an SSE event arrives here: the body was cut
@@ -313,6 +398,25 @@ fn non_empty(text: &str) -> Option<String> {
     } else {
         Some(text.to_string())
     }
+}
+
+/// Prompt tokens served from the provider's prefix cache.
+///
+/// Three shapes are in the wild and a gateway may translate between them:
+/// OpenAI's `prompt_tokens_details.cached_tokens`, DeepSeek's native
+/// `prompt_cache_hit_tokens`, and the Anthropic-compatible
+/// `cache_read_input_tokens`. Reporting this is what makes a "we are at 98%"
+/// claim measurable instead of a hope.
+fn cached_tokens(usage: &Value) -> Option<u32> {
+    let nested = usage
+        .get("prompt_tokens_details")
+        .or_else(|| usage.get("input_tokens_details"))
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64);
+    nested
+        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64))
+        .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+        .map(|value| value.min(u64::from(u32::MAX)) as u32)
 }
 
 fn token_count(usage: &Value, primary: &str, fallback: &str) -> Option<u32> {
@@ -421,6 +525,10 @@ mod tests {
     use super::*;
 
     fn state_with_chunks(chunks: Vec<&'static str>) -> StreamState {
+        state_with_tools(chunks, Vec::new())
+    }
+
+    fn state_with_tools(chunks: Vec<&'static str>, tool_names: Vec<String>) -> StreamState {
         let bytes: Vec<reqwest::Result<Bytes>> = chunks
             .into_iter()
             .map(|c| Ok(Bytes::from_static(c.as_bytes())))
@@ -434,6 +542,8 @@ mod tests {
             parser: SseParser::new(),
             decoder: Utf8Decoder::default(),
             queue: VecDeque::new(),
+            dsml: DsmlTools::new(tool_names).map(DsmlScanner::new),
+            dsml_calls: 0,
             saw_event: false,
             saw_finish: false,
             input_done: false,
@@ -448,6 +558,32 @@ mod tests {
             out.push(item);
         }
         out
+    }
+
+    /// The provider reports prompt-cache hits in three different shapes, and a
+    /// gateway may translate between them. All of them must be read: a harness
+    /// that cannot see `cached_tokens` cannot answer "are we at 98%?".
+    #[tokio::test]
+    async fn cached_prompt_tokens_are_read_from_every_reported_shape() {
+        let cases = [
+            ("{\"prompt_tokens\":100,\"completion_tokens\":1,\"prompt_tokens_details\":{\"cached_tokens\":90}}", Some(90)),
+            ("{\"prompt_tokens\":100,\"completion_tokens\":1,\"prompt_cache_hit_tokens\":75}", Some(75)),
+            ("{\"input_tokens\":100,\"output_tokens\":1,\"cache_read_input_tokens\":60}", Some(60)),
+            ("{\"prompt_tokens\":100,\"completion_tokens\":1}", None),
+        ];
+        for (usage, expected) in cases {
+            let body = format!("data: {{\"choices\":[],\"usage\":{usage}}}\n\ndata: [DONE]\n\n");
+            let body: &'static str = Box::leak(body.into_boxed_str());
+            let items = drain(state_with_chunks(vec![body])).await;
+            let reported = items
+                .into_iter()
+                .find_map(|item| match item.unwrap() {
+                    ProviderChunk::Usage { cached_tokens, .. } => Some(cached_tokens),
+                    _ => None,
+                })
+                .expect("a usage chunk");
+            assert_eq!(reported, expected, "usage {usage}");
+        }
     }
 
     #[tokio::test]

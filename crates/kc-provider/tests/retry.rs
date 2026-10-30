@@ -36,6 +36,7 @@ fn chat_request() -> ChatRequest {
         messages: vec![kc_core::message::Message::user("hello")],
         tools: Vec::new(),
         temperature: 0.2,
+        send_temperature: true,
         max_tokens: None,
         top_p: None,
         parallel_tool_calls: true,
@@ -107,24 +108,151 @@ async fn retries_server_errors_until_an_attempt_succeeds() {
     assert_eq!(hit_count(&server), 3, "two failed attempts plus the winner");
 }
 
-// The gateway answers 401/404 for a model the next channel serves fine, so a
-// client error status is retried like any other failure.
+// A 401 is permanent for a single endpoint: a revoked key is not fixed by
+// re-sending the request. It used to be retried 51 times (~20 minutes, 51 billed
+// attempts) before the user saw the real error.
 #[tokio::test]
-async fn retries_client_error_statuses_too() {
+async fn does_not_retry_unauthorized_by_default() {
     let failure = response(
         "401 Unauthorized",
         "application/json",
         "{\"error\":{\"message\":\"channel key rotated\"}}",
     );
-    let server = flaky_server(1, failure).await;
+    let server = flaky_server(usize::MAX, failure).await;
 
-    let stream = retrying(&server, 3)
+    let mut stream = retrying(&server, 5)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let err = stream
+        .next()
+        .await
+        .expect("a terminal error item")
+        .expect_err("a 401 must fail the attempt");
+    let text = err.to_string();
+    assert!(text.contains("401"), "{text}");
+    assert!(
+        !text.contains("gave up after"),
+        "a permanent failure must not report a retry budget: {text}"
+    );
+    assert_eq!(hit_count(&server), 1, "a 401 must be sent exactly once");
+    assert!(stream.next().await.is_none());
+}
+
+// A malformed request stays malformed: 400/413/422 are never retried.
+#[tokio::test]
+async fn does_not_retry_a_bad_request() {
+    let failure = response(
+        "400 Bad Request",
+        "application/json",
+        "{\"error\":{\"message\":\"unsupported field: foo\"}}",
+    );
+    let server = flaky_server(usize::MAX, failure).await;
+
+    let mut stream = retrying(&server, 5)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let err = stream
+        .next()
+        .await
+        .expect("a terminal error item")
+        .expect_err("a 400 must fail the attempt");
+    assert!(err.to_string().contains("400"), "{err}");
+    assert_eq!(hit_count(&server), 1, "a 400 must be sent exactly once");
+    assert!(stream.next().await.is_none());
+}
+
+// 429 is transient: the endpoint is busy, not the request.
+#[tokio::test]
+async fn retries_rate_limits() {
+    let failure = response(
+        "429 Too Many Requests",
+        "application/json",
+        "{\"error\":{\"message\":\"slow down\"}}",
+    );
+    let server = flaky_server(2, failure).await;
+
+    let stream = retrying(&server, 5)
         .stream_chat(chat_request(), CancellationToken::new())
         .await
         .unwrap();
 
     assert_eq!(texts(stream).await, "ok");
-    assert_eq!(hit_count(&server), 2);
+    assert_eq!(hit_count(&server), 3, "two 429s then the winner");
+}
+
+// The stream layer's own `retryable: false` must be honoured: an in-stream
+// `invalid_request_error` is a rejected request, not a dead channel.
+#[tokio::test]
+async fn honours_a_non_retryable_stream_error() {
+    let body = "data: {\"error\":{\"message\":\"unsupported parameter: foo\",\
+                \"type\":\"invalid_request_error\"}}\n\n";
+    let server = spawn(move |_req, mut socket| async move {
+        write_sse(&mut socket, body).await;
+    })
+    .await;
+
+    let mut stream = retrying(&server, 5)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let err = stream
+        .next()
+        .await
+        .expect("a terminal error item")
+        .expect_err("a non-retryable stream error must surface");
+    assert!(err.to_string().contains("unsupported parameter"), "{err}");
+    assert_eq!(
+        hit_count(&server),
+        1,
+        "retryable: false must not be re-sent"
+    );
+    assert!(stream.next().await.is_none());
+}
+
+// The wall-clock budget stops a long retry chain even when the attempt count
+// would still allow it: 50 retries against a 30s ceiling is ~20 minutes.
+#[tokio::test]
+async fn wall_clock_budget_stops_a_long_retry_chain() {
+    let failure = response("503 Service Unavailable", "text/plain", "always down");
+    let server = flaky_server(usize::MAX, failure).await;
+
+    let inner: Arc<dyn Provider> = Arc::new(OpenAiProvider::new(model_config(&server)).unwrap());
+    // A generous attempt budget (100) with a 300ms wall-clock budget and a
+    // 100ms backoff: only the clock can stop this quickly.
+    let provider = RetryingProvider::new(
+        inner,
+        RetryPolicy::new(100, Duration::from_millis(100), Duration::from_millis(100))
+            .with_max_total(Duration::from_millis(300)),
+    );
+
+    let mut stream = provider
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let started = Instant::now();
+    let err = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("the wall-clock budget must end the retries, not run 100 attempts")
+        .expect("a terminal item")
+        .expect_err("expected failure");
+    let elapsed = started.elapsed();
+    assert!(err.to_string().contains("503"), "{err}");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the budget must stop the chain, took {elapsed:?}"
+    );
+    let hits = hit_count(&server);
+    assert!(
+        hits < 100,
+        "the wall-clock budget must cut the attempt count short, got {hits}"
+    );
+    assert!(stream.next().await.is_none());
 }
 
 // The exact production failure: headers look fine, the body dies before a single

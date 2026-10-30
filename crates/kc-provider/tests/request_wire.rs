@@ -39,6 +39,7 @@ fn base_config(server: &MockServer) -> ModelConfig {
 fn full_request() -> ChatRequest {
     ChatRequest {
         model: "gpt-test".into(),
+        send_temperature: true,
         messages: vec![
             Message::system("be helpful"),
             Message::user("read a.txt"),
@@ -299,6 +300,95 @@ async fn list_models_reports_an_unavailable_endpoint() {
     assert!(err.contains("model listing unavailable"), "{err}");
     assert!(err.contains("404"), "{err}");
     assert!(err.contains("/models"), "{err}");
+}
+
+#[tokio::test]
+async fn output_limit_from_max_output_tokens_reaches_the_wire() {
+    // The runtime reserves `window - max_output_tokens` for the answer, so the
+    // request must actually carry that limit; otherwise the model can generate
+    // past the reserve and hit `finish_reason: "length"` on long answers.
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, OK_SSE).await }).await;
+    let mut config = base_config(&server);
+    config.max_tokens = None;
+    config.max_output_tokens = Some(8_192);
+    let provider = OpenAiProvider::new(config).unwrap();
+    let stream = provider
+        .stream_chat(full_request(), CancellationToken::new())
+        .await
+        .unwrap();
+    drain(stream).await;
+
+    let body = server.wait_for_request().await.json();
+    assert_eq!(body["max_tokens"], 8_192, "{body}");
+    assert!(
+        body.get("max_completion_tokens").is_none(),
+        "only one output-limit spelling may be sent: {body}"
+    );
+}
+
+#[tokio::test]
+async fn max_tokens_wins_over_max_output_tokens() {
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, OK_SSE).await }).await;
+    let mut config = base_config(&server);
+    config.max_tokens = Some(1_024);
+    config.max_output_tokens = Some(8_192);
+    let provider = OpenAiProvider::new(config).unwrap();
+    let stream = provider
+        .stream_chat(full_request(), CancellationToken::new())
+        .await
+        .unwrap();
+    drain(stream).await;
+
+    let body = server.wait_for_request().await.json();
+    assert_eq!(body["max_tokens"], 1_024, "{body}");
+}
+
+#[tokio::test]
+async fn no_output_limit_is_sent_when_none_is_configured() {
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, OK_SSE).await }).await;
+    let mut config = base_config(&server);
+    config.max_tokens = None;
+    config.max_output_tokens = None;
+    let provider = OpenAiProvider::new(config).unwrap();
+    let stream = provider
+        .stream_chat(full_request(), CancellationToken::new())
+        .await
+        .unwrap();
+    drain(stream).await;
+
+    let body = server.wait_for_request().await.json();
+    assert!(body.get("max_tokens").is_none(), "{body}");
+    assert!(body.get("max_completion_tokens").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn extra_body_can_switch_to_max_completion_tokens() {
+    // Newer OpenAI models reject `max_tokens` in favour of
+    // `max_completion_tokens`; `model.extra_body` is the documented override.
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, OK_SSE).await }).await;
+    let mut config = base_config(&server);
+    config.max_output_tokens = Some(8_192);
+    config.extra_body = BTreeMap::from_iter([(
+        "max_completion_tokens".to_string(),
+        serde_json::json!(4_096),
+    )]);
+    let provider = OpenAiProvider::new(config).unwrap();
+    let stream = provider
+        .stream_chat(full_request(), CancellationToken::new())
+        .await
+        .unwrap();
+    drain(stream).await;
+
+    let body = server.wait_for_request().await.json();
+    assert_eq!(body["max_completion_tokens"], 4_096, "{body}");
+    assert!(
+        body.get("max_tokens").is_none(),
+        "the operator's spelling must replace ours, not join it: {body}"
+    );
 }
 
 #[tokio::test]

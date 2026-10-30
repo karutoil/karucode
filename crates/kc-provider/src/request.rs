@@ -60,10 +60,22 @@ pub fn build_chat_body(request: &ChatRequest) -> Value {
     body.insert("model".into(), Value::String(request.model.clone()));
     body.insert(
         "messages".into(),
-        Value::Array(request.messages.iter().map(message_json).collect()),
+        Value::Array(messages_json(&request.messages)),
     );
     body.insert("stream".into(), Value::Bool(true));
-    body.insert("temperature".into(), float_json(request.temperature));
+    // Ask for the usage block explicitly. OpenAI-compatible gateways are allowed
+    // to omit (or zero) the usage on a streamed response unless this is set, and
+    // a zeroed usage is worse than none: it makes a 99% prompt-cache hit rate
+    // read as 0% on every dashboard built from those records. Measured against
+    // ai.karutoil.site: without this key `cached_tokens` came back 0 for a
+    // request that was 8_960/9_039 cached; with it, the real number.
+    body.insert(
+        "stream_options".into(),
+        serde_json::json!({ "include_usage": true }),
+    );
+    if request.send_temperature {
+        body.insert("temperature".into(), float_json(request.temperature));
+    }
     if let Some(max_tokens) = request.max_tokens {
         body.insert("max_tokens".into(), Value::from(max_tokens));
     }
@@ -94,6 +106,44 @@ pub fn build_chat_body(request: &ChatRequest) -> Value {
     Value::Object(body)
 }
 
+/// Build the request body for one streaming turn, including the output limit
+/// the model config declares.
+///
+/// The runtime derives its context budget as `window - max_output_tokens`, so
+/// that room is reserved on the assumption the answer cannot exceed it. Without
+/// a limit on the wire the model is free to generate past the reserve and hit
+/// `finish_reason: "length"` on exactly the long answers the reserve protects —
+/// and with `max_tokens` unset (the default) there is no output cap at all.
+///
+/// `max_tokens` wins when set; `max_output_tokens` is the fallback. Only one of
+/// them is ever sent. Newer OpenAI models reject `max_tokens` in favour of
+/// `max_completion_tokens`; an operator can override the key through
+/// `model.extra_body` (e.g. `max_completion_tokens = 8192`), which is merged
+/// after this and therefore wins.
+pub fn build_chat_body_for(config: &ModelConfig, request: &ChatRequest) -> Value {
+    let mut body = build_chat_body(request);
+    if let Some(limit) = output_token_limit(config, request) {
+        if let Some(map) = body.as_object_mut() {
+            // Never send both spellings: a gateway that understands one may
+            // reject the other, and two limits disagreeing is undefined.
+            map.remove("max_completion_tokens");
+            map.insert("max_tokens".into(), Value::from(limit));
+        }
+    }
+    body
+}
+
+/// The output cap to send: the request's own `max_tokens`, else the model's
+/// `max_tokens`, else its `max_output_tokens`.
+fn output_token_limit(config: &ModelConfig, request: &ChatRequest) -> Option<u64> {
+    request
+        .max_tokens
+        .map(u64::from)
+        .or(config.max_tokens.map(u64::from))
+        .or(config.max_output_tokens)
+        .filter(|limit| *limit > 0)
+}
+
 /// Serialise an `f32` without leaking binary-float noise (0.9f32 would otherwise
 /// become 0.8999999761581421 on the wire).
 fn float_json(value: f32) -> Value {
@@ -119,7 +169,23 @@ pub(crate) fn apply_config_extra_body(
         if RESERVED_BODY_KEYS.contains(&key.as_str()) {
             continue;
         }
+        // `max_tokens` and `max_completion_tokens` are two spellings of one
+        // limit. Newer OpenAI models reject the former, so an operator who sets
+        // the latter through `extra_body` must get exactly that key on the wire,
+        // not both.
+        if let Some(other) = output_limit_counterpart(key) {
+            map.remove(other);
+        }
         map.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+}
+
+/// The other spelling of the output limit, if `key` is one of them.
+fn output_limit_counterpart(key: &str) -> Option<&'static str> {
+    match key {
+        "max_tokens" => Some("max_completion_tokens"),
+        "max_completion_tokens" => Some("max_tokens"),
+        _ => None,
     }
 }
 
@@ -139,6 +205,60 @@ fn tools_json(tools: &[ToolSpec]) -> Value {
             })
             .collect(),
     )
+}
+
+/// Serialise the transcript, expanding attached images.
+///
+/// A `tool` message can only carry text on the OpenAI-compatible wire format, so
+/// an image a tool returned travels in a **separate `user` message** with an
+/// `image_url` content part. That message is emitted after the run of tool
+/// results, never between them: a request whose assistant `tool_calls` are not
+/// followed directly by their `tool` results is rejected by strict endpoints.
+fn messages_json(messages: &[Message]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(messages.len());
+    let mut pending: Vec<Value> = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        out.push(message_json(message));
+        if !message.images.is_empty() {
+            pending.push(image_message_json(message));
+        }
+        // Hold the images back while the tool results of this turn are still
+        // arriving; flush as soon as the run ends (or the transcript does).
+        let next_is_tool = messages
+            .get(index + 1)
+            .map(|next| next.role == Role::Tool)
+            .unwrap_or(false);
+        if !next_is_tool {
+            out.append(&mut pending);
+        }
+    }
+    out.append(&mut pending);
+    out
+}
+
+/// The `user` message that carries one message's images.
+fn image_message_json(message: &Message) -> Value {
+    let mut parts = Vec::with_capacity(message.images.len() * 2 + 1);
+    let source = message
+        .name
+        .as_deref()
+        .or(message.tool_call_id.as_deref())
+        .unwrap_or("a tool");
+    parts.push(serde_json::json!({
+        "type": "text",
+        "text": format!(
+            "Images returned by `{source}`. Look at them directly; the text of the result \
+             describes what was read, it is not the image."
+        ),
+    }));
+    for image in &message.images {
+        parts.push(serde_json::json!({"type": "text", "text": image.label()}));
+        parts.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": {"url": image.data_url()},
+        }));
+    }
+    serde_json::json!({"role": "user", "content": parts})
 }
 
 fn message_json(message: &Message) -> Value {
@@ -251,7 +371,7 @@ pub(crate) fn sensitive_values(headers: &HeaderMap) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kc_core::message::ToolCall;
+    use kc_core::message::{ImageAttachment, ToolCall};
 
     fn request() -> ChatRequest {
         ChatRequest {
@@ -259,6 +379,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             temperature: 0.2,
+            send_temperature: true,
             max_tokens: None,
             top_p: None,
             parallel_tool_calls: true,
@@ -312,6 +433,38 @@ mod tests {
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
         assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn temperature_is_not_sent_unless_it_is_asked_for() {
+        // A sampling value the model was not tuned for pushed a reasoning model
+        // into repeating itself instead of acting; the default is to send none.
+        let mut req = request();
+        req.send_temperature = false;
+        let body = build_chat_body(&req);
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature was invented: {body}"
+        );
+        req.send_temperature = true;
+        let body = build_chat_body(&req);
+        assert_eq!(body["temperature"], 0.2);
+    }
+
+    #[test]
+    fn usage_is_requested_on_the_stream_so_cache_hits_are_visible() {
+        // Without `stream_options.include_usage` a gateway may answer with a
+        // zeroed usage block, which reports a 99% prompt-cache hit as 0%.
+        let body = build_chat_body(&request());
+        assert_eq!(body["stream_options"]["include_usage"], true);
+
+        // An operator can still override it through `extra_body` (a gateway
+        // that rejects the field, for instance).
+        let mut req = request();
+        req.extra_body
+            .insert("stream_options".into(), serde_json::json!({}));
+        let body = build_chat_body(&req);
+        assert_eq!(body["stream_options"], serde_json::json!({}));
     }
 
     #[test]
@@ -411,6 +564,73 @@ mod tests {
         assert_eq!(body["reasoning_effort"], "high");
         assert_eq!(body["prompt_cache"], true);
         assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn an_image_travels_in_a_user_message_after_its_tool_result() {
+        // A `tool` message cannot hold an image on this wire format, and a user
+        // message wedged between an assistant's `tool_calls` and its results is
+        // rejected by strict endpoints. So the pixels follow the whole run of
+        // tool results.
+        let image = ImageAttachment {
+            media_type: "image/png".into(),
+            data: "iVBORw0KGgo=".into(),
+            bytes: 8,
+            name: Some("assets/logo.png".into()),
+        };
+        let mut req = request();
+        req.messages = vec![
+            Message::user("look at this"),
+            Message::assistant(
+                "",
+                vec![
+                    ToolCall {
+                        id: "call_1".into(),
+                        name: "read_file".into(),
+                        arguments: "{\"path\":\"a.txt\"}".into(),
+                    },
+                    ToolCall {
+                        id: "call_2".into(),
+                        name: "read_file".into(),
+                        arguments: "{\"path\":\"assets/logo.png\"}".into(),
+                    },
+                ],
+            ),
+            Message::tool_result("call_1", "read_file", "a.txt — 1 line"),
+            Message::tool_result("call_2", "read_file", "assets/logo.png — image/png")
+                .with_images(vec![image]),
+        ];
+        let body = build_chat_body(&req);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 5, "assistant + 2 tool results + image turn");
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(
+            messages[3]["content"], "assets/logo.png — image/png",
+            "the tool text stays text, so a gateway that ignores images still gets the summary"
+        );
+        assert_eq!(messages[4]["role"], "user");
+        let parts = messages[4]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert!(parts[0]["text"].as_str().unwrap().contains("read_file"));
+        assert_eq!(parts[1]["type"], "text");
+        assert_eq!(parts[1]["text"], "assets/logo.png — image/png, 8 bytes");
+        assert_eq!(parts[2]["type"], "image_url");
+        assert_eq!(
+            parts[2]["image_url"]["url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+        // No image field leaks onto the tool object itself.
+        assert!(messages[3].get("images").is_none());
+    }
+
+    #[test]
+    fn a_text_only_transcript_keeps_its_shape() {
+        let mut req = request();
+        req.messages = vec![Message::user("hi"), Message::assistant("hello", vec![])];
+        let body = build_chat_body(&req);
+        assert_eq!(body["messages"][0]["content"], "hi");
+        assert!(body["messages"][0]["content"].is_string());
     }
 
     #[test]

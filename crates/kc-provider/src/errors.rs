@@ -12,6 +12,67 @@ const ERROR_BODY_LIMIT: usize = 4096;
 /// Characters of the body excerpt kept in the message.
 const ERROR_EXCERPT_CHARS: usize = 480;
 
+/// Machine-readable tag carrying the HTTP status inside a provider error
+/// message.
+///
+/// [`Error::Provider`] is a plain string and the retry layer only ever sees that
+/// string, so the status has to travel inside it for [`crate::retry::retryable`]
+/// to tell a permanent 400 from a transient 502. The tag is a *suffix* so the
+/// human-readable head stays first, and it is bracketed so it cannot be confused
+/// with a status code quoted from an upstream body.
+pub(crate) const HTTP_STATUS_TAG: &str = "[http ";
+
+/// Stable tag marking a failure as "the prompt did not fit the context window".
+///
+/// `kc_core::Error` has no dedicated variant for this, so the classification
+/// travels in the message. The runtime should match this tag (or, better, a real
+/// `Error::ContextOverflow` variant) and compact-and-retry once instead of
+/// failing the turn.
+pub const CONTEXT_OVERFLOW_TAG: &str = "[context-overflow]";
+
+/// Phrases providers use for a prompt that overflows the context window. Covers
+/// OpenAI (`maximum context length`, `context_length_exceeded`), Anthropic
+/// (`prompt is too long`), vLLM/TGI (`too many tokens`), Gemini (`reduce the
+/// length`) and the generic gateway wording.
+const CONTEXT_OVERFLOW_MARKERS: [&str; 6] = [
+    "context length",
+    "maximum context",
+    "too many tokens",
+    "context_length_exceeded",
+    "reduce the length",
+    "prompt is too long",
+];
+
+/// The HTTP status carried by a provider error message, when it has one.
+pub(crate) fn http_status_of(message: &str) -> Option<u16> {
+    let start = message.find(HTTP_STATUS_TAG)? + HTTP_STATUS_TAG.len();
+    let rest = &message[start..];
+    let end = rest.find(']')?;
+    rest[..end].trim().parse().ok()
+}
+
+/// Does this message describe a prompt that overflowed the model's window?
+///
+/// Deliberately a substring test over the lowercased text: providers word this
+/// differently and a gateway may wrap the upstream message in its own prose.
+pub fn is_context_overflow(message: &str) -> bool {
+    if message.contains(CONTEXT_OVERFLOW_TAG) {
+        return true;
+    }
+    let lower = message.to_ascii_lowercase();
+    CONTEXT_OVERFLOW_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+/// [`is_context_overflow`] for a whole error value.
+pub fn is_context_overflow_error(err: &Error) -> bool {
+    match err {
+        Error::Provider(message) => is_context_overflow(message),
+        _ => false,
+    }
+}
+
 /// Map a transport-level failure. Timeouts become [`Error::Timeout`]; everything
 /// else becomes a provider error naming the URL (never the credentials).
 pub(crate) fn map_reqwest_error(
@@ -58,6 +119,10 @@ pub(crate) async fn http_status_error(
             format!("{head} (response body: {excerpt})")
         }
     };
+    // A prompt that does not fit the window is a 400/413/422 on every provider,
+    // and the body is the only place that says so. Tag it before the status
+    // mapping so the runtime can compact-and-retry instead of failing the turn.
+    let overflow = is_context_overflow(&excerpt);
     let text = match status {
         StatusCode::UNAUTHORIZED => with_body(format!(
             "provider authentication failed (401 Unauthorized) at {url}: the configured API key was rejected; \
@@ -94,6 +159,14 @@ pub(crate) async fn http_status_error(
         )),
         s => with_body(format!("unexpected provider response ({}) from {url}", status_line(s))),
     };
+    // The status travels inside the message so the retry layer can classify it
+    // (see `HTTP_STATUS_TAG`); the overflow tag tells the runtime to compact and
+    // retry once instead of failing the turn.
+    let mut text = format!("{text} {HTTP_STATUS_TAG}{}]", status.as_u16());
+    if overflow {
+        text.push(' ');
+        text.push_str(CONTEXT_OVERFLOW_TAG);
+    }
     Error::Provider(redact(&text, secrets))
 }
 
@@ -179,5 +252,70 @@ mod tests {
     fn truncation_is_char_safe() {
         assert_eq!(truncate_chars("héllo", 3), "hél…");
         assert_eq!(truncate_chars("ok", 5), "ok");
+    }
+
+    /// Real provider bodies for a prompt that does not fit the window. Every one
+    /// of these must be recognised, because the runtime's recovery (compact and
+    /// retry once) hangs off this classification.
+    #[test]
+    fn context_overflow_is_detected_in_real_provider_bodies() {
+        let bodies = [
+            // OpenAI
+            "This model's maximum context length is 128000 tokens. However, your \
+             messages resulted in 200000 tokens. Please reduce the length of the messages.",
+            // OpenAI error code form
+            "{\"error\":{\"message\":\"...\",\"type\":\"invalid_request_error\",\
+             \"code\":\"context_length_exceeded\"}}",
+            // Anthropic
+            "prompt is too long: 210000 tokens > 200000 maximum",
+            // vLLM / TGI
+            "This model's maximum context length is 32768 tokens. \
+             However, you requested 40000 tokens (36000 in the messages, 4000 in the completion). \
+             Please reduce the length of the messages or completion.",
+            // Gemini
+            "The input token count (1048577) exceeds the maximum number of tokens allowed (1048576). \
+             Please reduce the length of the messages.",
+            // Generic gateway wording
+            "too many tokens in request",
+            "maximum context window exceeded",
+        ];
+        for body in bodies {
+            assert!(is_context_overflow(body), "not detected: {body}");
+        }
+    }
+
+    /// Ordinary failures must not be mistaken for an overflow, or the runtime
+    /// would compact a conversation that was never too long.
+    #[test]
+    fn ordinary_errors_are_not_context_overflows() {
+        let bodies = [
+            "provider authentication failed (401 Unauthorized)",
+            "provider rate limit hit (429 Too Many Requests)",
+            "upstream provider error (502 Bad Gateway)",
+            "invalid response body from http://h/v1: error decoding response body",
+            "model `gpt-nope` does not exist",
+            "unsupported parameter: max_tokens",
+        ];
+        for body in bodies {
+            assert!(!is_context_overflow(body), "false positive: {body}");
+        }
+    }
+
+    #[test]
+    fn overflow_tag_is_recognised_on_its_own() {
+        assert!(is_context_overflow(CONTEXT_OVERFLOW_TAG));
+        assert!(is_context_overflow_error(&Error::Provider(format!(
+            "provider rejected the request (400) {CONTEXT_OVERFLOW_TAG}"
+        ))));
+        assert!(!is_context_overflow_error(&Error::Timeout("slow".into())));
+        assert!(!is_context_overflow_error(&Error::Cancelled));
+    }
+
+    #[test]
+    fn status_tag_is_parsed_out_of_a_message() {
+        assert_eq!(http_status_of("boom [http 400]"), Some(400));
+        assert_eq!(http_status_of("boom [http 503] tail"), Some(503));
+        assert_eq!(http_status_of("boom"), None);
+        assert_eq!(http_status_of("[http not-a-number]"), None);
     }
 }

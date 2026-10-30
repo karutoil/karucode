@@ -27,6 +27,7 @@ fn chat_request() -> ChatRequest {
         messages: vec![kc_core::message::Message::user("hello")],
         tools: Vec::new(),
         temperature: 0.2,
+        send_temperature: true,
         max_tokens: None,
         top_p: None,
         parallel_tool_calls: true,
@@ -93,7 +94,8 @@ async fn text_deltas_usage_and_done() {
     }));
     assert!(chunks.contains(&ProviderChunk::Usage {
         input_tokens: 12,
-        output_tokens: 4
+        output_tokens: 4,
+        cached_tokens: None,
     }));
 
     let request = server.request();
@@ -325,6 +327,91 @@ async fn unterminated_final_event_is_parsed_at_eof() {
     }));
 }
 
+/// A gateway that terminates events with CRLF, interleaves keep-alive comments
+/// and splits frames at arbitrary byte boundaries must still stream cleanly.
+#[tokio::test]
+async fn crlf_keepalives_and_split_frames_are_handled() {
+    let body = concat!(
+        ": keepalive\r\n\r\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"}}]}\r\n\r\n",
+        ": ping\r\n\r\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"b\"},\"finish_reason\":\"stop\"}]}\r\n\r\n",
+        "data: [DONE]\r\n\r\n",
+    );
+    let bytes = format!("{SSE_HEAD}{body}").into_bytes();
+    let server = spawn(move |_req, mut socket| {
+        let bytes = bytes.clone();
+        async move {
+            // 5-byte chunks guarantee splits inside `\r\n\r\n` and inside JSON.
+            for part in bytes.chunks(5) {
+                socket.write_all(part).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+            let _ = socket.shutdown().await;
+        }
+    })
+    .await;
+    let (stream, _cancel) = start(model_config(&server), chat_request()).await;
+    let chunks = collect(stream).await;
+    assert_eq!(texts(&chunks), "ab");
+    assert!(chunks.contains(&ProviderChunk::Finish {
+        reason: "stop".into()
+    }));
+}
+
+/// A multi-line `data:` field is joined with newlines by the SSE spec. A JSON
+/// payload split that way is still valid JSON (a newline is legal whitespace),
+/// so it must parse into the same chunks as the single-line form.
+#[tokio::test]
+async fn multiline_data_field_is_joined_and_parsed() {
+    let body = "data: {\"choices\":\ndata: [{\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}\n\n";
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, body).await }).await;
+    let (stream, _cancel) = start(model_config(&server), chat_request()).await;
+    let chunks = collect(stream).await;
+    assert_eq!(texts(&chunks), "x", "unexpected chunks: {chunks:?}");
+    assert!(chunks.contains(&ProviderChunk::Finish {
+        reason: "stop".into()
+    }));
+}
+
+/// A multi-line `data:` field whose joined text is *not* valid JSON must be
+/// reported as a malformed frame, not silently dropped.
+#[tokio::test]
+async fn multiline_data_that_is_not_json_is_reported() {
+    let body = "data: not\ndata: json\n\n";
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, body).await }).await;
+    let (stream, _cancel) = start(model_config(&server), chat_request()).await;
+    let chunks = collect(stream).await;
+    assert_eq!(chunks.len(), 1, "unexpected chunks: {chunks:?}");
+    match &chunks[0] {
+        ProviderChunk::Error { message, retryable } => {
+            assert!(message.contains("malformed JSON"), "{message}");
+            assert!(*retryable, "a corrupt frame stays retryable");
+        }
+        other => panic!("expected Error chunk, got {other:?}"),
+    }
+}
+
+/// A stream that ends without `[DONE]` and without a `finish_reason` reports
+/// `eof`; the provider does not claim a clean stop it cannot vouch for.
+#[tokio::test]
+async fn stream_ending_without_done_or_finish_reports_eof() {
+    let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"cut\"}}]}\n\n";
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, body).await }).await;
+    let (stream, _cancel) = start(model_config(&server), chat_request()).await;
+    let chunks = collect(stream).await;
+    assert_eq!(texts(&chunks), "cut");
+    assert_eq!(
+        chunks.last(),
+        Some(&ProviderChunk::Finish {
+            reason: "eof".into()
+        })
+    );
+}
+
 #[tokio::test]
 async fn empty_body_is_rejected_before_streaming() {
     let server = spawn(move |_req, mut socket| async move {
@@ -515,4 +602,212 @@ async fn connect_error_redacts_the_api_key() {
         .expect("connect must fail");
     let text = err.to_string();
     assert!(!text.contains("sk-connect-secret"), "{text}");
+}
+
+// --- DeepSeek DSML recovery -------------------------------------------------
+//
+// DeepSeek-V4 sometimes writes its native tool-call markup into `content`
+// instead of `tool_calls`, and an OpenAI-compatible endpoint hands it back as
+// prose: the tool never runs and the model looks broken. These tests drive a
+// real SSE response through the provider to prove the call comes out the far
+// side as a `ToolCallDelta`.
+
+fn request_with_tools(names: &[&str]) -> ChatRequest {
+    let mut request = chat_request();
+    request.tools = names
+        .iter()
+        .map(|name| kc_core::tool::ToolSpec {
+            name: (*name).into(),
+            description: "test tool".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            origin: Default::default(),
+        })
+        .collect();
+    request
+}
+
+/// SSE data lines carrying `content` deltas, one event per fragment.
+fn content_events(fragments: &[&str]) -> String {
+    let mut body = String::new();
+    for fragment in fragments {
+        let payload = serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": fragment}}]
+        });
+        body.push_str("data: ");
+        body.push_str(&payload.to_string());
+        body.push_str("\n\n");
+    }
+    body.push_str("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n");
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
+fn calls_and_text(chunks: &[ProviderChunk]) -> (String, Vec<kc_core::message::ToolCall>) {
+    let mut accumulator = ToolCallAccumulator::default();
+    let mut text = String::new();
+    for chunk in chunks {
+        match chunk {
+            ProviderChunk::ToolCallDelta {
+                index,
+                id,
+                name,
+                arguments_delta,
+            } => accumulator.apply(*index, id.clone(), name.clone(), arguments_delta.clone()),
+            ProviderChunk::Text(delta) => text.push_str(delta),
+            _ => {}
+        }
+    }
+    (text, accumulator.finish())
+}
+
+#[tokio::test]
+async fn dsml_tool_calls_instead_of_content_are_recovered() {
+    // The exact shape from the upstream report: prose, then the markup, with no
+    // structured `tool_calls` anywhere in the stream.
+    let body = content_events(&[
+        "I will search several relevant directions first.",
+        "<||DSML||tool_calls><||DSML||invoke name=\"doc_knowledgebase\">",
+        "<||DSML||parameter name=\"query\" string=\"true\">bond detail fields display",
+        "</||DSML||parameter></||DSML||invoke></||DSML||tool_calls>",
+    ]);
+    let server = spawn(move |_req, mut socket| {
+        let body = body.clone();
+        async move { write_sse(&mut socket, &body).await }
+    })
+    .await;
+    let (stream, _cancel) = start(
+        model_config(&server),
+        request_with_tools(&["doc_knowledgebase"]),
+    )
+    .await;
+    let chunks = collect(stream).await;
+    let (text, calls) = calls_and_text(&chunks);
+
+    assert_eq!(text.trim(), "I will search several relevant directions first.");
+    assert!(!text.contains("DSML"), "markup leaked into the answer: {text}");
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].name, "doc_knowledgebase");
+    let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+    assert_eq!(args["query"], serde_json::json!("bond detail fields display"));
+    // The provider still reports the finish reason it was given.
+    assert!(chunks.contains(&ProviderChunk::Finish {
+        reason: "stop".into()
+    }));
+}
+
+#[tokio::test]
+async fn dsml_recovery_survives_a_marker_split_across_network_chunks() {
+    // The same message, split at every awkward boundary: mid-marker, mid-bar,
+    // mid-attribute. Nothing may leak as text and nothing may be lost.
+    let whole = "Working on it.<\u{ff5c}DSML\u{ff5c}tool_calls><\u{ff5c}DSML\u{ff5c}invoke name=\"read_file\">\
+        <\u{ff5c}DSML\u{ff5c}parameter name=\"path\" string=\"true\">src/main.rs</\u{ff5c}DSML\u{ff5c}parameter>\
+        </\u{ff5c}DSML\u{ff5c}invoke></\u{ff5c}DSML\u{ff5c}tool_calls>";
+    // Split on character boundaries in the harness (a `&str` cannot be cut
+    // mid-char), which still lands inside markers, bars and attributes; the
+    // byte-level split of a multi-byte bar is covered by the decoder test.
+    let boundaries: Vec<usize> = whole
+        .char_indices()
+        .map(|(at, _)| at)
+        .chain(std::iter::once(whole.len()))
+        .step_by(3)
+        .chain(std::iter::once(whole.len()))
+        .collect();
+    let pieces: Vec<&str> = boundaries
+        .windows(2)
+        .filter(|window| window[0] < window[1])
+        .map(|window| &whole[window[0]..window[1]])
+        .collect();
+    assert!(pieces.len() > 10, "the message must really be split");
+    let body = content_events(&pieces);
+    let server = spawn(move |_req, mut socket| {
+        let body = body.clone();
+        async move { write_sse(&mut socket, &body).await }
+    })
+    .await;
+    let (stream, _cancel) = start(model_config(&server), request_with_tools(&["read_file"])).await;
+    let chunks = collect(stream).await;
+    let (text, calls) = calls_and_text(&chunks);
+
+    assert_eq!(text, "Working on it.");
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].name, "read_file");
+    let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+    assert_eq!(args["path"], serde_json::json!("src/main.rs"));
+}
+
+#[tokio::test]
+async fn dsml_markup_for_an_unknown_tool_is_left_as_text() {
+    // No tool by that name, so the model is quoting or hallucinating. Running
+    // nothing and showing the operator what it asked for is the honest answer.
+    let body = content_events(&[
+        "Call <||DSML||tool_calls><||DSML||invoke name=\"not_a_tool\">",
+        "<||DSML||parameter name=\"x\" string=\"true\">1</||DSML||parameter>",
+        "</||DSML||invoke></||DSML||tool_calls> like this.",
+    ]);
+    let server = spawn(move |_req, mut socket| {
+        let body = body.clone();
+        async move { write_sse(&mut socket, &body).await }
+    })
+    .await;
+    let (stream, _cancel) = start(model_config(&server), request_with_tools(&["read_file"])).await;
+    let chunks = collect(stream).await;
+    let (text, calls) = calls_and_text(&chunks);
+
+    assert!(calls.is_empty(), "must not execute: {calls:?}");
+    assert!(text.contains("not_a_tool"), "{text}");
+    assert!(text.ends_with("like this."), "{text}");
+}
+
+#[tokio::test]
+async fn dsml_and_native_tool_calls_in_one_turn_do_not_merge() {
+    // A gateway that understands DSML for some calls and not others must not
+    // have its structured call's arguments appended to with a recovered one.
+    let body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_n\",",
+        "\"function\":{\"name\":\"list_dir\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":",
+        "\"<||DSML||tool_calls><||DSML||invoke name=\\\"git_status\\\"></||DSML||invoke></||DSML||tool_calls>\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server = spawn(move |_req, mut socket| async move {
+        write_sse(&mut socket, body).await
+    })
+    .await;
+    let (stream, _cancel) = start(
+        model_config(&server),
+        request_with_tools(&["list_dir", "git_status"]),
+    )
+    .await;
+    let chunks = collect(stream).await;
+    let (text, calls) = calls_and_text(&chunks);
+
+    assert!(text.is_empty(), "no prose was sent: {text:?}");
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0].name, "list_dir");
+    assert_eq!(calls[0].arguments, "{\"path\":\".\"}");
+    assert_eq!(calls[1].name, "git_status");
+    assert_eq!(calls[1].arguments, "{}");
+}
+
+#[tokio::test]
+async fn dsml_markup_with_no_tools_offered_is_never_executed() {
+    // A turn that could not call anything treats the markup as prose.
+    let body = content_events(&[
+        "Format: <||DSML||tool_calls><||DSML||invoke name=\"read_file\"></||DSML||invoke></||DSML||tool_calls>",
+    ]);
+    let server = spawn(move |_req, mut socket| {
+        let body = body.clone();
+        async move { write_sse(&mut socket, &body).await }
+    })
+    .await;
+    let (stream, _cancel) = start(model_config(&server), chat_request()).await;
+    let chunks = collect(stream).await;
+    let (text, calls) = calls_and_text(&chunks);
+
+    assert!(calls.is_empty(), "{calls:?}");
+    assert_eq!(
+        text,
+        "Format: <||DSML||tool_calls><||DSML||invoke name=\"read_file\"></||DSML||invoke></||DSML||tool_calls>"
+    );
 }

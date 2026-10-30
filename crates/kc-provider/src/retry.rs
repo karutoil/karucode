@@ -2,18 +2,24 @@
 //!
 //! The gateway endpoints this client talks to (new-api style aggregators,
 //! LiteLLM, a self-hosted proxy) surface a transient upstream death as an
-//! arbitrary answer: a rotated key gives 401, a mid-failover channel 404, a
-//! dying backend 502, a broken proxy 200 with an HTML splash, and a stream that
-//! simply stops mid-body fails with a *decode* error
-//! (`invalid response body … error decoding response body`). None of those are
-//! worth failing a run over: the next attempt usually lands on a healthy
-//! channel.
+//! arbitrary answer: a dying backend gives 502, a rate-limited channel 429, a
+//! broken proxy 200 with an HTML splash, and a stream that simply stops mid-body
+//! fails with a *decode* error (`invalid response body … error decoding response
+//! body`). None of those are worth failing a run over: the next attempt usually
+//! lands on a healthy channel.
 //!
-//! [`RetryingProvider`] therefore retries **every** failure class, up to a
-//! configurable attempt budget with an exponential, jittered, capped backoff —
-//! but only while **no content has reached the consumer**. Once text, reasoning
-//! or a tool-call delta was delivered, replaying the exchange would duplicate
-//! it, so the failure is reported honestly instead.
+//! What is *not* retried is a request the endpoint has already judged: a 400 for
+//! an unsupported body field, a 413/422 for a payload it refuses, a 401 for a
+//! revoked key, a 404 for a model id that does not exist. Re-sending those 51
+//! times with a 30 s backoff ceiling burns ~20 minutes and 51 billed attempts
+//! before the user sees the real error, and the answer never changes. See
+//! [`retryable`] for the exact table.
+//!
+//! [`RetryingProvider`] therefore retries the transient classes, up to a
+//! configurable attempt budget **and** a wall-clock budget, with an exponential,
+//! jittered, capped backoff — but only while **no content has reached the
+//! consumer**. Once text, reasoning or a tool-call delta was delivered, replaying
+//! the exchange would duplicate it, so the failure is reported honestly instead.
 //!
 //! Retries live inside the returned stream, not around `stream_chat`, because
 //! that is where most of these failures appear: the response headers look fine
@@ -21,7 +27,7 @@
 //! state machine, so both phases share one policy.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_util::stream::{self, StreamExt};
@@ -30,12 +36,22 @@ use kc_core::error::{Error, Result};
 use kc_core::provider::{ChatRequest, Provider, ProviderChunk, ProviderStream};
 use tokio_util::sync::CancellationToken;
 
+use crate::errors;
+
 /// Default number of RETRIES (so `MAX_RETRIES + 1` upstream attempts).
 pub const DEFAULT_MAX_RETRIES: u32 = 50;
 /// Default first delay; doubles per attempt.
 pub const DEFAULT_BASE_DELAY: Duration = Duration::from_millis(500);
 /// Default ceiling for the exponential backoff.
 pub const DEFAULT_MAX_DELAY: Duration = Duration::from_secs(30);
+/// Default wall-clock budget for one stream's retries.
+///
+/// The attempt count alone cannot bound a run: 50 retries against a 30 s backoff
+/// ceiling is ~20 minutes of a hung turn. This is the hard stop, and it is a
+/// constant because `ModelConfig` (in `kc-core`) has no field for it yet — see
+/// `retry_max_total_secs` in the report; wiring it up is a one-line
+/// `RetryPolicy::with_max_total` call once the field exists.
+pub const DEFAULT_MAX_TOTAL_RETRY: Duration = Duration::from_secs(300);
 
 /// How patient a run is with a failing provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +59,10 @@ pub struct RetryPolicy {
     max_retries: u32,
     base_delay: Duration,
     max_delay: Duration,
+    max_total: Duration,
+    /// The endpoint fronts several upstream channels, so a 401/403/404 may mean
+    /// "this channel's key is dead" rather than "your request is wrong".
+    aggregator: bool,
 }
 
 impl Default for RetryPolicy {
@@ -58,7 +78,27 @@ impl RetryPolicy {
             max_retries,
             base_delay,
             max_delay: max_delay.max(base_delay),
+            max_total: DEFAULT_MAX_TOTAL_RETRY,
+            aggregator: false,
         }
+    }
+
+    /// Mark the endpoint as a multi-channel aggregator, which makes a
+    /// 401/403/404 retryable (see [`retryable_with`]).
+    pub fn with_aggregator(mut self, aggregator: bool) -> Self {
+        self.aggregator = aggregator;
+        self
+    }
+
+    /// Whether this endpoint is treated as an aggregator.
+    pub fn aggregator(&self) -> bool {
+        self.aggregator
+    }
+
+    /// Override the wall-clock retry budget (default [`DEFAULT_MAX_TOTAL_RETRY`]).
+    pub fn with_max_total(mut self, max_total: Duration) -> Self {
+        self.max_total = max_total;
+        self
     }
 
     /// A policy that never retries (one attempt, then fail).
@@ -67,18 +107,36 @@ impl RetryPolicy {
     }
 
     /// The policy the operator configured for this endpoint
-    /// (`[model] retry_max_retries / retry_base_delay_ms / retry_max_delay_ms`,
-    /// overridable with `KARUCODE_RETRY_*`). Zero retries disables the layer.
+    /// (`[model] retry_max_retries / retry_base_delay_ms / retry_max_delay_ms /
+    /// retry_max_total_secs`, overridable with `KARUCODE_RETRY_*`). Zero retries
+    /// disables the layer; zero `retry_max_total_secs` leaves only the attempt
+    /// count as a bound.
     pub fn from_config(config: &ModelConfig) -> Self {
-        Self::new(
+        let policy = Self::new(
             config.retry_max_retries,
             Duration::from_millis(config.retry_base_delay_ms),
             Duration::from_millis(config.retry_max_delay_ms),
-        )
+        );
+        if config.retry_max_total_secs == 0 {
+            // `Duration::MAX` is the "no wall-clock bound" sentinel; the attempt
+            // count still applies.
+            policy
+                .with_max_total(Duration::MAX)
+                .with_aggregator(config.aggregator)
+        } else {
+            policy
+                .with_max_total(Duration::from_secs(config.retry_max_total_secs))
+                .with_aggregator(config.aggregator)
+        }
     }
 
     pub fn max_retries(&self) -> u32 {
         self.max_retries
+    }
+
+    /// Wall-clock budget for the retries of one stream.
+    pub fn max_total(&self) -> Duration {
+        self.max_total
     }
 
     /// Total upstream attempts allowed: the first try plus its retries.
@@ -119,14 +177,70 @@ fn jitter(span: Duration) -> Duration {
 
 /// Which failures earn another attempt.
 ///
-/// Every *upstream* failure does, including a 4xx: a 401 from an aggregator
-/// means *this channel's* key is dead, and the next attempt is a different
-/// channel behind the same endpoint. Two things are not retried: a
-/// cancellation (the user asked to stop) and a configuration error (an empty
-/// `base_url`, a header value that cannot be sent) — no attempt count fixes
-/// those, and the request never left the process.
+/// The table, by HTTP status (the status is carried in the message by
+/// `errors::http_status_error`, see `errors::HTTP_STATUS_TAG`):
+///
+/// | status | retried | why |
+/// |---|---|---|
+/// | 408, 409, 425, 429 | yes | the endpoint is busy or the request raced; the next attempt can succeed |
+/// | 5xx | yes | the upstream is failing, not the request |
+/// | 400, 413, 422 | **no** | a malformed or oversized request stays malformed; re-sending it 51 times only delays the real error |
+/// | 401, 403, 404 | **no** (default) | a revoked key or a missing model id is permanent for this endpoint |
+/// | other 4xx | **no** | the endpoint judged the request |
+///
+/// 401/403/404 are the interesting case: behind a multi-channel aggregator they
+/// *are* transient (a rotated upstream key, a channel in failover), and retrying
+/// them is what makes such a gateway usable. That behaviour needs an explicit
+/// opt-in — `ProviderProfile::aggregator` in `kc-core` — which does not exist
+/// yet, so the conservative default is used: do not retry them. See
+/// [`retryable_with`] for the opt-in hook.
+///
+/// Transport failures ([`Error::Timeout`], a connection reset, a body that dies
+/// mid-decode) are always retried: nothing about them says the request was bad.
+/// Two things are never retried: a cancellation (the user asked to stop) and a
+/// configuration error (an empty `base_url`, a missing API key, a header value
+/// that cannot be sent) — no attempt count fixes those, and the request never
+/// left the process.
 pub fn retryable(err: &Error) -> bool {
-    !matches!(err, Error::Cancelled | Error::Config(_))
+    retryable_with(err, false)
+}
+
+/// [`retryable`] with the aggregator opt-in made explicit.
+///
+/// `aggregator = true` additionally retries 401/403/404, which is correct only
+/// for a multi-channel gateway where the next attempt lands on a different
+/// upstream channel. It is not reachable from config yet: `ProviderProfile` has
+/// no `aggregator` field, and inventing one here would be a guess about the
+/// operator's topology.
+pub fn retryable_with(err: &Error, aggregator: bool) -> bool {
+    match err {
+        Error::Cancelled | Error::Config(_) => false,
+        // A prompt that does not fit the window is not fixed by re-sending it;
+        // the runtime has to compact first.
+        Error::Provider(message) if errors::is_context_overflow(message) => false,
+        Error::Provider(message) => match errors::http_status_of(message) {
+            Some(status) => status_retryable(status, aggregator),
+            // No status: a transport/decode failure, an empty body, a splash
+            // page, a stream that died mid-frame. Always worth another attempt.
+            None => true,
+        },
+        // Timeouts, and every other error class that reaches this layer, are
+        // transport-shaped.
+        _ => true,
+    }
+}
+
+/// The status half of [`retryable`], split out so the table is testable without
+/// building error messages.
+pub fn status_retryable(status: u16, aggregator: bool) -> bool {
+    match status {
+        408 | 409 | 425 | 429 => true,
+        500..=599 => true,
+        // Permanent for this endpoint unless it is a multi-channel gateway.
+        401 | 403 | 404 => aggregator,
+        // 400/413/422 and every other 4xx: the request itself was refused.
+        _ => false,
+    }
 }
 
 /// Wraps a provider so its streams survive transient upstream failures.
@@ -165,6 +279,7 @@ impl Provider for RetryingProvider {
             cancel,
             policy: self.policy,
             attempt: 0,
+            started: Instant::now(),
             content_seen: false,
             current: None,
             done: false,
@@ -188,6 +303,10 @@ struct RetryState {
     policy: RetryPolicy,
     /// Attempts started so far.
     attempt: u32,
+    /// When the first attempt started; the wall-clock retry budget is measured
+    /// from here, so a run cannot spend 20 minutes retrying even when the
+    /// attempt count would still allow it.
+    started: Instant,
     /// Real content reached the consumer; retrying is over for this stream.
     content_seen: bool,
     current: Option<ProviderStream>,
@@ -245,12 +364,20 @@ impl RetryState {
             self.current = Some(current);
 
             match item {
-                Ok(ProviderChunk::Error { message, .. }) if !self.content_seen => {
-                    // Any stream-level failure before content is worth another
-                    // attempt: the channel died mid-negotiation, or the
-                    // endpoint answered with a splash/JSON error body instead
-                    // of an event stream. (After content, the chunk is
-                    // forwarded unchanged below.)
+                Ok(ProviderChunk::Error {
+                    message,
+                    retryable: stream_retryable,
+                }) if !self.content_seen => {
+                    // The stream layer classified this failure itself: a cut
+                    // body or a splash page is worth another attempt, a rejected
+                    // request (`retryable: false`, e.g. an in-stream
+                    // `invalid_request_error`) is not. Honour that flag instead
+                    // of re-deriving it from the message. (After content, the
+                    // chunk is forwarded unchanged below.)
+                    if !stream_retryable {
+                        self.done = true;
+                        return Some(Err(self.exhausted(Error::Provider(message))));
+                    }
                     if let Some(item) = self.on_failure(Error::Provider(message)).await {
                         return Some(item);
                     }
@@ -277,12 +404,32 @@ impl RetryState {
     async fn on_failure(&mut self, err: Error) -> Option<Result<ProviderChunk>> {
         self.current = None; // drop the dead stream before sleeping
 
-        if !retryable(&err) || self.content_seen || self.attempt >= self.policy.max_attempts() {
+        if !retryable_with(&err, self.policy.aggregator())
+            || self.content_seen
+            || self.attempt >= self.policy.max_attempts()
+        {
             self.done = true;
             return Some(Err(self.exhausted(err)));
         }
 
         let delay = self.policy.delay(self.attempt.saturating_sub(1));
+        // Wall-clock budget: the attempt count alone would allow ~20 minutes of
+        // retrying against a 30 s backoff ceiling. Stop before sleeping past the
+        // budget rather than after, so the user sees the real error promptly.
+        let elapsed = self.started.elapsed();
+        if elapsed.saturating_add(delay) > self.policy.max_total() {
+            self.done = true;
+            tracing::warn!(
+                provider = self.inner.id(),
+                attempt = self.attempt,
+                elapsed_secs = elapsed.as_secs(),
+                budget_secs = self.policy.max_total().as_secs(),
+                error = %err,
+                "provider retry budget exhausted; surfacing the failure"
+            );
+            return Some(Err(self.exhausted(err)));
+        }
+
         tracing::warn!(
             provider = self.inner.id(),
             attempt = self.attempt,
@@ -415,6 +562,117 @@ mod tests {
         assert!(retryable(&Error::Timeout("slow".into())));
     }
 
+    /// The status table, asserted directly so a future edit cannot quietly make
+    /// a permanent failure retryable again.
+    #[test]
+    fn status_classification_table() {
+        // Transient: the endpoint is busy or the upstream is failing.
+        for status in [408, 409, 425, 429, 500, 502, 503, 504, 599] {
+            assert!(status_retryable(status, false), "{status} must retry");
+        }
+        // Permanent: the request itself was refused. Re-sending it 51 times
+        // only delays the real error and bills 51 attempts.
+        for status in [400, 413, 422, 405, 415, 451] {
+            assert!(
+                !status_retryable(status, false),
+                "{status} must NOT retry by default"
+            );
+        }
+        // 401/403/404 are permanent for one endpoint, transient behind a
+        // multi-channel aggregator (opt-in only).
+        for status in [401, 403, 404] {
+            assert!(
+                !status_retryable(status, false),
+                "{status} must NOT retry by default"
+            );
+            assert!(
+                status_retryable(status, true),
+                "{status} must retry for an aggregator"
+            );
+        }
+    }
+
+    /// A 400 must not be retried: the payload is malformed and stays malformed.
+    #[test]
+    fn bad_request_is_not_retried() {
+        let err = Error::Provider(
+            "provider rejected the request (400 Bad Request) at http://h/v1: \
+             unsupported field `foo` [http 400]"
+                .to_string(),
+        );
+        assert!(!retryable(&err), "{err}");
+    }
+
+    /// A 401 must not be retried by default: a revoked key is not fixed by
+    /// re-sending the request 51 times.
+    #[test]
+    fn unauthorized_is_not_retried_by_default() {
+        let err = Error::Provider(
+            "provider authentication failed (401 Unauthorized) at http://h/v1 [http 401]".into(),
+        );
+        assert!(!retryable(&err), "{err}");
+        // ... but an aggregator may opt in, where the next attempt is a
+        // different upstream channel.
+        assert!(retryable_with(&err, true));
+    }
+
+    #[test]
+    fn rate_limit_and_server_errors_are_retried() {
+        let limited = Error::Provider("provider rate limit hit (429) [http 429]".into());
+        assert!(retryable(&limited), "{limited}");
+        let down = Error::Provider("upstream provider error (502) [http 502]".into());
+        assert!(retryable(&down), "{down}");
+    }
+
+    /// A transport failure carries no status and is always worth another try.
+    #[test]
+    fn transport_failures_are_retried() {
+        assert!(retryable(&Error::Provider(
+            "invalid response body from http://h/v1: error decoding response body".into()
+        )));
+        assert!(retryable(&Error::Timeout("no headers in 300s".into())));
+    }
+
+    /// A context overflow is not fixed by re-sending: the runtime has to
+    /// compact first, so the retry layer must surface it immediately.
+    #[test]
+    fn context_overflow_is_not_retried() {
+        let err = Error::Provider(format!(
+            "provider rejected the request (400) at http://h/v1: \
+             maximum context length is 32768 tokens [http 400] {}",
+            errors::CONTEXT_OVERFLOW_TAG
+        ));
+        assert!(!retryable(&err), "{err}");
+    }
+
+    /// The status tag must survive the message formatting and be readable back.
+    #[test]
+    fn status_tag_round_trips() {
+        let message = "provider rejected the request (400) at http://h/v1 [http 400]";
+        assert_eq!(errors::http_status_of(message), Some(400));
+        assert_eq!(errors::http_status_of("no status here"), None);
+        // A status quoted from an upstream body is not a tag.
+        assert_eq!(
+            errors::http_status_of("upstream said 400 Bad Request"),
+            None
+        );
+    }
+
+    #[test]
+    fn wall_clock_budget_defaults_to_five_minutes() {
+        assert_eq!(RetryPolicy::default().max_total(), Duration::from_secs(300));
+        assert_eq!(
+            RetryPolicy::from_config(&ModelConfig::default()).max_total(),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            RetryPolicy::none()
+                .with_max_total(Duration::from_secs(1))
+                .max_total(),
+            Duration::from_secs(1)
+        );
+    }
+
     #[test]
     fn content_classes_stop_retrying() {
         assert!(is_content(&ProviderChunk::Text("hi".into())));
@@ -428,6 +686,7 @@ mod tests {
         assert!(!is_content(&ProviderChunk::Usage {
             input_tokens: 1,
             output_tokens: 2,
+            cached_tokens: None,
         }));
         assert!(!is_content(&ProviderChunk::Finish {
             reason: "stop".into()

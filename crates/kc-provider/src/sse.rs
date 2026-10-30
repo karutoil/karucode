@@ -19,6 +19,12 @@ impl SseParser {
     /// Feed raw bytes; returns every complete event found so far.
     pub fn push(&mut self, chunk: &str) -> Vec<SseEvent> {
         self.buffer.push_str(chunk);
+        // A proxy may prefix the stream with a UTF-8 BOM. Left in place it turns
+        // the first `data:` line into an unrecognised one and silently drops the
+        // first event, so strip it once at the very start of the stream.
+        if self.buffer.starts_with('\u{FEFF}') {
+            self.buffer.drain(..'\u{FEFF}'.len_utf8());
+        }
         let mut out = Vec::new();
         while let Some(end) = find_event_end(&self.buffer) {
             let block: String = self.buffer.drain(..end).collect();
@@ -119,5 +125,73 @@ mod tests {
         let mut p = SseParser::new();
         assert!(p.push(": keepalive\n\n").is_empty());
         assert!(p.buffered_len() == 0);
+    }
+
+    /// Keep-alive comments and blank lines arrive between real events on every
+    /// long-lived gateway stream; they must not swallow or merge the events.
+    #[test]
+    fn keepalives_between_events_are_transparent() {
+        let mut p = SseParser::new();
+        let evs = p.push(": ping\n\ndata: a\n\n: ping\n\ndata: b\n\n");
+        assert_eq!(evs.len(), 2, "{evs:?}");
+        assert_eq!(evs[0].data, "a");
+        assert_eq!(evs[1].data, "b");
+        assert_eq!(p.buffered_len(), 0);
+    }
+
+    /// A comment line *inside* an event block must not corrupt its data.
+    #[test]
+    fn comment_inside_an_event_is_ignored() {
+        let mut p = SseParser::new();
+        let evs = p.push("data: a\n: note\ndata: b\n\n");
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].data, "a\nb");
+    }
+
+    /// CRLF terminators split across chunk boundaries: the `\r\n\r\n` sequence
+    /// only becomes visible once the second chunk arrives.
+    #[test]
+    fn crlf_split_across_chunk_boundaries() {
+        let mut p = SseParser::new();
+        assert!(p.push("data: a\r").is_empty());
+        assert!(p.push("\n\r").is_empty());
+        let evs = p.push("\ndata: b\r\n\r\n");
+        assert_eq!(evs.len(), 2, "{evs:?}");
+        assert_eq!(evs[0].data, "a");
+        assert_eq!(evs[1].data, "b");
+    }
+
+    /// A JSON object split at an arbitrary byte boundary must be reassembled.
+    #[test]
+    fn json_split_across_chunk_boundaries() {
+        let mut p = SseParser::new();
+        assert!(p.push("data: {\"choices\":[{\"delta\":{\"con").is_empty());
+        assert!(p.push("tent\":\"hi\"}}]}\n").is_empty());
+        let evs = p.push("\n");
+        assert_eq!(evs.len(), 1);
+        assert_eq!(
+            evs[0].data,
+            "{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"
+        );
+    }
+
+    /// A UTF-8 byte order mark is a real proxy artifact; it must not turn the
+    /// first event into an unparseable line.
+    #[test]
+    fn byte_order_mark_is_tolerated() {
+        let mut p = SseParser::new();
+        let evs = p.push("\u{FEFF}data: a\n\ndata: b\n\n");
+        assert_eq!(evs.len(), 2, "{evs:?}");
+        assert_eq!(evs[0].data, "a");
+        assert_eq!(evs[1].data, "b");
+    }
+
+    /// `data:` with no space after the colon is valid SSE.
+    #[test]
+    fn data_without_a_space_is_parsed() {
+        let mut p = SseParser::new();
+        let evs = p.push("data:{\"a\":1}\n\n");
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].data, "{\"a\":1}");
     }
 }

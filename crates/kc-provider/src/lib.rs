@@ -9,7 +9,7 @@
 // @kc-title: Configure a model provider
 // @kc-summary: Point karucode at any OpenAI-compatible endpoint, by environment or as named profiles, and choose the active model.
 // @kc-tags: provider, model, config, setup, gateway, llm
-// @kc-applies-to: env:KARUCODE_BASE_URL, env:KARUCODE_API_KEY, env:KARUCODE_MODEL, env:OPENAI_BASE_URL, env:OPENAI_API_KEY, env:KARUCODE_TEMPERATURE, env:KARUCODE_MAX_TOKENS, env:KARUCODE_REQUEST_TIMEOUT_SECS, env:KARUCODE_MODELS_DEV_URL, env:KARUCODE_RETRY_MAX_RETRIES, env:KARUCODE_RETRY_BASE_DELAY_MS, env:KARUCODE_RETRY_MAX_DELAY_MS, env:KARUCODE_RETRY_MAX_STREAM_RESTARTS, config:[[providers]], config:active_provider, config:active_model, config:[model], config:retry_max_retries, config:retry_base_delay_ms, config:retry_max_delay_ms, config:retry_max_stream_restarts, event:stream_retry, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, ui:Settings
+// @kc-applies-to: env:KARUCODE_BASE_URL, env:KARUCODE_API_KEY, env:KARUCODE_MODEL, env:OPENAI_BASE_URL, env:OPENAI_API_KEY, env:KARUCODE_TEMPERATURE, env:KARUCODE_MAX_TOKENS, env:KARUCODE_REQUEST_TIMEOUT_SECS, env:KARUCODE_MODELS_DEV_URL, env:KARUCODE_RETRY_MAX_RETRIES, env:KARUCODE_RETRY_BASE_DELAY_MS, env:KARUCODE_RETRY_MAX_DELAY_MS, env:KARUCODE_RETRY_MAX_STREAM_RESTARTS, env:KARUCODE_MODEL_SUPPORTS_IMAGES, config:[[providers]], config:active_provider, config:active_model, config:[model], config:model.supports_images, config:vision, config:retry_max_retries, config:retry_base_delay_ms, config:retry_max_delay_ms, config:retry_max_stream_restarts, event:stream_retry, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, ui:Settings
 //
 // # Fastest path: three environment variables
 //
@@ -49,6 +49,7 @@
 //   max_output_tokens = 8192
 //   tool_call = true
 //   reasoning = true
+//   vision = true                # this model accepts image input
 //   cost_input = 3.0             # USD per million input tokens
 //   cost_output = 15.0
 //
@@ -63,14 +64,52 @@
 //   tool_call = true
 // ```
 //
+// * `context_window` is not decoration: it decides how much conversation a run
+//   may send (`window - max_output_tokens`, at four characters per token). A
+//   model added by hand without it falls back to `limits.context_max_chars`,
+//   so fill it in - models picked from the catalog already have it.
+// * `max_output_tokens` is sent on the wire as `max_tokens`, so the room the
+//   budget reserves for the answer is actually enforced. `max_tokens` wins when
+//   both are set; only one is ever sent. Newer OpenAI models reject `max_tokens`
+//   in favour of `max_completion_tokens` - set that through
+//   `[model.extra_body] max_completion_tokens = 8192` and it replaces ours
+//   rather than being sent alongside it.
+// * A remote `base_url` with no `api_key` fails immediately with a
+//   configuration error instead of sending an unauthenticated request and
+//   retrying the resulting 401. Loopback endpoints (`127.0.0.1`, `::1`,
+//   `localhost`) are exempt, because local servers are keyless by design.
 // * `active_provider` / `active_model` are install-wide: every project and
 //   session uses the same model.
 // * `temperature`, `max_tokens`, `top_p` and `parallel_tool_calls` stay global in
 //   `[model]`, so switching profiles does not change sampling.
+// * **No temperature is sent unless you ask for one** (`send_temperature = true`).
+//   A sampling value the model was not tuned for can push a reasoning model tool
+//   into repeating itself instead of acting: measured on a real 140-message
+//   session, at the turn where the model was about to write a file, sending
+//   `temperature: 0.2` produced 8,000 tokens of reasoning and no tool call, while
+//   omitting the field produced the `write_file` call. pi sends none for the same
+//   model; karucode now matches that, and `temperature` is only a value kept for
+//   the operators who turn sending on.
 // * With `[[providers]]` present, the connection fields of `[model]`
 //   (`base_url`, `api_key`, `request_timeout_secs`, `extra_headers`, `extra_body`)
 //   are ignored; without profiles, a `default` profile is synthesised from
 //   `[model]`.
+// * `vision = true` on a model entry (or `supports_images = true` in `[model]`,
+//   or `KARUCODE_MODEL_SUPPORTS_IMAGES=1`) tells karucode the model accepts image
+//   input. Nothing guesses it from the model id. With it on, `read_file` on a
+//   PNG/JPEG/GIF/WebP attaches the pixels to the tool result; with it off, the
+//   model is told plainly that it cannot see images, which is far better than a
+//   text-only model inventing a description. A per-model `vision` entry wins over
+//   the install-wide flag, so a session pinned to a vision model works even when
+//   the default model is text-only: the flag is resolved for the model the
+//   session will actually call, not for the profile's default model.
+//
+//   The settings screen prefills `vision` from models.dev when a model is picked,
+//   added by id, or refreshed: `true` only when `modalities.input` contains
+//   `image`. Plain `attachment: true` is not enough - models.dev sets it for
+//   audio- and pdf-only models too - so it is only a fallback for a mirror with
+//   no `modalities` at all. The field stays editable (unknown / accepted / text
+//   only), because a gateway may serve a vision model under a text-only id.
 // * Limits: 16 profiles, 64 models per profile, unique model ids per profile,
 //   `base_url` must be `http(s)://` without embedded credentials, model ids at
 //   most 200 characters. `PATCH /api/config` enforces the same rules and returns
@@ -91,18 +130,15 @@
 //
 // # Retries, and why a broken answer no longer fails the run
 //
-// A gateway dying mid-request is routine: a rotated upstream key answers 401, a
-// channel in failover 404, a dying backend 502, a broken proxy 200 with an HTML
-// splash, and a stream can stop mid-body with `error decoding response body`.
-// Two budgets cover that, both global (`[model]`, not per profile):
+// A gateway dying mid-request is routine: a dying backend answers 502, a
+// rate-limited channel 429, a broken proxy 200 with an HTML splash, and a stream
+// can stop mid-body with `error decoding response body`. Two budgets cover that,
+// both global (`[model]`, not per profile):
 //
 // * `retry_max_retries` (default 50, `KARUCODE_RETRY_MAX_RETRIES`) covers
-//   attempts that fail **before the first chunk**. It is deliberately
-//   indiscriminate - any status, any transport error, an empty or unreadable
-//   body - because the next attempt is a different upstream channel behind the
-//   same URL. Backoff starts at `retry_base_delay_ms` (default 500), doubles per
-//   attempt with jitter, and is capped by `retry_max_delay_ms` (default 30000),
-//   so the ceiling rather than the attempt count bounds the total wait.
+//   attempts that fail **before the first chunk**. Backoff starts at
+//   `retry_base_delay_ms` (default 500), doubles per attempt with jitter, and is
+//   capped by `retry_max_delay_ms` (default 30000).
 // * `retry_max_stream_restarts` (default 3,
 //   `KARUCODE_RETRY_MAX_STREAM_RESTARTS`) covers the harder case: the answer
 //   *started* streaming and then the stream died. Replaying it would duplicate
@@ -113,6 +149,39 @@
 //   the budget runs out the last partial text is kept and the run fails with
 //   the upstream reason.
 //
+// ## What is retried, and what is not
+//
+// The attempt count is not the whole story: a request the endpoint has already
+// judged is not fixed by re-sending it. Classification is by HTTP status:
+//
+// | status | retried | why |
+// |---|---|---|
+// | 408, 409, 425, 429 | yes | the endpoint is busy or the request raced |
+// | 5xx | yes | the upstream is failing, not the request |
+// | 400, 413, 422 | **no** | a malformed or oversized request stays malformed |
+// | 401, 403, 404 | **no** | a revoked key or a missing model id is permanent here |
+// | other 4xx | **no** | the endpoint refused the request |
+//
+// Transport failures (a timeout, a connection reset, a body that dies
+// mid-decode) are always retried. A context overflow is never retried: the
+// runtime has to compact first (see below).
+//
+// 401/403/404 are the one judgement call. Behind a multi-channel aggregator they
+// *are* transient - a rotated upstream key, a channel in failover - and retrying
+// them is what makes such a gateway usable. That needs an explicit opt-in
+// (`ProviderProfile::aggregator`, not implemented yet), so the default is
+// conservative: those statuses fail immediately. If you run a multi-channel
+// gateway and want the old behaviour, that flag is the change to ask for.
+//
+// ## The wall-clock budget
+//
+// The attempt count alone cannot bound a run: 50 retries against a 30 s backoff
+// ceiling is ~20 minutes of a hung turn. A hard wall-clock budget of **300 s**
+// per stream stops the chain even when attempts remain, and the real error is
+// surfaced instead. It is currently a constant
+// (`kc_provider::retry::DEFAULT_MAX_TOTAL_RETRY`); a `retry_max_total_secs`
+// config field is the intended follow-up.
+//
 // ```toml
 // [model]
 // retry_max_retries = 50          # attempts = retries + 1; 0 disables
@@ -120,6 +189,85 @@
 // retry_max_delay_ms = 30000      # backoff ceiling for both layers
 // retry_max_stream_restarts = 3   # restarts of a stream that died mid-answer
 // ```
+//
+// # A prompt that does not fit the window
+//
+// When the endpoint rejects a request because the conversation is too long
+// (`maximum context length`, `context_length_exceeded`, `too many tokens`,
+// `reduce the length`, `prompt is too long`), the provider tags the error as a
+// context overflow (`kc_provider::CONTEXT_OVERFLOW_TAG`) instead of reporting a
+// generic 400. The runtime is expected to catch that tag, compact the
+// conversation and retry once. Until it does, the turn fails with the upstream
+// message - which is at least the real reason, not a retry storm.
+//
+// # DeepSeek writes tool calls as text, and karucode recovers them
+//
+// DeepSeek-V4 models are trained on their own markup language, DSML, and
+// sometimes write a tool call into the ordinary answer instead of the
+// `tool_calls` field:
+//
+// ```text
+// Looking at the workspace.<||DSML||tool_calls><||DSML||invoke name="list_dir"><||DSML||parameter name="path" string="true">.</||DSML||parameter></||DSML||invoke></||DSML||tool_calls>
+// ```
+//
+// An endpoint that understands DSML converts that into a structured call. One
+// that does not - a plain OpenAI-compatible gateway, or DeepSeek's own API for a
+// model that emitted the degraded `||DSML||` spelling instead of the full-width
+// `｜DSML｜` - forwards the markup as prose. The tool then never runs and the
+// model looks broken: it "answered" about a file instead of reading it. This is
+// upstream behaviour of the model, not a karucode bug, so karucode repairs it
+// in the provider layer instead of asking you to switch endpoints.
+//
+// What is recovered:
+//
+// * the block is turned into real tool calls, so the loop runs the tool exactly
+//   as if the endpoint had sent `tool_calls`, and its results come back to the
+//   model on the next turn;
+// * `string="true"` parameters are taken literally and every other parameter is
+//   parsed as JSON (a number stays a number, a boolean a boolean); a missing
+//   `string` attribute is treated the same way, falling back to the literal text
+//   when the value is not valid JSON;
+// * markers split across network chunks are reassembled, and no half-marker is
+//   ever rendered as text and then retracted;
+// * several invokes in one block become several calls, and a turn that carries
+//   both a real `tool_calls` field and a text block keeps them apart.
+//
+// What is **not** recovered, on purpose:
+//
+// * **an invoke naming a tool this run could not call.** All invokes in a block
+//   must name a tool that was offered in that request, or the whole markup stays
+//   in the transcript as text and a warning is logged. A model explaining the
+//   format ("write your call as `<||DSML||tool_calls>`") must never fire a tool,
+//   and nothing is guessed from the model id.
+// * a turn with no tools offered: there is nothing to call, so the markup is
+//   prose.
+// * a block the model never closed. A stream cut off mid-call shows what
+//   arrived rather than inventing a partial call.
+//
+// There is no setting: the recovery only engages on markup the model actually
+// emitted, and a model that never writes DSML is unaffected. A self-hosted vLLM
+// or gateway that already parses DSML itself keeps working - it sends
+// `tool_calls`, and the recovery never sees the markup.
+//
+// # A stream that degenerates into a repetition loop
+// Some models occasionally stop producing language and start repeating one
+// short block - `Let me write. Go. Now. OK.` over and over - usually inside the
+// reasoning channel, where a turn can burn its whole output budget without
+// writing a word of content. The runtime watches both channels for a block of up
+// to 48 characters repeating eight times in a row at the end of the stream:
+//
+// * **reasoning** that loops is abandoned and the same request is re-issued under
+//   `retry_max_stream_restarts` (nothing of that attempt was persisted, so
+//   nothing is duplicated). `stream_retry` carries the reason starting with
+//   `the model's reasoning repeated a N-character block`.
+// * **answer text** that loops is trimmed back to the last clean paragraph and the
+//   turn completes, because the model did produce something worth keeping; the
+//   repeated tail is never persisted, so it cannot become the model's own habit
+//   on the next request.
+//
+// Eight repetitions is high on purpose: a table row or a short sentence may
+// legitimately appear several times, and a run of punctuation or a repeated
+// 200-character paragraph is not treated as a loop.
 //
 // A cancellation is never retried, and neither is a configuration error: no
 // attempt count fixes an empty `base_url` or an unsendable header.
@@ -159,8 +307,8 @@
 // * Provider settings are not per project. Switching project does not switch
 //   model.
 //
-// Full reference: `README.md` (Provider profiles and the model library) and
-// `docs/API.md` (config routes).
+// Full reference: `README.md` (Providers) and `docs/ARCHITECTURE.md`
+// (Provider profiles and resolution), `docs/API.md` (config routes).
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -172,13 +320,16 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+mod dsml;
 mod errors;
 pub mod request;
 pub mod retry;
 pub mod sse;
 mod stream;
 
-pub use request::{build_chat_body, chat_completions_url, models_url};
+pub use dsml::strip_tool_markup;
+pub use errors::{is_context_overflow, is_context_overflow_error, CONTEXT_OVERFLOW_TAG};
+pub use request::{build_chat_body, build_chat_body_for, chat_completions_url, models_url};
 pub use retry::{RetryPolicy, RetryingProvider};
 
 /// TCP/TLS handshake budget; the request itself is bounded by
@@ -237,6 +388,59 @@ fn timeout_for(config: &ModelConfig) -> Duration {
     Duration::from_secs(config.request_timeout_secs.max(MIN_TIMEOUT_SECS))
 }
 
+/// Is this base URL a loopback endpoint?
+///
+/// Local servers (Ollama, vLLM, llama.cpp, the mock servers in the test suite)
+/// legitimately run without an API key, so a missing key is only an error for a
+/// remote endpoint. The host is parsed out of the URL by hand because the
+/// provider crate deliberately has no URL-parsing dependency, but it is then
+/// validated as a real IP literal: a prefix test would accept
+/// `127.0.0.1.evil.example`, which is a remote host.
+pub fn is_loopback_base_url(base_url: &str) -> bool {
+    let Some((_, rest)) = base_url.trim().split_once("://") else {
+        return false;
+    };
+    // Drop path/query/fragment, then any `user:pass@` userinfo.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if let Some(rest) = host_port.strip_prefix('[') {
+        // IPv6 literal: `[::1]:8080`.
+        let host = rest.split(']').next().unwrap_or_default();
+        return host
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok_and(|addr| addr.is_loopback());
+    }
+    let host = host_port.split(':').next().unwrap_or_default();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::Ipv4Addr>()
+        .is_ok_and(|addr| addr.is_loopback() || addr.is_unspecified())
+}
+
+/// Fail fast when a remote endpoint has no API key.
+///
+/// Without this the request goes out unauthenticated, the endpoint answers 401,
+/// and the retry layer used to re-send it 51 times before the user saw anything.
+/// [`Error::Config`] is never retried, so the run stops immediately with a
+/// message that names the actual problem.
+pub fn validate_credentials(config: &ModelConfig) -> Result<()> {
+    let has_key = config
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|key| !key.is_empty());
+    if has_key || is_loopback_base_url(&config.base_url) {
+        return Ok(());
+    }
+    Err(Error::Config(format!(
+        "no API key configured for the remote provider at `{}`: set model.api_key \
+         (KARUCODE_API_KEY) for this endpoint, or point base_url at a loopback address \
+         (127.0.0.1, ::1, localhost) for a keyless local server",
+        config.base_url.trim()
+    )))
+}
+
 #[async_trait]
 impl Provider for OpenAiProvider {
     fn id(&self) -> &str {
@@ -249,7 +453,7 @@ impl Provider for OpenAiProvider {
         cancel: CancellationToken,
     ) -> Result<ProviderStream> {
         let url = self.endpoint()?;
-        let mut body = request::build_chat_body(&request);
+        let mut body = request::build_chat_body_for(&self.config, &request);
         request::apply_config_extra_body(&mut body, &self.config.extra_body);
         let headers = request::build_headers(&self.config, &request)?;
         let secrets = self.secrets(&headers);
@@ -312,6 +516,7 @@ impl Provider for OpenAiProvider {
             url,
             timeout,
             secrets,
+            request.tools.iter().map(|tool| tool.name.clone()).collect(),
         ))
     }
 
@@ -425,12 +630,17 @@ impl Default for ProviderFactoryImpl {
 #[async_trait]
 impl ProviderFactory for ProviderFactoryImpl {
     async fn build(&self, config: &ModelConfig) -> Result<Arc<dyn Provider>> {
+        // Fail fast on a remote endpoint with no key: the request would go out
+        // unauthenticated, come back 401, and (before the retry classification
+        // was fixed) be re-sent 51 times. `Error::Config` is never retried.
+        validate_credentials(config)?;
         let provider: Arc<dyn Provider> = Arc::new(OpenAiProvider::new(config.clone())?);
         // Every run goes through the retry layer: the endpoints this talks to
         // fail transiently in ways a single attempt cannot survive — a dropped
-        // connection, an arbitrary error status from a rotating channel, a
-        // body that dies mid-decode. See `retry` for why retries happen inside
-        // the stream and why they stop at the first delivered chunk.
+        // connection, a transient error status from a rotating channel, a body
+        // that dies mid-decode. See `retry` for why retries happen inside the
+        // stream, why they stop at the first delivered chunk, and which statuses
+        // are permanent.
         Ok(Arc::new(RetryingProvider::new(
             provider,
             RetryPolicy::from_config(config),
@@ -484,5 +694,98 @@ mod tests {
         assert_eq!(factory.supported(), vec!["openai_compatible".to_string()]);
         let provider = factory.build(&ModelConfig::default()).await.unwrap();
         assert_eq!(provider.id(), "openai_compatible");
+    }
+
+    #[test]
+    fn loopback_hosts_are_recognised() {
+        for url in [
+            "http://127.0.0.1:4000/v1",
+            "http://127.0.0.1/v1",
+            "http://localhost:11434/v1",
+            "http://[::1]:8080/v1",
+            "http://0.0.0.0:8000/v1",
+            "http://user:pass@127.0.0.1:4000/v1",
+            "  http://127.0.0.1:4000/v1  ",
+        ] {
+            assert!(is_loopback_base_url(url), "{url} must be loopback");
+        }
+        for url in [
+            "https://api.openai.com/v1",
+            "https://gw.example/v1",
+            "http://192.168.1.10:4000/v1",
+            "http://127.0.0.1.evil.example/v1",
+            "http://localhost.evil.example/v1",
+            "not-a-url",
+            "",
+        ] {
+            assert!(!is_loopback_base_url(url), "{url} must not be loopback");
+        }
+    }
+
+    /// A remote endpoint with no key used to send an unauthenticated request,
+    /// get a 401, and retry it 51 times. It must fail fast instead.
+    #[tokio::test]
+    async fn remote_profile_without_a_key_fails_fast_with_a_config_error() {
+        let config = ModelConfig {
+            base_url: "https://gw.example/v1".into(),
+            api_key: None,
+            ..ModelConfig::default()
+        };
+        let err = match ProviderFactoryImpl.build(&config).await {
+            Ok(_) => panic!("a remote endpoint without a key must not build"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+        let text = err.to_string();
+        assert!(text.contains("API key"), "{text}");
+        assert!(text.contains("gw.example"), "{text}");
+        // A config error is never retried, so the run stops immediately.
+        assert!(!retry::retryable(&err));
+    }
+
+    /// A blank key is the same as no key.
+    #[tokio::test]
+    async fn remote_profile_with_a_blank_key_fails_fast() {
+        let config = ModelConfig {
+            base_url: "https://gw.example/v1".into(),
+            api_key: Some("   ".into()),
+            ..ModelConfig::default()
+        };
+        let err = match ProviderFactoryImpl.build(&config).await {
+            Ok(_) => panic!("a blank key must not build a remote provider"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+    }
+
+    /// Local servers are keyless by design; the check must not break them.
+    #[tokio::test]
+    async fn loopback_profile_without_a_key_is_allowed() {
+        for base_url in [
+            "http://127.0.0.1:4000/v1",
+            "http://localhost:11434/v1",
+            "http://[::1]:8080/v1",
+        ] {
+            let config = ModelConfig {
+                base_url: base_url.into(),
+                api_key: None,
+                ..ModelConfig::default()
+            };
+            let provider = ProviderFactoryImpl
+                .build(&config)
+                .await
+                .unwrap_or_else(|e| panic!("{base_url} must build without a key: {e}"));
+            assert_eq!(provider.id(), "openai_compatible");
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_profile_with_a_key_is_allowed() {
+        let config = ModelConfig {
+            base_url: "https://gw.example/v1".into(),
+            api_key: Some("sk-live".into()),
+            ..ModelConfig::default()
+        };
+        assert!(ProviderFactoryImpl.build(&config).await.is_ok());
     }
 }
