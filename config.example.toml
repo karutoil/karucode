@@ -11,6 +11,26 @@ port = 8787
 workspace = "/home/me/project"
 data_dir = "/home/me/.local/share/karucode"
 # auth_token = "at-least-16-characters"
+# Separate credential required to change the approval mode, the model endpoint or
+# the provider list over `PATCH /api/config` (header `X-Karucode-Admin-Token`).
+# Without it, any API client can turn approvals off and then repoint the provider
+# at itself. Env: KARUCODE_ADMIN_TOKEN.
+# admin_token = "a-different-long-secret"
+# Optional allowlist for where a project may be created. Unset - the default -
+# means any existing directory (except `/`), which is what a single-operator
+# install wants. Set it on a shared or remotely reachable deployment.
+# Env: KARUCODE_PROJECT_ROOTS (colon-separated).
+# project_roots = ["/home/me/projects", "/srv/code"]
+# Let the file tools reach the system temporary directory (`TMPDIR`, else /tmp)
+# as well as the project. On by default: build output, screenshots, downloads and
+# browser profiles land there, and a path error for them is noise, not
+# protection. It is a second root, not a wider project: `..` out of it and
+# symlinks pointing elsewhere are still refused. Set false for project-only
+# confinement. Env: KARUCODE_ALLOW_TEMP_DIR.
+# allow_temp_dir = true
+# Delete messages older than this many days (the newest 100 per session are
+# always kept). 0 keeps everything. Env: KARUCODE_RETENTION_DAYS.
+# retention_days = 0
 log_level = "info"
 
 [model]
@@ -21,22 +41,38 @@ model = "gpt-4o-mini"
 # Prefer KARUCODE_API_KEY / OPENAI_API_KEY in the environment over this file.
 # api_key = "sk-..."
 temperature = 0.2
+# Send that temperature at all? Off (the default) sends none, which is what other
+# harnesses do and what this model behaves best with: a forced sampling value can
+# push a reasoning model into repeating itself instead of acting.
+send_temperature = false
 # max_tokens = 4096
 request_timeout_secs = 300
 parallel_tool_calls = true
+# Does this model accept IMAGE input? Off by default, and never guessed from the
+# model id: an endpoint accepts an image for a text-only model and either drops
+# it or fails the turn, and a model that never saw the picture will describe it
+# anyway. With this on, read_file on a PNG/JPEG/GIF/WebP attaches the pixels to
+# the tool result; with it off, the model is told plainly that it cannot see
+# images (which is what you want it to say). A `vision = true` on a
+# [[providers.models]] entry overrides this per model, so a session pinned to a
+# vision model can read images while this stays off.
+supports_images = false
 
-# Retry budget (global: it applies to every provider profile). A failed attempt
-# is retried for EVERY failure class — connection resets, timeouts, any HTTP
-# error status, an empty or unreadable body, and a stream that dies before its
-# first byte of content — because aggregator gateways fail transiently in
-# arbitrary ways (a rotated upstream key answers 401, a mid-failover channel
-# 404, a broken proxy 200 with an HTML splash). Retries stop as soon as real
-# content has been streamed, so nothing is ever duplicated.
+# Retry budget (global: it applies to every provider profile). Retries are
+# classified, not blanket: connection resets, timeouts, 408/409/425/429 and 5xx
+# are retried, because those are transient. A 400/413/422 is NOT retried — a
+# malformed request stays malformed, and re-sending it 50 times turns a clear
+# error into a twenty-minute hang. 401/403/404 are not retried either, unless the
+# profile sets `aggregator = true` (see below), where the same status usually
+# means "this channel's key is dead" and the next attempt lands elsewhere.
+# Retries stop as soon as real content has been streamed, so nothing is ever
+# duplicated.
 # retry_max_retries = 50      # attempts = retries + 1; 0 disables retries
 # retry_base_delay_ms = 500   # first delay; doubles per attempt (jittered)
-# retry_max_delay_ms = 30000  # backoff ceiling; bounds the total wait
+# retry_max_delay_ms = 30000  # backoff ceiling
+# retry_max_total_secs = 300  # wall-clock ceiling for the whole chain; 0 = attempts only
 # Env equivalents: KARUCODE_RETRY_MAX_RETRIES, KARUCODE_RETRY_BASE_DELAY_MS,
-# KARUCODE_RETRY_MAX_DELAY_MS.
+# KARUCODE_RETRY_MAX_DELAY_MS, KARUCODE_RETRY_MAX_TOTAL_SECS.
 
 # [model.extra_headers]
 # "X-Gateway-Project" = "karucode"
@@ -65,14 +101,18 @@ parallel_tool_calls = true
 # base_url = "http://127.0.0.1:4000/v1"
 # api_key = "sk-litellm"           # write-only: the browser only sees api_key_set
 # request_timeout_secs = 300
+# aggregator = true                # multi-channel proxy: retry 401/403/404 too
+#                                  # (a dead channel's key, not a bad request)
 #
 #   [[providers.models]]
 #   id = "claude-sonnet"           # the id sent to the endpoint (unique per profile)
 #   name = "Claude Sonnet"         # label; falls back to the id
-#   context_window = 200000        # metadata: shown in the UI, prefilled from models.dev
-#   max_output_tokens = 8192
+#   context_window = 200000        # decides the request budget: (window - output) x 4 x 0.95 chars
+#   max_output_tokens = 8192       # reserved out of the window so the answer always fits
 #   tool_call = true
 #   reasoning = true
+#   vision = true                  # takes image input: read_file attaches the pixels.
+#                                  # The settings screen prefills this from models.dev.
 #   cost_input = 3.0               # USD per million input tokens
 #   cost_output = 15.0
 #   # catalog_provider = "anthropic"   # models.dev provider it was prefilled from
@@ -109,8 +149,22 @@ max_command_output_bytes = 32000
 command_timeout_secs = 120
 max_command_timeout_secs = 600
 max_file_read_bytes = 200000
+# Largest image read_file will hand a vision model, in bytes. The bytes are
+# base64-encoded into the transcript and resent on every later turn of the
+# session, so this is a cost knob as much as a read limit. 4 MiB covers a
+# full-screen screenshot; raise it for design work, lower it to keep image-heavy
+# sessions cheap.
+max_image_read_bytes = 4194304
 search_max_results = 200
-context_max_chars = 240000
+# How much conversation may be sent to the model, in characters.
+#
+# 0 (the default) DERIVES it from the resolved model: its context_window minus
+# the room its answer needs, at four characters per token - so a 1M-token model
+# gets ~2.5M chars and a 32k model ~110k. A non-zero value is an install-wide
+# *ceiling*: it can only lower the derived budget, never raise it past what the
+# model accepts. Leave it at 0 unless you deliberately want less context than
+# the model can hold.
+context_max_chars = 0
 # Safety valve against a runaway tool batch, not a work budget.
 max_tool_calls_per_turn = 32
 
@@ -143,6 +197,14 @@ timeout_secs = 14400
 # command = ["example-hello"]
 # enabled = true
 # permissions = ["files.read"]
+
+# Hot plugin reloads. Off by default: a reload replaces plugin processes, so it is
+# an explicit choice. With it on, the server re-reads the [[plugins]] entries above
+# and every <data_dir>/plugins/*/plugin.toml, and applies adds, removals and
+# rebuilt binaries without a restart. `POST /api/plugins/reload` does the same
+# thing on demand. The interval is clamped to 1..=600 seconds.
+# plugins_watch = true
+# plugins_watch_secs = 2
 
 # [[mcp_servers]]
 # name = "filesystem"
