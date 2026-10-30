@@ -14,3 +14,15 @@ exports/
 # local design mock: a single-file reference the theme engine was derived from,
 # not a build input (the values live in web/src/theme/builtins.ts)
 karucode-v3-themes.html
+# branding sources ARE the build input for web/public favicons; only the
+# rendered PNG size matrix and the social exports are generated
+branding/png/
+branding/social/*.png
+
+# --- local state, never committed -------------------------------------------
+# karucode's own state while developing karucode: the todo plugin's session
+# files and attachments, the local server's data dir (SQLite, logs, the lock)
+# and scratch screenshots. None of it is a build input.
+.karucode/
+.kc-data/
+.audit/
