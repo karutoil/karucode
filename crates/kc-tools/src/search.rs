@@ -19,6 +19,10 @@ use tokio_util::sync::CancellationToken;
 pub const MAX_MATCH_COLUMNS: usize = 300;
 const MAX_FALLBACK_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const RG_TIMEOUT: Duration = Duration::from_secs(120);
+/// Safety valve for the streaming reader: a single record longer than this is
+/// discarded instead of growing the buffer without bound. `--max-columns`
+/// keeps real records far below it.
+const MAX_RG_RECORD_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchEngine {
@@ -121,8 +125,19 @@ pub async fn search_with_rg(
         .arg("--no-heading")
         .arg("--color")
         .arg("never")
+        // `-H` forces the `path:` prefix even when ripgrep is given a single
+        // file argument. Without it rg emits bare `line:text`, which the parser
+        // cannot attribute to a file, so every match was silently dropped.
+        .arg("--with-filename")
         .arg("--max-columns")
         .arg(MAX_MATCH_COLUMNS.to_string())
+        // Without this, `--max-columns` replaces the whole line with the literal
+        // text `[Omitted long matching line]`, so a match on a minified bundle
+        // arrives with no content at all.
+        .arg("--max-columns-preview")
+        // `--max-count` is *per file*, not global: it is only a per-file safety
+        // valve here. The global cap is enforced by the streaming reader below,
+        // which stops at `max_results` matches and kills the child.
         .arg("--max-count")
         .arg(max_results.to_string())
         // Honor .gitignore even outside a git repository, matching the fallback
@@ -164,10 +179,17 @@ pub async fn search_with_rg(
             return Err(Error::Cancelled);
         }
         res = async {
-            let stdout = read_pipe(&mut stdout_pipe).await;
+            // Stream stdout and stop at the global cap instead of buffering the
+            // whole result set: a broad pattern on a large repo can emit
+            // hundreds of MB, of which all but `max_results` are discarded.
+            // `read_matches` takes ownership of the pipe so it is closed the
+            // moment the cap is reached; otherwise ripgrep would block writing
+            // to a full pipe while we wait for it to exit.
+            let (matches, hit_limit) =
+                read_matches(stdout_pipe.take(), ws, &base, max_results).await;
             let stderr = read_pipe(&mut stderr_pipe).await;
             let status = child.wait().await;
-            (stdout, stderr, status)
+            (matches, hit_limit, stderr, status)
         } => res,
         _ = tokio::time::sleep(RG_TIMEOUT) => {
             let _ = child.start_kill();
@@ -180,22 +202,10 @@ pub async fn search_with_rg(
         }
     };
 
-    let (stdout, stderr, status) = outcome;
+    let (matches, hit_limit, stderr, status) = outcome;
     let status = status.map_err(|e| Error::Tool(format!("failed to wait for ripgrep: {e}")))?;
     let code = status.code();
     let stderr_text = String::from_utf8_lossy(&stderr).trim().to_string();
-    let stdout_text = String::from_utf8_lossy(&stdout).into_owned();
-
-    let mut matches: Vec<SearchMatch> = Vec::new();
-    for line in stdout_text.lines() {
-        if let Some(m) = parse_rg_line(ws, &base, line) {
-            matches.push(m);
-            if matches.len() >= max_results {
-                break;
-            }
-        }
-    }
-    let hit_limit = matches.len() >= max_results;
 
     let mut warning = None;
     match code {
@@ -223,7 +233,10 @@ pub async fn search_with_rg(
             warning = Some(format!("ripgrep exited with status {other}: {stderr_text}"));
         }
         None => {
-            warning = Some("ripgrep was terminated by a signal".to_string());
+            // Expected when the reader stopped at the cap and killed the child.
+            if !hit_limit {
+                warning = Some("ripgrep was terminated by a signal".to_string());
+            }
         }
     }
     if warning.is_none() && !stderr_text.is_empty() {
@@ -238,6 +251,63 @@ pub async fn search_with_rg(
     }))
 }
 
+/// Read ripgrep's stdout line by line, stopping as soon as `max_results`
+/// matches have been collected.
+///
+/// Takes ownership of the pipe so it is dropped (closed) on return: ripgrep then
+/// dies of SIGPIPE instead of writing the rest of a huge result set, and cannot
+/// block on a full pipe while the caller waits for it to exit. The buffer never
+/// holds more than one record, so memory is bounded by [`MAX_RG_RECORD_BYTES`]
+/// rather than by the size of the output.
+///
+/// Returns the matches and whether the cap was reached.
+async fn read_matches<R: tokio::io::AsyncRead + Unpin>(
+    pipe: Option<R>,
+    ws: &Workspace,
+    base: &Path,
+    max_results: usize,
+) -> (Vec<SearchMatch>, bool) {
+    let mut matches: Vec<SearchMatch> = Vec::new();
+    let Some(pipe) = pipe else {
+        return (matches, false);
+    };
+    let mut reader = tokio::io::BufReader::new(pipe);
+    let mut record: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; 8192];
+    loop {
+        let n = match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let mut rest = &chunk[..n];
+        while let Some(nl) = rest.iter().position(|b| *b == b'\n') {
+            record.extend_from_slice(&rest[..nl]);
+            if let Some(m) = parse_rg_line(ws, base, &String::from_utf8_lossy(&record)) {
+                matches.push(m);
+                if matches.len() >= max_results {
+                    return (matches, true);
+                }
+            }
+            record.clear();
+            rest = &rest[nl + 1..];
+        }
+        record.extend_from_slice(rest);
+        if record.len() > MAX_RG_RECORD_BYTES {
+            // A single absurdly long record: drop it rather than grow forever.
+            record.clear();
+        }
+    }
+    if !record.is_empty() {
+        if let Some(m) = parse_rg_line(ws, base, &String::from_utf8_lossy(&record)) {
+            matches.push(m);
+        }
+    }
+    let hit_limit = matches.len() >= max_results;
+    (matches, hit_limit)
+}
+
 async fn read_pipe<R: tokio::io::AsyncRead + Unpin>(pipe: &mut Option<R>) -> Vec<u8> {
     let Some(pipe) = pipe.as_mut() else {
         return Vec::new();
@@ -247,16 +317,39 @@ async fn read_pipe<R: tokio::io::AsyncRead + Unpin>(pipe: &mut Option<R>) -> Vec
     buf
 }
 
+/// Parse one `path:line:text` record.
+///
+/// ripgrep normally emits the filename prefix (`-H` is passed for exactly this
+/// reason), but a bare `line:text` record is still accepted and attributed to
+/// `base`: dropping it would turn a real match into a silent "no matches".
 fn parse_rg_line(ws: &Workspace, base: &Path, line: &str) -> Option<SearchMatch> {
     let mut parts = line.splitn(3, ':');
-    let raw_path = parts.next()?;
-    let raw_line: u64 = parts.next()?.parse().ok()?;
-    let text = parts.next().unwrap_or("");
-    let path = Path::new(raw_path);
-    let abs: PathBuf = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base.join(path)
+    let first = parts.next()?;
+    let second = parts.next();
+    let third = parts.next();
+
+    // `path:line:text` when the second field is a line number, else `line:text`
+    // relative to `base`.
+    let (raw_path, raw_line, text) = match (second, third) {
+        (Some(second), Some(third)) => match second.parse::<u64>() {
+            Ok(n) => (Some(first), n, third),
+            Err(_) => (None, first.parse::<u64>().ok()?, second),
+        },
+        // `line:text` with an empty text field.
+        (Some(second), None) => (None, first.parse::<u64>().ok()?, second),
+        (None, _) => return None,
+    };
+
+    let abs: PathBuf = match raw_path {
+        Some(raw_path) => {
+            let path = Path::new(raw_path);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                base.join(path)
+            }
+        }
+        None => base.to_path_buf(),
     };
     Some(SearchMatch {
         path: ws.relative(&abs),
@@ -395,4 +488,245 @@ fn truncate_columns(line: &str, max: usize) -> String {
     let mut out: String = line.chars().take(max).collect();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Minimal temp workspace; the crate-level test harness lives in
+    /// `crate::tests`, which this module cannot reach.
+    struct TempWs {
+        path: PathBuf,
+    }
+
+    impl TempWs {
+        fn new(tag: &str) -> Self {
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "kc-tools-search-{tag}-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::SeqCst)
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn write(&self, rel: &str, content: &str) {
+            let path = self.path.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, content).unwrap();
+        }
+
+        fn ws(&self) -> Workspace {
+            Workspace::new(&self.path).unwrap()
+        }
+    }
+
+    impl Drop for TempWs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn rg_available() -> bool {
+        std::process::Command::new("rg")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn query(pattern: &str, path: &str, max_results: usize) -> SearchQuery {
+        SearchQuery {
+            pattern: pattern.into(),
+            path: path.into(),
+            glob: None,
+            case_insensitive: false,
+            max_results,
+        }
+    }
+
+    /// Bug 1: ripgrep omits the filename prefix for a single file argument, so
+    /// every match used to be dropped and the tool reported "no matches".
+    #[tokio::test]
+    async fn an_explicit_file_path_still_returns_matches() {
+        let tmp = TempWs::new("single-file");
+        tmp.write("one.txt", "alpha\nbeta\nalpha\n");
+        let ws = tmp.ws();
+        let q = query("alpha", "one.txt", 10);
+        let cancel = CancellationToken::new();
+
+        // The built-in walker always handled this; it is the reference.
+        let builtin = search_fallback(&ws, &q).await.unwrap();
+        assert_eq!(builtin.matches.len(), 2, "{:?}", builtin.matches);
+        assert_eq!(builtin.matches[0].path, "one.txt");
+        assert_eq!(builtin.matches[0].line, 1);
+        assert_eq!(builtin.matches[1].line, 3);
+
+        if !rg_available() {
+            return;
+        }
+        let rg = search_with_rg("rg", &ws, &q, &cancel)
+            .await
+            .unwrap()
+            .expect("rg is installed");
+        assert_eq!(rg.engine, SearchEngine::Ripgrep);
+        assert_eq!(
+            rg.matches.len(),
+            2,
+            "a single-file search must not silently return zero matches: {:?}",
+            rg.matches
+        );
+        assert_eq!(rg.matches[0].path, "one.txt");
+        assert_eq!(rg.matches[0].line, 1);
+        assert_eq!(rg.matches[0].text, "alpha");
+        assert_eq!(rg.matches[1].line, 3);
+    }
+
+    /// Bug 1, defensive half: a bare `line:text` record is attributed to the
+    /// search base instead of being dropped.
+    #[test]
+    fn a_bare_line_text_record_is_attributed_to_the_base() {
+        let tmp = TempWs::new("parse-bare");
+        tmp.write("one.txt", "alpha\n");
+        let ws = tmp.ws();
+
+        // A bare record is relative to the search base, which for a single-file
+        // search is the file itself.
+        let file_base = ws.resolve_existing("one.txt").unwrap();
+        let m = parse_rg_line(&ws, &file_base, "1:alpha").expect("bare record must parse");
+        assert_eq!(m.path, "one.txt");
+        assert_eq!(m.line, 1);
+        assert_eq!(m.text, "alpha");
+
+        // The normal `path:line:text` shape still works against a directory base.
+        let dir_base = ws.resolve_existing(".").unwrap();
+        let m = parse_rg_line(&ws, &dir_base, "one.txt:3:alpha").expect("prefixed record");
+        assert_eq!(m.path, "one.txt");
+        assert_eq!(m.line, 3);
+        assert_eq!(m.text, "alpha");
+
+        // Garbage is still rejected rather than invented.
+        assert!(parse_rg_line(&ws, &dir_base, "not a match").is_none());
+    }
+
+    /// Bug 2: `--max-count` is per file, so the cap used to be multiplied by the
+    /// number of files. The cap must be global.
+    #[tokio::test]
+    async fn the_result_cap_is_global_across_files() {
+        let tmp = TempWs::new("global-cap");
+        let body: String = (1..=20).map(|i| format!("needle {i}\n")).collect();
+        tmp.write("a.txt", &body);
+        tmp.write("b.txt", &body);
+        tmp.write("c.txt", &body);
+        let ws = tmp.ws();
+        let q = query("needle", ".", 3);
+        let cancel = CancellationToken::new();
+
+        let builtin = search_fallback(&ws, &q).await.unwrap();
+        assert_eq!(builtin.matches.len(), 3, "{:?}", builtin.matches);
+        assert!(builtin.hit_limit);
+
+        if !rg_available() {
+            return;
+        }
+        let rg = search_with_rg("rg", &ws, &q, &cancel)
+            .await
+            .unwrap()
+            .expect("rg is installed");
+        assert_eq!(
+            rg.matches.len(),
+            3,
+            "the cap must be global, not per file: {:?}",
+            rg.matches
+        );
+        assert!(rg.hit_limit, "reaching the cap must be reported");
+    }
+
+    /// Bug 2: the two engines must agree on the cap, as the module doc claims.
+    #[tokio::test]
+    async fn both_engines_agree_on_the_cap() {
+        let tmp = TempWs::new("cap-parity");
+        let body: String = (1..=30).map(|i| format!("needle {i}\n")).collect();
+        tmp.write("a.txt", &body);
+        tmp.write("b.txt", &body);
+        let ws = tmp.ws();
+        let cancel = CancellationToken::new();
+
+        for cap in [1usize, 5, 30] {
+            let q = query("needle", ".", cap);
+            let builtin = search_fallback(&ws, &q).await.unwrap();
+            assert_eq!(builtin.matches.len(), cap, "builtin cap {cap}");
+            assert_eq!(builtin.hit_limit, cap <= 30);
+
+            if !rg_available() {
+                continue;
+            }
+            let rg = search_with_rg("rg", &ws, &q, &cancel)
+                .await
+                .unwrap()
+                .expect("rg is installed");
+            assert_eq!(
+                rg.matches.len(),
+                builtin.matches.len(),
+                "engines disagree on cap {cap}: rg {:?} vs builtin {:?}",
+                rg.matches.len(),
+                builtin.matches.len()
+            );
+            assert_eq!(rg.hit_limit, builtin.hit_limit, "hit_limit at cap {cap}");
+        }
+    }
+
+    /// Bug 3: `--max-columns` without `--max-columns-preview` replaced the whole
+    /// line with the literal text `[Omitted long matching line]`, so a match on a
+    /// minified bundle arrived with no content.
+    #[tokio::test]
+    async fn long_lines_keep_their_content_in_both_engines() {
+        let tmp = TempWs::new("long-line");
+        let line = format!("NEEDLE{}", "y".repeat(394));
+        assert_eq!(line.chars().count(), 400);
+        tmp.write("long.txt", &format!("{line}\n"));
+        let ws = tmp.ws();
+        let q = query("NEEDLE", ".", 10);
+        let cancel = CancellationToken::new();
+
+        let builtin = search_fallback(&ws, &q).await.unwrap();
+        assert_eq!(builtin.matches.len(), 1);
+        let builtin_text = &builtin.matches[0].text;
+        assert!(
+            !builtin_text.contains("[Omitted long matching line]"),
+            "builtin: {builtin_text:?}"
+        );
+        assert_eq!(builtin_text.chars().count(), MAX_MATCH_COLUMNS + 1);
+        assert!(builtin_text.ends_with('…'), "{builtin_text:?}");
+
+        if !rg_available() {
+            return;
+        }
+        let rg = search_with_rg("rg", &ws, &q, &cancel)
+            .await
+            .unwrap()
+            .expect("rg is installed");
+        assert_eq!(rg.matches.len(), 1);
+        let rg_text = &rg.matches[0].text;
+        assert!(
+            !rg_text.contains("[Omitted long matching line]"),
+            "a long match must keep its content: {rg_text:?}"
+        );
+        // Parity: both engines keep the same first MAX_MATCH_COLUMNS characters.
+        let expected: String = line.chars().take(MAX_MATCH_COLUMNS).collect();
+        assert!(
+            rg_text.starts_with(&expected),
+            "rg must keep the first {MAX_MATCH_COLUMNS} chars: {rg_text:?}"
+        );
+        assert!(
+            builtin_text.starts_with(&expected),
+            "builtin must keep the first {MAX_MATCH_COLUMNS} chars: {builtin_text:?}"
+        );
+    }
 }

@@ -181,6 +181,7 @@ mod tests {
             events: Arc::new(|_e: Event| {}),
             settings: Arc::new(TestSettings),
             depth: 0,
+            supports_images: false,
         }
     }
 

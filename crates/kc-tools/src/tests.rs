@@ -152,6 +152,7 @@ fn env_with(
         events: sink,
         settings: Arc::new(TestSettings { limits, policy }),
         depth: 0,
+        supports_images: false,
     };
     TestEnv {
         tmp,
@@ -164,6 +165,39 @@ fn env_with(
 
 fn env(tag: &str) -> TestEnv {
     env_with(tag, ask(), Limits::default(), ApprovalDecision::AllowOnce)
+}
+
+/// Like [`env`], but the workspace also allows `extra_roots` - the shape the
+/// server builds by default, with the system temp dir on the list.
+fn env_with_extra_roots(tag: &str, extra_roots: Vec<PathBuf>) -> TestEnv {
+    let tmp = TempWorkspace::new(tag);
+    let ws = Arc::new(Workspace::with_extra_roots(tmp.path(), extra_roots).unwrap());
+    let gate = Arc::new(RecordingGate {
+        decision: ApprovalDecision::AllowOnce,
+        requests: Mutex::new(Vec::new()),
+    });
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink_events = events.clone();
+    let sink: EventSink = Arc::new(move |e| sink_events.lock().unwrap().push(e));
+    let ctx = ToolCtx {
+        workspace: ws.clone(),
+        cancel: CancellationToken::new(),
+        approvals: ApprovalHandle::new(gate.clone(), SessionId::new(), RunId::new(), None),
+        events: sink,
+        settings: Arc::new(TestSettings {
+            limits: Limits::default(),
+            policy: ask(),
+        }),
+        depth: 0,
+        supports_images: false,
+    };
+    TestEnv {
+        tmp,
+        ws,
+        ctx,
+        gate,
+        events,
+    }
 }
 
 async fn call(tool: &dyn Tool, ctx: &ToolCtx, args: serde_json::Value) -> ToolOutcome {
@@ -236,13 +270,101 @@ async fn read_file_honours_offset_and_limit() {
 #[tokio::test]
 async fn read_file_refuses_binary_content() {
     let env = env("read-binary");
+    // An ELF header, not an image: image magic bytes are their own case below.
     env.tmp
-        .write_bytes("blob.bin", &[0x89, b'P', b'N', b'G', 0x00, 0x01, 0x02]);
+        .write_bytes("blob.bin", &[0x7f, b'E', b'L', b'F', 0x00, 0x01, 0x02]);
 
     let out = call(&ReadFile, &env.ctx, json!({"path": "blob.bin"})).await;
     assert!(!out.ok);
     assert!(out.content.contains("binary file"), "{}", out.content);
     assert!(out.content.contains("blob.bin"), "{}", out.content);
+}
+
+/// The 8-byte PNG signature plus a truncated chunk: enough for the magic-byte
+/// sniffer to classify it, and deliberately not decodable (nothing here decodes
+/// images, so a real one would only be a bigger fixture).
+const PNG_BYTES: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H', b'D', b'R',
+];
+
+#[tokio::test]
+async fn read_file_attaches_an_image_for_a_vision_model() {
+    let env = env("read-image");
+    env.tmp.write_bytes("assets/shot.png", PNG_BYTES);
+    let mut ctx = env.ctx.clone();
+    ctx.supports_images = true;
+
+    let out = call(&ReadFile, &ctx, json!({"path": "assets/shot.png"})).await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(out.images.len(), 1, "{}", out.content);
+    assert_eq!(out.images[0].media_type, "image/png");
+    assert_eq!(out.images[0].name.as_deref(), Some("assets/shot.png"));
+    assert_eq!(out.images[0].bytes, PNG_BYTES.len() as u64);
+    assert!(!out.images[0].data.is_empty());
+    // The text tells the model there is no text to read, and names the file.
+    assert!(out.content.contains("assets/shot.png"), "{}", out.content);
+    assert!(out.content.contains("attached"), "{}", out.content);
+    assert_eq!(out.meta.unwrap()["image"], json!(true));
+}
+
+#[tokio::test]
+async fn a_text_only_model_is_told_it_cannot_see_images() {
+    let env = env("read-image-no-vision");
+    env.tmp.write_bytes("shot.png", PNG_BYTES);
+
+    let out = call(&ReadFile, &env.ctx, json!({"path": "shot.png"})).await;
+    assert!(!out.ok, "a refusal, not an empty success");
+    assert!(
+        out.images.is_empty(),
+        "no pixels for a model that cannot see"
+    );
+    assert!(out.content.contains("cannot see images"), "{}", out.content);
+    assert!(
+        out.content.contains("model.supports_images"),
+        "the refusal must name the knob: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("Tell the user"),
+        "the model is told what to say: {}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn an_image_format_vision_cannot_take_is_named_with_the_fix() {
+    let env = env("read-image-bmp");
+    env.tmp
+        .write_bytes("scan.bmp", b"BM\x36\x00\x00\x00\x00\x00\x00\x00");
+    let mut ctx = env.ctx.clone();
+    ctx.supports_images = true;
+
+    let out = call(&ReadFile, &ctx, json!({"path": "scan.bmp"})).await;
+    assert!(!out.ok);
+    assert!(out.content.contains("image/bmp"), "{}", out.content);
+    assert!(out.content.contains("run_command"), "{}", out.content);
+    assert!(out.content.contains("image/png"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn an_over_limit_image_is_refused_and_names_the_cap() {
+    let limits = Limits {
+        max_image_read_bytes: 8,
+        ..Default::default()
+    };
+    let env = env_with("read-image-cap", ask(), limits, ApprovalDecision::AllowOnce);
+    env.tmp.write_bytes("big.png", PNG_BYTES);
+    let mut ctx = env.ctx.clone();
+    ctx.supports_images = true;
+
+    let out = call(&ReadFile, &ctx, json!({"path": "big.png"})).await;
+    assert!(!out.ok);
+    assert!(
+        out.content.contains("max_image_read_bytes"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains("big.png"), "{}", out.content);
 }
 
 #[tokio::test]
@@ -334,6 +456,70 @@ async fn traversal_and_outside_absolute_paths_are_rejected() {
     // No file was created outside, and no approval was requested for escapes.
     assert!(!Path::new("/tmp/kc-tools-escape-outside.txt").exists());
     assert!(env.gate.requests.lock().unwrap().is_empty());
+}
+
+/// The point of the whole extra-root feature: a scratch directory outside the
+/// project is a first-class path for every file tool, not a path error.
+#[tokio::test]
+async fn a_shared_temp_dir_is_usable_by_the_file_tools() {
+    // Stands in for `/tmp`: a directory that is not the workspace.
+    let shared = TempWorkspace::new("shared");
+    let env = env_with_extra_roots("extra-root", vec![shared.path().to_path_buf()]);
+    env.tmp.write("inside.txt", "project file");
+
+    // write_file creates a file in the shared dir (and its parents).
+    let abs = shared.path().join("nested/scratch.txt");
+    let out = call(
+        &WriteFile,
+        &env.ctx,
+        json!({"path": abs.to_str().unwrap(), "content": "from the temp dir"}),
+    )
+    .await;
+    assert!(out.ok, "write into the temp dir failed: {}", out.content);
+    assert_eq!(
+        std::fs::read_to_string(&abs).unwrap(),
+        "from the temp dir",
+        "the bytes must really land in the temp dir"
+    );
+
+    // read_file reads it back, and also reads a file something else dropped
+    // there (the "files appear in /tmp automatically" case).
+    std::fs::write(shared.path().join("dropped.log"), "auto\n").unwrap();
+    let out = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"path": shared.path().join("dropped.log").to_str().unwrap()}),
+    )
+    .await;
+    assert!(out.ok, "read from the temp dir failed: {}", out.content);
+    assert!(out.content.contains("auto"), "{}", out.content);
+
+    // edit_file works there too: it resolves through the same check.
+    let out = call(
+        &EditFile,
+        &env.ctx,
+        json!({
+            "path": abs.to_str().unwrap(),
+            "old_string": "temp dir",
+            "new_string": "scratch space",
+        }),
+    )
+    .await;
+    assert!(out.ok, "edit in the temp dir failed: {}", out.content);
+    assert_eq!(
+        std::fs::read_to_string(&abs).unwrap(),
+        "from the scratch space"
+    );
+
+    // The project itself still works, and a path outside *both* roots is still
+    // refused - the allowlist did not turn into "any absolute path".
+    let outside = call(&ReadFile, &env.ctx, json!({"path": "/etc/hostname"})).await;
+    assert!(!outside.ok, "{}", outside.content);
+    assert!(
+        outside.content.contains("escapes workspace root"),
+        "{}",
+        outside.content
+    );
 }
 
 #[cfg(unix)]

@@ -18,6 +18,64 @@ use tokio::sync::mpsc;
 /// Grace period between SIGTERM and SIGKILL when a command must be stopped.
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
+/// Environment variables a command inherits from the server.
+///
+/// The child gets a **cleared** environment plus this allowlist, never the
+/// server's own environment: the server holds `KARUCODE_AUTH_TOKEN` and the
+/// operator's provider API key, and a prompt-injected `curl` in a shell command
+/// would otherwise exfiltrate them. Everything here is needed to run ordinary
+/// tooling (find a compiler, resolve `~`, pick a locale/terminal/temp dir).
+///
+/// Operators can extend this per install with `limits.command_env_passthrough`
+/// (names of extra variables to pass through); those names are filtered by
+/// [`is_secret_like`] as well, so the list cannot be used to re-leak a secret.
+const ENV_ALLOWLIST: &[&str] = &[
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR", "PWD", "TZ",
+];
+
+/// Locale forced on every command, as before the allowlist existed.
+const FORCED_LOCALE: &str = "C";
+
+/// Whether an environment variable name looks like it carries a credential.
+///
+/// Defence in depth on top of [`ENV_ALLOWLIST`]: even if a name reaches the
+/// passthrough list (or a future allowlist entry), it is dropped here. Matching
+/// is case-insensitive and anchored on `_` boundaries, so `MY_TOKENIZER` is not
+/// mistaken for a token while `GITHUB_TOKEN` and `OPENAI_API_KEY` are caught.
+fn is_secret_like(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    const SECRET_PREFIXES: &[&str] = &["KARUCODE_", "AWS_", "OPENAI_", "ANTHROPIC_"];
+    const SECRET_NAMES: &[&str] = &["GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN"];
+    const SECRET_SUFFIXES: &[&str] = &["_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD"];
+
+    SECRET_PREFIXES.iter().any(|p| upper.starts_with(p))
+        || SECRET_NAMES.contains(&upper.as_str())
+        || SECRET_SUFFIXES.iter().any(|s| upper.ends_with(s))
+}
+
+/// Clear the inherited environment and re-add only what a command may see.
+///
+/// `passthrough` holds extra variable *names* from
+/// `limits.command_env_passthrough`; a name is only added when it is actually
+/// present in the parent environment, so no empty values are invented.
+fn apply_env_allowlist(cmd: &mut tokio::process::Command, passthrough: &[String]) {
+    cmd.env_clear();
+    for name in ENV_ALLOWLIST
+        .iter()
+        .copied()
+        .chain(passthrough.iter().map(|s| s.as_str()))
+    {
+        if is_secret_like(name) {
+            continue;
+        }
+        if let Some(value) = std::env::var_os(name) {
+            cmd.env(name, value);
+        }
+    }
+    // Set last so it wins over an inherited `LANG`/`LC_*`.
+    cmd.env("LC_ALL", FORCED_LOCALE);
+}
+
 #[derive(Debug, Clone)]
 pub struct CommandRequest {
     pub call_id: String,
@@ -179,32 +237,37 @@ fn ceil_char_boundary(bytes: &[u8], idx: usize) -> usize {
 }
 
 /// Kills the whole process group if the `run` future is dropped before the
-/// leader was reaped (task abort, subagent hard timeout).
+/// group is confirmed empty (task abort, subagent hard timeout).
 ///
 /// `kill_on_drop(true)` only signals the leader, which called `setsid()` and is
 /// therefore the group leader: its children (`sleep` under a shell, a build's
-/// compiler, ...) would survive. The guard is disarmed as soon as the leader is
-/// reaped — after that the pid may be reused and `kill(-pid)` would hit an
-/// unrelated process group.
+/// compiler, ...) would survive. The guard holds the **group id**, not the
+/// leader pid, and stays armed until `kill(-pgid, 0)` reports the group empty:
+/// a reaped leader says nothing about its children, and the kernel keeps the
+/// group id allocated while any member lives, so signalling it cannot hit a
+/// reused pid.
 struct GroupGuard {
-    pid: u32,
+    pgid: u32,
     armed: bool,
 }
 
 impl GroupGuard {
-    fn new(pid: u32) -> Self {
-        Self { pid, armed: true }
+    fn new(pgid: u32) -> Self {
+        Self { pgid, armed: true }
     }
 
-    fn disarm(&mut self) {
-        self.armed = false;
+    /// Disarm only when the group has no members left.
+    fn disarm_if_empty(&mut self) {
+        if !group_alive(self.pgid) {
+            self.armed = false;
+        }
     }
 }
 
 impl Drop for GroupGuard {
     fn drop(&mut self) {
         if self.armed {
-            signal_group(self.pid, libc::SIGKILL);
+            signal_group(self.pgid, libc::SIGKILL);
         }
     }
 }
@@ -220,11 +283,16 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
     cmd.arg("-c")
         .arg(&request.command)
         .current_dir(&request.cwd)
-        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // The child must not inherit the server's environment: it holds the harness
+    // bearer token and the provider API key. Only the allowlist is passed on,
+    // plus any names the operator opted into via `limits.command_env_passthrough`
+    // (which still drops credential-shaped names).
+    let passthrough = ctx.limits().await.command_env_passthrough;
+    apply_env_allowlist(&mut cmd, &passthrough);
     // Own session => own process group, so `kill(-pid)` reaches every child.
     unsafe {
         cmd.as_std_mut().pre_exec(|| {
@@ -309,9 +377,10 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
                 match status {
                     Ok(status) => {
                         exit_status = Some(status);
-                        // The leader is reaped; the pid may be reused now, so the
-                        // drop guard must never signal this group again.
-                        group.disarm();
+                        // The leader is reaped, but its children may still be
+                        // running: only disarm once the group is empty, so a
+                        // dropped future still kills the survivors.
+                        group.disarm_if_empty();
                     }
                     Err(e) => {
                         return Err(Error::Tool(format!(
@@ -330,9 +399,9 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
     } else {
         exit_status
     };
-    if status.is_some() {
-        group.disarm();
-    }
+    // The leader is reaped; keep the guard armed until the group is empty so a
+    // surviving grandchild cannot keep the pipes open past this call.
+    group.disarm_if_empty();
     for pump in pumps {
         pump.abort();
     }
@@ -384,41 +453,64 @@ fn signal_group(pid: u32, signal: i32) {
     }
 }
 
+/// Whether any process is still a member of the group `pgid`.
+///
+/// `kill(-pgid, 0)` returns ESRCH once the group is empty. While any member
+/// lives the kernel keeps the group id allocated, so the id cannot have been
+/// reused by an unrelated process group.
+fn group_alive(pgid: u32) -> bool {
+    let rc = unsafe { libc::kill(-(pgid as libc::pid_t), 0) };
+    if rc == 0 {
+        return true;
+    }
+    // EPERM means the group exists but is not ours to signal: still alive.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// SIGTERM the group, wait up to [`KILL_GRACE`], then SIGKILL. Returns the exit
 /// status when it could be collected.
 ///
-/// Signalling a process group by pid is only safe while the leader has not been
-/// reaped: once it has, the kernel may reuse that pid for an unrelated process
-/// (group), and `kill(-pid)` would hit innocent processes. So the group is only
-/// signalled after `try_wait()` confirms the leader is still running, and never
-/// again once it has been reaped.
+/// The escalation is unconditional: a leader that dies on SIGTERM says nothing
+/// about its children. A grandchild that ignores SIGTERM keeps the stdout/stderr
+/// pipes open, so the pump tasks never see EOF and the tool call hangs. The
+/// group id stays valid while any member lives, so `kill(-pgid, SIGKILL)` is
+/// safe even after the leader has been reaped.
 async fn terminate_group(
     child: &mut tokio::process::Child,
-    pid: u32,
+    pgid: u32,
     reaped: Option<std::process::ExitStatus>,
 ) -> Option<std::process::ExitStatus> {
     if let Some(status) = reaped {
+        // The leader is gone, but the group may not be: kill whatever is left.
+        if group_alive(pgid) {
+            signal_group(pgid, libc::SIGKILL);
+        }
         return Some(status);
     }
     match child.try_wait() {
-        Ok(Some(status)) => return Some(status),
+        Ok(Some(status)) => {
+            if group_alive(pgid) {
+                signal_group(pgid, libc::SIGKILL);
+            }
+            return Some(status);
+        }
         Ok(None) => {}
         // The state is unknown; never risk signalling a reused pid.
         Err(_) => return None,
     }
 
-    signal_group(pid, libc::SIGTERM);
+    signal_group(pgid, libc::SIGTERM);
     if let Ok(Ok(status)) = tokio::time::timeout(KILL_GRACE, child.wait()).await {
+        // The leader exited on SIGTERM. Its children may have ignored it, so
+        // escalate anyway: this is the orphan case.
+        if group_alive(pgid) {
+            signal_group(pgid, libc::SIGKILL);
+        }
         return Some(status);
     }
 
-    // Escalate only if the leader is still unreaped; a reaped leader means the
-    // pid may already belong to somebody else and must not be signalled.
-    match child.try_wait() {
-        Ok(Some(status)) => return Some(status),
-        Ok(None) => signal_group(pid, libc::SIGKILL),
-        Err(_) => return None,
-    }
+    // The leader survived the grace period: kill the whole group, then reap.
+    signal_group(pgid, libc::SIGKILL);
     match tokio::time::timeout(KILL_GRACE, child.wait()).await {
         Ok(Ok(status)) => Some(status),
         Ok(Err(_)) | Err(_) => None,
@@ -480,6 +572,7 @@ mod tests {
             events: kc_core::events::noop_sink(),
             settings: Arc::new(TestSettings),
             depth: 0,
+            supports_images: false,
         }
     }
 
@@ -587,6 +680,196 @@ mod tests {
         assert!(status.signal().is_some(), "expected a signal exit");
     }
 
+    /// Sets a variable in the *process* environment for the duration of a test.
+    ///
+    /// Environment mutation is process-global and the test harness runs tests in
+    /// parallel threads, so every test that uses this must pick a name no other
+    /// test touches (the names below are unique to this module) and must restore
+    /// the previous value even when the test panics.
+    struct EnvGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    #[test]
+    fn is_secret_like_flags_credentials() {
+        for name in [
+            "KARUCODE_AUTH_TOKEN",
+            "KARUCODE_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_ACCESS_KEY_ID",
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "NPM_TOKEN",
+            "MY_SERVICE_TOKEN",
+            "DB_PASSWORD",
+            "SIGNING_SECRET",
+            // Case must not matter: a lower-case name is still a credential.
+            "openai_api_key",
+        ] {
+            assert!(is_secret_like(name), "{name} must be treated as a secret");
+        }
+    }
+
+    #[test]
+    fn is_secret_like_ignores_ordinary_names() {
+        for name in [
+            "PATH",
+            "HOME",
+            "TERM",
+            "LANG",
+            "TMPDIR",
+            // `*_TOKEN` must match on the suffix boundary, not as a substring.
+            "MY_TOKENIZER",
+            "TOKEN_COUNT",
+            "PASSWORD_FILE_NAME",
+            "AWSOME_THING",
+        ] {
+            assert!(
+                !is_secret_like(name),
+                "{name} must not be treated as a secret"
+            );
+        }
+    }
+
+    #[test]
+    fn the_allowlist_replaces_the_inherited_environment() {
+        let _guard = EnvGuard::set("KARUCODE_TEST_ALLOWLIST_TOKEN", "leak-me");
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        apply_env_allowlist(&mut cmd, &[]);
+
+        let env: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+
+        assert!(
+            !names.contains(&"KARUCODE_TEST_ALLOWLIST_TOKEN"),
+            "a secret-like variable must never be passed through: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| is_secret_like(n)),
+            "no secret-like name may survive the allowlist: {names:?}"
+        );
+        // `LC_ALL` is always forced, and `PATH` is present in any test runner.
+        assert!(names.contains(&"LC_ALL"), "{names:?}");
+        assert!(names.contains(&"PATH"), "{names:?}");
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "LC_ALL")
+                .unwrap()
+                .1
+                .as_deref(),
+            Some("C")
+        );
+        // Nothing outside the allowlist leaks in.
+        for name in ["CARGO_HOME", "RUSTUP_HOME", "KARUCODE_CONFIG"] {
+            assert!(
+                !names.contains(&name),
+                "{name} must not be inherited: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn passthrough_names_are_added_unless_they_look_like_secrets() {
+        // Deliberately not `KARUCODE_*`: that prefix is filtered outright, and
+        // this test is about the suffix rule and about absent names.
+        let _guard = EnvGuard::set("KC_TEST_PASSTHROUGH_VALUE", "kept");
+        let _secret = EnvGuard::set("KC_TEST_PASSTHROUGH_TOKEN", "leak-me");
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        apply_env_allowlist(
+            &mut cmd,
+            &[
+                "KC_TEST_PASSTHROUGH_VALUE".to_string(),
+                "KC_TEST_PASSTHROUGH_TOKEN".to_string(),
+                // Absent from the parent: must not be invented as an empty value.
+                "KC_TEST_PASSTHROUGH_MISSING".to_string(),
+            ],
+        );
+
+        let env: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+
+        assert!(names.contains(&"KC_TEST_PASSTHROUGH_VALUE"), "{names:?}");
+        assert!(
+            !names.contains(&"KC_TEST_PASSTHROUGH_TOKEN"),
+            "the passthrough list must not be able to re-leak a secret: {names:?}"
+        );
+        assert!(
+            !names.contains(&"KC_TEST_PASSTHROUGH_MISSING"),
+            "an absent variable must not be passed as an empty value: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_in_the_parent_environment_does_not_reach_the_command() {
+        // The exact failure this allowlist fixes: the server's own bearer token
+        // and provider key used to be inherited by every shell command.
+        let _guard = EnvGuard::set("KARUCODE_TEST_LEAK_TOKEN", "leak-me");
+        let dir = temp_workspace("env-leak");
+        let ctx = test_ctx(&dir);
+        let request = CommandRequest {
+            call_id: "env".into(),
+            command: "echo \"token=${KARUCODE_TEST_LEAK_TOKEN:-ABSENT}\"; \
+                      echo \"path=${PATH:+PATH-SET}\""
+                .into(),
+            cwd: dir.clone(),
+            cwd_label: ".".into(),
+            timeout: Duration::from_secs(30),
+            max_output_bytes: 4096,
+        };
+        let outcome = run(request, &ctx).await.expect("the command should run");
+        assert!(outcome.ok(), "stderr: {}", outcome.stderr.text);
+        assert!(
+            outcome.stdout.text.contains("token=ABSENT"),
+            "the parent's secret leaked into the command: {:?}",
+            outcome.stdout.text
+        );
+        // The allowlist must still let ordinary tooling work.
+        assert!(
+            outcome.stdout.text.contains("path=PATH-SET"),
+            "PATH must still be passed through: {:?}",
+            outcome.stdout.text
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn bounded_output_keeps_head_and_tail() {
         let mut out = BoundedOutput::new(64);
@@ -660,6 +943,90 @@ mod tests {
         assert!(
             wait_until_gone(child, Duration::from_secs(2)).await,
             "child {child} survived the dropped run future (group was not killed)"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Bug 5: the leader dies on SIGTERM but a grandchild ignores it. The old
+    /// code only escalated when `try_wait()` still reported the leader running,
+    /// so the reaped leader meant SIGKILL was never sent and the grandchild
+    /// survived - keeping the stdout/stderr pipes open forever.
+    #[tokio::test]
+    async fn a_term_ignoring_grandchild_does_not_survive_termination() {
+        let dir = temp_workspace("term-ignoring");
+        let gc_pid_file = dir.join("gc.pid");
+        let script = dir.join("gc.sh");
+        // The grandchild ignores SIGTERM and loops, so only SIGKILL can stop it.
+        std::fs::write(
+            &script,
+            format!(
+                "trap '' TERM\necho $$ > '{}'\nwhile true; do sleep 1; done\n",
+                gc_pid_file.display()
+            ),
+        )
+        .unwrap();
+
+        // The leader does not trap SIGTERM, so it dies on the first signal while
+        // the grandchild lives on: exactly the orphan case.
+        let (mut child, pid) =
+            spawn_own_group(&format!("/bin/sh '{}' & wait", script.display())).await;
+        let grandchild = wait_for_pid(&gc_pid_file)
+            .await
+            .expect("the grandchild should start and write its pid");
+        assert!(
+            alive(grandchild),
+            "grandchild {grandchild} should be running"
+        );
+
+        let cleaned = terminate_group(&mut child, pid, None).await;
+        assert!(cleaned.is_some(), "the leader must be reaped");
+
+        assert!(
+            wait_until_gone(grandchild, Duration::from_secs(3)).await,
+            "grandchild {grandchild} survived termination: SIGKILL was never sent \
+             because the leader had already been reaped"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The group id stays valid while any member lives, so the guard must not
+    /// disarm just because the leader was reaped.
+    #[tokio::test]
+    async fn the_group_guard_stays_armed_while_a_member_lives() {
+        let dir = temp_workspace("guard-armed");
+        let gc_pid_file = dir.join("gc.pid");
+        let script = dir.join("gc.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "trap '' TERM\necho $$ > '{}'\nwhile true; do sleep 1; done\n",
+                gc_pid_file.display()
+            ),
+        )
+        .unwrap();
+
+        // The leader exits immediately, leaving the grandchild as the only
+        // member of the group: the leader being reaped must not disarm the guard.
+        let (mut child, pid) =
+            spawn_own_group(&format!("/bin/sh '{}' & exit 0", script.display())).await;
+        let grandchild = wait_for_pid(&gc_pid_file)
+            .await
+            .expect("the grandchild should start and write its pid");
+
+        // Reap the leader only; the grandchild is still a group member.
+        let _ = child.wait().await;
+        assert!(alive(grandchild));
+        assert!(
+            group_alive(pid),
+            "the group must still be reported alive while a member lives"
+        );
+
+        let mut guard = GroupGuard::new(pid);
+        guard.disarm_if_empty();
+        drop(guard);
+        assert!(
+            wait_until_gone(grandchild, Duration::from_secs(3)).await,
+            "dropping the guard must kill the surviving group member"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

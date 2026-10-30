@@ -8,16 +8,16 @@
 // @kc-title: The built-in tools the agent can call
 // @kc-summary: What each first-party tool does, how it is gated, and the limits and gotchas that shape its output.
 // @kc-tags: tools, agent, files, search, shell, git
-// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:karucode_docs, config:[limits]
+// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:karucode_docs, config:[limits], config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES
 //
 // | Tool | Class | Approval | What it does |
 // | --- | --- | --- | --- |
-// | `read_file` | read_only | none | UTF-8 text with numbered lines and a `path - lines A-B of N` header; `offset`/`limit` (default 400, max 2000 lines) |
+// | `read_file` | read_only | none | UTF-8 text with numbered lines and a `path - lines A-B of N` header; `offset`/`limit` (default 400, max 2000 lines). `N` is the real line count of the whole file, even when `limits.max_file_read_bytes` cut the read short. A PNG/JPEG/GIF/WebP is attached as an image for a model that takes image input; a text-only model gets a refusal it can pass on |
 // | `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries |
-// | `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text` |
+// | `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`. The result cap is global across files, and long matching lines keep their first 300 characters |
 // | `write_file` | mutating | policy | create/overwrite atomically, max 2 MiB per call |
 // | `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff |
-// | `run_command` | shell | policy | `/bin/sh -c` in the workspace, streamed output, timeout, own process group |
+// | `run_command` | shell | policy | `/bin/sh -c` in the workspace, streamed output, timeout, own process group. On timeout or cancellation the whole group gets SIGTERM, then SIGKILL after a grace period, so a child that ignores SIGTERM cannot survive |
 // | `git_status` | read_only | none | branch + porcelain status for the workspace or a subdirectory |
 // | `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref |
 // | `karucode_docs` | read_only | none | search and read karucode's own documentation (this system) |
@@ -45,8 +45,9 @@
 //
 // * `edit_file` is exact-match and ambiguity-safe: it refuses when the old string
 //   appears twice (pass `replace_all`) or not at all. Read the region first.
-// * File tools are confined to the run's project directory: `..`, absolute paths
-//   outside it and symlink escapes are refused, for reads and writes alike.
+// * File tools are confined to the run's project directory **plus the system
+//   temporary directory**: `..`, any other absolute path and symlink escapes are
+//   refused, for reads and writes alike. See "Scratch space" below.
 // * `run_command` is **not** sandboxed. It runs as the server user, in a process
 //   group that is killed on timeout or cancellation; an approved command can do
 //   anything that user can do.
@@ -54,9 +55,99 @@
 //   the header - a failing test run is a failed tool call, not a silent success.
 // * `search_files` honours `.gitignore`. Searching ignored/build output needs a
 //   pattern under an explicitly named path, not a glob trick.
+// * `search_files` caps results globally, not per file, and both engines agree on
+//   the cap. A match on a very long line keeps its first 300 characters rather
+//   than being replaced by a placeholder.
+// * `read_file` reports the file's real line count in its header even when the
+//   byte cap truncated the content; when the byte cap (not the line window) ended
+//   the read, there is no "continue with offset" hint, because those lines cannot
+//   be reached without raising `limits.max_file_read_bytes`.
 // * Binary files are refused by `read_file` instead of being rendered as noise.
 //
-// Full reference: `README.md` (What is implemented), `docs/SECURITY.md`.
+// # Scratch space: the temp directory
+//
+// A file tool may reach the system temporary directory as well as the project.
+// Anything a build, a screenshot helper, a browser profile or a download leaves
+// in `/tmp` can then be read, searched, edited and written without a path error,
+// and an agent asked to save something "to a temp file" has somewhere legal to
+// put it.
+//
+// This is on by default because it is not a security boundary. `run_command`
+// already runs as the server user with that user's whole filesystem, and `/tmp`
+// is writable by every process on the machine; refusing `write_file` a path that
+// `/bin/sh` could `echo` into buys nothing and fails a whole class of ordinary
+// work. What the allowlist protects is the *model* not wandering into
+// `~/.ssh` or `/etc`, and that still holds.
+//
+// What the temp root is **not** is the whole filesystem. The root is checked like
+// any other root:
+//
+// * `..` may not climb out of it - `/tmp/../etc/passwd` is refused;
+// * a symlink inside it that points elsewhere is refused;
+// * neither is `/etc` or a sibling directory of `/tmp`.
+//
+// Turn it off to go back to project-only confinement:
+//
+// ```toml
+// allow_temp_dir = false      # or KARUCODE_ALLOW_TEMP_DIR=0
+// ```
+//
+// The root is `TMPDIR` when it is set and absolute, otherwise the platform
+// default (`/tmp` on Linux). A configured root that does not exist is skipped. A
+// workspace that itself lives under `/tmp` (a scratch or CI checkout) still gets
+// it: the temp dir being an ancestor of the project is exactly what such a layout
+// asks for, so it is not treated as a mistake. Only `/` is refused, because that
+// one value would make every absolute path legal.
+// `run_command` is unaffected either way: it is not confined at all. Its
+// children still get their normal environment, so they write to `/tmp` whatever
+// this setting says.
+//
+// # Images
+//
+// `read_file` on an image does not return text. The file is classified by its
+// magic bytes (not its extension): a PNG, JPEG, GIF or WebP is base64-encoded and
+// attached to the tool result, so a vision-capable model looks at the pixels.
+//
+// This only happens when the session's model accepts image input. It does when
+// the resolved model says so:
+//
+// ```toml
+// [model]
+// supports_images = true          # or KARUCODE_MODEL_SUPPORTS_IMAGES=1
+//
+// [[providers.models]]
+// id = "gpt-4o"
+// vision = true                   # per-model override, prefilled from models.dev
+// ```
+//
+// With it off, `read_file` refuses with a sentence the model is expected to repeat
+// to the user: it cannot see images, and switching models or describing the image
+// are the ways forward. That refusal is the point - a text-only model that "reads"
+// an image silently would otherwise invent what is in it.
+//
+// The image bytes count against `limits.max_image_read_bytes` (4 MiB by default)
+// and are kept in the transcript, so they are resent on every later turn of the
+// session. A file over the cap is refused with its size and the key's name.
+// Formats the vision APIs reject (BMP, ICO, TIFF, AVIF, HEIC) are named and
+// refused too, with the conversion command to use; SVG is text and is read as
+// text.
+//
+// # Environment
+//
+// `run_command` does **not** inherit the server's environment. The child gets a
+// cleared environment plus an allowlist: `PATH`, `HOME`, `USER`, `LOGNAME`,
+// `SHELL`, `LANG`, `LC_ALL` (forced to `C`), `TERM`, `TMPDIR`, `PWD`, `TZ`, and
+// any names in `limits.command_env_passthrough`. A variable is only passed when
+// it is actually set, so no empty values are invented.
+//
+// Secrets are never passed to a command: `KARUCODE_*`, `AWS_*`, `OPENAI_*`,
+// `ANTHROPIC_*`, `GITHUB_TOKEN`, `GH_TOKEN`, `NPM_TOKEN` and any name ending in
+// `_API_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD` are dropped even if listed in
+// `command_env_passthrough`. The harness bearer token and the provider API key
+// therefore cannot be exfiltrated by a prompt-injected `curl`. A command that
+// needs a credential must be given it explicitly (e.g. read from a file).
+//
+// Full reference: `README.md` (What it does), `docs/SECURITY.md`.
 
 use async_trait::async_trait;
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, AutoDecision};
@@ -71,6 +162,7 @@ use std::time::Duration;
 
 pub mod command;
 pub mod docs_tool;
+pub mod favicon;
 pub mod file_ops;
 pub mod git;
 pub mod search;
@@ -150,9 +242,11 @@ impl Tool for ReadFile {
     fn spec(&self) -> ToolSpec {
         spec(
             "read_file",
-            "Read a UTF-8 text file inside the workspace. Returns numbered lines with a \
-             `path — lines A-B of N (bytes)` header; use offset/limit for large files \
-             (default 400 lines, max 2000). Binary files are refused. Output is capped by the \
+            "Read a file inside the workspace. Text comes back as numbered lines with a \
+             `path — lines A-B of N (bytes)` header (use offset/limit for large files: default \
+             400 lines, max 2000). An image (PNG/JPEG/GIF/WebP) is attached for a model that \
+             accepts image input; on a text-only model it is refused with an explanation, as are \
+             binary files and image formats vision APIs do not accept. Output is capped by the \
              configured tool-output limit.",
             json!({
                 "type": "object",
@@ -174,6 +268,66 @@ impl Tool for ReadFile {
         let offset = request.opt_u64("offset");
         let limit = request.opt_u64("limit");
         let limits = ctx.limits().await;
+
+        // An image is not text. Classify it first: a vision model gets the pixels,
+        // a text-only model gets a refusal it can pass on instead of a guess.
+        match file_ops::probe_image(&ctx.workspace, path) {
+            Ok(file_ops::ImageProbe::Vision {
+                rel,
+                media_type,
+                size,
+            }) => {
+                if !ctx.supports_images {
+                    return ToolOutcome::err(format!(
+                        "`{rel}` is an image ({media_type}, {}). The active model cannot see images \
+                         (model.supports_images is off), so read_file cannot show it to you. Tell \
+                         the user plainly that you cannot view images, and that they can describe it, \
+                         or switch to a vision-capable model (model.supports_images = true, or \
+                         vision = true on the model's provider entry) and ask again.",
+                        file_ops::format_size(size)
+                    ));
+                }
+                return match file_ops::read_image(
+                    &ctx.workspace,
+                    path,
+                    media_type,
+                    limits.max_image_read_bytes,
+                ) {
+                    Ok(image) => {
+                        let text = format!(
+                            "{rel} — {media_type} ({})\n[the image itself is attached to this result: look \
+                             at it directly, there is no text to read]",
+                            file_ops::format_size(size)
+                        );
+                        ToolOutcome::ok(text)
+                            .with_images(vec![image])
+                            .with_meta(json!({
+                                "path": rel,
+                                "media_type": media_type,
+                                "bytes": size,
+                                "image": true,
+                            }))
+                    }
+                    Err(e) => ToolOutcome::err(e.to_string()),
+                };
+            }
+            Ok(file_ops::ImageProbe::Unsupported {
+                rel,
+                media_type,
+                size,
+            }) => {
+                return ToolOutcome::err(format!(
+                    "`{rel}` is a {media_type} image ({}), a format the vision APIs do not accept, \
+                     so read_file cannot attach it. Convert it first - e.g. run_command with \
+                     `magick '{rel}' out.png` or `ffmpeg -i '{rel}' out.png` - then read the \
+                     converted file. Accepted formats: {}.",
+                    file_ops::format_size(size),
+                    file_ops::VISION_MEDIA_TYPES.join(", ")
+                ));
+            }
+            // Not an image, or a path error the text read reports precisely.
+            Ok(file_ops::ImageProbe::NotAnImage) | Err(_) => {}
+        }
 
         match file_ops::read_file(
             &ctx.workspace,
@@ -650,6 +804,7 @@ impl Tool for RunCommand {
                 "stderr_bytes": outcome.stderr.total_bytes,
                 "timeout_secs": timeout_secs,
             })),
+            images: Vec::new(),
         }
     }
 }

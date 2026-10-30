@@ -6,6 +6,7 @@
 //! confinement; they only reject shapes that make no sense (a directory where a
 //! file is required, binary content, oversized payloads).
 
+use kc_core::message::ImageAttachment;
 use kc_core::paths::Workspace;
 use kc_core::{Error, Result};
 use std::io::{Read, Write};
@@ -21,6 +22,12 @@ pub const MAX_EDIT_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_LIST_ENTRIES: usize = 500;
 /// How many leading bytes are inspected for a NUL byte (binary sniff).
 pub const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+/// How many leading bytes are used to recognise an image by its magic number.
+///
+/// The extension is deliberately *not* trusted: `logo.png` that is really a
+/// ZIP would otherwise be base64-attached and rejected by the endpoint, and a
+/// real PNG saved as `assets/logo` must still work.
+pub const IMAGE_SNIFF_BYTES: usize = 32;
 pub const MAX_DEPTH: u32 = 3;
 const DIFF_MAX_LINES: usize = 80;
 const DIFF_CONTEXT_LINES: usize = 2;
@@ -83,7 +90,19 @@ pub fn read_file(
 
     let text = String::from_utf8_lossy(&buf).into_owned();
     let lines: Vec<&str> = text.lines().collect();
-    let total = lines.len();
+    // `lines` only covers the bytes that were read. When the read was byte
+    // limited, count the whole file so the header, `lines_total` and the
+    // "next N lines" hint describe the real file instead of the prefix.
+    let available = lines.len();
+    let total = if byte_limited {
+        match count_lines_streaming(&abs) {
+            Ok(n) => n as usize,
+            // The count is a nicety; never fail a readable file over it.
+            Err(_) => available,
+        }
+    } else {
+        available
+    };
 
     let offset = offset.unwrap_or(1).max(1) as usize;
     let limit = limit
@@ -95,14 +114,20 @@ pub fn read_file(
     } else {
         (start + limit).min(total)
     };
+    // Never index past the bytes that were actually read.
+    let shown_end = end.min(available);
 
-    let mut out = String::new();
-    let first = if total == 0 {
-        0
+    let (first, last) = if total == 0 {
+        (0, 0)
+    } else if start >= total {
+        (total, total)
+    } else if start >= available {
+        // Inside the file, but past the bytes the cap let us read.
+        (start + 1, available)
     } else {
-        (start + 1).min(total)
+        (start + 1, shown_end)
     };
-    let last = if total == 0 { 0 } else { end };
+    let mut out = String::new();
     out.push_str(&format!(
         "{rel} — lines {first}-{last} of {total} ({size} bytes)"
     ));
@@ -112,7 +137,7 @@ pub fn read_file(
     if byte_limited {
         out.push_str(&format!(
             "\n[note: only the first {max_bytes} of {size} bytes were read (limits.max_file_read_bytes); \
-             use offset/limit or raise the limit to see the rest]"
+             raise the limit to see the rest]"
         ));
     }
 
@@ -122,15 +147,22 @@ pub fn read_file(
         out.push_str(&format!(
             "\n[offset {offset} is past the end of the file ({total} lines); start at or before {total}]"
         ));
+    } else if start >= available {
+        out.push_str(&format!(
+            "\n[offset {offset} is beyond the {available} lines that fit in the first {max_bytes} bytes; \
+             raise limits.max_file_read_bytes to read further]"
+        ));
     } else {
-        for (i, line) in lines[start..end].iter().enumerate() {
+        for (i, line) in lines[start..shown_end].iter().enumerate() {
             out.push_str(&format!("\n{:>5}\t{}", start + i + 1, line));
         }
-        if end < total {
+        // Only offer "continue with offset" when the window was not cut short by
+        // the byte cap; otherwise the note above already explains the limit.
+        if shown_end < total && shown_end == end {
             out.push_str(&format!(
                 "\n[next {} lines omitted; continue with offset={}]",
-                total - end,
-                end + 1
+                total - shown_end,
+                shown_end + 1
             ));
         }
     }
@@ -148,6 +180,185 @@ pub fn read_file(
             "offset": offset,
             "limit": limit,
         }),
+    })
+}
+
+/// Count the lines in a file with a streaming pass, so a file far larger than
+/// `max_file_read_bytes` can still be described accurately without loading it.
+///
+/// Matches `str::lines` semantics: a trailing newline does not start a new line,
+/// and an empty file has zero lines.
+fn count_lines_streaming(abs: &Path) -> std::io::Result<u64> {
+    let mut file = std::fs::File::open(abs)?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut newlines = 0u64;
+    let mut last_byte = None;
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        newlines += buf[..n].iter().filter(|b| **b == b'\n').count() as u64;
+        last_byte = Some(buf[n - 1]);
+    }
+    // A file that does not end in a newline has one more (partial) line.
+    if last_byte.is_some() && last_byte != Some(b'\n') {
+        newlines += 1;
+    }
+    Ok(newlines)
+}
+
+/// What a file turned out to be, as far as the vision APIs are concerned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageProbe {
+    /// A PNG/JPEG/GIF/WebP: an image a vision model can be shown.
+    Vision {
+        rel: String,
+        media_type: &'static str,
+        size: u64,
+    },
+    /// A real image in a format the OpenAI-compatible vision APIs reject.
+    Unsupported {
+        rel: String,
+        media_type: &'static str,
+        size: u64,
+    },
+    /// Not an image at all (text, a directory, or some other binary).
+    NotAnImage,
+}
+
+/// Media types every OpenAI-compatible vision endpoint accepts. Anything else
+/// is refused before the request is built, because an endpoint that does not
+/// understand a format fails the *whole turn*, not just the image.
+pub const VISION_MEDIA_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// Classify a workspace file by its **magic bytes**, never by its extension.
+///
+/// Directories, missing files and permission problems are `NotAnImage`: the
+/// plain text path in [`read_file`] produces the precise error for those, and a
+/// probe must not change the message a user sees for a non-image.
+pub fn probe_image(ws: &Workspace, path: &str) -> Result<ImageProbe> {
+    let abs = ws.resolve_existing(path)?;
+    let rel = ws.relative(&abs);
+    let meta = match std::fs::metadata(&abs) {
+        Ok(meta) => meta,
+        Err(_) => return Ok(ImageProbe::NotAnImage),
+    };
+    if !meta.is_file() {
+        return Ok(ImageProbe::NotAnImage);
+    }
+    let head = read_head(&abs, IMAGE_SNIFF_BYTES)?;
+    let size = meta.len();
+    if let Some(media_type) = sniff_image(&head) {
+        return Ok(ImageProbe::Vision {
+            rel,
+            media_type,
+            size,
+        });
+    }
+    if let Some(media_type) = sniff_other_image(&head) {
+        return Ok(ImageProbe::Unsupported {
+            rel,
+            media_type,
+            size,
+        });
+    }
+    Ok(ImageProbe::NotAnImage)
+}
+
+fn read_head(abs: &Path, max: usize) -> Result<Vec<u8>> {
+    let mut file = std::fs::File::open(abs).map_err(|e| Error::io(abs, e))?;
+    let mut head = Vec::with_capacity(max);
+    Read::by_ref(&mut file)
+        .take(max as u64)
+        .read_to_end(&mut head)
+        .map_err(|e| Error::io(abs, e))?;
+    Ok(head)
+}
+
+/// Formats the vision APIs accept.
+fn sniff_image(head: &[u8]) -> Option<&'static str> {
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// Real images in formats the vision APIs reject, named so the refusal can tell
+/// the model what it is looking at instead of "binary file".
+fn sniff_other_image(head: &[u8]) -> Option<&'static str> {
+    if head.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    if head.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
+        return Some("image/x-icon");
+    }
+    if head.starts_with(b"II*\0") || head.starts_with(b"MM\0*") {
+        return Some("image/tiff");
+    }
+    // ISO base media (`ftyp`) containers: AVIF and HEIC/HEIF.
+    if head.len() >= 12 && &head[4..8] == b"ftyp" {
+        return match &head[8..12] {
+            b"avif" | b"avis" => Some("image/avif"),
+            b"heic" | b"heix" | b"heim" | b"heis" | b"mif1" | b"msf1" => Some("image/heic"),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// Read an image file and encode it for a vision model.
+///
+/// `media_type` comes from [`probe_image`]; the bytes are read once, so the
+/// payload always describes one consistent snapshot of the file.
+pub fn read_image(
+    ws: &Workspace,
+    path: &str,
+    media_type: &str,
+    max_bytes: usize,
+) -> Result<ImageAttachment> {
+    let abs = ws.resolve_existing(path)?;
+    let rel = ws.relative(&abs);
+    let meta = std::fs::metadata(&abs).map_err(|e| Error::io(&abs, e))?;
+    if !meta.is_file() {
+        return Err(Error::BadRequest(format!(
+            "`{rel}` is not a regular file; refusing to read it as an image"
+        )));
+    }
+    if meta.len() > max_bytes as u64 {
+        return Err(Error::BadRequest(format!(
+            "`{rel}` is {} and limits.max_image_read_bytes is {}; refusing to attach it. \
+             Shrink or convert it first (e.g. run_command with `magick`/`convert`/`ffmpeg`) and read \
+             the smaller file, or the user can raise the limit.",
+            format_size(meta.len()),
+            format_size(max_bytes as u64)
+        )));
+    }
+    let bytes = std::fs::read(&abs).map_err(|e| Error::io(&abs, e))?;
+    if bytes.len() > max_bytes {
+        // The file grew between the metadata check and the read.
+        return Err(Error::BadRequest(format!(
+            "`{rel}` grew to {} while being read, past limits.max_image_read_bytes ({}); \
+             refusing to attach it",
+            format_size(bytes.len() as u64),
+            format_size(max_bytes as u64)
+        )));
+    }
+    use base64::Engine as _;
+    Ok(ImageAttachment {
+        media_type: media_type.to_string(),
+        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        bytes: bytes.len() as u64,
+        name: Some(rel),
     })
 }
 
@@ -587,4 +798,232 @@ fn diff_ops<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<(DiffOp, &'a str)> {
         j += 1;
     }
     ops
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct TempWs {
+        path: PathBuf,
+    }
+
+    impl TempWs {
+        fn new(tag: &str) -> Self {
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "kc-tools-fileops-{tag}-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::SeqCst)
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn write(&self, rel: &str, content: &str) {
+            self.write_bytes(rel, content.as_bytes());
+        }
+
+        fn write_bytes(&self, rel: &str, bytes: &[u8]) {
+            let path = self.path.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        fn ws(&self) -> Workspace {
+            Workspace::new(&self.path).unwrap()
+        }
+    }
+
+    impl Drop for TempWs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// Bug 4: `total` used to be counted from the *truncated* buffer, so a file
+    /// over `max_file_read_bytes` was reported as far shorter than it is (a
+    /// 40 000-line file claimed to be 7 408 lines) and the "next N lines" hint
+    /// was computed from that wrong number.
+    #[test]
+    fn a_byte_limited_read_reports_the_real_total_line_count() {
+        let tmp = TempWs::new("byte-cap-total");
+        let lines = 40_000usize;
+        let body: String = (1..=lines).map(|i| format!("row {i}\n")).collect();
+        tmp.write("big.txt", &body);
+        let ws = tmp.ws();
+        let size = body.len();
+        assert!(size > 200_000, "the fixture must exceed the default cap");
+
+        let rendered = read_file(&ws, "big.txt", None, None, 200_000).unwrap();
+        assert!(rendered.meta["byte_limited"].as_bool().unwrap());
+        assert_eq!(
+            rendered.meta["lines_total"].as_u64().unwrap(),
+            lines as u64,
+            "lines_total must describe the whole file, not the bytes that were read"
+        );
+        assert!(
+            rendered
+                .text
+                .starts_with(&format!("big.txt — lines 1-400 of {lines} ({size} bytes)")),
+            "header must carry the real total: {:?}",
+            rendered.text.lines().next()
+        );
+        // The 400-line window ended this read (not the byte cap), so the hint is
+        // valid and must be computed from the real total.
+        assert!(
+            rendered.text.contains(&format!(
+                "[next {} lines omitted; continue with offset=401]",
+                lines - 400
+            )),
+            "the omitted-line hint must use the real total: {:?}",
+            rendered.text.lines().last()
+        );
+        assert!(rendered.text.contains("max_file_read_bytes"));
+        assert!(rendered.truncated);
+    }
+
+    /// When the *byte* cap is what cut the window short, an "offset=" hint would
+    /// promise lines that cannot be read: it must be suppressed.
+    #[test]
+    fn a_byte_capped_window_does_not_promise_more_lines_via_offset() {
+        let tmp = TempWs::new("byte-cap-window");
+        let lines = 40_000usize;
+        let body: String = (1..=lines).map(|i| format!("row {i}\n")).collect();
+        tmp.write("big.txt", &body);
+        let ws = tmp.ws();
+
+        // 1 000 bytes is ~125 lines, far short of the 2 000-line window.
+        let rendered = read_file(&ws, "big.txt", None, Some(2000), 1000).unwrap();
+        assert!(rendered.meta["byte_limited"].as_bool().unwrap());
+        assert_eq!(rendered.meta["lines_total"].as_u64().unwrap(), lines as u64);
+        assert!(
+            !rendered.text.contains("continue with offset="),
+            "a byte-capped read must not promise more lines via offset: {:?}",
+            rendered.text.lines().last()
+        );
+        assert!(rendered.text.contains("max_file_read_bytes"));
+    }
+
+    /// The streaming counter must agree with `str::lines` on the awkward shapes.
+    #[test]
+    fn the_streaming_line_count_matches_str_lines() {
+        let tmp = TempWs::new("count-lines");
+        let ws = tmp.ws();
+        for (name, body) in [
+            ("empty.txt", ""),
+            ("one.txt", "a"),
+            ("one-nl.txt", "a\n"),
+            ("two.txt", "a\nb"),
+            ("two-nl.txt", "a\nb\n"),
+            ("blank.txt", "\n\n\n"),
+        ] {
+            tmp.write(name, body);
+            let abs = ws.resolve_existing(name).unwrap();
+            assert_eq!(
+                count_lines_streaming(&abs).unwrap(),
+                body.lines().count() as u64,
+                "{name} ({body:?})"
+            );
+        }
+    }
+
+    /// A file under the cap must keep the exact header it always had.
+    #[test]
+    fn a_small_file_still_reports_its_exact_total() {
+        let tmp = TempWs::new("small-total");
+        tmp.write("a.txt", "alpha\nbeta\ngamma\n");
+        let ws = tmp.ws();
+        let rendered = read_file(&ws, "a.txt", None, None, 200_000).unwrap();
+        assert!(!rendered.meta["byte_limited"].as_bool().unwrap());
+        assert_eq!(rendered.meta["lines_total"].as_u64().unwrap(), 3);
+        assert!(rendered
+            .text
+            .starts_with("a.txt — lines 1-3 of 3 (17 bytes)"));
+    }
+
+    /// Images are classified by their magic bytes. Trusting the extension would
+    /// base64 a file the endpoint rejects (or refuse a real PNG saved without
+    /// one), and both failures are silent from the model's side.
+    #[test]
+    fn images_are_recognised_by_magic_bytes_not_extension() {
+        let tmp = TempWs::new("image-probe");
+        let png: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
+        let jpeg: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10];
+        let gif: &[u8] = b"GIF89a\x01\x00";
+        let webp: &[u8] = b"RIFF\x24\x00\x00\x00WEBPVP8 ";
+        let bmp: &[u8] = b"BM\x36\x00\x00\x00\x00\x00\x00\x00";
+        let ws = tmp.ws();
+
+        for (name, bytes, media) in [
+            ("a.png", png, "image/png"),
+            ("no-extension", png, "image/png"),
+            ("a.jpg", jpeg, "image/jpeg"),
+            ("a.gif", gif, "image/gif"),
+            ("a.webp", webp, "image/webp"),
+        ] {
+            tmp.write_bytes(name, bytes);
+            match probe_image(&ws, name).unwrap() {
+                ImageProbe::Vision {
+                    media_type, size, ..
+                } => {
+                    assert_eq!(media_type, media, "{name}");
+                    assert_eq!(size as usize, bytes.len(), "{name}");
+                }
+                other => panic!("{name} should be a vision image, got {other:?}"),
+            }
+        }
+
+        // A format the vision APIs reject is named, not treated as binary noise.
+        tmp.write_bytes("scan.bmp", bmp);
+        match probe_image(&ws, "scan.bmp").unwrap() {
+            ImageProbe::Unsupported { media_type, .. } => assert_eq!(media_type, "image/bmp"),
+            other => panic!("bmp should be an unsupported image, got {other:?}"),
+        }
+
+        // Text named like an image is still text, and a PNG signature is not a
+        // licence to attach a file whose extension lies about being text.
+        tmp.write("fake.png", "not an image\n");
+        assert_eq!(
+            probe_image(&ws, "fake.png").unwrap(),
+            ImageProbe::NotAnImage
+        );
+        tmp.write("notes.txt", "hello\n");
+        assert_eq!(
+            probe_image(&ws, "notes.txt").unwrap(),
+            ImageProbe::NotAnImage
+        );
+        // A directory is not an image; the text path produces the real error.
+        std::fs::create_dir_all(tmp.path.join("dir")).unwrap();
+        assert_eq!(probe_image(&ws, "dir").unwrap(), ImageProbe::NotAnImage);
+    }
+
+    #[test]
+    fn read_image_encodes_the_bytes_and_refuses_over_the_cap() {
+        let tmp = TempWs::new("image-read");
+        let png: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
+        tmp.write_bytes("shot.png", png);
+        let ws = tmp.ws();
+
+        let image = read_image(&ws, "shot.png", "image/png", 1024).unwrap();
+        assert_eq!(image.media_type, "image/png");
+        assert_eq!(image.name.as_deref(), Some("shot.png"));
+        assert_eq!(image.bytes, png.len() as u64);
+        assert!(image.data_url().starts_with("data:image/png;base64,"));
+        // Standard base64 of the 12 PNG bytes, decoded back to the same bytes.
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&image.data)
+            .unwrap();
+        assert_eq!(decoded, png);
+
+        let err = read_image(&ws, "shot.png", "image/png", 4).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("max_image_read_bytes"), "{message}");
+        assert!(message.contains("shot.png"), "{message}");
+    }
 }
