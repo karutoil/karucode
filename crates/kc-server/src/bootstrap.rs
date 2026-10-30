@@ -458,12 +458,14 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     validate_config(&config)?;
     init_tracing(&config.log_level);
 
-    let workspace = Arc::new(Workspace::new(&config.workspace_root).map_err(|e| {
-        anyhow!(
-            "workspace {} is not usable: {e}. Pass --workspace <path> or set KARUCODE_WORKSPACE to an existing directory.",
-            config.workspace_root.display()
-        )
-    })?);
+    let workspace = Arc::new(
+        Workspace::with_extra_roots(&config.workspace_root, config.extra_roots()).map_err(|e| {
+            anyhow!(
+                "workspace {} is not usable: {e}. Pass --workspace <path> or set KARUCODE_WORKSPACE to an existing directory.",
+                config.workspace_root.display()
+            )
+        })?,
+    );
     // Canonicalise so `/api/config` and `/api/health` report the same path the
     // file tools actually use.
     config.workspace_root = workspace.root().to_path_buf();
@@ -493,8 +495,13 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
 
     // Projects: seed the default one for the configured workspace, attach
     // sessions created before projects existed, then load the registry the
-    // runtime resolves runs against.
-    let projects = Arc::new(ProjectRegistry::new(Arc::clone(&workspace)));
+    // runtime resolves runs against. The registry carries the same extra roots
+    // as the default workspace, so a project created later (or a subagent, which
+    // inherits its parent's workspace) can reach the temp dir too.
+    let projects = Arc::new(ProjectRegistry::with_extra_roots(
+        Arc::clone(&workspace),
+        workspace.extra_roots().to_vec(),
+    ));
     seed_projects(&store, &projects, &workspace).await?;
 
     let plugin_tools = {
@@ -544,6 +551,19 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     });
     state.reload_tools().await;
 
+    // Hot plugin reloads (`plugins_watch = true`): one `read_dir` plus a `stat`
+    // per plugin command, on a timer. Off by default — a reload replaces
+    // processes, so an operator opts in. The task stops itself on shutdown.
+    if config.plugins_watch {
+        let interval = Duration::from_secs(config.plugins_watch_secs);
+        crate::plugins_watch::spawn(state.clone(), interval);
+        tracing::info!(
+            interval_secs = config.plugins_watch_secs,
+            "plugin watcher enabled: changes to plugin manifests and command files are applied \
+             without a restart"
+        );
+    }
+
     // Log the allowlist when it actually gates requests, so an operator who
     // reaches the server through a proxy sees the 403 reason in the log.
     if state.enforce_host_allowlist() {
@@ -552,6 +572,40 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             "loopback bind without a token: only allowlisted Host headers are served \
              (extend with KARUCODE_ALLOWED_HOSTS)"
         );
+    }
+
+    // Reap terminal shells nobody is attached to. A forgotten tab on a laptop
+    // closed for the night must not hold a shell open, but the *tab* and its
+    // title stay: attaching later starts a fresh shell in the same directory.
+    // The interval is a fraction of the timeout so a 12-hour setting is not
+    // reaped hours late, floored at a minute so a short timeout is not a busy
+    // loop.
+    let idle_secs = config.terminals.idle_timeout_secs;
+    if config.terminals.enabled && idle_secs > 0 {
+        let state_for_reaper = state.clone();
+        let token = state.shutdown_token();
+        let every = Duration::from_secs((idle_secs / 10).max(60));
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => return,
+                    _ = tokio::time::sleep(every) => {}
+                }
+                let current = state_for_reaper.settings().snapshot().terminals;
+                if !current.enabled {
+                    continue;
+                }
+                let reaped = state_for_reaper.terminals().reap_idle(current.idle_timeout_secs);
+                if !reaped.is_empty() {
+                    tracing::info!(
+                        terminals = %reaped.join(", "),
+                        idle_secs = current.idle_timeout_secs,
+                        "closed terminal shells with no connected browser; the tabs and their \
+                         titles are kept, and attaching starts a fresh shell"
+                    );
+                }
+            }
+        });
     }
 
     // Bind after the wiring so the startup summary can report real tool/plugin
@@ -635,6 +689,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
 
     shutdown.cancel();
     runtime.shutdown().await;
+    // Hang up every terminal shell: they are children of this process, and a
+    // `make watch` left in a tab must not outlive the server that started it.
+    state.terminals().shutdown_all();
     plugins.lock().await.shutdown().await;
     mcp.lock().await.shutdown().await;
     // Dropping the final store handle closes SQLite, which checkpoints the WAL.

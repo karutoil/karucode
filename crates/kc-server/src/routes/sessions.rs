@@ -21,7 +21,7 @@ const MAX_PROMPT_BYTES: usize = 1024 * 1024;
 const MAX_TITLE_CHARS: usize = 200;
 /// Title `POST /api/sessions` assigns when the caller supplies no title. A
 /// session still carrying it is treated as untitled.
-const DEFAULT_SESSION_TITLE: &str = "New session";
+pub const DEFAULT_SESSION_TITLE: &str = "New session";
 /// Auto-derived titles are cut here (plus `…`) so the session rail stays
 /// readable at narrow widths.
 const MAX_AUTO_TITLE_CHARS: usize = 60;
@@ -223,6 +223,21 @@ pub async fn get_session(
     let approvals = store.list_pending_approvals(Some(&session.id)).await?;
     let claims = store.list_claims(&session.id).await?;
     let running = state.runtime().is_running(&session.id);
+    // Messages the user queued while a run was in flight. Returned with the
+    // session so a reload (or a second browser) shows the same pending work
+    // instead of silently losing it.
+    let queued_steers: Vec<Value> = state
+        .runtime()
+        .queued_steers(&session.id)
+        .iter()
+        .map(kc_runtime::QueuedSteer::public_view)
+        .collect();
+    let queued_follow_ups: Vec<Value> = state
+        .runtime()
+        .queued_follow_ups(&session.id)
+        .iter()
+        .map(kc_runtime::QueuedFollowUp::public_view)
+        .collect();
     Ok(Json(json!({
         "session": session,
         "messages": messages,
@@ -233,6 +248,8 @@ pub async fn get_session(
         "approvals": approvals,
         "claims": claims,
         "running": running,
+        "queued_steers": queued_steers,
+        "queued_follow_ups": queued_follow_ups,
     })))
 }
 
@@ -328,13 +345,127 @@ pub async fn delete_session(
 pub async fn send_message(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<QueryMap>,
     body: Bytes,
 ) -> ApiResult<Response> {
     let session = session_or_404(&state, &id).await?;
+    let mode = MessageMode::parse(query_str(&query, "mode"))?;
     let body: MessageBody = parse_required(&body, "POST /api/sessions/:id/messages")?;
     let content = body
         .content
         .ok_or_else(|| ApiError::bad_request("content is required"))?;
+    validate_prompt(&content)?;
+
+    match mode {
+        MessageMode::Steer => {
+            let steer = state
+                .runtime()
+                .steer(&id, content)
+                .map_err(steer_error)?;
+            Ok((
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "mode": "steer",
+                    "session_id": id,
+                    "steer_id": steer.id,
+                    "queued": true,
+                })),
+            )
+                .into_response())
+        }
+        MessageMode::FollowUp => {
+            let follow_up = state
+                .runtime()
+                .enqueue_follow_up(&id, content)
+                .map_err(steer_error)?;
+            Ok((
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "mode": "follow_up",
+                    "session_id": id,
+                    "follow_up_id": follow_up.id,
+                    "queued": true,
+                })),
+            )
+                .into_response())
+        }
+        MessageMode::Send => {
+            // Cheap up-front check gives the documented 409 instead of the
+            // runtime's generic "already active" bad_request. `submit` still
+            // re-checks under its lock, so the race window cannot start two runs.
+            if state.runtime().is_running(&id) {
+                return Err(ApiError::conflict(
+                    "a run is already active for this session; send `?mode=steer` or \
+                     `?mode=follow_up` to queue this message instead, or cancel the run",
+                ));
+            }
+            // The first user message titles an untitled session: immediately with
+            // a derived title (so the rail is never empty), then - if `[titles]`
+            // is on, which it is by default - with a short model-written one in
+            // the background. `expected` is `None` for a session the user already
+            // named, which is what disables the model title for it.
+            let expected = maybe_auto_title(&state, &session, &content).await;
+            let handle = state
+                .runtime()
+                .submit(&id, content.clone())
+                .await
+                .map_err(|error| match error {
+                    kc_core::Error::BadRequest(message) if message.contains("already active") => {
+                        ApiError::conflict(message)
+                    }
+                    other => ApiError::from(other),
+                })?;
+
+            // The AI title is a second, optional request: spawned so the run is
+            // never delayed by it. `expected` is the title the session carries
+            // right now, which is what the generated title must still replace for
+            // the rename to be honest about who set it.
+            if let Some(expected) = expected {
+                spawn_ai_title(state.clone(), id.clone(), expected, content);
+            }
+
+            Ok((
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "mode": "send",
+                    "run_id": handle.run_id,
+                    "session_id": handle.session_id,
+                })),
+            )
+                .into_response())
+        }
+    }
+}
+
+/// How a message relates to the run that may or may not be in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageMode {
+    /// Start a run. The historical behaviour, and the default.
+    Send,
+    /// Fold this message into the *running* conversation at the next iteration.
+    Steer,
+    /// Start a new run once the current one finishes.
+    FollowUp,
+}
+
+impl MessageMode {
+    fn parse(raw: Option<&str>) -> ApiResult<Self> {
+        match raw.map(str::trim) {
+            None | Some("") | Some("send") => Ok(MessageMode::Send),
+            Some("steer") => Ok(MessageMode::Steer),
+            Some(value) if value.eq_ignore_ascii_case("follow_up") || value.eq_ignore_ascii_case("follow-up") => {
+                Ok(MessageMode::FollowUp)
+            }
+            Some(other) => Err(ApiError::bad_request(format!(
+                "query parameter `mode` must be `send`, `steer` or `follow_up` (got `{other}`)"
+            ))),
+        }
+    }
+}
+
+/// Shared prompt validation for all three modes: the same message travels
+/// through each, so the same limits apply.
+fn validate_prompt(content: &str) -> ApiResult<()> {
     if content.trim().is_empty() {
         return Err(ApiError::bad_request("content may not be empty"));
     }
@@ -347,35 +478,35 @@ pub async fn send_message(
     if content.contains('\0') {
         return Err(ApiError::bad_request("content may not contain NUL bytes"));
     }
+    Ok(())
+}
 
-    // Cheap up-front check gives the documented 409 instead of the runtime's
-    // generic "already active" bad_request. `submit` still re-checks under its
-    // lock, so the race window cannot start two runs.
-    if state.runtime().is_running(&id) {
-        return Err(ApiError::conflict(
-            "a run is already active for this session; wait for it to finish or cancel it",
-        ));
+/// Map a queue rejection from the runtime to its documented status.
+///
+/// "No run in flight" is a `409` (the request is well-formed but the state is
+/// wrong for this mode), and a full queue is a `409` too. Everything else is the
+/// runtime's own classification.
+fn steer_error(error: kc_core::Error) -> ApiError {
+    match error {
+        kc_core::Error::BadRequest(message) => ApiError::conflict(message),
+        other => ApiError::from(other),
     }
-    maybe_auto_title(&state, &session, &content).await;
-    let handle = state
-        .runtime()
-        .submit(&id, content)
-        .await
-        .map_err(|error| match error {
-            kc_core::Error::BadRequest(message) if message.contains("already active") => {
-                ApiError::conflict(message)
-            }
-            other => ApiError::from(other),
-        })?;
+}
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({
-            "run_id": handle.run_id,
-            "session_id": handle.session_id,
-        })),
-    )
-        .into_response())
+/// Ask a model for a session title, in the background.
+///
+/// Fire-and-forget by construction: the task cannot report an error to the
+/// client (it outlives the request) and does not need to, because the deterministic
+/// title is already stored. Spawning rather than awaiting is the whole point -
+/// the run must start immediately, and a titling request that hangs for its
+/// `timeout_secs` would otherwise hold the composer.
+fn spawn_ai_title(state: AppState, session_id: String, expected_title: String, prompt: String) {
+    if !state.settings().snapshot().titles.enabled {
+        return;
+    }
+    tokio::spawn(async move {
+        crate::titles::maybe_auto_title(&state, &session_id, &expected_title, &prompt).await;
+    });
 }
 
 /// `PATCH /api/sessions/:id/model` — pin this session to a provider + model, or
@@ -424,15 +555,24 @@ pub async fn cancel_run(
 
 /// Give an untitled session a title derived from its first user message.
 ///
-/// Runs before `runtime.submit` so the rail shows a real title as soon as the
-/// run starts. Cosmetic only: any failure is logged and the request proceeds.
-async fn maybe_auto_title(state: &AppState, session: &Session, content: &str) {
+/// Give an untitled session a deterministic title derived from its first user
+/// message, and say whether the session is eligible for a model-written title.
+///
+/// Runs before `runtime.submit` so the rail shows a real title as soon as the run
+/// starts - the model-written title (see `crate::titles`) arrives later and
+/// replaces this one. Cosmetic only: any failure is logged and the request
+/// proceeds with whatever title the session already had.
+///
+/// Returns `Some(title)` when the session was still untitled (the AI title may go
+/// on to replace `title`), and `None` when somebody already named it. The `None`
+/// case is what keeps the documented promise that an explicitly titled session is
+/// never retitled by a model: there is nothing to improve on, and a user who typed
+/// a name meant it.
+async fn maybe_auto_title(state: &AppState, session: &Session, content: &str) -> Option<String> {
     if !is_placeholder_title(&session.title) {
-        return;
+        return None;
     }
-    let Some(title) = derive_title(content) else {
-        return;
-    };
+    let title = derive_title(content)?;
     match state.store().rename_session(&session.id, &title).await {
         Ok(()) => {
             state.runtime().emit(
@@ -441,15 +581,21 @@ async fn maybe_auto_title(state: &AppState, session: &Session, content: &str) {
                 None,
                 Event::SessionRenamed {
                     session_id: session.id.clone(),
-                    title,
+                    title: title.clone(),
                 },
             );
+            Some(title)
         }
-        Err(error) => tracing::warn!(
-            session = %session.id,
-            error = %error,
-            "could not auto-title session"
-        ),
+        Err(error) => {
+            tracing::warn!(
+                session = %session.id,
+                error = %error,
+                "could not auto-title session"
+            );
+            // The derived title did not land, so there is nothing stable for the
+            // model's title to replace. Leave the session alone.
+            None
+        }
     }
 }
 

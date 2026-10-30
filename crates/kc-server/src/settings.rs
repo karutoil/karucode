@@ -15,7 +15,7 @@
 // @kc-title: Change karucode's configuration
 // @kc-summary: The four config layers, which settings apply live, and how secrets and invalid values are handled.
 // @kc-tags: config, settings, configuration, toml, env
-// @kc-applies-to: file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_AUTO_CONTINUE, env:KARUCODE_MAX_CONTINUES, env:KARUCODE_CONTEXT_MAX_CHARS, config:[model], config:[limits], config:[approvals], config:[subagents], config:[[plugins]], config:[[mcp_servers]], route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings
+// @kc-applies-to: file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_AUTO_CONTINUE, env:KARUCODE_MAX_CONTINUES, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, config:[model], config:[limits], config:[approvals], config:[subagents], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings
 //
 // # Where the settings come from
 //
@@ -37,6 +37,77 @@
 // Set `KARUCODE_LOCK_SETTINGS=1` to remove layer 1 entirely: the UI becomes
 // read-only for settings and `PATCH /api/config` answers `403`. This is how you
 // run karucode where the operator, not the browser, owns the model and keys.
+//
+// # Which settings apply without a restart
+//
+// Model, sampling, limits, approvals and subagents are hot-swapped by a saved
+// change. The plugin list is not part of `PATCH /api/config` - installing a
+// plugin is not a settings tweak - so it has its own refresh:
+//
+// ```toml
+// plugins_watch = true      # KARUCODE_PLUGINS_WATCH=1
+// plugins_watch_secs = 2    # KARUCODE_PLUGINS_WATCH_SECS, clamped to 1..=600
+// ```
+//
+// With `plugins_watch` on, the server re-reads `[[plugins]]` from this file and
+// every `<data_dir>/plugins/*/plugin.toml` on a timer and applies additions,
+// removals and rebuilt binaries without a restart. It is off by default because a
+// reload replaces processes; `POST /api/plugins/reload` does the same thing on
+// demand, and `POST /api/plugins/:name/reload` refreshes one plugin. Bind
+// address, port, data directory and auth token still need a restart.
+//
+// # The admin gate
+//
+// `KARUCODE_LOCK_SETTINGS` is all-or-nothing. For the middle ground - the UI may
+// tune limits and sampling, but not the security-relevant settings - set
+// `KARUCODE_ADMIN_TOKEN` (or `admin_token` in the config file). A
+// `PATCH /api/config` that changes any of these then also needs
+// `X-Karucode-Admin-Token: <token>`:
+//
+// * `approvals` - the human gate itself;
+// * `model.base_url`, `model.api_key` (including `clear_api_key`) - the endpoint
+//   that receives every prompt and every command's output;
+// * `providers` - the same, for every saved profile;
+// * `active_provider`, `active_model` - which of those profiles is live.
+//
+// Everything else (`limits`, `subagents`, sampling) keeps working with the
+// ordinary bearer token. A missing or wrong admin credential is
+// `403 permission_denied`, and the change is not applied. The comparison is
+// constant-time, and the token is never logged or echoed. Every authorised
+// security change is logged at `info` with the field *names* only.
+//
+// With no admin token configured the gate is off and any API client can change
+// those fields; the server logs a warning at startup when that is the case.
+//
+// # Project roots
+//
+// `project_roots` (`KARUCODE_PROJECT_ROOTS`, colon-separated) is an optional
+// allowlist for where `POST /api/projects` may create a project. **Empty - the
+// default - means no allowlist**: any existing directory is a valid project,
+// which is what a single-operator install wants, since the obvious second
+// project is a sibling checkout of the default workspace. Set it for a shared or
+// remotely reachable deployment. Either way `/` itself is refused, so a request
+// cannot make the whole filesystem the confinement root for every file tool.
+//
+// ```toml
+// project_roots = ["/home/me/projects", "/srv/code"]
+// ```
+//
+// # The temp directory
+//
+// `allow_temp_dir` (default `true`, or `KARUCODE_ALLOW_TEMP_DIR`) lets the file
+// tools read and write the system temporary directory as well as the project.
+// It is on by default because build output, screenshots, downloads and browser
+// profiles land in `/tmp` and a path error there is noise, not protection. The
+// root is `TMPDIR` when set and absolute, otherwise `/tmp`.
+//
+// ```toml
+// allow_temp_dir = false      # project-only confinement
+// ```
+//
+// This is unrelated to `project_roots`: that one gates where a project may be
+// created, this one widens what a run's file tools may touch. Both are
+// process-level, so changing either needs a restart.
 //
 // # What applies without a restart
 //
@@ -105,10 +176,55 @@
 // `KARUCODE_SUBAGENT_TIMEOUT_SECS`.
 //
 // `limits.context_max_chars` decides how much conversation is sent to the model.
-// When it overflows, the oldest exchanges are replaced by one compaction notice
-// that keeps a one-line digest of what they said; the persisted transcript keeps
-// every message. `limits.max_tool_calls_per_turn` is a runaway-batch guard, not a
-// work budget - calls past it are skipped with a placeholder result.
+// Leave it at `0` (the default) and the budget is **derived from the resolved
+// model**: its `context_window` minus the room its answer needs, at four
+// characters per token. A non-zero value is an explicit ceiling for the whole
+// install and can only lower that derived budget. When it overflows, the oldest
+// exchanges are replaced by one compaction notice
+// that keeps a one-line digest of what they said (including which files each
+// turn read); the persisted transcript keeps every message. The original user
+// turn and the exchange in flight are never compacted away. `limits.max_tool_calls_per_turn`
+// is a runaway-batch guard, not a work budget - calls past it are skipped with a
+// placeholder result. How compaction interacts with provider prompt caching is
+// documented under `prompt-cache`.
+//
+// # Images (vision models)
+//
+// `read_file` can show a model an image, and this is the switch that decides
+// whether it does. Nothing guesses it from the model id - an endpoint will
+// accept a request carrying an image for a text-only model and either drop it or
+// fail the whole turn, and a model that "read" an image it never saw will
+// describe it confidently.
+//
+// ```toml
+// [model]
+// supports_images = true        # KARUCODE_MODEL_SUPPORTS_IMAGES=1
+//
+// [limits]
+// max_image_read_bytes = 4194304   # 4 MiB, base64'd into the transcript
+// ```
+//
+// With `supports_images` on, `read_file` on a PNG/JPEG/GIF/WebP base64-encodes
+// the file and attaches it to the tool result. With it off, the tool refuses with
+// a sentence the model is expected to repeat ("I cannot see images"), which is
+// the whole point: a text-only model must say so rather than invent a
+// description. A `vision = true|false` on a `[[providers.models]]` entry overrides
+// the install-wide flag for that model, so one session can use a vision model
+// while the default stays text-only. It is resolved for the model a session will
+// actually call: pinning a session to a vision model is enough, even when the
+// profile's default model is text-only. Formats the vision APIs reject (BMP, ICO,
+// TIFF, AVIF, HEIC) are named in the refusal; SVG is text and is read as text.
+//
+// Both knobs are on the settings screen: "Send images to models" is the
+// install-wide default, and each model row carries its own image setting
+// (unknown / accepted / text only), prefilled from models.dev - `image` in
+// `modalities.input` - whenever the model is picked from the catalog, added by
+// id, or refreshed.
+//
+// The image bytes live in the persisted transcript and are resent on every later
+// turn, which is why the cap exists. Count one image as about 8,000 characters of
+// the context budget (`limits.context_max_chars`); the base64 length is not
+// counted, because the provider bills the picture, not the encoding.
 //
 // # Minimal config
 //
@@ -143,7 +259,8 @@ use crate::error::ApiError;
 use async_trait::async_trait;
 use kc_core::config::{
     ApprovalMode, ApprovalPolicy, Config, Limits, ModelConfig, ModelEntry, ProviderProfile,
-    SessionModelSelection, SubagentConfig,
+    SessionModelSelection, SubagentConfig, TerminalConfig, TitlesConfig, MAX_TERMINALS_HINT,
+    MAX_TERMINAL_SCROLLBACK, MAX_TITLE_CHARS_HINT, MIN_TERMINAL_SCROLLBACK,
 };
 use kc_core::error::{Error, Result};
 use kc_core::settings::Settings;
@@ -161,10 +278,12 @@ mod keys {
     pub const MODEL_NAME: &str = "model.model";
     pub const MODEL_API_KEY: &str = "model.api_key";
     pub const MODEL_TEMPERATURE: &str = "model.temperature";
+    pub const MODEL_SEND_TEMPERATURE: &str = "model.send_temperature";
     pub const MODEL_MAX_TOKENS: &str = "model.max_tokens";
     pub const MODEL_TOP_P: &str = "model.top_p";
     pub const MODEL_REQUEST_TIMEOUT: &str = "model.request_timeout_secs";
     pub const MODEL_PARALLEL_TOOL_CALLS: &str = "model.parallel_tool_calls";
+    pub const MODEL_SUPPORTS_IMAGES: &str = "model.supports_images";
     pub const MODEL_ACTIVE_PROVIDER: &str = "model.active_provider";
     pub const MODEL_ACTIVE_MODEL: &str = "model.active_model";
     /// JSON array of [`ProviderProfile`]s, keys included. Written as one row so
@@ -180,6 +299,7 @@ mod keys {
     pub const LIMITS_COMMAND_TIMEOUT_SECS: &str = "limits.command_timeout_secs";
     pub const LIMITS_MAX_COMMAND_TIMEOUT_SECS: &str = "limits.max_command_timeout_secs";
     pub const LIMITS_MAX_FILE_READ_BYTES: &str = "limits.max_file_read_bytes";
+    pub const LIMITS_MAX_IMAGE_READ_BYTES: &str = "limits.max_image_read_bytes";
     pub const LIMITS_SEARCH_MAX_RESULTS: &str = "limits.search_max_results";
     pub const LIMITS_CONTEXT_MAX_CHARS: &str = "limits.context_max_chars";
     pub const LIMITS_MAX_TOOL_CALLS_PER_TURN: &str = "limits.max_tool_calls_per_turn";
@@ -195,6 +315,12 @@ mod keys {
     pub const SUBAGENTS_ALLOW_RECURSIVE: &str = "subagents.allow_recursive";
     pub const SUBAGENTS_MAX_DEPTH: &str = "subagents.max_depth";
     pub const SUBAGENTS_TIMEOUT_SECS: &str = "subagents.timeout_secs";
+
+    pub const TITLES_ENABLED: &str = "titles.enabled";
+    pub const TITLES_PROVIDER: &str = "titles.provider";
+    pub const TITLES_MODEL: &str = "titles.model";
+    pub const TITLES_MAX_CHARS: &str = "titles.max_chars";
+    pub const TITLES_TIMEOUT_SECS: &str = "titles.timeout_secs";
 }
 
 // ---------------------------------------------------------------------------
@@ -217,12 +343,16 @@ pub struct ModelPatch {
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub temperature: Option<f32>,
+    /// Send a temperature at all. Default stays whatever was stored (off).
+    pub send_temperature: Option<bool>,
     #[serde(default, deserialize_with = "double_option")]
     pub max_tokens: Option<Option<u32>>,
     #[serde(default, deserialize_with = "double_option")]
     pub top_p: Option<Option<f32>>,
     pub request_timeout_secs: Option<u64>,
     pub parallel_tool_calls: Option<bool>,
+    /// Whether the model accepts image input (`read_file` on a PNG/JPEG/...).
+    pub supports_images: Option<bool>,
     /// Write-only. Empty strings are treated as absent.
     pub api_key: Option<String>,
     /// Erase the stored API key (wins over `api_key`).
@@ -241,6 +371,7 @@ pub struct LimitsPatch {
     pub command_timeout_secs: Option<u64>,
     pub max_command_timeout_secs: Option<u64>,
     pub max_file_read_bytes: Option<usize>,
+    pub max_image_read_bytes: Option<usize>,
     pub search_max_results: Option<usize>,
     pub context_max_chars: Option<usize>,
     pub max_tool_calls_per_turn: Option<usize>,
@@ -263,6 +394,21 @@ pub struct SubagentsPatch {
     pub max_continues: Option<u32>,
     pub allow_recursive: Option<bool>,
     pub max_depth: Option<u8>,
+    pub timeout_secs: Option<u64>,
+}
+
+/// `[titles]` section of `PATCH /api/config`.
+///
+/// `provider`/`model` are plain strings, not `Option<Option<String>>`: an empty
+/// string is the documented spelling of "inherit the session's model", which is
+/// exactly what `TitlesConfig` stores, so there is nothing to distinguish.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TitlesPatch {
+    pub enabled: Option<bool>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub max_chars: Option<usize>,
     pub timeout_secs: Option<u64>,
 }
 
@@ -313,6 +459,111 @@ pub struct ConfigPatch {
     pub limits: Option<LimitsPatch>,
     pub approvals: Option<ApprovalsPatch>,
     pub subagents: Option<SubagentsPatch>,
+    pub titles: Option<TitlesPatch>,
+}
+
+impl ConfigPatch {
+    /// The security-relevant fields this patch would change, by documented name.
+    ///
+    /// These are the settings that decide *whether a human is asked* and *where
+    /// the prompts go*: `approvals` (the human gate), `model.base_url` /
+    /// `model.api_key` (the endpoint that receives every prompt and every
+    /// command's output), `providers` (the same, for every saved profile) and
+    /// `active_provider` / `active_model` (which of those profiles is live).
+    /// `project_roots` and `admin_token` are listed for completeness: they are
+    /// not part of [`ConfigPatch`] (the API cannot change them), but a future
+    /// field must not silently skip the gate.
+    ///
+    /// An empty result means the patch is safe to apply with the ordinary bearer
+    /// token alone.
+    pub fn security_fields(&self) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+        if self.approvals.is_some() {
+            fields.push("approvals");
+        }
+        if let Some(model) = &self.model {
+            if model.base_url.is_some() {
+                fields.push("model.base_url");
+            }
+            // `clear_api_key` erases the credential, so it is as sensitive as
+            // setting one.
+            if model.api_key.is_some() || model.clear_api_key.is_some() {
+                fields.push("model.api_key");
+            }
+        }
+        if self.providers.is_some() {
+            fields.push("providers");
+        }
+        if let Some(active) = &self.active {
+            if active.provider.is_some() {
+                fields.push("active_provider");
+            }
+            if active.model.is_some() {
+                fields.push("active_model");
+            }
+        }
+        fields
+    }
+}
+
+/// Header that carries the admin credential for security-relevant settings
+/// changes. Deliberately *not* `Authorization`: the bearer token is the ordinary
+/// API credential, and the admin token is a second, stronger one.
+pub const ADMIN_TOKEN_HEADER: &str = "x-karucode-admin-token";
+
+/// Constant-time byte comparison. `crate::app` has an identical private helper
+/// for the bearer token; it is not reachable from here, so this mirrors it
+/// (length check first, then XOR-accumulate) rather than comparing with `==`,
+/// which would leak the matching prefix length through timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Enforce the admin gate for a settings patch.
+///
+/// * `admin_token = None` - no gate (the historical behaviour); the caller logs
+///   a warning once at startup.
+/// * `admin_token = Some(_)` and the patch touches no security field - allowed
+///   with the ordinary credential.
+/// * `admin_token = Some(_)` and the patch touches a security field - the
+///   `X-Karucode-Admin-Token` header must match, otherwise `403`.
+///
+/// Returns the names of the security fields that were authorised, so the caller
+/// can log them (names only, never values).
+pub fn authorize_patch(
+    config: &Config,
+    patch: &ConfigPatch,
+    presented: Option<&str>,
+) -> Result<Vec<&'static str>> {
+    let fields = patch.security_fields();
+    if fields.is_empty() {
+        return Ok(fields);
+    }
+    let Some(expected) = config.admin_token.as_deref().filter(|t| !t.is_empty()) else {
+        // No admin token configured: the gate is off. Startup already warned.
+        return Ok(fields);
+    };
+    let presented = presented.map(str::trim).unwrap_or_default();
+    if presented.is_empty() {
+        return Err(Error::PermissionDenied(format!(
+            "changing {} requires the admin credential: send `X-Karucode-Admin-Token` \
+             (KARUCODE_ADMIN_TOKEN)",
+            fields.join(", ")
+        )));
+    }
+    if !constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+        return Err(Error::PermissionDenied(
+            "the admin credential is not valid for this change".into(),
+        ));
+    }
+    Ok(fields)
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +624,21 @@ impl SettingsHandle {
                 .await
                 .map_err(|e| Error::Store(format!("could not read persisted settings: {e}")))?;
             apply_rows_resilient(&mut config, &rows, legacy_config);
+        }
+        // Warn once, here, because this runs exactly once per process: without
+        // an admin token any bearer-token holder can turn approvals off and
+        // repoint the model endpoint, which is the whole human gate.
+        if config
+            .admin_token
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            warn!(
+                "no admin token configured (KARUCODE_ADMIN_TOKEN): any API client can change \
+                 approvals, the model endpoint and provider credentials via PATCH /api/config"
+            );
         }
         Ok(Arc::new(Self {
             config: RwLock::new(config),
@@ -503,6 +769,37 @@ impl SettingsHandle {
             "limits": cfg.limits,
             "approvals": cfg.approvals,
             "subagents": cfg.subagents,
+            "titles": {
+                "enabled": cfg.titles.enabled,
+                "provider": cfg.titles.provider,
+                "model": cfg.titles.model,
+                "max_chars": cfg.titles.max_chars,
+                "timeout_secs": cfg.titles.timeout_secs,
+                // What a run would actually ask. `null` provider/model means
+                // "inherits the session's model", and the settings screen shows
+                // the resolved name so the inheritance is not a mystery.
+                "resolved": resolved_title_model(&cfg).map(|model| serde_json::json!({
+                    "provider": model.provider,
+                    "model": model.model,
+                    "inherited": cfg.titles.inherits_session_model(),
+                })),
+            },
+            // Plugin hot-reload settings: read-only here (they are not part of
+            // `PATCH /api/config`), but the settings sheet shows what the server
+            // is actually watching on, which is the difference between "my edit
+            // is loading" and "my edit will never load".
+            "plugins_watch": cfg.plugins_watch,
+            "plugins_watch_secs": cfg.plugins_watch_secs,
+            // The browser terminal. `shell` is resolved so the UI can say what
+            // would actually be spawned, and `enabled` is what hides the tab: a
+            // deployment that must not offer a shell sets KARUCODE_TERMINALS=0.
+            "terminals": {
+                "enabled": cfg.terminals.enabled,
+                "shell": cfg.terminals.shell_program(),
+                "scrollback_bytes": cfg.terminals.replay_capacity(),
+                "max_terminals": cfg.terminals.terminal_budget(),
+                "idle_timeout_secs": cfg.terminals.idle_timeout_secs,
+            },
             "settings_locked": cfg.lock_settings,
             "version": crate::VERSION,
         })
@@ -558,13 +855,15 @@ pub fn resolve_session_model(
         return config.effective_model();
     };
 
-    let mut model = config.model_for_profile(profile);
+    let mut model = config.model_for(profile, &selection.model);
     let model_id = selection.model.trim();
     let known =
         profile.models.is_empty() || profile.models.iter().any(|entry| entry.id == model_id);
-    if known {
-        model.model = model_id.to_string();
-    } else {
+    if !known {
+        // An unknown id was never looked up in the profile's model list, so the
+        // per-model metadata above is missing: fall back to the profile default
+        // (which also resets `supports_images` to that model's declaration).
+        model = config.model_for_profile(profile);
         warn!(
             provider = %profile.id,
             model = model_id,
@@ -586,6 +885,71 @@ pub fn resolve_session_model(
         );
     }
     model
+}
+
+/// Resolve the model that writes **session titles**.
+///
+/// Three cases, in order:
+///
+/// 1. `[titles] provider` + `model` both set: that profile and that model.
+///    A profile/model that no longer exists falls back to case 2 (a stale title
+///    model must not silently disable the feature).
+/// 2. `[titles] provider` alone: that profile's default model.
+/// 3. nothing set (the default): the install-wide default model. This is what
+///    "inherit" means on the server side; a session with a *pin* inherits its own
+///    pin instead, which the caller resolves with [`resolved_title_model_for_session`].
+pub fn resolved_title_model(config: &Config) -> Option<ModelConfig> {
+    let profile_id = config.titles.provider_id();
+    let model_id = config.titles.model_id();
+    match (profile_id, model_id) {
+        (Some(profile_id), model) => {
+            match config
+                .providers
+                .iter()
+                .find(|profile| profile.id == profile_id)
+            {
+                Some(profile) => Some(match model {
+                    Some(model_id) => config.model_for(profile, model_id),
+                    None => config.model_for_profile(profile),
+                }),
+                None => {
+                    warn!(
+                        provider = profile_id,
+                        "titles.provider no longer exists; titles follow the default model"
+                    );
+                    Some(config.effective_model())
+                }
+            }
+        }
+        (None, Some(model_id)) => {
+            // A model id with no provider: use the active profile, which is
+            // where the user's other model choices live.
+            Some(match config.active_profile() {
+                Some(profile) => config.model_for(profile, model_id),
+                None => {
+                    let mut model = config.effective_model();
+                    model.model = model_id.to_string();
+                    model
+                }
+            })
+        }
+        (None, None) => Some(config.effective_model()),
+    }
+}
+
+/// The model that writes titles **for one session**.
+///
+/// An explicit `[titles]` model always wins. Otherwise the session's own pin is
+/// inherited, so a session running a local 3B model titles itself with that model
+/// rather than reaching for the install-wide default it is not otherwise using.
+pub fn resolved_title_model_for_session(
+    config: &Config,
+    selection: Option<&SessionModelSelection>,
+) -> Option<ModelConfig> {
+    if config.titles.inherits_session_model() {
+        return Some(resolve_session_model(config, selection));
+    }
+    resolved_title_model(config)
 }
 
 /// Validate a session's model selection against the live provider profiles.
@@ -624,10 +988,12 @@ pub fn public_model(model: &ModelConfig) -> serde_json::Value {
         "base_url": model.base_url,
         "model": model.model,
         "temperature": round(model.temperature),
+        "send_temperature": model.send_temperature,
         "max_tokens": model.max_tokens,
         "top_p": model.top_p.map(round),
         "request_timeout_secs": model.request_timeout_secs,
         "parallel_tool_calls": model.parallel_tool_calls,
+        "supports_images": model.supports_images,
         "api_key_set": api_key_set(model),
     })
 }
@@ -666,6 +1032,9 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         if let Some(name) = &model.model {
             config.model.model = name.clone();
         }
+        if let Some(send) = model.send_temperature {
+            config.model.send_temperature = send;
+        }
         if let Some(temperature) = model.temperature {
             config.model.temperature = temperature;
         }
@@ -680,6 +1049,9 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         }
         if let Some(parallel) = model.parallel_tool_calls {
             config.model.parallel_tool_calls = parallel;
+        }
+        if let Some(images) = model.supports_images {
+            config.model.supports_images = images;
         }
         if model.clear_api_key != Some(true) {
             if let Some(key) = &model.api_key {
@@ -835,6 +1207,9 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         if let Some(v) = limits.max_file_read_bytes {
             config.limits.max_file_read_bytes = v;
         }
+        if let Some(v) = limits.max_image_read_bytes {
+            config.limits.max_image_read_bytes = v;
+        }
         if let Some(v) = limits.search_max_results {
             config.limits.search_max_results = v;
         }
@@ -885,6 +1260,27 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         if let Some(v) = subagents.timeout_secs {
             config.subagents.timeout_secs = v;
         }
+    }
+
+    if let Some(titles) = &patch.titles {
+        if let Some(v) = titles.enabled {
+            config.titles.enabled = v;
+        }
+        if let Some(v) = &titles.provider {
+            config.titles.provider = v.trim().to_string();
+        }
+        if let Some(v) = &titles.model {
+            config.titles.model = v.trim().to_string();
+        }
+        if let Some(v) = titles.max_chars {
+            config.titles.max_chars = v;
+        }
+        if let Some(v) = titles.timeout_secs {
+            config.titles.timeout_secs = v;
+        }
+        // `enabled` and the model ids are checked where the config is validated;
+        // the content of the ids is free-form here because a provider profile can
+        // be renamed in the same patch.
     }
 
     // Repair a missing selection (first profile added, active profile deleted)
@@ -939,7 +1335,129 @@ pub fn validate_settings(config: &Config) -> Result<()> {
     check_provider_id(&config.model.provider, &supported)?;
     validate_limits(&config.limits)?;
     validate_approvals(&config.approvals)?;
-    validate_subagents(&config.subagents)
+    validate_subagents(&config.subagents)?;
+    validate_titles(&config.titles)?;
+    validate_terminals(&config.terminals)
+}
+
+/// Longest a terminal may sit with no connected browser before its shell is
+/// reaped, in seconds (30 days). Past this the setting is a typo, not a policy.
+const MAX_TERMINAL_IDLE_SECS: u64 = 30 * 24 * 3600;
+
+/// Validate `[terminals]`.
+///
+/// The shell is checked here rather than at spawn time: a bad `terminals.shell`
+/// would otherwise surface as a websocket that closes with a message, every time
+/// someone opens the tab. An absolute path must exist and be executable; a bare
+/// name must resolve on `PATH` the way the child's `exec` would.
+///
+/// `enabled = false` still validates the rest: the values are what the settings
+/// screen shows, and re-enabling later must not revive a broken shell.
+fn validate_terminals(terminals: &TerminalConfig) -> Result<()> {
+    if terminals.scrollback_bytes < MIN_TERMINAL_SCROLLBACK
+        || terminals.scrollback_bytes > MAX_TERMINAL_SCROLLBACK
+    {
+        return Err(Error::BadRequest(format!(
+            "terminals.scrollback_bytes must be between {MIN_TERMINAL_SCROLLBACK} and \
+             {MAX_TERMINAL_SCROLLBACK} (got {})",
+            terminals.scrollback_bytes
+        )));
+    }
+    if terminals.max_terminals == 0 || terminals.max_terminals > MAX_TERMINALS_HINT {
+        return Err(Error::BadRequest(format!(
+            "terminals.max_terminals must be between 1 and {MAX_TERMINALS_HINT} (got {})",
+            terminals.max_terminals
+        )));
+    }
+    if terminals.idle_timeout_secs > MAX_TERMINAL_IDLE_SECS {
+        return Err(Error::BadRequest(format!(
+            "terminals.idle_timeout_secs must be at most {MAX_TERMINAL_IDLE_SECS} (0 keeps a shell \
+             until the server restarts)"
+        )));
+    }
+    let shell = terminals.shell.trim();
+    if shell.is_empty() {
+        return Ok(());
+    }
+    if shell.chars().any(|c| c.is_control()) {
+        return Err(Error::BadRequest(
+            "terminals.shell may not contain control characters".into(),
+        ));
+    }
+    // A shell is one executable, not a command line: `"bash -l"` would be a
+    // confusing strerror from `exec`, and a space in a path is better handled by
+    // an absolute path than by surprise word-splitting.
+    if shell.contains(char::is_whitespace) {
+        return Err(Error::BadRequest(
+            "terminals.shell must be one executable path or name, without arguments".into(),
+        ));
+    }
+    if shell.contains('/') {
+        let path = std::path::Path::new(shell);
+        let meta = std::fs::metadata(path).map_err(|e| {
+            Error::BadRequest(format!("terminals.shell `{shell}` is not usable: {e}"))
+        })?;
+        if !meta.is_file() {
+            return Err(Error::BadRequest(format!(
+                "terminals.shell `{shell}` is not a regular file"
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if meta.permissions().mode() & 0o111 == 0 {
+                return Err(Error::BadRequest(format!(
+                    "terminals.shell `{shell}` is not executable"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Longest a title request may wait. A title nobody sees for a minute is worse
+/// than the heuristic title it was going to replace.
+const MAX_TITLE_TIMEOUT_SECS: u64 = 120;
+
+/// Validate `[titles]`.
+///
+/// **`enabled` and the model ids are deliberately not required to resolve here.**
+/// Titles are a convenience; an install whose title model was deleted should keep
+/// running (and fall back), temporarily disable titles (which is what the user
+/// asked for), or rename the profile (which is what validation would forbid).
+/// What *is* validated is what a bad value would make dangerous: a title budget
+/// of zero (an empty title), a run-away `max_chars`, and a timeout of zero (an
+/// instant, always-failing request).
+fn validate_titles(titles: &TitlesConfig) -> Result<()> {
+    if titles.max_chars < 8 || titles.max_chars > MAX_TITLE_CHARS_HINT {
+        return Err(Error::BadRequest(format!(
+            "titles.max_chars must be between 8 and {MAX_TITLE_CHARS_HINT} (got {})",
+            titles.max_chars
+        )));
+    }
+    if titles.timeout_secs == 0 {
+        return Err(Error::BadRequest(
+            "titles.timeout_secs must be at least 1".into(),
+        ));
+    }
+    if titles.timeout_secs > MAX_TITLE_TIMEOUT_SECS {
+        return Err(Error::BadRequest(format!(
+            "titles.timeout_secs must be at most {MAX_TITLE_TIMEOUT_SECS}"
+        )));
+    }
+    for (field, value) in [("provider", &titles.provider), ("model", &titles.model)] {
+        if value.len() > 200 {
+            return Err(Error::BadRequest(format!(
+                "titles.{field} is longer than 200 characters"
+            )));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(Error::BadRequest(format!(
+                "titles.{field} may not contain control characters"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Bound on how many endpoints one install may configure. Generous for a real
@@ -1285,9 +1803,14 @@ fn validate_authority(authority: &str, url: &str) -> Result<()> {
 /// single read allocate gigabytes and OOM the process.
 const LIMITS_BOUNDS: &[(&str, u64, u64)] = &[
     ("limits.max_file_read_bytes", 1, 5_000_000),
+    // An image is base64-encoded into the transcript (a third larger) and resent
+    // every turn, so the ceiling is the same order as a file read.
+    ("limits.max_image_read_bytes", 1, 20_000_000),
     ("limits.max_tool_output_bytes", 256, 1_000_000),
     ("limits.max_command_output_bytes", 256, 1_000_000),
-    ("limits.context_max_chars", 10_000, 4_000_000),
+    // 0 = derive the budget from the resolved model's context window; any
+    // non-zero value is an explicit ceiling for the install.
+    ("limits.context_max_chars", 0, 4_000_000),
     ("limits.max_iterations", 1, 10_000),
     ("limits.max_run_secs", 10, 604_800),
     ("limits.max_continues", 0, 1_000),
@@ -1314,10 +1837,14 @@ fn check_bounds(name: &str, value: u64, min: u64, max: u64) -> Result<()> {
 }
 
 fn validate_limits(limits: &Limits) -> Result<()> {
-    let values: [(&str, u64); 11] = [
+    let values: [(&str, u64); 12] = [
         (
             "limits.max_file_read_bytes",
             limits.max_file_read_bytes as u64,
+        ),
+        (
+            "limits.max_image_read_bytes",
+            limits.max_image_read_bytes as u64,
         ),
         (
             "limits.max_tool_output_bytes",
@@ -1458,6 +1985,10 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
     );
     rows.insert(keys::MODEL_TEMPERATURE, model.temperature.to_string());
     rows.insert(
+        keys::MODEL_SEND_TEMPERATURE,
+        model.send_temperature.to_string(),
+    );
+    rows.insert(
         keys::MODEL_MAX_TOKENS,
         model.max_tokens.map(|v| v.to_string()).unwrap_or_default(),
     );
@@ -1472,6 +2003,10 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
     rows.insert(
         keys::MODEL_PARALLEL_TOOL_CALLS,
         model.parallel_tool_calls.to_string(),
+    );
+    rows.insert(
+        keys::MODEL_SUPPORTS_IMAGES,
+        model.supports_images.to_string(),
     );
     rows.insert(
         keys::PROVIDERS,
@@ -1513,6 +2048,10 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
     rows.insert(
         keys::LIMITS_MAX_FILE_READ_BYTES,
         limits.max_file_read_bytes.to_string(),
+    );
+    rows.insert(
+        keys::LIMITS_MAX_IMAGE_READ_BYTES,
+        limits.max_image_read_bytes.to_string(),
     );
     rows.insert(
         keys::LIMITS_SEARCH_MAX_RESULTS,
@@ -1564,6 +2103,13 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
         keys::SUBAGENTS_TIMEOUT_SECS,
         subagents.timeout_secs.to_string(),
     );
+
+    let titles = &config.titles;
+    rows.insert(keys::TITLES_ENABLED, titles.enabled.to_string());
+    rows.insert(keys::TITLES_PROVIDER, titles.provider.clone());
+    rows.insert(keys::TITLES_MODEL, titles.model.clone());
+    rows.insert(keys::TITLES_MAX_CHARS, titles.max_chars.to_string());
+    rows.insert(keys::TITLES_TIMEOUT_SECS, titles.timeout_secs.to_string());
 
     rows
 }
@@ -1646,6 +2192,11 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
         keys::MODEL_ACTIVE_MODEL => {
             config.active_model = (!value.trim().is_empty()).then(|| value.trim().to_string());
         }
+        keys::MODEL_SEND_TEMPERATURE => {
+            if let Ok(v) = value.parse::<bool>() {
+                config.model.send_temperature = v;
+            }
+        }
         keys::MODEL_TEMPERATURE => {
             if let Some(v) = parse_value::<f32>(key, value) {
                 config.model.temperature = v;
@@ -1673,6 +2224,11 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
         keys::MODEL_PARALLEL_TOOL_CALLS => {
             if let Some(v) = parse_bool(key, value) {
                 config.model.parallel_tool_calls = v;
+            }
+        }
+        keys::MODEL_SUPPORTS_IMAGES => {
+            if let Some(v) = parse_bool(key, value) {
+                config.model.supports_images = v;
             }
         }
 
@@ -1719,6 +2275,11 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
         keys::LIMITS_MAX_FILE_READ_BYTES => {
             if let Some(v) = parse_value(key, value) {
                 config.limits.max_file_read_bytes = v;
+            }
+        }
+        keys::LIMITS_MAX_IMAGE_READ_BYTES => {
+            if let Some(v) = parse_value(key, value) {
+                config.limits.max_image_read_bytes = v;
             }
         }
         keys::LIMITS_SEARCH_MAX_RESULTS => {
@@ -1791,6 +2352,24 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
             }
         }
 
+        keys::TITLES_ENABLED => {
+            if let Some(v) = parse_bool(key, value) {
+                config.titles.enabled = v;
+            }
+        }
+        keys::TITLES_PROVIDER => config.titles.provider = value.trim().to_string(),
+        keys::TITLES_MODEL => config.titles.model = value.trim().to_string(),
+        keys::TITLES_MAX_CHARS => {
+            if let Some(v) = parse_value(key, value) {
+                config.titles.max_chars = v;
+            }
+        }
+        keys::TITLES_TIMEOUT_SECS => {
+            if let Some(v) = parse_value(key, value) {
+                config.titles.timeout_secs = v;
+            }
+        }
+
         // Unknown keys belong to a newer build; ignore instead of failing.
         _ => {}
     }
@@ -1835,6 +2414,141 @@ mod tests {
         }
     }
 
+    fn config_with_admin(token: Option<&str>) -> Config {
+        Config {
+            admin_token: token.map(str::to_string),
+            ..Config::default()
+        }
+    }
+
+    fn approvals_patch(mode: &str) -> ConfigPatch {
+        ConfigPatch {
+            approvals: Some(ApprovalsPatch {
+                mode: Some(mode.to_string()),
+                ..ApprovalsPatch::default()
+            }),
+            ..ConfigPatch::default()
+        }
+    }
+
+    fn limits_patch() -> ConfigPatch {
+        ConfigPatch {
+            limits: Some(LimitsPatch {
+                max_iterations: Some(42),
+                ..LimitsPatch::default()
+            }),
+            ..ConfigPatch::default()
+        }
+    }
+
+    #[test]
+    fn security_fields_are_recognised() {
+        assert_eq!(approvals_patch("auto").security_fields(), vec!["approvals"]);
+        assert!(limits_patch().security_fields().is_empty());
+
+        let endpoint = ConfigPatch {
+            model: Some(ModelPatch {
+                base_url: Some("https://attacker.example/v1".into()),
+                ..ModelPatch::default()
+            }),
+            ..ConfigPatch::default()
+        };
+        assert_eq!(endpoint.security_fields(), vec!["model.base_url"]);
+
+        let key = ConfigPatch {
+            model: Some(ModelPatch {
+                api_key: Some("sk-x".into()),
+                ..ModelPatch::default()
+            }),
+            ..ConfigPatch::default()
+        };
+        assert_eq!(key.security_fields(), vec!["model.api_key"]);
+
+        // Erasing the key is as sensitive as setting one.
+        let clear = ConfigPatch {
+            model: Some(ModelPatch {
+                clear_api_key: Some(true),
+                ..ModelPatch::default()
+            }),
+            ..ConfigPatch::default()
+        };
+        assert_eq!(clear.security_fields(), vec!["model.api_key"]);
+
+        let providers = ConfigPatch {
+            providers: Some(ProvidersPatch::default()),
+            ..ConfigPatch::default()
+        };
+        assert_eq!(providers.security_fields(), vec!["providers"]);
+
+        let active = ConfigPatch {
+            active: Some(ActivePatch {
+                provider: Some("p".into()),
+                model: Some("m".into()),
+            }),
+            ..ConfigPatch::default()
+        };
+        assert_eq!(
+            active.security_fields(),
+            vec!["active_provider", "active_model"]
+        );
+    }
+
+    #[test]
+    fn without_an_admin_token_the_gate_is_off() {
+        let config = config_with_admin(None);
+        assert!(authorize_patch(&config, &approvals_patch("auto"), None).is_ok());
+        // An empty token is treated as unset rather than as "match the empty
+        // string", which would be a trivially bypassable gate.
+        let empty = config_with_admin(Some(""));
+        assert!(authorize_patch(&empty, &approvals_patch("auto"), None).is_ok());
+    }
+
+    #[test]
+    fn a_security_patch_without_the_admin_token_is_refused() {
+        let config = config_with_admin(Some("s3cret-admin"));
+        let error = authorize_patch(&config, &approvals_patch("auto"), None).unwrap_err();
+        assert!(matches!(error, Error::PermissionDenied(_)), "{error:?}");
+        assert!(error.to_string().contains("X-Karucode-Admin-Token"));
+        // The message names the field but never the credential.
+        assert!(error.to_string().contains("approvals"));
+        assert!(!error.to_string().contains("s3cret-admin"));
+    }
+
+    #[test]
+    fn a_wrong_admin_token_is_refused() {
+        let config = config_with_admin(Some("s3cret-admin"));
+        let error =
+            authorize_patch(&config, &approvals_patch("auto"), Some("s3cret-admi")).unwrap_err();
+        assert!(matches!(error, Error::PermissionDenied(_)), "{error:?}");
+        assert!(!error.to_string().contains("s3cret-admin"));
+    }
+
+    #[test]
+    fn the_admin_token_authorises_a_security_patch() {
+        let config = config_with_admin(Some("s3cret-admin"));
+        let fields = authorize_patch(&config, &approvals_patch("auto"), Some("s3cret-admin"))
+            .expect("authorised");
+        assert_eq!(fields, vec!["approvals"]);
+        // Surrounding whitespace from a header value is tolerated.
+        assert!(authorize_patch(&config, &approvals_patch("auto"), Some(" s3cret-admin ")).is_ok());
+    }
+
+    #[test]
+    fn a_non_security_patch_needs_no_admin_token() {
+        let config = config_with_admin(Some("s3cret-admin"));
+        let fields = authorize_patch(&config, &limits_patch(), None).expect("allowed");
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn the_admin_comparison_is_exact_and_constant_time() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
     #[test]
     fn every_limit_is_bounded_and_names_the_field() {
         // (mutation, expected field name in the error)
@@ -1842,7 +2556,9 @@ mod tests {
             ("limits.max_file_read_bytes", 0, 5_000_001),
             ("limits.max_tool_output_bytes", 255, 1_000_001),
             ("limits.max_command_output_bytes", 255, 1_000_001),
-            ("limits.context_max_chars", 9_999, 4_000_001),
+            // 0 is the "derive it from the model" sentinel, so only the high end
+            // is out of range.
+            ("limits.context_max_chars", 4_000_001, 4_000_001),
             ("limits.max_iterations", 0, 10_001),
             ("limits.max_run_secs", 9, 604_801),
             ("limits.max_continues", 1_001, 1_001),
@@ -2402,6 +3118,48 @@ mod tests {
         let resolved = resolve_session_model(&cfg, Some(&selection("gateway", "removed", None)));
         assert_eq!(resolved.model, "model-a");
         assert_eq!(resolved.base_url, "https://gw.example/v1");
+    }
+
+    /// The reported bug, end to end at the resolver: a session pinned to a
+    /// vision model must be able to read an image even though the profile's
+    /// default model (and the install-wide flag) say text-only. `read_file`
+    /// reads `ToolCtx::supports_images`, which the runtime fills from exactly
+    /// this `ModelConfig`.
+    #[test]
+    fn a_session_pinned_to_a_vision_model_can_see_images() {
+        let mut cfg = two_profile_config();
+        // The profile's *first* model is the install-wide default: text-only.
+        cfg.model.supports_images = false;
+        cfg.providers[0].models.push(ModelEntry {
+            id: "gpt-4o".into(),
+            name: Some("GPT-4o".into()),
+            context_window: Some(128_000),
+            vision: Some(true),
+            ..ModelEntry::default()
+        });
+        cfg.normalize_providers();
+
+        // The install-wide default stays text-only.
+        assert!(!resolve_session_model(&cfg, None).supports_images);
+        assert!(
+            !resolve_session_model(&cfg, Some(&selection("gateway", "model-a", None)))
+                .supports_images
+        );
+
+        // The pin is what the session runs, so it is what decides.
+        let pinned = resolve_session_model(&cfg, Some(&selection("gateway", "gpt-4o", None)));
+        assert_eq!(pinned.model, "gpt-4o");
+        assert!(
+            pinned.supports_images,
+            "a session pinned to a vision model must be allowed to read images"
+        );
+        // The per-model metadata follows the pin, not the profile default.
+        assert_eq!(pinned.context_window, Some(128_000));
+
+        // A stale pin still resolves to the default model *and* its capabilities.
+        let stale = resolve_session_model(&cfg, Some(&selection("gateway", "deleted", None)));
+        assert_eq!(stale.model, "model-a");
+        assert!(!stale.supports_images);
     }
 
     #[test]

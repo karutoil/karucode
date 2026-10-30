@@ -5,7 +5,10 @@
 //! * no `provider`: the list of provider ids and names;
 //! * with `provider=<id>`: that provider's models, with the fields the UI
 //!   prefills (`name`, `context_window`, `max_output_tokens`, `tool_call`,
-//!   `reasoning`, costs).
+//!   `reasoning`, `vision`, costs). `vision` is `true` only when models.dev says
+//!   the model takes **image** input (`modalities.input` contains `image`), so
+//!   the settings screen can prefill `[[providers.models]] vision = true` without
+//!   offering a picture to an audio- or pdf-only model.
 //!
 //! `refresh=true` bypasses the cache. A catalog that cannot be reached answers
 //! `200 {ok:false,...}` when there is nothing cached (the settings screen shows

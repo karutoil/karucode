@@ -7,7 +7,7 @@
 // @kc-title: Work on more than one project
 // @kc-summary: How projects map to directories, how sessions are confined to one, and what happens when a project's directory moves or is deleted.
 // @kc-tags: projects, sessions, workspace, directories
-// @kc-applies-to: route:GET /api/projects, route:POST /api/projects, route:PATCH /api/projects/:id, route:DELETE /api/projects/:id, route:GET /api/sessions, route:PATCH /api/sessions/:id/model, config:workspace, env:KARUCODE_WORKSPACE, cmd:--workspace, ui:ProjectRail, concept:session workspace
+// @kc-applies-to: route:GET /api/projects, route:POST /api/projects, route:PATCH /api/projects/:id, route:DELETE /api/projects/:id, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:PATCH /api/sessions/:id/model, config:workspace, env:KARUCODE_WORKSPACE, cmd:--workspace, ui:ProjectRail, concept:session workspace, concept:favicon.ico
 //
 // A **project** is a canonical directory plus a display name. It is not a git
 // repository, a branch or a worktree - just the root every run in its sessions is
@@ -41,6 +41,56 @@
 // inherit the workspace of the run that spawned them. The workspace explorer and
 // `/api/workspace/*` use the same rule.
 //
+// The one exception is the system temporary directory, which every workspace
+// also allows (`allow_temp_dir`, on by default) so scratch files, build output
+// and screenshots in `/tmp` are usable. It is an additional root, not a widening
+// of the project's: `..` out of it and symlinks pointing elsewhere are still
+// refused. `project_roots` below is a different setting - it decides where a
+// project may be *created*, not what a run's tools may touch.
+//
+// # Which directories a project may be created in
+//
+// Any existing directory, except `/`. There is no allowlist by default: adding a
+// second checkout that sits next to the workspace is the normal case and must not
+// need an environment variable. `/` itself is refused, because a project's
+// directory is the confinement root for its sessions and `/` would make every
+// file tool able to read the whole disk.
+//
+// Pin the list with `project_roots` (`KARUCODE_PROJECT_ROOTS`, colon-separated)
+// when the server is reachable by more than one person, or when you want the API
+// unable to register a directory outside your projects. Paths are compared
+// component-wise on canonical paths, so `/srv/app-evil` is not inside `/srv/app`.
+//
+// # The project rail icon
+//
+// Each square in the project rail draws the project's own `favicon.ico` when it
+// has one, and its initials when it does not. The file is found by
+// `GET /api/projects/:id/favicon`, which searches that project's directory:
+//
+// * only the name `favicon.ico`, matched case-insensitively (a `favicon.svg` or
+//   `apple-touch-icon.png` is not considered);
+// * `.gitignore` rules apply - the project's own, nested ones and
+//   `.git/info/exclude` - even outside a git repository, so a favicon in ignored
+//   build output or a vendored copy is skipped. Your *global* gitignore is not
+//   read, so the answer does not depend on which machine serves the project;
+// * hidden directories, `node_modules` and `target` are skipped, the walk stops
+//   after 6 levels and 20000 entries, and the shallowest match wins
+//   (`favicon.ico` beats `public/favicon.ico` beats `web/public/favicon.ico`);
+// * a file over 512 KiB, a symlink pointing outside the project, and an empty
+//   file are all treated as "no icon".
+//
+// No icon is an empty `204 No Content`, which is the normal case and is not an
+// error: the rail falls back to initials. It is deliberately not a `404` - a
+// browser logs every 4xx as `Failed to load resource`, so an expected absence
+// would look like a broken deployment. An unknown project id is still a `404`,
+// because that one is a caller mistake.
+//
+// Nothing is cached server-side, so replacing a favicon shows up on the next
+// load of the page. The bytes are fetched with the bearer token (an `<img src>`
+// cannot send one) and turned into an object URL, so this works on a deployment
+// with `KARUCODE_AUTH_TOKEN` set - and it is why the page CSP must allow
+// `blob:` in `img-src`.
+//
 // # Deleting
 //
 // Deleting a project removes its rows from SQLite and never touches files on
@@ -63,12 +113,14 @@
 // * Symlinked project roots are canonicalised on insert, so the stored path is the
 //   real one.
 //
-// Full reference: `README.md` (Projects), `docs/API.md` (projects).
+// Full reference: `docs/ARCHITECTURE.md` (Workspace per run), `docs/API.md`
+// (projects).
 
 use crate::catalog::CatalogCache;
 use crate::host::HostAllowlist;
 use crate::settings::SettingsHandle;
 use crate::static_ui::WebAssets;
+use crate::terminals::TerminalRegistry;
 use async_trait::async_trait;
 use kc_core::error::{Error, Result};
 use kc_core::hooks::Hooks;
@@ -78,7 +130,7 @@ use kc_core::provider::ProviderFactory;
 use kc_core::store::Store;
 use kc_core::tool::{Tool, ToolRegistry};
 use kc_mcp::McpManager;
-use kc_plugin_host::{namespaced_name, PluginHost};
+use kc_plugin_host::{namespaced_name, PluginHost, RescanReport};
 use kc_runtime::Runtime;
 use kc_runtime::WorkspaceProvider;
 use serde_json::json;
@@ -104,17 +156,40 @@ pub fn now_ms() -> i64 {
 /// current by the project routes. The default workspace (the `--workspace` /
 /// `KARUCODE_WORKSPACE` directory) always exists and backs sessions that are not
 /// attached to a project yet.
+///
+/// Every workspace this registry builds carries the same *extra roots* (see
+/// [`Workspace::with_extra_roots`]) - by default the system temporary directory,
+/// because build tools, screenshots and browser profiles land there and refusing
+/// them fails tool calls for no security gain. Holding them here, rather than
+/// re-reading the settings per tool call, is what makes every project and every
+/// subagent inherit the same allowlist.
 pub struct ProjectRegistry {
     default_workspace: Arc<Workspace>,
+    extra_roots: Vec<PathBuf>,
     projects: RwLock<HashMap<String, Arc<Workspace>>>,
 }
 
 impl ProjectRegistry {
     pub fn new(default_workspace: Arc<Workspace>) -> Self {
+        Self::with_extra_roots(default_workspace, Vec::new())
+    }
+
+    /// A registry whose workspaces also allow `extra_roots`.
+    ///
+    /// The default workspace passed in is expected to have been built with the
+    /// same roots (the bootstrap does that); this constructor re-applies them to
+    /// every project it registers later.
+    pub fn with_extra_roots(default_workspace: Arc<Workspace>, extra_roots: Vec<PathBuf>) -> Self {
         Self {
             default_workspace,
+            extra_roots,
             projects: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// The extra roots every workspace in this registry allows.
+    pub fn extra_roots(&self) -> &[PathBuf] {
+        &self.extra_roots
     }
 
     pub fn default_workspace(&self) -> Arc<Workspace> {
@@ -125,7 +200,10 @@ impl ProjectRegistry {
     /// directory; a project whose directory disappears later keeps its row but
     /// fails to resolve, with a message naming the directory.
     pub fn insert(&self, id: &str, root: &Path) -> Result<()> {
-        let workspace = Arc::new(Workspace::new(root)?);
+        let workspace = Arc::new(Workspace::with_extra_roots(
+            root,
+            self.extra_roots.clone(),
+        )?);
         self.projects
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -276,6 +354,10 @@ pub struct AppStateInner {
     pub projects: Arc<ProjectRegistry>,
     /// DNS-rebinding `Host` allowlist (see [`crate::host`]).
     pub host_allowlist: HostAllowlist,
+    /// Live shells, keyed by terminal id. Empty after a restart by design: the
+    /// processes are gone and a fresh shell starts on the next attach. The
+    /// durable half is the `terminals` table.
+    pub terminals: Arc<TerminalRegistry>,
     pub started: Instant,
     /// Cancelled on SIGINT/SIGTERM so SSE streams end and the server can stop.
     pub shutdown: CancellationToken,
@@ -303,6 +385,7 @@ impl AppState {
                 catalog: Arc::new(CatalogCache::new()),
                 projects: deps.projects,
                 host_allowlist: HostAllowlist::new(&deps.bind_host, deps.allowed_hosts.as_deref()),
+                terminals: Arc::new(TerminalRegistry::new()),
                 started: Instant::now(),
                 shutdown: CancellationToken::new(),
             }),
@@ -360,6 +443,11 @@ impl AppState {
 
     pub fn catalog(&self) -> &Arc<CatalogCache> {
         &self.inner.catalog
+    }
+
+    /// The live shells. See [`TerminalRegistry`].
+    pub fn terminals(&self) -> &Arc<TerminalRegistry> {
+        &self.inner.terminals
     }
 
     pub fn db_path(&self) -> &Path {
@@ -420,12 +508,83 @@ impl AppState {
         self.inner.runtime.set_tools(Arc::new(registry));
     }
 
+    /// Re-read the plugin sources and reconcile the running processes with them.
+    ///
+    /// This is what `POST /api/plugins/reload` and the watcher call. It reads the
+    /// `[[plugins]]` entries from the config file again (see
+    /// [`Config::reload_plugin_entries`]) plus `<data_dir>/plugins/*/plugin.toml`,
+    /// then adds, removes or replaces processes as needed and rebuilds the tool
+    /// registry, so the model sees the new set on its very next call.
+    ///
+    /// Returns the report and the diagnostics of the lock is already dropped, so
+    /// the caller can answer with both without waiting on another request.
+    pub async fn reload_plugins(&self) -> (RescanReport, Vec<kc_core::plugin::PluginDiagnostics>) {
+        let configs = self.inner.settings.snapshot().reload_plugin_entries();
+        let (report, diagnostics) = {
+            let mut host = self.inner.plugins.lock().await;
+            let report = host.rescan(&configs).await;
+            (report, host.diagnostics())
+        };
+        self.reload_tools().await;
+        (report, diagnostics)
+    }
+
+    /// Reload one plugin by name: re-read its sources and replace its process.
+    ///
+    /// `Err` carries the plugin host's own error (`NotFound` for an unknown
+    /// name), which the HTTP layer maps exactly like `set_enabled` does.
+    pub async fn reload_plugin(
+        &self,
+        name: &str,
+    ) -> kc_core::Result<kc_core::plugin::PluginDiagnostics> {
+        let configs = self.inner.settings.snapshot().reload_plugin_entries();
+        let diagnostics = {
+            let mut host = self.inner.plugins.lock().await;
+            host.reload(name, &configs).await?
+        };
+        self.reload_tools().await;
+        Ok(diagnostics)
+    }
+
+    /// A cheap number that changes when a plugin source changes: the manifests
+    /// and command files the host knows about, plus the config file itself (which
+    /// is where `[[plugins]]` entries live). The watcher polls it and reloads only
+    /// when it moves — unlike a filesystem event stream it cannot miss a write
+    /// that happened while the server was busy.
+    pub async fn plugin_source_stamp(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        {
+            let host = self.inner.plugins.lock().await;
+            host.source_stamp().hash(&mut hasher);
+        }
+        if let Some(path) = self.inner.settings.snapshot().config_path {
+            path.hash(&mut hasher);
+            if let Ok(meta) = std::fs::metadata(&path) {
+                meta.len().hash(&mut hasher);
+                meta.modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos() as u64)
+                    .hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
     /// `GET/PATCH /api/config` payload.
     pub async fn config_payload(&self) -> serde_json::Value {
         let mut payload = self.inner.settings.public_config().await;
         let plugins: Vec<serde_json::Value> = {
             let host = self.inner.plugins.lock().await;
             host.diagnostics().iter().map(plugin_summary).collect()
+        };
+        // Panels are grouped per plugin so the inspector knows which plugin (and
+        // version) a tab belongs to without a second request. A plugin that
+        // declares none contributes nothing.
+        let plugin_panels = {
+            let host = self.inner.plugins.lock().await;
+            host.panels()
         };
         let mcp_servers: Vec<serde_json::Value> = {
             let mcp = self.inner.mcp.lock().await;
@@ -439,6 +598,7 @@ impl AppState {
                 json!(self.inner.providers.supported()),
             );
             object.insert("plugins".into(), json!(plugins));
+            object.insert("plugin_panels".into(), json!(plugin_panels));
             object.insert("mcp_servers".into(), json!(mcp_servers));
         }
         payload

@@ -479,8 +479,8 @@ async fn upload_without_the_csrf_header_is_refused() {
 async fn upload_follows_the_session_project_when_no_project_is_given() {
     let h = HarnessBuilder::new(Vec::new()).build().await;
 
-    // A second project beside the default workspace, like the UI's rail.
-    let project_dir = h.workspace_path().parent().unwrap().join("project-two");
+    // A second project inside the default workspace, like the UI's rail.
+    let project_dir = h.workspace_path().join("project-two");
     std::fs::create_dir_all(&project_dir).unwrap();
     let project_path = project_dir
         .canonicalize()

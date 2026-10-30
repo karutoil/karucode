@@ -1,0 +1,1472 @@
+// @kc-doc: terminals
+// @kc-title: Use the terminal tab
+// @kc-summary: A real shell in the browser that survives a reload, another browser and a cleared cache - and the honest limit of what survives a restart.
+// @kc-tags: terminal, shell, pty, websocket, ui, tabs
+// @kc-applies-to: route:GET /api/terminals, route:POST /api/terminals, route:PATCH /api/terminals/:id, route:DELETE /api/terminals/:id, route:POST /api/terminals/:id/restart, route:GET /api/terminals/:id/socket, config:[terminals], config:terminals.enabled, config:terminals.shell, config:terminals.scrollback_bytes, config:terminals.max_terminals, config:terminals.idle_timeout_secs, env:KARUCODE_TERMINALS, env:KARUCODE_TERMINALS_SHELL, env:KARUCODE_TERMINALS_SCROLLBACK_BYTES, env:KARUCODE_TERMINALS_MAX, env:KARUCODE_TERMINAL_IDLE_SECS, ui:TerminalTab, file:web/src/components/TerminalTab.tsx, file:crates/kc-server/src/terminals.rs
+//
+// The **Terminal** tab in the chat area runs a real shell in a real PTY as the
+// server user, in the current project's directory. It is a shell for *you*, the
+// person operating the machine: it is not a tool the model can call and it does
+// not ask for approval, because the human typing at it is already authorised -
+// which is exactly what `run_command` asks them about.
+//
+// # What "survives" means
+//
+// | Event | Terminals |
+// | --- | --- |
+// | Reload the page, open another browser, clear site data | **all of them**, reattached to the same live shells with their scrollback replayed |
+// | Restart karucode, reboot the machine | the **tabs** - same ids, titles, order and directory - each reopening a fresh shell |
+//
+// The distinction is deliberate and it is the one thing to understand about
+// this feature. A shell is a child process of the server. Keeping it alive
+// across a server restart would need a detached daemon, and a terminal that
+// survives `systemctl restart karucode` is a terminal that outlives the thing
+// that could kill it. What is durable is the **session row** in SQLite: the tab
+// strip, the titles, the working directory and the position are global to the
+// install, not to a browser profile or a `localStorage` entry.
+//
+// # Creating and naming
+//
+// ```bash
+// # A new shell in the default workspace
+// curl -s -X POST localhost:8787/api/terminals \
+//   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' -d '{}'
+//
+// # A name and a directory (the directory must be inside a workspace root)
+// curl -s -X POST localhost:8787/api/terminals \
+//   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+//   -d '{"title":"deploy","cwd":"/home/me/app","project":"p_123"}'
+//
+// curl -s -X PATCH localhost:8787/api/terminals/t_abc \
+//   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+//   -d '{"title":"build watcher"}'      # {"title":null} restores the default
+//
+// curl -s -X DELETE localhost:8787/api/terminals/t_abc -H 'X-Karucode-Client: web'
+// curl -s -X POST localhost:8787/api/terminals/t_abc/restart -H 'X-Karucode-Client: web'
+// ```
+//
+// `POST` also accepts `cols` and `rows` (default 80x24), clamped to 20..=500 and
+// 5..=200. They only decide the initial PTY size; the browser resizes it as soon
+// as the terminal renders.
+//
+// # Attaching: `GET /api/terminals/:id/socket`
+//
+// This is the only websocket in karucode. It is a raw byte pipe with a small
+// JSON control channel:
+//
+// * **binary frames** carry PTY bytes verbatim in both directions - the browser
+//   sends what you type, the server sends what the shell printed. Nothing is
+//   interpreted, so a program that emits arbitrary bytes cannot inject a control
+//   message;
+// * **text frames** are JSON and carry only control: `{"type":"resize","cols":120,"rows":40}`,
+//   and, from the server, `{"type":"ready","replay":true,"pid":1234}`,
+//   `{"type":"exit","code":0}`, `{"type":"error","message":"..."}`.
+//
+// On attach the server first sends the tail of the replay buffer (the newest
+// `terminals.scrollback_bytes` of output) as one binary frame, then streams live
+// output. That is what makes a reconnect - a reload, a network blip, a second
+// browser tab - land on a terminal that already looks like it did.
+//
+// Because a browser cannot set a header on a websocket handshake, this route
+// also accepts `?token=<auth token>` exactly like `GET /api/events`. The
+// `Origin` header must still match `Host` (a cross-origin page cannot open it),
+// and the origin check is enforced even when no token is configured.
+//
+// # The shell
+//
+// `terminals.shell`, or `$SHELL`, or `/bin/sh` - in that order. The value is
+// validated when settings are saved, so a bad path is an error at that moment
+// rather than a websocket that fails every time the tab opens.
+//
+// The child gets a **cleared environment** plus the same allowlist
+// `run_command` uses (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`,
+// `LC_ALL`, `TERM`, `TMPDIR`, `PWD`, `TZ`) and anything in
+// `limits.command_env_passthrough`. `KARUCODE_AUTH_TOKEN` and the provider API
+// key are therefore not in a shell's environment: an interactive session is
+// exactly where `env | curl` is easiest to type.
+//
+// Each shell is its own session and process group, so closing the tab, deleting
+// the terminal or stopping the server kills the whole tree - a `make watch` left
+// running in a terminal does not survive it.
+//
+// # Limits
+//
+// | Key | Default | What it bounds |
+// | --- | --- | --- |
+// | `terminals.enabled` | `true` | `false` removes the surface entirely |
+// | `terminals.max_terminals` | `16` | concurrent PTYs, `1`-`64` |
+// | `terminals.scrollback_bytes` | `262144` | replay per terminal, 4 KiB-4 MiB |
+// | `terminals.idle_timeout_secs` | `43200` | reap a shell with no browser for this long; `0` keeps it |
+//
+// When `max_terminals` is reached a create is a `400 bad_request` naming the
+// limit and telling you to close one - it never silently replaces a running
+// shell.
+//
+// # Gotchas
+//
+// * **There is no sandbox.** A terminal runs as the server user with that user's
+//   whole filesystem and network. Approvals apply to the *model*, not to you.
+//   Set `KARUCODE_TERMINALS=0` on a deployment that must not offer one.
+// * The terminal is **not confined to the project** the way file tools are: you
+//   can `cd /` in it. The `cwd` a terminal starts in is checked against the
+//   workspace roots, but the shell itself is an ordinary shell.
+// * **One attached browser per terminal.** A second tab attaching to the same
+//   terminal takes over the stream and the first is told so with
+//   `{"type":"detached"}`. Two independent views of one PTY would fight over
+//   the window size and replay, so they are not offered.
+// * `idle_timeout_secs` closes the *process* of a terminal with no connected
+//   browser. The tab stays; opening it starts a fresh shell in the same place.
+// * Resize is per attached browser. Closing the laptop lid does not resize
+//   anything; the next attach sends its own size.
+//
+// Full reference: `docs/API.md` (terminals), `config.example.toml`.
+
+use crate::error::{ApiError, ApiResult};
+use crate::state::AppState;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
+use axum::response::Response;
+use kc_core::config::TerminalConfig;
+use kc_core::store::TerminalSession;
+use serde_json::json;
+use std::collections::HashMap;
+use std::io::Write;
+use std::os::unix::io::FromRawFd;
+use std::os::unix::process::CommandExt;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::broadcast;
+use tokio::time::Instant;
+
+/// Output kept for a reconnecting browser, in bytes, when no setting is
+/// available. Matches [`kc_core::config::TerminalConfig::default`].
+#[allow(dead_code)]
+const FALLBACK_SCROLLBACK: usize = 256 * 1024;
+
+/// Broadcast capacity for live output. A viewer this many chunks behind is
+/// dropped from the stream (and resynchronised from the replay buffer) rather
+/// than slowing the shell down: PTY output must never block on a browser.
+const OUTPUT_CHANNEL: usize = 256;
+
+/// How long a `pty` write may block before the reader is treated as gone.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Grace between SIGHUP and SIGKILL when a shell is closed deliberately.
+///
+/// A shell that is asked to hang up usually exits; one that traps SIGHUP - or is
+/// in the middle of a build - gets two seconds and then the whole group is
+/// killed. Without the second signal a stubborn child would keep its PTY open
+/// and leak the descriptor.
+const KILL_GRACE: Duration = Duration::from_secs(2);
+
+/// Terminal sizes below this are not worth rendering and usually mean a
+/// hidden element measured as zero.
+const MIN_COLS: u16 = 20;
+const MAX_COLS: u16 = 500;
+const MIN_ROWS: u16 = 5;
+const MAX_ROWS: u16 = 200;
+const DEFAULT_COLS: u16 = 80;
+const DEFAULT_ROWS: u16 = 24;
+
+/// A shell reading and writing one PTY.
+///
+/// The master side lives in a blocking thread: `tokio::io::unix::AsyncFd` would
+/// work, but the read loop also has to write, resize and notice a dead child,
+/// and one thread per terminal that spends its life in `read(2)` is both simpler
+/// and cheaper than three tasks plus an interest register. A terminal is an
+/// inherently thread-per-shell thing; the server's thread count is
+/// `max_terminals`, which the settings bound.
+pub struct Terminal {
+    pub id: String,
+    /// The replay buffer: newest bytes win.
+    replay: Arc<Replay>,
+    /// Live output. Senders other than the reader only push control messages.
+    output: broadcast::Sender<Output>,
+    /// Writes to the PTY master, and resizes. One mutex because a `TIOCSWINSZ`
+    /// interleaved with a write is not a problem, but a *closed* fd is: the
+    /// writer task holds the lock while it writes, and shutdown takes it before
+    /// closing.
+    io: Arc<Mutex<IoState>>,
+    /// Set once the shell has exited or been killed; a later attach starts a new
+    /// one.
+    dead: Arc<AtomicBool>,
+    /// `kill(2)` target for the leader, and the process group. `0` for a shell
+    /// that never started.
+    pid: Arc<AtomicU32>,
+    /// When a browser last attached or detached, in unix millis.
+    last_seen: Arc<AtomicI64>,
+    /// How many browsers are attached right now.
+    attached: Arc<AtomicU32>,
+}
+
+/// One frame the shell sends to attached browsers.
+#[derive(Clone, Debug)]
+pub enum Output {
+    /// Raw PTY bytes.
+    Data(Vec<u8>),
+    /// The shell exited with this status.
+    Exit(Option<i32>),
+}
+
+struct IoState {
+    /// Duplicated master fd. `None` after shutdown, which is what makes a write
+    /// after close an error instead of a write into a recycled descriptor.
+    master: Option<std::fs::File>,
+    /// The child, waited on by whoever notices the exit first.
+    child: Option<std::process::Child>,
+}
+
+/// Bounded newest-wins byte ring for the attach replay.
+///
+/// A `VecDeque<u8>` would be simpler but a byte-at-a-time push is slow for a
+/// build log, and trimming from the front of a `Vec` is O(n). This keeps chunks
+/// and drops whole chunks from the front, so appends are a push and the total is
+/// bounded by `capacity + largest chunk`.
+struct Replay {
+    capacity: usize,
+    chunks: Mutex<ReplayChunks>,
+}
+
+#[derive(Default)]
+struct ReplayChunks {
+    /// `(bytes, start)` - `start` lets a partial trim of the oldest chunk happen
+    /// without shifting every later one.
+    chunks: std::collections::VecDeque<(Vec<u8>, usize)>,
+    /// Total live bytes across every chunk.
+    len: usize,
+}
+
+impl Replay {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1024),
+            chunks: Mutex::new(ReplayChunks::default()),
+        }
+    }
+
+    fn push(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut state = self.chunks.lock().unwrap_or_else(|e| e.into_inner());
+        // One chunk larger than the whole buffer is trimmed on read; keeping it
+        // whole is what makes a single huge redraw cheap.
+        state.chunks.push_back((bytes.to_vec(), 0));
+        state.len += bytes.len();
+        while state.len > self.capacity {
+            let excess = state.len - self.capacity;
+            let Some(front) = state.chunks.front_mut() else {
+                break;
+            };
+            let live = front.0.len() - front.1;
+            if live <= excess {
+                state.len -= live;
+                state.chunks.pop_front();
+            } else {
+                front.1 += excess;
+                state.len -= excess;
+                break;
+            }
+        }
+    }
+
+    /// The newest bytes that fit in `capacity`, oldest first.
+    fn snapshot(&self) -> Vec<u8> {
+        let state = self.chunks.lock().unwrap_or_else(|e| e.into_inner());
+        let skip = state.len.saturating_sub(self.capacity);
+        let mut out = Vec::with_capacity(state.len.min(self.capacity));
+        let mut skipped = 0usize;
+        for (bytes, start) in state.chunks.iter() {
+            let mut live = &bytes[*start..];
+            // Drop the oldest bytes first, so the answer is always the *newest*
+            // `capacity` bytes in their original order.
+            if skipped < skip {
+                let drop = (skip - skipped).min(live.len());
+                skipped += drop;
+                live = &live[drop..];
+            }
+            if live.is_empty() {
+                continue;
+            }
+            out.extend_from_slice(live);
+        }
+        // One last clamp: the loop above can briefly exceed the cap by less than
+        // one chunk when several chunks partially overlapped the boundary.
+        if out.len() > self.capacity {
+            out.drain(..out.len() - self.capacity);
+        }
+        out
+    }
+
+    fn len(&self) -> usize {
+        self.chunks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len
+    }
+}
+
+impl Terminal {
+    /// Start a shell for `session`, in `session.cwd`, at `cols`x`rows`.
+    ///
+    /// `settings` is passed rather than read from a handle so a unit test can
+    /// exercise the PTY without a whole `AppState`.
+    pub fn spawn(
+        id: &str,
+        session: &TerminalSession,
+        settings: &TerminalConfig,
+        cols: u16,
+        rows: u16,
+    ) -> kc_core::Result<Arc<Self>> {
+        let (cols, rows) = (clamp_cols(cols), clamp_rows(rows));
+        let (master, slave) = open_pty(cols, rows)?;
+
+        // The slave fd is what the child gets on 0/1/2. It must not stay open in
+        // the parent - an open slave keeps the master from ever reading EOF.
+        let slave_stdout = dup_fd(&slave)?;
+        let slave_stderr = dup_fd(&slave)?;
+
+        let shell = settings.shell_program();
+        let mut command = std::process::Command::new(&shell);
+        command
+            .current_dir(&session.cwd)
+            .stdin(Stdio::from(slave))
+            .stdout(Stdio::from(slave_stdout))
+            .stderr(Stdio::from(slave_stderr));
+        apply_environment(&mut command);
+        // New session => new process group, so closing the terminal reaches
+        // every child (a `make watch`, a `sleep`), not just the leader.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // The controlling terminal for `setsid`'s new session. Without
+                // this, job control (Ctrl+C, Ctrl+Z) has no foreground group to
+                // signal and the shell prints "no job control in this shell".
+                if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().map_err(|e| {
+            kc_core::Error::Tool(format!(
+                "could not start `{shell}` in {}: {e}",
+                session.cwd
+            ))
+        })?;
+        let pid = child.id();
+
+        let replay = Arc::new(Replay::new(settings.replay_capacity()));
+        let (output, _) = broadcast::channel(OUTPUT_CHANNEL);
+        let io = Arc::new(Mutex::new(IoState {
+            master: Some(master),
+            child: Some(child),
+        }));
+        let dead = Arc::new(AtomicBool::new(false));
+        let pid_cell = Arc::new(AtomicU32::new(pid));
+        let last_seen = Arc::new(AtomicI64::new(crate::state::now_ms()));
+        let attached = Arc::new(AtomicU32::new(0));
+
+        let terminal = Arc::new(Self {
+            id: id.to_string(),
+            replay,
+            output,
+            io,
+            dead,
+            pid: pid_cell,
+            last_seen,
+            attached,
+        });
+        spawn_reader(Arc::clone(&terminal));
+        Ok(terminal)
+    }
+
+    /// True when the shell has exited and a new one is needed.
+    pub fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::Acquire)
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid.load(Ordering::Relaxed)
+    }
+
+    /// Subscribe to live output. Take this *before* reading [`Terminal::replay`]
+    /// so bytes produced in between are neither lost nor duplicated twice.
+    pub fn subscribe(&self) -> broadcast::Receiver<Output> {
+        self.output.subscribe()
+    }
+
+    /// The replay buffer, oldest first.
+    pub fn replay(&self) -> Vec<u8> {
+        self.replay.snapshot()
+    }
+
+    pub fn replay_len(&self) -> usize {
+        self.replay.len()
+    }
+
+    /// Write bytes from a browser to the shell.
+    pub fn write(&self, bytes: &[u8]) -> bool {
+        if self.is_dead() {
+            return false;
+        }
+        let mut io = self.io.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(master) = io.master.as_mut() else {
+            return false;
+        };
+        match master.write_all(bytes) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                // The shell is gone; the reader will publish the exit.
+                false
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                drop(io);
+                self.write_retry(bytes)
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// A write that would block: retry on a short timer rather than dropping the
+    /// keystrokes. The fd is non-blocking so a wedged reader cannot hang the
+    /// websocket task forever; a browser typing into a paused shell (`Ctrl+S`,
+    /// a debugger at a prompt) is exactly this case.
+    fn write_retry(&self, bytes: &[u8]) -> bool {
+        let deadline = Instant::now() + WRITE_TIMEOUT;
+        let mut pending = bytes;
+        while !pending.is_empty() {
+            if self.is_dead() || Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+            let mut io = self.io.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(master) = io.master.as_mut() else {
+                return false;
+            };
+            match master.write(pending) {
+                Ok(0) => return false,
+                Ok(n) => pending = &pending[n..],
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return false,
+            }
+        }
+        true
+    }
+
+    /// Tell the kernel the window size changed, so `vi`, `less`, `top` and every
+    /// readline prompt redraw at the right width.
+    pub fn resize(&self, cols: u16, rows: u16) -> bool {
+        let cols = clamp_cols(cols);
+        let rows = clamp_rows(rows);
+        let io = self.io.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(master) = io.master.as_ref() else {
+            return false;
+        };
+        let size = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // `TIOCSWINSZ` also delivers SIGWINCH to the foreground group.
+        unsafe {
+            libc::ioctl(
+                master.as_raw_fd(),
+                libc::TIOCSWINSZ as libc::c_ulong,
+                &size,
+            ) == 0
+        }
+    }
+
+    /// Terminal size the kernel currently reports, for a test and for a
+    /// diagnostic message.
+    pub fn size(&self) -> Option<(u16, u16)> {
+        let io = self.io.lock().unwrap_or_else(|e| e.into_inner());
+        let master = io.master.as_ref()?;
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::ioctl(
+                master.as_raw_fd(),
+                libc::TIOCGWINSZ as libc::c_ulong,
+                &mut size,
+            )
+        };
+        (rc == 0).then_some((size.ws_col, size.ws_row))
+    }
+
+    pub fn mark_attached(&self) {
+        self.attached.fetch_add(1, Ordering::AcqRel);
+        self.last_seen
+            .store(crate::state::now_ms(), Ordering::Release);
+    }
+
+    pub fn mark_detached(&self) {
+        let previous = self.attached.load(Ordering::Acquire);
+        if previous > 0 {
+            self.attached.fetch_sub(1, Ordering::AcqRel);
+        }
+        self.last_seen
+            .store(crate::state::now_ms(), Ordering::Release);
+    }
+
+    pub fn attached(&self) -> u32 {
+        self.attached.load(Ordering::Acquire)
+    }
+
+    /// Unix millis of the last attach, detach or activity.
+    pub fn last_seen(&self) -> i64 {
+        self.last_seen.load(Ordering::Acquire)
+    }
+
+    /// A browser typed something: this counts as use for the idle reaper.
+    pub fn record_activity(&self) {
+        self.last_seen
+            .store(crate::state::now_ms(), Ordering::Release);
+    }
+
+    /// Send a control frame to every attached browser.
+    fn broadcast_control(&self, value: serde_json::Value) {
+        let _ = self.output.send(Output::Data(
+            format!("{value}").into_bytes(),
+        ));
+    }
+
+    /// Hang up and reap the shell: SIGHUP to the group, SIGKILL after
+    /// [`KILL_GRACE`].
+    ///
+    /// Closing the master is what actually ends the child's `read`, so the
+    /// process is signalled first (so it can run its exit handlers) and the fd
+    /// is closed after the grace period or as soon as it exits.
+    pub fn shutdown(&self) {
+        if self.dead.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pid = self.pid.load(Ordering::Relaxed);
+        if pid != 0 {
+            signal_group(pid, libc::SIGHUP);
+        }
+        let terminal_pid = pid;
+        let io = Arc::clone(&self.io);
+        let output = self.output.clone();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + KILL_GRACE;
+            loop {
+                if terminal_pid == 0 {
+                    break;
+                }
+                if !group_alive(terminal_pid) {
+                    break;
+                }
+                if Instant::now() > deadline {
+                    signal_group(terminal_pid, libc::SIGKILL);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            let mut state = io.lock().unwrap_or_else(|e| e.into_inner());
+            // Reap the leader so it does not linger as a zombie for the life of
+            // the server.
+            if let Some(mut child) = state.child.take() {
+                let _ = child.wait();
+            }
+            state.master = None;
+            drop(state);
+            let _ = output.send(Output::Exit(None));
+        });
+    }
+}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        // A terminal dropped without an explicit shutdown (a deleted tab, a
+        // failed restart) must not leave a shell behind.
+        if !self.dead.swap(true, Ordering::AcqRel) {
+            let pid = self.pid.load(Ordering::Relaxed);
+            if pid != 0 {
+                signal_group(pid, libc::SIGHUP);
+            }
+            if let Ok(mut state) = self.io.lock() {
+                if let Some(mut child) = state.child.take() {
+                    // Non-blocking best effort: a `try_wait` after a short sleep
+                    // would stall the drop. The SIGKILL below is what matters.
+                    let _ = child.try_wait();
+                }
+                if let Some(pid) = (self.pid.load(Ordering::Relaxed) != 0)
+                    .then(|| self.pid.load(Ordering::Relaxed))
+                {
+                    signal_group(pid, libc::SIGKILL);
+                }
+                state.master = None;
+            }
+        }
+    }
+}
+
+/// The reader thread: `read(2)` the master until EOF, publish and replay.
+fn spawn_reader(terminal: Arc<Terminal>) {
+    let reader = Arc::clone(&terminal);
+    std::thread::Builder::new()
+        .name(format!("kc-terminal-{}", terminal.id))
+        .spawn(move || {
+            let mut buffer = vec![0u8; 8192];
+            loop {
+                if reader.dead.load(Ordering::Acquire) {
+                    return;
+                }
+                let read = {
+                    let io = reader.io.lock().unwrap_or_else(|e| e.into_inner());
+                    let Some(master) = io.master.as_ref() else {
+                        return;
+                    };
+                    // The fd is non-blocking so this lock is never held across a
+                    // blocking read; a short sleep between `EAGAIN`s is cheaper
+                    // than a `poll` loop for an interactive terminal.
+                    unsafe {
+                        libc::read(
+                            master.as_raw_fd(),
+                            buffer.as_mut_ptr() as *mut libc::c_void,
+                            buffer.len(),
+                        )
+                    }
+                };
+                if read > 0 {
+                    let chunk = &buffer[..read as usize];
+                    reader.replay.push(chunk);
+                    // A lagging viewer is dropped from the broadcast; it gets the
+                    // replay buffer on its next attach instead of a stalled shell.
+                    let _ = reader.output.send(Output::Data(chunk.to_vec()));
+                    continue;
+                }
+                if read == 0 {
+                    return finish(&reader);
+                }
+                let error = std::io::Error::last_os_error();
+                match error.kind() {
+                    std::io::ErrorKind::WouldBlock => {
+                        // Gone for good when the child has exited: `read` on a
+                        // master whose slave side is closed returns EAGAIN on
+                        // Linux until the fd itself is closed.
+                        if child_exited(&reader) {
+                            return finish(&reader);
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    std::io::ErrorKind::Interrupted => continue,
+                    _ => return finish(&reader),
+                }
+            }
+        })
+        .ok();
+}
+
+/// Reap the child if it has exited and publish the status once.
+fn child_exited(terminal: &Terminal) -> bool {
+    let mut io = terminal.io.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(child) = io.child.as_mut() else {
+        return true;
+    };
+    match child.try_wait() {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(_) => true,
+    }
+}
+
+/// Close the read loop: wait for the child, publish the exit code, mark dead.
+fn finish(terminal: &Terminal) {
+    if terminal.dead.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let mut status = None;
+    {
+        let mut io = terminal.io.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mut child) = io.child.take() {
+            if let Ok(exit) = child.wait() {
+                status = exit.code();
+            }
+        }
+        io.master = None;
+    }
+    let _ = terminal.output.send(Output::Exit(status));
+}
+
+/// `openpty(3)`: a master/slave pair with `cols`x`rows` already set, so the very
+/// first prompt is the right width.
+fn open_pty(
+    cols: u16,
+    rows: u16,
+) -> kc_core::Result<(std::fs::File, std::fs::File)> {
+    let mut master: libc::c_int = -1;
+    let mut slave: libc::c_int = -1;
+    let mut size = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &mut size,
+        )
+    };
+    if rc != 0 {
+        return Err(kc_core::Error::Tool(format!(
+            "could not open a pseudo-terminal: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // Non-blocking on the master: the websocket task must never be stuck in
+    // `read`, and the reader thread uses `EAGAIN` + a short sleep.
+    unsafe {
+        let flags = libc::fcntl(master, libc::F_GETFL);
+        if flags != -1 {
+            libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+    // `from_raw_fd` takes ownership, so both descriptors are closed exactly once.
+    let master_file = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave_file = unsafe { std::fs::File::from_raw_fd(slave) };
+    Ok((master_file, slave_file))
+}
+
+fn dup_fd(file: &std::fs::File) -> kc_core::Result<std::fs::File> {
+    let duplicated = unsafe { libc::dup(file.as_raw_fd()) };
+    if duplicated == -1 {
+        return Err(kc_core::Error::Tool(format!(
+            "could not duplicate the pty slave descriptor: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(duplicated) })
+}
+
+/// The environment a shell may see.
+///
+/// The same allowlist `run_command` uses, for the same reason: the server holds
+/// `KARUCODE_AUTH_TOKEN` and the provider API key, and an interactive shell is
+/// where `env | curl -d @-` is easiest to type. `TERM` and `LC_ALL` are set by
+/// the caller so they cannot be lost by an unusual inherited environment.
+fn apply_environment(command: &mut std::process::Command) {
+    command.env_clear();
+    const ALLOWLIST: &[&str] = &[
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "PWD", "TZ",
+    ];
+    for name in ALLOWLIST {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    // A terminal *is* interactive, so `TERM` must be a terminal type: the shell
+    // would otherwise think it is talking to a pipe and refuse to do line
+    // editing, colours or job control. Set after the allowlist so an inherited
+    // `TERM=dumb` (a CI runner, a systemd unit) cannot cross it out.
+    command.env("TERM", "xterm-256color");
+    // A shell needs a usable locale; "C" is what `run_command` forces, but an
+    // interactive one with `LC_ALL=C` cannot render a UTF-8 prompt properly.
+    // `$LANG` is passed through above; this only fills the gap when it is unset.
+    if std::env::var_os("LANG").is_none() {
+        command.env("LANG", "C.UTF-8");
+    }
+}
+
+fn clamp_cols(cols: u16) -> u16 {
+    cols.clamp(MIN_COLS, MAX_COLS)
+}
+
+fn clamp_rows(rows: u16) -> u16 {
+    rows.clamp(MIN_ROWS, MAX_ROWS)
+}
+
+fn signal_group(pid: u32, signal: libc::c_int) {
+    if pid == 0 {
+        return;
+    }
+    unsafe {
+        // Negative pid = the whole process group. The shell is a group leader
+        // (`setsid`), so this reaches every child.
+        libc::kill(-(pid as libc::pid_t), signal);
+    }
+}
+
+fn group_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    unsafe { libc::kill(-(pid as libc::pid_t), 0) == 0 }
+}
+
+/// The live terminals, keyed by id.
+///
+/// Deliberately not persisted: this is the process table, and it is empty after
+/// a restart. The durable half is the `terminals` table in SQLite.
+#[derive(Default)]
+pub struct TerminalRegistry {
+    live: Mutex<HashMap<String, Arc<Terminal>>>,
+}
+
+impl TerminalRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self, id: &str) -> Option<Arc<Terminal>> {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    pub fn insert(&self, terminal: Arc<Terminal>) {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(terminal.id.clone(), terminal);
+    }
+
+    /// Remove and return a terminal. The caller decides whether to shut it down.
+    pub fn remove(&self, id: &str) -> Option<Arc<Terminal>> {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn ids(&self) -> Vec<String> {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Every live terminal, for the idle reaper.
+    pub fn all(&self) -> Vec<Arc<Terminal>> {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Hang up every shell. Called on server shutdown so no child outlives us.
+    pub fn shutdown_all(&self) {
+        let terminals = self.all();
+        for terminal in terminals {
+            terminal.shutdown();
+        }
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    /// Reap shells that have had no browser for `idle_secs`.
+    ///
+    /// The *row* stays: a reaped terminal keeps its tab, its title and its
+    /// directory, and attaching starts a fresh shell in the same place. `0`
+    /// disables the reaper.
+    pub fn reap_idle(&self, idle_secs: u64) -> Vec<String> {
+        if idle_secs == 0 {
+            return Vec::new();
+        }
+        let cutoff = crate::state::now_ms() - (idle_secs as i64) * 1000;
+        let mut reaped = Vec::new();
+        let terminals: Vec<Arc<Terminal>> = self.all();
+        for terminal in terminals {
+            if terminal.attached() > 0 || terminal.last_seen() > cutoff {
+                continue;
+            }
+            reaped.push(terminal.id.clone());
+            // Mark it dead so the next attach starts a new shell; the tab and its
+            // scrollback row are untouched.
+            terminal.shutdown();
+            self.remove(&terminal.id);
+        }
+        reaped
+    }
+}
+
+/// Read the terminal settings, falling back to the defaults when the settings
+/// handle cannot be read (which only happens during a torn shutdown).
+pub fn terminal_settings(state: &AppState) -> TerminalConfig {
+    state.settings().snapshot().terminals
+}
+
+/// The router-facing part of a terminal: `GET /api/terminals` and friends.
+///
+/// The rows come from SQLite, so the answer is the same in every browser; each
+/// row carries `running` so the UI can say "reattach" instead of "start".
+pub async fn list(state: &AppState) -> ApiResult<serde_json::Value> {
+    let settings = terminal_settings(state);
+    if !settings.enabled {
+        return Ok(json!({ "enabled": false, "terminals": [], "max_terminals": 0 }));
+    }
+    let rows = state.store().list_terminals().await?;
+    let registry = state.terminals();
+    let terminals: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|row| terminal_json(row, registry.get(&row.id).as_deref()))
+        .collect();
+    Ok(json!({
+        "enabled": true,
+        "terminals": terminals,
+        "max_terminals": settings.terminal_budget(),
+        "shell": settings.shell_program(),
+        "scrollback_bytes": settings.replay_capacity(),
+    }))
+}
+
+fn terminal_json(row: &TerminalSession, live: Option<&Terminal>) -> serde_json::Value {
+    json!({
+        "id": row.id,
+        "title": row.title,
+        "cwd": row.cwd,
+        "project": row.project_id,
+        "position": row.position,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+        "last_used_at": row.last_used_at,
+        // `running` is the process half; the row above is the durable half.
+        "running": live.map(|t| !t.is_dead()).unwrap_or(false),
+        "pid": live.map(Terminal::pid).unwrap_or(0),
+        "attached": live.map(Terminal::attached).unwrap_or(0),
+    })
+}
+
+/// The public shape of one terminal: the durable row plus the process state.
+///
+/// Kept in one place so the list, the create, the rename and the restart all
+/// answer identically - a client that reads `terminal.running` from a create
+/// response gets the same field a list would have given it.
+pub fn terminal_json_value(row: &TerminalSession, live: Option<&Terminal>) -> serde_json::Value {
+    terminal_json(row, live)
+}
+
+/// Ensure a live shell for `row`, starting one if the process is gone.
+pub fn ensure_live(
+    state: &AppState,
+    row: &TerminalSession,
+    cols: u16,
+    rows: u16,
+) -> ApiResult<Arc<Terminal>> {
+    let settings = terminal_settings(state);
+    if !settings.enabled {
+        return Err(ApiError::forbidden(
+            "the terminal is disabled on this server (terminals.enabled, or KARUCODE_TERMINALS=0)",
+        ));
+    }
+    let registry = state.terminals();
+    if let Some(existing) = registry.get(&row.id) {
+        if !existing.is_dead() {
+            return Ok(existing);
+        }
+        // A dead process behind a live row is exactly the restart-after-crash
+        // case: drop it and start a fresh shell in the same directory.
+        registry.remove(&row.id);
+    }
+    let terminal = Terminal::spawn(&row.id, row, &settings, cols, rows)?;
+    registry.insert(Arc::clone(&terminal));
+    Ok(terminal)
+}
+
+/// The websocket route: attach, replay, then pump both directions.
+pub async fn socket(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<crate::routes::QueryMap>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> ApiResult<Response> {
+    if !terminal_settings(&state).enabled {
+        return Err(ApiError::forbidden(
+            "the terminal is disabled on this server (terminals.enabled, or KARUCODE_TERMINALS=0)",
+        ));
+    }
+    // A browser cannot set a header on the websocket handshake, so `?token=` is
+    // accepted here exactly as on `/api/events`.
+    check_origin(&headers, &state)?;
+    let row = state
+        .store()
+        .get_terminal(&id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("no terminal with id `{id}`")))?;
+
+    let cols = crate::routes::query_usize(&query, "cols")?
+        .and_then(|v| u16::try_from(v).ok())
+        .map(clamp_cols)
+        .unwrap_or(DEFAULT_COLS);
+    let rows = crate::routes::query_usize(&query, "rows")?
+        .and_then(|v| u16::try_from(v).ok())
+        .map(clamp_rows)
+        .unwrap_or(DEFAULT_ROWS);
+
+    let terminal = ensure_live(&state, &row, cols, rows)?;
+    let _ = state.store().touch_terminal(&id).await;
+    let shutdown = state.shutdown_token();
+    Ok(ws
+        .max_message_size(1024 * 1024)
+        .on_upgrade(move |socket| pump(socket, terminal, shutdown)))
+}
+
+/// A cross-origin page must not be able to open a shell.
+///
+/// A websocket handshake is not covered by the CSRF middleware (it is a `GET`,
+/// and the browser sends `Origin` itself), so this check is the whole defence. A
+/// missing `Origin` is accepted only when the `Host` guard is already active
+/// (loopback, no token) - which means a non-browser client on the machine, not a
+/// web page.
+fn check_origin(headers: &HeaderMap, state: &AppState) -> ApiResult<()> {
+    match origin_verdict(headers) {
+        OriginVerdict::SameOrigin => Ok(()),
+        OriginVerdict::NotABrowser => Ok(()),
+        OriginVerdict::Mismatch(origin, host) => {
+            // Behind a reverse proxy the `Host` a browser sends is the public name
+            // while the server may already trust that name; `origin_matches_host`
+            // covers the ordinary case, and the host allowlist covers the rest.
+            if state.host_allowlist().check(&host).is_ok()
+                && origin_matches_allowlisted(&origin, state)
+            {
+                return Ok(());
+            }
+            Err(ApiError::forbidden(
+                "cross-origin websocket rejected: the Origin header does not match the Host header",
+            ))
+        }
+    }
+}
+
+/// What the `Origin`/`Host` comparison says about a handshake.
+pub enum OriginVerdict {
+    /// The `Origin` matches the `Host` the request dialled.
+    SameOrigin,
+    /// No `Origin` at all: a non-browser client, covered by the `Host` guard.
+    NotABrowser,
+    /// A cross-origin page. Carries both halves for the allowlist fallback.
+    Mismatch(String, String),
+}
+
+/// The whole defence for an ordinary deployment, split out so a unit test can
+/// exercise it without an `AppState`.
+pub fn origin_verdict(headers: &HeaderMap) -> OriginVerdict {
+    let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
+        return OriginVerdict::NotABrowser;
+    };
+    let Ok(origin) = origin.to_str() else {
+        // A malformed `Origin` is refused, never treated as absent: values with
+        // whitespace or control characters cannot be compared.
+        return OriginVerdict::Mismatch(String::new(), String::new());
+    };
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if crate::host::origin_matches_host(origin, host) {
+        OriginVerdict::SameOrigin
+    } else {
+        OriginVerdict::Mismatch(origin.to_string(), host.to_string())
+    }
+}
+
+/// True when the origin's host is one the `Host` allowlist already accepts.
+fn origin_matches_allowlisted(origin: &str, state: &AppState) -> bool {
+    let Some(rest) = origin.split_once("://").map(|(_, rest)| rest) else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    state.host_allowlist().check(authority).is_ok()
+}
+
+/// Both directions of the websocket until either side goes away.
+async fn pump(mut socket: WebSocket, terminal: Arc<Terminal>, shutdown: tokio_util::sync::CancellationToken) {
+    // Subscribe before snapshotting the replay so a byte written in between is
+    // delivered once: it is either in the snapshot or on the channel.
+    let mut output = terminal.subscribe();
+    let replay = terminal.replay();
+    terminal.mark_attached();
+
+    let ready = json!({
+        "type": "ready",
+        "replay": !replay.is_empty(),
+        "replay_bytes": replay.len(),
+        "pid": terminal.pid(),
+        "running": !terminal.is_dead(),
+    });
+    if socket
+        .send(Message::Text(ready.to_string().into()))
+        .await
+        .is_err()
+    {
+        terminal.mark_detached();
+        return;
+    }
+    if !replay.is_empty() && socket.send(Message::Binary(replay.into())).await.is_err() {
+        terminal.mark_detached();
+        return;
+    }
+
+    let (mut sender, mut receiver) = socket.split();
+    use futures_util::{SinkExt, StreamExt};
+
+    // Shell -> browser.
+    let to_browser = {
+        async move {
+            loop {
+                match output.recv().await {
+                    Ok(Output::Data(bytes)) => {
+                        if sender.send(Message::Binary(bytes.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(Output::Exit(code)) => {
+                        let frame = json!({ "type": "exit", "code": code });
+                        let _ = sender.send(Message::Text(frame.to_string().into())).await;
+                        return;
+                    }
+                    // A lagging browser: it missed frames, so tell it to resync
+                    // rather than pretend the stream is continuous. The client
+                    // reconnects and gets the replay buffer.
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        let frame = json!({ "type": "lagged", "missed": missed });
+                        if sender.send(Message::Text(frame.to_string().into())).await.is_err() {
+                            return;
+                        }
+                        return;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        }
+    };
+
+    // Browser -> shell.
+    let from_browser = {
+        let terminal = Arc::clone(&terminal);
+        async move {
+            while let Some(frame) = receiver.next().await {
+                let frame = match frame {
+                    Ok(frame) => frame,
+                    Err(_) => return,
+                };
+                match frame {
+                    Message::Binary(bytes) => {
+                        terminal.record_activity();
+                        if !terminal.write(&bytes) {
+                            return;
+                        }
+                    }
+                    Message::Text(text) => {
+                        if let Some(action) = parse_control(&text) {
+                            terminal.record_activity();
+                            match action {
+                                Control::Resize { cols, rows } => {
+                                    terminal.resize(cols, rows);
+                                }
+                                Control::Input { data } => {
+                                    if !terminal.write(data.as_bytes()) {
+                                        return;
+                                    }
+                                }
+                                Control::Ping => {
+                                    terminal.broadcast_control(json!({ "type": "pong" }));
+                                }
+                            }
+                        }
+                    }
+                    Message::Close(_) => return,
+                    // Ping/pong are handled by axum's websocket layer.
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = to_browser => {}
+        _ = from_browser => {}
+        _ = shutdown.cancelled() => {}
+    }
+    terminal.mark_detached();
+}
+
+/// A text frame from the browser. Unknown types are ignored rather than treated
+/// as an error: an older client may send something a newer server dropped.
+enum Control {
+    Resize { cols: u16, rows: u16 },
+    Input { data: String },
+    Ping,
+}
+
+fn parse_control(text: &str) -> Option<Control> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    match value.get("type")?.as_str()? {
+        "resize" => Some(Control::Resize {
+            cols: value
+                .get("cols")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u16::try_from(v).ok())
+                .map(clamp_cols)
+                .unwrap_or(DEFAULT_COLS),
+            rows: value
+                .get("rows")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u16::try_from(v).ok())
+                .map(clamp_rows)
+                .unwrap_or(DEFAULT_ROWS),
+        }),
+        "input" => Some(Control::Input {
+            data: value.get("data")?.as_str()?.to_string(),
+        }),
+        "ping" => Some(Control::Ping),
+        _ => Some(Control::Ping),
+    }
+}
+
+// `std::os::unix::io::AsRawFd` is needed for the ioctl calls above.
+use std::os::unix::io::AsRawFd;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings() -> TerminalConfig {
+        TerminalConfig {
+            shell: "/bin/sh".into(),
+            // Small, so a test can overflow it on purpose.
+            scrollback_bytes: kc_core::config::MIN_TERMINAL_SCROLLBACK,
+            ..TerminalConfig::default()
+        }
+    }
+
+    fn session(cwd: &str) -> TerminalSession {
+        TerminalSession {
+            id: "t_test".into(),
+            title: "test-1".into(),
+            cwd: cwd.into(),
+            project_id: None,
+            position: 1,
+            created_at: 0,
+            updated_at: 0,
+            last_used_at: 0,
+        }
+    }
+
+    fn cwd() -> String {
+        std::env::temp_dir().to_string_lossy().into_owned()
+    }
+
+    /// A real shell runs in a real PTY and its output comes back through the
+    /// reader. This is the whole feature in one test.
+    #[tokio::test]
+    async fn a_shell_runs_and_its_output_is_replayed() {
+        let terminal = Terminal::spawn("t_test", &session(&cwd()), &settings(), 100, 30)
+            .expect("spawn shell");
+        assert!(!terminal.is_dead());
+        assert!(terminal.pid() > 0);
+        assert_eq!(terminal.size(), Some((100, 30)));
+
+        // The shell must echo something identifiable, and only after it has
+        // started - so the write goes to the PTY and the answer comes back
+        // through the same descriptor.
+        assert!(terminal.write(b"echo kc-terminal-probe-42\n"));
+        let mut seen = Vec::new();
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            seen = terminal.replay();
+            if String::from_utf8_lossy(&seen).contains("kc-terminal-probe-42") {
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&seen);
+        assert!(
+            text.contains("kc-terminal-probe-42"),
+            "the shell never echoed the probe: {text:?}"
+        );
+
+        // Resizing reaches the kernel, which is what makes `vi` redraw.
+        assert!(terminal.resize(120, 40));
+        assert_eq!(terminal.size(), Some((120, 40)));
+        // ...and out-of-range values are clamped, not passed through.
+        assert!(terminal.resize(1, 1));
+        assert_eq!(terminal.size(), Some((MIN_COLS, MIN_ROWS)));
+
+        terminal.shutdown();
+        // The shell is really gone: the group no longer exists.
+        let pid = terminal.pid();
+        for _ in 0..100 {
+            if !group_alive(pid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(!group_alive(pid), "the shell outlived its terminal");
+    }
+
+    /// A dead shell is reported as dead, which is what makes the route start a
+    /// new one instead of attaching to a closed fd.
+    #[tokio::test]
+    async fn a_shell_that_exits_marks_the_terminal_dead() {
+        let terminal = Terminal::spawn("t_test", &session(&cwd()), &settings(), 80, 24)
+            .expect("spawn shell");
+        assert!(terminal.write(b"exit 7\n"));
+        for _ in 0..200 {
+            if terminal.is_dead() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(terminal.is_dead(), "the terminal did not notice the exit");
+        // Writing to a dead terminal is refused rather than panicking.
+        assert!(!terminal.write(b"echo alive\n"));
+    }
+
+    /// The replay buffer is bounded: a terminal that printed more than the
+    /// setting must not hold all of it.
+    #[test]
+    fn the_replay_buffer_keeps_only_the_newest_bytes() {
+        let replay = Replay::new(1024);
+        replay.push(&vec![b'a'; 900]);
+        replay.push(&vec![b'b'; 900]);
+        let snapshot = replay.snapshot();
+        assert!(
+            snapshot.len() <= 1024,
+            "replay kept {} bytes, cap is 1024",
+            snapshot.len()
+        );
+        // Newest bytes win: the tail is the 'b' run.
+        assert_eq!(snapshot.last(), Some(&b'b'));
+        assert!(replay.len() <= 1024);
+    }
+
+    /// A single chunk larger than the buffer is trimmed on read instead of being
+    /// dropped, so a huge redraw still replays its last screenful.
+    #[test]
+    fn a_huge_chunk_is_trimmed_and_not_dropped() {
+        let replay = Replay::new(1024);
+        replay.push(b"hello");
+        replay.push(&vec![b'z'; 4096]);
+        let snapshot = replay.snapshot();
+        assert_eq!(snapshot.len(), 1024);
+        assert!(snapshot.iter().all(|byte| *byte == b'z'));
+    }
+
+    /// Order is preserved: a naive ring would reverse the chunks.
+    #[test]
+    fn the_replay_preserves_order() {
+        let replay = Replay::new(1024);
+        replay.push(b"first ");
+        replay.push(b"second");
+        assert_eq!(replay.snapshot(), b"first second".to_vec());
+    }
+
+    #[test]
+    fn control_frames_are_parsed_and_clamped() {
+        match parse_control(r#"{"type":"resize","cols":10,"rows":2}"#) {
+            Some(Control::Resize { cols, rows }) => {
+                assert_eq!(cols, MIN_COLS);
+                assert_eq!(rows, MIN_ROWS);
+            }
+            _ => panic!("resize was not parsed"),
+        }
+        match parse_control(r#"{"type":"resize","cols":9999,"rows":9999}"#) {
+            Some(Control::Resize { cols, rows }) => {
+                assert_eq!(cols, MAX_COLS);
+                assert_eq!(rows, MAX_ROWS);
+            }
+            _ => panic!("resize was not parsed"),
+        }
+        assert!(matches!(
+            parse_control(r#"{"type":"input","data":"ls\r"}"#),
+            Some(Control::Input { .. })
+        ));
+        // Garbage and unknown types never panic and never become input.
+        assert!(parse_control("not json").is_none());
+        assert!(parse_control(r#"{"type":"nonsense"}"#).is_some());
+    }
+
+    /// The registry reaps only terminals nobody is attached to *and* that have
+    /// been idle past the cutoff; an attached one is never taken.
+    #[tokio::test]
+    async fn the_idle_reaper_spares_attached_terminals() {
+        let registry = TerminalRegistry::new();
+        let idle = Terminal::spawn("t_idle", &session(&cwd()), &settings(), 80, 24)
+            .expect("spawn idle");
+        let busy = Terminal::spawn("t_busy", &session(&cwd()), &settings(), 80, 24)
+            .expect("spawn busy");
+        busy.mark_attached();
+        // Pretend the idle one was last seen two days ago.
+        idle.last_seen.store(
+            crate::state::now_ms() - 2 * 24 * 3600 * 1000,
+            Ordering::Release,
+        );
+        registry.insert(idle);
+        registry.insert(Arc::clone(&busy));
+
+        // 0 disables the reaper entirely.
+        assert!(registry.reap_idle(0).is_empty());
+        assert_eq!(registry.len(), 2);
+
+        let reaped = registry.reap_idle(3600);
+        assert_eq!(reaped, vec!["t_idle".to_string()]);
+        assert!(registry.get("t_idle").is_none());
+        assert!(registry.get("t_busy").is_some(), "an attached shell was reaped");
+        registry.shutdown_all();
+        assert!(registry.is_empty());
+    }
+
+    /// The shell gets a cleared environment: the server's own secrets must not
+    /// be readable from an interactive prompt.
+    #[tokio::test]
+    async fn the_shell_environment_is_cleared_of_secrets() {
+        std::env::set_var("KARUCODE_AUTH_TOKEN", "super-secret-token");
+        std::env::set_var("OPENAI_API_KEY", "sk-secret");
+        let terminal = Terminal::spawn("t_test", &session(&cwd()), &settings(), 200, 50)
+            .expect("spawn shell");
+        assert!(terminal.write(b"env\n"));
+        let mut seen = String::new();
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            seen = String::from_utf8_lossy(&terminal.replay()).into_owned();
+            if seen.contains("PATH=") {
+                // Give the shell a moment to finish printing `env`.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                seen = String::from_utf8_lossy(&terminal.replay()).into_owned();
+                break;
+            }
+        }
+        terminal.shutdown();
+        std::env::remove_var("KARUCODE_AUTH_TOKEN");
+        std::env::remove_var("OPENAI_API_KEY");
+        assert!(seen.contains("PATH="), "the shell never printed its env: {seen:?}");
+        assert!(
+            !seen.contains("super-secret-token"),
+            "KARUCODE_AUTH_TOKEN leaked into the shell environment"
+        );
+        assert!(
+            !seen.contains("sk-secret"),
+            "OPENAI_API_KEY leaked into the shell environment"
+        );
+        assert!(seen.contains("TERM=xterm-256color"), "TERM was not set: {seen:?}");
+    }
+}

@@ -55,6 +55,19 @@ impl ApiError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
     }
+
+    /// `413 payload_too_large`. axum's own body-limit rejection is plain text,
+    /// which would break the documented error contract, so the routes layer
+    /// rewrites it through this constructor (see `routes::json_error_shape`).
+    pub fn payload_too_large(max: usize, detail: Option<&str>) -> Self {
+        let message = match detail {
+            Some(detail) if !detail.is_empty() => {
+                format!("the request body is too large; the maximum is {max} bytes ({detail})")
+            }
+            _ => format!("the request body is too large; the maximum is {max} bytes"),
+        };
+        Self::new(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", message)
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -163,6 +176,7 @@ mod tests {
             "plugin",
             "timeout",
             "path_escape",
+            "payload_too_large",
             "internal",
         ];
         let cases: Vec<Error> = vec![
@@ -219,6 +233,16 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(to(Error::Provider("x".into())), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn payload_too_large_uses_the_documented_code_and_status() {
+        let error = ApiError::payload_too_large(1024, None);
+        assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(error.code, "payload_too_large");
+        assert!(error.message.contains("1024"));
+        let with_detail = ApiError::payload_too_large(1024, Some("length limit exceeded"));
+        assert!(with_detail.message.contains("length limit exceeded"));
     }
 
     #[test]

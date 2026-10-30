@@ -3,6 +3,143 @@
 //! All logic lives in the `kc_server` library so it can be tested and embedded;
 //! this file only wires the process entry point.
 
+// @kc-doc: deployment
+// @kc-title: Run it as a systemd service
+// @kc-summary: Install the binary and a hardened unit, keep it enabled across reboots, and upgrade or roll back without losing the paths it needs.
+// @kc-tags: install, deploy, systemd, service, upgrade, reboot, production
+// @kc-applies-to: file:packaging/install.sh, file:packaging/karucode.service, cmd:install.sh, cmd:install.sh --workspace, cmd:install.sh --dry-run, cmd:install.sh --binary, cmd:install.sh --no-systemd, cmd:install.sh --allow-jit, cmd:install.sh --port, cmd:install.sh --service-user, path:/etc/systemd/system/karucode.service, path:/etc/systemd/system/karucode.service.d/10-install.conf, path:/etc/systemd/system/karucode.service.d/20-local.conf, path:/etc/karucode/karucode.env, path:/var/lib/karucode, path:/usr/local/bin/karucode, cmd:systemctl enable --now karucode, cmd:systemctl restart karucode, cmd:journalctl -u karucode
+//
+// # Install
+//
+// A release ships a checksum-verified tarball; the installer also accepts a build
+// you made yourself, which is what you want before the first release exists:
+//
+// ```bash
+// # from the published release
+// sudo sh packaging/install.sh --workspace /srv/karucode/workspace
+//
+// # from a local build
+// cargo build --release -p kc-server
+// sudo sh packaging/install.sh --binary target/release/karucode \
+//      --workspace /srv/karucode/workspace
+//
+// # preview first, change nothing
+// sudo sh packaging/install.sh --workspace /srv/karucode/workspace --dry-run
+// ```
+//
+// `--workspace` is the one directory the agent may read and edit. The installer
+// creates it, owns it by the service user, installs the unit, enables it at boot,
+// starts it, and only reports success once `/api/health` answers. It creates the
+// `karucode` system group and user if they are missing, and it writes a commented
+// template to `/etc/karucode/karucode.env` only when that file does not exist.
+//
+// Exit codes: `0` installed and running, `1` nothing installed (or rolled back),
+// `2` installed but the service did not come up — then it prints the four things
+// worth checking (busy port, workspace permissions, data-dir permissions, a bad
+// value in the env file).
+//
+// # The paths live in a drop-in, not in the unit
+//
+// ```
+// /etc/systemd/system/karucode.service              shipped, replaced on upgrade
+// /etc/systemd/system/karucode.service.d/
+//     10-install.conf                              generated, rewritten on upgrade
+//     20-local.conf                                yours, never touched
+// ```
+//
+// `WorkingDirectory=`, `ReadWritePaths=`, `User=`, the port and `ExecStart=` are
+// written to `10-install.conf`. Editing the unit in place does not stick: the next
+// install replaces the file, and the service then fails with `status=200/CHDIR`
+// because the workspace path it needs is gone. Put local overrides in
+// `20-local.conf` and `sudo systemctl daemon-reload` afterwards — the filename must
+// end in `.conf` or systemd ignores it.
+//
+// ```ini
+// # /etc/systemd/system/karucode.service.d/20-local.conf
+// [Service]
+// ReadWritePaths=/srv/karucode/.cargo
+// MemoryDenyWriteExecute=no
+// ```
+//
+// # Credentials
+//
+// The unit reads `/etc/karucode/karucode.env` (mode 0600, owned by root) after its
+// own `Environment=` lines, so the file wins. Set at least the model connection,
+// then restart:
+//
+// ```sh
+// KARUCODE_BASE_URL=https://api.example.com/v1
+// KARUCODE_API_KEY=sk-...
+// KARUCODE_MODEL=gpt-4o-mini
+// KARUCODE_AUTH_TOKEN=<32+ random chars>   # openssl rand -hex 32
+// KARUCODE_ADMIN_TOKEN=<32+ random chars>
+// ```
+//
+// ```bash
+// sudo systemctl restart karucode && journalctl -u karucode -f
+// curl -s -H "Authorization: Bearer $KARUCODE_AUTH_TOKEN" localhost:8787/api/health
+// ```
+//
+// Without a token the loopback bind is still safe: the server only answers for
+// `Host: 127.0.0.1`, `localhost` or `[::1]`. A non-loopback bind refuses to start
+// without `KARUCODE_AUTH_TOKEN`. The binary has no TLS — terminate it in a reverse
+// proxy.
+//
+// # Upgrade, roll back, remove
+//
+// Re-running the installer is the upgrade: it verifies the new tarball, replaces
+// the binary, rewrites the unit and the drop-in, and restarts a running service
+// onto the new binary (so the old process is not left serving). The previous
+// binary stays at `/usr/local/bin/karucode.old`, the previous unit at
+// `karucode.service.bak`, and the env file, the database and `20-local.conf` are
+// untouched.
+//
+// ```bash
+// sudo sh packaging/install.sh --version 0.2.0 --workspace /srv/karucode/workspace
+// sudo cp -p /usr/local/bin/karucode.old /usr/local/bin/karucode   # roll back
+// sudo systemctl restart karucode
+// ```
+//
+// There is no uninstall verb; `packaging/README.md` lists the six commands
+// (`systemctl disable --now`, remove the unit, the drop-in, both binaries,
+// `daemon-reload`), plus the optional removal of `/var/lib/karucode` and
+// `/etc/karucode`. The database holds sessions **and the provider API key**, so
+// removing it is a separate decision.
+//
+// # Gotchas that bite on a real host
+//
+// * Running the unit inside an **unprivileged container** fails with
+//   `status=217/USER` or `ProtectHostname=yes is configured, but UTS namespace
+//   setup is prohibited`: the namespace sandboxing needs `CAP_SYS_ADMIN`. Use the
+//   `Dockerfile` in a container instead of this unit.
+// * A hand-started `karucode` on the same port makes the unit exit at startup. The
+//   installer warns about it before writing the unit; `ss -ltnp | grep :8787`
+//   finds the process.
+// * `MemoryDenyWriteExecute=yes` (in the unit) stops the agent from running
+//   `node`, Java or Python C extensions. Re-run the installer with `--allow-jit`
+//   rather than hand-editing the unit.
+// * After a failure the unit can be held by `StartLimitBurst=5`
+//   (`start of the service was attempted too often`); the installer clears that
+//   with `systemctl reset-failed` before it starts or restarts.
+// * `Type=simple` means systemd reports `active` the moment the process forks, so
+//   a service that dies 200 ms later still looks started for a moment. Health is
+//   `/api/health`, not `is-active`.
+// * The service gets the **default** `PATH` (`/usr/local/sbin:/usr/local/bin:/
+//   usr/sbin:/usr/bin`), not your shell's. `cargo` in `~/.cargo/bin`, `pnpm`, `bun`
+//   and the nvm `node` are then not found by the agent's shell. Put
+//   `Environment=PATH=…` in `20-local.conf`.
+// * `ProtectHome=read-only` makes `~/.cargo`, `~/.npm` and `~/.cache` read-only, so
+//   `cargo add` and `npm install` fail with `EPERM`. Grant those caches with
+//   `ReadWritePaths=` in `20-local.conf` — caches only, never the whole home
+//   directory.
+// * To keep an instance you already ran by hand, pass `--service-user <you>` and
+//   `--data-dir ~/.local/share/karucode`: the provider API key and every setting
+//   live in the database, so a fresh data directory is an empty instance, not an
+//   upgrade.
+//
+// The full operator guide — reverse proxy, backups, container deployment, the
+// hardening rationale — is `packaging/README.md`.
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     kc_server::run().await

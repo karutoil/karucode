@@ -45,6 +45,16 @@ pub struct CatalogModel {
     pub tool_call: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<bool>,
+    /// Whether this model accepts **image** input.
+    ///
+    /// Read from `modalities.input` containing `image`, which is the precise
+    /// signal. `attachment: true` is not a substitute: it is set for models that
+    /// only take `pdf` or `audio` attachments (a whisper or a document model), so
+    /// using it alone would offer `read_file` a picture the endpoint rejects.
+    /// The legacy `attachment` flag is therefore only consulted as a fallback,
+    /// when the document carries no `modalities` at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_input: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,6 +245,7 @@ pub fn parse_catalog(value: &serde_json::Value) -> Result<Catalog, String> {
                     max_output_tokens,
                     tool_call: model.get("tool_call").and_then(|v| v.as_bool()),
                     reasoning: model.get("reasoning").and_then(|v| v.as_bool()),
+                    vision: json_vision(model),
                     cost_input,
                     cost_output,
                 });
@@ -278,6 +289,34 @@ fn json_u64(value: &serde_json::Value) -> Option<u64> {
 
 fn json_f64(value: &serde_json::Value) -> Option<f64> {
     value.as_f64().filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+/// Does models.dev say this model takes **image** input?
+///
+/// `modalities.input` is the authoritative field, and `image` in it is what
+/// `read_file` needs: a model whose inputs are `text`+`pdf` or `audio` cannot be
+/// shown a PNG, even though models.dev marks both as `attachment: true` (136 of
+/// the live entries are attachment-only for exactly that reason). So
+/// `attachment` is only a fallback for a document that predates `modalities`;
+/// when `modalities` is present but unreadable, the answer is "unknown" rather
+/// than a guess that could send an image to an endpoint that rejects it.
+fn json_vision(model: &serde_json::Map<String, serde_json::Value>) -> Option<bool> {
+    match model.get("modalities") {
+        Some(serde_json::Value::Object(modalities)) => match modalities.get("input") {
+            Some(serde_json::Value::Array(inputs)) => Some(
+                inputs
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .any(|value| value.trim().eq_ignore_ascii_case("image")),
+            ),
+            // `modalities` without a usable `input` list: fall through to the
+            // legacy flag rather than claiming the model cannot see.
+            _ => model.get("attachment").and_then(|v| v.as_bool()),
+        },
+        // No `modalities` at all (older document): the legacy flag stands in.
+        None => model.get("attachment").and_then(|v| v.as_bool()),
+        Some(_) => model.get("attachment").and_then(|v| v.as_bool()),
+    }
 }
 
 /// A cached catalog plus when it was fetched (unix ms).
@@ -559,6 +598,96 @@ mod tests {
         assert_eq!(model.max_output_tokens, None, "negative limits are dropped");
         assert_eq!(model.cost_input, None, "negative costs are dropped");
         assert_eq!(model.cost_output, None);
+    }
+
+    /// The `image` entry in `modalities.input` is the signal `read_file` needs.
+    #[test]
+    fn image_input_is_read_from_modalities() {
+        let value = json!({
+            "openai": {
+                "models": {
+                    "gpt-4o": {
+                        "id": "gpt-4o",
+                        "attachment": true,
+                        "modalities": {"input": ["text", "image", "pdf"], "output": ["text"]}
+                    },
+                    "gpt-text": {
+                        "id": "gpt-text",
+                        "attachment": false,
+                        "modalities": {"input": ["text"], "output": ["text"]}
+                    }
+                }
+            }
+        });
+        let catalog = parse_catalog(&value).unwrap();
+        let models = &catalog.provider("openai").unwrap().models;
+        let find = |id: &str| models.iter().find(|m| m.id == id).unwrap();
+        assert_eq!(find("gpt-4o").vision, Some(true));
+        assert_eq!(find("gpt-text").vision, Some(false));
+        // It rides through the lookup shape the settings screen prefills from.
+        let hit = catalog.lookup("openai/gpt-4o").unwrap();
+        assert_eq!(hit.model.vision, Some(true));
+    }
+
+    /// `attachment: true` does not mean "can see": a pdf-only or audio-only model
+    /// is an attachment model too, and handing it a PNG fails the whole turn.
+    #[test]
+    fn an_attachment_only_model_is_not_a_vision_model() {
+        let value = json!({
+            "p": {
+                "models": {
+                    "whisper": {
+                        "id": "whisper",
+                        "attachment": true,
+                        "modalities": {"input": ["audio"], "output": ["text"]}
+                    },
+                    "doc": {
+                        "id": "doc",
+                        "attachment": true,
+                        "modalities": {"input": ["text", "pdf"], "output": ["text"]}
+                    },
+                    "omni": {
+                        "id": "omni",
+                        "attachment": true,
+                        "modalities": {"input": ["text", "audio", "image"], "output": ["text"]}
+                    }
+                }
+            }
+        });
+        let catalog = parse_catalog(&value).unwrap();
+        let models = &catalog.provider("p").unwrap().models;
+        let find = |id: &str| models.iter().find(|m| m.id == id).unwrap();
+        assert_eq!(find("whisper").vision, Some(false));
+        assert_eq!(find("doc").vision, Some(false));
+        assert_eq!(find("omni").vision, Some(true), "one image is enough");
+    }
+
+    /// A document without `modalities` (an older mirror) still answers from the
+    /// legacy `attachment` flag, and an entry with neither stays unknown.
+    #[test]
+    fn vision_falls_back_to_the_legacy_attachment_flag() {
+        let value = json!({
+            "p": {
+                "models": {
+                    "legacy-vision": {"id": "legacy-vision", "attachment": true},
+                    "legacy-text": {"id": "legacy-text", "attachment": false},
+                    "silent": {"id": "silent"},
+                    "odd": {"id": "odd", "modalities": "yes please"}
+                }
+            }
+        });
+        let catalog = parse_catalog(&value).unwrap();
+        let models = &catalog.provider("p").unwrap().models;
+        let find = |id: &str| models.iter().find(|m| m.id == id).unwrap();
+        assert_eq!(find("legacy-vision").vision, Some(true));
+        assert_eq!(find("legacy-text").vision, Some(false));
+        assert_eq!(
+            find("silent").vision,
+            None,
+            "unknown must stay unknown, not become a silent 'no'"
+        );
+        // An unreadable `modalities` is not trusted either way.
+        assert_eq!(find("odd").vision, None);
     }
 
     fn lookup_catalog() -> Catalog {

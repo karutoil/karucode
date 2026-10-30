@@ -11,7 +11,7 @@ use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use futures_util::StreamExt;
-use kc_core::config::{Config, McpServerConfig, ModelConfig, PluginConfig};
+use kc_core::config::{Config, McpServerConfig, ModelConfig, PluginConfig, TerminalConfig};
 use kc_core::hooks::NoHooks;
 use kc_core::paths::Workspace;
 use kc_core::provider::{ChatRequest, Provider, ProviderChunk, ProviderFactory, ProviderStream};
@@ -149,6 +149,7 @@ impl Provider for ScriptedProvider {
                 items.push(Ok(ProviderChunk::Usage {
                     input_tokens: 3,
                     output_tokens: 5,
+                    cached_tokens: None,
                 }));
                 items.push(Ok(ProviderChunk::Finish {
                     reason: "stop".into(),
@@ -244,6 +245,12 @@ pub struct HarnessBuilder {
     bind_host: String,
     /// `None` = read `KARUCODE_ALLOWED_HOSTS` like the bootstrap does.
     allowed_hosts: Option<Option<String>>,
+    /// Allowlist for `POST /api/projects`. Empty (the default) is "no
+    /// allowlist", which is what an install with `KARUCODE_PROJECT_ROOTS` unset
+    /// gets.
+    project_roots: Vec<PathBuf>,
+    /// `[terminals]`. `None` uses the defaults (on, `/bin/sh`-ish, 16 slots).
+    terminals: Option<TerminalConfig>,
 }
 
 impl HarnessBuilder {
@@ -259,7 +266,24 @@ impl HarnessBuilder {
             mcp_configs: Vec::new(),
             bind_host: "127.0.0.1".into(),
             allowed_hosts: None,
+            project_roots: Vec::new(),
+            terminals: None,
         }
+    }
+
+    /// Configure `[terminals]`. The default is the shipped one (enabled, one
+    /// shell per tab, 16 slots); a test that wants a disabled or tiny terminal
+    /// sets it here rather than reaching into the live settings.
+    pub fn terminals(mut self, config: TerminalConfig) -> Self {
+        self.terminals = Some(config);
+        self
+    }
+
+    /// Configure `project_roots` (`KARUCODE_PROJECT_ROOTS`), which turns project
+    /// creation into an allowlisted operation.
+    pub fn project_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.project_roots = roots;
+        self
     }
 
     pub fn models(mut self, models: ModelsMode) -> Self {
@@ -333,6 +357,15 @@ impl HarnessBuilder {
             auth_token: self.auth_token,
             lock_settings: self.lock_settings,
             web_dir: web_dir.clone(),
+            // The settings snapshot is what a plugin reload re-reads, so it must
+            // list the entries the host was actually given — the bootstrap wires
+            // it that way too.
+            plugins: self.plugin_configs.clone(),
+            terminals: self
+                .terminals
+                .clone()
+                .unwrap_or_else(TerminalConfig::default),
+            project_roots: self.project_roots.clone(),
             model: ModelConfig {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 model: "test-model".into(),
@@ -347,7 +380,11 @@ impl HarnessBuilder {
             .await
             .expect("settings");
         let factory = Arc::new(ScriptedFactory::new(self.scripts, self.models));
-        let workspace = Arc::new(Workspace::new(&workspace_dir).expect("workspace"));
+        // Mirrors the bootstrap: the workspace carries the configured extra roots
+        // (the temp dir by default), and the registry re-applies them to projects.
+        let workspace = Arc::new(
+            Workspace::with_extra_roots(&workspace_dir, config.extra_roots()).expect("workspace"),
+        );
 
         // Mirrors the bootstrap: externals start concurrently and a broken one
         // is isolated as a failed diagnostic.
@@ -363,7 +400,10 @@ impl HarnessBuilder {
 
         // Mirrors the bootstrap: one default project for the workspace, loaded
         // into the registry the runtime resolves runs against.
-        let projects = Arc::new(ProjectRegistry::new(Arc::clone(&workspace)));
+        let projects = Arc::new(ProjectRegistry::with_extra_roots(
+            Arc::clone(&workspace),
+            workspace.extra_roots().to_vec(),
+        ));
         let default_project = kc_core::ids::ProjectId::new();
         store
             .create_project(
@@ -455,6 +495,14 @@ impl TestResponse {
 
     pub fn error_code(&self) -> String {
         self.json()["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// The documented error message, for asserting on what a rejection says.
+    pub fn error_message(&self) -> String {
+        self.json()["error"]["message"]
             .as_str()
             .unwrap_or_default()
             .to_string()
@@ -623,6 +671,43 @@ impl Harness {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("session {session_id} never went idle");
+    }
+
+    /// Poll the session detail until it reports an active run.
+    ///
+    /// Needed to steer or queue a follow-up against a run: submitting returns
+    /// once the run row exists, but `running` is derived from the runtime's map,
+    /// which the background task registers a moment later.
+    pub async fn wait_until_running(&self, session_id: &str) {
+        for _ in 0..300 {
+            let response = self.get(&format!("/api/sessions/{session_id}")).await;
+            assert_eq!(response.status, StatusCode::OK);
+            if response.json()["running"] == json!(true) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("session {session_id} never started running");
+    }
+}
+
+/// Alias kept explicit at the call site: several mode tests wait for a hang-based
+/// run to register before steering at it.
+pub async fn wait_for_running(h: &Harness, session_id: &str) {
+    h.wait_until_running(session_id).await;
+}
+
+/// Wait for the session to settle, without asserting it is idle right away.
+///
+/// A cancelled run unwinds asynchronously, so `running` can still be true for a
+/// moment; this is the "best effort settle" the mode tests need after a cancel.
+pub async fn wait_until_idle_ignored(h: &Harness, session_id: &str) {
+    for _ in 0..300 {
+        let response = h.get(&format!("/api/sessions/{session_id}")).await;
+        if response.status == StatusCode::OK && response.json()["running"] == json!(false) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 

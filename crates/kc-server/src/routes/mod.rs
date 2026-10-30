@@ -1,5 +1,6 @@
 //! HTTP handlers, one module per area of `docs/API.md`.
 
+pub mod agents;
 pub mod approvals;
 pub mod config;
 pub mod events;
@@ -9,24 +10,51 @@ pub mod models;
 pub mod plugins;
 pub mod projects;
 pub mod sessions;
+pub mod terminals;
 pub mod workspace;
 
 use crate::app::api_not_found;
 use crate::error::{ApiError, ApiResult};
+use crate::settings::{authorize_patch, ConfigPatch, ADMIN_TOKEN_HEADER};
 use crate::state::AppState;
 use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 use std::collections::HashMap;
+
+/// Ceiling for a JSON request body. `MAX_PROMPT_BYTES` (1 MiB, in
+/// `routes/sessions.rs`) is the largest documented payload, so the transport
+/// limit sits just above it: a body between the two still reaches the handler
+/// and gets the documented `400 bad_request` naming the field, instead of a
+/// transport-level rejection. axum's own default is 2 MiB, which made that
+/// documented 400 unreachable.
+pub const MAX_JSON_BODY_BYTES: usize = 1024 * 1024 + 64 * 1024;
+
+/// Ceiling for the raw upload body: the handler's own `MAX_UPLOAD_BYTES` (8 MiB)
+/// plus slack, so the handler - not the transport - produces the documented
+/// `413 payload_too_large` message that names the limit.
+pub const MAX_UPLOAD_BODY_BYTES: usize = workspace::MAX_UPLOAD_BYTES + 64 * 1024;
+
+/// Ceiling for the editor's save body: the handler's own `MAX_WRITE_BYTES`
+/// (2 MiB of text) at the worst-case JSON escaping ratio (six bytes per byte,
+/// `\u00XX`) plus slack, so the handler - not the transport - produces the
+/// documented `413 payload_too_large` that names the limit.
+pub const MAX_WRITE_BODY_BYTES: usize = workspace::MAX_WRITE_BYTES * 6 + 64 * 1024;
 
 /// Every `/api` route. Path parameters use axum 0.7's `:name` syntax.
 pub fn api_router() -> Router<AppState> {
-    Router::new()
+    // JSON routes: one explicit body limit for the whole group.
+    let json_routes = Router::new()
         .route("/health", get(health::health))
         .route(
             "/config",
-            get(config::get_config).patch(config::patch_config),
+            get(config::get_config).patch(patch_config_guarded),
         )
         .route("/provider/test", post(config::provider_test))
         .route("/models/catalog", get(models::catalog))
@@ -56,20 +84,131 @@ pub fn api_router() -> Router<AppState> {
             "/projects/:id",
             axum::routing::patch(projects::rename_project).delete(projects::delete_project),
         )
+        .route("/projects/:id/favicon", get(projects::project_favicon))
+        .route("/agents", get(agents::list_agents))
+        .route("/agents/:id", get(agents::get_agent))
         .route("/approvals", get(approvals::list_approvals))
         .route("/approvals/:id", post(approvals::resolve_approval))
         .route("/workspace/tree", get(workspace::tree))
         .route("/workspace/file", get(workspace::file))
-        // The upload body is the raw file, not JSON, so its size is enforced by
-        // the handler (`MAX_UPLOAD_BYTES`) instead of axum's 2 MB default limit.
-        .route("/workspace/upload", post(workspace::upload))
+        .route("/workspace/raw", get(workspace::raw))
         .route("/git/status", get(git::status))
         .route("/git/diff", get(git::diff))
+        .route(
+            "/terminals",
+            get(terminals::list_terminals).post(terminals::create_terminal),
+        )
+        .route(
+            "/terminals/:id",
+            axum::routing::patch(terminals::rename_terminal)
+                .delete(terminals::delete_terminal),
+        )
+        .route("/terminals/:id/restart", post(terminals::restart_terminal))
+        .route("/terminals/:id/socket", get(terminals::terminal_socket))
         .route("/plugins", get(plugins::list_plugins))
+        .route("/plugins/reload", post(plugins::reload_plugins))
         .route("/plugins/:name/enable", post(plugins::enable_plugin))
+        .route("/plugins/:name/reload", post(plugins::reload_plugin))
+        .route("/plugins/:name/panels/:panel", get(plugins::read_panel))
         .route("/mcp", get(plugins::list_mcp))
         .route("/events", get(events::stream))
+        .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES));
+
+    // The upload body is the raw file, not JSON, so it gets its own, larger
+    // limit; the handler still enforces `MAX_UPLOAD_BYTES` and reports the
+    // documented message.
+    let upload_routes = Router::new()
+        .route("/workspace/upload", post(workspace::upload))
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES));
+
+    // The editor's save body is JSON but can carry a 2 MiB file, so it gets its
+    // own limit too. `put` lives here rather than on the GET route above so that
+    // a 413 comes from the handler that names `MAX_WRITE_BYTES`.
+    let write_routes = Router::new()
+        .route("/workspace/file", axum::routing::put(workspace::write_file))
+        .layer(DefaultBodyLimit::max(MAX_WRITE_BODY_BYTES));
+
+    json_routes
+        .merge(upload_routes)
+        .merge(write_routes)
         .fallback(api_not_found)
+        // Outermost, so a transport-level rejection from *any* extractor is
+        // rewritten into the documented JSON error shape.
+        .layer(axum::middleware::from_fn(json_error_shape))
+}
+
+/// `PATCH /api/config`, with the admin gate in front of it.
+///
+/// The gate lives here rather than in `routes::config` so that the security
+/// decision is made in one place, before the patch is applied: a patch that
+/// touches `approvals`, `model.base_url`, `model.api_key`, `providers`,
+/// `active_provider` or `active_model` needs `X-Karucode-Admin-Token` whenever
+/// `config.admin_token` is set. Everything else keeps working with the ordinary
+/// bearer token.
+async fn patch_config_guarded(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    // Same order as `config::patch_config`: a locked deployment answers 403 even
+    // for a malformed body.
+    if state.settings().is_locked() {
+        return Err(ApiError::forbidden(
+            "settings are locked (KARUCODE_LOCK_SETTINGS); change them in the config file or environment",
+        ));
+    }
+    let patch: ConfigPatch = parse_body(&body)?;
+    let presented = admin_token_from(&headers);
+    let config = state.settings().snapshot();
+    let security_fields = authorize_patch(&config, &patch, presented).map_err(ApiError::from)?;
+    if !security_fields.is_empty() {
+        // Field names only: never the values, and never the credential.
+        tracing::info!(
+            fields = %security_fields.join(", "),
+            "security-relevant settings change authorised"
+        );
+    }
+    config::patch_config(State(state), body).await
+}
+
+/// The admin credential from the request headers, if any. A header that is not
+/// valid ASCII is treated as absent (and therefore as a failed check) rather
+/// than as a match.
+fn admin_token_from(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(ADMIN_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+}
+
+/// Rewrite a non-JSON error response (axum's plain-text `413` from
+/// `DefaultBodyLimit`, and any other transport rejection) into the documented
+/// `{"error":{"code","message"}}` shape. Responses that are already JSON are
+/// passed through untouched.
+async fn json_error_shape(request: axum::extract::Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    let status = response.status();
+    if !status.is_client_error() && !status.is_server_error() {
+        return response;
+    }
+    let is_json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.starts_with("application/json"))
+        .unwrap_or(false);
+    if is_json {
+        return response;
+    }
+    let error = if status == StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError::payload_too_large(MAX_JSON_BODY_BYTES, None)
+    } else {
+        ApiError::new(
+            status,
+            "bad_request",
+            status.canonical_reason().unwrap_or("request rejected"),
+        )
+    };
+    error.into_response()
 }
 
 /// Parse an optional JSON body. An empty body is accepted and yields `Default`,
@@ -159,5 +298,103 @@ mod tests {
         assert_eq!(query_usize(&query, "depth").unwrap(), Some(3));
         query.insert("staged".into(), "yes".into());
         assert!(query_bool(&query, "staged").unwrap());
+    }
+
+    #[test]
+    fn the_json_limit_leaves_room_for_the_documented_prompt_error() {
+        // `MAX_PROMPT_BYTES` is 1 MiB and its documented answer is a 400 naming
+        // the field. The transport limit must sit above it, or that 400 is
+        // unreachable and the client sees a 413 instead.
+        const { assert!(MAX_JSON_BODY_BYTES > 1024 * 1024) };
+        // ...and below axum's 2 MiB default, which is what we are replacing.
+        const { assert!(MAX_JSON_BODY_BYTES < 2 * 1024 * 1024) };
+    }
+
+    #[test]
+    fn the_upload_limit_leaves_room_for_the_handlers_own_check() {
+        // The handler reports the documented 413 itself, so the transport limit
+        // must be the larger of the two.
+        const { assert!(MAX_UPLOAD_BODY_BYTES > workspace::MAX_UPLOAD_BYTES) };
+    }
+
+    /// A body over the limit must come back as the documented JSON error, not
+    /// axum's plain-text 413.
+    #[tokio::test]
+    async fn an_oversized_body_is_a_json_payload_too_large() {
+        use tower::ServiceExt;
+
+        // A minimal router with the same limit + rewrite layer as `api_router`,
+        // so this exercises the real rejection path without a full `AppState`.
+        let app: Router = Router::new()
+            .route(
+                "/echo",
+                post(|body: Bytes| async move { body.len().to_string() }),
+            )
+            .layer(DefaultBodyLimit::max(1024))
+            .layer(axum::middleware::from_fn(json_error_shape));
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/echo")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(vec![b'x'; 4096]))
+            .unwrap();
+        let response = app.oneshot(request).await.expect("router call");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let value: Value = serde_json::from_slice(&body).unwrap_or_else(|e| {
+            panic!(
+                "413 body was not JSON ({e}): {}",
+                String::from_utf8_lossy(&body)
+            )
+        });
+        assert_eq!(
+            value["error"]["code"],
+            serde_json::json!("payload_too_large")
+        );
+        assert!(value["error"]["message"].is_string());
+    }
+
+    #[test]
+    fn the_admin_credential_is_read_from_its_own_header() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(admin_token_from(&headers), None);
+        headers.insert(ADMIN_TOKEN_HEADER, "s3cret".parse().unwrap());
+        assert_eq!(admin_token_from(&headers), Some("s3cret"));
+        // The ordinary bearer token is not the admin credential.
+        let mut bearer = HeaderMap::new();
+        bearer.insert(header::AUTHORIZATION, "Bearer s3cret".parse().unwrap());
+        assert_eq!(admin_token_from(&bearer), None);
+    }
+
+    /// A JSON error from a handler must pass through untouched.
+    #[tokio::test]
+    async fn an_existing_json_error_is_not_rewritten() {
+        use tower::ServiceExt;
+
+        let app: Router = Router::new()
+            .route(
+                "/boom",
+                get(|| async { ApiError::not_found("no such thing") }),
+            )
+            .layer(axum::middleware::from_fn(json_error_shape));
+
+        let request = axum::http::Request::builder()
+            .uri("/boom")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.expect("router call");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let value: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["error"]["code"], serde_json::json!("not_found"));
+        assert_eq!(
+            value["error"]["message"],
+            serde_json::json!("no such thing")
+        );
     }
 }

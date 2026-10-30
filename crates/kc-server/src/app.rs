@@ -1,9 +1,14 @@
 //! Router construction and the security middlewares (auth, host guard, CSRF,
 //! headers).
 //!
-//! Layer order (outermost first): security headers -> bearer auth -> host guard
-//! -> CSRF -> API/static routes. That way even a 401/403 carries `nosniff` and
-//! the CSP.
+//! Layer order (outermost first): observability (request id, access log, request
+//! counters) -> tracing span -> security headers -> bearer auth -> host guard ->
+//! CSRF -> API/static routes. That way even a 401/403 carries `nosniff` and the
+//! CSP, and is still logged, counted and correlated by its `X-Request-Id`.
+//!
+//! Observability is deliberately the outermost layer: a request refused by the
+//! auth or `Host` guard is exactly the one an operator needs to see, and a layer
+//! placed inside those guards would never run for it.
 //!
 //! The host guard runs for *every* method (a rebound page can read `GET
 //! /api/config` too) and is the DNS-rebinding defence described in [`crate::host`].
@@ -12,7 +17,7 @@
 // @kc-title: Understand the security model
 // @kc-summary: What karucode protects by default, what it explicitly does not, and the recipe for safe remote access.
 // @kc-tags: security, auth, csrf, sandbox, remote, trust
-// @kc-applies-to: env:KARUCODE_AUTH_TOKEN, env:KARUCODE_ALLOWED_HOSTS, header:X-Karucode-Client, header:Authorization, config:auth_token, doc:docs/SECURITY.md, concept:approvals, concept:workspace containment
+// @kc-applies-to: env:KARUCODE_AUTH_TOKEN, env:KARUCODE_ALLOWED_HOSTS, header:X-Karucode-Client, header:Authorization, config:auth_token, config:allow_temp_dir, doc:docs/SECURITY.md, concept:approvals, concept:workspace containment
 //
 // # Default posture
 //
@@ -30,14 +35,36 @@
 //   127.0.0.1`, `localhost`, `[::1]` (any port) and entries in
 //   `KARUCODE_ALLOWED_HOSTS` are served. Everything else gets `403`.
 // * **Path confinement** - read/write/edit/list/search resolve through the project
-//   workspace; `..`, outside-absolute paths and symlink escapes are refused.
+//   workspace, plus the system temporary directory (see below); `..`,
+//   outside-absolute paths and symlink escapes are refused.
 // * **Secrets** - API keys and MCP headers are write-only over the API, redacted in
 //   errors and never logged. The data directory is forced to `0700`.
 // * **Rendered content** - the UI disables raw HTML in Markdown and sanitises what
 //   it renders; the CSP allows no inline scripts.
+// * **Plugin panels** - a plugin contributes *data*, never markup. The inspector
+//   draws the payload with a first-party component (or a read-only JSON view),
+//   so a plugin cannot execute code in the app's origin; the CSP and
+//   `frame-ancestors 'none'` keep their meaning, and no iframe, `unsafe-eval` or
+//   `unsafe-inline` script exemption is needed.
 // * **Response headers** - `nosniff`, `no-referrer`, `X-Frame-Options: DENY`, a
 //   restrictive CSP and `Cross-Origin-Resource-Policy: same-origin` on every
 //   response, including errors.
+//
+// # The temp directory is deliberately inside the fence
+//
+// The file tools may also reach the system temporary directory (`TMPDIR`, else
+// `/tmp`). It is a *second root*, not the absence of one: `..` cannot climb out
+// of it, a symlink inside it that points elsewhere is refused, and `/etc` stays
+// out of reach. Turn it off with `allow_temp_dir = false` (or
+// `KARUCODE_ALLOW_TEMP_DIR=0`) for project-only confinement.
+//
+// This is not a hole, because `/tmp` was never outside the attacker's reach to
+// begin with: `run_command` is unsandboxed and runs as the server user, and every
+// other process on the machine can already write to `/tmp`. The confinement
+// rules exist to stop a *model* wandering out of its project - `~/.ssh`,
+// `/etc`, another repository - not to contain code that can already fork a
+// shell. Keeping the temp dir usable is what lets builds, screenshots and
+// downloads work without an approval prompt per scratch file.
 //
 // # What is NOT protected - read this
 //
@@ -46,7 +73,8 @@
 //   gate, not isolation.
 // * **Plugins and MCP servers are trusted code.** They run as the server user;
 //   their declared `permissions` limit which tools the host exposes, not what the
-//   process can do.
+//   process can do. A plugin panel cannot run code in the *browser*, but the
+//   plugin process behind it has the server user's privileges.
 // * **Subagents share the workspace.** `owned_paths` claims are advisory conflict
 //   reporting, not locking.
 // * **There is no built-in TLS.** Plain HTTP on loopback is fine; anything else
@@ -80,6 +108,7 @@
 
 use crate::error::ApiError;
 use crate::host::{self, display_host};
+use crate::metrics;
 use crate::routes;
 use crate::state::AppState;
 use axum::body::Body;
@@ -88,16 +117,33 @@ use axum::http::{header, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
+use tower_http::trace::TraceLayer;
 
 /// The CSP from the task/security docs. `unsafe-inline` is limited to styles;
 /// scripts are same-origin files only.
+///
+/// `img-src` additionally allows `blob:`, which the project rail needs: an icon
+/// is fetched with the bearer token (an `<img src>` cannot send `Authorization`)
+/// and handed to the DOM as an object URL. A `blob:` URL inherits the creating
+/// document's origin, so it can only carry same-origin content — it is not a way
+/// to load or leak anything from another host, which is what `img-src` exists to
+/// prevent. Remote images stay blocked, so a prompt-injected Markdown image still
+/// cannot phone home.
 pub const CONTENT_SECURITY_POLICY: &str =
-    "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+    "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
      connect-src 'self'; frame-ancestors 'none'";
 
 /// Build the complete application router.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        // `GET /metrics` (Prometheus text). Registered here rather than in
+        // `routes::api_router` because it is not part of the documented `/api`
+        // surface: it is an operator endpoint, and it must not be reachable
+        // through the SPA fallback. It sits *inside* the auth layer, so a
+        // deployment with `KARUCODE_AUTH_TOKEN` set needs the bearer token to
+        // scrape it - metrics name routes and counts, which is not something to
+        // hand to an unauthenticated caller on a non-loopback bind.
+        .route("/metrics", axum::routing::get(metrics::metrics))
         .nest("/api", routes::api_router())
         .fallback(crate::static_ui::serve_spa)
         .layer(axum::middleware::from_fn_with_state(
@@ -116,6 +162,18 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             security_headers,
         ))
+        // One span per request, carrying the id `observability` minted. The
+        // span is what a tracing backend groups the handler's own events under;
+        // the access-log line and the counters live in the layer below.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(metrics::request_span)
+                .on_response(metrics::record_response),
+        )
+        // Outermost: mint the request id, log one line, count the request and
+        // echo `X-Request-Id`. Outside the auth and `Host` guards so a 401/403
+        // is logged and counted too.
+        .layer(axum::middleware::from_fn(metrics::observability))
         .with_state(state)
 }
 
@@ -154,7 +212,12 @@ fn authorized(request: &Request<Body>, expected: &str) -> bool {
             return true;
         }
     }
-    if request.uri().path() == "/api/events" {
+    // Two endpoints accept `?token=`: the SSE stream (a `ReadableStream` fetch
+    // cannot always set headers) and the terminal websocket (a browser never can
+    // on a handshake). Both are same-origin only, and the websocket additionally
+    // checks `Origin` against `Host`.
+    let path = request.uri().path();
+    if path == "/api/events" || (path.starts_with("/api/terminals/") && path.ends_with("/socket")) {
         if let Some(token) = query_param(request.uri().query(), "token") {
             if constant_time_eq(token.as_bytes(), expected.as_bytes()) {
                 return true;
@@ -368,6 +431,19 @@ fn percent_decode(input: &str) -> String {
 /// Status helper used by tests and docs.
 pub fn is_no_content(status: StatusCode) -> bool {
     status == StatusCode::NO_CONTENT
+}
+
+/// The "nothing to send" answer for a route whose absence is routine (a project
+/// with no favicon), rather than a `404`.
+///
+/// A `404` is correct semantically, but every browser logs a 4xx as
+/// `Failed to load resource` in the console, so a normal, expected absence looks
+/// like a broken deployment. `204 No Content` says the same thing without the
+/// noise and without inventing a body. It is deliberately *not* used where a
+/// missing thing is an error: every other route still answers with the
+/// documented `404 not_found`.
+pub fn no_content() -> Response {
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[cfg(test)]

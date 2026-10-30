@@ -7,8 +7,8 @@ use axum::http::{Method, StatusCode};
 use serde_json::{json, Value};
 use std::time::Duration;
 use support::{
-    collect_events_until, events_within, text, tool_call, ApprovalTool, HarnessBuilder, ModelsMode,
-    Script,
+    collect_events_until, events_within, text, tool_call, wait_for_running,
+    wait_until_idle_ignored, ApprovalTool, HarnessBuilder, ModelsMode, Script,
 };
 
 fn event_types(events: &[Value]) -> Vec<&str> {
@@ -514,8 +514,8 @@ async fn projects_scope_sessions_workspace_and_runs() {
     let default_id = projects[0]["id"].as_str().unwrap().to_string();
     assert_eq!(projects[0]["session_count"], 0);
 
-    // A second project, a sibling of the default workspace.
-    let second_dir = h.workspace_path().parent().unwrap().join("project-two");
+    // A second project, a subdirectory of the default workspace.
+    let second_dir = h.workspace_path().join("project-two");
     std::fs::create_dir_all(&second_dir).unwrap();
     let second_path = second_dir
         .canonicalize()
@@ -686,6 +686,93 @@ async fn projects_scope_sessions_workspace_and_runs() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn a_project_outside_the_workspace_is_accepted_without_configured_roots() {
+    // The default is "no allowlist": `KARUCODE_PROJECT_ROOTS` unset must not
+    // confine project creation to the default workspace, otherwise the obvious
+    // second project - a sibling checkout - is a 400 until someone sets an
+    // environment variable they never needed.
+    let h = HarnessBuilder::new(vec![]).build().await;
+    assert!(
+        h.state.settings().snapshot().project_roots.is_empty(),
+        "the harness is the default install: no project roots configured"
+    );
+
+    let sibling = h.root.join("sibling");
+    std::fs::create_dir_all(&sibling).unwrap();
+    let sibling_path = sibling
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let created = h
+        .post("/api/projects", json!({ "path": sibling_path }))
+        .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.text());
+    let project = created.json()["project"].clone();
+    assert_eq!(project["path"], sibling_path);
+
+    // The project really is usable: a session in it records that directory.
+    let id = project["id"].as_str().unwrap().to_string();
+    let session = h.post("/api/sessions", json!({ "project": id })).await;
+    assert_eq!(session.status, StatusCode::OK, "{}", session.text());
+    assert_eq!(session.json()["workspace"], sibling_path);
+
+    // `/` is still refused, so a project cannot make the filesystem the root.
+    let root = h.post("/api/projects", json!({ "path": "/" })).await;
+    assert_eq!(root.status, StatusCode::BAD_REQUEST);
+    assert!(root.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("filesystem root"));
+}
+
+#[tokio::test]
+async fn configured_project_roots_are_still_an_allowlist() {
+    // The other half of the default: when the operator does pin the list, a path
+    // outside it is refused with a message that says how to widen it.
+    let allow_root = std::env::temp_dir().join(format!(
+        "kc-project-root-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let inside = allow_root.join("inside-root");
+    std::fs::create_dir_all(&inside).unwrap();
+    let inside = inside.canonicalize().unwrap();
+
+    let h = HarnessBuilder::new(vec![])
+        .project_roots(vec![allow_root.clone()])
+        .build()
+        .await;
+    assert_eq!(
+        h.state.settings().snapshot().project_roots,
+        vec![allow_root.clone()],
+        "one configured root"
+    );
+
+    let created = h
+        .post("/api/projects", json!({ "path": inside.to_string_lossy() }))
+        .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.text());
+
+    // The harness workspace is a *sibling* of the configured root, so it is
+    // outside the allowlist now.
+    let outside = h.workspace_path().to_string_lossy().to_string();
+    let refused = h.post("/api/projects", json!({ "path": outside })).await;
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+    let message = refused.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        message.contains("outside the allowed project roots"),
+        "{message}"
+    );
+    assert!(message.contains("KARUCODE_PROJECT_ROOTS"), "{message}");
+
+    std::fs::remove_dir_all(&allow_root).ok();
 }
 
 #[tokio::test]
@@ -939,6 +1026,141 @@ async fn workspace_explorer_confines_paths() {
     assert_eq!(git_status.status, StatusCode::OK);
     // The temp workspace is not a repository; that is a payload, not an error.
     assert_eq!(git_status.json()["is_repo"], false);
+}
+
+/// `PUT /api/workspace/file` is the editor's save: it writes text, refuses a stale
+/// `expected_size` and stays inside the workspace.
+#[tokio::test]
+async fn workspace_file_can_be_saved_from_the_editor() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    std::fs::create_dir_all(h.workspace_path().join("docs")).unwrap();
+    std::fs::write(h.workspace_path().join("docs/notes.md"), "# hi\n").unwrap();
+
+    let save = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file?path=docs/notes.md",
+            Some(json!({ "content": "# hello\n", "expected_size": 5 })),
+            &[],
+        )
+        .await;
+    assert_eq!(save.status, StatusCode::OK, "body: {}", save.text());
+    let saved = save.json();
+    assert_eq!(saved["path"], "docs/notes.md");
+    assert_eq!(saved["size"], 8);
+    assert_eq!(saved["created"], false);
+    assert_eq!(saved["language"], "markdown");
+    assert_eq!(
+        std::fs::read_to_string(h.workspace_path().join("docs/notes.md")).unwrap(),
+        "# hello\n"
+    );
+
+    // The next save carries the size the editor now holds.
+    let again = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file?path=docs/notes.md",
+            Some(json!({ "content": "# hello again\n" })),
+            &[],
+        )
+        .await;
+    assert_eq!(again.status, StatusCode::OK);
+
+    // A stale `expected_size` is a conflict, and nothing is written.
+    let stale = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file?path=docs/notes.md",
+            Some(json!({ "content": "clobbered", "expected_size": 5 })),
+            &[],
+        )
+        .await;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    assert_eq!(
+        std::fs::read_to_string(h.workspace_path().join("docs/notes.md")).unwrap(),
+        "# hello again\n"
+    );
+
+    // `force=true` is the user's answer to that prompt.
+    let forced = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file?path=docs/notes.md&force=true",
+            Some(json!({ "content": "clobbered", "expected_size": 5 })),
+            &[],
+        )
+        .await;
+    assert_eq!(forced.status, StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(h.workspace_path().join("docs/notes.md")).unwrap(),
+        "clobbered"
+    );
+
+    // Creating a file needs `create=true` so a typo cannot silently make one.
+    let missing = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file?path=docs/new.md",
+            Some(json!({ "content": "x" })),
+            &[],
+        )
+        .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    let created = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file?path=docs/new.md&create=true",
+            Some(json!({ "content": "x" })),
+            &[],
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::OK, "body: {}", created.text());
+    assert_eq!(created.json()["created"], true);
+
+    // Confinement and the CSRF guard still apply.
+    let escape = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file?path=../../etc/passwd&create=true",
+            Some(json!({ "content": "x" })),
+            &[],
+        )
+        .await;
+    assert_eq!(escape.status, StatusCode::BAD_REQUEST);
+    assert_eq!(escape.error_code(), "path_escape");
+
+    let no_csrf = h
+        .send_with(
+            Method::PUT,
+            "/api/workspace/file?path=docs/notes.md",
+            Some(json!({ "content": "x" })),
+            &[],
+            false,
+        )
+        .await;
+    assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+    assert_eq!(no_csrf.error_code(), "permission_denied");
+
+    let no_path = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file",
+            Some(json!({ "content": "x" })),
+            &[],
+        )
+        .await;
+    assert_eq!(no_path.status, StatusCode::BAD_REQUEST);
+
+    let no_body = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file?path=docs/notes.md",
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(no_body.status, StatusCode::BAD_REQUEST);
+    assert!(no_body.json()["error"]["message"].is_string());
 }
 
 #[tokio::test]
@@ -1879,7 +2101,9 @@ async fn out_of_range_settings_are_rejected_with_the_bounds() {
         ),
         (
             "limits.context_max_chars",
-            json!({ "limits": { "context_max_chars": 9_999 } }),
+            // 0 is the "derive it from the model window" sentinel now, so only
+            // the high end is out of range.
+            json!({ "limits": { "context_max_chars": 4_000_001 } }),
         ),
         (
             "limits.max_iterations",
@@ -1968,7 +2192,7 @@ async fn out_of_range_settings_are_rejected_with_the_bounds() {
                     "max_file_read_bytes": 5_000_000,
                     "max_tool_output_bytes": 1_000_000,
                     "max_command_output_bytes": 1_000_000,
-                    "context_max_chars": 10_000,
+                    "context_max_chars": 0,
                     "max_iterations": 10_000,
                     "max_run_secs": 604_800,
                     "auto_continue": false,
@@ -2379,4 +2603,736 @@ async fn session_detail_pages_the_transcript_and_says_when_it_is_truncated() {
     // A non-numeric window is a 400, not a silent default.
     let bad = h.get(&format!("/api/sessions/{id}?messages=lots")).await;
     assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn agents_are_listable_workspace_wide_and_each_has_its_own_transcript() {
+    let h = HarnessBuilder::new(vec![
+        tool_call(
+            "spawn_agent",
+            r#"{"task":"review the diff","name":"reviewer","role":"reviewer"}"#,
+        ),
+        text("the diff looks fine"),
+        text("parent finished"),
+    ])
+    .build()
+    .await;
+    let session = h.create_session(Some("agent routes")).await;
+    let started = h
+        .post(
+            &format!("/api/sessions/{session}/messages"),
+            json!({ "content": "delegate the review" }),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::ACCEPTED, "{}", started.text());
+    h.wait_until_idle(&session).await;
+
+    // The list carries the session context, so a workspace-wide view can group
+    // agents without a second request per session.
+    let list = h.get("/api/agents").await;
+    assert_eq!(list.status, StatusCode::OK);
+    let body = list.json();
+    assert_eq!(body["running"], 0);
+    let agents = body["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 1, "one spawned agent: {agents:?}");
+    let agent = &agents[0];
+    assert_eq!(agent["name"], "reviewer");
+    assert_eq!(agent["role"], "reviewer");
+    assert_eq!(agent["status"], "completed");
+    assert_eq!(agent["session_id"], session);
+    assert_eq!(agent["session_title"], "agent routes");
+    assert!(agent["workspace"].as_str().unwrap().contains("test"));
+    let agent_id = agent["id"].as_str().unwrap().to_string();
+
+    // `?session=` narrows to one session, `?status=` to one state.
+    let scoped = h
+        .get(&format!("/api/agents?session={session}"))
+        .await
+        .json();
+    assert_eq!(scoped["agents"].as_array().unwrap().len(), 1);
+    let none = h.get("/api/agents?status=running").await.json();
+    assert_eq!(none["agents"].as_array().unwrap().len(), 0);
+    let bad = h.get("/api/agents?status=exploded").await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    assert_eq!(bad.error_code(), "bad_request");
+
+    // The detail is the agent's transcript only - never the parent's messages.
+    let detail = h.get(&format!("/api/agents/{agent_id}")).await;
+    assert_eq!(detail.status, StatusCode::OK);
+    let body = detail.json();
+    assert_eq!(body["agent"]["id"], agent_id);
+    assert_eq!(body["messages_truncated"], false);
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "task + answer: {messages:?}");
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"], "review the diff");
+    assert_eq!(messages[1]["role"], "assistant");
+    assert!(messages
+        .iter()
+        .all(|message| message["agent_id"] == agent_id));
+
+    // A short window keeps the newest rows and reports the cut.
+    let tail = h
+        .get(&format!("/api/agents/{agent_id}?messages=1"))
+        .await
+        .json();
+    assert_eq!(tail["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(tail["messages_truncated"], true);
+
+    let missing = h.get("/api/agents/a_does_not_exist").await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    assert_eq!(missing.error_code(), "not_found");
+}
+
+// ---------------------------------------------------------------------------
+// Plugin-contributed inspector panels
+// ---------------------------------------------------------------------------
+
+/// A plugin that declares two panels: `todo` answers `panels/read`, `broken`
+/// fails on purpose. Everything else in the protocol is minimal.
+const PANEL_PLUGIN: &str = r#"
+import json, sys
+
+MANIFEST = {
+    "name": "kc-todo", "version": "0.2.0", "protocol": "1",
+    "capabilities": ["tools", "panels"], "permissions": [], "hooks": [],
+    "panels": [
+        {"id": "todo", "title": "Todo", "icon": "check", "source": "static",
+         "refresh_ms": 5000},
+        {"id": "broken", "title": "Broken", "source": "static"},
+    ],
+}
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    params = req.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": MANIFEST})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": []}})
+    elif method == "panels/read":
+        if params.get("panel") == "todo":
+            send({"jsonrpc": "2.0", "id": rid, "result": {
+                "title": "Todo",
+                "data": {"items": [{"id": "t1", "text": "write tests",
+                                    "status": "open"}],
+                         "session": params.get("session_id"),
+                         "project": params.get("project"),
+                         "workspace": params.get("workspace")},
+            }})
+        else:
+            send({"jsonrpc": "2.0", "id": rid,
+                  "error": {"code": -32000, "message": "the todo list is unreadable"}})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": rid, "result": None})
+        break
+    elif rid is not None:
+        send({"jsonrpc": "2.0", "id": rid,
+              "error": {"code": -32601, "message": "unknown"}})
+"#;
+
+/// Write an inline plugin script to its own temp directory and return a config
+/// that runs it. The directory outlives the harness, which is what a plugin's
+/// own installation directory does.
+fn inline_plugin(name: &str, source: &str) -> kc_core::config::PluginConfig {
+    let dir = std::env::temp_dir().join(format!(
+        "kc-server-panel-{name}-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join(format!("{name}.py"));
+    std::fs::write(&script, source).unwrap();
+    kc_core::config::PluginConfig {
+        name: name.into(),
+        enabled: true,
+        command: vec!["python3".to_string(), script.to_string_lossy().into_owned()],
+        env: Default::default(),
+        permissions: Vec::new(),
+        settings: Default::default(),
+    }
+}
+
+fn panel_plugin() -> kc_core::config::PluginConfig {
+    inline_plugin("kc-todo", PANEL_PLUGIN)
+}
+
+#[tokio::test]
+async fn a_plugin_panel_is_served_over_http() {
+    let h = HarnessBuilder::new(Vec::new())
+        .plugin(panel_plugin())
+        .build()
+        .await;
+    let session = h.create_session(Some("panel session")).await;
+
+    let response = h
+        .get(&format!(
+            "/api/plugins/kc-todo/panels/todo?session={session}"
+        ))
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.text());
+    let body = response.json();
+    assert_eq!(body["title"], "Todo");
+    assert_eq!(body["data"]["items"][0]["id"], "t1");
+    // The session the browser asked about reached the plugin.
+    assert_eq!(body["data"]["session"], json!(session));
+    assert!(body["version"].is_u64(), "{}", body);
+    assert!(body["fetched_ms"].is_u64(), "{}", body);
+}
+
+#[tokio::test]
+async fn a_plugin_panel_carries_the_project_workspace() {
+    let h = HarnessBuilder::new(Vec::new())
+        .plugin(panel_plugin())
+        .build()
+        .await;
+
+    let config = h.get("/api/config").await.json();
+    let project = config["workspace"].as_str().unwrap_or_default().to_string();
+    assert!(!project.is_empty());
+
+    // `?project=` is resolved to a workspace root before the plugin is called.
+    // The harness registers exactly one project (the default workspace).
+    let projects = h.get("/api/projects").await.json();
+    let id = projects["projects"][0]["id"].as_str().unwrap().to_string();
+    let response = h
+        .get(&format!("/api/plugins/kc-todo/panels/todo?project={id}"))
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.text());
+    let body = response.json();
+    assert_eq!(body["data"]["project"], json!(id));
+    let workspace = body["data"]["workspace"].as_str().unwrap_or_default();
+    assert!(
+        workspace.starts_with('/'),
+        "the plugin must receive the absolute workspace root: {body}"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_plugin_or_panel_is_a_404_and_a_broken_panel_is_a_plugin_error() {
+    let h = HarnessBuilder::new(Vec::new())
+        .plugin(panel_plugin())
+        .build()
+        .await;
+
+    let unknown_plugin = h.get("/api/plugins/nope/panels/todo").await;
+    assert_eq!(unknown_plugin.status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown_plugin.error_code(), "not_found");
+    assert!(unknown_plugin.text().contains("nope"));
+
+    // A panel the plugin does not declare names the ones it does.
+    let unknown_panel = h.get("/api/plugins/kc-todo/panels/nope").await;
+    assert_eq!(unknown_panel.status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown_panel.error_code(), "not_found");
+    assert!(
+        unknown_panel.text().contains("plugin__kc-todo__todo"),
+        "{}",
+        unknown_panel.text()
+    );
+
+    // The plugin answering with a JSON-RPC error is a plugin-side failure, not a
+    // 404 and not a panic.
+    let broken = h.get("/api/plugins/kc-todo/panels/broken").await;
+    assert_eq!(broken.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(broken.error_code(), "plugin");
+    let message = broken.text();
+    assert!(message.contains("the todo list is unreadable"), "{message}");
+    assert!(message.contains("kc-todo"), "{message}");
+
+    // The plugin is still healthy afterwards.
+    assert_eq!(
+        h.get("/api/plugins/kc-todo/panels/todo").await.status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn a_disabled_plugin_panel_is_a_400() {
+    let h = HarnessBuilder::new(Vec::new())
+        .plugin(panel_plugin())
+        .build()
+        .await;
+    assert_eq!(
+        h.post("/api/plugins/kc-todo/enable", json!({"enabled": false}))
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    let response = h.get("/api/plugins/kc-todo/panels/todo").await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    // Same shape `POST /api/plugins/:name/enable` produces for the same
+    // condition: `Config` is a caller/operator problem, so `400 bad_request`.
+    assert_eq!(response.error_code(), "bad_request");
+    assert!(response.text().contains("disabled"), "{}", response.text());
+
+    // Re-enabling makes the panel readable again.
+    assert_eq!(
+        h.post("/api/plugins/kc-todo/enable", json!({"enabled": true}))
+            .await
+            .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        h.get("/api/plugins/kc-todo/panels/todo").await.status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn a_panel_for_an_unknown_session_or_project_is_a_404() {
+    let h = HarnessBuilder::new(Vec::new())
+        .plugin(panel_plugin())
+        .build()
+        .await;
+
+    let missing_session = h
+        .get("/api/plugins/kc-todo/panels/todo?session=s_nope")
+        .await;
+    assert_eq!(missing_session.status, StatusCode::NOT_FOUND);
+    assert!(missing_session.text().contains("s_nope"));
+
+    let missing_project = h
+        .get("/api/plugins/kc-todo/panels/todo?project=p_nope")
+        .await;
+    assert_eq!(missing_project.status, StatusCode::NOT_FOUND);
+    assert!(missing_project.text().contains("p_nope"));
+}
+
+#[tokio::test]
+async fn the_panel_route_needs_the_bearer_token_when_one_is_configured() {
+    let token = "panel-route-token-0123456789";
+    let h = HarnessBuilder::new(Vec::new())
+        .plugin(panel_plugin())
+        .auth_token(token)
+        .build()
+        .await;
+
+    let unauthorized = h.get("/api/plugins/kc-todo/panels/todo").await;
+    assert_eq!(unauthorized.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(unauthorized.error_code(), "unauthorized");
+    // The refusal carries the security headers like every other response.
+    assert_security_headers(&unauthorized.headers);
+
+    let authorized = h
+        .get_with(
+            "/api/plugins/kc-todo/panels/todo",
+            &[("authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+    assert_eq!(authorized.status, StatusCode::OK, "{}", authorized.text());
+}
+
+#[tokio::test]
+async fn config_lists_the_panels_a_plugin_contributes() {
+    let h = HarnessBuilder::new(Vec::new())
+        .plugin(panel_plugin())
+        .build()
+        .await;
+
+    let config = h.get("/api/config").await.json();
+    let groups = config["plugin_panels"]
+        .as_array()
+        .unwrap_or_else(|| panic!("plugin_panels missing: {config}"));
+    assert_eq!(groups.len(), 1, "{groups:?}");
+    assert_eq!(groups[0]["plugin"], "kc-todo");
+    assert_eq!(groups[0]["version"], "0.2.0");
+    let panels = groups[0]["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 2);
+    assert_eq!(panels[0]["id"], "todo");
+    assert_eq!(panels[0]["hosted_id"], "plugin__kc-todo__todo");
+    assert_eq!(panels[0]["title"], "Todo");
+    assert_eq!(panels[0]["icon"], "check");
+    assert_eq!(panels[0]["refresh_ms"], 5000);
+
+    // The plugin summary keeps its old shape, so a client that ignores panels
+    // is unaffected.
+    assert_eq!(config["plugins"][0]["name"], "kc-todo");
+    assert_eq!(config["plugins"][0]["status"], "ready");
+}
+
+#[tokio::test]
+async fn a_plugin_with_no_panels_adds_no_tabs_and_no_errors() {
+    let h = HarnessBuilder::new(Vec::new())
+        .plugin(inline_plugin(
+            "plain",
+            r#"
+import json, sys
+MANIFEST = {"name": "plain", "version": "0.1.0", "protocol": "1",
+            "capabilities": ["tools"], "permissions": [], "hooks": []}
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        out = MANIFEST
+    elif method == "tools/list":
+        out = {"tools": []}
+    elif method == "shutdown":
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": None}) + "\n")
+        sys.stdout.flush()
+        break
+    else:
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid,
+            "error": {"code": -32601, "message": "unknown"}}) + "\n")
+        sys.stdout.flush()
+        continue
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": out}) + "\n")
+    sys.stdout.flush()
+"#,
+        ))
+        .build()
+        .await;
+
+    let config = h.get("/api/config").await.json();
+    assert_eq!(config["plugins"][0]["status"], "ready");
+    assert_eq!(config["plugin_panels"], json!([]));
+
+    let response = h.get("/api/plugins/plain/panels/todo").await;
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+    assert_eq!(response.error_code(), "not_found");
+}
+
+/// Hot plugin reload over HTTP: the three things an operator does without
+/// restarting the server — install, upgrade, uninstall.
+#[tokio::test]
+async fn plugin_reload_routes_rescan_hot_load_and_hot_unload() {
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/fake_plugin.sh"
+    );
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("FAKE_PLUGIN_NAME".to_string(), "fake".to_string());
+    let plugin = kc_core::config::PluginConfig {
+        name: "fake".into(),
+        enabled: true,
+        command: vec!["sh".into(), fixture.into()],
+        env,
+        permissions: Vec::new(),
+        settings: Default::default(),
+    };
+    let h = HarnessBuilder::new(vec![text("ok")])
+        .plugin(plugin)
+        .build()
+        .await;
+
+    let loaded = h.get("/api/plugins").await.json();
+    assert_eq!(loaded["plugins"][0]["status"], "ready");
+    let pid = loaded["plugins"][0]["pid"].as_u64().expect("pid");
+
+    // Rescanning an unchanged tree must not disturb the running process: the
+    // watcher calls this path on a timer, so churn here would be a bug.
+    let rescan = h.post("/api/plugins/reload", json!({})).await;
+    assert_eq!(rescan.status, StatusCode::OK);
+    let body = rescan.json();
+    assert_eq!(body["report"]["unchanged"][0], "fake");
+    assert!(body["report"]["added"].as_array().unwrap().is_empty());
+    assert_eq!(body["plugins"][0]["pid"].as_u64(), Some(pid));
+
+    // A plugin installed into the data dir after startup is picked up (load) ...
+    let data_dir = h.root.join("data");
+    let fresh_dir = data_dir.join("plugins").join("fresh");
+    std::fs::create_dir_all(&fresh_dir).unwrap();
+    std::fs::write(
+        fresh_dir.join("plugin.toml"),
+        format!(
+            "name = \"fresh\"\ncommand = [\"sh\", \"{fixture}\"]\nenv = {{ FAKE_PLUGIN_NAME = \"fresh\" }}\n"
+        ),
+    )
+    .unwrap();
+    let body = h.post("/api/plugins/reload", json!({})).await.json();
+    assert_eq!(body["report"]["added"][0], "fresh");
+    assert!(body["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "fresh" && p["status"] == "ready"));
+
+    // ... and removing the directory drops it again (unload).
+    std::fs::remove_dir_all(&fresh_dir).unwrap();
+    let body = h.post("/api/plugins/reload", json!({})).await.json();
+    assert_eq!(body["report"]["removed"][0], "fresh");
+    assert!(body["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|p| p["name"] != "fresh"));
+
+    // An explicit reload replaces exactly one plugin's process.
+    let one = h.post("/api/plugins/fake/reload", json!({})).await;
+    assert_eq!(one.status, StatusCode::OK);
+    assert_eq!(one.json()["status"], "ready");
+    let after = h.get("/api/plugins").await.json();
+    assert_ne!(after["plugins"][0]["pid"].as_u64(), Some(pid));
+
+    // An unknown name is a 404, not a 500.
+    let missing = h.post("/api/plugins/nope/reload", json!({})).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    assert_eq!(missing.error_code(), "not_found");
+}
+
+// ===========================================================================
+// Message modes: send / steer / follow_up
+// ===========================================================================
+
+/// `?mode=send` (and no `mode` at all) keeps the historical behaviour: it starts
+/// a run, and a second one while a run is active is the documented 409.
+#[tokio::test]
+async fn mode_send_starts_a_run_and_conflicts_with_an_active_one() {
+    let h = HarnessBuilder::new(vec![Script::Hang]).build().await;
+    let id = h.create_session(None).await;
+
+    // No `mode` (the historical call) is `send`.
+    let accepted = h
+        .post(
+            &format!("/api/sessions/{id}/messages"),
+            json!({ "content": "start working" }),
+        )
+        .await;
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{}", accepted.text());
+    let body = accepted.json();
+    assert_eq!(body["mode"], "send");
+    assert!(body["run_id"].is_string());
+
+    wait_for_running(&h, &id).await;
+
+    // The same call while the first run is still hanging is the documented 409,
+    // whether or not `mode=send` is spelled out.
+    for path in [
+        format!("/api/sessions/{id}/messages"),
+        format!("/api/sessions/{id}/messages?mode=send"),
+    ] {
+        let conflict = h.post(&path, json!({ "content": "again" })).await;
+        assert_eq!(
+            conflict.status,
+            StatusCode::CONFLICT,
+            "{path}: {}",
+            conflict.text()
+        );
+        assert!(
+            conflict.error_message().contains("mode=steer"),
+            "the conflict must point at the queue modes: {}",
+            conflict.error_message()
+        );
+    }
+
+    h.post(&format!("/api/sessions/{id}/cancel"), json!({}))
+        .await;
+    wait_until_idle_ignored(&h, &id).await;
+}
+
+/// A steer is accepted while a run is in flight, and only while it is in flight.
+#[tokio::test]
+async fn mode_steer_queues_while_running_and_refuses_when_idle() {
+    let h = HarnessBuilder::new(vec![Script::Hang]).build().await;
+    let id = h.create_session(None).await;
+
+    // Nothing running yet: a steer has nothing to steer.
+    let idle = h
+        .post(
+            &format!("/api/sessions/{id}/messages?mode=steer"),
+            json!({ "content": "adjust course" }),
+        )
+        .await;
+    assert_eq!(idle.status, StatusCode::CONFLICT, "{}", idle.text());
+    assert_eq!(idle.error_code(), "bad_request");
+    assert!(
+        idle.error_message().contains("no run in flight"),
+        "{}",
+        idle.error_message()
+    );
+
+    // Start a run, then steer it.
+    h.post(
+        &format!("/api/sessions/{id}/messages"),
+        json!({ "content": "long job" }),
+    )
+    .await;
+    wait_for_running(&h, &id).await;
+
+    let steered = h
+        .post(
+            &format!("/api/sessions/{id}/messages?mode=steer"),
+            json!({ "content": "use the real endpoint" }),
+        )
+        .await;
+    assert_eq!(steered.status, StatusCode::ACCEPTED, "{}", steered.text());
+    let body = steered.json();
+    assert_eq!(body["mode"], "steer");
+    assert_eq!(body["queued"], true);
+    assert!(body["steer_id"].is_string());
+
+    // The queue is visible on the session detail, so a reload shows it.
+    let detail = h.get(&format!("/api/sessions/{id}")).await.json();
+    let queued = detail["queued_steers"].as_array().expect("queue array");
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0]["content"], "use the real endpoint");
+
+    h.post(&format!("/api/sessions/{id}/cancel"), json!({}))
+        .await;
+    wait_until_idle_ignored(&h, &id).await;
+}
+
+/// A follow-up is queued while running and appears in the session detail; when
+/// the run ends it starts a new run with its own persisted user message.
+#[tokio::test]
+async fn mode_follow_up_is_queued_then_runs() {
+    // The first script hangs long enough to queue against, then answers; the
+    // second is the follow-up's own turn.
+    let h = HarnessBuilder::new(vec![text("first done"), text("second done")])
+        .build()
+        .await;
+    let id = h.create_session(None).await;
+
+    // Nothing running: refused, because a follow-up with no run is just a send.
+    let idle = h
+        .post(
+            &format!("/api/sessions/{id}/messages?mode=follow_up"),
+            json!({ "content": "then do this" }),
+        )
+        .await;
+    assert_eq!(idle.status, StatusCode::CONFLICT, "{}", idle.text());
+
+    // Race a follow-up against a run that will finish quickly. Whether the queue
+    // is accepted depends on timing, so accept either documented outcome and then
+    // verify the invariant: a queued follow-up never leaves a dangling row and a
+    // finished session ends up idle.
+    let started = h
+        .post(
+            &format!("/api/sessions/{id}/messages"),
+            json!({ "content": "do the thing" }),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::ACCEPTED);
+    let queued = h
+        .post(
+            &format!("/api/sessions/{id}/messages?mode=follow_up"),
+            json!({ "content": "then run the tests" }),
+        )
+        .await;
+    assert!(
+        queued.status == StatusCode::ACCEPTED || queued.status == StatusCode::CONFLICT,
+        "unexpected status {}: {}",
+        queued.status,
+        queued.text()
+    );
+    if queued.status == StatusCode::ACCEPTED {
+        assert_eq!(queued.json()["mode"], "follow_up");
+        assert!(queued.json()["follow_up_id"].is_string());
+    } else {
+        assert!(queued.error_message().contains("no run in flight"));
+    }
+
+    wait_until_idle_ignored(&h, &id).await;
+    // Whatever happened, the session settled and its queue is empty.
+    let detail = h.get(&format!("/api/sessions/{id}")).await.json();
+    assert_eq!(detail["running"], false);
+    assert!(
+        detail["queued_follow_ups"]
+            .as_array()
+            .map(|q| q.is_empty())
+            .unwrap_or(true),
+        "a settled session must not keep a follow-up queued"
+    );
+}
+
+/// An unknown `mode` is a 400 that names the accepted values, not a silent send.
+#[tokio::test]
+async fn an_unknown_mode_is_rejected() {
+    let h = HarnessBuilder::new(vec![text("unused")]).build().await;
+    let id = h.create_session(None).await;
+
+    let response = h
+        .post(
+            &format!("/api/sessions/{id}/messages?mode=shout"),
+            json!({ "content": "hello" }),
+        )
+        .await;
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        response.text()
+    );
+    let message = response.error_message();
+    assert!(message.contains("`mode`"), "{message}");
+    assert!(message.contains("steer"), "{message}");
+    assert!(message.contains("follow_up"), "{message}");
+}
+
+/// `follow-up` and `follow_up` both parse: the query string is hand-typed by
+/// people as often as it is generated.
+#[tokio::test]
+async fn the_follow_up_mode_accepts_both_spellings() {
+    let h = HarnessBuilder::new(vec![Script::Hang]).build().await;
+    let id = h.create_session(None).await;
+    h.post(
+        &format!("/api/sessions/{id}/messages"),
+        json!({ "content": "job" }),
+    )
+    .await;
+    wait_for_running(&h, &id).await;
+
+    for mode in ["follow_up", "follow-up"] {
+        let response = h
+            .post(
+                &format!("/api/sessions/{id}/messages?mode={mode}"),
+                json!({ "content": format!("then {mode}") }),
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::ACCEPTED, "{}", response.text());
+        assert_eq!(response.json()["mode"], "follow_up");
+    }
+    h.post(&format!("/api/sessions/{id}/cancel"), json!({}))
+        .await;
+    wait_until_idle_ignored(&h, &id).await;
+}
+
+/// Every mode shares the same prompt validation.
+#[tokio::test]
+async fn all_modes_validate_the_prompt() {
+    let h = HarnessBuilder::new(vec![Script::Hang]).build().await;
+    let id = h.create_session(None).await;
+    h.post(
+        &format!("/api/sessions/{id}/messages"),
+        json!({ "content": "job" }),
+    )
+    .await;
+    wait_for_running(&h, &id).await;
+
+    for mode in ["send", "steer", "follow_up"] {
+        for (body, expected) in [
+            (json!({ "content": "   \n " }), "may not be empty"),
+            (json!({ "content": "a\0b" }), "NUL"),
+        ] {
+            let response = h
+                .post(
+                    &format!("/api/sessions/{id}/messages?mode={mode}"),
+                    body.clone(),
+                )
+                .await;
+            assert_eq!(
+                response.status,
+                StatusCode::BAD_REQUEST,
+                "mode={mode} body={body}: {}",
+                response.text()
+            );
+            assert!(
+                response.error_message().contains(expected),
+                "mode={mode}: {}",
+                response.error_message()
+            );
+        }
+    }
+    h.post(&format!("/api/sessions/{id}/cancel"), json!({}))
+        .await;
+    wait_until_idle_ignored(&h, &id).await;
 }

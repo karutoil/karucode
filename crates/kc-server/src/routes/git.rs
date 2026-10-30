@@ -7,11 +7,19 @@
 //! Constraints for these read-only endpoints (no approval is involved):
 //! * `git` is spawned directly with an argv array (never a shell);
 //! * `current_dir` is the canonical workspace root;
-//! * repository-local configuration may not execute anything: `core.fsmonitor`
-//!   (runs on `status`) and `diff.external` (runs on `diff`) are overridden with
-//!   `-c`, `GIT_EXTERNAL_DIFF`/`GIT_PAGER` are pinned, `--no-ext-diff` is passed
-//!   to `diff`, and any inherited `GIT_DIR`/`GIT_WORK_TREE` is dropped, so a
-//!   cloned repository cannot turn a read-only panel into code execution;
+//! * repository-local configuration may not execute anything. The hardening is
+//!   *not* duplicated here: [`kc_tools::git::SAFE_CONFIG`], [`safe_env`] and
+//!   [`kc_tools::git::diff_args`] are the single source of truth shared with the
+//!   `git_status`/`git_diff` tools, so the two can never drift. That covers
+//!   `core.fsmonitor` (runs on `status`), `diff.external` and the pager, plus
+//!   `--no-ext-diff --no-textconv` for `.gitattributes`-selected diff drivers;
+//! * `diff` additionally neutralises every `filter.<driver>.clean`/`.smudge`/
+//!   `.process` the repository configures (see [`kc_tools::git::filter_env`]):
+//!   `git diff` runs the clean filter to build the working-tree side of a patch,
+//!   so a repo with `filter.evil.clean = /path/to/script` plus `*.txt
+//!   filter=evil` in `.gitattributes` would otherwise execute it on a plain GET;
+//! * any inherited `GIT_DIR`/`GIT_WORK_TREE` is dropped, so a cloned repository
+//!   cannot turn a read-only panel into code execution;
 //! * the whole call (spawn + read + wait) is bounded by a 10s timeout and
 //!   `kill_on_drop`;
 //! * stdout/stderr are drained but kept in memory only up to fixed caps;
@@ -24,6 +32,7 @@ use crate::routes::{query_bool, query_str, QueryMap};
 use crate::state::AppState;
 use axum::extract::{Query, State};
 use axum::Json;
+use kc_tools::git::{diff_args, filter_env, safe_env, SAFE_CONFIG};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Stdio;
@@ -43,25 +52,6 @@ struct GitOutput {
     stderr: String,
 }
 
-/// Global `-c` overrides prepended to every invocation.
-///
-/// * `core.fsmonitor=false` — otherwise `git status` executes a command taken
-///   from the repository's own `.git/config`.
-/// * `diff.external=` — belt and braces for `git diff`; on its own an *empty*
-///   value is parsed as a (failing) command, which is why [`run_git`] callers
-///   that diff also pass `--no-ext-diff` (see [`diff`]), the flag that really
-///   disables external drivers.
-/// * `core.pager=cat` — the server has no terminal, and a repo-local pager would
-///   be another command to spawn.
-const GIT_HARDENING_ARGS: [&str; 6] = [
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "diff.external=",
-    "-c",
-    "core.pager=cat",
-];
-
 pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<QueryMap>,
@@ -70,7 +60,9 @@ pub async fn status(
         .workspace_for_project(query_str(&query, "project"))?
         .root()
         .to_path_buf();
-    let outcome = run_git(&root, &["status", "--porcelain=v1", "-b"]).await;
+    // `git status` does not run clean/smudge filters, so no per-repository
+    // filter overrides are needed here.
+    let outcome = run_git(&root, &["status", "--porcelain=v1", "-b"], &[]).await;
 
     match outcome {
         Ok(output) if output.success => {
@@ -129,27 +121,32 @@ pub async fn diff(
     let requested_path = query_str(&query, "path");
     let workspace = state.workspace_for_project(query_str(&query, "project"))?;
 
-    let mut args: Vec<String> = vec!["diff".into(), "--no-ext-diff".into()];
-    if staged {
-        args.push("--staged".into());
-    }
-    if let Some(base) = base {
-        args.push(base.to_string());
-    }
-    if let Some(path) = requested_path {
-        // Lexical resolution: a deleted file no longer exists but its relative
-        // path must still be inside the workspace.
-        let absolute = workspace.resolve(path)?;
-        let relative = workspace.relative(&absolute);
-        if relative != "." {
-            args.push("--".into());
-            args.push(relative);
+    // Same argv as the `git_diff` tool: `--no-ext-diff --no-textconv` plus the
+    // path after `--`. `base` was validated above, so it cannot be a flag.
+    let pathspec = match requested_path {
+        Some(path) => {
+            // Lexical resolution: a deleted file no longer exists but its
+            // relative path must still be inside the workspace.
+            let absolute = workspace.resolve(path)?;
+            let relative = workspace.relative(&absolute);
+            if relative == "." {
+                None
+            } else {
+                Some(relative)
+            }
         }
-    }
+        None => None,
+    };
+    let args = diff_args(staged, base, pathspec.as_deref());
 
     let root = workspace.root().to_path_buf();
+    // `git diff` runs `filter.<driver>.clean`/`.process` for the working-tree
+    // side of the patch; neutralise every driver this repository configures.
+    let filter_overrides = filter_env(&root)
+        .await
+        .map_err(|e| ApiError::internal(state.redact(&e.to_string())))?;
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    let output = run_git(&root, &borrowed)
+    let output = run_git(&root, &borrowed, &filter_overrides)
         .await
         .map_err(|e| ApiError::internal(state.redact(&e.message)))?;
 
@@ -195,25 +192,36 @@ fn validate_ref(base: &str) -> ApiResult<()> {
     Ok(())
 }
 
-async fn run_git(root: &Path, args: &[&str]) -> Result<GitOutput, ApiError> {
+async fn run_git(
+    root: &Path,
+    args: &[&str],
+    config_overrides: &[(String, String)],
+) -> Result<GitOutput, ApiError> {
     let mut command = tokio::process::Command::new("git");
     command
         // Repository-local config must not run code on a read-only endpoint.
-        .args(GIT_HARDENING_ARGS)
+        // Shared with the `git_status`/`git_diff` tools so the two cannot drift.
+        .args(SAFE_CONFIG)
         .args(args)
         // Canonical workspace root; no shell, no `cd`.
-        .current_dir(root)
-        // Never prompt or page; the server has no terminal.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_PAGER", "cat")
-        // An inherited external diff driver would bypass `core.pager`/`-c`.
-        .env("GIT_EXTERNAL_DIFF", "")
-        // Read-only endpoints must not take `index.lock` or refresh the index.
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        // An inherited GIT_DIR/GIT_WORK_TREE points git at a different
-        // repository than the workspace the UI is showing.
+        .current_dir(root);
+    // Never prompt or page, drop system config/attributes, pin the external diff
+    // driver, and keep the index untouched.
+    for (key, value) in safe_env() {
+        command.env(key, value);
+    }
+    // An inherited GIT_DIR/GIT_WORK_TREE points git at a different repository
+    // than the workspace the UI is showing; an inherited GIT_CONFIG_COUNT would
+    // inject configuration the caller did not ask for.
+    command
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CONFIG_COUNT");
+    // Per-repository neutralisation of `filter.<driver>.*` (see `filter_env`).
+    for (key, value) in config_overrides {
+        command.env(key, value);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

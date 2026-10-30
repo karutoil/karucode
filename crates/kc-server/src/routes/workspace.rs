@@ -1,19 +1,22 @@
-//! Workspace explorer (directory tree, file contents) and attachment uploads.
+//! Workspace explorer (directory tree, file contents), the editor's save
+//! endpoint and attachment uploads.
 //!
-//! The read endpoints and the upload both resolve through
+//! The read endpoints, the write endpoint and the upload all resolve through
 //! [`kc_core::Workspace`], so traversal and symlink escapes are refused with a
 //! 400 `path_escape` before any I/O.
 
 use crate::error::{ApiError, ApiResult};
-use crate::routes::{query_str, query_usize, QueryMap};
+use crate::routes::{parse_required, query_bool, query_str, query_usize, QueryMap};
 use crate::state::AppState;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::Json;
+use kc_core::config::ApprovalMode;
 use kc_core::error::Error;
 use kc_core::paths::Workspace;
 use kc_core::settings::Settings;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -221,6 +224,239 @@ fn file_blocking(workspace: &Workspace, path: &str, limit: usize) -> Result<Valu
     }))
 }
 
+/// Ceiling for the raw-bytes preview endpoint. Images and PDFs are the point of
+/// it, so it is larger than the text read limit but still bounded so one request
+/// cannot exhaust memory.
+pub const MAX_RAW_BYTES: u64 = 32 * 1024 * 1024;
+
+/// `GET /api/workspace/raw?path=<file>[&project=<id>]`
+///
+/// The bytes of one workspace file, with the MIME type guessed from its name.
+/// This exists so the viewer can `<img src>` a PNG or embed a PDF: the text
+/// endpoint answers JSON, which a browser cannot render. It is read-only and
+/// confined exactly like `/api/workspace/file`.
+///
+/// Responses carry `Content-Disposition: inline` (never `attachment`), and the
+/// CSP keeps the browser from treating a same-origin asset as a script, so an
+/// uploaded HTML file served here cannot run code in the app's origin.
+pub async fn raw(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+
+    let path = query_str(&query, "path")
+        .ok_or_else(|| ApiError::bad_request("query parameter `path` is required"))?
+        .to_string();
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+
+    let (bytes, rel, content_type) =
+        tokio::task::spawn_blocking(move || raw_blocking(&workspace, &path, MAX_RAW_BYTES))
+            .await
+            .map_err(|e| ApiError::internal(format!("workspace task failed: {e}")))??;
+
+    let mut response = bytes.into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_str(&content_type)
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("application/octet-stream")),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        // The file name can hold quotes and non-ASCII; the path is echoed in a
+        // header, so keep it to a safe, quoted form.
+        axum::http::HeaderValue::from_str(&format!(
+            "inline; filename=\"{}\"",
+            rel.rsplit('/')
+                .next()
+                .unwrap_or("file")
+                .replace(['"', '\\'], "_")
+        ))
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("inline")),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
+}
+
+fn raw_blocking(
+    workspace: &Workspace,
+    path: &str,
+    limit: u64,
+) -> Result<(Vec<u8>, String, String), ApiError> {
+    let abs = workspace.resolve_existing(path)?;
+    let meta = std::fs::metadata(&abs).map_err(|e| ApiError::from(Error::io(&abs, e)))?;
+    if meta.is_dir() {
+        return Err(ApiError::bad_request(format!(
+            "`{path}` is a directory; use /api/workspace/tree"
+        )));
+    }
+    if meta.len() > limit {
+        return Err(ApiError::payload_too_large(
+            limit as usize,
+            Some("this file is too large to serve inline"),
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&abs)
+        .map_err(|e| ApiError::from(Error::io(&abs, e)))?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ApiError::from(Error::io(&abs, e)))?;
+    if bytes.len() as u64 > limit {
+        return Err(ApiError::payload_too_large(
+            limit as usize,
+            Some("this file is too large to serve inline"),
+        ));
+    }
+    let content_type = mime_guess::from_path(&abs)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string();
+    Ok((bytes, workspace.relative(&abs), content_type))
+}
+
+/// Ceiling for one editor save. It matches the `write_file` tool's own cap so the
+/// two write paths cannot disagree about what is too big.
+pub const MAX_WRITE_BYTES: usize = kc_tools::file_ops::MAX_FILE_WRITE_BYTES;
+
+/// `PUT /api/workspace/file?path=<file>[&project=<id>][&create=true][&force=true]`
+///
+/// The body is JSON: `{ "content": "...", "expected_size": <bytes, optional> }`.
+/// `content` must be UTF-8 text — this endpoint never writes binary data — and
+/// `expected_size`, when present, is an optimistic-concurrency check: the save is
+/// refused with `409` when the file on disk is no longer that size, so an editor
+/// cannot silently overwrite what the agent wrote in the meantime. `force=true`
+/// skips that check (the UI asks the user first).
+///
+/// Saves are gated by the same policy the `write_file` tool obeys: `read_only`
+/// denies them, and `ask`/`ask_commands` require the path to be inside the
+/// workspace (which it always is here) and outside nothing — the browser is the
+/// user, so there is nobody to ask.
+pub async fn write_file(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let path = query_str(&query, "path")
+        .ok_or_else(|| ApiError::bad_request("query parameter `path` is required"))?
+        .to_string();
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let create = query_bool(&query, "create")?;
+    let force = query_bool(&query, "force")?;
+
+    let mode = state.settings().snapshot().approvals.mode;
+    if mode == ApprovalMode::ReadOnly {
+        return Err(ApiError::forbidden(
+            "approvals.mode is `read_only`, so files cannot be written from the editor; \
+             change the mode in Settings to edit files",
+        ));
+    }
+
+    let request: WriteFileBody = parse_required(&body, "writing a workspace file")?;
+    let content = request.content;
+    // The cap is on the decoded bytes: JSON escaping can make the request body
+    // larger than the file it writes.
+    if content.len() > MAX_WRITE_BYTES {
+        return Err(ApiError::payload_too_large(
+            MAX_WRITE_BYTES,
+            Some("the editor saves UTF-8 text, at most 2 MiB"),
+        ));
+    }
+
+    let value = tokio::task::spawn_blocking(move || {
+        write_file_blocking(
+            &workspace,
+            &path,
+            &content,
+            request.expected_size,
+            create,
+            force,
+        )
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("workspace task failed: {e}")))??;
+    Ok(Json(value))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct WriteFileBody {
+    /// The complete new file contents. Required, but an empty file is legitimate.
+    #[serde(default)]
+    pub content: String,
+    /// Size the editor loaded. A mismatch is a `409` unless `force=true`.
+    #[serde(default)]
+    pub expected_size: Option<u64>,
+}
+
+fn write_file_blocking(
+    workspace: &Workspace,
+    path: &str,
+    content: &str,
+    expected_size: Option<u64>,
+    create: bool,
+    force: bool,
+) -> Result<Value, ApiError> {
+    // `resolve_existing` refuses traversal, symlink escapes and a missing file in
+    // one step; `resolve_for_write` additionally allows a new path, so the two
+    // branches below cannot disagree about confinement.
+    let abs = if create {
+        workspace.resolve_for_write(path)?
+    } else {
+        workspace.resolve_existing(path).map_err(|e| match e {
+            Error::NotFound(_) => ApiError::not_found(format!(
+                "`{path}` does not exist; pass `create=true` to create it"
+            )),
+            other => ApiError::from(other),
+        })?
+    };
+
+    let previous_size = match std::fs::metadata(&abs) {
+        Ok(meta) => {
+            if meta.is_dir() {
+                return Err(ApiError::bad_request(format!(
+                    "`{path}` is a directory; the editor can only write files"
+                )));
+            }
+            Some(meta.len())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(ApiError::from(Error::io(&abs, e))),
+    };
+
+    if previous_size.is_none() && expected_size.is_some() && !force {
+        // The editor loaded a file that has since been deleted. Recreating it on
+        // save is reasonable, but silently reversing somebody's deletion is not.
+        return Err(ApiError::conflict(format!(
+            "`{path}` was deleted while it was open; save with force=true to create it again"
+        )));
+    }
+    if let (Some(expected), Some(actual)) = (expected_size, previous_size) {
+        if !force && expected != actual {
+            return Err(ApiError::conflict(format!(
+                "`{path}` changed on disk (it was {expected} bytes when you opened it, now {actual}); \
+                 reload it or save with force=true to overwrite"
+            )));
+        }
+    }
+
+    kc_tools::file_ops::write_atomic(&abs, content.as_bytes())?;
+
+    Ok(json!({
+        "path": workspace.relative(&abs),
+        "size": content.len(),
+        "created": previous_size.is_none(),
+        "language": language_for(&abs),
+    }))
+}
+
 /// `POST /api/workspace/upload?session=<id>&name=<file>[&project=<id>]`
 ///
 /// The body is the raw file (`Content-Type` is that of the file, or omitted);
@@ -339,7 +575,7 @@ fn store_upload(
     // cannot be written through a link created in the meantime.
     let canon_dir = std::fs::canonicalize(&dir)
         .map_err(|e| ApiError::internal(format!("cannot open {}: {e}", dir.display())))?;
-    if !canon_dir.starts_with(workspace.root()) || !canon_dir.is_dir() {
+    if !workspace.contains(&canon_dir) || !canon_dir.is_dir() {
         return Err(Error::PathEscape {
             path: canon_dir,
             root: workspace.root().to_path_buf(),
@@ -819,5 +1055,128 @@ mod tests {
         assert!(!outside.join("s_test").exists());
         std::fs::remove_dir_all(dir).ok();
         std::fs::remove_dir_all(outside).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // PUT /api/workspace/file (the editor's save)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_replaces_a_file_and_reports_the_new_size() {
+        let (dir, ws) = workspace();
+        let value =
+            write_file_blocking(&ws, "README.md", "# bye\n", Some(5), false, false).unwrap();
+        assert_eq!(value["path"], "README.md");
+        assert_eq!(value["size"], 6);
+        assert_eq!(value["created"], false);
+        assert_eq!(value["language"], "markdown");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README.md")).unwrap(),
+            "# bye\n"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn write_refuses_a_stale_expected_size_unless_forced() {
+        let (dir, ws) = workspace();
+        // README.md is 5 bytes; the editor thinks it is 4.
+        let err = write_file_blocking(&ws, "README.md", "x", Some(4), false, false).unwrap_err();
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert!(err.message.contains("changed on disk"));
+        // Nothing was written.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README.md")).unwrap(),
+            "# hi\n"
+        );
+        // `force` is the user's answer to that prompt.
+        write_file_blocking(&ws, "README.md", "x", Some(4), false, true).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("README.md")).unwrap(), "x");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn write_can_create_a_file_only_when_asked() {
+        let (dir, ws) = workspace();
+        let err = write_file_blocking(&ws, "notes/todo.md", "x", None, false, false).unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert!(!dir.join("notes").exists());
+
+        let value = write_file_blocking(&ws, "notes/todo.md", "x", None, true, false).unwrap();
+        assert_eq!(value["created"], true);
+        assert_eq!(value["size"], 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes/todo.md")).unwrap(),
+            "x"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn write_refuses_to_resurrect_a_deleted_file_without_force() {
+        let (dir, ws) = workspace();
+        std::fs::remove_file(dir.join("README.md")).unwrap();
+        // Without `create` the missing file is simply a 404, like a read would be.
+        let err = write_file_blocking(&ws, "README.md", "x", Some(5), false, false).unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert!(!dir.join("README.md").exists());
+
+        // With `create` the editor is deliberately writing a new file, but it still
+        // has to admit that what it loaded is gone before it overwrites nothing.
+        let err = write_file_blocking(&ws, "README.md", "x", Some(5), true, false).unwrap_err();
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert!(!dir.join("README.md").exists());
+
+        let value = write_file_blocking(&ws, "README.md", "x", Some(5), true, true).unwrap();
+        assert_eq!(value["created"], true);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn write_is_confined_to_the_workspace() {
+        let (dir, ws) = workspace();
+        let err = write_file_blocking(&ws, "../../etc/passwd", "x", None, true, true).unwrap_err();
+        assert_eq!(err.code, "path_escape");
+        let err = write_file_blocking(&ws, "/etc/passwd", "x", None, true, true).unwrap_err();
+        assert_eq!(err.code, "path_escape");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn write_refuses_a_directory() {
+        let (dir, ws) = workspace();
+        let err = write_file_blocking(&ws, "src", "x", None, true, true).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_refuses_a_symlink_that_escapes_the_workspace() {
+        let (dir, ws) = workspace();
+        let outside = std::env::temp_dir().join(format!(
+            "kc-server-write-outside-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+
+        let err = write_file_blocking(&ws, "link/pwned.txt", "x", None, true, true).unwrap_err();
+        assert_eq!(err.code, "path_escape");
+        assert!(!outside.join("pwned.txt").exists());
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(outside).ok();
+    }
+
+    #[test]
+    fn the_save_body_limit_leaves_room_for_json_escaping() {
+        // The handler reports `413` itself in terms of MAX_WRITE_BYTES, so the
+        // transport limit has to be the larger of the two, at the worst-case
+        // escaping ratio JSON allows.
+        const { assert!(crate::routes::MAX_WRITE_BODY_BYTES > MAX_WRITE_BYTES * 6) };
     }
 }

@@ -83,7 +83,12 @@ pub async fn provider_test(State(state): State<AppState>, body: Bytes) -> ApiRes
         Some(id) => {
             let profile = config.providers.iter().find(|profile| profile.id == id);
             match profile {
-                Some(profile) => config.model_for_profile(profile),
+                // Test the model the user is probing, not the profile's default:
+                // its per-model limits and capabilities are what the run will use.
+                Some(profile) => match body.model.as_deref() {
+                    Some(model_id) => config.model_for(profile, model_id),
+                    None => config.model_for_profile(profile),
+                },
                 None => {
                     return Err(ApiError::not_found(format!(
                         "no provider profile with id `{id}`"
@@ -181,6 +186,7 @@ async fn chat_probe(
         messages: vec![Message::user("Reply with the single word: ok")],
         tools: Vec::new(),
         temperature: 0.0,
+        send_temperature: false,
         max_tokens: Some(1),
         top_p: None,
         parallel_tool_calls: false,
