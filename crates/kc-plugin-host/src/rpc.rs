@@ -269,7 +269,60 @@ pub(crate) struct PluginShared {
     /// Incremented on every spawn; stale tasks from a previous process compare
     /// their epoch before touching state.
     epoch: AtomicU64,
+    /// Where an inbound `notify` frame goes.
+    ///
+    /// A plugin cannot reach a browser — there is no route mounting and no script
+    /// execution — so the only way a plugin-raised notification can reach a human
+    /// is through this channel, which the server drains into the same
+    /// `Event::Notification` the runtime uses. `None` means "nobody is listening",
+    /// which is what the unit tests that do not care about notifications use.
+    notify_tx: Mutex<Option<mpsc::UnboundedSender<PluginNotice>>>,
+    /// Rate limiting for plugin-raised notifications: a plugin that floods `notify`
+    /// must not be able to flood a person's desktop.
+    notify_budget: Mutex<NotifyBudget>,
 }
+
+/// One notification a plugin asked for, already validated by the host.
+///
+/// Validated here rather than at the server so a malformed frame can never reach
+/// the event stream: the host is the only component that reads plugin output.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginNotice {
+    /// The plugin that raised it.
+    pub plugin: String,
+    pub kind: kc_core::notify::NotifyKind,
+    pub title: String,
+    pub body: String,
+    /// The session the plugin was called for, when it named one. Empty means
+    /// "not about a particular session".
+    pub session_id: String,
+    pub sound: Option<String>,
+    pub sticky: bool,
+}
+
+/// Token-bucket rate limit for plugin notifications.
+///
+/// One per second with a burst of five: enough for a plugin that reports a handful
+/// of related events, nowhere near enough to be a nuisance. Exceeding it drops the
+/// notification and warns once, because the alternative — a plugin in a loop
+/// pinning notifications to the screen — is exactly the failure mode this feature
+/// must not have.
+#[derive(Debug)]
+struct NotifyBudget {
+    /// Milliseconds of "credit" left, refilled at `REFILL_MS` per millisecond.
+    credit_ms: f64,
+    last_refill_ms: i64,
+    /// Set once the first drop has been logged, so a flooding plugin produces one
+    /// warning instead of a megabyte of them.
+    warned: bool,
+}
+
+/// Burst allowance, in milliseconds of credit (five notifications).
+const NOTIFY_BURST_MS: f64 = 5_000.0;
+/// Refill rate: one notification per second.
+const NOTIFY_REFILL_PER_MS: f64 = 0.001;
+/// Cost of one notification, in milliseconds of credit.
+const NOTIFY_COST_MS: f64 = 1_000.0;
 
 impl PluginShared {
     pub(crate) fn new(
@@ -299,6 +352,12 @@ impl PluginShared {
             start_lock: tokio::sync::Mutex::new(()),
             next_id: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
+            notify_tx: Mutex::new(None),
+            notify_budget: Mutex::new(NotifyBudget {
+                credit_ms: NOTIFY_BURST_MS,
+                last_refill_ms: 0,
+                warned: false,
+            }),
         })
     }
 
@@ -332,6 +391,11 @@ impl PluginShared {
 
     pub(crate) fn config(&self) -> PluginConfig {
         self.config.clone()
+    }
+
+    /// Point this slot's inbound `notify` frames at a listener (or nowhere).
+    pub(crate) fn set_notify_sender(&self, tx: Option<mpsc::UnboundedSender<PluginNotice>>) {
+        *self.notify_tx.lock().unwrap_or_else(|e| e.into_inner()) = tx;
     }
 
     /// Number of in-flight requests. Test-only: the pending map must not grow
@@ -962,6 +1026,14 @@ impl PluginShared {
                 .get("params")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
+            // `notify` is the one notification with a meaning beyond logging: it is
+            // how a plugin asks a human to look at something. It is handled before
+            // the generic debug line so a plugin raising a notification does not
+            // look like a protocol curiosity in the log.
+            if method == kc_core::plugin::methods::NOTIFY {
+                self.handle_notify(params);
+                return;
+            }
             debug!(
                 plugin = %self.name,
                 method,
@@ -971,6 +1043,107 @@ impl PluginShared {
             return;
         }
         debug!(plugin = %self.name, "unrecognised plugin message: {}", truncate(line, 200));
+    }
+
+    /// Handle an inbound `notify` frame.
+    ///
+    /// Everything about this method is defensive, because the input is another
+    /// process: a malformed frame is logged and dropped, never a panic, never a
+    /// host failure, and never a partially-valid notification. The caps that
+    /// [`kc_core::notify::Notify::new`] applies are applied again here so an
+    /// over-long title cannot even reach the channel.
+    fn handle_notify(&self, params: Value) {
+        let Some(object) = params.as_object() else {
+            debug!(plugin = %self.name, "ignoring a notify frame whose params are not an object");
+            return;
+        };
+        let text = |key: &str| {
+            object
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let kind_name = text("kind");
+        let Some(kind) = kc_core::notify::NotifyKind::parse(&kind_name) else {
+            // An unknown kind is a plugin bug, not something to guess at: guessing
+            // would let a plugin choose a cue it was never given.
+            debug!(
+                plugin = %self.name,
+                kind = %truncate(&kind_name, 40),
+                "ignoring a notify frame with an unknown kind"
+            );
+            return;
+        };
+        let title = text("title");
+        if title.is_empty() {
+            debug!(plugin = %self.name, "ignoring a notify frame with no title");
+            return;
+        }
+        let notice = PluginNotice {
+            plugin: self.name.clone(),
+            kind,
+            title: kc_core::notify::truncate_chars(&title, kc_core::notify::MAX_NOTIFY_TITLE_CHARS),
+            body: kc_core::notify::truncate_chars(
+                &text("body"),
+                kc_core::notify::MAX_NOTIFY_BODY_CHARS,
+            ),
+            session_id: text("session_id"),
+            sound: object
+                .get("sound")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    kc_core::notify::truncate_chars(s, kc_core::notify::MAX_NOTIFY_SOUND_CHARS)
+                }),
+            sticky: object
+                .get("sticky")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        };
+
+        if !self.spend_notify_budget() {
+            return;
+        }
+        let tx = self.notify_tx.lock().unwrap_or_else(|e| e.into_inner());
+        match tx.as_ref() {
+            Some(tx) => {
+                if tx.send(notice).is_err() {
+                    debug!(plugin = %self.name, "notification listener is gone; dropping notify");
+                }
+            }
+            // No listener: the host was built without one (a unit test) or the
+            // server has not wired it yet. Silent, not an error.
+            None => debug!(plugin = %self.name, "no notification listener; dropping notify"),
+        }
+    }
+
+    /// Take one notification's worth of credit, or refuse.
+    fn spend_notify_budget(&self) -> bool {
+        let now = crate::now_ms();
+        let mut budget = self.notify_budget.lock().unwrap_or_else(|e| e.into_inner());
+        if budget.last_refill_ms == 0 {
+            budget.last_refill_ms = now;
+        }
+        let elapsed = (now - budget.last_refill_ms).max(0) as f64;
+        budget.credit_ms = (budget.credit_ms + elapsed * NOTIFY_REFILL_PER_MS).min(NOTIFY_BURST_MS);
+        budget.last_refill_ms = now;
+        if budget.credit_ms >= NOTIFY_COST_MS {
+            budget.credit_ms -= NOTIFY_COST_MS;
+            return true;
+        }
+        if !budget.warned {
+            budget.warned = true;
+            warn!(
+                plugin = %self.name,
+                "dropping notify frames: the plugin is raising notifications faster than \
+                 one per second (burst of {})",
+                (NOTIFY_BURST_MS / NOTIFY_COST_MS) as u32
+            );
+        }
+        false
     }
 
     /// stdout closed: the process is exiting (or has already exited). Close the
@@ -1555,5 +1728,149 @@ mod tests {
 
         assert!(kill_rx.try_recv().is_err(), "no kill on a plain EOF");
         assert!(shared.lock().kill.is_some());
+    }
+}
+
+#[cfg(test)]
+mod notify_tests {
+    //! The `notify` frame and its rate limiter, exercised without a subprocess.
+
+    use super::*;
+
+    fn shared() -> Arc<PluginShared> {
+        let config = PluginConfig {
+            name: "p".into(),
+            enabled: true,
+            command: vec!["true".into()],
+            env: Default::default(),
+            permissions: Vec::new(),
+            settings: Default::default(),
+        };
+        PluginShared::new(
+            config,
+            Arc::new(TimeoutRefs::default()),
+            PluginStatus::Ready,
+        )
+    }
+
+    #[test]
+    fn a_well_formed_frame_becomes_a_notice() {
+        let slot = shared();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        slot.set_notify_sender(Some(tx));
+        slot.handle_notify(json!({
+            "kind": "needs_input",
+            "title": "  Deploy needs a yes  ",
+            "body": "staging is approved",
+            "session_id": "s_1",
+            "sound": "ping",
+            "sticky": true,
+        }));
+        let notice = rx.try_recv().expect("a notice");
+        assert_eq!(notice.plugin, "p");
+        assert_eq!(notice.kind, kc_core::notify::NotifyKind::NeedsInput);
+        assert_eq!(notice.title, "Deploy needs a yes", "trimmed");
+        assert_eq!(notice.body, "staging is approved");
+        assert_eq!(notice.session_id, "s_1");
+        assert_eq!(notice.sound.as_deref(), Some("ping"));
+        assert!(notice.sticky);
+    }
+
+    #[test]
+    fn defaults_are_the_quiet_ones() {
+        // A minimal frame must be legal: a plugin should not have to spell out
+        // every field to say one thing.
+        let slot = shared();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        slot.set_notify_sender(Some(tx));
+        slot.handle_notify(json!({"kind": "info", "title": "hello"}));
+        let notice = rx.try_recv().expect("a notice");
+        assert_eq!(notice.body, "");
+        assert_eq!(notice.session_id, "");
+        assert_eq!(notice.sound, None);
+        assert!(!notice.sticky);
+    }
+
+    #[test]
+    fn malformed_frames_are_dropped_rather_than_guessed_at() {
+        let cases = [
+            json!("not an object"),
+            json!({"title": "no kind"}),
+            json!({"kind": "critical", "title": "unknown kind"}),
+            json!({"kind": "info"}),
+            json!({"kind": "info", "title": "   "}),
+            json!({"kind": "info", "title": 42}),
+            json!(null),
+        ];
+        for frame in cases {
+            let slot = shared();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            slot.set_notify_sender(Some(tx));
+            slot.handle_notify(frame.clone());
+            assert!(rx.try_recv().is_err(), "{frame} must not produce a notice");
+        }
+    }
+
+    #[test]
+    fn an_over_long_title_is_capped_before_it_reaches_the_channel() {
+        let slot = shared();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        slot.set_notify_sender(Some(tx));
+        slot.handle_notify(json!({
+            "kind": "info",
+            "title": "x".repeat(kc_core::notify::MAX_NOTIFY_TITLE_CHARS * 4),
+            "body": "y".repeat(kc_core::notify::MAX_NOTIFY_BODY_CHARS * 4),
+        }));
+        let notice = rx.try_recv().expect("a notice");
+        assert!(notice.title.chars().count() <= kc_core::notify::MAX_NOTIFY_TITLE_CHARS + 1);
+        assert!(notice.body.chars().count() <= kc_core::notify::MAX_NOTIFY_BODY_CHARS + 1);
+    }
+
+    #[test]
+    fn the_rate_limiter_allows_a_burst_then_refuses() {
+        let slot = shared();
+        // The first call seeds `last_refill_ms`, so spend until it stops.
+        let mut allowed = 0;
+        for _ in 0..20 {
+            if slot.spend_notify_budget() {
+                allowed += 1;
+            }
+        }
+        // Burst of five, then refusals: the exact count can be five or six
+        // depending on how much wall clock the loop burned, and the property that
+        // matters is "a burst, not twenty".
+        assert!(
+            (5..=6).contains(&allowed),
+            "expected a burst of 5, got {allowed}"
+        );
+    }
+
+    #[test]
+    fn a_flood_warns_once_not_once_per_drop() {
+        let slot = shared();
+        for _ in 0..20 {
+            slot.spend_notify_budget();
+        }
+        let budget = slot.notify_budget.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(budget.warned, "the first drop must set the warn flag");
+    }
+
+    #[test]
+    fn a_slot_with_no_listener_drops_the_notice_without_panicking() {
+        let slot = shared();
+        slot.set_notify_sender(None);
+        slot.handle_notify(json!({"kind": "info", "title": "nobody home"}));
+        // Nothing to assert but the absence of a panic and a stuck budget.
+        assert!(slot.spend_notify_budget());
+    }
+
+    #[test]
+    fn the_notify_method_is_a_well_known_name() {
+        assert_eq!(methods::NOTIFY, "notify");
+        assert_eq!(
+            kc_core::plugin::methods::NOTIFY,
+            "notify",
+            "the SDK and the host must agree on the spelling"
+        );
     }
 }

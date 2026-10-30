@@ -132,9 +132,10 @@ export interface ComposerProps {
 }
 
 const CHAR_COUNTER_THRESHOLD = 4000;
-/** The mock's `.compose-area{max-height:150px}`; the inline height below wins
- * over CSS, so this constant — not the stylesheet — is what caps the box. */
-const MAX_TEXTAREA_HEIGHT = 150;
+/** The mock's `.compose-area{max-height:150px}` now lives in CSS as
+ * `--compose-input-max` on `.composer-input` (composer.css), which is what
+ * actually clamps the box: an inline `height` cannot beat `max-height`, and a
+ * viewport-dependent cap has to be a style rule rather than a constant. */
 /** Suggestion index lifetime; the workspace changes under us all the time. */
 const INDEX_TTL_MS = 60_000;
 const MENTION_MENU_ID = 'composer-mention-menu';
@@ -396,8 +397,12 @@ export function Composer({
   useEffect(() => {
     const element = textarea.current;
     if (!element) return;
+    // Grow to fit the draft and let CSS clamp it: `max-height` is
+    // `var(--compose-input-max)`, and `max-height` wins over an inline `height`,
+    // so the phone tier can lower the cap — including while the on-screen
+    // keyboard is up — without this effect having to re-run on a resize.
     element.style.height = 'auto';
-    element.style.height = `${Math.min(element.scrollHeight, MAX_TEXTAREA_HEIGHT)}px`;
+    element.style.height = `${element.scrollHeight}px`;
   }, [draft]);
 
   useEffect(() => {

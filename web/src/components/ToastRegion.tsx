@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
 import type { Toast } from '../api/types';
+import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { AlertIcon, CheckIcon, CloseIcon, SparkIcon } from './icons';
 
@@ -23,6 +24,18 @@ export function ToastRegion(): JSX.Element {
             <ToastIcon tone={toast.tone} />
           </span>
           <span class="toast-message">{toast.message}</span>
+          {toast.sessionId ? (
+            <button
+              type="button"
+              class="toast-action"
+              onClick={() => {
+                actions.focusSession(toast.sessionId as string);
+                store.removeToast(toast.id);
+              }}
+            >
+              Open
+            </button>
+          ) : null}
           <button
             type="button"
             class="icon-button toast-close"

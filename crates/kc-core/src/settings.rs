@@ -1,4 +1,6 @@
-use crate::config::{ApprovalPolicy, Limits, ModelConfig, SessionModelSelection, SubagentConfig};
+use crate::config::{
+    ApprovalPolicy, Limits, ModelConfig, NotificationsConfig, SessionModelSelection, SubagentConfig,
+};
 use async_trait::async_trait;
 
 /// Live, possibly-mutable settings source. Implemented by the server over the
@@ -19,4 +21,15 @@ pub trait Settings: Send + Sync {
     async fn limits(&self) -> Limits;
     async fn approval_policy(&self) -> ApprovalPolicy;
     async fn subagent_config(&self) -> SubagentConfig;
+
+    /// Live `[notifications]` settings.
+    ///
+    /// Defaulted to "everything on" so the test and embedding implementations that
+    /// existed before notifications keep compiling unchanged; the server overrides
+    /// it with the real, live values. The runtime reads this *at the moment it
+    /// would emit*, so flipping the switch takes effect on the next run rather
+    /// than at the next restart.
+    async fn notify_config(&self) -> NotificationsConfig {
+        NotificationsConfig::default()
+    }
 }

@@ -59,6 +59,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::AgentProgress { .. } => "agent_progress",
         Event::AgentFinished { .. } => "agent_finished",
         Event::Notice { .. } => "notice",
+        Event::Notification { .. } => "notification",
         Event::StreamLagged { .. } => "stream_lagged",
         Event::Error { .. } => "error",
     }
@@ -3130,7 +3131,11 @@ async fn server_emitted_events_share_the_runtime_sequence() {
         (1..=seqs.len() as u64).collect::<Vec<_>>(),
         "shared monotonic seq: {seqs:?}"
     );
-    assert_eq!(h.runtime.events_emitted() as usize, events.len());
+    // The harness stops collecting at `run_finished`, but the run also publishes a
+    // `notification` after it (deliberately last: a client that reacts to it must
+    // find the terminal state already persisted). So the emitted counter is one
+    // ahead of what this window saw, and only by that one frame.
+    assert_eq!(h.runtime.events_emitted() as usize, events.len() + 1);
 }
 
 #[tokio::test]
@@ -3460,7 +3465,9 @@ async fn a_steer_is_never_a_trailing_system_note() {
 /// A steer with no run in flight is refused rather than silently queued.
 #[tokio::test]
 async fn steering_with_nothing_running_is_refused() {
-    let h = HarnessBuilder::new(vec![Script::text("unused")]).build().await;
+    let h = HarnessBuilder::new(vec![Script::text("unused")])
+        .build()
+        .await;
     let error = h
         .runtime
         .steer(h.session(), "anyone there?".into())
@@ -3592,7 +3599,10 @@ async fn a_queued_follow_up_starts_the_next_run() {
         .collect();
     assert_eq!(
         users,
-        vec!["do the first job".to_string(), "now run the tests".to_string()]
+        vec![
+            "do the first job".to_string(),
+            "now run the tests".to_string()
+        ]
     );
     // The queue is empty: the follow-up was taken, not left to re-fire.
     assert!(h.runtime.queued_follow_ups(h.session()).is_empty());
@@ -3601,7 +3611,9 @@ async fn a_queued_follow_up_starts_the_next_run() {
 /// A follow-up with nothing running is refused; a plain `send` is what it means.
 #[tokio::test]
 async fn a_follow_up_with_nothing_running_is_refused() {
-    let h = HarnessBuilder::new(vec![Script::text("unused")]).build().await;
+    let h = HarnessBuilder::new(vec![Script::text("unused")])
+        .build()
+        .await;
     let error = h
         .runtime
         .enqueue_follow_up(h.session(), "after".into())
@@ -3613,17 +3625,18 @@ async fn a_follow_up_with_nothing_running_is_refused() {
 /// The follow-up queue is bounded (each entry is a whole run).
 #[tokio::test]
 async fn the_follow_up_queue_is_bounded() {
-    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text(
-        "busy".into(),
-    )])])
-    .build()
-    .await;
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text("busy".into())])])
+        .build()
+        .await;
     h.submit("long job").await;
     let _ = h.wait_idle().await;
 
     let mut accepted = 0usize;
     for i in 0..(crate::MAX_QUEUED_FOLLOW_UPS + 3) {
-        match h.runtime.enqueue_follow_up(h.session(), format!("then {i}")) {
+        match h
+            .runtime
+            .enqueue_follow_up(h.session(), format!("then {i}"))
+        {
             Ok(_) => accepted += 1,
             Err(error) => {
                 assert!(error.to_string().contains("already has"), "{error}");
@@ -3638,11 +3651,9 @@ async fn the_follow_up_queue_is_bounded() {
 /// Empty content is rejected by both queues, before reaching any storage.
 #[tokio::test]
 async fn an_empty_queued_message_is_rejected() {
-    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text(
-        "busy".into(),
-    )])])
-    .build()
-    .await;
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text("busy".into())])])
+        .build()
+        .await;
     h.submit("job").await;
     let _ = h.wait_idle().await;
 
@@ -3654,4 +3665,272 @@ async fn an_empty_queued_message_is_rejected() {
     assert!(h.runtime.queued_steers(h.session()).is_empty());
     assert!(h.runtime.queued_follow_ups(h.session()).is_empty());
     h.runtime.cancel(h.session());
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+/// Collect every `notification` frame the harness sees, up to and including the
+/// first one that follows a `run_finished`.
+async fn notification_after_run(h: &mut Harness) -> (EventEnvelope, Vec<EventEnvelope>) {
+    let mut seen = Vec::new();
+    loop {
+        let event = h.next_event().await;
+        let is_notification = matches!(event.event, Event::Notification { .. });
+        seen.push(event.clone());
+        if is_notification {
+            return (event, seen);
+        }
+    }
+}
+
+fn notify_of(event: &EventEnvelope) -> kc_core::notify::Notify {
+    match &event.event {
+        Event::Notification { notification } => notification.clone(),
+        other => panic!("expected a notification, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_finished_run_emits_one_notification_after_the_terminal_state() {
+    let mut h = HarnessBuilder::new(vec![Script::text("Done: the bug is fixed.")])
+        .build()
+        .await;
+
+    h.submit("fix the bug").await;
+    let (notification, seen) = notification_after_run(&mut h).await;
+
+    // Ordering is the contract: the notification describes state, so the state
+    // frame must already be on the wire when it arrives.
+    let kinds: Vec<&str> = seen.iter().map(|e| event_kind(&e.event)).collect();
+    let finished_at = kinds
+        .iter()
+        .position(|k| *k == "run_finished")
+        .expect("run_finished");
+    let notified_at = kinds
+        .iter()
+        .position(|k| *k == "notification")
+        .expect("notification");
+    assert!(
+        finished_at < notified_at,
+        "run_finished must precede its notification: {kinds:?}"
+    );
+
+    let notify = notify_of(&notification);
+    assert_eq!(notify.kind, kc_core::notify::NotifyKind::RunFinished);
+    assert_eq!(
+        notify.id,
+        format!("run:{}", notification.run_id.clone().unwrap())
+    );
+    assert_eq!(notify.source, kc_core::notify::RUNTIME_SOURCE);
+    assert_eq!(notify.session_id, h.session());
+    // The session's title travels with it so a notification is readable on its own.
+    assert_eq!(notify.session_title, "test session");
+    // The body is the first line of the answer.
+    assert!(
+        notify.body.contains("the bug is fixed"),
+        "body should carry the answer's first line, got {:?}",
+        notify.body
+    );
+    assert!(
+        !notify.sticky,
+        "a plain success should not pin itself to the screen"
+    );
+}
+
+#[tokio::test]
+async fn a_disabled_notification_config_emits_nothing_at_all() {
+    // The master switch is enforced on the server: a client never has to trust
+    // itself to ignore a frame, because the frame is never sent.
+    let mut h = HarnessBuilder::new(vec![Script::text("hi")])
+        .settings(FakeSettings::default().with_notifications(
+            kc_core::config::NotificationsConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        ))
+        .build()
+        .await;
+
+    h.submit("anything").await;
+    let seen = h.collect_until_finished().await;
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e.event, Event::Notification { .. })),
+        "a disabled server must send no notification frames"
+    );
+}
+
+#[tokio::test]
+async fn a_per_event_switch_silences_only_that_event() {
+    let mut h = HarnessBuilder::new(vec![Script::text("hi")])
+        .settings(FakeSettings::default().with_notifications(
+            kc_core::config::NotificationsConfig {
+                run_finished: false,
+                ..Default::default()
+            },
+        ))
+        .build()
+        .await;
+
+    h.submit("anything").await;
+    let seen = h.collect_until_finished().await;
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e.event, Event::Notification { .. })),
+        "run_finished is switched off, so a completed run must be silent"
+    );
+    // The switch is specific, not a global mute.
+    assert!(h.settings.notifications.needs_input);
+    assert!(h.settings.notifications.error);
+}
+
+#[tokio::test]
+async fn a_run_shorter_than_the_minimum_is_not_announced() {
+    // min_run_secs exists for people who do not want a ping for a two-second
+    // question. The test runs in milliseconds, so any minimum above 1 s suppresses.
+    let mut h = HarnessBuilder::new(vec![Script::text("hi")])
+        .settings(FakeSettings::default().with_notifications(
+            kc_core::config::NotificationsConfig {
+                min_run_secs: 3600,
+                ..Default::default()
+            },
+        ))
+        .build()
+        .await;
+
+    h.submit("anything").await;
+    let seen = h.collect_until_finished().await;
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e.event, Event::Notification { .. })),
+        "the run took well under an hour, so it must be suppressed"
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_run_does_not_notify_the_person_who_cancelled_it() {
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text("x".into())])])
+        .build()
+        .await;
+
+    h.submit("long job").await;
+    let _ = wait_for_kind(&mut h, "iteration_started").await;
+    // `Runtime::cancel` is the human path (Escape / the stop button).
+    assert!(h.runtime.cancel(h.session()));
+
+    // Drain until the run settles, then assert no notification followed it.
+    let mut seen = Vec::new();
+    loop {
+        let event = h.next_event().await;
+        let done = matches!(event.event, Event::RunFinished { .. });
+        seen.push(event);
+        if done {
+            break;
+        }
+    }
+    assert!(!seen
+        .iter()
+        .any(|e| matches!(e.event, Event::Notification { .. })));
+}
+
+#[tokio::test]
+async fn an_approval_raises_a_sticky_needs_input_notification() {
+    let policy = ApprovalPolicy {
+        mode: ApprovalMode::Ask,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "write", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(ApprovalTool::write("write", "out.txt"))
+    .settings(FakeSettings::default().with_policy(policy))
+    .build()
+    .await;
+
+    h.submit("write a file").await;
+    let (event, before) = wait_for_kind(&mut h, "approval_requested").await;
+    let approval = approval_from(&event);
+
+    // The approval notification follows the card, because the card is the thing
+    // that carries the state. `wait_for_kind` already consumed the card, so the two
+    // windows are stitched together before comparing positions.
+    let (notify_event, after) = notification_after_run(&mut h).await;
+    let seen: Vec<EventEnvelope> = before.into_iter().chain(after).collect();
+    let kinds: Vec<&str> = seen.iter().map(|e| event_kind(&e.event)).collect();
+    assert!(
+        kinds
+            .iter()
+            .position(|k| *k == "approval_requested")
+            .unwrap()
+            < kinds.iter().position(|k| *k == "notification").unwrap(),
+        "the card must exist before it is announced: {kinds:?}"
+    );
+
+    let notify = notify_of(&notify_event);
+    assert_eq!(notify.kind, kc_core::notify::NotifyKind::NeedsInput);
+    assert_eq!(notify.id, format!("approval:{}", approval.id));
+    assert!(
+        notify.sticky,
+        "an approval must not scroll away before it is read"
+    );
+    assert!(
+        notify.title.to_lowercase().contains("approval"),
+        "{:?}",
+        notify.title
+    );
+
+    // Let the run finish so the harness is not left with a pending gate.
+    h.runtime
+        .resolve_approval(&approval.id, ApprovalDecision::AllowOnce)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_subagent_approval_notifies_once_through_the_parent_card() {
+    // Two notifications for one card would be a bug: a subagent's approval is
+    // raised through its parent's card.
+    let policy = ApprovalPolicy {
+        mode: ApprovalMode::Ask,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "write", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(ApprovalTool::write("write", "out.txt"))
+    .settings(FakeSettings::default().with_policy(policy))
+    .build()
+    .await;
+
+    h.submit("write a file").await;
+    let (event, mut seen) = wait_for_kind(&mut h, "approval_requested").await;
+    let approval = approval_from(&event);
+    // Give any (incorrect) second notification time to arrive.
+    while let Ok(Ok(next)) = tokio::time::timeout(Duration::from_millis(80), h.events.recv()).await
+    {
+        seen.push(next);
+    }
+    let approval_notifications = seen
+        .iter()
+        .filter(|e| match &e.event {
+            Event::Notification { notification } => notification.id.starts_with("approval:"),
+            _ => false,
+        })
+        .count();
+    assert_eq!(
+        approval_notifications, 1,
+        "one card must produce exactly one notification"
+    );
+
+    h.runtime
+        .resolve_approval(&approval.id, ApprovalDecision::AllowOnce)
+        .await
+        .unwrap();
 }

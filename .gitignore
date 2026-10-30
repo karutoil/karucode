@@ -10,6 +10,8 @@ web/dist/
 # generated evidence is committed
 exports/
 .cache/
+# the release job's `dist/${name}.tar.gz` + SHA256SUMS (CI only; never a checkout)
+dist/
 
 # local design mock: a single-file reference the theme engine was derived from,
 # not a build input (the values live in web/src/theme/builtins.ts)
@@ -26,3 +28,29 @@ branding/social/*.png
 .karucode/
 .kc-data/
 .audit/
+
+# --- tool output that is never a source file ---------------------------------
+# The checks in this repo are mostly Python and Node: `python3 tests/...` and
+# `npx vitest` are documented commands (AGENTS.md, .github/workflows/ci.yml), and
+# they leave bytecode caches and a typecheck stamp behind. `packaging/install.sh`
+# and `update.sh` also extract release tarballs into the tree during the e2e
+# checks. None of it is an input to any build.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.tsbuildinfo
+
+# --- editor and patch debris -------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.orig
+*.rej

@@ -621,6 +621,20 @@ async fn run_subagent(
         error: error.clone(),
     });
 
+    // Only a failure is worth interrupting a human for: a subagent that succeeded
+    // is reported by its parent run's own completion.
+    if agent_status == AgentStatus::Failed || agent_status == AgentStatus::Interrupted {
+        crate::notify::agent_failed(
+            inner,
+            &session_id.0,
+            &ctx.events,
+            &agent_id.0,
+            &name,
+            error.as_deref(),
+        )
+        .await;
+    }
+
     let mut content = String::new();
     content.push_str(&format!(
         "subagent `{}` ({name}, {role}) \u{2014} {}\niterations: {}\n",

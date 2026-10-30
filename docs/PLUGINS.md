@@ -361,17 +361,59 @@ Optional, for structured logging instead of raw stderr:
 The host logs it at debug level. Unknown notifications are ignored; messages
 without `id` never get a response.
 
-### 4.7 Error codes
+### 4.7 `notify` (plugin → host, notification)
 
-| Code | Meaning |
-| --- | --- |
-| `-32700` | Parse error (the SDK answers this for a malformed line). |
-| `-32601` | Method or tool not found. |
-| `-32602` | Invalid params. |
-| `-32000…-32099` | Plugin-defined failures. |
+Ask a human to look at something. This is the **only** way a plugin can reach a
+person: the host serves no plugin routes and runs no plugin code in the app's
+origin, so there is no other channel.
 
-The host never sends `-32600`/`-32602` itself; the text of your `message` is
-surfaced in the tool failure, so write something actionable.
+```json
+{"jsonrpc":"2.0","method":"notify",
+ "params":{"kind":"needs_input","title":"Deploy needs a yes",
+           "body":"staging is approved, production is not",
+           "sticky":true}}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `kind` | yes | `run_finished`, `needs_input`, `error` or `info`. Anything else is dropped. |
+| `title` | yes | One line, capped at 120 characters. An empty title drops the frame. |
+| `body` | no | Capped at 400 characters. |
+| `session_id` | no | Which session it is about. Omit and the host uses the session it called you for. |
+| `sound` | no | A cue name: `finished`, `attention`, `error`, `tick`. An unknown name uses the kind's default. |
+| `sticky` | no | Keep the desktop notification on screen until dismissed. |
+
+The frame is a notification (no `id`), so nothing is sent back. Which is fine —
+the host validates it defensively because the input is another process:
+
+* an unknown `kind`, an empty `title`, non-string values or params that are not an
+  object are logged at debug and **dropped**;
+* text is truncated, so a plugin cannot push a 60 KB tool result into a desktop
+  notification;
+* a plugin raising more than one notification per second (burst of five) has the
+  extra ones dropped with one warning — a plugin in a loop must not be able to
+  flood a desktop;
+* a malformed frame never fails the host, never fails a run, and never disturbs
+  the plugin: it keeps answering tool calls.
+
+Accepted notices become the same `notification` event the runtime emits, with
+`source` set to the plugin's name, so the UI can say where it came from. That is
+why a plugin cannot spoof a runtime notification.
+
+With the SDK:
+
+```rust
+use sdk::{notify, NotifyKind};
+
+notify(NotifyKind::NeedsInput, "Deploy needs a yes", "staging is approved")?;
+```
+
+`notify` writes to stdout, which is the protocol channel — log with `eprintln!`,
+never `println!`. For the optional fields there is `NotifyFrame` + `notify_with`.
+
+A plugin's `[notifications] plugin = false` refuses all of this at the host, so a
+plugin that keeps sending gets nothing through. See the `notifications` topic.
+
 
 ### 4.8 `panels/read` (host → plugin)
 
@@ -405,6 +447,18 @@ The host asks for the payload of a panel the manifest declared:
   working.
 
 ---
+
+### 4.9 Error codes
+
+| Code | Meaning |
+| --- | --- |
+| `-32700` | Parse error (the SDK answers this for a malformed line). |
+| `-32601` | Method or tool not found. |
+| `-32602` | Invalid params. |
+| `-32000…-32099` | Plugin-defined failures. |
+
+The host never sends `-32600`/`-32602` itself; the text of your `message` is
+surfaced in the tool failure, so write something actionable.
 
 ## 5. Tool exposure
 
@@ -475,7 +529,30 @@ non-null `output` values. A failing hook never fails a run.
 | `before_prompt` | **implemented** | `{session_id, workspace}` | text appended to the system prompt |
 | `on_run_end` | **implemented** | `{session_id, run_id, status}` | ignored |
 | `on_tool_result` | **implemented** | `{session_id, tool, ok}` | ignored |
+| `on_notify` | **implemented** | `{session_id, run_id, kind, title, body, source}` | ignored |
 | `on_run_start`, `on_tool_call`, `on_model_request`, `on_model_response`, `on_session_create` | reserved | — | — |
+
+`on_notify` is how a plugin **observes** notifications: it is called for every
+`notification` the runtime emits (a run finishing, an approval appearing, a run
+failing), which is what lets a plugin bridge karucode to ntfy, Pushover, a webhook
+or a desktop daemon without karucode growing that integration. The other direction —
+a plugin *raising* a notification — is the `notify` frame in §4.7.
+
+The call is fire-and-forget: the runtime spawns it after the run has already ended,
+so a slow plugin cannot delay a run, and it never fails one. Advertise it with the
+SDK:
+
+```rust
+use sdk::{PluginBuilder};
+
+PluginBuilder::new("bridge", "0.1.0")
+    .on_notify(|payload| {
+        // payload: {session_id, run_id, kind, title, body, source}
+        eprintln!("karucode: {} {}", payload["kind"], payload["title"]);
+        serde_json::json!({})
+    })
+    .run()
+```
 
 Reserved hooks are never called: advertising one is harmless, it just does
 nothing today. `kc_core::plugin::hooks::IMPLEMENTED` is the authoritative list.

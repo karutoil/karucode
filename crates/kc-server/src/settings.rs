@@ -15,7 +15,7 @@
 // @kc-title: Change karucode's configuration
 // @kc-summary: The four config layers, which settings apply live, and how secrets and invalid values are handled.
 // @kc-tags: config, settings, configuration, toml, env
-// @kc-applies-to: file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_AUTO_CONTINUE, env:KARUCODE_MAX_CONTINUES, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, config:[model], config:[limits], config:[approvals], config:[subagents], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings
+// @kc-applies-to: file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_AUTO_CONTINUE, env:KARUCODE_MAX_CONTINUES, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, config:[model], config:[limits], config:[approvals], config:[subagents], config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:notifications.enabled, config:notifications.min_run_secs, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings
 //
 // # Where the settings come from
 //
@@ -321,6 +321,15 @@ mod keys {
     pub const TITLES_MODEL: &str = "titles.model";
     pub const TITLES_MAX_CHARS: &str = "titles.max_chars";
     pub const TITLES_TIMEOUT_SECS: &str = "titles.timeout_secs";
+
+    pub const NOTIFICATIONS_ENABLED: &str = "notifications.enabled";
+    pub const NOTIFICATIONS_RUN_FINISHED: &str = "notifications.run_finished";
+    pub const NOTIFICATIONS_NEEDS_INPUT: &str = "notifications.needs_input";
+    pub const NOTIFICATIONS_ERROR: &str = "notifications.error";
+    pub const NOTIFICATIONS_INFO: &str = "notifications.info";
+    pub const NOTIFICATIONS_PLUGIN: &str = "notifications.plugin";
+    pub const NOTIFICATIONS_MIN_RUN_SECS: &str = "notifications.min_run_secs";
+    pub const NOTIFICATIONS_SAY_BODY: &str = "notifications.say_body";
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +421,24 @@ pub struct TitlesPatch {
     pub timeout_secs: Option<u64>,
 }
 
+/// `[notifications]` section of `PATCH /api/config`.
+///
+/// Every field is optional, so the settings screen can flip one switch without
+/// sending the rest. `min_run_secs` is the only numeric bound; the boolean
+/// switches have no invalid value.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationsPatch {
+    pub enabled: Option<bool>,
+    pub run_finished: Option<bool>,
+    pub needs_input: Option<bool>,
+    pub error: Option<bool>,
+    pub info: Option<bool>,
+    pub plugin: Option<bool>,
+    pub min_run_secs: Option<u64>,
+    pub say_body: Option<bool>,
+}
+
 /// One provider profile to create or update. Fields left out keep their current
 /// value, so the settings screen can save just the model list.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -460,6 +487,7 @@ pub struct ConfigPatch {
     pub approvals: Option<ApprovalsPatch>,
     pub subagents: Option<SubagentsPatch>,
     pub titles: Option<TitlesPatch>,
+    pub notifications: Option<NotificationsPatch>,
 }
 
 impl ConfigPatch {
@@ -784,6 +812,10 @@ impl SettingsHandle {
                     "inherited": cfg.titles.inherits_session_model(),
                 })),
             },
+            // Notification routing. Every switch is here rather than in the
+            // browser so a client cannot accidentally ignore one: `enabled =
+            // false` means the server sends no `notification` frame at all.
+            "notifications": public_notifications(&cfg.notifications),
             // Plugin hot-reload settings: read-only here (they are not part of
             // `PATCH /api/config`), but the settings sheet shows what the server
             // is actually watching on, which is the difference between "my edit
@@ -806,6 +838,34 @@ impl SettingsHandle {
     }
 }
 
+/// The `notifications` slice of `GET /api/config`.
+///
+/// Extracted from `public_config` so a test can assert the wire shape without a
+/// database, and so the settings UI has one place to read the switch names from.
+pub fn public_notifications(
+    notifications: &kc_core::config::NotificationsConfig,
+) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": notifications.enabled,
+        "run_finished": notifications.run_finished,
+        "needs_input": notifications.needs_input,
+        "error": notifications.error,
+        "info": notifications.info,
+        "plugin": notifications.plugin,
+        "min_run_secs": notifications.min_run_secs,
+        "say_body": notifications.say_body,
+        // The documented ceiling, so the settings screen can validate without
+        // hard-coding a number that lives in core.
+        "max_min_run_secs": kc_core::config::MAX_MIN_RUN_SECS,
+        // The kinds the server can emit. A client should render a kind it does
+        // not know as `info` rather than dropping the notification.
+        "kinds": kc_core::notify::NotifyKind::ALL
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>(),
+    })
+}
+
 #[async_trait]
 impl Settings for SettingsHandle {
     async fn model(&self) -> ModelConfig {
@@ -826,6 +886,10 @@ impl Settings for SettingsHandle {
 
     async fn subagent_config(&self) -> SubagentConfig {
         self.read().subagents.clone()
+    }
+
+    async fn notify_config(&self) -> kc_core::config::NotificationsConfig {
+        self.read().notifications.clone()
     }
 }
 
@@ -1283,6 +1347,34 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         // be renamed in the same patch.
     }
 
+    if let Some(notifications) = &patch.notifications {
+        let target = &mut config.notifications;
+        if let Some(v) = notifications.enabled {
+            target.enabled = v;
+        }
+        if let Some(v) = notifications.run_finished {
+            target.run_finished = v;
+        }
+        if let Some(v) = notifications.needs_input {
+            target.needs_input = v;
+        }
+        if let Some(v) = notifications.error {
+            target.error = v;
+        }
+        if let Some(v) = notifications.info {
+            target.info = v;
+        }
+        if let Some(v) = notifications.plugin {
+            target.plugin = v;
+        }
+        if let Some(v) = notifications.min_run_secs {
+            target.min_run_secs = v;
+        }
+        if let Some(v) = notifications.say_body {
+            target.say_body = v;
+        }
+    }
+
     // Repair a missing selection (first profile added, active profile deleted)
     // and mirror the active connection into the flat section. An explicit but
     // wrong selection is an error, not something to silently rewrite.
@@ -1337,7 +1429,24 @@ pub fn validate_settings(config: &Config) -> Result<()> {
     validate_approvals(&config.approvals)?;
     validate_subagents(&config.subagents)?;
     validate_titles(&config.titles)?;
+    validate_notifications(&config.notifications)?;
     validate_terminals(&config.terminals)
+}
+
+/// Validate `[notifications]`.
+///
+/// Only one value can be out of range. It is still checked here rather than in the
+/// patch handler so a bad TOML file or a stale settings row is caught too — with
+/// the same message the API would return.
+fn validate_notifications(notifications: &kc_core::config::NotificationsConfig) -> Result<()> {
+    if notifications.min_run_secs > kc_core::config::MAX_MIN_RUN_SECS {
+        return Err(Error::BadRequest(format!(
+            "notifications.min_run_secs must be at most {} (got {})",
+            kc_core::config::MAX_MIN_RUN_SECS,
+            notifications.min_run_secs
+        )));
+    }
+    Ok(())
 }
 
 /// Longest a terminal may sit with no connected browser before its shell is
@@ -2111,6 +2220,31 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
     rows.insert(keys::TITLES_MAX_CHARS, titles.max_chars.to_string());
     rows.insert(keys::TITLES_TIMEOUT_SECS, titles.timeout_secs.to_string());
 
+    let notifications = &config.notifications;
+    rows.insert(
+        keys::NOTIFICATIONS_ENABLED,
+        notifications.enabled.to_string(),
+    );
+    rows.insert(
+        keys::NOTIFICATIONS_RUN_FINISHED,
+        notifications.run_finished.to_string(),
+    );
+    rows.insert(
+        keys::NOTIFICATIONS_NEEDS_INPUT,
+        notifications.needs_input.to_string(),
+    );
+    rows.insert(keys::NOTIFICATIONS_ERROR, notifications.error.to_string());
+    rows.insert(keys::NOTIFICATIONS_INFO, notifications.info.to_string());
+    rows.insert(keys::NOTIFICATIONS_PLUGIN, notifications.plugin.to_string());
+    rows.insert(
+        keys::NOTIFICATIONS_MIN_RUN_SECS,
+        notifications.min_run_secs.to_string(),
+    );
+    rows.insert(
+        keys::NOTIFICATIONS_SAY_BODY,
+        notifications.say_body.to_string(),
+    );
+
     rows
 }
 
@@ -2367,6 +2501,47 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
         keys::TITLES_TIMEOUT_SECS => {
             if let Some(v) = parse_value(key, value) {
                 config.titles.timeout_secs = v;
+            }
+        }
+
+        keys::NOTIFICATIONS_ENABLED => {
+            if let Some(v) = parse_value(key, value) {
+                config.notifications.enabled = v;
+            }
+        }
+        keys::NOTIFICATIONS_RUN_FINISHED => {
+            if let Some(v) = parse_value(key, value) {
+                config.notifications.run_finished = v;
+            }
+        }
+        keys::NOTIFICATIONS_NEEDS_INPUT => {
+            if let Some(v) = parse_value(key, value) {
+                config.notifications.needs_input = v;
+            }
+        }
+        keys::NOTIFICATIONS_ERROR => {
+            if let Some(v) = parse_value(key, value) {
+                config.notifications.error = v;
+            }
+        }
+        keys::NOTIFICATIONS_INFO => {
+            if let Some(v) = parse_value(key, value) {
+                config.notifications.info = v;
+            }
+        }
+        keys::NOTIFICATIONS_PLUGIN => {
+            if let Some(v) = parse_value(key, value) {
+                config.notifications.plugin = v;
+            }
+        }
+        keys::NOTIFICATIONS_MIN_RUN_SECS => {
+            if let Some(v) = parse_value(key, value) {
+                config.notifications.min_run_secs = v;
+            }
+        }
+        keys::NOTIFICATIONS_SAY_BODY => {
+            if let Some(v) = parse_value(key, value) {
+                config.notifications.say_body = v;
             }
         }
 
@@ -3276,6 +3451,154 @@ mod tests {
         let text = serde_json::to_string(&cfg.model.public_view()).unwrap();
         assert!(!text.contains("sk-super-secret"));
         assert!(text.contains("\"api_key_set\":true"));
+    }
+
+    // -----------------------------------------------------------------------
+    // [notifications]
+    // -----------------------------------------------------------------------
+
+    fn notifications_patch() -> ConfigPatch {
+        ConfigPatch {
+            notifications: Some(NotificationsPatch {
+                enabled: Some(false),
+                min_run_secs: Some(30),
+                ..NotificationsPatch::default()
+            }),
+            ..ConfigPatch::default()
+        }
+    }
+
+    #[test]
+    fn a_notifications_patch_applies_and_leaves_the_rest_alone() {
+        let mut config = Config::default();
+        apply_patch(&mut config, &notifications_patch()).unwrap();
+        assert!(!config.notifications.enabled);
+        assert_eq!(config.notifications.min_run_secs, 30);
+        // Fields the patch did not name keep their current value.
+        assert!(config.notifications.plugin);
+        assert!(config.notifications.run_finished);
+        assert!(config.notifications.say_body);
+    }
+
+    #[test]
+    fn a_notifications_patch_is_not_a_security_sensitive_change() {
+        // Silencing a ping is not the human gate and does not repoint a provider,
+        // so it must not need the admin token.
+        assert!(notifications_patch().security_fields().is_empty());
+        let config = Config {
+            admin_token: Some("s3cret-admin".into()),
+            ..Config::default()
+        };
+        assert!(authorize_patch(&config, &notifications_patch(), None).is_ok());
+    }
+
+    #[test]
+    fn an_out_of_range_minimum_run_length_is_refused_by_name() {
+        let mut config = Config::default();
+        config.notifications.min_run_secs = kc_core::config::MAX_MIN_RUN_SECS + 1;
+        let error = validate_settings(&config).unwrap_err().to_string();
+        assert!(error.contains("notifications.min_run_secs"), "{error}");
+        assert!(error.contains("at most"), "{error}");
+
+        // The ceiling itself is accepted.
+        config.notifications.min_run_secs = kc_core::config::MAX_MIN_RUN_SECS;
+        assert!(validate_settings(&config).is_ok());
+    }
+
+    #[test]
+    fn notification_settings_survive_a_write_and_read_round_trip() {
+        // The rows are the only thing between a UI save and the next restart, so a
+        // switch that is written but not read back is a silent data loss.
+        let mut config = Config::default();
+        config.notifications = kc_core::config::NotificationsConfig {
+            enabled: false,
+            run_finished: false,
+            needs_input: true,
+            error: true,
+            info: false,
+            plugin: false,
+            min_run_secs: 45,
+            say_body: false,
+        };
+        let rows: Vec<(String, String)> = rows_for(&config)
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let mut restored = Config::default();
+        apply_rows(&mut restored, &rows);
+        assert_eq!(restored.notifications, config.notifications);
+    }
+
+    #[test]
+    fn every_notification_row_is_persisted() {
+        let config = Config::default();
+        let rows = rows_for(&config);
+        for key in [
+            keys::NOTIFICATIONS_ENABLED,
+            keys::NOTIFICATIONS_RUN_FINISHED,
+            keys::NOTIFICATIONS_NEEDS_INPUT,
+            keys::NOTIFICATIONS_ERROR,
+            keys::NOTIFICATIONS_INFO,
+            keys::NOTIFICATIONS_PLUGIN,
+            keys::NOTIFICATIONS_MIN_RUN_SECS,
+            keys::NOTIFICATIONS_SAY_BODY,
+        ] {
+            assert!(
+                rows.contains_key(key),
+                "{key} is missing from the persisted rows"
+            );
+        }
+    }
+
+    #[test]
+    fn public_config_reports_every_notification_switch() {
+        let json = public_notifications(&kc_core::config::NotificationsConfig::default());
+        assert_eq!(json["enabled"], serde_json::json!(true));
+        assert_eq!(json["run_finished"], serde_json::json!(true));
+        assert_eq!(json["needs_input"], serde_json::json!(true));
+        assert_eq!(json["error"], serde_json::json!(true));
+        assert_eq!(json["info"], serde_json::json!(true));
+        assert_eq!(json["plugin"], serde_json::json!(true));
+        assert_eq!(json["min_run_secs"], serde_json::json!(0));
+        assert_eq!(json["say_body"], serde_json::json!(true));
+        // The ceiling and the kind list come from core, so the UI cannot drift.
+        assert_eq!(
+            json["max_min_run_secs"],
+            serde_json::json!(kc_core::config::MAX_MIN_RUN_SECS)
+        );
+        let kinds = json["kinds"].as_array().unwrap();
+        assert_eq!(kinds.len(), 4);
+        assert!(kinds.iter().any(|k| k == "needs_input"));
+    }
+
+    #[test]
+    fn an_unknown_notifications_field_is_rejected_by_the_api() {
+        // `deny_unknown_fields`: a typo in the browser must fail loudly instead of
+        // silently doing nothing.
+        let error = serde_json::from_value::<ConfigPatch>(serde_json::json!({
+            "notifications": { "enabeld": false }
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("enabeld"), "{error}");
+    }
+
+    #[test]
+    fn a_stale_notification_row_is_ignored_rather_than_breaking_startup() {
+        // A row written by a newer build, or corrupted, must not stop the server.
+        let mut config = Config::default();
+        apply_rows(
+            &mut config,
+            &[
+                (keys::NOTIFICATIONS_ENABLED.to_string(), "not-a-bool".into()),
+                (keys::NOTIFICATIONS_MIN_RUN_SECS.to_string(), "abc".into()),
+            ],
+        );
+        assert!(
+            config.notifications.enabled,
+            "the default survives a bad row"
+        );
+        assert_eq!(config.notifications.min_run_secs, 0);
     }
 }
 

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde_json::Value;
 
 /// Lifecycle hooks implemented by the plugin host (and by tests). Kept in core
 /// so the runtime never depends on the plugin host directly.
@@ -17,9 +18,52 @@ pub trait Hooks: Send + Sync {
     async fn on_tool_result(&self, session_id: &str, tool: &str, ok: bool) {
         let _ = (session_id, tool, ok);
     }
+
+    /// The notification observer, if this source can observe notifications.
+    ///
+    /// `on_notify` lives on its own trait rather than on [`Hooks`] because it is
+    /// the one hook the runtime calls **after** the run has already finished, from
+    /// a spawned task: the caller must be able to hold the observer without
+    /// holding the hook source, and a source that does not implement it costs
+    /// nothing at the call site.
+    ///
+    /// `None` (the default) means "nothing observes notifications", which is what
+    /// every test embedding and every non-plugin source wants.
+    fn notifier(&self) -> Option<std::sync::Arc<dyn NotificationObserver>> {
+        None
+    }
+}
+
+/// Something that wants to hear about every notification the runtime emits.
+///
+/// Implemented by the plugin host, which fans the call out to plugins that
+/// advertise `on_notify`. This is the "out" half of the plugin notification story:
+/// plugins raise notifications over `notify`, and observe everyone else's through
+/// this hook, so a plugin can bridge karucode to ntfy, Pushover, a desktop notifier
+/// or anything else without karucode growing those integrations.
+#[async_trait]
+pub trait NotificationObserver: Send + Sync {
+    /// Called once per emitted notification with
+    /// `{session_id, run_id, kind, title, body, source}`.
+    ///
+    /// The runtime spawns this and does not wait for it: a plugin that hangs must
+    /// not delay a run, and its 5 s budget is the plugin host's problem.
+    async fn on_notify(&self, payload: Value);
 }
 
 pub struct NoHooks;
 
 #[async_trait]
 impl Hooks for NoHooks {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_hook_source_observes_no_notifications() {
+        // Registering a listener must be opt-in: every existing embedding keeps
+        // compiling and keeps costing nothing.
+        assert!(NoHooks.notifier().is_none());
+    }
+}

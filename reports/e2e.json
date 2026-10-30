@@ -12,6 +12,12 @@
     "file read returns content",
     "git status works in a repo",
     "text streams and tool executes",
+    "a finished run emits one notification",
+    "a disabled configuration emits no notification",
+    "the config reports every notification switch",
+    "the plugin tool needs approval",
+    "a plugin-raised notification reaches the event stream",
+    "disabling plugin notifications refuses the frame",
     "run completed and history persisted",
     "shell command asks for approval",
     "approved command runs and streams output",
@@ -43,7 +49,7 @@
   ],
   "failed": [],
   "skipped": [],
-  "events": 281,
-  "server_log": "/tmp/kc-e2e-4mdyvyq4/server.log",
-  "mock_requests": 36
+  "events": 349,
+  "server_log": "/tmp/kc-e2e-_2jkp9t3/server.log",
+  "mock_requests": 41
 }

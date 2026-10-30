@@ -7,7 +7,7 @@
 // @kc-title: Run it as a systemd service
 // @kc-summary: Install the binary and a hardened unit, keep it enabled across reboots, and upgrade or roll back without losing the paths it needs.
 // @kc-tags: install, deploy, systemd, service, upgrade, reboot, production
-// @kc-applies-to: file:packaging/install.sh, file:packaging/karucode.service, cmd:install.sh, cmd:install.sh --workspace, cmd:install.sh --dry-run, cmd:install.sh --binary, cmd:install.sh --no-systemd, cmd:install.sh --allow-jit, cmd:install.sh --port, cmd:install.sh --service-user, path:/etc/systemd/system/karucode.service, path:/etc/systemd/system/karucode.service.d/10-install.conf, path:/etc/systemd/system/karucode.service.d/20-local.conf, path:/etc/karucode/karucode.env, path:/var/lib/karucode, path:/usr/local/bin/karucode, cmd:systemctl enable --now karucode, cmd:systemctl restart karucode, cmd:journalctl -u karucode
+// @kc-applies-to: file:packaging/install.sh, file:packaging/update.sh, file:packaging/karucode.service, cmd:install.sh, cmd:install.sh --workspace, cmd:install.sh --dry-run, cmd:install.sh --binary, cmd:install.sh --no-systemd, cmd:install.sh --allow-jit, cmd:install.sh --port, cmd:install.sh --service-user, cmd:update.sh, cmd:update.sh --check, cmd:update.sh --dry-run, cmd:update.sh --no-pull, cmd:update.sh --ref, cmd:update.sh --build-only, cmd:update.sh --skip-build, cmd:update.sh --allow-dirty, cmd:update.sh --no-backup, cmd:update.sh --force, cmd:update.sh --stage-only, cmd:update.sh --from-stage, cmd:update.sh --no-stage, cmd:update.sh --stage-dir, cmd:update.sh --detach, cmd:update.sh --no-detach, cmd:update.sh --follow, path:/etc/systemd/system/karucode.service, path:/etc/systemd/system/karucode.service.d/10-install.conf, path:/etc/systemd/system/karucode.service.d/20-local.conf, path:/etc/karucode/karucode.env, path:/var/lib/karucode, path:/usr/local/bin/karucode, cmd:systemctl enable --now karucode, cmd:systemctl restart karucode, cmd:journalctl -u karucode
 //
 // # Install
 //
@@ -99,6 +99,88 @@
 // sudo cp -p /usr/local/bin/karucode.old /usr/local/bin/karucode   # roll back
 // sudo systemctl restart karucode
 // ```
+//
+// # Updating from your own build
+//
+// If the service runs a binary you compiled yourself, `packaging/update.sh` is
+// the one command: it pulls, builds, stages, snapshots the database and installs.
+//
+// ```bash
+// sudo sh packaging/update.sh              # pull, build, stage, install, restart
+// sh packaging/update.sh --check           # exit 3 if commits are waiting
+// sudo sh packaging/update.sh --dry-run    # print the plan, change nothing
+// ```
+//
+// It does not reimplement the systemd half — it reads the *running* unit
+// (`ExecStart=`, `User=`, `WorkingDirectory=`, `KARUCODE_*`, and
+// `MemoryDenyWriteExecute=`, which becomes `--allow-jit`) and hands that
+// configuration to `install.sh`, so the paths the service actually starts with
+// survive. The defaults compiled into `install.sh` are for a fresh host and
+// would otherwise replace them on the first update.
+//
+// ## Staged, then switched
+//
+// Everything that can fail happens before anything live is touched. The binary
+// and the unit are copied into a stage directory and *those copies* are
+// validated — the binary has to run, the unit has to parse, and a sha256 of the
+// staged binary is recorded. Only then does the switch move the binary, rewrite
+// the drop-in and restart the unit. A build that produces a binary for the wrong
+// libc, or a truncated download, is therefore caught while the old binary is
+// still serving.
+//
+// ```bash
+// sudo sh packaging/update.sh --stage-only   # build and validate; stop there
+// sudo sh packaging/update.sh --from-stage   # switch onto it; no rebuild
+// ```
+//
+// `--stage-only` is the maintenance-window form: it reports the staged version
+// and sha256 and changes nothing live. `--from-stage` applies exactly those
+// bytes, refuses if the staged binary no longer matches its recorded checksum,
+// and leaves no stage behind afterwards. The stage lives in
+// `<data-dir>/stage` (`--stage-dir` to move it) and is root-owned, because the
+// build runs as you and `install.sh` reads it as root.
+//
+// ## Surviving the terminal
+//
+// A run that builds or switches detaches itself into its own session with its
+// own log before doing anything, so closing the terminal — or losing the SSH
+// connection — cannot stop an update half way through the switch.
+//
+// ```bash
+// sh packaging/update.sh --follow            # reattach to the last run's log
+// sudo sh packaging/update.sh --no-detach    # stay in the foreground
+// ```
+//
+// The job directory is `<data-dir>/update-job`: `log`, `pid` and, when it
+// finishes, `status` (the exit code). The waiting shell forwards that code, so
+// `sudo sh packaging/update.sh` still exits `0`, `1` or `2` as documented.
+// Detaching is skipped when there is no terminal (a `sudo` password prompt
+// could not be answered), for `--check`, `--dry-run`, `--build-only` and
+// `--stage-only`, and when sudo would need to ask for a password. Two updates
+// cannot run at once: a lock beside the data directory refuses the second.
+//
+// | Flag | Effect |
+// | --- | --- |
+// | `--stage-only` | Build and validate, then stop before touching the service |
+// | `--from-stage` | Switch onto what `--stage-only` staged; no rebuild |
+// | `--no-stage` | Install straight from the build, skipping the stage |
+// | `--detach` / `--no-detach` | Force or forbid running in the background |
+// | `--follow` | Attach to a detached run's log |
+// | `--no-pull` | build the working tree as it is (offline, or a local branch) |
+// | `--ref <REF>` | build a tag instead of the current branch (detached HEAD) |
+// | `--build-only` | compile and stop; the service is not touched |
+// | `--skip-build` | install the binary already in `target/release` |
+// | `--allow-dirty` | permit modified tracked files (refused by default) |
+// | `--no-backup` | skip the `VACUUM INTO` snapshot taken before the install |
+// | `--force` | reinstall even when the binary and unit are unchanged |
+//
+// Exit codes: `0` updated and serving, `1` nothing changed (dirty tree, build
+// failure, no unit), `2` installed but the service did not come back, `3`
+// `--check` found commits you do not have. Only the stage, the snapshot and
+// `install.sh` run under `sudo`; the fetch and the build run as the checkout's
+// owner, so `target/` is not left root-owned. Run it from a normal login shell:
+// inside the service itself `NoNewPrivileges=yes` makes `sudo` impossible, and
+// the script says so instead of failing obscurely.
 //
 // There is no uninstall verb; `packaging/README.md` lists the six commands
 // (`systemctl disable --now`, remove the unit, the drop-in, both binaries,

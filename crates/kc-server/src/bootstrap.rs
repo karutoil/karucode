@@ -488,6 +488,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     // Plugin host and MCP manager start concurrently: a slow plugin must not
     // delay MCP servers and vice versa.
     let mut plugin_host = PluginHost::discover(&config.plugins, &config.data_dir);
+    // Subscribe *before* `start_all`: a plugin that raises a notification during
+    // its own startup would otherwise have it dropped on the floor.
+    let plugin_notices = plugin_host.listen_notifications();
     let mut mcp_manager = McpManager::new(&config.mcp_servers);
     tokio::join!(plugin_host.start_all(), mcp_manager.connect_all());
     let plugins = Arc::new(Mutex::new(plugin_host));
@@ -551,6 +554,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     });
     state.reload_tools().await;
 
+    // Plugin-raised notifications: drain the host channel into the same event
+    // stream the runtime publishes on, so a plugin notification is
+    // indistinguishable from a runtime one downstream.
+    crate::plugin_notifications::spawn(state.clone(), plugin_notices);
+
     // Hot plugin reloads (`plugins_watch = true`): one `read_dir` plus a `stat`
     // per plugin command, on a timer. Off by default — a reload replaces
     // processes, so an operator opts in. The task stops itself on shutdown.
@@ -595,7 +603,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 if !current.enabled {
                     continue;
                 }
-                let reaped = state_for_reaper.terminals().reap_idle(current.idle_timeout_secs);
+                let reaped = state_for_reaper
+                    .terminals()
+                    .reap_idle(current.idle_timeout_secs);
                 if !reaped.is_empty() {
                     tracing::info!(
                         terminals = %reaped.join(", "),

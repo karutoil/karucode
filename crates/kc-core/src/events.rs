@@ -142,6 +142,20 @@ pub enum Event {
         level: String,
         message: String,
     },
+    /// A human-facing notification: the run settled, something is waiting for an
+    /// answer, or a plugin asked for attention.
+    ///
+    /// This is the one signal a client acts on *outside* the transcript, so it is a
+    /// distinct event rather than a `notice` with a level: the UI keys its sound
+    /// cue, its OS notification and its unread badge off the type, and `notice` is
+    /// already used for advisory text that belongs inline.
+    ///
+    /// Emitted after the state it describes is persisted, and suppressed entirely
+    /// by `[notifications] enabled = false` — a disabled server sends no such frame,
+    /// so a client never has to trust itself to ignore one.
+    Notification {
+        notification: crate::notify::Notify,
+    },
     Error {
         message: String,
         #[serde(default)]
@@ -177,4 +191,74 @@ pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
 
 pub fn noop_sink() -> EventSink {
     Arc::new(|_| {})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::notify::{Notify, NotifyKind};
+
+    /// The exact JSON the browser receives. The UI switches on `type` and reads
+    /// `notification`, so the flattened shape is part of the contract with
+    /// `web/src/api/types.ts` and cannot be changed casually.
+    #[test]
+    fn a_notification_event_serialises_flat_with_type_notification() {
+        let notify = Notify::new(
+            NotifyKind::RunFinished,
+            "run:r_1",
+            "Run finished",
+            "All 3 files updated.",
+            "s_1",
+            "Fix the login redirect",
+            crate::notify::RUNTIME_SOURCE,
+        );
+        let envelope = EventEnvelope {
+            seq: 7,
+            ts_ms: 1_700_000_000_000,
+            session_id: Some("s_1".into()),
+            run_id: Some("r_1".into()),
+            agent_id: None,
+            event: Event::Notification {
+                notification: notify.clone(),
+            },
+        };
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["type"], serde_json::json!("notification"));
+        assert_eq!(json["seq"], serde_json::json!(7));
+        assert_eq!(json["session_id"], serde_json::json!("s_1"));
+        // The payload is nested under `notification`, not flattened into the
+        // envelope: the envelope already owns `ts_ms` and would clash.
+        assert_eq!(
+            json["notification"]["kind"],
+            serde_json::json!("run_finished")
+        );
+        assert_eq!(json["notification"]["id"], serde_json::json!("run:r_1"));
+        assert_eq!(
+            json["notification"]["session_title"],
+            serde_json::json!("Fix the login redirect")
+        );
+        assert!(
+            json.get("agent_id").is_none(),
+            "an absent agent must be omitted"
+        );
+
+        let back: EventEnvelope = serde_json::from_value(json).unwrap();
+        match back.event {
+            Event::Notification { notification } => assert_eq!(notification, notify),
+            other => panic!("expected a notification, got {other:?}"),
+        }
+    }
+
+    /// An older client ignores unknown `type` values, which is what makes adding
+    /// this event additive rather than a protocol break.
+    #[test]
+    fn an_unknown_event_type_is_representable_for_forward_compatibility() {
+        let raw: serde_json::Value = serde_json::json!({
+            "seq": 1, "ts_ms": 0, "type": "something_new",
+        });
+        // The client-side reducers default to "ignore"; on this side the proof is
+        // that a payload with no known tag simply fails to parse rather than
+        // producing a wrong event.
+        assert!(serde_json::from_value::<Event>(raw).is_err());
+    }
 }

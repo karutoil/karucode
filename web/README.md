@@ -73,13 +73,13 @@ the frame metrics (`--rail-w`, `--header-h`, `--content-max`, …).
 properties with no React/Preact re-render.
 
 Theme Studio (project-rail palette button, header theme button,
-`Ctrl/Cmd+Shift+T`, or Settings → Appearance) ships eight built-in themes and
-edits 18 palette colours, mode, density, fonts, corner radius, the transcript
-view options and custom CSS. The selection, saved custom themes and the unsigned
-draft persist in `localStorage` under `karucode.theme-studio.v3`; a theme exports
-as `karucode-theme` version 1 JSON and imports back through a validating parser
-(150 KB cap, hex/mode/density/font checks). See the `themes` topic in the
-`karucode_docs` tool for the user-facing version.
+`Ctrl/Cmd+Shift+T`, or Settings → General → Appearance) ships eight built-in
+themes and edits 18 palette colours, mode, density, fonts, corner radius, the
+transcript view options and custom CSS. The selection, saved custom themes and
+the unsigned draft persist in `localStorage` under `karucode.theme-studio.v3`; a
+theme exports as `karucode-theme` version 1 JSON and imports back through a
+validating parser (150 KB cap, hex/mode/density/font checks). See the `themes`
+topic in the `karucode_docs` tool for the user-facing version.
 
 ### Transcript view options
 
@@ -213,24 +213,34 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
     the token entry screen.
 12. **Settings lock**: `settings_locked` disables the form, and a 403 from PATCH is
     surfaced as a locked notice rather than a generic failure.
-13. **Sequence resets**: `seq` is assumed to be per-server-process/connection; the
+13. **Settings tabs**: the sheet is five tabs (General / Models / Agent /
+    Notifications / Plugins & MCP) over one shared form and one shared Save.
+    Panels are mounted together and merely `hidden` — a panel that unmounted
+    would discard what was typed, and the Models tab owns local state (key
+    drafts, the add-provider form). Because the Save is shared, a rejected field
+    can be on another tab, so `FIELD_LOCATIONS` maps every validated key to its
+    tab, its Advanced disclosure and its input id: a failed save switches tab,
+    opens the disclosure and focuses the field, and the footer summarizes the
+    count and the tabs involved. Notification switches are the exception — they
+    PATCH immediately and have no Save of their own.
+14. **Sequence resets**: `seq` is assumed to be per-server-process/connection; the
     reducer does not enforce global monotonicity across reconnects.
-14. **Health/provider state**: `provider_configured` from `/api/health` is the source
+15. **Health/provider state**: `provider_configured` from `/api/health` is the source
     of truth for the composer gate; saving settings triggers a health refresh.
-15. **Session ordering**: the UI preserves `/api/sessions` order and selects the
+16. **Session ordering**: the UI preserves `/api/sessions` order and selects the
     last-opened session from local storage when it still exists, otherwise the first
     item.
-16. **Attachment upload**: `POST /api/workspace/upload?session=&name=[&project=]`
+17. **Attachment upload**: `POST /api/workspace/upload?session=&name=[&project=]`
     takes the raw bytes as the request body (`application/octet-stream`, 8 MiB) and
     returns `{ session, name, path, size, content_type, workspace, deduplicated }`.
     The UI always uses the returned `path` (a collision renames the stored file)
     and never the local `File.name`. The message itself still carries text, so a
     binary attachment is referenced by path and opened by the agent's own tools.
-17. **Mention index**: `GET /api/workspace/tree?depth=6` is fetched once per
+18. **Mention index**: `GET /api/workspace/tree?depth=6` is fetched once per
     project (2 000-entry server cap, noise directories skipped server-side) and
     cached for 60 s; switching project invalidates it immediately, so a mention can
     only name a path the agent can actually open.
-18. **Theme persistence** is per-browser `localStorage`, not the config file: a
+19. **Theme persistence** is per-browser `localStorage`, not the config file: a
     theme does not follow the user to another machine, and the API knows nothing
     about it.
 
@@ -256,6 +266,11 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
 - approval decisions and resolved/expired states;
 - session list rendering, inline rename, delete confirmation and empty/loading
   states;
+- the settings sheet: the five tabs and their panels, arrow-key tab movement,
+  typed values surviving a tab switch, Advanced blocks starting collapsed, and a
+  rejected field pulling the sheet to its tab and disclosure — plus the
+  stylesheet contract in `styles/settings.test.ts` that keeps the scroll on the
+  panel rather than the sheet body;
 - mocked SSE parsing, split chunks, keepalives, seq dedupe, backoff that grows
   across reconnect attempts, the 45 s silence watchdog, `seq`-gap and
   `stream_lagged` reporting, a handshake deadline, and 401 handling;

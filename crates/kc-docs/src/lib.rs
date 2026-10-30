@@ -117,6 +117,7 @@ pub const REQUIRED_SLUGS: &[&str] = &[
     "documentation",
     "http-api",
     "mcp",
+    "notifications",
     "plugins",
     "projects",
     "provider-profiles",
@@ -497,6 +498,10 @@ mod tests {
             ("mcp server stdio", "mcp"),
             ("approval mode read_only", "approvals"),
             ("GET /api/config", "http-api"),
+            // The upgrade-from-your-own-build question: someone running the
+            // systemd unit asks this before they know packaging/update.sh
+            // exists, so the query must be phrased without naming it.
+            ("update the systemd service from my own build", "deployment"),
         ];
         for (query, expected) in cases {
             let hits = search(query, 5);

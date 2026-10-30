@@ -460,7 +460,12 @@ Not blockers, but each is something a production coding harness is expected to h
 - **Resolved approvals are not exposed** by any endpoint; only pending ones are. There is no audit view of what was approved and when.
 - **Approval expiry granularity** — subagent approvals are marked `resolved` with decision `expired`, so the UI shows them as resolved rather than expired.
 - **Missing tools** a production harness is expected to have: glob, multi-file/apply-patch editing, background/long-running process management, test-runner integration, LSP diagnostics, web fetch/search, image reading, todo/plan tracking.
-- **No session search** in the UI; no message editing/retry; no cost display; no notifications for long runs; no multi-tab consistency.
+- **No session search** in the UI; no message editing/retry; no cost display; no multi-tab consistency.
+- **Notifications are best-effort desktop-only**: they need a secure context and a
+  permission the user grants, and most mobile browsers cannot show a page-initiated
+  notification at all (that needs a service worker karucode does not register). The
+  in-app badge, the title counter and the sound work everywhere. A notification is
+  not an approval channel, and a plugin cannot set a URL, icon or action on one.
 - **No i18n readiness**; dates and numbers are formatted ad hoc.
 
 ---

@@ -25,6 +25,7 @@ Prompt hints (in the user message):
   [tool:crash]           call run_command "sleep 5" (cancellation/timeout)
   [tool:agent]           spawn a subagent through the delegate tool
   [tool:plugin]          call the example-hello plugin tool
+  [tool:notify]          call a plugin tool that raises a `notify` frame
   [tool:mcp]             call an MCP tool from the mock MCP server
   [text]                 reply with plain text only (no tools)
   [die]                  first time: stream a reasoning delta and half an
@@ -158,6 +159,14 @@ def decide(messages):
         return (
             "tools",
             [call("call_plugin_1", "plugin__example-hello__hello", {"name": "e2e"})],
+        )
+    if "[tool:notify]" in last_user:
+        # A plugin tool that raises a `notify` frame: the one path that proves a
+        # plugin can reach a human, which the host validates and the server turns
+        # into the same `notification` event the runtime emits.
+        return (
+            "tools",
+            [call("call_notify_1", "plugin__notifier-fixture__ping", {})],
         )
     if "[tool:mcp]" in last_user:
         return ("tools", [call("call_mcp_1", "mcp__mock__echo", {"text": "hi"})])

@@ -8,6 +8,12 @@ import { formatCount, relativeTime } from '../lib/format';
 import * as store from '../state/store';
 import * as actions from '../state/actions';
 import { Dialog } from './Dialog';
+import {
+  AddProjectDialog,
+  DeleteProjectDialog,
+  RenameProjectDialog,
+  projectInitials,
+} from './ProjectRail';
 import { CloseIcon, KebabIcon, PlusIcon, SearchIcon, SettingsIcon } from './icons';
 
 const DAY = 86_400_000;
@@ -31,12 +37,14 @@ interface SessionRowProps {
   session: SessionSummary;
   active: boolean;
   now: number;
+  /** Unread notifications for this session. */
+  unreadCount: number;
   onSelect: (id: string) => void;
   onRename: (id: string, title: string) => void | Promise<boolean>;
   onRequestDelete: (session: SessionSummary, trigger: HTMLElement | null) => void;
 }
 
-function SessionRow({ session, active, now, onSelect, onRename, onRequestDelete }: SessionRowProps): JSX.Element {
+function SessionRow({ session, active, now, unreadCount, onSelect, onRename, onRequestDelete }: SessionRowProps): JSX.Element {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.title);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -143,7 +151,18 @@ function SessionRow({ session, active, now, onSelect, onRename, onRequestDelete 
           onDblClick={startRename}
           aria-current={active ? 'true' : undefined}
         >
-          <span class="session-title">{session.title || 'Untitled session'}</span>
+          <span class="session-head">
+            <span class="session-title">{session.title || 'Untitled session'}</span>
+            {unreadCount > 0 ? (
+              <span
+                class="session-unread"
+                aria-label={`${unreadCount} unread notification${unreadCount === 1 ? '' : 's'}`}
+                title={`${unreadCount} unread notification${unreadCount === 1 ? '' : 's'}`}
+              >
+                {unreadCount > 9 ? '9+' : unreadCount}
+              </span>
+            ) : null}
+          </span>
           <span class="session-meta">
             {statusTone ? <span class={`status-dot status-${statusTone}`} aria-hidden="true" /> : null}
             {session.running ? <span class="sr-only">Running. </span> : null}
@@ -330,6 +349,10 @@ export function SessionList({
                   session={session}
                   active={session.id === currentId}
                   now={now}
+                  // The dot is the surface that works when a desktop notification
+                  // could not be shown (no permission, no secure context, a mobile
+                  // browser), and it clears when the session is opened.
+                  unreadCount={store.unread.value[session.id] ?? 0}
                   onSelect={onSelect}
                   onRename={onRename}
                   onRequestDelete={(session, trigger) => setPendingDelete({ session, trigger })}
@@ -366,6 +389,196 @@ export function SessionList({
           </div>
         ) : null}
       </Dialog>
+    </div>
+  );
+}
+
+/**
+ * The project switcher, rendered inside the sessions sheet on a phone.
+ *
+ * On desktop the far-left rail owns this: one square per project, plus add and
+ * the project menu. On a phone that rail cost 56 of 440px of every screen to
+ * show two glyphs, so it is hidden and this horizontal strip takes over — the
+ * same projects, the same dialogs, the same actions, in a row instead of a
+ * column. It is not rendered at all above 1023px (CSS hides it there too, so the
+ * DOM and the layout agree).
+ */
+function ProjectSwitcher(): JSX.Element {
+  const projects = store.projects.value;
+  const activeId = store.currentProjectId.value;
+  const activeProject = store.currentProject.value;
+  const [dialog, setDialog] = useState<'add' | 'rename' | 'delete' | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuWrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (event: MouseEvent): void => {
+      if (!menuWrapRef.current?.contains(event.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [menuOpen]);
+
+  // A project that disappears (deleted elsewhere) must not leave the menu open
+  // pointing at nothing.
+  useEffect(() => {
+    if (!activeProject) setMenuOpen(false);
+  }, [activeProject]);
+
+  const copyPath = async (): Promise<void> => {
+    const path = activeProject?.path ?? '';
+    if (path === '') return;
+    const copied = await copyText(path);
+    store.pushToast(
+      copied ? 'Project path copied.' : 'Could not copy the path.',
+      copied ? 'success' : 'error',
+    );
+  };
+
+  return (
+    <div class="project-switcher">
+      <div class="project-switcher-head">
+        <p class="eyebrow">Projects</p>
+        <div class="project-switcher-actions">
+          <button
+            type="button"
+            class="side-mini-btn"
+            aria-label="Add project"
+            title="Add project"
+            onClick={() => setDialog('add')}
+          >
+            <PlusIcon size={15} />
+          </button>
+          <div class="project-switcher-menu-wrap" ref={menuWrapRef}>
+            <button
+              type="button"
+              class="side-mini-btn"
+              aria-label="Project options"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              title="Project options"
+              disabled={!activeProject}
+              onClick={() => setMenuOpen((open) => !open)}
+            >
+              <KebabIcon size={15} />
+            </button>
+            {menuOpen && activeProject ? (
+              <div
+                class="rail-menu project-switcher-menu"
+                role="menu"
+                aria-label={`Project options for ${activeProject.name}`}
+              >
+                <div class="rail-menu-meta">
+                  <span class="rail-menu-name">{activeProject.name}</span>
+                  <span class="rail-menu-path">{activeProject.path}</span>
+                </div>
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="menu-item"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void copyPath();
+                  }}
+                >
+                  Copy project path
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="menu-item"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void actions.refreshSessions();
+                  }}
+                >
+                  Refresh sessions
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="menu-item"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    actions.openSettings();
+                  }}
+                >
+                  Project settings…
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="menu-item"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setDialog('rename');
+                  }}
+                >
+                  Rename…
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="menu-item menu-item-danger"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setDialog('delete');
+                  }}
+                >
+                  Delete project…
+                </button>
+              </div>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            class="side-mini-btn"
+            aria-label="Close sessions panel"
+            data-autofocus
+            onClick={actions.closeSheets}
+          >
+            <CloseIcon size={15} />
+          </button>
+        </div>
+      </div>
+
+      <ul class="project-switcher-list">
+        {projects.map((item) => {
+          const active = item.id === activeId;
+          return (
+            <li key={item.id}>
+              <button
+                type="button"
+                class={`project-switcher-item${active ? ' is-active' : ''}`}
+                aria-label={`Switch to ${item.name} (${item.path})`}
+                aria-current={active ? 'true' : undefined}
+                title={item.path}
+                onClick={() => {
+                  if (!active) void actions.switchProject(item.id);
+                }}
+              >
+                <span class="project-switcher-initials" aria-hidden="true">
+                  {projectInitials(item.name, item.path)}
+                </span>
+                <span class="project-switcher-name">{item.name}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+
+      <AddProjectDialog open={dialog === 'add'} onClose={() => setDialog(null)} />
+      <RenameProjectDialog
+        project={activeProject}
+        open={dialog === 'rename'}
+        onClose={() => setDialog(null)}
+      />
+      <DeleteProjectDialog
+        project={activeProject}
+        open={dialog === 'delete'}
+        onClose={() => setDialog(null)}
+      />
     </div>
   );
 }
@@ -481,43 +694,39 @@ export function SessionsRail(): JSX.Element {
       aria-modal={isSheetOpen ? 'true' : undefined}
     >
       <div class="rail-inner">
-        <div class="side-head">
-          <p class="eyebrow">Your workspace</p>
-          <div class="project-heading">
-            <h2 class="project-title" title={project?.name ?? 'No project'}>
-              <span class="project-title-dot" aria-hidden="true" />
-              <span class="project-title-text">{project?.name ?? 'No project'}</span>
-            </h2>
-            <div class="side-head-actions">
-              <button
-                ref={optionsRef}
-                type="button"
-                class="side-mini-btn"
-                aria-label="Project options"
-                aria-haspopup="menu"
-                aria-expanded={menu !== null}
-                title="Project options"
-                onClick={() => (menu ? closeMenu(false) : openProjectMenu())}
-              >
-                <KebabIcon size={15} />
-              </button>
-              {isNarrow ? (
+        {isNarrow ? <ProjectSwitcher /> : null}
+        {/* The switcher above owns the project story on a phone — name, every
+         * project, the add button, the project menu — so this head is a duplicate
+         * there. It is not rendered at all rather than hidden in CSS, so the
+         * sheet has one `Project options` button rather than two. */}
+        {isNarrow ? null : (
+          <div class="side-head">
+            <p class="eyebrow">Your workspace</p>
+            <div class="project-heading">
+              <h2 class="project-title" title={project?.name ?? 'No project'}>
+                <span class="project-title-dot" aria-hidden="true" />
+                <span class="project-title-text">{project?.name ?? 'No project'}</span>
+              </h2>
+              <div class="side-head-actions">
                 <button
+                  ref={optionsRef}
                   type="button"
-                  class="side-mini-btn rail-close"
-                  aria-label="Close sessions panel"
-                  data-autofocus
-                  onClick={actions.closeSheets}
+                  class="side-mini-btn"
+                  aria-label="Project options"
+                  aria-haspopup="menu"
+                  aria-expanded={menu !== null}
+                  title="Project options"
+                  onClick={() => (menu ? closeMenu(false) : openProjectMenu())}
                 >
-                  <CloseIcon size={15} />
+                  <KebabIcon size={15} />
                 </button>
-              ) : null}
+              </div>
             </div>
+            <p class="path-hint" title={project?.path ?? ''}>
+              {project?.path ?? 'No project selected'}
+            </p>
           </div>
-          <p class="path-hint" title={project?.path ?? ''}>
-            {project?.path ?? 'No project selected'}
-          </p>
-        </div>
+        )}
 
         <button
           type="button"

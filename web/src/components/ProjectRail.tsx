@@ -68,7 +68,12 @@ interface AddProjectDialogProps {
   onClose: () => void;
 }
 
-function AddProjectDialog({ open, onClose }: AddProjectDialogProps): JSX.Element {
+/**
+ * Exported so the sessions sheet can offer project management on a phone, where
+ * the rail itself is hidden: the dialogs are the only way to add, rename or
+ * delete a project, and they must not be reachable only by mouse.
+ */
+export function AddProjectDialog({ open, onClose }: AddProjectDialogProps): JSX.Element {
   const fieldId = useId();
   const [path, setPath] = useState('');
   const [name, setName] = useState('');
@@ -172,7 +177,7 @@ interface RenameProjectDialogProps {
   onClose: () => void;
 }
 
-function RenameProjectDialog({ project, open, onClose }: RenameProjectDialogProps): JSX.Element {
+export function RenameProjectDialog({ project, open, onClose }: RenameProjectDialogProps): JSX.Element {
   const fieldId = useId();
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -260,7 +265,7 @@ interface DeleteProjectDialogProps {
   onClose: () => void;
 }
 
-function DeleteProjectDialog({ project, open, onClose }: DeleteProjectDialogProps): JSX.Element {
+export function DeleteProjectDialog({ project, open, onClose }: DeleteProjectDialogProps): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 

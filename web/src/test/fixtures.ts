@@ -9,6 +9,7 @@ import { setAuthToken } from '../api/client';
 import * as actions from '../state/actions';
 import { emptyChatState } from '../state/chat';
 import { resetProjectIcons } from '../state/projectIcons';
+import { resetPromptTokens } from '../state/promptTokens';
 import * as store from '../state/store';
 
 export const NOW = 1_710_000_100_000;
@@ -70,6 +71,18 @@ export const configFixture: Config = {
   },
   plugins: [],
   mcp_servers: [],
+  notifications: {
+    enabled: true,
+    run_finished: true,
+    needs_input: true,
+    error: true,
+    info: true,
+    plugin: true,
+    min_run_secs: 0,
+    say_body: true,
+    max_min_run_secs: 3600,
+    kinds: ['run_finished', 'needs_input', 'error', 'info'],
+  },
   settings_locked: false,
   version: '0.1.0',
 };
@@ -205,6 +218,7 @@ export function resetAppState(): void {
   resetProjectIcons();
   setAuthToken(null);
   store.writeLastSessionId(null);
+  resetPromptTokens();
   store.boot.value = 'loading';
   store.bootError.value = null;
   store.health.value = null;

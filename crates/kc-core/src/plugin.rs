@@ -201,6 +201,11 @@ pub mod methods {
     pub const HOOKS_RUN: &str = "hooks/run";
     pub const SHUTDOWN: &str = "shutdown";
     pub const LOG: &str = "log";
+    /// Plugin asks a human to look at something (plugin → host, notification).
+    ///
+    /// Unlike [`LOG`] this reaches the UI: the host validates it and the server
+    /// turns it into the same `notification` event the runtime emits.
+    pub const NOTIFY: &str = "notify";
     /// Host asks the plugin for the payload of a panel it declared.
     pub const PANELS_READ: &str = "panels/read";
 }
@@ -217,8 +222,11 @@ pub mod hooks {
     /// Hooks that may contribute text to the system prompt.
     pub const BEFORE_PROMPT: &str = "before_prompt";
     pub const ON_SESSION_CREATE: &str = "on_session_create";
+    /// Called for every notification the runtime emits, so a plugin can bridge
+    /// karucode to an external notifier (ntfy, Pushover, a desktop daemon).
+    pub const ON_NOTIFY: &str = "on_notify";
 
-    pub const IMPLEMENTED: &[&str] = &[BEFORE_PROMPT, ON_RUN_END, ON_TOOL_RESULT];
+    pub const IMPLEMENTED: &[&str] = &[BEFORE_PROMPT, ON_RUN_END, ON_TOOL_RESULT, ON_NOTIFY];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

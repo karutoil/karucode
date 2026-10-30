@@ -886,7 +886,8 @@ impl TerminalConfig {
 
     /// `scrollback_bytes` clamped to a range one terminal can actually hold.
     pub fn replay_capacity(&self) -> usize {
-        self.scrollback_bytes.clamp(MIN_TERMINAL_SCROLLBACK, MAX_TERMINAL_SCROLLBACK)
+        self.scrollback_bytes
+            .clamp(MIN_TERMINAL_SCROLLBACK, MAX_TERMINAL_SCROLLBACK)
     }
 
     /// `max_terminals` clamped so the setting cannot be `0` (a tab that never
@@ -1012,6 +1013,146 @@ impl TitlesConfig {
 /// paragraph, and the session rail truncates it anyway.
 pub const MAX_TITLE_CHARS_HINT: usize = 120;
 
+/// Whether karucode tells a human that something happened, and how loudly.
+///
+/// A long run is exactly the case where you stop watching: the agent works for
+/// minutes, you switch windows, and without this the only way to find out it
+/// finished is to come back and look. The same signal covers the opposite case —
+/// a run parked on an approval, which will sit there until it times out.
+///
+/// **Four independent layers can turn it off**, because they answer different
+/// questions:
+///
+/// 1. `enabled = false` here (or `KARUCODE_NOTIFICATIONS=0`): the server stops
+///    emitting the `notification` event at all. Nothing downstream has to
+///    cooperate, and a client cannot accidentally ignore the switch.
+/// 2. The per-event switches below: keep run-finished pings, drop the rest.
+/// 3. `plugin = false`: refuse notifications raised by plugins, enforced in the
+///    plugin host so a plugin cannot bypass it by sending anyway.
+/// 4. Browser preferences (sound, desktop notifications): a frontend concern, not
+///    this struct. They silence a *surface*, not the signal.
+///
+/// Routing is deliberately server-side: a browser only knows about the session it
+/// has open, so a run that finishes in another project would otherwise be
+/// invisible. The server reports every terminal run; the UI decides which ones are
+/// worth interrupting you for.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NotificationsConfig {
+    /// Emit `notification` events at all. Off silences the stream completely.
+    #[serde(default = "d_true")]
+    pub enabled: bool,
+    /// Notify when a run completes successfully.
+    #[serde(default = "d_true")]
+    pub run_finished: bool,
+    /// Notify when something waits on a human: a pending approval, or a run that
+    /// stopped at a configured limit and may continue.
+    #[serde(default = "d_true")]
+    pub needs_input: bool,
+    /// Notify when a run fails, is interrupted by a restart, or a subagent fails.
+    #[serde(default = "d_true")]
+    pub error: bool,
+    /// Notify for plugin-raised `info` notifications. Distinct from `plugin`
+    /// below: this is the kind, that one is whether plugins may speak at all.
+    #[serde(default = "d_true")]
+    pub info: bool,
+    /// Let plugins raise notifications (both the `notify` frame and the resulting
+    /// `on_notify` fan-out). Enforced by the plugin host.
+    #[serde(default = "d_true")]
+    pub plugin: bool,
+    /// Skip notifications for runs shorter than this many seconds. `0` notifies
+    /// every run; a two-second question is noise to most people, so this is the
+    /// knob for that.
+    #[serde(default)]
+    pub min_run_secs: u64,
+    /// Include the first line of the answer as the notification body. Off sends the
+    /// title only, which keeps model output off a lock screen.
+    #[serde(default = "d_true")]
+    pub say_body: bool,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            run_finished: true,
+            needs_input: true,
+            error: true,
+            info: true,
+            plugin: true,
+            min_run_secs: 0,
+            say_body: true,
+        }
+    }
+}
+
+/// Upper bound for [`NotificationsConfig::min_run_secs`].
+///
+/// An hour: past that the feature is off in all but name, and the number is
+/// probably a typo (seconds vs minutes).
+pub const MAX_MIN_RUN_SECS: u64 = 3_600;
+
+impl NotificationsConfig {
+    /// Whether a notification of this kind is switched on *and* the master switch
+    /// is on. The one predicate every emitter asks, so the per-kind table cannot
+    /// drift between the runtime and the plugin host.
+    pub fn allows(&self, kind: crate::notify::NotifyKind) -> bool {
+        use crate::notify::NotifyKind;
+        if !self.enabled {
+            return false;
+        }
+        match kind {
+            NotifyKind::RunFinished => self.run_finished,
+            NotifyKind::NeedsInput => self.needs_input,
+            NotifyKind::Error => self.error,
+            NotifyKind::Info => self.info,
+        }
+    }
+
+    /// Whether a plugin-raised notification may be emitted: the master switch, the
+    /// kind switch, and permission for plugins to speak.
+    pub fn allows_plugin(&self, kind: crate::notify::NotifyKind) -> bool {
+        self.allows(kind) && self.plugin
+    }
+
+    /// Whether a run that took `secs` seconds is worth a notification.
+    ///
+    /// `>=` rather than `>`: with `min_run_secs = 1`, a run reported as exactly one
+    /// second is not "shorter than one second", so it notifies.
+    pub fn run_is_long_enough(&self, secs: u64) -> bool {
+        secs >= self.min_run_secs
+    }
+
+    /// The per-event switches as names, for the settings screen and for error
+    /// messages. Order matches [`crate::notify::NotifyKind::ALL`].
+    pub fn event_names() -> &'static [&'static str] {
+        &["run_finished", "needs_input", "error", "info"]
+    }
+
+    /// Set one per-event switch by name. `None` for an unknown name, so a typo in
+    /// `KARUCODE_NOTIFICATIONS_EVENTS` is reported rather than ignored.
+    pub fn set_event(&mut self, name: &str, on: bool) -> Option<()> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "run_finished" | "run-finished" => self.run_finished = on,
+            "needs_input" | "needs-input" => self.needs_input = on,
+            "error" => self.error = on,
+            "info" => self.info = on,
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// Read one per-event switch by name.
+    pub fn event(&self, name: &str) -> Option<bool> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "run_finished" | "run-finished" => Some(self.run_finished),
+            "needs_input" | "needs-input" => Some(self.needs_input),
+            "error" => Some(self.error),
+            "info" => Some(self.info),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginConfig {
     pub name: String,
@@ -1094,6 +1235,9 @@ pub struct ConfigFile {
     /// `[titles]`: AI-written session titles (on by default).
     #[serde(default)]
     pub titles: Option<TitlesConfig>,
+    /// `[notifications]`: tell a human when a run finishes or needs an answer.
+    #[serde(default)]
+    pub notifications: Option<NotificationsConfig>,
     /// `[terminals]`: the browser terminal (a PTY running a shell as the server
     /// user). On by default; see [`TerminalConfig`].
     #[serde(default)]
@@ -1155,6 +1299,8 @@ pub struct Config {
     pub subagents: SubagentConfig,
     /// AI-written session titles (see [`TitlesConfig`]). On by default.
     pub titles: TitlesConfig,
+    /// Human-facing notifications (see [`NotificationsConfig`]). On by default.
+    pub notifications: NotificationsConfig,
     /// The browser terminal (see [`TerminalConfig`]). On by default.
     pub terminals: TerminalConfig,
     pub plugins: Vec<PluginConfig>,
@@ -1199,6 +1345,7 @@ impl Default for Config {
             approvals: ApprovalPolicy::default(),
             subagents: SubagentConfig::default(),
             titles: TitlesConfig::default(),
+            notifications: NotificationsConfig::default(),
             terminals: TerminalConfig::default(),
             plugins: Vec::new(),
             plugins_watch: false,
@@ -1335,6 +1482,9 @@ impl Config {
         if let Some(v) = file.titles {
             cfg.titles = v;
         }
+        if let Some(v) = file.notifications {
+            cfg.notifications = v;
+        }
         if let Some(v) = file.terminals {
             cfg.terminals = v;
         }
@@ -1411,6 +1561,36 @@ impl Config {
         }
         if let Some(v) = env_str("KARUCODE_TITLES_MODEL") {
             cfg.titles.model = v;
+        }
+        // Notifications: one master switch plus a comma-separated event list, so a
+        // locked deployment can silence the ping without editing `[notifications]`.
+        if let Some(v) = env_bool("KARUCODE_NOTIFICATIONS") {
+            cfg.notifications.enabled = v;
+        }
+        if let Some(v) = env_str("KARUCODE_NOTIFICATIONS_EVENTS") {
+            // Fail loudly on a typo: an operator who writes `run-finished,` or
+            // `errorz` should find out at startup, not by silently getting either
+            // everything or nothing.
+            for name in v.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                let on = !name.starts_with('!') && !name.starts_with('-');
+                let bare = name.trim_start_matches(['!', '-']);
+                if cfg.notifications.set_event(bare, on).is_none() {
+                    return Err(Error::Config(format!(
+                        "KARUCODE_NOTIFICATIONS_EVENTS: unknown event `{bare}` \
+                         (expected any of: {})",
+                        NotificationsConfig::event_names().join(", ")
+                    )));
+                }
+            }
+        }
+        if let Some(v) = env_bool("KARUCODE_NOTIFICATIONS_PLUGIN") {
+            cfg.notifications.plugin = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_NOTIFICATIONS_MIN_RUN_SECS") {
+            cfg.notifications.min_run_secs = v;
+        }
+        if let Some(v) = env_bool("KARUCODE_NOTIFICATIONS_SAY_BODY") {
+            cfg.notifications.say_body = v;
         }
         // The browser terminal. `KARUCODE_TERMINALS=0` is the switch a locked
         // deployment needs: with it off there is no PTY surface at all, so an
@@ -2512,5 +2692,125 @@ retry_max_stream_restarts = 0
         assert_eq!(entries[0].name, "stale");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // [notifications]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn notifications_are_on_by_default() {
+        let cfg = Config::default();
+        let n = &cfg.notifications;
+        assert!(n.enabled);
+        assert!(n.run_finished && n.needs_input && n.error && n.info);
+        assert!(n.plugin);
+        assert_eq!(n.min_run_secs, 0, "every run notifies until you raise it");
+        assert!(n.say_body);
+        // Every kind is allowed by the defaults, which is what makes the master
+        // switch the only thing an ordinary user has to find.
+        for kind in crate::notify::NotifyKind::ALL {
+            assert!(n.allows(*kind), "{kind:?} should be allowed by default");
+        }
+    }
+
+    #[test]
+    fn the_master_switch_overrides_every_per_kind_switch() {
+        let n = NotificationsConfig {
+            enabled: false,
+            ..NotificationsConfig::default()
+        };
+        for kind in crate::notify::NotifyKind::ALL {
+            assert!(!n.allows(*kind), "{kind:?} must be refused when disabled");
+            assert!(!n.allows_plugin(*kind));
+        }
+    }
+
+    #[test]
+    fn a_per_event_switch_only_silences_that_event() {
+        let n = NotificationsConfig {
+            error: false,
+            ..NotificationsConfig::default()
+        };
+        assert!(!n.allows(crate::notify::NotifyKind::Error));
+        assert!(n.allows(crate::notify::NotifyKind::RunFinished));
+        assert!(n.allows(crate::notify::NotifyKind::NeedsInput));
+        assert!(n.allows(crate::notify::NotifyKind::Info));
+    }
+
+    #[test]
+    fn plugins_are_gated_separately_from_the_kind_switches() {
+        let n = NotificationsConfig {
+            plugin: false,
+            ..NotificationsConfig::default()
+        };
+        // The kind is still allowed for runtime producers...
+        assert!(n.allows(crate::notify::NotifyKind::Info));
+        // ...but nothing a plugin raises gets through.
+        assert!(!n.allows_plugin(crate::notify::NotifyKind::Info));
+        assert!(!n.allows_plugin(crate::notify::NotifyKind::NeedsInput));
+    }
+
+    #[test]
+    fn the_minimum_run_length_is_a_lower_bound_not_an_exclusive_one() {
+        let n = NotificationsConfig {
+            min_run_secs: 30,
+            ..NotificationsConfig::default()
+        };
+        assert!(!n.run_is_long_enough(29));
+        assert!(n.run_is_long_enough(30), "exactly the minimum notifies");
+        assert!(n.run_is_long_enough(31));
+        assert!(NotificationsConfig::default().run_is_long_enough(0));
+    }
+
+    #[test]
+    fn event_switches_are_addressable_by_name() {
+        let mut n = NotificationsConfig::default();
+        for name in NotificationsConfig::event_names() {
+            assert_eq!(n.event(name), Some(true), "{name} starts on");
+            assert_eq!(n.set_event(name, false), Some(()));
+            assert_eq!(n.event(name), Some(false), "{name} turned off");
+            assert_eq!(n.set_event(name, true), Some(()));
+        }
+        assert_eq!(n.set_event("nope", true), None);
+        assert_eq!(n.event("nope"), None);
+        // The spelling in the API and the plugin protocol uses underscores; a
+        // hyphen is accepted so a hand-written TOML/env value is not a trap.
+        assert_eq!(n.set_event("run-finished", false), Some(()));
+        assert!(!n.run_finished);
+    }
+
+    #[test]
+    fn the_notifications_section_parses_from_toml_with_the_documented_defaults() {
+        let file: ConfigFile = toml::from_str(
+            r#"
+            [notifications]
+            min_run_secs = 15
+            error = false
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::from_parts(file, None).unwrap();
+        assert_eq!(cfg.notifications.min_run_secs, 15);
+        assert!(!cfg.notifications.error);
+        // Everything not named keeps its default: a partial section is legal.
+        assert!(cfg.notifications.enabled);
+        assert!(cfg.notifications.run_finished);
+        assert!(cfg.notifications.plugin);
+    }
+
+    #[test]
+    fn a_config_file_without_a_notifications_section_keeps_the_defaults() {
+        let file: ConfigFile = toml::from_str("[limits]\nmax_iterations = 5\n").unwrap();
+        let cfg = Config::from_parts(file, None).unwrap();
+        assert!(cfg.notifications.enabled);
+        assert_eq!(cfg.notifications, NotificationsConfig::default());
+    }
+
+    #[test]
+    fn the_minimum_run_secs_bound_is_documented() {
+        // The settings layer validates against this; the constant exists here so a
+        // TOML reader and the API agree on the ceiling.
+        assert_eq!(MAX_MIN_RUN_SECS, 3_600);
     }
 }

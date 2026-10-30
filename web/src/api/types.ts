@@ -297,6 +297,11 @@ export interface Config {
   limits: Limits;
   approvals: ApprovalPolicy;
   subagents: SubagentConfig;
+  /**
+   * Server-side notification routing. Absent on an older server, which emits no
+   * `notification` events at all.
+   */
+  notifications?: NotificationsConfig;
   plugins: ConfigPluginSummary[];
   /**
    * Inspector panels contributed by ready plugins, grouped per plugin.
@@ -340,6 +345,7 @@ export interface ConfigPatch {
   limits?: Partial<Limits>;
   approvals?: Partial<ApprovalPolicy>;
   subagents?: Partial<SubagentConfig>;
+  notifications?: NotificationsPatch;
 }
 
 export interface ProviderTestResult {
@@ -774,6 +780,10 @@ export type KnownEvent = EventEnvelope &
       }
     | { type: 'stream_retry'; attempt: number; max_attempts: number; reason: string }
     | { type: 'notice'; level: string; message: string }
+    // A human-facing notification: the run settled, something waits for an answer,
+    // or a plugin asked for attention. The server sends none when
+    // `[notifications] enabled = false`, so the client never has to filter one out.
+    | { type: 'notification'; notification: NotifyPayload }
     // Transport marker, not a session event: the SSE pump dropped frames for this
     // client. Exempt from the `seq` dedupe (see api/events.ts).
     | { type: 'stream_lagged'; skipped: number }
@@ -797,10 +807,81 @@ export type ConnectionState =
   /** The server refused this origin (Host allowlist): retrying cannot help. */
   | 'blocked';
 
+/** Why a human is being interrupted. Mirrors `kc_core::notify::NotifyKind`. */
+export type NotifyKind = 'run_finished' | 'needs_input' | 'error' | 'info';
+
+/**
+ * `config.notifications` from `GET /api/config`.
+ *
+ * The switches are server-side on purpose: `enabled = false` means the server sends
+ * no `notification` event at all, so a client cannot accidentally ignore it. The
+ * settings screen edits these through `PATCH /api/config`.
+ */
+export interface NotificationsConfig {
+  enabled: boolean;
+  run_finished: boolean;
+  needs_input: boolean;
+  error: boolean;
+  info: boolean;
+  /** Whether plugins may raise notifications at all. */
+  plugin: boolean;
+  /** Skip notifications for runs shorter than this. */
+  min_run_secs: number;
+  /** Include the first line of the answer as the notification body. */
+  say_body: boolean;
+  /** The documented ceiling, sent by the server so the UI need not hard-code it. */
+  max_min_run_secs: number;
+  /** The kinds this server can emit. */
+  kinds: NotifyKind[];
+}
+
+/** `[notifications]` section of `PATCH /api/config`. */
+export interface NotificationsPatch {
+  enabled?: boolean;
+  run_finished?: boolean;
+  needs_input?: boolean;
+  error?: boolean;
+  info?: boolean;
+  plugin?: boolean;
+  min_run_secs?: number;
+  say_body?: boolean;
+}
+
+/**
+ * One notification from `GET /api/events` (`type: "notification"`).
+ *
+ * Everything is plain text, capped by the server, and `source` is either
+ * `"runtime"` or the name of the plugin that raised it. A client that does not
+ * recognise a `kind` should render it as `info` rather than dropping it: the server
+ * may learn kinds before the browser does.
+ */
+export interface NotifyPayload {
+  /** Stable per source moment (`run:<id>`, `approval:<id>`, `plugin:<name>:<title>`). */
+  id: string;
+  kind: NotifyKind;
+  title: string;
+  body: string;
+  session_id: string;
+  /** The session's title at emit time, so the notification is readable on its own. */
+  session_title: string;
+  /** `runtime`, or the plugin's name. */
+  source: string;
+  /** A cue override; absent means "the kind's default". */
+  sound?: string | null;
+  /** Keep the desktop notification until it is dismissed. */
+  sticky: boolean;
+}
+
 export interface Toast {
   id: number;
   tone: 'info' | 'success' | 'error';
   message: string;
+  /**
+   * A notification about a session, rather than transient feedback. Such a toast
+   * offers "Open" instead of only a dismiss button, and is what the unread badge is
+   * cleared by.
+   */
+  sessionId?: string;
 }
 
 /**

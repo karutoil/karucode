@@ -55,6 +55,10 @@ const RAIL_KEY = 'karucode.railCollapsed';
 const INSPECTOR_KEY = 'karucode.inspectorCollapsed';
 const LAST_SESSION_KEY = 'karucode.lastSession';
 const LAST_PROJECT_KEY = 'karucode.lastProject';
+/** Browser-side notification preferences. Server-side routing lives in config. */
+const NOTIFY_SOUND_KEY = 'karucode.notify.sound';
+const NOTIFY_VOLUME_KEY = 'karucode.notify.volume';
+const NOTIFY_DESKTOP_KEY = 'karucode.notify.desktop';
 
 function readBool(key: string, fallback: boolean): boolean {
   try {
@@ -64,6 +68,28 @@ function readBool(key: string, fallback: boolean): boolean {
     return value === 'true';
   } catch {
     return fallback;
+  }
+}
+
+/** Read a number clamped to a range, falling back when the stored value is junk. */
+function readNumber(key: string, fallback: number, min: number, max: number): number {
+  try {
+    if (typeof localStorage === 'undefined') return fallback;
+    const value = localStorage.getItem(key);
+    if (value === null) return fallback;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(max, Math.max(min, parsed));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeString(key: string, value: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(key, value);
+  } catch {
+    // Storage may be disabled; the in-memory signal still works for this tab.
   }
 }
 
@@ -192,6 +218,80 @@ export const fileViewerPath = signal<string | null>(null);
 /** Bumped when the UI itself writes a workspace file, so the explorer refetches. */
 export const workspaceRefreshTick = signal(0);
 export const toasts = signal<Toast[]>([]);
+/**
+ * Unread notification counts per session, cleared when that session is opened.
+ *
+ * A session rail row shows a dot for a nonzero count. This is the surface that works
+ * when the desktop notification does not: it needs no permission, it survives a
+ * flash of the tab, and it is the only thing visible from another tab (through the
+ * title counter below).
+ */
+export const unread = signal<Record<string, number>>({});
+
+/**
+ * Whether the user wants sound. A browser preference, not a server setting: it
+ * describes *this* device, and the server has no business knowing.
+ */
+export const soundEnabled = signal(readBool(NOTIFY_SOUND_KEY, true));
+/** Cue volume, 0..1. */
+export const soundVolume = signal(readNumber(NOTIFY_VOLUME_KEY, 0.8, 0, 1));
+/**
+ * Whether desktop notifications are wanted. Separate from the browser permission:
+ * permission says it is *possible*, this says it is *wanted*. Both must be true.
+ */
+export const desktopEnabled = signal(readBool(NOTIFY_DESKTOP_KEY, false));
+
+export function persistSound(enabled: boolean): void {
+  soundEnabled.value = enabled;
+  writeString(NOTIFY_SOUND_KEY, String(enabled));
+}
+
+/** Re-read the persisted preferences, for a change made in another tab. */
+export function readSoundEnabled(): boolean {
+  return readBool(NOTIFY_SOUND_KEY, true);
+}
+
+export function readSoundVolume(): number {
+  return readNumber(NOTIFY_VOLUME_KEY, 0.8, 0, 1);
+}
+
+export function readDesktopEnabled(): boolean {
+  return readBool(NOTIFY_DESKTOP_KEY, false);
+}
+
+export function persistVolume(volume: number): void {
+  const clamped = Math.min(1, Math.max(0, volume));
+  soundVolume.value = clamped;
+  writeString(NOTIFY_VOLUME_KEY, String(clamped));
+}
+
+export function persistDesktopEnabled(enabled: boolean): void {
+  desktopEnabled.value = enabled;
+  writeString(NOTIFY_DESKTOP_KEY, String(enabled));
+}
+
+/** Count one unread notification against a session. */
+export function markUnread(sessionId: string): void {
+  if (!sessionId) return;
+  unread.value = {
+    ...unread.value,
+    [sessionId]: (unread.value[sessionId] ?? 0) + 1,
+  };
+}
+
+/** Clear a session's unread count (it was opened). */
+export function clearUnread(sessionId: string | null): void {
+  if (!sessionId) return;
+  if (!(sessionId in unread.value)) return;
+  const next = { ...unread.value };
+  delete next[sessionId];
+  unread.value = next;
+}
+
+/** Total unread across every session, for the document title. */
+export const unreadTotal = computed<number>(() =>
+  Object.values(unread.value).reduce((sum, count) => sum + count, 0),
+);
 export const resolvingApprovals = signal<Record<string, boolean>>({});
 export const stopping = signal(false);
 export const clock = signal(Date.now());
@@ -203,9 +303,14 @@ export const streamEpoch = signal(0);
 let toastSequence = 0;
 let toastTimers = new Map<number, number>();
 
-export function pushToast(message: string, tone: Toast['tone'] = 'error', ttlMs = 7000): number {
+export function pushToast(
+  message: string,
+  tone: Toast['tone'] = 'error',
+  ttlMs = 7000,
+  sessionId?: string,
+): number {
   const id = (toastSequence += 1);
-  toasts.value = [...toasts.value, { id, tone, message }];
+  toasts.value = [...toasts.value, { id, tone, message, ...(sessionId ? { sessionId } : {}) }];
   if (typeof window !== 'undefined' && ttlMs > 0) {
     const timer = window.setTimeout(() => removeToast(id), ttlMs);
     toastTimers.set(id, timer);

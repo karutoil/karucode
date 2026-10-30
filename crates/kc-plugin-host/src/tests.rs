@@ -273,6 +273,23 @@ fn hooks_module_lists_implemented_hooks() {
     assert!(hooks::IMPLEMENTED.contains(&hooks::BEFORE_PROMPT));
     assert!(hooks::IMPLEMENTED.contains(&hooks::ON_RUN_END));
     assert!(hooks::IMPLEMENTED.contains(&hooks::ON_TOOL_RESULT));
+    // `on_notify` is implemented: the runtime fans every emitted notification out
+    // to plugins that advertise it, which is how a plugin bridges karucode to an
+    // external notifier.
+    assert!(hooks::IMPLEMENTED.contains(&hooks::ON_NOTIFY));
+    // The reserved ones must stay reserved: advertising them does nothing.
+    for reserved in [
+        hooks::ON_RUN_START,
+        hooks::ON_TOOL_CALL,
+        hooks::ON_MODEL_REQUEST,
+        hooks::ON_MODEL_RESPONSE,
+        hooks::ON_SESSION_CREATE,
+    ] {
+        assert!(
+            !hooks::IMPLEMENTED.contains(&reserved),
+            "{reserved} is documented as reserved"
+        );
+    }
 }
 
 #[test]

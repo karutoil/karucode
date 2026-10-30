@@ -210,6 +210,60 @@ describe('ChatView sticky bottom', () => {
     expect(jumpButton()).not.toBeNull();
   });
 
+  // The reported bug. A browser frame runs scroll events first, then rAF, then
+  // layout observers. So when one big tool card is followed and the next is
+  // committed before that frame's measurement, the scroll event caused by the
+  // follow measures a fresh scrollHeight against the scrollTop the follow left
+  // behind: a gap the size of the second card. Reading that gap as "the reader
+  // scrolled away" is what stopped auto-following for good.
+  it('keeps following when a big card lands between a follow and its measurement', async () => {
+    const { element } = renderChat();
+    const box: Box = { scrollHeight: 1000, clientHeight: VIEWPORT };
+    fakeScrollBox(element, box);
+
+    await scrollTo(element, box.scrollHeight - box.clientHeight);
+    expect(jumpButton()).toBeNull();
+
+    // Card one mounts; the observer follows it and writes scrollTop.
+    await growContent(element, box, 600);
+    expect(element.scrollTop).toBe(box.scrollHeight - box.clientHeight);
+
+    // Card two is committed before the browser can measure that follow, so the
+    // height grows with no further observer callback.
+    box.scrollHeight += 640;
+    // The follow's own scroll event finally dispatches and its handler measures.
+    fireEvent.scroll(element);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 32));
+    });
+
+    // It caught up with the card rather than giving up on the run.
+    expect(element.scrollTop).toBe(box.scrollHeight - box.clientHeight);
+    expect(jumpButton()).toBeNull();
+
+    // And following still works for everything after it.
+    await growContent(element, box, 500);
+    expect(element.scrollTop).toBe(box.scrollHeight - box.clientHeight);
+    expect(jumpButton()).toBeNull();
+  });
+
+  it('gives up following when the reader scrolls up after a catch-up', async () => {
+    const { element } = renderChat();
+    const box: Box = { scrollHeight: 1000, clientHeight: VIEWPORT };
+    fakeScrollBox(element, box);
+
+    await scrollTo(element, box.scrollHeight - box.clientHeight);
+    // A big card arrives and is followed.
+    await growContent(element, box, 600);
+    // Then the reader scrolls up by hand while more output streams in.
+    await scrollTo(element, 200);
+
+    await growContent(element, box, 900);
+
+    expect(element.scrollTop).toBe(200);
+    expect(jumpButton()).not.toBeNull();
+  });
+
   it('scrolls to the bottom and hides the button when "Jump to latest" is clicked', async () => {
     const { element } = renderChat();
     const box: Box = { scrollHeight: 1200, clientHeight: VIEWPORT };

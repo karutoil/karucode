@@ -9,6 +9,7 @@ import type {
   CatalogLookupResponse,
   CatalogResponse,
   KarucodeEvent,
+  NotifyPayload,
   Project,
   ProviderTestRequest,
   ProviderTestResult,
@@ -22,6 +23,8 @@ import { emptyChatState, seedChatState, type ChatState, type MessageItem } from 
 import * as agentConsole from './agentConsole';
 import { applyEventToChat, applyEventToSessions, markUserRun, sessionAgentFromRecord } from './eventReducer';
 import { syncProjectIcons } from './projectIcons';
+import * as notifyWiring from './notifyWiring';
+import * as promptTokens from './promptTokens';
 import { summaryFromDetail } from './selectors';
 import * as store from './store';
 
@@ -245,6 +248,15 @@ function handleRawEvent(raw: RawEvent): void {
   // are ignored by the reducers.
   const event = raw as unknown as KarucodeEvent;
 
+  // Notifications are handled before every filter below. The server reports every
+  // terminal run, including ones in sessions this tab is not showing — that is the
+  // case the feature exists for — so the notifier must see the frame even when the
+  // chat reducer would drop it.
+  if (event.type === 'notification') {
+    void handleNotificationEvent(event.notification);
+    return;
+  }
+
   // Subagent frames are handled before the current-session filter below: the tab
   // shows agents running anywhere in the project, not only in the open session.
   handleAgentEvent(event);
@@ -289,7 +301,19 @@ function handleRawEvent(raw: RawEvent): void {
 }
 
 function applyChatEvent(event: KarucodeEvent): void {
-  store.chat.value = applyEventToChat(store.chat.value, event);
+  const next = applyEventToChat(store.chat.value, event);
+  // The context pill's number is the provider's own prompt count for the newest
+  // call. Persisting it is what lets the pill survive a reload: `usage` is
+  // live-only state and the session snapshot never carries it.
+  if (
+    event.type === 'usage' &&
+    !event.agent_id &&
+    next.lastPromptTokens !== store.chat.value.lastPromptTokens &&
+    next.lastPromptTokens !== null
+  ) {
+    promptTokens.rememberPromptTokens(next.sessionId, next.lastPromptTokens);
+  }
+  store.chat.value = next;
 }
 
 /**
@@ -299,6 +323,23 @@ function applyChatEvent(event: KarucodeEvent): void {
  * agent's transcript only. The chat reducer deliberately drops subagent text and
  * tool frames (they belong to another conversation), so this is where they land.
  */
+/**
+ * Hand one notification to the page's notifier.
+ *
+ * Kept out of the chat reducer on purpose: a notification is not a transcript item,
+ * and the reducer only ever sees the open session. The notifier decides which of
+ * the four surfaces fires; a failure there must never break the stream, so it is
+ * caught and logged rather than propagated.
+ */
+async function handleNotificationEvent(payload: NotifyPayload | undefined): Promise<void> {
+  if (!payload || typeof payload.id !== 'string') return;
+  try {
+    await notifyWiring.handleNotification(payload);
+  } catch (error) {
+    console.error('karucode: a notification could not be shown', error);
+  }
+}
+
 function handleAgentEvent(event: KarucodeEvent): void {
   const agentId = agentConsole.agentEventId(event);
   if (!agentId) return;
@@ -493,6 +534,27 @@ export interface OpenSessionOptions {
   preserveLive?: boolean;
 }
 
+/**
+ * Bring the workspace forward and open a session.
+ *
+ * The click handler of a desktop notification: a notification you can click that
+ * does nothing is worse than one that cannot be clicked.
+ */
+export function focusSession(sessionId: string): void {
+  try {
+    // `window.focus` is best-effort: a browser may refuse it when the click did not
+    // come from a real gesture, and there is nothing to do about that.
+    if (typeof window !== 'undefined' && typeof window.focus === 'function') {
+      window.focus();
+    }
+  } catch {
+    // Ignore: the navigation below is the part that matters.
+  }
+  if (sessionId && sessionId !== store.currentSessionId.value) {
+    void openSession(sessionId);
+  }
+}
+
 export async function openSession(id: string, options: OpenSessionOptions = {}): Promise<boolean> {
   const silent = options.silent ?? false;
   if (id === store.currentSessionId.value && !silent && !options.force) return false;
@@ -500,6 +562,9 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
   const generation = (sessionGeneration += 1);
   store.currentSessionId.value = id;
   store.writeLastSessionId(id);
+  // Opening a session is what "reads" its notifications: the badge clears here
+  // rather than on a timer, so it reflects what you have actually looked at.
+  store.clearUnread(id);
   store.chatError.value = null;
   if (!silent) {
     store.chatLoading.value = true;
@@ -524,6 +589,14 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
     } else {
       store.chat.value = seedChatState(detail, store.chat.value);
       settled = !detail.running;
+    }
+    // The snapshot cannot carry `usage` (it is not persisted), so the context
+    // pill would be blank until the next call finished. Restore the last number
+    // this browser saw for the session; `seedChatState` already kept a live
+    // in-flight value, so only fill a hole.
+    if (store.chat.value.lastPromptTokens === null) {
+      const remembered = promptTokens.recallPromptTokens(id);
+      if (remembered !== null) store.chat.value = { ...store.chat.value, lastPromptTokens: remembered };
     }
     seedAgentState(detail);
     mergeSummary(summaryFromDetail(detail));
@@ -604,6 +677,7 @@ export async function renameSessionById(id: string, title: string): Promise<bool
 export async function deleteSessionById(id: string): Promise<boolean> {
   try {
     await api.deleteSession(id);
+    promptTokens.forgetPromptTokens(id);
     store.sessions.value = store.sessions.value.filter((session) => session.id !== id);
     if (store.currentSessionId.value === id) {
       const next = store.sessions.value[0] ?? null;

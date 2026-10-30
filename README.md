@@ -157,6 +157,12 @@ service is enabled at boot and started, and the installer waits until
 `/api/health` answers before it reports success. `--dry-run` prints every action
 without changing anything.
 
+Once the service is running a binary you built yourself, upgrades are
+`sudo sh packaging/update.sh`: it pulls, builds, snapshots the database and hands
+the result to the installer, reading your unit so the workspace, user and port
+survive. `sh packaging/update.sh --check` tells you whether there is anything to
+update, and `--dry-run` prints the plan.
+
 Two things to set before exposing it beyond loopback: `KARUCODE_AUTH_TOKEN` (a
 non-loopback bind is refused without one, minimum 16 characters) and
 `KARUCODE_ADMIN_TOKEN` (so an ordinary API client cannot turn approvals off or

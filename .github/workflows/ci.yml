@@ -92,6 +92,24 @@ jobs:
       - run: python3 tests/test_check_readme.py
       - run: python3 scripts/check_readme.py
 
+  # The updater is the script that can take a working service down, and it is
+  # shell: no type system will find its mistakes. Its tests run it as a real
+  # process against a real git repo with systemctl/cargo/install.sh stubbed, so
+  # shellcheck plus a green run here is the whole safety net.
+  packaging:
+    name: packaging scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck -s sh packaging/install.sh packaging/update.sh
+      - name: syntax
+        run: sh -n packaging/install.sh && sh -n packaging/update.sh
+      - name: update.sh tests
+        run: python3 tests/test_update.py
+
   docs:
     name: docs gate
     runs-on: ubuntu-latest

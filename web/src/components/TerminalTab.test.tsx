@@ -10,10 +10,27 @@ import { TerminalTab } from './TerminalTab';
 // canvas jsdom cannot provide. Its behaviour (mounting, fitting, reconnecting,
 // writing bytes) is covered by the browser check and by
 // `state/terminalSocket.test.ts`; this file is about the tab strip and the
-// states, so the surface is stubbed to a marker element.
+// states, so the surface is stubbed.
+//
+// The stub keeps the panel's **meta row** — the state and the working directory
+// — because `.terminal-cwd` is the only place the cwd is shown to the user:
+// "two shells in different projects are distinguishable" is asserted here, and a
+// stub that dropped the row made that assertion pass by accident, on the tab
+// chip's combined `title — cwd` tooltip instead of the visible path.
 vi.mock('./TerminalSurface', () => ({
-  TerminalSurface: ({ terminal }: { terminal: { id: string } }) => (
-    <div data-testid="terminal-surface" data-terminal={terminal.id} />
+  TerminalSurface: ({ terminal }: { terminal: Terminal }) => (
+    <div
+      id={`terminal-panel-${terminal.id}`}
+      data-testid="terminal-surface"
+      data-terminal={terminal.id}
+    >
+      <span class={`terminal-state status-${terminal.running ? 'open' : 'closed'}`}>
+        {terminal.running ? 'open' : 'closed'}
+      </span>
+      <span class="terminal-cwd" title={terminal.cwd}>
+        {terminal.cwd}
+      </span>
+    </div>
   ),
 }));
 
@@ -246,8 +263,35 @@ describe('TerminalTab', () => {
   it('shows the working directory so two shells in different projects are distinguishable', async () => {
     stubServer([terminal({ cwd: '/work/some-long-project-name' })]);
     render(<TerminalTab />);
+
+    // The cwd is the visible text of the surface's meta row, not just a tooltip:
+    // the point is telling two shells apart at a glance.
     await waitFor(() => {
-      expect(screen.getByTitle('/work/some-long-project-name')).toBeTruthy();
+      const cwd = document.querySelector('.terminal-cwd');
+      expect(cwd?.textContent).toBe('/work/some-long-project-name');
+      expect(cwd?.getAttribute('title')).toBe('/work/some-long-project-name');
+    });
+
+    // The tab chip's own tooltip still leads with the *title* — the label clips
+    // at 150px, so dropping the name to make room for the path would make two
+    // tabs with the same directory indistinguishable instead of distinguishable.
+    const tab = screen.getByRole('tab');
+    expect(tab.getAttribute('title')).toBe('karucode-1 — /work/some-long-project-name');
+  });
+
+  it('shows each terminal its own directory', async () => {
+    stubServer([
+      terminal({ cwd: '/work/app' }),
+      terminal({ id: 't_two', title: 'watcher', position: 2, cwd: '/work/other' }),
+    ]);
+    render(<TerminalTab />);
+    await waitFor(() => {
+      expect(document.querySelector('.terminal-cwd')?.textContent).toBe('/work/app');
+    });
+
+    fireEvent.click(screen.getAllByRole('tab')[1]!);
+    await waitFor(() => {
+      expect(document.querySelector('.terminal-cwd')?.textContent).toBe('/work/other');
     });
   });
 });

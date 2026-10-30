@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/preact';
+import { fireEvent, render, screen, within } from '@testing-library/preact';
 import { SessionList, SessionsRail, sessionGroup, type SessionListProps } from './SessionsRail';
 import { secondSummaryFixture, summaryFixture, NOW } from '../test/fixtures';
 import * as actions from '../state/actions';
@@ -259,5 +259,109 @@ describe('SessionsRail shell', () => {
     expect(container.querySelector('.online-row .right')?.textContent).toBe('v0.2.4');
     expect(container.querySelector('.settings-row .provider')?.textContent).not.toBe('v0.2.4');
     expect(container.querySelector('.settings-row .provider')?.textContent).not.toBe('');
+  });
+});
+
+describe('SessionsRail project switcher (phones)', () => {
+  function seedProjects(): void {
+    store.sessions.value = [summaryFixture];
+    store.sessionsLoading.value = false;
+    store.currentSessionId.value = summaryFixture.id;
+    store.currentProjectId.value = 'p_karucode';
+    store.projects.value = [
+      {
+        id: 'p_karucode',
+        name: 'KaruCode',
+        path: '/home/me/karucode',
+        created_at: NOW,
+        updated_at: NOW,
+        session_count: 2,
+      },
+      {
+        id: 'p_docs',
+        name: 'Docs Site',
+        path: '/home/me/docs',
+        created_at: NOW,
+        updated_at: NOW,
+        session_count: 3,
+      },
+    ];
+    store.clock.value = NOW;
+    store.narrowViewport.value = true;
+    store.mobileSheet.value = 'sessions';
+  }
+
+  beforeEach(seedProjects);
+
+  it('replaces the hidden rail on a phone and lists every project', () => {
+    // The rail is `display: none` below 1023px, so without this strip a phone
+    // could not change project at all.
+    const { container } = render(<SessionsRail />);
+    const switcher = container.querySelector('.project-switcher');
+    expect(switcher).not.toBeNull();
+
+    const items = container.querySelectorAll('.project-switcher-item');
+    expect(items).toHaveLength(2);
+    expect(items[0]?.getAttribute('aria-label')).toBe(
+      'Switch to KaruCode (/home/me/karucode)',
+    );
+    // The active project is marked, and is not itself a way to switch.
+    expect(items[0]?.className).toContain('is-active');
+    expect(items[0]?.getAttribute('aria-current')).toBe('true');
+    expect(items[1]?.getAttribute('aria-current')).toBeNull();
+  });
+
+  it('is not rendered on a wide viewport, where the rail does the job', () => {
+    store.narrowViewport.value = false;
+    store.mobileSheet.value = null;
+    const { container } = render(<SessionsRail />);
+    expect(container.querySelector('.project-switcher')).toBeNull();
+  });
+
+  it('switches project from a pill and ignores a click on the active one', () => {
+    const switchProject = vi.spyOn(actions, 'switchProject').mockResolvedValue(undefined);
+    const { container } = render(<SessionsRail />);
+    const items = container.querySelectorAll<HTMLButtonElement>('.project-switcher-item');
+
+    fireEvent.click(items[0]!);
+    expect(switchProject).not.toHaveBeenCalled();
+
+    fireEvent.click(items[1]!);
+    expect(switchProject).toHaveBeenCalledWith('p_docs');
+    switchProject.mockRestore();
+  });
+
+  it('carries the project actions that used to live only on the rail', () => {
+    // Add, rename and delete were reachable only from the project rail's menus,
+    // which a phone does not render.
+    const { container } = render(<SessionsRail />);
+    expect(screen.getByRole('button', { name: 'Add project' })).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project options' }));
+    const menu = screen.getByRole('menu', { name: /Project options for KaruCode/ });
+    expect(menu.textContent).toContain('/home/me/karucode');
+    for (const label of ['Copy project path', 'Refresh sessions', 'Project settings…', 'Rename…', 'Delete project…']) {
+      expect(within(menu).getByRole('menuitem', { name: label })).not.toBeNull();
+    }
+
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Rename…' }));
+    expect(screen.getByRole('dialog', { name: 'Rename project' })).not.toBeNull();
+    expect(container.querySelector('.project-switcher')).not.toBeNull();
+  });
+
+  it('opens the add-project dialog from the switcher', () => {
+    render(<SessionsRail />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add project' }));
+    expect(screen.getByRole('dialog', { name: 'Add project' })).not.toBeNull();
+  });
+
+  it('offers the close button the toolbar used to own', () => {
+    // The sessions tab in the deleted mobile toolbar was the way out of this
+    // sheet; the sheet has to be able to close itself now.
+    const close = vi.spyOn(actions, 'closeSheets').mockImplementation(() => undefined);
+    render(<SessionsRail />);
+    fireEvent.click(screen.getByRole('button', { name: 'Close sessions panel' }));
+    expect(close).toHaveBeenCalledTimes(1);
+    close.mockRestore();
   });
 });

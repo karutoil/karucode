@@ -6,8 +6,8 @@
 > Build an out-of-process plugin that adds tools, hooks and inspector panels, register it, and debug it when it fails to start.
 
 - **Slug:** `plugins`
-- **Tags:** plugins, extension, sdk, tools, hooks, jsonrpc, panels
-- **Applies to:** `config:[[plugins]]`, `file:~/.local/share/karucode/plugins/<name>/plugin.toml`, `dir:plugins/example-hello`, `tool:plugin__<plugin>__<tool>`, `cmd:cargo build -p example-hello`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin sdk --check`, `file:src/sdk.rs`, `file:src/protocol.rs`, `doc:docs/PLUGINS.md`, `env:KARUCODE_PLUGIN_NAME`, `env:KARUCODE_PLUGIN_PROTOCOL`, `env:KARUCODE_PLUGIN_PERMISSIONS`, `env:KARUCODE_PLUGIN_SETTINGS`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `config:panels`, `config:plugins_watch`, `config:plugins_watch_secs`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `fn:PluginBuilder::panel`
+- **Tags:** plugins, extension, sdk, tools, hooks, jsonrpc, panels, notifications
+- **Applies to:** `config:[[plugins]]`, `file:~/.local/share/karucode/plugins/<name>/plugin.toml`, `dir:plugins/example-hello`, `tool:plugin__<plugin>__<tool>`, `cmd:cargo build -p example-hello`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin sdk --check`, `file:src/sdk.rs`, `file:src/protocol.rs`, `doc:docs/PLUGINS.md`, `env:KARUCODE_PLUGIN_NAME`, `env:KARUCODE_PLUGIN_PROTOCOL`, `env:KARUCODE_PLUGIN_PERMISSIONS`, `env:KARUCODE_PLUGIN_SETTINGS`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `config:panels`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:notifications.plugin`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `method:notify`, `hook:on_notify`, `fn:PluginBuilder::panel`, `fn:PluginBuilder::on_notify`, `fn:notify`
 - **Source:** `crates/kc-plugin-sdk/src/lib.rs:49`
 
 ---

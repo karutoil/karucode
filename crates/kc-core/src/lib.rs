@@ -12,6 +12,7 @@ pub mod hooks;
 pub mod ids;
 pub mod message;
 pub mod metrics;
+pub mod notify;
 pub mod paths;
 pub mod plugin;
 pub mod prompt;
@@ -32,6 +33,7 @@ pub use error::{Error, Result};
 pub use events::{Event, EventEnvelope, EventSink};
 pub use ids::{AgentId, ApprovalId, RunId, SessionId};
 pub use message::{Message, Role, ToolCall};
+pub use notify::{Notify, NotifyKind};
 pub use paths::Workspace;
 pub use settings::Settings;
 pub use tool::{

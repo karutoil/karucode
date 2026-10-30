@@ -24,7 +24,7 @@ use kc_core::settings::Settings;
 use kc_core::store::{AgentStatus, SessionSummary, Store};
 use kc_core::tool::ToolRegistry;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -34,6 +34,7 @@ pub mod approvals;
 pub mod context;
 pub mod events;
 pub(crate) mod history;
+mod notify;
 mod restart;
 pub mod subagent;
 
@@ -267,6 +268,13 @@ pub(crate) struct RunState {
     /// True for a user-submitted run (one per session at a time), false for a
     /// subagent loop.
     pub top_level: bool,
+    /// Set when the human asked for this run to stop.
+    ///
+    /// `run_top_level` reads it to decide whether a `Cancelled` outcome is worth a
+    /// notification: a cancellation you asked for needs no ping, one you did not
+    /// ask for (a shutdown, a timeout) does. An `AtomicBool` rather than a flag on
+    /// the token because `CancellationToken` deliberately does not carry a reason.
+    pub cancelled_by_user: AtomicBool,
 }
 
 impl RunState {
@@ -285,7 +293,13 @@ impl RunState {
             started_at: events::now_ms(),
             iterations: AtomicU32::new(0),
             top_level,
+            cancelled_by_user: AtomicBool::new(false),
         }
+    }
+
+    /// Whether the human was the one who stopped this run.
+    pub(crate) fn was_cancelled_by_user(&self) -> bool {
+        self.cancelled_by_user.load(Ordering::Relaxed)
     }
 
     pub(crate) fn key(&self) -> String {
@@ -558,13 +572,18 @@ impl Runtime {
         agent::start_run(self, session_id, prompt).await
     }
 
-    /// Cancel every run belonging to `session_id` (including subagents).
+    /// Cancel the run(s) for a session because the human asked.
+    ///
+    /// The `cancelled_by_user` flag is what keeps the resulting notification quiet:
+    /// you pressed Escape, you know what happened. `shutdown()` deliberately does
+    /// not set it, so a run stopped by the server going down still notifies.
     /// Returns `false` when nothing was running.
     pub fn cancel(&self, session_id: &str) -> bool {
         let runs = self.inner.runs.lock().expect("runs lock");
         let mut cancelled = false;
         for state in runs.values() {
             if state.session_id.0 == session_id {
+                state.cancelled_by_user.store(true, Ordering::Relaxed);
                 state.cancel.cancel();
                 cancelled = true;
             }

@@ -191,6 +191,35 @@ max_depth = 1
 # Wall clock for one delegated task, across every segment (4h).
 timeout_secs = 14400
 
+# Tell a human when something happened: a run settled, an approval is waiting, a
+# run failed. On by default; every switch below is also editable in Settings and
+# through PATCH /api/config, and overridable from the environment.
+[notifications]
+# The master switch. `false` stops the server emitting the event at all, so no
+# client has to cooperate — and `KARUCODE_NOTIFICATIONS=0` does the same for a
+# locked deployment without touching this file.
+enabled = true
+# Per-event switches. They answer "which pings are worth interrupting me for",
+# independently of the master switch above.
+run_finished = true
+# An approval is pending, or a run stopped at a limit and can continue.
+needs_input = true
+# A run failed, a restart interrupted it, or a subagent failed.
+error = true
+# Notifications a plugin raises as information rather than as a problem.
+info = true
+# Let plugins raise notifications at all (the `notify` frame), and let them
+# observe notifications with the `on_notify` hook. Enforced in the plugin host, so
+# `false` refuses both whatever a plugin sends.
+plugin = true
+# Skip notifications for runs shorter than this many seconds (0 = every run, and
+# the default). A two-second question is noise to most people.
+min_run_secs = 0
+# Include the first line of the answer as the notification body. `false` sends the
+# title only, which keeps model output off a lock screen. Error text always travels:
+# "Run failed" with no reason is not actionable.
+say_body = true
+
 # Out-of-process plugins (JSON-RPC over stdio).
 # [[plugins]]
 # name = "example-hello"

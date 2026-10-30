@@ -433,6 +433,18 @@ impl ApprovalGate for RuntimeApprovalGate {
                 agent_id: self.agent_id.as_ref().map(|a| a.0.clone()),
             },
         });
+        // Only the app-level card notifies: a subagent's approval is raised through
+        // its parent's card, and two notifications for one card is a bug.
+        if self.agent_id.is_none() {
+            crate::notify::approval_requested(
+                &self.inner,
+                &ctx,
+                &approval_id,
+                &request.title,
+                &request.detail,
+            )
+            .await;
+        }
         tracing::debug!(
             approval = %approval_id,
             kind = kind_key(&request.kind),

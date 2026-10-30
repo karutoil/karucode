@@ -7,7 +7,7 @@
 
 - **Slug:** `web-ui`
 - **Tags:** ui, web, frontend, panels, shortcuts, preact
-- **Applies to:** `ui:ProjectRail`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:ChatView`, `ui:Composer`, `ui:Inspector`, `ui:SettingsSheet`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:POST /api/workspace/upload`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `file:web/src/components/pluginPanels.ts`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/lib/dockHeight.ts`, `fn:registerPluginPanelRenderer`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`
+- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:POST /api/workspace/upload`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `config:providers.models.context_window`, `config:[notifications]`, `event:usage`, `event:notification`, `file:web/src/components/pluginPanels.ts`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `fn:registerPluginPanelRenderer`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`
 - **Source:** `web/src/app.tsx:1`
 
 ---
@@ -17,10 +17,13 @@
 * **Project rail** (left, 64 px): projects drawn as the project's own
   `favicon.ico` when it ships one and as initials when it does not, a **Theme
   studio** button, the **command palette** button and a settings shortcut.
-  Collapses to an icon column with `Ctrl/Cmd+B` on the session rail.
+  Collapses to an icon column with `Ctrl/Cmd+B` on the session rail. Below
+  1024 px it is hidden entirely and the sessions sheet carries a **project
+  switcher** instead (see **Mobile**).
 * **Sessions rail**: the current project, a session search (`/`), sessions
   grouped by last activity, newest first, with running indicators; create one
-  with `Ctrl/Cmd+N`.
+  with `Ctrl/Cmd+N`. On a phone it is a full-height sheet, headed by the
+  project switcher and a **Close** button.
 * **Chat**: streaming Markdown, tool cards whose footer carries the duration
   and a **Show output** disclosure, command output, diff cards with a review
   footer, approval cards, thinking blocks, and the composer with a model
@@ -41,6 +44,18 @@
   hit target, so a wheel or drag there still scrolls the transcript. The
   transcript reserves the dock's measured height, so nothing hides behind it at
   rest, and **Jump to latest** sits above it rather than under it.
+* **Auto-follow**: while you are at the newest message the transcript keeps up
+  with everything that lands - streamed text, Markdown that renders late, tool
+  cards, command output, approval cards - however much arrives at once. Scroll
+  up and it stops following immediately and offers **Jump to latest**; sending
+  a message re-pins it. The rule it uses (`web/src/lib/stickyBottom.ts`) is not
+  "am I within 48px of the bottom": a browser frame dispatches the scroll event
+  from a follow *before* the next one can measure it, so with fast tools a
+  single frame can add more than the threshold and the view would read its own
+  backlog as you scrolling away. Instead it records where following left the
+  viewport and treats a gap no wider than the content that has arrived since
+  then as its own to close. Any movement of the scroll position is yours, and
+  is never overridden.
 * **Workspace tabs** (above the transcript): *Conversation* and *Changes*.
   *Changes* reuses the inspector's git diff list; the composer only shows on
   *Conversation*.
@@ -59,10 +74,47 @@
 * **Theme studio** (right drawer, `Ctrl/Cmd+Shift+T`): built-in themes,
   per-token colours, density and custom CSS, persisted in the browser. The
   `themes` topic covers the storage key and the shareable export format.
-* **Settings sheet** (modal): **Appearance**, a shortcut into the Theme studio,
-  then provider profiles and their model libraries, generation, approvals,
-  limits, subagents, plugin/MCP diagnostics and the security note.
+* **Settings sheet** (modal): five tabs, split by who owns the setting —
+  **General** (appearance: theme, density, colour mode, transcript layout, and
+  a door into the Theme studio), **Models** (provider profiles, their model
+  libraries, plus sampling under *Advanced*), **Agent** (approvals and
+  subagents; subagent budget, timeouts and raw limits under *Advanced*),
+  **Notifications** (server routing, then this browser, with delivery tuning
+  under *Advanced*) and **Plugins & MCP** (lifecycle and diagnostics). Each
+  tab's *Advanced* block is collapsed by default, because those are the knobs
+  whose defaults are right for nearly every install. A rejected field takes you
+  to its tab and opens the disclosure that holds it — the Save button is
+  shared, so the error could otherwise be off-screen. Panels stay mounted
+  (merely `hidden`) so switching tabs never discards what was typed.
 * **Command palette** (`Ctrl/Cmd+K`): sessions, projects, actions.
+
+## Notifications
+
+One `notification` event from the server feeds four surfaces, and
+`src/state/notifier.ts` is the only place that decides which one fires:
+
+* an in-app toast that names the session and offers **Open**;
+* an unread count on the session row and in `document.title`
+  (`(2) Fix the login redirect — karucode`), which is the only thing visible
+  from another tab;
+* a synthesized sound cue (see below);
+* a desktop notification, when the browser allows one and the event is not about
+  the session you are already looking at.
+
+The notifier is fed from the event dispatch path, **before** the current-session
+filter, because the server reports every terminal run — a run finishing in
+another project is exactly the case this exists for.
+
+Sounds are synthesized with Web Audio rather than shipped as files: the page CSP
+has no `media-src`, so it falls back to `default-src 'self'` and a `blob:` audio
+URL is refused by the browser. `src/lib/notifySound.ts` builds each cue from two
+or three oscillators with an envelope, which also means a test can render it and
+measure it. It is deliberately independent of `Notification.permission`: a
+browser that refused notifications still plays the cue.
+
+`src/lib/notifyDesktop.ts` owns the permission rules — never ask on load, ask only
+from the settings button, report "insecure context" instead of failing silently,
+and report "limited" where a mobile browser would need a service worker.
 
 ## Composer
 
@@ -94,6 +146,41 @@ by its workspace path, `.karucode/attachments/<session>/<name>`, which the agent
 can open with its file tools; names are never overwritten. Files above the 8 MiB
 upload ceiling are refused before any request is made. Sending is blocked while
 a chip is still reading or uploading, and a failed chip says why.
+
+## Live throughput and context usage
+
+Two readouts answer the questions a long run raises: *is the model actually
+producing anything*, and *how close is this conversation to its window*.
+
+**Throughput badge.** While a turn is doing something — streaming prose,
+streaming reasoning, running a tool or command, or blocked on an approval — its
+header carries `↓ <tokens> <rate> t/s` beside the **Working** chip. Both halves
+are estimates from the characters arriving so far (`chars / 4`, the same ratio
+`kc-core` budgets with; the tooltip says so), because the provider's own
+`usage` block only arrives once the call is over. The rate is averaged over the
+last ~3 s of *growth*: when the stream stops growing the number disappears and
+the token count stays, so a 40 s `cargo test` shows `↓ 12.4k` with no invented
+speed. The badge is mounted only while the turn works, so it cannot outlive the
+run, and the **Completed** chip uses the same rule — a turn whose prose finished
+but whose call is still running is **Working**, not **Completed**.
+
+**Context pill.** The composer's bottom row shows `35.9%` over a hairline meter:
+the prompt size the provider reported for the newest call (`usage.input_tokens`)
+divided by the selected model's `context_window`. Both numbers are the real ones
+— the count from the provider, the window from the model entry the composer's
+own model switcher names (the session pin wins over the install default) — so
+the pill renders nothing at all when either is missing, instead of a
+plausible-looking guess. The session's total `input_tokens` is deliberately not
+used: that is a running cost across every call, and on a long run it sums well
+past the window. `usage` is live-only server state, so the last reported figure
+is cached per session in `localStorage` (`karucode.lastPromptTokens`,
+`src/state/promptTokens.ts`) — otherwise a reload would blank the pill until the
+next call finished. It turns amber at 70% and red at 90%, around where
+compaction starts and where the next large tool result may not fit.
+
+On a phone the rate and the meter are dropped and the number keeps its place;
+the composer row stays one line, which is why the spacer collapses before the
+buttons do.
 
 ## Plugin panels
 
@@ -153,8 +240,38 @@ mounting, no asset serving and no script execution. A panel is a tab whose
 
 ## Mobile
 
-Below 1024 px the rails become sheets driven by the mobile toolbar. `Escape`
-closes the open sheet first and stops the run only when nothing else is open.
+Below 1024 px the rails become full-height sheets, opened from the two header
+icons at the top. `Escape` closes the open sheet first and stops the run only
+when nothing else is open.
+
+The phone layout is a space budget, and it is measured at 440x956 (an iPhone
+16 Pro Max in CSS pixels). A conversation is the only thing the screen is for,
+so the frame above it is deliberately small:
+
+* **No bottom toolbar.** There used to be a fixed 57 px tab bar with Sessions,
+  New, Inspector and Settings. Every one of those is reachable without it —
+  sessions and inspector are the header icons, new session and settings are in
+  the sessions sheet — so it was 6% of the screen spent on duplicates.
+* **No project rail.** The far-left column held 56 of 440 px (13% of the width)
+  to draw two glyphs. It is hidden on a phone and the sessions sheet carries a
+  **project switcher** instead: one pill per project, plus the add button and
+  the project menu (copy path, refresh, project settings, rename, delete) that
+  used to live only on the rail.
+* **A 52 px header and a 38 px tab strip.** The breadcrumb's
+  project → sessions → activity line is dropped: the title alone answers it.
+  Together with the toolbar this took the frame from 167 px to 90 px, so the
+  transcript went from 82% of the viewport to about 91%.
+* **Safe areas are honoured.** `index.html` sets `viewport-fit=cover`, so the
+  header insets itself by `env(safe-area-inset-top)` and the chat column
+  reserves `env(safe-area-inset-bottom)` for the home indicator.
+* **Tool cards are compact.** The avatar column is hidden (26 px plus a gap is
+  a fifth of a 390 px row), cards stop indenting to line up under it, and the
+  output preview is 74 px instead of 112 px. A finished call was 191 px — two
+  of them filled a screen — and is now about 157 px. Every line is still one
+  tap away in **Show output**; opening a card shows up to 320 px.
+
+Keyboard hints (`Ctrl N`, `/`) are hidden in the sheet, because a phone has no
+keyboard.
 
 ## Development loop
 

@@ -2262,6 +2262,121 @@
   }
 }
 
+/* ---------- phones ----------
+ *
+ * Measured at 440x956 (iPhone 16 Pro Max): a tool card was 191px — 44px head +
+ * a 112px output preview + 33px footer — so two finished calls filled a whole
+ * screen and the answer they produced was below the fold. The card keeps its
+ * shape and every line stays one click away in "Show output"; what it gives up
+ * is the padding and the preview depth, which bought nothing on a column this
+ * narrow.
+ */
+
+@media (max-width: 640px) {
+  /* The avatar column is 26px of every row plus a 9px gap. At 420px of column
+   * that is a fifth of the width spent on a badge that repeats what the author
+   * line already says. Drop it, and let the row use the whole column. */
+  .msg {
+    gap: 0;
+    margin-bottom: 22px;
+  }
+
+  .msg-avatar {
+    display: none;
+  }
+
+  /* Cards used to indent by 35px to line up under the (now gone) avatar body.
+   * With the avatar column gone they line up flush with the text instead. */
+  .transcript > :is(.tool-card, .command-card, .approval-card, .diff-preview, .notice, .run-error) {
+    margin-left: 0;
+  }
+
+  .msg-top {
+    margin-bottom: 6px;
+  }
+
+  .user-question {
+    padding: 12px 14px;
+  }
+
+  .tool-card {
+    margin: 13px 0 11px;
+  }
+
+  .tool-head {
+    gap: 8px;
+    min-height: 38px;
+    padding: 0 10px;
+  }
+
+  .tool-symbol {
+    flex-basis: 22px;
+    width: 22px;
+    height: 22px;
+  }
+
+  .tool-body {
+    /* One and a bit lines of context, not 112px of preview: the "Show output"
+     * disclosure is the way to read the rest, and it is right below. */
+    max-height: 74px;
+    padding: 8px 10px;
+    font-size: 10.5px;
+    line-height: 1.7;
+  }
+
+  .tool-card[data-open='true'] .tool-body {
+    max-height: 320px;
+  }
+
+  .tool-card[data-open='false'] .tool-body::after {
+    height: 20px;
+  }
+
+  .tool-foot {
+    min-height: 28px;
+    padding: 0 10px;
+  }
+
+  /* The mock's 112px clamp shrinks a code block to a sliver on a phone; let the
+   * reader scroll it instead of staring at three lines. */
+  .code-block-pre {
+    max-height: 300px;
+    padding: 10px 11px;
+    font-size: 10.5px;
+  }
+
+  .code-block-head {
+    min-height: 28px;
+    padding: 0 6px 0 10px;
+  }
+
+  /* The date marker is 30px of air below a 15px label; the groups are obvious
+   * from the timestamps on phones. */
+  .date-marker {
+    margin: 2px auto 16px;
+  }
+
+  .transcript-foot {
+    margin-top: 16px;
+    padding-top: 10px;
+  }
+
+  .empty-state {
+    min-height: min(420px, 52vh);
+    padding: 16px 0;
+  }
+
+  .empty-symbol {
+    width: 44px;
+    height: 44px;
+    margin-bottom: 15px;
+  }
+
+  .empty-copy {
+    margin-bottom: 17px;
+  }
+}
+
 @media (max-width: 1023px) {
   .boot-inspector,
   .boot-rail {

@@ -100,7 +100,10 @@ describe('composer dock: the box stays compact', () => {
     // 47px was two-and-a-bit empty lines at rest; the box auto-grows from here
     // and Composer.tsx still caps it at 150px.
     expect(input['min-height']).toBe('26px');
-    expect(input['max-height']).toBe('150px');
+    // The cap is a custom property so the phone tier can shrink it without a
+    // second magic number in the component; the default is still the mock's 150px.
+    expect(input['--compose-input-max']).toBe('150px');
+    expect(input['max-height']).toBe('var(--compose-input-max)');
   });
 
   it('does not force the bottom row onto a second line', () => {
@@ -229,5 +232,17 @@ describe('context window pill', () => {
       .join('\n');
     expect(phone).toMatch(/\.context-pill-meter \{\s*\n\s*display: none/);
     expect(phone).not.toMatch(/\.context-pill-text \{\s*\n\s*display: none/);
+  });
+
+  it('gives the spacer up before the buttons on a phone', () => {
+    // Measured at 390px: with the pill in the row and the spacer still taking
+    // flex, `.compose-bottom` stood 66px tall (two lines) instead of 36px. The
+    // spacer must collapse first, and Send/Stop must not shrink below their
+    // labels - a squeezed label wraps *inside* the button, which is just as bad.
+    const phone = [...composerCss.matchAll(/@media \(max-width: 640px\) \{([\s\S]*?)\n\}/g)]
+      .map((match) => match[1] ?? '')
+      .join('\n');
+    expect(phone).toMatch(/\.compose-bottom \.composer-spacer \{[^}]*flex: 0 1 0/);
+    expect(phone).toMatch(/\.compose-bottom \.button-send,\s*\n\s*\.compose-bottom \.button-stop \{[^}]*flex: 0 0 auto/);
   });
 });

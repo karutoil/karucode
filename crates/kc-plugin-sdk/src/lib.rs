@@ -49,8 +49,8 @@
 // @kc-doc: plugins
 // @kc-title: Write and install a plugin
 // @kc-summary: Build an out-of-process plugin that adds tools, hooks and inspector panels, register it, and debug it when it fails to start.
-// @kc-tags: plugins, extension, sdk, tools, hooks, jsonrpc, panels
-// @kc-applies-to: config:[[plugins]], file:~/.local/share/karucode/plugins/<name>/plugin.toml, dir:plugins/example-hello, tool:plugin__<plugin>__<tool>, cmd:cargo build -p example-hello, cmd:karucode plugin init, cmd:karucode plugin sdk, cmd:karucode plugin sdk --check, file:src/sdk.rs, file:src/protocol.rs, doc:docs/PLUGINS.md, env:KARUCODE_PLUGIN_NAME, env:KARUCODE_PLUGIN_PROTOCOL, env:KARUCODE_PLUGIN_PERMISSIONS, env:KARUCODE_PLUGIN_SETTINGS, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, config:panels, config:plugins_watch, config:plugins_watch_secs, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, fn:PluginBuilder::panel
+// @kc-tags: plugins, extension, sdk, tools, hooks, jsonrpc, panels, notifications
+// @kc-applies-to: config:[[plugins]], file:~/.local/share/karucode/plugins/<name>/plugin.toml, dir:plugins/example-hello, tool:plugin__<plugin>__<tool>, cmd:cargo build -p example-hello, cmd:karucode plugin init, cmd:karucode plugin sdk, cmd:karucode plugin sdk --check, file:src/sdk.rs, file:src/protocol.rs, doc:docs/PLUGINS.md, env:KARUCODE_PLUGIN_NAME, env:KARUCODE_PLUGIN_PROTOCOL, env:KARUCODE_PLUGIN_PERMISSIONS, env:KARUCODE_PLUGIN_SETTINGS, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, config:panels, config:plugins_watch, config:plugins_watch_secs, config:notifications.plugin, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, method:notify, hook:on_notify, fn:PluginBuilder::panel, fn:PluginBuilder::on_notify, fn:notify
 //
 // A plugin is a separate executable that speaks newline-delimited JSON-RPC 2.0 on
 // stdin/stdout, protocol version `1`. It never links the harness, so it can be
@@ -452,6 +452,126 @@ type ToolHandler = Box<dyn Fn(ToolRequest) -> PluginToolResult + Send + Sync>;
 type HookHandler = Box<dyn Fn(Value) -> Value + Send + Sync>;
 type PanelHandler = Box<dyn Fn(PanelRequest) -> Value + Send + Sync>;
 
+/// Why a human is being interrupted, from a plugin's point of view.
+///
+/// Mirrors the host's `NotifyKind` over the wire. It is redefined here rather
+/// than re-exported because the SDK is copied *verbatim* into a scaffolded plugin,
+/// which must not depend on the harness crates. The wire spellings are pinned by a
+/// test, so the two definitions cannot drift silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifyKind {
+    /// A run settled successfully.
+    RunFinished,
+    /// Something waits on a human (an approval, a run that may continue).
+    NeedsInput,
+    /// Something failed.
+    Error,
+    /// Neutral. The only kind a plugin can use without claiming urgency.
+    Info,
+}
+
+impl NotifyKind {
+    /// The wire spelling, matching the host's `NotifyKind`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NotifyKind::RunFinished => "run_finished",
+            NotifyKind::NeedsInput => "needs_input",
+            NotifyKind::Error => "error",
+            NotifyKind::Info => "info",
+        }
+    }
+}
+
+/// Ask a human to look at something.
+///
+/// A plugin cannot reach a browser — the host serves no plugin routes and runs no
+/// plugin code in the app's origin — so this frame is the only way to say "look at
+/// this" from inside a plugin. It is a JSON-RPC *notification* (no `id`, no reply):
+/// fire it from a tool handler, a hook or a background thread and do not wait.
+///
+/// ```no_run
+/// use kc_plugin_sdk::{notify, NotifyKind};
+///
+/// // Anything that can write a line to stdout works, including from a thread.
+/// # fn main() -> std::io::Result<()> {
+/// notify(NotifyKind::NeedsInput, "Deploy needs a yes", "staging is approved")?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// The host validates the frame before it reaches a person: an unknown `kind`, an
+/// empty title or junk params are dropped, the title and body are truncated, and a
+/// plugin raising more than one notification per second (burst five) has the extra
+/// ones dropped. Which is to say: nothing here can be used to flood a desktop.
+///
+/// Writing goes to stdout, which is the protocol channel. A plugin that logs with
+/// `println!` corrupts the protocol; log with `eprintln!`.
+pub fn notify(
+    kind: NotifyKind,
+    title: impl AsRef<str>,
+    body: impl AsRef<str>,
+) -> std::io::Result<()> {
+    notify_with(NotifyFrame {
+        kind,
+        title: title.as_ref().to_string(),
+        body: body.as_ref().to_string(),
+        session_id: None,
+        sound: None,
+        sticky: false,
+    })
+}
+
+/// One `notify` frame, for the fields [`notify`] does not take.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NotifyFrame {
+    pub kind: NotifyKind,
+    pub title: String,
+    pub body: String,
+    /// The session it is about. `None` lets the host use the session it invoked
+    /// the plugin for, when there is one.
+    pub session_id: Option<String>,
+    /// A cue name. `None` means the kind's default; an unknown name falls back to
+    /// the default rather than going silent.
+    pub sound: Option<String>,
+    /// Keep the OS notification on screen until dismissed.
+    pub sticky: bool,
+}
+
+impl NotifyFrame {
+    /// The exact JSON written to the protocol channel.
+    ///
+    /// Exposed so a plugin that speaks the protocol by hand (not through this SDK)
+    /// can build the same frame, and so tests can assert on it without stdout.
+    pub fn to_value(&self) -> Value {
+        let mut params = json!({
+            "kind": self.kind.as_str(),
+            "title": self.title,
+            "body": self.body,
+        });
+        let object = params.as_object_mut().expect("json object");
+        if let Some(session_id) = &self.session_id {
+            object.insert("session_id".into(), json!(session_id));
+        }
+        if let Some(sound) = &self.sound {
+            object.insert("sound".into(), json!(sound));
+        }
+        if self.sticky {
+            object.insert("sticky".into(), json!(true));
+        }
+        json!({"jsonrpc": "2.0", "method": methods::NOTIFY, "params": params})
+    }
+}
+
+/// Write one fully-specified `notify` frame.
+///
+/// Flushes immediately: a notification that sits in a buffer because the plugin is
+/// still working is a notification that arrives too late to be useful.
+pub fn notify_with(frame: NotifyFrame) -> std::io::Result<()> {
+    let mut stdout = std::io::stdout();
+    writeln!(stdout, "{}", frame.to_value())?;
+    stdout.flush()
+}
+
 struct ToolEntry {
     def: PluginToolDef,
     handler: ToolHandler,
@@ -751,6 +871,40 @@ impl PluginBuilder {
             self.manifest.hooks.push(name.to_string());
         }
         self.hooks.insert(name.to_string(), Box::new(handler));
+        self
+    }
+
+    /// Observe every notification the runtime emits, so this plugin can bridge
+    /// karucode to an external notifier (ntfy, Pushover, a desktop daemon, a web
+    /// hook) without karucode growing that integration.
+    ///
+    /// The payload is `{session_id, run_id, kind, title, body, source}`. The call
+    /// is fire-and-forget: the runtime does not wait for the answer, and a failing
+    /// handler never fails a run.
+    ///
+    /// ```no_run
+    /// # use kc_plugin_sdk::PluginBuilder;
+    /// # use serde_json::{json, Value};
+    /// # let builder = PluginBuilder::new("bridge", "0.1.0");
+    /// builder.on_notify(|payload: Value| {
+    ///     eprintln!("karucode says: {} {}", payload["kind"], payload["title"]);
+    ///     json!({ "forwarded": true })
+    /// });
+    /// ```
+    pub fn on_notify(self, handler: impl Fn(Value) -> Value + Send + Sync + 'static) -> Self {
+        // The literal, not `kc_core::plugin::hooks::ON_NOTIFY`: this file is copied
+        // verbatim into a scaffolded plugin, which must not depend on the harness
+        // crates. A test pins the spelling against the host's constant.
+        self.capability("notifications").hook("on_notify", handler)
+    }
+
+    /// Declare that this plugin raises notifications with [`notify`].
+    ///
+    /// Purely informational: the host accepts a `notify` frame whether or not the
+    /// capability is declared. Declaring it lets the settings screen explain why a
+    /// plugin has a notification switch.
+    pub fn notifications(mut self) -> Self {
+        self = self.capability("notifications");
         self
     }
 
@@ -1079,5 +1233,121 @@ mod tests {
             .manifest()
             .capabilities
             .contains(&"panels".to_string()));
+    }
+
+    #[test]
+    fn a_notify_frame_has_the_documented_wire_shape() {
+        let frame = NotifyFrame {
+            kind: NotifyKind::NeedsInput,
+            title: "Deploy needs a yes".into(),
+            body: "staging is approved".into(),
+            session_id: Some("s_1".into()),
+            sound: Some("ping".into()),
+            sticky: true,
+        };
+        let value = frame.to_value();
+        assert_eq!(value["jsonrpc"], json!("2.0"));
+        assert_eq!(value["method"], json!("notify"));
+        // A notification: no id, so the host must not try to answer it.
+        assert!(value.get("id").is_none());
+        assert_eq!(value["params"]["kind"], json!("needs_input"));
+        assert_eq!(value["params"]["title"], json!("Deploy needs a yes"));
+        assert_eq!(value["params"]["body"], json!("staging is approved"));
+        assert_eq!(value["params"]["session_id"], json!("s_1"));
+        assert_eq!(value["params"]["sound"], json!("ping"));
+        assert_eq!(value["params"]["sticky"], json!(true));
+    }
+
+    #[test]
+    fn optional_notify_fields_are_omitted_rather_than_null() {
+        // The host treats an absent field and a null one the same way, but omitting
+        // keeps the frame small and the wire log readable.
+        let value = NotifyFrame {
+            kind: NotifyKind::Info,
+            title: "t".into(),
+            body: String::new(),
+            session_id: None,
+            sound: None,
+            sticky: false,
+        }
+        .to_value();
+        assert!(value["params"].get("session_id").is_none());
+        assert!(value["params"].get("sound").is_none());
+        assert!(value["params"].get("sticky").is_none());
+        assert_eq!(value["params"]["kind"], json!("info"));
+    }
+
+    #[test]
+    fn the_sdk_kind_spellings_match_the_host() {
+        // The SDK is copied verbatim into a scaffolded plugin and cannot depend on
+        // kc-core, so the two definitions are pinned here instead.
+        assert_eq!(NotifyKind::RunFinished.as_str(), "run_finished");
+        assert_eq!(NotifyKind::NeedsInput.as_str(), "needs_input");
+        assert_eq!(NotifyKind::Error.as_str(), "error");
+        assert_eq!(NotifyKind::Info.as_str(), "info");
+        assert_eq!(
+            kc_core::plugin::methods::NOTIFY,
+            "notify",
+            "the method name must match the host's"
+        );
+    }
+
+    #[test]
+    fn on_notify_advertises_the_hook_and_the_capability() {
+        let plugin = PluginBuilder::new("bridge", "0.1.0")
+            .on_notify(|_payload| json!({"forwarded": true}))
+            .build();
+        let manifest = plugin.manifest();
+        assert!(manifest
+            .hooks
+            .contains(&kc_core::plugin::hooks::ON_NOTIFY.to_string()));
+        assert!(manifest.capabilities.contains(&"notifications".to_string()));
+        // Registering the same hook twice must not duplicate it in the manifest.
+        let twice = PluginBuilder::new("bridge", "0.1.0")
+            .on_notify(|_| json!({}))
+            .on_notify(|_| json!({}))
+            .build();
+        assert_eq!(
+            twice
+                .manifest()
+                .hooks
+                .iter()
+                .filter(|h| *h == kc_core::plugin::hooks::ON_NOTIFY)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_on_notify_handler_answers_the_hook_request() {
+        let mut plugin = PluginBuilder::new("bridge", "0.1.0")
+            .on_notify(|payload| json!({"title": payload["title"]}))
+            .build();
+        let response = plugin
+            .handle_request(json!({
+                "jsonrpc": "2.0", "id": 5, "method": "hooks/run",
+                "params": {"hook": "on_notify",
+                           "payload": {"kind": "run_finished", "title": "Run finished"}}
+            }))
+            .expect("a response");
+        assert_eq!(response["result"]["output"]["title"], json!("Run finished"));
+    }
+
+    #[test]
+    fn declaring_notifications_is_additive_and_idempotent() {
+        let manifest = PluginBuilder::new("p", "0.1.0")
+            .notifications()
+            .notifications()
+            .build()
+            .manifest()
+            .clone();
+        assert_eq!(
+            manifest
+                .capabilities
+                .iter()
+                .filter(|c| *c == "notifications")
+                .count(),
+            1
+        );
     }
 }

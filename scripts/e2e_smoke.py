@@ -196,6 +196,18 @@ def build_config(tmp, plugin_bin):
             "enabled = true",
             'permissions = ["files.read"]',
         ]
+    # A plugin whose tool raises a `notify` frame: the only way a plugin can reach a
+    # human, and the path that has to work end to end through the host's validation
+    # and the server's bridge onto the event stream.
+    notify_plugin = ROOT / "tests/fixtures/notify_plugin.sh"
+    if notify_plugin.exists():
+        cfg += [
+            "[[plugins]]",
+            'name = "notifier-fixture"',
+            f'command = ["sh", "{notify_plugin}"]',
+            "enabled = true",
+            'permissions = ["*"]',
+        ]
     cfg += [
         "[[mcp_servers]]",
         'name = "mock"',
@@ -414,6 +426,165 @@ def main():
             _assert(all(e["ok"] for e in events.for_run(rid, "tool_call_finished")), "tool failed"),
             f"{len(events.for_run(rid, 'text_delta'))} deltas",
         )[-1])
+
+        # A completed run must announce itself as a notification, with the kind and
+        # the session title the UI keys its cue, badge and toast off.
+        def notification_for_run():
+            # The notification is emitted *after* `run_finished` (deliberately: a
+            # client that reacts to it must find the terminal state already
+            # persisted), so `run_prompt` returning is not enough — wait for it.
+            events.wait(
+                lambda e: e.get("type") == "notification" and e.get("run_id") == rid,
+                timeout=30,
+                label="notification for the run",
+            )
+            frames = events.for_run(rid, "notification")
+            _assert(len(frames) == 1, f"expected exactly one notification, got {len(frames)}")
+            payload = frames[0]["notification"]
+            _assert(payload["kind"] == "run_finished", payload["kind"])
+            _assert(payload["source"] == "runtime", payload["source"])
+            _assert(payload["session_id"] == sid, payload["session_id"])
+            _assert(payload["id"] == f"run:{rid}", payload["id"])
+            _assert(payload["session_title"], "the notification must carry the session title")
+            # Ordering: the terminal state must be on the wire first, so a client
+            # that reacts by refetching finds the truth.
+            types = [e.get("type") for e in events.of_type("run_finished", "notification")]
+            _assert(
+                types.index("run_finished") < types.index("notification"),
+                f"run_finished must precede its notification: {types}",
+            )
+            return f"kind={payload['kind']} title={payload['session_title']!r}"
+
+        check("a finished run emits one notification", notification_for_run)
+
+        print("\n== notifications can be turned off ==", flush=True)
+        # The master switch is enforced by the server, so the proof is that no frame
+        # arrives at all rather than that a client chose to ignore one.
+        client.ok("PATCH", "/api/config", {"notifications": {"enabled": False}})
+        try:
+            silent_rid = run_prompt("[text] second prompt while notifications are off")
+            # Give any (incorrect) frame time to arrive before asserting absence.
+            time.sleep(0.5)
+            check("a disabled configuration emits no notification", lambda: (
+                _assert(
+                    len(events.for_run(silent_rid, "notification")) == 0,
+                    f"got {len(events.for_run(silent_rid, 'notification'))} frame(s)",
+                ),
+                "0 frames",
+            )[-1])
+        finally:
+            client.ok("PATCH", "/api/config", {"notifications": {"enabled": True}})
+
+        check("the config reports every notification switch", lambda: (
+            _assert(
+                set(client.ok("GET", "/api/config")["notifications"])
+                >= {
+                    "enabled", "run_finished", "needs_input", "error", "info",
+                    "plugin", "min_run_secs", "say_body", "max_min_run_secs", "kinds",
+                },
+                client.ok("GET", "/api/config")["notifications"],
+            ),
+            "all switches present",
+        )[-1])
+
+        print("\n== a plugin can raise a notification ==", flush=True)
+        if any(p["name"] == "notifier-fixture" for p in client.ok("GET", "/api/plugins")["plugins"]):
+            # A session of its own: these checks run two plugin tools (each behind an
+            # approval), and a session holds one run at a time — the later steps still
+            # use the original session.
+            plugin_session = client.ok("POST", "/api/sessions", {"title": "plugin notify"})["id"]
+            # The only channel by which a plugin can reach a human: a `notify` frame,
+            # which the host validates and the server bridges onto the event stream.
+            #
+            # A plugin tool is always class `external`, so it needs approval. The
+            # prompt is submitted first and the approval answered below, because the
+            # run only finishes after the gate opens.
+            client.ok("POST", f"/api/sessions/{plugin_session}/messages",
+                      {"content": "[tool:notify] ask the plugin to notify"}, expect=202)
+
+            def approve_plugin_tool():
+                events.wait(lambda e: e.get("type") == "approval_requested", timeout=60,
+                            label="approval for the plugin tool")
+                pending = client.ok("GET", "/api/approvals")["approvals"]
+                _assert(pending, "no pending approval to answer")
+                client.ok("POST", f"/api/approvals/{pending[0]['id']}", {"decision": "allow_once"})
+                return pending[0]["title"]
+
+            check("the plugin tool needs approval", approve_plugin_tool)
+            # The run finishes now; wait for its terminal frame and the notification.
+            events.wait(
+                lambda e: e.get("type") == "notification"
+                and e["notification"].get("source") == "notifier-fixture",
+                timeout=60,
+                label="plugin notification",
+            )
+
+            def plugin_notification():
+                frames = [
+                    e for e in events.of_type("notification")
+                    if e["notification"].get("source") == "notifier-fixture"
+                ]
+                _assert(len(frames) >= 1, "the plugin notification never arrived")
+                payload = frames[-1]["notification"]
+                _assert(payload["source"] == "notifier-fixture", payload["source"])
+                _assert(payload["kind"] == "needs_input", payload["kind"])
+                _assert(payload["title"], "a plugin notification must carry its title")
+                _assert(payload["sticky"] is True, "the fixture asked to stay on screen")
+                return f"source={payload['source']} kind={payload['kind']}"
+
+            check("a plugin-raised notification reaches the event stream", plugin_notification)
+
+            # The switch is enforced in the host, so a plugin that keeps sending gets
+            # nothing through.
+            client.ok("PATCH", "/api/config", {"notifications": {"plugin": False}})
+            try:
+                # The session accepts one run at a time. `events.wait` returns at once
+                # for an event it has already seen, so poll the session itself until
+                # the previous run has actually settled.
+                deadline = time.time() + 60
+                while time.time() < deadline:
+                    detail = client.ok("GET", f"/api/sessions/{plugin_session}")
+                    if detail.get("running") is False:
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise AssertionError("the plugin run never settled")
+                before = len(
+                    [e for e in events.of_type("notification")
+                     if e["notification"].get("source") == "notifier-fixture"]
+                )
+                client.ok("POST", f"/api/sessions/{plugin_session}/messages",
+                          {"content": "[tool:notify] try again with plugins muted"}, expect=202)
+                events.wait(lambda e: e.get("type") == "approval_requested", timeout=60,
+                            label="second approval")
+                pending = client.ok("GET", "/api/approvals")["approvals"]
+                if pending:
+                    client.ok("POST", f"/api/approvals/{pending[0]['id']}", {"decision": "allow_once"})
+                # Leave the session idle: the steps after this one submit again, and a
+                # session accepts one run at a time.
+                deadline = time.time() + 60
+                while time.time() < deadline:
+                    detail = client.ok("GET", f"/api/sessions/{plugin_session}")
+                    if detail.get("running") is False:
+                        break
+                    time.sleep(0.1)
+                time.sleep(1.0)
+                check("disabling plugin notifications refuses the frame", lambda: (
+                    _assert(
+                        len([e for e in events.of_type("notification")
+                             if e["notification"].get("source") == "notifier-fixture"]) == before,
+                        "a plugin notification got through while plugin = false",
+                    ),
+                    "0 further plugin frames",
+                )[-1])
+            finally:
+                client.ok("PATCH", "/api/config", {"notifications": {"plugin": True}})
+        else:
+            SKIP.append("plugin notification (fixture plugin not discovered)")
+            print("  SKIP  a plugin can raise a notification  [fixture not discovered]", flush=True)
+
+
+
         detail = client.ok("GET", f"/api/sessions/{sid}")
         check("run completed and history persisted", lambda: (
             _assert(any(r["id"] == rid and r["status"] == "completed" for r in detail["runs"]),

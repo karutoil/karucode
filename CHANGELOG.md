@@ -8,6 +8,55 @@ under **Changed**.
 
 ## [Unreleased]
 
+### Added
+
+- **A tabbed settings sheet.** The settings screen was one long scroll of every
+  section at once, which made any one setting hard to find. It is now five tabs —
+  **General** (appearance: theme, density, colour mode and the transcript layout,
+  with a door into the Theme studio), **Models** (provider profiles and their
+  model libraries), **Agent** (approvals and subagents), **Notifications** and
+  **Plugins & MCP** — split by who owns the setting: this browser, the endpoint,
+  the agent's guardrails, what it announces, and what is loaded.
+- Tuning knobs whose defaults are right for nearly every install moved under a
+  collapsed **Advanced** disclosure in their tab: sampling and the request
+  timeout in *Models*, the subagent budget, timeouts and every raw limit in
+  *Agent*, and the notification delivery knobs (*minimum run length*, *include
+  the start of the answer*) in *Notifications*. Fonts and corner rounding in
+  *General* likewise.
+- The notification settings are now three sections rather than one: server
+  routing, *this browser*, and delivery. The first is what the server announces
+  for every client, the second is stored on the device and never travels, and
+  the third decides whether a notification is worth sending.
+- Appearance is editable without opening the Theme studio. Theme, density and
+  colour mode apply immediately from *General*, alongside the transcript's tool
+  style, grouping and reasoning-block options.
+- A save that fails validation takes you to the field: the sheet switches to the
+  tab that owns it, opens the disclosure it lives behind, and focuses the input,
+  while the footer says how many settings need attention and in which tabs. The
+  Save button is shared across tabs, so the failing field was otherwise
+  off-screen.
+- **Notifications.** karucode now tells you when a run settles, parks on an
+  approval, or fails. The server emits one `notification` event per moment, with a
+  `kind` (`run_finished`, `needs_input`, `error`, `info`), the session's title and
+  a stable id; every client renders it. `[notifications]` (and
+  `KARUCODE_NOTIFICATIONS*`) turns it off four different ways — globally, per event,
+  for plugins only, or per browser surface — and `enabled = false` stops the event at
+  the source rather than asking clients to ignore it.
+- Notifications reach a human four ways: an in-app toast that jumps to the session,
+  an unread count on the session row and in the tab title, a sound cue, and a
+  desktop notification where the browser allows one. The cues are synthesized with
+  Web Audio (the page CSP has no `media-src`, so an audio file would be refused) and
+  are independent of the notification permission: a browser that refused
+  notifications still plays the cue.
+- Plugins can raise notifications with a `notify` JSON-RPC frame, validated,
+  truncated and rate-limited by the host (1/s, burst 5) so a plugin cannot flood a
+  desktop, and can observe every notification with the new `on_notify` hook — which
+  is how a plugin bridges karucode to ntfy or a desktop daemon. The SDK gains
+  `notify()`, `NotifyFrame`, `PluginBuilder::on_notify` and
+  `PluginBuilder::notifications`.
+- A run cancelled by the user is deliberately silent, and a subagent is reported
+  only when it fails.
+
 ### Security
 
 - `GET /api/git/diff` no longer executes repository-controlled commands. The
@@ -37,6 +86,23 @@ under **Changed**.
 
 ### Fixed
 
+- The transcript stopped auto-following as soon as output got fast. While pinned
+  to the newest message it kept up with streamed text, but a burst of big tool
+  cards could unpin it for good: a browser frame dispatches the scroll event from
+  a follow *before* the next one can measure it, so when the following frame
+  measured a fresh `scrollHeight` against the `scrollTop` the follow had just
+  written, the difference was the size of the card that arrived in between — well
+  over the 48px pin threshold — and the view read its own backlog as the reader
+  scrolling away. It now records where following left the viewport and treats a
+  gap no wider than the content that has arrived since then as its own to close,
+  so any number of cards can land in a frame. Any movement of the scroll position
+  is still the reader's, and is never overridden.
+
+- A turn whose prose had finished but whose tool call was still running showed
+  the **Completed** chip. The status chip and the new throughput badge would then
+  contradict each other on the same row — "Completed" beside a live token counter.
+  Both now use the same rule (streaming, a running call, or a pending approval
+  means **Working**), which is also the rule that keeps a turn unfolded.
 - DeepSeek tool calls written as text now run. DeepSeek-V4 sometimes emits its
   native DSML markup (`<||DSML||tool_calls><||DSML||invoke name="...">…`) inside
   the ordinary `content` channel, and an OpenAI-compatible endpoint that does not
@@ -96,6 +162,86 @@ under **Changed**.
 
 ### Added
 
+- `packaging/update.sh`: one command to move a systemd install onto a fresh build
+  of your own checkout, for the case the installer does not cover. `install.sh`
+  installs a binary but never builds one, so anyone following `main` instead of a
+  release was doing the upgrade by hand: `cargo build`, `sudo install`, then
+  remembering every flag the unit was installed with. `sudo sh packaging/update.sh`
+  now fetches, builds, snapshots the SQLite database (`VACUUM INTO`, online, no
+  `-wal` sidecar) and hands the result to `install.sh`, which still owns every
+  systemd step, so there is no second copy of that logic to drift. It reads the
+  *running* unit (`ExecStart=`, `User=`, `WorkingDirectory=`, the `KARUCODE_*`
+  lines, and `MemoryDenyWriteExecute=`, which becomes `--allow-jit`) instead of
+  using the fresh-host defaults compiled into `install.sh` — otherwise the first
+  update would rewrite `10-install.conf` to point at `/srv/karucode/workspace`
+  and the service would die with `status=200/CHDIR`; a workspace that is missing
+  is now a hard error rather than a guess. The build runs as the checkout's owner
+  even under `sudo`, so `target/` is not left root-owned. A dirty tree is refused
+  (`--allow-dirty` overrides) so the shipped binary is the reviewed revision, and
+  an unchanged binary plus unchanged unit skips the restart instead of dropping
+  in-flight sessions (`--force` reinstalls). `--check` reports pending commits as
+  exit `3` without changing anything, `--dry-run` prints the whole plan, and
+  `--build-only`, `--skip-build`, `--no-pull` and `--ref` cover the offline and
+  reproduce-a-tag cases. It refuses to run from inside the service, where
+  `NoNewPrivileges=yes` makes `sudo` impossible.
+- The update is **staged before it is switched**. Every failure that can be
+  caught without touching the live service is now caught there: the built binary
+  and the unit file are copied into `<data-dir>/stage`, and *those copies* are
+  validated — the binary has to run (`--version`), the unit has to contain a
+  `[Unit]` section, and a sha256 is recorded in a manifest that is written last.
+  Only then does anything move the binary, rewrite `10-install.conf` or restart
+  the unit, so a binary built for the wrong libc or a half-written file can no
+  longer take a working service down. `--stage-only` stops after the stage and
+  prints the version and checksum, which is the maintenance-window form: build
+  and prove one day, switch the next with `--from-stage` (no rebuild, no fetch).
+  `--from-stage` re-checks the manifest checksum and refuses a tampered or
+  incomplete stage, and removes the stage after a successful switch so it cannot
+  be applied twice. The stage is root-owned because it carries the artifacts
+  across the privilege boundary: the build runs as the operator, `install.sh`
+  reads as root.
+- The update **survives losing the terminal**. A run that builds or switches now
+  re-executes itself in its own session (`setsid`, its own log) before doing any
+  work, and the shell that started it only waits and forwards the exit code, so
+  closing the window or dropping an SSH connection can no longer abort an update
+  part way through the switch — the one moment nobody can tell what state the
+  install is in. `--follow` reattaches to the log afterwards, and
+  `<data-dir>/update-job/` holds `log`, `pid` and the final `status` (exit code).
+  It deliberately stays in the foreground when it cannot do so safely: with no
+  terminal (a `sudo` password prompt would have nowhere to go), when `sudo -n`
+  cannot escalate, and for `--check`/`--dry-run`/`--build-only`/`--stage-only`,
+  where nothing live is at risk. `--detach`/`--no-detach` override the decision.
+  Two updates can no longer run at once: a lock beside the data directory refuses
+  the second run and names the pid holding it, distinguishes a stale lock from a
+  live one, and reports a non-writable directory as such instead of blaming a
+  phantom lock.
+- `tests/test_update.py` runs `update.sh` as a real process against a real git
+  repository with `systemctl`, `cargo` and `install.sh` stubbed: 72 cases, up from
+  46. New coverage for staging (a binary that does not run, a file that is not a
+  unit, a tampered stage, an incomplete stage, `--from-stage` not rebuilding,
+  the stage being consumed), for detaching (a real SIGHUP to the waiting shell
+  followed by a completed switch, and the no-tty case staying in the foreground),
+  and for locking (a live lock, a stale one, one with no pid). Mutation-tested:
+  dropping the staged-binary validation, making `--from-stage` rebuild, or
+  forgetting to mark the detached child each fails a specific case. CI gained a
+  `packaging` job running shellcheck and that suite.
+- A live **throughput badge** and a **context-window pill**, the two readouts a
+  long run needs. While an assistant turn is doing anything — streaming prose or
+  reasoning, running a tool or command, or waiting on an approval — its header
+  shows `↓ <tokens> <rate> t/s` beside the **Working** chip: the tokens produced
+  so far and how fast they are arriving, both estimated from the streamed
+  characters at the server's own four-chars-per-token ratio, and labelled as
+  estimates in the tooltip because the provider's exact count only arrives when
+  the call ends. The rate averages the last few seconds of *growth*, so a stream
+  that has gone quiet (a 40 s `cargo test`) drops the number and keeps the count
+  instead of freezing at the last burst. The badge is mounted only while the turn
+  works, so it cannot outlive the run. The composer's bottom row gained
+  `35.9%`-style **context usage**: the prompt size the provider reported for the
+  newest call over the selected model's `context_window`, amber at 70% and red at
+  90%, hidden entirely when either number is unknown rather than guessing. It
+  reads the session's model pin (the same model the switcher beside it names) and
+  remembers the last reported figure per session, so a reload does not blank it.
+  On a phone the rate and the meter drop out and the number keeps its place, with
+  the composer row still one line.
 - Transcript view options, saved with the theme. A long session used to be a wall
   of equally-bulky tool cards with the reasoning collapsed to a 10px chip and the
   agent's between-calls prose styled exactly like its answer. The Theme Studio

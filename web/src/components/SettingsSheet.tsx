@@ -4,6 +4,7 @@ import { ApiError, toErrorMessage } from '../api/client';
 import { listMcpServers, listPlugins, reloadPlugin, rescanPlugins, setPluginEnabled } from '../api/endpoints';
 import type {
   ApprovalMode,
+  NotificationsPatch,
   CatalogModel,
   CatalogProviderSummary,
   Config,
@@ -18,9 +19,33 @@ import type {
 } from '../api/types';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
+import * as THEME from '../theme';
+import type {
+  ThemeDensity,
+  ThemeFont,
+  ThemeGrouping,
+  ThemeMode,
+  ThemeMono,
+  ThemeThinking,
+  ThemeToolStyle,
+} from '../theme';
+import { SettingsAdvanced } from './SettingsAdvanced';
 import { Dialog } from './Dialog';
+import {
+  NotificationsDeliverySection,
+  NotificationsDeviceSection,
+  NotificationsSection,
+} from './NotificationsSettings';
+import { TabPanel, Tabs, type TabItem } from './Tabs';
 import { Toggle } from './Toggle';
 import { AlertIcon, CheckIcon, EditIcon, PaletteIcon, PlusIcon, RefreshIcon } from './icons';
+
+/** Density labels, matching the Theme studio so one setting reads the same in both. */
+const DENSITY_LABELS: Record<ThemeDensity, string> = {
+  compact: 'Compact',
+  comfortable: 'Comfortable',
+  spacious: 'Spacious',
+};
 
 /** Every limit the sheet edits as a number (`auto_continue` is a toggle). */
 type NumericLimitKey = Exclude<keyof Limits, 'auto_continue'>;
@@ -1817,6 +1842,76 @@ function ProvidersSection({ disabled }: { disabled: boolean }): JSX.Element | nu
     </section>
   );
 }
+export type SettingsTab = 'general' | 'models' | 'agent' | 'notifications' | 'plugins';
+
+const SETTINGS_TABS: readonly TabItem<SettingsTab>[] = [
+  { id: 'general', label: 'General' },
+  { id: 'models', label: 'Models' },
+  { id: 'agent', label: 'Agent' },
+  { id: 'notifications', label: 'Notifications' },
+  { id: 'plugins', label: 'Plugins & MCP' },
+];
+
+/** The collapsible "Advanced" block of each tab that has one. */
+interface AdvancedState {
+  general: boolean;
+  models: boolean;
+  agent: boolean;
+  notifications: boolean;
+}
+
+const ADVANCED_CLOSED: AdvancedState = {
+  general: false,
+  models: false,
+  agent: false,
+  notifications: false,
+};
+
+/**
+ * Where each validated field lives: its tab, whether it sits behind that tab's
+ * Advanced disclosure, and the DOM id to focus.
+ *
+ * The Save button is in the footer and validates the whole form, but only one tab
+ * is on screen. Without this map a rejected value would be reported against a
+ * control the user cannot see, so `revealErrors` uses it to open the right tab,
+ * expand the disclosure and focus the field.
+ */
+interface FieldLocation {
+  tab: SettingsTab;
+  advanced?: keyof AdvancedState;
+  anchor: string;
+}
+
+const FIELD_LOCATIONS: Record<string, FieldLocation> = {
+  temperature: { tab: 'models', advanced: 'models', anchor: 'temperature' },
+  maxTokens: { tab: 'models', advanced: 'models', anchor: 'max-tokens' },
+  topP: { tab: 'models', advanced: 'models', anchor: 'top-p' },
+  requestTimeout: { tab: 'models', advanced: 'models', anchor: 'request-timeout' },
+  approvalTimeout: { tab: 'agent', anchor: 'approval-timeout' },
+  // Approvals are open on the Agent tab; the subagent budget and the raw limits
+  // are both inside its Advanced fold.
+  subagentConcurrent: { tab: 'agent', advanced: 'agent', anchor: 'subagent-concurrent' },
+  subagentIterations: { tab: 'agent', advanced: 'agent', anchor: 'subagent-iterations' },
+  subagentContinues: { tab: 'agent', advanced: 'agent', anchor: 'subagent-continues' },
+  subagentMaxDepth: { tab: 'agent', advanced: 'agent', anchor: 'subagent-max-depth' },
+  subagentTimeout: { tab: 'agent', advanced: 'agent', anchor: 'subagent-timeout' },
+  ...Object.fromEntries(
+    LIMIT_FIELDS.map((field) => [
+      `limits.${field.key}`,
+      { tab: 'agent', advanced: 'agent', anchor: `limit-${field.key}` } satisfies FieldLocation,
+    ]),
+  ),
+};
+
+/** The tab a validated field belongs to, for the footer's error summary. */
+function tabOf(errorKey: string): SettingsTab {
+  return FIELD_LOCATIONS[errorKey]?.tab ?? 'general';
+}
+
+/** The human label of a tab, for the footer's error summary. */
+function tabLabel(tab: SettingsTab): string {
+  return SETTINGS_TABS.find((item) => item.id === tab)?.label ?? tab;
+}
 
 export function SettingsSheet(): JSX.Element | null {
   const open = store.settingsOpen.value;
@@ -1827,6 +1922,8 @@ export function SettingsSheet(): JSX.Element | null {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
+  const [tab, setTab] = useState<SettingsTab>('general');
+  const [advanced, setAdvanced] = useState<AdvancedState>(ADVANCED_CLOSED);
   const [plugins, setPlugins] = useState<PluginDiagnostics[] | null>(null);
   const [mcpServers, setMcpServers] = useState<McpServer[] | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
@@ -1926,11 +2023,45 @@ export function SettingsSheet(): JSX.Element | null {
     setErrors((current) => (Object.keys(current).length > 0 ? {} : current));
   };
 
+  const onAdvancedChange = (key: keyof AdvancedState) => (value: boolean): void => {
+    setAdvanced((current) => ({ ...current, [key]: value }));
+  };
+
+  /**
+   * Take the user to the first field the form rejected.
+   *
+   * Validation covers every tab, so a failure is usually off-screen. Switching
+   * tab, expanding the disclosure that holds it and focusing the input is the
+   * difference between "fix this" and "find this".
+   */
+  const revealErrors = (validation: Record<string, string>): void => {
+    const first = Object.keys(validation)[0];
+    if (!first) return;
+    const location = FIELD_LOCATIONS[first];
+    if (!location) return;
+    setTab(location.tab);
+    if (location.advanced) {
+      const advancedKey = location.advanced;
+      setAdvanced((current) => ({ ...current, [advancedKey]: true }));
+    }
+    // After the render that switches the tab and opens the disclosure, so the
+    // element is visible (a closed <details> hides its own subtree).
+    window.setTimeout(() => {
+      const element = document.getElementById(location.anchor);
+      if (!element) return;
+      element.scrollIntoView({ block: 'center' });
+      element.focus({ preventScroll: true });
+    }, 0);
+  };
+
   const submit = async (): Promise<void> => {
     if (!form || disabled) return;
     const validation = validate(form);
     setErrors(validation);
-    if (Object.keys(validation).length > 0) return;
+    if (Object.keys(validation).length > 0) {
+      revealErrors(validation);
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     try {
@@ -1949,8 +2080,34 @@ export function SettingsSheet(): JSX.Element | null {
     }
   };
 
+  /**
+   * Save one notification switch and re-seed the form from the answer.
+   *
+   * Notification switches PATCH on their own (they have no Save button of their
+   * own), so this reports failure the same way `submit` does: a locked install
+   * flips the sheet into its read-only state rather than showing a generic error.
+   */
+  const saveNotifications = async (patch: NotificationsPatch): Promise<boolean> => {
+    try {
+      const updated = await actions.saveConfig({ notifications: patch });
+      setForm(formFromConfig(updated));
+      setLocked(updated.settings_locked);
+      return true;
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 403) {
+        setLocked(true);
+        setSaveError('Settings are locked by the server (KARUCODE_LOCK_SETTINGS).');
+      } else {
+        setSaveError(toErrorMessage(cause));
+      }
+      return false;
+    }
+  };
+
   const approvalDescription =
     APPROVAL_MODES.find((mode) => mode.value === form?.approvalMode)?.description ?? '';
+  const errorCount = Object.keys(errors).length;
+  const errorTabs = [...new Set(Object.keys(errors).map(tabOf))];
 
   return (
     <Dialog
@@ -2013,515 +2170,769 @@ export function SettingsSheet(): JSX.Element | null {
               void submit();
             }}
           >
-            <section class="settings-section" aria-labelledby="settings-appearance">
-              <div class="settings-section-head">
-                <h3 id="settings-appearance">Appearance</h3>
-                <span class="settings-section-note">Themes, colours, fonts and density — stored in this browser</span>
-              </div>
-              <div class="setting-row">
-                <div class="setting-copy">
-                  <span class="setting-name">Theme studio</span>
-                  <span class="setting-hint">
-                    Pick a built-in theme or tune every surface, accent, font and density.
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  class="panel-action-btn"
-                  onClick={actions.openThemeStudio}
-                  aria-haspopup="dialog"
-                >
-                  <PaletteIcon size={14} /> Theme studio
-                </button>
-              </div>
-            </section>
+            <Tabs
+              items={SETTINGS_TABS}
+              active={tab}
+              onChange={setTab}
+              label="Settings sections"
+              idPrefix="settings"
+              variant="settings"
+            />
 
-            <ProvidersSection disabled={disabled} />
+            {/*
+             * Panels stay mounted and merely hide. A tab switch must not throw
+             * away what was typed, and the Models tab owns local state (key
+             * drafts, the add-provider form) that would otherwise vanish the
+             * moment the user looked at another tab.
+             */}
+            <div class="settings-panels">
+              <TabPanel idPrefix="settings" id="general" active={tab === 'general'} persist>
+                <section class="settings-section" aria-labelledby="settings-appearance">
+                  <div class="settings-section-head">
+                    <h3 id="settings-appearance">Appearance</h3>
+                    <span class="settings-section-note">Stored in this browser, not in the server config</span>
+                  </div>
+                  <div class="setting-row">
+                    <div class="setting-copy">
+                      <span class="setting-name">Theme studio</span>
+                      <span class="setting-hint">
+                        Pick a built-in theme or tune every surface, accent, font and density.
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      class="panel-action-btn"
+                      onClick={actions.openThemeStudio}
+                      aria-haspopup="dialog"
+                    >
+                      <PaletteIcon size={14} /> Theme studio
+                    </button>
+                  </div>
+                  <div class="field-grid">
+                    <Field
+                      id="settings-theme"
+                      label="Theme"
+                      hint="Applies immediately. Saving this sheet is not required."
+                    >
+                      <select
+                        id="settings-theme"
+                        class="input"
+                        value={THEME.activeThemeId.value}
+                        onChange={(event) => THEME.selectTheme(event.currentTarget.value)}
+                      >
+                        {THEME.themeLibrary.value.map((entry) => (
+                          <option value={entry.id} key={entry.id}>
+                            {entry.name}
+                          </option>
+                        ))}
+                        {THEME.draftEdited.value ? (
+                          <option value="draft">{THEME.activeThemeName.value}</option>
+                        ) : null}
+                      </select>
+                    </Field>
+                    <Field id="settings-density" label="Density" hint="Moves type size and spacing together.">
+                      <select
+                        id="settings-density"
+                        class="input"
+                        value={THEME.activeTheme.value.density}
+                        onChange={(event) =>
+                          THEME.setDensity(event.currentTarget.value as ThemeDensity)
+                        }
+                      >
+                        {THEME.THEME_DENSITIES.map((density) => (
+                          <option value={density} key={density}>
+                            {DENSITY_LABELS[density]}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field id="settings-mode" label="Colour mode" hint="Re-bases the surfaces, keeping your accent.">
+                      <select
+                        id="settings-mode"
+                        class="input"
+                        value={THEME.activeTheme.value.mode}
+                        onChange={(event) => THEME.setThemeMode(event.currentTarget.value as ThemeMode)}
+                      >
+                        {THEME.THEME_MODES.map((mode) => (
+                          <option value={mode} key={mode}>
+                            {mode === 'dark' ? 'Dark' : 'Light'}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                  </div>
+                </section>
 
-            <section class="settings-section" aria-labelledby="settings-generation">
-              <div class="settings-section-head">
-                <h3 id="settings-generation">Generation</h3>
-                <span class="settings-section-note">Sampling tunables, shared by every provider</span>
-              </div>
-              <div class="field-grid">
-                <Field
-                  id="temperature"
-                  label="Temperature"
-                  error={errors.temperature}
-                  hint={
-                    form.sendTemperature
-                      ? '0–2. Lower is more deterministic.'
-                      : 'Not sent: the endpoint uses the model’s own default.'
-                  }
-                >
-                  <input
-                    id="temperature"
-                    class="input mono"
-                    type="number"
-                    step="0.05"
-                    min="0"
-                    max="2"
-                    value={form.temperature}
-                    disabled={disabled || !form.sendTemperature}
-                    onInput={(event) => update({ temperature: event.currentTarget.value })}
-                    aria-invalid={errors.temperature ? 'true' : undefined}
-                    aria-describedby={errors.temperature ? 'temperature-error' : 'temperature-hint'}
-                  />
-                </Field>
-                <Toggle
-                  label="Send a temperature"
-                  description="Off by default. An invented sampling value can make a reasoning model repeat itself instead of acting; leave it off unless the endpoint asks for one."
-                  checked={form.sendTemperature}
-                  disabled={disabled}
-                  onChange={(checked) => update({ sendTemperature: checked })}
-                />
-                <Field id="max-tokens" label="Max tokens" error={errors.maxTokens} hint="Empty means the provider default.">
-                  <input
-                    id="max-tokens"
-                    class="input mono"
-                    type="number"
-                    min="1"
-                    step="1"
-                    value={form.maxTokens}
-                    disabled={disabled}
-                    onInput={(event) => update({ maxTokens: event.currentTarget.value })}
-                    aria-invalid={errors.maxTokens ? 'true' : undefined}
-                    aria-describedby={errors.maxTokens ? 'max-tokens-error' : 'max-tokens-hint'}
-                  />
-                </Field>
-                <Field id="top-p" label="Top-p" error={errors.topP} hint="Empty means the provider default.">
-                  <input
-                    id="top-p"
-                    class="input mono"
-                    type="number"
-                    min="0"
-                    max="1"
-                    step="0.05"
-                    value={form.topP}
-                    disabled={disabled}
-                    onInput={(event) => update({ topP: event.currentTarget.value })}
-                    aria-invalid={errors.topP ? 'true' : undefined}
-                    aria-describedby={errors.topP ? 'top-p-error' : 'top-p-hint'}
-                  />
-                </Field>
-                <Field
-                  id="request-timeout"
-                  label="Request timeout (s)"
-                  error={errors.requestTimeout}
-                  hint="Per provider request."
-                >
-                  <input
-                    id="request-timeout"
-                    class="input mono"
-                    type="number"
-                    min="1"
-                    max="3600"
-                    step="1"
-                    value={form.requestTimeout}
-                    disabled={disabled}
-                    onInput={(event) => update({ requestTimeout: event.currentTarget.value })}
-                    aria-invalid={errors.requestTimeout ? 'true' : undefined}
-                    aria-describedby={
-                      errors.requestTimeout ? 'request-timeout-error' : 'request-timeout-hint'
-                    }
-                  />
-                </Field>
-                <div class="field field-toggle">
-                  <Toggle
-                    label="Parallel tool calls"
-                    description="Ask the endpoint to allow multiple tool calls per turn."
-                    checked={form.parallelToolCalls}
-                    disabled={disabled}
-                    onChange={(checked) => update({ parallelToolCalls: checked })}
-                  />
-                </div>
-                <div class="field field-toggle">
-                  <Toggle
-                    label="Send images to models"
-                    description="Install-wide default for read_file on an image. A model's own “Image input (vision)” setting overrides it, so a vision model still works while this is off. models.dev fills that in when you add a model."
-                    checked={form.supportsImages}
-                    disabled={disabled}
-                    onChange={(checked) => update({ supportsImages: checked })}
-                  />
-                </div>
-              </div>
-            </section>
+                <section class="settings-section" aria-labelledby="settings-transcript">
+                  <div class="settings-section-head">
+                    <h3 id="settings-transcript">Transcript</h3>
+                    <span class="settings-section-note">
+                      How the conversation is drawn; the rest of the theme lives in the Studio
+                    </span>
+                  </div>
+                  <div class="field-grid">
+                    <Field id="settings-tool-style" label="Tool calls">
+                      <select
+                        id="settings-tool-style"
+                        class="input"
+                        value={THEME.activeTheme.value.toolStyle}
+                        onChange={(event) =>
+                          THEME.setToolStyle(event.currentTarget.value as ThemeToolStyle)
+                        }
+                      >
+                        {THEME.THEME_TOOL_STYLE_CHOICES.map(({ value, label }) => (
+                          <option value={value} key={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field id="settings-grouping" label="Grouping">
+                      <select
+                        id="settings-grouping"
+                        class="input"
+                        value={THEME.activeTheme.value.grouping}
+                        onChange={(event) =>
+                          THEME.setGrouping(event.currentTarget.value as ThemeGrouping)
+                        }
+                      >
+                        {THEME.THEME_GROUPING_CHOICES.map(({ value, label }) => (
+                          <option value={value} key={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field id="settings-thinking" label="Reasoning blocks">
+                      <select
+                        id="settings-thinking"
+                        class="input"
+                        value={THEME.activeTheme.value.thinking}
+                        onChange={(event) =>
+                          THEME.setThinking(event.currentTarget.value as ThemeThinking)
+                        }
+                      >
+                        {THEME.THEME_THINKING_CHOICES.map(({ value, label }) => (
+                          <option value={value} key={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                  </div>
+                </section>
 
-            <section class="settings-section" aria-labelledby="settings-approvals">
-              <div class="settings-section-head">
-                <h3 id="settings-approvals">Approvals</h3>
-                <span class="settings-section-note">The only gate for shell commands</span>
-              </div>
-              <Field id="approval-mode" label="Approval mode" hint={approvalDescription} wide>
-                <select
-                  id="approval-mode"
-                  class="input"
-                  value={form.approvalMode}
-                  disabled={disabled}
-                  onChange={(event) => update({ approvalMode: event.currentTarget.value as ApprovalMode })}
-                  aria-describedby="approval-mode-hint"
+                <SettingsAdvanced
+                  id="settings-general-advanced"
+                  open={advanced.general}
+                  onOpenChange={onAdvancedChange('general')}
+                  note="Fonts, rounding and the transcript layout"
                 >
-                  {APPROVAL_MODES.map((mode) => (
-                    <option value={mode.value} key={mode.value}>
-                      {mode.label}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              {form.approvalMode === 'auto' ? (
-                <div class="inline-warning" role="status">
-                  <AlertIcon size={14} /> Auto mode removes the approval gate. Every command will run without
-                  asking.
-                </div>
-              ) : null}
-              <div class="field-grid">
-                <div class="field field-wide">
-                  <ListEditor
-                    label="Always allow commands"
-                    hint="Prefix match. For example, `cargo test` also allows `cargo test -p foo`. Keep this list narrow."
-                    items={form.allowCommands}
-                    placeholder="cargo test"
-                    disabled={disabled}
-                    onChange={(items) => update({ allowCommands: items })}
-                  />
-                </div>
-                <div class="field field-wide">
-                  <ListEditor
-                    label="Pre-approved write paths"
-                    hint="Only consulted in ask mode. Paths are workspace-relative."
-                    items={form.autoApprovePaths}
-                    placeholder="docs/"
-                    disabled={disabled}
-                    onChange={(items) => update({ autoApprovePaths: items })}
-                  />
-                </div>
-                <Field
-                  id="approval-timeout"
-                  label="Approval timeout (s)"
-                  error={errors.approvalTimeout}
-                  hint="A pending approval is denied when this expires."
-                >
-                  <input
-                    id="approval-timeout"
-                    class="input mono"
-                    type="number"
-                    min="1"
-                    max="86400"
-                    step="1"
-                    value={form.approvalTimeout}
-                    disabled={disabled}
-                    onInput={(event) => update({ approvalTimeout: event.currentTarget.value })}
-                    aria-invalid={errors.approvalTimeout ? 'true' : undefined}
-                    aria-describedby={
-                      errors.approvalTimeout ? 'approval-timeout-error' : 'approval-timeout-hint'
-                    }
-                  />
-                </Field>
-              </div>
-            </section>
+                  <section class="settings-section" aria-labelledby="settings-type">
+                    <div class="settings-section-head">
+                      <h3 id="settings-type">Type and shape</h3>
+                      <span class="settings-section-note">Every change is applied and saved at once</span>
+                    </div>
+                    <div class="field-grid">
+                      <Field id="settings-font" label="Interface font">
+                        <select
+                          id="settings-font"
+                          class="input"
+                          value={THEME.activeTheme.value.font}
+                          onChange={(event) => THEME.setFont(event.currentTarget.value as ThemeFont)}
+                        >
+                          {THEME.THEME_FONTS.map((font) => (
+                            <option value={font} key={font}>
+                              {THEME.THEME_FONT_LABELS[font]}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field id="settings-mono" label="Code font">
+                        <select
+                          id="settings-mono"
+                          class="input"
+                          value={THEME.activeTheme.value.mono}
+                          onChange={(event) => THEME.setMono(event.currentTarget.value as ThemeMono)}
+                        >
+                          {THEME.THEME_MONO_FONTS.map((mono) => (
+                            <option value={mono} key={mono}>
+                              {THEME.THEME_MONO_LABELS[mono]}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field
+                        id="settings-rounding"
+                        label="Corner rounding (px)"
+                        hint="0 is square, 22 is fully rounded."
+                        wide
+                      >
+                        <input
+                          id="settings-rounding"
+                          class="input-range"
+                          type="range"
+                          min="0"
+                          max="22"
+                          step="1"
+                          value={String(THEME.activeTheme.value.rounding)}
+                          onInput={(event) => THEME.setRounding(Number(event.currentTarget.value))}
+                        />
+                      </Field>
+                    </div>
+                  </section>
+                </SettingsAdvanced>
+              </TabPanel>
 
-            <section class="settings-section" aria-labelledby="settings-limits">
-              <div class="settings-section-head">
-                <h3 id="settings-limits">Limits</h3>
-                <span class="settings-section-note">Resource and context bounds</span>
-              </div>
-              <div class="field-grid field-grid-compact">
-                <div class="field field-toggle field-wide">
-                  <Toggle
-                    label="Auto-continue long runs"
-                    description="When a segment's iteration budget runs out, refresh it and keep working in the same session instead of ending the run."
-                    checked={form.autoContinue}
-                    disabled={disabled}
-                    onChange={(checked) => update({ autoContinue: checked })}
-                  />
-                </div>
-                {LIMIT_FIELDS.map((field) => (
-                  <Field
-                    key={field.key}
-                    id={`limit-${field.key}`}
-                    label={field.label}
-                    error={errors[`limits.${field.key}`]}
-                  >
-                    <input
-                      id={`limit-${field.key}`}
-                      class="input mono"
-                      type="number"
-                      min="1"
-                      step="1"
-                      value={form.limits[field.key]}
+              <TabPanel idPrefix="settings" id="models" active={tab === 'models'} persist>
+                <ProvidersSection disabled={disabled} />
+
+                <SettingsAdvanced
+                  id="settings-models-advanced"
+                  open={advanced.models}
+                  onOpenChange={onAdvancedChange('models')}
+                  note="Sampling, request timeout and image input"
+                >
+                  <div class="field-grid">
+                    <Field
+                      id="temperature"
+                      label="Temperature"
+                      error={errors.temperature}
+                      hint={
+                        form.sendTemperature
+                          ? '0–2. Lower is more deterministic.'
+                          : 'Not sent: the endpoint uses the model’s own default.'
+                      }
+                    >
+                      <input
+                        id="temperature"
+                        class="input mono"
+                        type="number"
+                        step="0.05"
+                        min="0"
+                        max="2"
+                        value={form.temperature}
+                        disabled={disabled || !form.sendTemperature}
+                        onInput={(event) => update({ temperature: event.currentTarget.value })}
+                        aria-invalid={errors.temperature ? 'true' : undefined}
+                        aria-describedby={errors.temperature ? 'temperature-error' : 'temperature-hint'}
+                      />
+                    </Field>
+                    <Toggle
+                      label="Send a temperature"
+                      description="Off by default. An invented sampling value can make a reasoning model repeat itself instead of acting; leave it off unless the endpoint asks for one."
+                      checked={form.sendTemperature}
                       disabled={disabled}
-                      onInput={(event) =>
-                        update({
-                          limits: { ...form.limits, [field.key]: event.currentTarget.value },
-                        })
-                      }
-                      aria-invalid={errors[`limits.${field.key}`] ? 'true' : undefined}
-                      aria-describedby={
-                        errors[`limits.${field.key}`] ? `limit-${field.key}-error` : undefined
-                      }
+                      onChange={(checked) => update({ sendTemperature: checked })}
                     />
+                    <Field id="max-tokens" label="Max tokens" error={errors.maxTokens} hint="Empty means the provider default.">
+                      <input
+                        id="max-tokens"
+                        class="input mono"
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={form.maxTokens}
+                        disabled={disabled}
+                        onInput={(event) => update({ maxTokens: event.currentTarget.value })}
+                        aria-invalid={errors.maxTokens ? 'true' : undefined}
+                        aria-describedby={errors.maxTokens ? 'max-tokens-error' : 'max-tokens-hint'}
+                      />
+                    </Field>
+                    <Field id="top-p" label="Top-p" error={errors.topP} hint="Empty means the provider default.">
+                      <input
+                        id="top-p"
+                        class="input mono"
+                        type="number"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={form.topP}
+                        disabled={disabled}
+                        onInput={(event) => update({ topP: event.currentTarget.value })}
+                        aria-invalid={errors.topP ? 'true' : undefined}
+                        aria-describedby={errors.topP ? 'top-p-error' : 'top-p-hint'}
+                      />
+                    </Field>
+                    <Field
+                      id="request-timeout"
+                      label="Request timeout (s)"
+                      error={errors.requestTimeout}
+                      hint="Per provider request."
+                    >
+                      <input
+                        id="request-timeout"
+                        class="input mono"
+                        type="number"
+                        min="1"
+                        max="3600"
+                        step="1"
+                        value={form.requestTimeout}
+                        disabled={disabled}
+                        onInput={(event) => update({ requestTimeout: event.currentTarget.value })}
+                        aria-invalid={errors.requestTimeout ? 'true' : undefined}
+                        aria-describedby={
+                          errors.requestTimeout ? 'request-timeout-error' : 'request-timeout-hint'
+                        }
+                      />
+                    </Field>
+                    <div class="field field-toggle">
+                      <Toggle
+                        label="Parallel tool calls"
+                        description="Ask the endpoint to allow multiple tool calls per turn."
+                        checked={form.parallelToolCalls}
+                        disabled={disabled}
+                        onChange={(checked) => update({ parallelToolCalls: checked })}
+                      />
+                    </div>
+                    <div class="field field-toggle">
+                      <Toggle
+                        label="Send images to models"
+                        description="Install-wide default for read_file on an image. A model's own “Image input (vision)” setting overrides it, so a vision model still works while this is off. models.dev fills that in when you add a model."
+                        checked={form.supportsImages}
+                        disabled={disabled}
+                        onChange={(checked) => update({ supportsImages: checked })}
+                      />
+                    </div>
+                  </div>
+                </SettingsAdvanced>
+              </TabPanel>
+
+              <TabPanel idPrefix="settings" id="agent" active={tab === 'agent'} persist>
+                <section class="settings-section" aria-labelledby="settings-approvals">
+                  <div class="settings-section-head">
+                    <h3 id="settings-approvals">Approvals</h3>
+                    <span class="settings-section-note">The only gate for shell commands</span>
+                  </div>
+                  <Field id="approval-mode" label="Approval mode" hint={approvalDescription} wide>
+                    <select
+                      id="approval-mode"
+                      class="input"
+                      value={form.approvalMode}
+                      disabled={disabled}
+                      onChange={(event) => update({ approvalMode: event.currentTarget.value as ApprovalMode })}
+                      aria-describedby="approval-mode-hint"
+                    >
+                      {APPROVAL_MODES.map((mode) => (
+                        <option value={mode.value} key={mode.value}>
+                          {mode.label}
+                        </option>
+                      ))}
+                    </select>
                   </Field>
-                ))}
-              </div>
-            </section>
-
-            <section class="settings-section" aria-labelledby="settings-subagents">
-              <div class="settings-section-head">
-                <h3 id="settings-subagents">Subagents</h3>
-                <span class="settings-section-note">Same workspace, advisory path ownership</span>
-              </div>
-              <div class="field-grid">
-                <Field
-                  id="subagent-concurrent"
-                  label="Max concurrent"
-                  error={errors.subagentConcurrent}
-                >
-                  <input
-                    id="subagent-concurrent"
-                    class="input mono"
-                    type="number"
-                    min="1"
-                    max="32"
-                    step="1"
-                    value={form.subagentConcurrent}
-                    disabled={disabled}
-                    onInput={(event) => update({ subagentConcurrent: event.currentTarget.value })}
-                    aria-invalid={errors.subagentConcurrent ? 'true' : undefined}
-                    aria-describedby={
-                      errors.subagentConcurrent ? 'subagent-concurrent-error' : undefined
-                    }
-                  />
-                </Field>
-                <Field
-                  id="subagent-iterations"
-                  label="Turns per segment"
-                  error={errors.subagentIterations}
-                  hint="A checkpoint, not a finish line: the subagent refreshes it below."
-                >
-                  <input
-                    id="subagent-iterations"
-                    class="input mono"
-                    type="number"
-                    min="1"
-                    max="10000"
-                    step="1"
-                    value={form.subagentIterations}
-                    disabled={disabled}
-                    onInput={(event) => update({ subagentIterations: event.currentTarget.value })}
-                    aria-invalid={errors.subagentIterations ? 'true' : undefined}
-                    aria-describedby={
-                      errors.subagentIterations
-                        ? 'subagent-iterations-error'
-                        : 'subagent-iterations-hint'
-                    }
-                  />
-                </Field>
-                <Field
-                  id="subagent-continues"
-                  label="Auto-continues"
-                  error={errors.subagentContinues}
-                  hint="How many times one subagent may refresh its budget. 0 = stop at the segment."
-                >
-                  <input
-                    id="subagent-continues"
-                    class="input mono"
-                    type="number"
-                    min="0"
-                    max="1000"
-                    step="1"
-                    value={form.subagentContinues}
-                    disabled={disabled}
-                    onInput={(event) => update({ subagentContinues: event.currentTarget.value })}
-                    aria-invalid={errors.subagentContinues ? 'true' : undefined}
-                    aria-describedby={
-                      errors.subagentContinues
-                        ? 'subagent-continues-error'
-                        : 'subagent-continues-hint'
-                    }
-                  />
-                </Field>
-                <Field
-                  id="subagent-max-depth"
-                  label="Max depth"
-                  error={errors.subagentMaxDepth}
-                  hint="Only meaningful when recursion is allowed."
-                >
-                  <input
-                    id="subagent-max-depth"
-                    class="input mono"
-                    type="number"
-                    min="0"
-                    max="10"
-                    step="1"
-                    value={form.subagentMaxDepth}
-                    disabled={disabled}
-                    onInput={(event) => update({ subagentMaxDepth: event.currentTarget.value })}
-                    aria-invalid={errors.subagentMaxDepth ? 'true' : undefined}
-                    aria-describedby={
-                      errors.subagentMaxDepth ? 'subagent-max-depth-error' : 'subagent-max-depth-hint'
-                    }
-                  />
-                </Field>
-                <Field id="subagent-timeout" label="Timeout (s)" error={errors.subagentTimeout}>
-                  <input
-                    id="subagent-timeout"
-                    class="input mono"
-                    type="number"
-                    min="1"
-                    max="604800"
-                    step="1"
-                    value={form.subagentTimeout}
-                    disabled={disabled}
-                    onInput={(event) => update({ subagentTimeout: event.currentTarget.value })}
-                    aria-invalid={errors.subagentTimeout ? 'true' : undefined}
-                    aria-describedby={errors.subagentTimeout ? 'subagent-timeout-error' : undefined}
-                  />
-                </Field>
-                <div class="field field-toggle field-wide">
-                  <Toggle
-                    label="Allow recursive subagents"
-                    description="Subagents may spawn their own subagents, bounded by depth."
-                    checked={form.allowRecursive}
-                    disabled={disabled}
-                    onChange={(checked) => update({ allowRecursive: checked })}
-                  />
-                </div>
-              </div>
-            </section>
-
-            <section class="settings-section" aria-labelledby="settings-plugins">
-              <div class="settings-section-head">
-                <h3 id="settings-plugins">Plugins &amp; MCP</h3>
-                <div class="settings-section-actions">
-                  <button
-                    type="button"
-                    class="button button-small"
-                    onClick={() => runPluginAction('all', 'rescan')}
-                    disabled={pluginBusy !== null}
-                    title="Re-read every plugin source: start new plugins, drop removed ones, replace changed ones"
-                  >
-                    {pluginBusy === 'rescan:all' ? 'Rescanning…' : 'Rescan plugins'}
-                  </button>
-                  <button
-                    type="button"
-                    class="button button-small"
-                    onClick={() => setDiagnosticsKey((key) => key + 1)}
-                    disabled={diagnosticsLoading}
-                  >
-                    <RefreshIcon size={13} class={diagnosticsLoading ? 'spin' : undefined} /> Refresh status
-                  </button>
-                </div>
-              </div>
-              <p class="settings-section-note">
-                Plugins and MCP servers run as separate processes with the server's OS permissions.
-                {/* Say whether a reload happens on its own: an operator who just
-                    rebuilt a plugin needs to know whether to click or to wait. */}
-                {store.config.value?.plugins_watch
-                  ? ` Plugin sources are watched every ${store.config.value.plugins_watch_secs ?? 2}s; edits apply without a click.`
-                  : ' Reload or rescan after changing a plugin. Nothing is applied automatically.'}
-              </p>
-              {diagnosticsError ? (
-                <div class="inline-error" role="alert">
-                  <p>{diagnosticsError}</p>
-                </div>
-              ) : null}
-              {pluginActionError ? (
-                <div class="inline-error" role="alert">
-                  <p>{pluginActionError}</p>
-                </div>
-              ) : null}
-              <div class="diagnostics-grid">
-                <div class="diagnostics-block">
-                  <span class="eyebrow">Plugins</span>
-                  {diagnosticsLoading && plugins === null ? <p class="muted small">Loading…</p> : null}
-                  {plugins && plugins.length === 0 ? <p class="muted small">No plugins loaded.</p> : null}
-                  <ul class="diagnostics-list">
-                    {(plugins ?? []).map((plugin) => (
-                      <li class="diagnostics-row" key={plugin.name}>
-                        <span class={`status-dot status-${statusTone(plugin.status)}`} aria-hidden="true" />
-                        <span class="diagnostics-name">{plugin.name}</span>
-                        <span class="diagnostics-status">{plugin.status}</span>
-                        <span class="diagnostics-meta">
-                          {plugin.manifest?.version ? `v${plugin.manifest.version} · ` : ''}
-                          {plugin.tools.length} tool{plugin.tools.length === 1 ? '' : 's'}
-                        </span>
-                        {plugin.error ? <span class="diagnostics-error">{plugin.error}</span> : null}
-                        <span class="diagnostics-actions">
-                          <button
-                            type="button"
-                            class="button button-small"
-                            onClick={() => runPluginAction(plugin.name, 'reload')}
-                            disabled={pluginBusy !== null}
-                            title="Restart this plugin's process (pick up a rebuilt binary or an edited manifest)"
-                          >
-                            {pluginBusy === `reload:${plugin.name}` ? 'Reloading…' : 'Reload'}
-                          </button>
-                          <button
-                            type="button"
-                            class="button button-small"
-                            onClick={() =>
-                              runPluginAction(
-                                plugin.name,
-                                plugin.status === 'disabled' ? 'enable' : 'disable',
-                              )
-                            }
-                            disabled={pluginBusy !== null}
-                            title="Start or stop this plugin without restarting the server"
-                          >
-                            {plugin.status === 'disabled' ? 'Enable' : 'Disable'}
-                          </button>
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-                <div class="diagnostics-block">
-                  <span class="eyebrow">MCP servers</span>
-                  {diagnosticsLoading && mcpServers === null ? <p class="muted small">Loading…</p> : null}
-                  {mcpServers && mcpServers.length === 0 ? (
-                    <p class="muted small">No MCP servers configured.</p>
+                  {form.approvalMode === 'auto' ? (
+                    <div class="inline-warning" role="status">
+                      <AlertIcon size={14} /> Auto mode removes the approval gate. Every command will run without
+                      asking.
+                    </div>
                   ) : null}
-                  <ul class="diagnostics-list">
-                    {(mcpServers ?? []).map((server) => (
-                      <li class="diagnostics-row" key={server.name}>
-                        <span class={`status-dot status-${statusTone(server.status)}`} aria-hidden="true" />
-                        <span class="diagnostics-name">{server.name}</span>
-                        <span class="diagnostics-status">{server.status}</span>
-                        <span class="diagnostics-meta">
-                          {server.transport} · {server.tools.length} tool
-                          {server.tools.length === 1 ? '' : 's'}
-                        </span>
-                        {server.error ? <span class="diagnostics-error">{server.error}</span> : null}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            </section>
+                  <div class="field-grid">
+                    <div class="field field-wide">
+                      <ListEditor
+                        label="Always allow commands"
+                        hint="Prefix match. For example, `cargo test` also allows `cargo test -p foo`. Keep this list narrow."
+                        items={form.allowCommands}
+                        placeholder="cargo test"
+                        disabled={disabled}
+                        onChange={(items) => update({ allowCommands: items })}
+                      />
+                    </div>
+                    <div class="field field-wide">
+                      <ListEditor
+                        label="Pre-approved write paths"
+                        hint="Only consulted in ask mode. Paths are workspace-relative."
+                        items={form.autoApprovePaths}
+                        placeholder="docs/"
+                        disabled={disabled}
+                        onChange={(items) => update({ autoApprovePaths: items })}
+                      />
+                    </div>
+                    <Field
+                      id="approval-timeout"
+                      label="Approval timeout (s)"
+                      error={errors.approvalTimeout}
+                      hint="A pending approval is denied when this expires."
+                    >
+                      <input
+                        id="approval-timeout"
+                        class="input mono"
+                        type="number"
+                        min="1"
+                        max="86400"
+                        step="1"
+                        value={form.approvalTimeout}
+                        disabled={disabled}
+                        onInput={(event) => update({ approvalTimeout: event.currentTarget.value })}
+                        aria-invalid={errors.approvalTimeout ? 'true' : undefined}
+                        aria-describedby={
+                          errors.approvalTimeout ? 'approval-timeout-error' : 'approval-timeout-hint'
+                        }
+                      />
+                    </Field>
+                  </div>
+                </section>
 
-            <section class="security-note" aria-labelledby="settings-security">
-              <h3 id="settings-security">
-                <AlertIcon size={15} /> Security note
-              </h3>
-              <p>
-                Shell commands are <strong>not sandboxed</strong>. <code>run_command</code> executes{' '}
-                <code>/bin/sh -c &lt;command&gt;</code> as the server user, with that user's filesystem and network
-                access. The approval policy and command allowlist are convenience gates, not isolation. Run
-                karucode in a container or VM, or as a dedicated unprivileged user, if you need real isolation.
-              </p>
-              <p class="muted small">
-                Plugins and MCP servers are trusted code. Their diagnostics above are informational; permissions
-                are declarations, not an enforced sandbox.
-              </p>
-            </section>
+                <SettingsAdvanced
+                  id="settings-agent-advanced"
+                  open={advanced.agent}
+                  onOpenChange={onAdvancedChange('agent')}
+                  note="Subagent budget, timeouts and resource limits"
+                >
+                  <section class="settings-section" aria-labelledby="settings-subagents">
+                    <div class="settings-section-head">
+                      <h3 id="settings-subagents">Subagents</h3>
+                      <span class="settings-section-note">Same workspace, advisory path ownership</span>
+                    </div>
+                    <div class="field-grid">
+                      <Field
+                        id="subagent-concurrent"
+                        label="Max concurrent"
+                        error={errors.subagentConcurrent}
+                      >
+                        <input
+                          id="subagent-concurrent"
+                          class="input mono"
+                          type="number"
+                          min="1"
+                          max="32"
+                          step="1"
+                          value={form.subagentConcurrent}
+                          disabled={disabled}
+                          onInput={(event) => update({ subagentConcurrent: event.currentTarget.value })}
+                          aria-invalid={errors.subagentConcurrent ? 'true' : undefined}
+                          aria-describedby={
+                            errors.subagentConcurrent ? 'subagent-concurrent-error' : undefined
+                          }
+                        />
+                      </Field>
+                      <Field
+                        id="subagent-iterations"
+                        label="Turns per segment"
+                        error={errors.subagentIterations}
+                        hint="A checkpoint, not a finish line: the subagent refreshes it below."
+                      >
+                        <input
+                          id="subagent-iterations"
+                          class="input mono"
+                          type="number"
+                          min="1"
+                          max="10000"
+                          step="1"
+                          value={form.subagentIterations}
+                          disabled={disabled}
+                          onInput={(event) => update({ subagentIterations: event.currentTarget.value })}
+                          aria-invalid={errors.subagentIterations ? 'true' : undefined}
+                          aria-describedby={
+                            errors.subagentIterations
+                              ? 'subagent-iterations-error'
+                              : 'subagent-iterations-hint'
+                          }
+                        />
+                      </Field>
+                      <Field
+                        id="subagent-continues"
+                        label="Auto-continues"
+                        error={errors.subagentContinues}
+                        hint="How many times one subagent may refresh its budget. 0 = stop at the segment."
+                      >
+                        <input
+                          id="subagent-continues"
+                          class="input mono"
+                          type="number"
+                          min="0"
+                          max="1000"
+                          step="1"
+                          value={form.subagentContinues}
+                          disabled={disabled}
+                          onInput={(event) => update({ subagentContinues: event.currentTarget.value })}
+                          aria-invalid={errors.subagentContinues ? 'true' : undefined}
+                          aria-describedby={
+                            errors.subagentContinues
+                              ? 'subagent-continues-error'
+                              : 'subagent-continues-hint'
+                          }
+                        />
+                      </Field>
+                      <Field
+                        id="subagent-max-depth"
+                        label="Max depth"
+                        error={errors.subagentMaxDepth}
+                        hint="Only meaningful when recursion is allowed."
+                      >
+                        <input
+                          id="subagent-max-depth"
+                          class="input mono"
+                          type="number"
+                          min="0"
+                          max="10"
+                          step="1"
+                          value={form.subagentMaxDepth}
+                          disabled={disabled}
+                          onInput={(event) => update({ subagentMaxDepth: event.currentTarget.value })}
+                          aria-invalid={errors.subagentMaxDepth ? 'true' : undefined}
+                          aria-describedby={
+                            errors.subagentMaxDepth ? 'subagent-max-depth-error' : 'subagent-max-depth-hint'
+                          }
+                        />
+                      </Field>
+                      <Field id="subagent-timeout" label="Timeout (s)" error={errors.subagentTimeout}>
+                        <input
+                          id="subagent-timeout"
+                          class="input mono"
+                          type="number"
+                          min="1"
+                          max="604800"
+                          step="1"
+                          value={form.subagentTimeout}
+                          disabled={disabled}
+                          onInput={(event) => update({ subagentTimeout: event.currentTarget.value })}
+                          aria-invalid={errors.subagentTimeout ? 'true' : undefined}
+                          aria-describedby={errors.subagentTimeout ? 'subagent-timeout-error' : undefined}
+                        />
+                      </Field>
+                      <div class="field field-toggle field-wide">
+                        <Toggle
+                          label="Allow recursive subagents"
+                          description="Subagents may spawn their own subagents, bounded by depth."
+                          checked={form.allowRecursive}
+                          disabled={disabled}
+                          onChange={(checked) => update({ allowRecursive: checked })}
+                        />
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="settings-section" aria-labelledby="settings-limits">
+                    <div class="settings-section-head">
+                      <h3 id="settings-limits">Limits</h3>
+                      <span class="settings-section-note">Resource and context bounds</span>
+                    </div>
+                    <div class="field-grid field-grid-compact">
+                      <div class="field field-toggle field-wide">
+                        <Toggle
+                          label="Auto-continue long runs"
+                          description="When a segment's iteration budget runs out, refresh it and keep working in the same session instead of ending the run."
+                          checked={form.autoContinue}
+                          disabled={disabled}
+                          onChange={(checked) => update({ autoContinue: checked })}
+                        />
+                      </div>
+                      {LIMIT_FIELDS.map((field) => (
+                        <Field
+                          key={field.key}
+                          id={`limit-${field.key}`}
+                          label={field.label}
+                          error={errors[`limits.${field.key}`]}
+                        >
+                          <input
+                            id={`limit-${field.key}`}
+                            class="input mono"
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={form.limits[field.key]}
+                            disabled={disabled}
+                            onInput={(event) =>
+                              update({
+                                limits: { ...form.limits, [field.key]: event.currentTarget.value },
+                              })
+                            }
+                            aria-invalid={errors[`limits.${field.key}`] ? 'true' : undefined}
+                            aria-describedby={
+                              errors[`limits.${field.key}`] ? `limit-${field.key}-error` : undefined
+                            }
+                          />
+                        </Field>
+                      ))}
+                    </div>
+                  </section>
+                </SettingsAdvanced>
+
+                <section class="security-note" aria-labelledby="settings-security-shell">
+                  <h3 id="settings-security-shell">
+                    <AlertIcon size={15} /> Not a sandbox
+                  </h3>
+                  <p>
+                    Shell commands are <strong>not sandboxed</strong>. <code>run_command</code> executes{' '}
+                    <code>/bin/sh -c &lt;command&gt;</code> as the server user, with that user's filesystem
+                    and network access. The approval policy and command allowlist are convenience gates,
+                    not isolation. Run karucode in a container or VM, or as a dedicated unprivileged user,
+                    if you need real isolation.
+                  </p>
+                </section>
+              </TabPanel>
+
+              <TabPanel
+                idPrefix="settings"
+                id="notifications"
+                active={tab === 'notifications'}
+                persist
+              >
+                <NotificationsSection
+                  config={store.config.value}
+                  disabled={disabled}
+                  onSave={saveNotifications}
+                />
+
+                <NotificationsDeviceSection />
+
+                <SettingsAdvanced
+                  id="settings-notifications-advanced"
+                  open={advanced.notifications}
+                  onOpenChange={onAdvancedChange('notifications')}
+                  note="Delivery: minimum run length and body text"
+                >
+                  <NotificationsDeliverySection
+                    config={store.config.value}
+                    disabled={disabled}
+                    onSave={saveNotifications}
+                  />
+                </SettingsAdvanced>
+              </TabPanel>
+
+              <TabPanel idPrefix="settings" id="plugins" active={tab === 'plugins'} persist>
+                <section class="settings-section" aria-labelledby="settings-plugins">
+                  <div class="settings-section-head">
+                    <h3 id="settings-plugins">Plugins &amp; MCP</h3>
+                    <div class="settings-section-actions">
+                      <button
+                        type="button"
+                        class="button button-small"
+                        onClick={() => runPluginAction('all', 'rescan')}
+                        disabled={pluginBusy !== null}
+                        title="Re-read every plugin source: start new plugins, drop removed ones, replace changed ones"
+                      >
+                        {pluginBusy === 'rescan:all' ? 'Rescanning…' : 'Rescan plugins'}
+                      </button>
+                      <button
+                        type="button"
+                        class="button button-small"
+                        onClick={() => setDiagnosticsKey((key) => key + 1)}
+                        disabled={diagnosticsLoading}
+                      >
+                        <RefreshIcon size={13} class={diagnosticsLoading ? 'spin' : undefined} /> Refresh status
+                      </button>
+                    </div>
+                  </div>
+                  <p class="settings-section-note">
+                    Plugins and MCP servers run as separate processes with the server's OS permissions.
+                    {/* Say whether a reload happens on its own: an operator who just
+                        rebuilt a plugin needs to know whether to click or to wait. */}
+                    {store.config.value?.plugins_watch
+                      ? ` Plugin sources are watched every ${store.config.value.plugins_watch_secs ?? 2}s; edits apply without a click.`
+                      : ' Reload or rescan after changing a plugin. Nothing is applied automatically.'}
+                  </p>
+                  {diagnosticsError ? (
+                    <div class="inline-error" role="alert">
+                      <p>{diagnosticsError}</p>
+                    </div>
+                  ) : null}
+                  {pluginActionError ? (
+                    <div class="inline-error" role="alert">
+                      <p>{pluginActionError}</p>
+                    </div>
+                  ) : null}
+                  <div class="diagnostics-grid">
+                    <div class="diagnostics-block">
+                      <span class="eyebrow">Plugins</span>
+                      {diagnosticsLoading && plugins === null ? <p class="muted small">Loading…</p> : null}
+                      {plugins && plugins.length === 0 ? <p class="muted small">No plugins loaded.</p> : null}
+                      <ul class="diagnostics-list">
+                        {(plugins ?? []).map((plugin) => (
+                          <li class="diagnostics-row" key={plugin.name}>
+                            <span class={`status-dot status-${statusTone(plugin.status)}`} aria-hidden="true" />
+                            <span class="diagnostics-name">{plugin.name}</span>
+                            <span class="diagnostics-status">{plugin.status}</span>
+                            <span class="diagnostics-meta">
+                              {plugin.manifest?.version ? `v${plugin.manifest.version} · ` : ''}
+                              {plugin.tools.length} tool{plugin.tools.length === 1 ? '' : 's'}
+                            </span>
+                            {plugin.error ? <span class="diagnostics-error">{plugin.error}</span> : null}
+                            <span class="diagnostics-actions">
+                              <button
+                                type="button"
+                                class="button button-small"
+                                onClick={() => runPluginAction(plugin.name, 'reload')}
+                                disabled={pluginBusy !== null}
+                                title="Restart this plugin's process (pick up a rebuilt binary or an edited manifest)"
+                              >
+                                {pluginBusy === `reload:${plugin.name}` ? 'Reloading…' : 'Reload'}
+                              </button>
+                              <button
+                                type="button"
+                                class="button button-small"
+                                onClick={() =>
+                                  runPluginAction(
+                                    plugin.name,
+                                    plugin.status === 'disabled' ? 'enable' : 'disable',
+                                  )
+                                }
+                                disabled={pluginBusy !== null}
+                                title="Start or stop this plugin without restarting the server"
+                              >
+                                {plugin.status === 'disabled' ? 'Enable' : 'Disable'}
+                              </button>
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div class="diagnostics-block">
+                      <span class="eyebrow">MCP servers</span>
+                      {diagnosticsLoading && mcpServers === null ? <p class="muted small">Loading…</p> : null}
+                      {mcpServers && mcpServers.length === 0 ? (
+                        <p class="muted small">No MCP servers configured.</p>
+                      ) : null}
+                      <ul class="diagnostics-list">
+                        {(mcpServers ?? []).map((server) => (
+                          <li class="diagnostics-row" key={server.name}>
+                            <span class={`status-dot status-${statusTone(server.status)}`} aria-hidden="true" />
+                            <span class="diagnostics-name">{server.name}</span>
+                            <span class="diagnostics-status">{server.status}</span>
+                            <span class="diagnostics-meta">
+                              {server.transport} · {server.tools.length} tool
+                              {server.tools.length === 1 ? '' : 's'}
+                            </span>
+                            {server.error ? <span class="diagnostics-error">{server.error}</span> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="security-note" aria-labelledby="settings-security-plugins">
+                  <h3 id="settings-security-plugins">
+                    <AlertIcon size={15} /> Trusted code
+                  </h3>
+                  <p>
+                    Plugins and MCP servers run as separate processes with the server's OS permissions.
+                    The status above is informational: their permissions are declarations, not an
+                    enforced sandbox, so install only what you would run yourself.
+                  </p>
+                </section>
+              </TabPanel>
+            </div>
 
             <footer class="settings-footer">
-              <button type="button" class="button" onClick={actions.closeSettings}>
-                Cancel
-              </button>
-              <button type="submit" class="button button-primary" disabled={disabled || saving}>
-                {saving ? 'Saving…' : 'Save changes'}
-              </button>
+              {errorCount > 0 ? (
+                <p class="settings-error-summary" role="alert">
+                  <AlertIcon size={13} />
+                  <span>
+                    {errorCount} setting{errorCount === 1 ? '' : 's'} need
+                    {errorCount === 1 ? 's' : ''} attention in{' '}
+                    {errorTabs.map(tabLabel).join(', ')}.
+                  </span>
+                </p>
+              ) : null}
+              <div class="settings-footer-actions">
+                <button type="button" class="button" onClick={actions.closeSettings}>
+                  Cancel
+                </button>
+                <button type="submit" class="button button-primary" disabled={disabled || saving}>
+                  {saving ? 'Saving…' : 'Save changes'}
+                </button>
+              </div>
             </footer>
           </form>
         ) : null}

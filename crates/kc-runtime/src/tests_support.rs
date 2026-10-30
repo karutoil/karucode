@@ -643,7 +643,11 @@ impl Store for FakeStore {
     async fn list_terminals(&self) -> Result<Vec<TerminalSession>> {
         let db = self.db_mut();
         let mut terminals: Vec<TerminalSession> = db.terminals.values().cloned().collect();
-        terminals.sort_by(|a, b| a.position.cmp(&b.position).then(a.created_at.cmp(&b.created_at)));
+        terminals.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then(a.created_at.cmp(&b.created_at))
+        });
         Ok(terminals)
     }
 
@@ -927,6 +931,7 @@ pub(crate) struct FakeSettings {
     pub limits: Limits,
     pub policy: ApprovalPolicy,
     pub subagents: SubagentConfig,
+    pub notifications: kc_core::config::NotificationsConfig,
 }
 
 impl Default for FakeSettings {
@@ -942,6 +947,7 @@ impl Default for FakeSettings {
                 ..Default::default()
             },
             subagents: SubagentConfig::default(),
+            notifications: kc_core::config::NotificationsConfig::default(),
         }
     }
 }
@@ -964,6 +970,14 @@ impl FakeSettings {
 
     pub(crate) fn with_subagents(mut self, subagents: SubagentConfig) -> Self {
         self.subagents = subagents;
+        self
+    }
+
+    pub(crate) fn with_notifications(
+        mut self,
+        notifications: kc_core::config::NotificationsConfig,
+    ) -> Self {
+        self.notifications = notifications;
         self
     }
 }
@@ -1001,6 +1015,10 @@ impl Settings for FakeSettings {
 
     async fn subagent_config(&self) -> SubagentConfig {
         self.subagents.clone()
+    }
+
+    async fn notify_config(&self) -> kc_core::config::NotificationsConfig {
+        self.notifications.clone()
     }
 }
 

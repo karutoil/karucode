@@ -309,6 +309,8 @@
 @media (max-width: 1023px) {
   :root {
     --sidebar-w: 0px;
-    --rail-w: 56px;
+    /* The project rail is hidden at this width (the sessions sheet carries a
+     * project switcher instead), so nothing may reserve its column. */
+    --rail-w: 0px;
   }
 }

@@ -480,6 +480,41 @@ pub(crate) async fn run_top_level(
         error: outcome.error.clone(),
     });
 
+    // Last, and only after the run's terminal state is persisted and announced:
+    // a notification describes state, so a client that reacts to it by refetching
+    // must already find the truth on the server.
+    //
+    // The title is read *here* rather than before the loop: it is only needed for the
+    // notification, and a store round-trip on the run's critical path delayed
+    // `RunStarted` (which the UI and the API both key "is it running" off) for no
+    // benefit.
+    let session_title = inner
+        .deps
+        .store
+        .get_session(&state.session_id.0)
+        .await
+        .ok()
+        .flatten()
+        .map(|session| session.title)
+        .unwrap_or_default();
+    crate::notify::run_finished(
+        &inner,
+        &ctx,
+        &session_title,
+        crate::notify::RunFinished {
+            run_id: &state.run_id.0,
+            status: outcome.status,
+            error: outcome.error.as_deref(),
+            answer: &outcome.text,
+            started_at_ms: state.started_at,
+            finished_at_ms: crate::events::now_ms(),
+            // Read here, not at the top of the run: the flag is set by `cancel()`
+            // while the loop is in flight.
+            cancelled_by_user: state.was_cancelled_by_user(),
+        },
+    )
+    .await;
+
     match finish_error {
         Some(e) => Err(e),
         None => Ok(()),
@@ -562,7 +597,10 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
                 )
                 .await
                 {
-                    ctx.error("store", format!("could not persist a steering message: {e}"));
+                    ctx.error(
+                        "store",
+                        format!("could not persist a steering message: {e}"),
+                    );
                 }
                 // The transcript and the request must agree: an unpersisted steer
                 // is still one the model acted on, so it goes into `history`

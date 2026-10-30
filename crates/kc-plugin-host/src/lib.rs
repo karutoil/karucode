@@ -36,6 +36,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
@@ -46,7 +47,19 @@ pub use tool::{namespaced_name, parse_class, required_permission, TOOL_PREFIX};
 
 use rpc::{PluginShared, TimeoutRefs};
 
-pub use rpc::PanelPayload;
+pub use rpc::{PanelPayload, PluginNotice};
+
+/// Milliseconds since the Unix epoch, clamped at 0 for a pre-epoch clock.
+///
+/// Used by the plugin notification rate limiter. A monotonic clock would be more
+/// correct in principle but the bucket only needs to be roughly right, and this
+/// keeps the crate free of a second time abstraction.
+pub(crate) fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// One panel as the host exposes it to the UI: the manifest declaration plus
 /// the id it is hosted under.
@@ -281,6 +294,9 @@ pub struct PluginHost {
     timeouts: Arc<TimeoutRefs>,
     /// Where the manifest-only plugins live, kept so a rescan can look again.
     data_dir: PathBuf,
+    /// Sender handed to every slot so an inbound `notify` frame reaches the
+    /// server. `None` until [`PluginHost::listen_notifications`] is called.
+    notify_tx: Option<mpsc::UnboundedSender<PluginNotice>>,
 }
 
 impl PluginHost {
@@ -297,6 +313,7 @@ impl PluginHost {
             plugins,
             timeouts,
             data_dir: data_dir.to_path_buf(),
+            notify_tx: None,
         }
     }
 
@@ -472,6 +489,41 @@ impl PluginHost {
     /// best-effort and must never fail a run.
     pub async fn call_hook(&self, hook: &str, payload: Value) -> Vec<Value> {
         fan_out(&self.ready_plugins(), hook, &payload).await
+    }
+
+    /// Listen for notifications plugins raise over the `notify` frame.
+    ///
+    /// Call once, at startup, before [`start_all`](Self::start_all): a plugin that
+    /// is already running would otherwise have its first notification dropped.
+    /// The returned receiver yields every accepted notice from every ready plugin;
+    /// the server turns each into the same `Event::Notification` the runtime
+    /// emits, so a plugin-raised notification is indistinguishable downstream.
+    ///
+    /// The channel is unbounded on purpose. A bounded channel would make the
+    /// plugin's stdout reader block, which stalls *every* response from that
+    /// plugin — a notification flood would become a tools failure. The rate
+    /// limiter in the slot is what bounds the volume instead.
+    pub fn listen_notifications(&mut self) -> mpsc::UnboundedReceiver<PluginNotice> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        for slot in &self.plugins {
+            if let Some(shared) = &slot.shared {
+                shared.set_notify_sender(Some(tx.clone()));
+            }
+        }
+        // Remember it so a plugin discovered later (a hot reload) gets the same
+        // sender without the server having to re-register.
+        self.notify_tx = Some(tx);
+        rx
+    }
+
+    /// Stop listening. Notices from a plugin are dropped rather than buffered.
+    pub fn stop_notifications(&mut self) {
+        self.notify_tx = None;
+        for slot in &self.plugins {
+            if let Some(shared) = &slot.shared {
+                shared.set_notify_sender(None);
+            }
+        }
     }
 
     /// Every panel contributed by a **ready** plugin, in discovery order.
@@ -1273,6 +1325,24 @@ impl kc_core::hooks::Hooks for PluginHooks {
         });
         fan_out(&self.plugins, hooks::ON_TOOL_RESULT, &payload).await;
     }
+
+    fn notifier(&self) -> Option<std::sync::Arc<dyn kc_core::hooks::NotificationObserver>> {
+        Some(std::sync::Arc::new(PluginHooks {
+            plugins: self.plugins.clone(),
+        }))
+    }
+}
+
+/// `on_notify` fan-out for the live handle.
+///
+/// Separate from [`kc_core::hooks::Hooks`] because the runtime calls it from a
+/// spawned task after the run has already ended: it must not be able to hold the
+/// caller up, and it must not be able to fail a run.
+#[async_trait]
+impl kc_core::hooks::NotificationObserver for PluginHooks {
+    async fn on_notify(&self, payload: Value) {
+        fan_out(&self.plugins, hooks::ON_NOTIFY, &payload).await;
+    }
 }
 
 #[async_trait]
@@ -1297,6 +1367,12 @@ impl kc_core::hooks::Hooks for PluginHost {
             "ok": ok,
         });
         fan_out(&self.ready_plugins(), hooks::ON_TOOL_RESULT, &payload).await;
+    }
+
+    fn notifier(&self) -> Option<std::sync::Arc<dyn kc_core::hooks::NotificationObserver>> {
+        Some(std::sync::Arc::new(PluginHooks {
+            plugins: self.ready_plugins(),
+        }))
     }
 }
 

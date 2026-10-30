@@ -10,6 +10,7 @@ Files in this directory:
 | File | Purpose |
 | --- | --- |
 | `install.sh` | Downloads a verified release tarball (or takes a local build), installs the binary, the unit and a site drop-in, enables the service and starts it |
+| `update.sh` | Rebuilds a checkout of your own and moves the running service onto the new binary: fetch, build, database snapshot, then `install.sh` |
 | `karucode.service` | systemd unit with the hardening that contains the agent |
 
 `scripts/e2e_install.py` tests the installer end to end in a throwaway systemd
@@ -387,6 +388,145 @@ sudo sh install.sh --version 0.2.0 --workspace /srv/karucode/workspace
 # 3. Watch it come up.
 journalctl -u karucode -n 50
 ```
+
+### Updating a service that runs your own build
+
+`install.sh` installs a binary; it does not build one. If the unit runs something
+you compiled from a checkout — the normal case while you are following `main`
+rather than a release — use `update.sh`. It is one command, and it does the four
+things that are easy to get wrong by hand:
+
+```bash
+sudo sh packaging/update.sh            # pull, build, stage, install, restart
+sh packaging/update.sh --check         # exit 3 if commits are waiting; changes nothing
+sudo sh packaging/update.sh --dry-run  # print the whole plan; build nothing
+```
+
+1. **It builds as you, not as root.** `sudo ./update.sh` that runs `cargo` as
+   root leaves root-owned files in `target/` and in `~/.cargo`, and your next
+   build as yourself fails on permissions. Only the stage, the snapshot and
+   `install.sh` are elevated; the fetch and the build run as the owner of the
+   checkout.
+2. **It reads the running unit instead of guessing.** `ExecStart=`, `User=`,
+   `WorkingDirectory=`, the `KARUCODE_*` lines and `MemoryDenyWriteExecute=` are
+   taken from `systemctl show` and passed to `install.sh`. The defaults compiled
+   into `install.sh` (`/srv/karucode/workspace`, user `karucode`) are for a fresh
+   host; without this, the first update would rewrite `10-install.conf` to point
+   at a workspace that does not exist and the service would die with
+   `status=200/CHDIR`. A workspace that is not on disk is a hard error, not a
+   guess.
+3. **It snapshots the database first.** `VACUUM INTO <data-dir>/backups/pre-update-<stamp>.db`
+   runs before anything restarts, because there is no automatic pre-migration
+   snapshot. It works while the server is running and the result is a single file
+   with no `-wal`/`-shm` sidecars.
+4. **It refuses to ship what you did not commit.** A tree with modified tracked
+   files is rejected (`--allow-dirty` overrides), so what lands in `/usr/local/bin`
+   is the revision you think it is.
+5. **It stages before it switches, and survives losing the terminal.** See below.
+
+Every systemd step is still `install.sh`'s: keeps `karucode.old`, rewrites the
+unit and the drop-in, clears a stale `StartLimitBurst`, restarts a running
+service onto the new binary, and only reports success once `/api/health` answers.
+There is deliberately no second copy of that logic to drift.
+
+#### Staged, then switched
+
+Everything that can fail happens while the old binary is still serving. The build
+and the unit file are copied into a stage directory and **those copies** are
+validated: the binary has to run (`--version`), the unit has to contain a
+`[Unit]` section, and a sha256 of the staged binary is written to a manifest.
+Only then does the switch move the binary, rewrite `10-install.conf` and restart
+the unit.
+
+```bash
+sudo sh packaging/update.sh --stage-only   # build and validate; stop there
+sudo sh packaging/update.sh --from-stage   # switch onto it; no rebuild, no fetch
+```
+
+* `--stage-only` is the maintenance-window form. It prints the staged version and
+  sha256 and leaves the running service completely alone; a bad build cannot take
+  it down.
+* `--from-stage` applies exactly those bytes. It refuses if the staged binary no
+  longer matches the recorded checksum, refuses an incomplete stage (no
+  manifest), and cannot be combined with `--build-only` or `--check`. After a
+  successful switch the stage is removed, so the same stage cannot be applied
+  twice.
+* The stage is `<data-dir>/stage` (`--stage-dir` to move it), root-owned and
+  world-readable: the build runs as you and `install.sh` reads it as root, so the
+  bytes have to cross that boundary as files rather than as a path under your
+  home. `--no-stage` skips staging and installs straight from the build.
+
+A stale stage is cleared at the start of the next `--stage-only`, and the
+manifest is written last, so a failed re-stage can never leave a manifest
+describing bytes that were never validated.
+
+#### Surviving the terminal
+
+A run that builds or switches **detaches itself into its own session** before
+doing anything, with its own log, so closing the terminal or dropping an SSH
+connection cannot stop an update half way through the switch.
+
+```
+<data-dir>/update-job/
+    log       everything the run printed
+    pid       the detached process
+    status    the exit code, written when it finishes
+```
+
+The shell you started it from waits and forwards that exit code, so
+`sudo sh packaging/update.sh` still exits `0`, `1` or `2` as documented. From
+another terminal:
+
+```bash
+sh packaging/update.sh --follow    # tail the log; Ctrl-C stops the tail, not the job
+```
+
+Detaching is deliberately skipped when it would do more harm than good: with no
+terminal (a `sudo` password prompt could not be answered, so the run would hang
+invisibly), when `sudo -n` cannot escalate without a password, and for
+`--check`, `--dry-run`, `--build-only` and `--stage-only`, where there is nothing
+live to protect. Force either behaviour with `--detach` / `--no-detach`.
+
+Two updates cannot run at once: a lock directory beside the data directory
+(`<data-dir>/../.<name>.update.lock`) refuses the second run and names the pid
+holding it. A lock whose process is gone is reported as stale with the exact
+command to remove it. If that directory is not writable at all, the script says
+so once and continues rather than refusing to run.
+
+| Flag | Effect |
+| --- | --- |
+| `--check` | Is there anything to update? Changes nothing; exit `3` if there is |
+| `--dry-run` | Print the fetch, build and install plan; change nothing |
+| `--stage-only` | Build and validate into the stage, then stop before the switch |
+| `--from-stage` | Switch onto the staged bytes; no rebuild, no fetch |
+| `--no-stage` | Install straight from the build, skipping the stage |
+| `--stage-dir <DIR>` | Put the stage somewhere other than `<data-dir>/stage` |
+| `--detach` / `--no-detach` | Force or forbid running in the background |
+| `--follow` | Attach to a detached run's log |
+| `--no-pull` | Build the working tree as it is (offline, or a local branch) |
+| `--ref <REF>` | Build a tag/commit instead of the current branch (detached HEAD) |
+| `--build-only` | Compile and stop; the service is not touched |
+| `--skip-build` | Install the binary already in `target/release` |
+| `--allow-dirty` | Permit modified tracked files, and ship them |
+| `--no-backup` | Skip the pre-update snapshot |
+| `--backup-dir <DIR>` | Write the snapshot somewhere other than `<data-dir>/backups` |
+| `--force` | Reinstall even when the binary and the unit are unchanged |
+| `--workspace`, `--data-dir`, `--service-user`, `--host`, `--port`, `--prefix` | Override what the unit says |
+
+Exit codes: `0` updated and serving, `1` nothing changed (dirty tree, build
+failure, no unit, refused install), `2` installed but the service did not come
+back — the same rollback hint as `install.sh`, `3` `--check` found commits you do
+not have.
+
+Two things it will not do for you:
+
+* **It does not run from inside the service.** The unit sets
+  `NoNewPrivileges=yes`, so `sudo` cannot escalate from an agent session; the
+  script detects that and says so. Use a normal login shell on the host.
+* **It does not fix a dirty upgrade.** If the *build* compiles but the service
+  still will not start, `karucode.old` is the previous binary and
+  `pre-update-*.db` the previous database — that pair is the rollback, and
+  `update.sh` prints both commands when it exits `2`.
 
 What survives an upgrade, and what does not:
 

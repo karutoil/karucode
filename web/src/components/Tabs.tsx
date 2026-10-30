@@ -12,10 +12,11 @@ export interface TabItem<T extends string> {
 
 /**
  * `default` is the compact inspector strip; `workspace` is the header tab bar
- * (Conversation / Changes) that shares the same tablist semantics but a
- * different visual treatment.
+ * (Conversation / Changes); `settings` is the settings sheet's section strip.
+ * All three share the same tablist semantics and differ only in the classes the
+ * stylesheets key off.
  */
-export type TabVariant = 'default' | 'workspace';
+export type TabVariant = 'default' | 'workspace' | 'settings';
 
 export interface TabsProps<T extends string> {
   items: readonly TabItem<T>[];
@@ -46,6 +47,9 @@ export function Tabs<T extends string>({
   const generated = useId();
   const prefix = idPrefix ?? generated;
   const workspace = variant === 'workspace';
+  const settings = variant === 'settings';
+  const listClass = settings ? 'settings-tabs' : workspace ? 'workspace-tabs' : 'tabs';
+  const tabClass = settings ? 'settings-tab' : workspace ? 'workspace-tab' : 'tab';
   const listRef = useRef<HTMLDivElement>(null);
 
   // Measured by hand rather than with `scrollIntoView`, which would also scroll
@@ -82,7 +86,7 @@ export function Tabs<T extends string>({
   return (
     <div
       ref={listRef}
-      class={workspace ? 'workspace-tabs' : 'tabs'}
+      class={listClass}
       role="tablist"
       aria-label={label}
       onKeyDown={onKeyDown}
@@ -95,7 +99,7 @@ export function Tabs<T extends string>({
             id={`${prefix}-tab-${item.id}`}
             type="button"
             role="tab"
-            class={`${workspace ? 'workspace-tab' : 'tab'}${selected ? ' is-active' : ''}`}
+            class={`${tabClass}${selected ? ' is-active' : ''}`}
             aria-selected={selected}
             // Panels are mounted lazily, so only the selected tab can point at one.
             aria-controls={selected ? `${prefix}-panel-${item.id}` : undefined}
@@ -118,17 +122,35 @@ export interface TabPanelProps {
   id: string;
   idPrefix: string;
   active: boolean;
+  /**
+   * Keep the panel in the DOM (merely `hidden`) while another tab is selected.
+   *
+   * The default unmounts it, which is right for inspector panels: a plugin panel
+   * costs a fetch per view. A panel that holds form state cannot be unmounted
+   * without throwing that state away, so a caller that owns state inside its
+   * panels turns this on.
+   */
+  persist?: boolean;
   children: JSX.Element | JSX.Element[] | null;
 }
 
-export function TabPanel({ id, idPrefix, active, children }: TabPanelProps): JSX.Element | null {
-  if (!active) return null;
+export function TabPanel({
+  id,
+  idPrefix,
+  active,
+  persist = false,
+  children,
+}: TabPanelProps): JSX.Element | null {
+  if (!active && !persist) return null;
   return (
     <div
       id={`${idPrefix}-panel-${id}`}
       class="tab-panel"
       role="tabpanel"
       aria-labelledby={`${idPrefix}-tab-${id}`}
+      // `hidden` takes the panel out of the tab order and the accessibility tree,
+      // so a kept-alive panel is exactly as unreachable as an unmounted one.
+      hidden={!active}
       tabIndex={0}
     >
       {children}

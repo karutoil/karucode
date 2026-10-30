@@ -140,8 +140,11 @@
   /* One line at rest — the dock should not reserve a paragraph's worth of empty
    * space — and it grows with the draft (Composer.tsx measures scrollHeight). */
   min-height: 26px;
-  /* The mock caps the textarea at 150px (Composer.tsx MAX_TEXTAREA_HEIGHT). */
-  max-height: 150px;
+  /* The mock caps the textarea at 150px. `--compose-input-max` is what the
+   * component actually reads, so the phone tier can shrink it without a magic
+   * number in two places. */
+  --compose-input-max: 150px;
+  max-height: var(--compose-input-max);
   padding: 1px 0 0;
   overflow-y: auto;
   border: 0;
@@ -942,6 +945,11 @@
 @media (max-width: 640px) {
   .composer-input {
     font-size: 16px;
+    /* The on-screen keyboard takes roughly half the viewport, and a 150px draft
+     * then leaves the conversation a sliver. `max-height` beats the inline
+     * `height` Composer.tsx sets, so lowering the cap here is enough — no
+     * re-measure needed when the keyboard opens or the phone rotates. */
+    --compose-input-max: min(112px, 22vh);
   }
 
   /* A narrow dock has no room for a wrapped footnote: the status line, the
@@ -984,6 +992,42 @@
 
   .context-pill-meter {
     display: none;
+  }
+
+  /* The context pill is the newest tenant in this row, so it is the one that has
+   * to give way when the pills, the number and Send cannot share a line. It was
+   * measured pushing the row from 36px to 66px at 390px - two lines of dock over
+   * the transcript, which is exactly what the caps above exist to prevent.
+   *
+   * The spacer is what has to yield first: at 390px it was still taking 32-236px
+   * of flex, and the row only wraps once it is gone. Then the pill shrinks, and
+   * the buttons keep enough width for their labels. */
+  .compose-bottom .composer-spacer {
+    flex: 0 1 0;
+    min-width: 0;
+    width: 0;
+  }
+
+  .compose-bottom .model-switcher {
+    max-width: 96px;
+  }
+
+  .compose-bottom .reasoning-selector {
+    max-width: 78px;
+  }
+
+  /* `flex-shrink: 0` on the buttons: they must not be squeezed below their label,
+   * and `min-width` keeps "Send"/"Stop" legible rather than wrapping inside. */
+  .compose-bottom .button-send,
+  .compose-bottom .button-stop {
+    flex: 0 0 auto;
+    min-width: 54px;
+  }
+
+  .context-pill {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
   }
 }
 

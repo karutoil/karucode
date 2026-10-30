@@ -1,29 +1,37 @@
-/* Settings sheet — provider profiles, model libraries, generation, approvals,
- * limits, subagents, plugins/MCP diagnostics and the appearance entry point.
+/* Settings sheet — a tabbed panel over provider profiles, model libraries,
+ * appearance, generation, approvals, subagent/limit tuning, notifications and
+ * plugin/MCP diagnostics.
  *
  * Visual contract: the v3 mock's `.settings-modal` / `.setting-row` /
- * `.toggle` blocks (typography, dividers, 36×21 switches), scaled up to a
- * scrollable sheet because the real form has far more than two rows.
+ * `.toggle` blocks (typography, dividers, 36×21 switches). The sheet used to be
+ * one long scroll; it is now five tabs (see `.settings-tabs`) with per-tab
+ * disclosures (`.settings-advanced`) for the knobs most installs never touch.
+ *
+ * The scroll lives on the *panel*, not on `.settings-body`: the tab strip and
+ * the footer have to stay put while the content between them scrolls, and a
+ * single scroller on the body would carry both away.
  */
 
 .dialog-settings {
-  width: min(580px, 100vw);
+  width: min(680px, 100vw);
 }
 
+/* The sheet's three bands: the header (in Dialog), the scrolling panel, the
+ * footer. `min-height: 0` on the body is what lets the panel, and not the page,
+ * own the overflow. */
 .settings-body {
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
-  padding: 0 23px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  padding: 0;
 }
 
 .settings-loading {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 22px 0;
+  padding: 22px 23px;
 }
 
 .skeleton-setting-row {
@@ -32,8 +40,104 @@
 
 .settings-form {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
+  min-height: 0;
 }
+
+/* ---------- tabs ------------------------------------------------------- */
+
+/* Same tablist semantics as the inspector strip (Tabs.tsx), different look: a
+ * full-width row of equal cells under the sheet header, because the sheet has a
+ * fixed, small number of sections rather than a growing plugin list. */
+.settings-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 0 15px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+
+.settings-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  /* Grow to share the row, but never shrink below the label: on a narrow sheet
+   * the strip scrolls instead of overlapping its labels. */
+  flex: 1 0 max-content;
+  min-width: 0;
+  height: 40px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-small);
+  font-weight: 550;
+  white-space: nowrap;
+  transition: color var(--transition-fast);
+}
+
+.settings-tab > span:not(.tab-count):not(.tab-icon) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settings-tab:hover {
+  color: var(--tab-hover);
+}
+
+.settings-tab.is-active {
+  color: var(--text);
+}
+
+.settings-tab.is-active::after {
+  content: '';
+  position: absolute;
+  right: 8px;
+  bottom: 0;
+  left: 8px;
+  height: 2px;
+  border-radius: 3px 3px 0 0;
+  background: var(--accent);
+}
+
+.settings-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+  border-radius: var(--radius-sm);
+}
+
+/* The panel area: one scroller for whichever tab is showing. */
+.settings-panels {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.settings-panels > .tab-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 23px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+/* Tabs keep their panels mounted (tab state would otherwise be lost), so a
+ * hidden panel must also be inert: `display: none` takes it out of the tab
+ * order and out of the layout in one declaration. */
+.settings-panels > .tab-panel[hidden] {
+  display: none;
+}
+
 
 /* ---------- sections --------------------------------------------------- */
 
@@ -87,6 +191,67 @@
   gap: 15px;
   padding: 15px 0;
   border-top: 1px solid var(--line-card);
+}
+
+/*
+ * A row whose control is a stack of switches rather than a single input: the
+ * notifications section groups four per-event toggles this way. `stretch` keeps the
+ * control block full width instead of squeezing it to the right.
+ */
+.setting-row-stack {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.toggle-group {
+  display: grid;
+  gap: 9px;
+  padding: 2px 0 2px 2px;
+  border-left: 2px solid var(--line-card);
+  padding-left: 12px;
+}
+
+/* A sub-heading inside one settings section (server routing vs this browser). */
+.settings-subhead {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-card);
+}
+
+.settings-subhead h4 {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+/* A small input that sits on the right of a setting row. */
+.input-inline {
+  flex: 0 0 auto;
+  width: 92px;
+}
+
+.input-range {
+  flex: 0 0 auto;
+  width: 160px;
+  accent-color: var(--accent);
+}
+
+.cue-buttons {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cue-buttons .panel-action-btn {
+  padding: 7px 10px;
+  font-size: 10.5px;
 }
 
 .setting-copy {
@@ -958,20 +1123,142 @@
   font-size: 0.9em;
 }
 
+/* ---------- advanced disclosure ---------------------------------------- */
+
+/* One per tab that has tuning knobs. Collapsed by default: the point of the
+ * tabs is that the common settings fit without scrolling, and a timeouts block
+ * would refill that screen for everyone to spare a click for a few. */
+.settings-advanced {
+  margin: 20px 0 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.settings-advanced summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 11px 13px;
+  cursor: pointer;
+  list-style: none;
+  transition: background-color var(--transition-fast);
+}
+
+.settings-advanced summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-advanced summary:hover {
+  background: var(--surface-hover);
+}
+
+.settings-advanced summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.settings-advanced-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: var(--fs-small);
+  font-weight: 650;
+}
+
+.settings-advanced-label svg {
+  color: var(--muted);
+  transition: transform var(--transition-fast);
+}
+
+/* The chevron points at the body: down when open, right when closed. */
+.settings-advanced[open] > summary .settings-advanced-label svg {
+  transform: rotate(180deg);
+}
+
+.settings-advanced-note {
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+}
+
+.settings-advanced[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+/* Inset to the summary's own gutter, because the contents are full settings
+ * sections: they bring their own vertical rhythm but no horizontal padding, so
+ * without this their labels sit flush against the disclosure's border. */
+.settings-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 13px 6px;
+}
+
+/* Inside a disclosure the section is the only thing on screen, so the divider
+ * that separates sections elsewhere has nothing to separate. */
+.settings-advanced-body > .settings-section {
+  padding-bottom: 14px;
+}
+
+.settings-advanced-body > .settings-section:first-child {
+  padding-top: 14px;
+}
+
+.settings-advanced-help {
+  margin: 0;
+  padding: 0 0 4px;
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  line-height: 1.55;
+}
+
+/* A section inside a disclosure is the last thing in the panel, so it does not
+ * need the divider it draws when it follows another section. */
+.settings-advanced-body .settings-section:last-of-type {
+  border-bottom: 0;
+}
+
 /* ---------- footer ----------------------------------------------------- */
 
 .settings-footer {
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
-  margin: 22px -23px 0;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   padding: 13px 23px;
   border-top: 1px solid var(--line);
   background: var(--sidebar);
+}
+
+/* The error summary takes the row when it is there, so the buttons stay put
+ * instead of jumping between the two states. */
+.settings-error-summary {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  gap: 6px;
+  min-width: 0;
+  color: var(--danger);
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+}
+
+.settings-error-summary svg {
+  flex: 0 0 auto;
+}
+
+.settings-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .settings-footer .button {
@@ -981,7 +1268,17 @@
 /* ---------- narrow ----------------------------------------------------- */
 
 @media (max-width: 600px) {
-  .settings-body {
+  .settings-tabs {
+    padding: 0 10px;
+  }
+
+  .settings-tab {
+    height: 38px;
+    padding: 0 8px;
+    font-size: var(--fs-micro);
+  }
+
+  .settings-panels > .tab-panel {
     padding: 0 16px;
   }
 
@@ -998,11 +1295,22 @@
   }
 
   .settings-footer {
-    margin-right: -16px;
-    margin-left: -16px;
     padding-bottom: calc(13px + env(safe-area-inset-bottom, 0px));
     padding-right: 16px;
     padding-left: 16px;
+  }
+
+  .settings-error-summary {
+    flex-basis: 100%;
+  }
+
+  .settings-footer-actions {
+    flex: 1 1 auto;
+    margin-left: 0;
+  }
+
+  .settings-footer-actions .button {
+    flex: 1 1 auto;
   }
 
   .provider-actions .button {

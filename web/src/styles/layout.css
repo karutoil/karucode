@@ -339,8 +339,17 @@
   padding: 15px 34px 15px 13px;
 }
 
+.session-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .session-title {
   overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
   padding-right: 13px;
   color: color-mix(in srgb, var(--text) 88%, var(--muted));
   font-size: 12px;
@@ -348,6 +357,28 @@
   line-height: 1.5;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/*
+ * Unread notifications for a session.
+ *
+ * The dot-and-count is deliberately small and low-contrast: it is a reminder, not an
+ * alarm, and it must not compete with the running indicator. It uses the accent
+ * token so it reads as "news" in every theme, and `tabular-nums` keeps a two-digit
+ * count from reflowing the title.
+ */
+.session-unread {
+  flex: 0 0 auto;
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
 }
 
 .session-row.is-active .session-title {
@@ -1067,10 +1098,6 @@
   white-space: nowrap;
 }
 
-.mobile-toolbar {
-  display: none;
-}
-
 .sheet-backdrop {
   display: none;
 }
@@ -1162,13 +1189,15 @@
     display: block;
   }
 
+  /* A sheet is a sheet: with the bottom toolbar gone it owns the full height of
+   * the screen, so it gains the 57px the bar used to keep at the bottom. */
   .rail {
     position: fixed;
     top: 0;
-    bottom: calc(57px + env(safe-area-inset-bottom, 0px));
-    left: var(--rail-w);
+    bottom: 0;
+    left: 0;
     z-index: 40;
-    width: min(258px, 88vw);
+    width: min(300px, 88vw);
     height: auto;
     border-right: 1px solid var(--line-strong);
     box-shadow: 15px 0 30px var(--shadow-lg);
@@ -1180,7 +1209,7 @@
   }
 
   .rail-inner {
-    width: min(258px, 88vw);
+    width: min(300px, 88vw);
   }
 
   .session-menu-trigger {
@@ -1196,7 +1225,7 @@
 
   .app[data-rail-collapsed='true'] .rail {
     flex-basis: auto;
-    width: min(258px, 88vw);
+    width: min(300px, 88vw);
     border-right-color: var(--line-strong);
   }
 
@@ -1204,9 +1233,9 @@
     position: fixed;
     top: 0;
     right: 0;
-    bottom: calc(57px + env(safe-area-inset-bottom, 0px));
+    bottom: 0;
     z-index: 40;
-    width: min(360px, 92vw);
+    width: min(380px, 92vw);
     height: auto;
     border-left: 1px solid var(--line-strong);
     box-shadow: -15px 0 36px var(--shadow-lg);
@@ -1218,7 +1247,7 @@
   }
 
   .inspector-inner {
-    width: min(360px, 92vw);
+    width: min(380px, 92vw);
   }
 
   .inspector.is-open,
@@ -1230,18 +1259,14 @@
 
   .app[data-inspector-collapsed='true'] .inspector {
     flex-basis: auto;
-    width: min(360px, 92vw);
+    width: min(380px, 92vw);
     border-left-color: var(--line-strong);
   }
 
   .sheet-backdrop {
     display: block;
     position: fixed;
-    top: 0;
-    right: 0;
-    bottom: calc(57px + env(safe-area-inset-bottom, 0px));
-    /* The project rail stays uncovered (and usable) beside a sheet. */
-    left: var(--rail-w);
+    inset: 0;
     z-index: 35;
     width: 100%;
     height: auto;
@@ -1251,16 +1276,23 @@
     cursor: default;
   }
 
+  /* The rail is a sheet now, so the chat column takes the whole width. The one
+   * thing it still has to surrender is the home indicator's band. */
   .chat-main {
     height: 100dvh;
-    padding-left: var(--rail-w);
-    padding-bottom: calc(57px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
   .main-head {
-    gap: 10px;
-    padding: 0 14px;
+    gap: 8px;
+    /* The status bar is not part of the viewport when the app is installed to
+     * the home screen (`viewport-fit=cover`), so the header has to inset itself
+     * or the session buttons sit under the clock. */
+    height: calc(var(--header-h) + env(safe-area-inset-top, 0px));
+    min-height: calc(var(--header-h) + env(safe-area-inset-top, 0px));
+    padding: env(safe-area-inset-top, 0px) 12px 0;
   }
+
   /* Like the mock's mobile header: icon buttons only, one 31px square each. */
   .head-btn.sessions-toggle {
     display: inline-flex;
@@ -1279,9 +1311,17 @@
     display: none;
   }
 
+  .header-buttons {
+    gap: 6px;
+  }
+
+  .header-divider {
+    display: none;
+  }
+
   .workspace-tabbar {
     gap: 18px;
-    padding: 0 14px;
+    padding: 0 12px;
   }
 
   .workspace-tabs {
@@ -1290,52 +1330,58 @@
 
   .chat-inner {
     /* Longhands, so the dock's reserved band (base rule) survives the tier. */
-    padding-top: 22px;
-    padding-right: 14px;
-    padding-left: 14px;
+    padding-top: 18px;
+    padding-right: 12px;
+    padding-left: 12px;
   }
 
   .composer-wrap {
     /* The mock's narrow-viewport composer region (`<=800` in the mock; our
        compact mode starts at 1023, where the rail becomes a sheet). */
-    padding: 9px 10px 11px;
+    padding: 9px 8px 10px;
+  }
+}
+
+/* The phone tier: the header gives up its second line and the tab strip gives up
+ * its padding, because a 66 + 44 + 57px frame on a 956px screen left the
+ * conversation 82% of the viewport and one tool card filled a third of what was
+ * left. */
+@media (max-width: 640px) {
+  :root {
+    --header-h: 52px;
+    --tabs-h: 38px;
   }
 
-  .mobile-toolbar {
-    display: flex;
-    position: fixed;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    z-index: 45;
-    height: calc(57px + env(safe-area-inset-bottom, 0px));
-    padding-bottom: env(safe-area-inset-bottom, 0px);
-    border-top: 1px solid var(--line);
-    background: var(--sidebar);
+  .main-head {
+    padding-right: 10px;
+    padding-left: 10px;
   }
 
-  .mobile-tab {
-    display: flex;
-    flex: 1 1 0;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 2px;
-    color: var(--muted);
-    font-size: var(--fs-micro);
-    transition:
-      color var(--transition-fast),
-      background-color var(--transition-fast);
+  .header-buttons {
+    gap: 5px;
   }
 
-  .mobile-tab[aria-pressed='true'],
-  .mobile-tab.is-active {
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  .head-btn {
+    height: 30px;
   }
 
-  .mobile-tab:active {
-    background: var(--surface-raised);
+  .head-btn.head-icon,
+  .head-btn.accent-head {
+    width: 30px;
+  }
+
+  /* The breadcrumb's project → sessions → activity line is a second row of
+   * chrome the title alone already answers on a phone. */
+  .breadcrumb {
+    display: none;
+  }
+
+  .main-title {
+    margin-top: 0;
+  }
+
+  .workspace-tabbar {
+    padding: 0 10px;
   }
 }
 
@@ -1362,12 +1408,12 @@
 
 @media (max-width: 460px) {
   .chat-inner {
-    padding: 16px 12px 10px;
+    padding: 14px 10px 10px;
     padding-bottom: calc(var(--composer-h, 0px) + 10px);
   }
 
   .composer-wrap {
-    padding: 8px 10px 10px;
+    padding: 8px 8px 9px;
   }
 
   .breadcrumb span:not(strong):not(.crumb-sep) {
@@ -1600,9 +1646,20 @@
     position: fixed;
     top: auto;
     right: 8px;
+    /* The rail is not on screen at this width (`--rail-w` is 0 there); the `+8px`
+     * is the menu's own gutter. Reserving `--rail-w` kept it honest while the
+     * rail still existed. */
     bottom: calc(64px + env(safe-area-inset-bottom, 0px));
     left: calc(var(--rail-w) + 8px);
     width: auto;
     max-height: min(380px, 60dvh);
+  }
+
+  /* Keyboard shortcuts are not a thing on a phone: the `Ctrl N` on the new-session
+   * button and the `/` beside the search field are noise in a 300px sheet. The
+   * affordances they label are still there. */
+  .rail .shortcut,
+  .rail .side-search .keycap {
+    display: none;
   }
 }

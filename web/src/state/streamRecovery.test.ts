@@ -3,6 +3,7 @@ import type { SessionDetail } from '../api/types';
 import { NOW, detailFixture, jsonResponse, resetAppState, storedMessage, summaryFixture } from '../test/fixtures';
 import { emptyChatState } from './chat';
 import * as actions from './actions';
+import { recallPromptTokens } from './promptTokens';
 import * as store from './store';
 
 /**
@@ -177,5 +178,53 @@ describe('stream recovery', () => {
     // …and the answer that is still streaming was not deleted to get it.
     expect(transcriptText()).toContain('the streamed answer');
     expect(store.chat.value.running).toBe(true);
+  });
+
+  it('keeps the context pill populated across a reload', async () => {
+    // `usage` is live-only state: the session snapshot never carries it, so
+    // without an explicit cache the pill went blank on every reload until the
+    // next call finished. That is the one question the pill exists to answer.
+    await openRun();
+    push({
+      seq: 3,
+      ts_ms: NOW,
+      session_id: 's_ab12',
+      run_id: 'r_x',
+      type: 'usage',
+      input_tokens: 46_000,
+      output_tokens: 100,
+    });
+    await vi.waitFor(() => expect(store.chat.value.lastPromptTokens).toBe(46_000), {
+      timeout: 3000,
+    });
+
+    // A reload is: fresh chat state, then the same session opened again.
+    store.chat.value = emptyChatState('s_ab12');
+    expect(store.chat.value.lastPromptTokens).toBeNull();
+    await actions.openSession('s_ab12', { force: true });
+
+    expect(store.chat.value.lastPromptTokens).toBe(46_000);
+  });
+
+  it('does not carry one session\u2019s prompt size into another', async () => {
+    await openRun();
+    push({
+      seq: 3,
+      ts_ms: NOW,
+      session_id: 's_ab12',
+      run_id: 'r_x',
+      type: 'usage',
+      input_tokens: 46_000,
+      output_tokens: 100,
+    });
+    await vi.waitFor(() => expect(store.chat.value.lastPromptTokens).toBe(46_000), {
+      timeout: 3000,
+    });
+
+    store.chat.value = emptyChatState('s_cd34');
+    store.currentSessionId.value = 's_cd34';
+    // A different session has no remembered value, so the pill stays hidden
+    // rather than showing the previous conversation's fill.
+    expect(recallPromptTokens('s_cd34')).toBeNull();
   });
 });

@@ -53,7 +53,12 @@ export function useStreamRate(
       const tokens = estimateTokens(latestChars.current);
       const next = withSample(samples.current, { at: now, tokens });
       samples.current = next;
-      setState({ tokens, rate: tokensPerSecond(next, now) });
+      const rate = tokensPerSecond(next, now);
+      // A long `cargo test` ticks with nothing to report; re-rendering the badge
+      // 160 times for an unchanged pair is pure waste.
+      setState((previous) =>
+        previous.tokens === tokens && previous.rate === rate ? previous : { tokens, rate },
+      );
     };
 
     // One sample now, so a turn that is already mid-answer when this mounts (a

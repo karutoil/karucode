@@ -139,9 +139,17 @@ async fn handshake_lists_namespaced_tools() {
     let manifest = diags[0].manifest.as_ref().expect("manifest");
     assert_eq!(manifest.name, "fake");
     assert_eq!(manifest.protocol, "1");
-    assert_eq!(manifest.hooks, vec!["before_prompt".to_string()]);
+    assert_eq!(
+        manifest.hooks,
+        vec![
+            "before_prompt".to_string(),
+            "on_run_end".to_string(),
+            "on_notify".to_string()
+        ]
+    );
     assert!(diags[0].pid.is_some());
-    assert_eq!(diags[0].tools.len(), 8);
+    // Eight tool behaviours plus the five notification-frame fixtures.
+    assert_eq!(diags[0].tools.len(), 13);
 
     let tools = host.tools();
     let echo = find(&tools, "plugin__fake__echo");
@@ -295,7 +303,7 @@ async fn a_dead_plugin_is_restarted_once_per_failed_call() {
     let diags = host.diagnostics();
     assert_eq!(diags[0].status, PluginStatus::Ready, "{:?}", diags[0].error);
     assert_eq!(diags[0].restart_count, 1);
-    assert_eq!(host.tools().len(), 7);
+    assert_eq!(host.tools().len(), 12);
 
     host.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();
@@ -405,7 +413,7 @@ async fn enable_and_disable_start_and_stop_the_process() {
     let dir = temp_dir("toggle");
     let mut host = PluginHost::discover(&[plugin("fake", "fake")], &dir);
     host.start_all().await;
-    assert_eq!(host.tools().len(), 7);
+    assert_eq!(host.tools().len(), 12);
     assert_eq!(host.diagnostics()[0].status, PluginStatus::Ready);
 
     let diag = host.set_enabled("fake", false).await.unwrap();
@@ -417,7 +425,7 @@ async fn enable_and_disable_start_and_stop_the_process() {
     let diag = host.set_enabled("fake", true).await.unwrap();
     assert_eq!(diag.status, PluginStatus::Ready);
     assert!(diag.pid.is_some());
-    assert_eq!(host.tools().len(), 7);
+    assert_eq!(host.tools().len(), 12);
     // Enabling resets the restart budget.
     assert_eq!(diag.restart_count, 0);
 
@@ -1244,7 +1252,7 @@ async fn rescan_hot_loads_a_new_manifest_and_hot_unloads_it_again() {
     let diags = host.diagnostics();
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].status, PluginStatus::Ready, "{:?}", diags[0].error);
-    assert_eq!(host.tools().len(), 7);
+    assert_eq!(host.tools().len(), 12);
 
     // Removing the directory unloads it: no process, no tools, no diagnostics.
     std::fs::remove_dir_all(dir.join("plugins").join("fresh")).unwrap();
@@ -1272,7 +1280,7 @@ async fn a_rescan_of_an_unchanged_tree_disturbs_nothing() {
     // plugin's state (or lose its in-memory data) on every poll.
     assert_eq!(host.diagnostics()[0].pid, Some(pid));
     assert_eq!(host.diagnostics()[0].status, PluginStatus::Ready);
-    assert_eq!(host.tools().len(), 7);
+    assert_eq!(host.tools().len(), 12);
 
     host.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();
@@ -1296,7 +1304,7 @@ async fn rescan_restarts_a_plugin_whose_config_changed() {
         Some(pid),
         "the process should have been replaced"
     );
-    assert_eq!(host.tools().len(), 7);
+    assert_eq!(host.tools().len(), 12);
 
     host.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();
@@ -1358,7 +1366,7 @@ async fn reload_restarts_one_plugin_only() {
         .unwrap();
     assert_eq!(diag.status, PluginStatus::Ready);
     assert_ne!(diag.pid, Some(pid));
-    assert_eq!(host.tools().len(), 7);
+    assert_eq!(host.tools().len(), 12);
 
     let err = host
         .reload("nope", &[plugin("fake", "fake")])
@@ -1438,6 +1446,192 @@ async fn source_stamp_moves_only_when_the_sources_move() {
         host.source_stamp(),
         "a rebuilt command file must move the stamp"
     );
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Plugin-raised notifications (`notify`) and the `on_notify` hook
+// ---------------------------------------------------------------------------
+
+/// The whole point of `notify`: a plugin says something, and the *host* turns it
+/// into a validated notice the server can publish. A plugin has no other way to
+/// reach a browser.
+#[tokio::test]
+async fn a_plugin_can_raise_a_notification() {
+    let dir = temp_dir("notify-good");
+    let mut host = PluginHost::discover(&[plugin("fake", "fake")], &dir);
+    // Subscribed before start_all: a plugin may notify during its own startup.
+    let mut notices = host.listen_notifications();
+    host.start_all().await;
+    let tools = host.tools();
+
+    let outcome = call(
+        find(&tools, "plugin__fake__notify_good"),
+        &dir,
+        serde_json::json!({"kind": "needs_input", "title": "Deploy needs a yes"}),
+    )
+    .await;
+    assert!(outcome.ok, "{outcome:?}");
+
+    let notice = tokio::time::timeout(Duration::from_secs(5), notices.recv())
+        .await
+        .expect("a notice within 5s")
+        .expect("channel open");
+    assert_eq!(notice.plugin, "fake");
+    assert_eq!(notice.kind, kc_core::notify::NotifyKind::NeedsInput);
+    assert_eq!(notice.title, "Deploy needs a yes");
+    assert_eq!(notice.body, "the fixture asked for attention");
+    assert!(notice.sticky, "the fixture asked to stay on screen");
+    // The session comes from the call context the host forwards.
+    assert_eq!(notice.session_id, "s_test");
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Every rejection rule, in one test: a malformed frame is dropped rather than
+/// becoming a half-valid notification, and it must not disturb the plugin.
+#[tokio::test]
+async fn malformed_notifications_are_dropped_without_disturbing_the_plugin() {
+    let dir = temp_dir("notify-bad");
+    let mut host = PluginHost::discover(&[plugin("fake", "fake")], &dir);
+    let mut notices = host.listen_notifications();
+    host.start_all().await;
+    let tools = host.tools();
+
+    for (tool, args) in [
+        ("plugin__fake__notify_bad_kind", serde_json::json!({})),
+        ("plugin__fake__notify_no_title", serde_json::json!({})),
+        ("plugin__fake__notify_junk", serde_json::json!({})),
+    ] {
+        let outcome = call(find(&tools, tool), &dir, args).await;
+        // The tool itself succeeded: sending a bad notification is the *plugin's*
+        // mistake, and refusing it must not look like a tool failure.
+        assert!(outcome.ok, "{tool} should still answer: {outcome:?}");
+    }
+
+    // Nothing reached the channel...
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), notices.recv())
+            .await
+            .is_err(),
+        "no malformed notification may reach the server"
+    );
+    // ...and the plugin is still healthy and answering.
+    let outcome = call(
+        find(&tools, "plugin__fake__echo"),
+        &dir,
+        serde_json::json!({"text": "still alive"}),
+    )
+    .await;
+    assert!(outcome.ok);
+    assert_eq!(outcome.content, "echo: still alive");
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A plugin in a loop must not be able to flood someone's desktop: the burst
+/// allowance is spent and the rest are dropped.
+#[tokio::test]
+async fn a_notification_flood_is_rate_limited() {
+    let dir = temp_dir("notify-flood");
+    let mut host = PluginHost::discover(&[plugin("fake", "fake")], &dir);
+    let mut notices = host.listen_notifications();
+    host.start_all().await;
+    let tools = host.tools();
+
+    let outcome = call(
+        find(&tools, "plugin__fake__notify_flood"),
+        &dir,
+        serde_json::json!({}),
+    )
+    .await;
+    assert!(outcome.ok, "a flood must not fail the call: {outcome:?}");
+
+    let mut received = 0;
+    while tokio::time::timeout(Duration::from_millis(150), notices.recv())
+        .await
+        .is_ok()
+    {
+        received += 1;
+        assert!(received <= 10, "the fixture only sent 10");
+    }
+    // Ten were sent; the burst allowance is five. The exact number depends on how
+    // much wall clock the calls took, so the assertion is the safety property:
+    // some were dropped, and not all ten came through.
+    assert!(
+        received > 0 && received < 10,
+        "the flood must be partially dropped, got {received} of 10"
+    );
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The "out" half: a plugin that advertises `on_notify` hears about notifications
+/// the runtime emits, which is how a plugin bridges karucode to an external
+/// notifier without karucode growing that integration.
+#[tokio::test]
+async fn on_notify_reaches_a_plugin_that_advertises_it() {
+    let dir = temp_dir("notify-hook");
+    let mut host = PluginHost::discover(&[plugin("fake", "fake")], &dir);
+    host.start_all().await;
+
+    let observer = {
+        // `PluginHost` implements `Hooks`; the observer is what the runtime uses.
+        let hooks: Arc<dyn Hooks> = Arc::new(host.hooks_handle());
+        hooks
+            .notifier()
+            .expect("the plugin host observes notifications")
+    };
+    // The fixture echoes the hook to stderr and answers non-null, so a completed
+    // round trip is the proof it arrived.
+    observer
+        .on_notify(serde_json::json!({
+            "session_id": "s_test",
+            "run_id": "r_test",
+            "kind": "run_finished",
+            "title": "Run finished",
+            "body": "all done",
+            "source": "runtime",
+        }))
+        .await;
+
+    // No assertion on the return value: `on_notify` is fire-and-forget by design,
+    // and the call above must simply not hang or panic. The plugin answering is
+    // what `fan_out` waits for within its 5s budget.
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Without a listener, a `notify` frame is dropped silently: the host must work
+/// in an embedding that does not care about notifications.
+#[tokio::test]
+async fn notify_without_a_listener_is_harmless() {
+    let dir = temp_dir("notify-nolistener");
+    let mut host = PluginHost::discover(&[plugin("fake", "fake")], &dir);
+    host.start_all().await;
+    let tools = host.tools();
+
+    let outcome = call(
+        find(&tools, "plugin__fake__notify_good"),
+        &dir,
+        serde_json::json!({"title": "nobody is listening"}),
+    )
+    .await;
+    assert!(outcome.ok, "{outcome:?}");
+
+    // Still usable afterwards.
+    let outcome = call(
+        find(&tools, "plugin__fake__echo"),
+        &dir,
+        serde_json::json!({"text": "fine"}),
+    )
+    .await;
+    assert!(outcome.ok);
 
     host.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();

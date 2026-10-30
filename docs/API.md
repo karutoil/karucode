@@ -76,6 +76,11 @@ directory. `provider_configured` is computed from the effective model (below).
   "subagents": { "max_concurrent": 3, "max_iterations": 200,
                  "max_continues": 60, "allow_recursive": false,
                  "max_depth": 1, "timeout_secs": 14400 },
+  "notifications": { "enabled": true, "run_finished": true, "needs_input": true,
+                     "error": true, "info": true, "plugin": true,
+                     "min_run_secs": 0, "say_body": true,
+                     "max_min_run_secs": 3600,
+                     "kinds": ["run_finished", "needs_input", "error", "info"] },
   "plugins": [ { "name": "example-hello", "version": "0.1.0", "status": "ready",
                  "tools": ["plugin__example-hello__hello"], "error": null,
                  "permissions": ["files.read"] } ],
@@ -893,6 +898,7 @@ When a resume is not possible, the client has to notice what it missed:
 | `agent_progress` | `agent_id`, `iterations`, `note` |
 | `agent_finished` | `agent_id`, `status`, `summary`, `error` |
 | `notice` | `level`, `message` |
+| `notification` | `notification` — a `{id, kind, title, body, session_id, session_title, source, sound?, sticky}` payload. `kind` is `run_finished`, `needs_input`, `error` or `info`; `source` is `runtime` or a plugin's name. Emitted after the state it describes is persisted, and **not emitted at all** when `[notifications] enabled = false`. Render an unknown `kind` as `info` rather than dropping it. |
 | `stream_lagged` | `skipped` - the SSE pump dropped frames for this client; refetch the session (emitted by the server, not the runtime) |
 | `error` | `message`, `kind` |
 

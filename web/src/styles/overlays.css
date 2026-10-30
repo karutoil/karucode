@@ -738,6 +738,25 @@
   color: var(--muted);
 }
 
+/*
+ * "Open" on a notification toast: jumps to the session the notification is about.
+ * A toast that names a session but cannot take you there is only half useful.
+ */
+.toast-action {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border: 1px solid var(--line-toast);
+  border-radius: calc(var(--radius) - 2px);
+  color: var(--text-toast);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.toast-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-toast) 10%, transparent);
+}
+
 .toast-close:hover:not(:disabled) {
   color: var(--text);
 }

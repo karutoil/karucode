@@ -36,9 +36,11 @@ manifest = {
     'version': '0.1.0',
     'description': 'fixture plugin for the karucode plugin-host tests',
     'protocol': protocol,
-    'capabilities': ['tools', 'hooks'],
+    'capabilities': ['tools', 'hooks', 'notifications'],
     'permissions': ['files.read'],
-    'hooks': ['before_prompt'],
+    # `on_notify` is advertised so the host fans emitted notifications out to this
+    # plugin, which is how the "out" half of the notification story is tested.
+    'hooks': ['before_prompt', 'on_run_end', 'on_notify'],
     # One panel that answers `panels/read`, one that only names a tool (the
     # pre-panels/read fallback), and one that reports a failure.
     'panels': [
@@ -71,6 +73,19 @@ tools = [
     {'name': 'broken', 'description': 'Listed but not implemented: exercises JSON-RPC error mapping.',
      'parameters': schema({}), 'class': 'read_only'},
     {'name': 'context', 'description': 'Echo the call context the host forwarded.',
+     'parameters': schema({}), 'class': 'read_only'},
+    # Notification frames. `notify_good` is a well-formed request for a human's
+    # attention; every `notify_bad_*` exercises one rejection rule.
+    {'name': 'notify_good', 'description': 'Raise a notification, then answer.',
+     'parameters': schema({'kind': {'type': 'string'}, 'title': {'type': 'string'}}),
+     'class': 'read_only'},
+    {'name': 'notify_bad_kind', 'description': 'Raise a notification with an unknown kind.',
+     'parameters': schema({}), 'class': 'read_only'},
+    {'name': 'notify_no_title', 'description': 'Raise a notification with no title.',
+     'parameters': schema({}), 'class': 'read_only'},
+    {'name': 'notify_junk', 'description': 'Raise a notification whose params are not an object.',
+     'parameters': schema({}), 'class': 'read_only'},
+    {'name': 'notify_flood', 'description': 'Raise ten notifications at once.',
      'parameters': schema({}), 'class': 'read_only'},
 ]
 
@@ -136,6 +151,35 @@ for line in sys.stdin:
         elif tool == 'context':
             result(rid, {'ok': True, 'content': 'context',
                          'meta': {'context': context}})
+        elif tool == 'notify_good':
+            # A well-formed request for a human's attention. Written before the
+            # response so the host sees it while the call is still in flight, which
+            # is the ordering a real plugin would produce.
+            ctx = context or {}
+            send({'jsonrpc': '2.0', 'method': 'notify', 'params': {
+                'kind': args.get('kind') or 'info',
+                'title': args.get('title') or 'from the fake plugin',
+                'body': 'the fixture asked for attention',
+                'session_id': ctx.get('session_id') or '',
+                'sticky': True,
+            }})
+            result(rid, {'ok': True, 'content': 'notified'})
+        elif tool == 'notify_bad_kind':
+            send({'jsonrpc': '2.0', 'method': 'notify', 'params': {
+                'kind': 'critical', 'title': 'should be refused'}})
+            result(rid, {'ok': True, 'content': 'sent an unknown kind'})
+        elif tool == 'notify_no_title':
+            send({'jsonrpc': '2.0', 'method': 'notify',
+                  'params': {'kind': 'info', 'title': ''}})
+            result(rid, {'ok': True, 'content': 'sent an empty title'})
+        elif tool == 'notify_junk':
+            send({'jsonrpc': '2.0', 'method': 'notify', 'params': 'not-an-object'})
+            result(rid, {'ok': True, 'content': 'sent junk'})
+        elif tool == 'notify_flood':
+            for index in range(10):
+                send({'jsonrpc': '2.0', 'method': 'notify', 'params': {
+                    'kind': 'info', 'title': 'flood %d' % index}})
+            result(rid, {'ok': True, 'content': 'flooded'})
         else:
             error(rid, -32601, 'unknown tool %s' % tool)
     elif method == 'panels/read':
@@ -172,6 +216,14 @@ for line in sys.stdin:
                          % (name, payload.get('session_id', '?'))})
         elif hook == 'on_run_end':
             result(rid, {'output': None})
+        elif hook == 'on_notify':
+            # The "out" half of the plugin notification story: the host fans every
+            # emitted notification out to plugins that advertise `on_notify`. Echoed
+            # to stderr so a test can assert it arrived without a second channel.
+            sys.stderr.write('fake plugin: on_notify %s/%s\n'
+                             % (payload.get('kind', '?'), payload.get('title', '?')))
+            sys.stderr.flush()
+            result(rid, {'output': {'seen': payload.get('kind')}})
         else:
             result(rid, {'output': None})
     elif method == 'shutdown':
