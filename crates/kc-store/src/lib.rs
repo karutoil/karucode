@@ -1,19 +1,51 @@
 //! SQLite persistence.
 //!
-//! One writer connection guarded by a mutex, WAL mode, synchronous=NORMAL. All
-//! queries run on the blocking pool so the async runtime is never blocked.
+//! One writer connection guarded by a mutex plus a small pool of read-only
+//! connections, WAL mode, synchronous=NORMAL. WAL lets the readers run while the
+//! writer commits, so a long `list_messages` scan no longer queues every write
+//! behind it. All queries run on the blocking pool so the async runtime is never
+//! blocked.
+//!
+//! Three invariants are enforced at [`SqliteStore::open`] instead of being
+//! assumed:
+//!
+//! * **one process per data directory** — an exclusive `flock` on
+//!   `<data_dir>/karucode.lock` is held for the lifetime of the store, so two
+//!   servers can never migrate the same file or mark each other's live runs as
+//!   interrupted;
+//! * **the pragmas actually took effect** — `journal_mode=WAL` and
+//!   `foreign_keys=ON` are read back and a failure is fatal, because a silently
+//!   disabled `foreign_keys` turns `ON DELETE CASCADE` into orphaned rows;
+//! * **the file is readable** — `PRAGMA quick_check` runs before any migration,
+//!   so corruption is reported with a recovery command instead of a raw
+//!   rusqlite string.
 
 use async_trait::async_trait;
 use kc_core::config::SessionModelSelection;
 use kc_core::error::{Error, Result};
-use kc_core::message::ToolCall;
+use kc_core::message::{ImageAttachment, ToolCall};
 use kc_core::store::*;
-use rusqlite::{params, Row};
+use rusqlite::{params, OptionalExtension, Row};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 6;
+
+/// Advisory lock file that makes a data directory single-instance.
+const LOCK_FILE_NAME: &str = "karucode.lock";
+
+/// Read-only connections used by the `list_*` / `get_*` paths. Two is enough to
+/// keep a slow scan from starving the UI's polling reads without multiplying the
+/// per-connection page cache.
+const READ_POOL_SIZE: usize = 2;
+
+/// A retention pass always keeps this many newest messages per session, so a
+/// session that has been idle for longer than the retention window still has the
+/// context its next run needs.
+const RETENTION_KEEP_MESSAGES: usize = 100;
 
 /// Schema v1. Every statement is `IF NOT EXISTS` so a partially applied
 /// migration can be re-run safely; the whole batch runs in one transaction.
@@ -130,9 +162,82 @@ const MIGRATION_3: &str = r#"
 ALTER TABLE sessions ADD COLUMN model TEXT;
 "#;
 
+/// Schema v4: multi-instance safety and the indexes the hot queries need.
+///
+/// `instance_id` records which process created a run/agent. Crash recovery
+/// (`mark_interrupted_runs` / `mark_interrupted_agents`) is scoped to the
+/// current instance, so a second server can never mark another server's live
+/// rows as interrupted. Rows written before v4 keep the empty string and are
+/// therefore never touched by recovery — they are already terminal.
+///
+/// The indexes cover the four queries that were scanning:
+/// `messages(agent_id, id)` for `list_agent_messages`,
+/// `approvals(run_id)` for `expire_pending_approvals`,
+/// `approvals(session_id, status)` for `list_pending_approvals(Some(_))` and
+/// `sessions(updated_at)` for the `ORDER BY s.updated_at DESC` in
+/// `list_sessions`.
+const MIGRATION_4: &str = r#"
+ALTER TABLE runs ADD COLUMN instance_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE agents ADD COLUMN instance_id TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS idx_messages_agent_id ON messages(agent_id, id);
+CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals(run_id);
+CREATE INDEX IF NOT EXISTS idx_approvals_session_status ON approvals(session_id, status);
+CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);
+"#;
+
+/// Schema v5: images carried by a message.
+///
+/// A `tool` message cannot hold pixels on the OpenAI-compatible wire format, so
+/// `read_file` on an image stores the base64 payload beside the text and
+/// `kc-provider` re-emits it as a follow-up `user` message with an `image_url`
+/// content part. `'[]'` for rows written before v5 keeps every existing
+/// transcript readable.
+const MIGRATION_5: &str = r#"
+ALTER TABLE messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]';
+"#;
+
+/// Schema v6: the browser terminal.
+///
+/// A row is a *named shell*: its title, the directory it was started in and its
+/// place in the tab strip. It is not the process - a PTY is a child of the
+/// server and cannot outlive it - but keeping the row means the tab strip, the
+/// titles and the working directory are identical in every browser and after
+/// every restart, which is what makes the terminal tab feel global rather than
+/// per-page. `position` is a manual sort key; ties break on `created_at` so an
+/// install that never reorders still lists oldest-first.
+const MIGRATION_6: &str = r#"
+CREATE TABLE IF NOT EXISTS terminals (
+    id           TEXT PRIMARY KEY,
+    title        TEXT NOT NULL DEFAULT '',
+    cwd          TEXT NOT NULL DEFAULT '',
+    project_id   TEXT,
+    position     INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_terminals_position ON terminals(position, created_at);
+"#;
+
 pub struct SqliteStore {
+    /// The single writer connection. Every mutation takes this mutex.
     conn: Arc<Mutex<rusqlite::Connection>>,
+    /// Read-only connections for the `list_*` / `get_*` paths. WAL lets them
+    /// read a consistent snapshot while the writer commits, so a long scan no
+    /// longer blocks every write. Empty when the pool could not be opened (the
+    /// reads then fall back to the writer connection).
+    readers: Arc<Vec<Mutex<rusqlite::Connection>>>,
+    /// Round-robin cursor into `readers`.
+    next_reader: AtomicUsize,
     path: PathBuf,
+    /// Identity of this process in `runs.instance_id` / `agents.instance_id`.
+    instance_id: String,
+    /// Held for the lifetime of the store: dropping it releases the advisory
+    /// lock that keeps a data directory single-instance.
+    _lock: Option<std::fs::File>,
+    /// Unix ms of the last successful integrity check, for the health endpoint.
+    last_integrity_check: AtomicI64,
 }
 
 /// Force `path` to `mode` on Unix. The settings table can hold an API key, so
@@ -159,6 +264,21 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
+}
+
+/// Unix ms before which a row counts as "older than `days`".
+fn retention_cutoff(days: u64) -> i64 {
+    let ms = days.saturating_mul(24 * 60 * 60 * 1000);
+    now_ms().saturating_sub(i64::try_from(ms).unwrap_or(i64::MAX))
+}
+
+/// Size of a file in bytes, or 0 when it does not exist yet.
+fn file_size(path: &Path) -> Result<u64> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.len()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(Error::io(path, e)),
+    }
 }
 
 fn db_err(context: &str, e: rusqlite::Error) -> Error {
@@ -235,6 +355,19 @@ fn map_project(row: &Row<'_>) -> rusqlite::Result<Project> {
     })
 }
 
+fn map_terminal(row: &Row<'_>) -> rusqlite::Result<TerminalSession> {
+    Ok(TerminalSession {
+        id: row.get("id")?,
+        title: row.get("title")?,
+        cwd: row.get("cwd")?,
+        project_id: row.get("project_id")?,
+        position: row.get("position")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        last_used_at: row.get("last_used_at")?,
+    })
+}
+
 fn map_session_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
     Ok(SessionSummary {
         id: row.get("id")?,
@@ -281,6 +414,7 @@ fn summarize_sessions(
 
 fn map_stored_message(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
     let tool_calls = json_vec::<ToolCall>(row.get("tool_calls")?, "messages.tool_calls");
+    let images = json_vec::<ImageAttachment>(row.get("images")?, "messages.images");
     Ok(StoredMessage {
         id: row.get("id")?,
         session_id: row.get("session_id")?,
@@ -289,6 +423,7 @@ fn map_stored_message(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
         role: row.get("role")?,
         content: row.get("content")?,
         tool_calls,
+        images,
         tool_call_id: row.get("tool_call_id")?,
         name: row.get("name")?,
         created_at: row.get("created_at")?,
@@ -327,6 +462,15 @@ fn map_agent(row: &Row<'_>) -> rusqlite::Result<AgentRecord> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         finished_at: row.get("finished_at")?,
+    })
+}
+
+fn map_agent_summary(row: &Row<'_>) -> rusqlite::Result<AgentSummary> {
+    Ok(AgentSummary {
+        agent: map_agent(row)?,
+        session_title: row.get("session_title")?,
+        workspace: row.get("workspace")?,
+        project_id: row.get("project_id")?,
     })
 }
 
@@ -386,20 +530,174 @@ fn paths_overlap(a: &str, b: &str) -> bool {
     a_under_b || b_under_a
 }
 
+/// Take the exclusive advisory lock that makes a data directory single-instance.
+///
+/// `flock` is released automatically when the returned `File` is dropped or the
+/// process dies, so a crashed server never leaves a stale lock behind — which is
+/// why this is a lock file and not a pid file. The pid is written into it purely
+/// so an operator can see who holds it.
+fn acquire_instance_lock(data_dir: &Path) -> Result<std::fs::File> {
+    let lock_path = data_dir.join(LOCK_FILE_NAME);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| Error::io(&lock_path, e))?;
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: `file` owns a valid descriptor for the duration of the call.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                let holder = std::fs::read_to_string(&lock_path)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "unknown pid".to_string());
+                return Err(Error::Config(format!(
+                    "another karucode instance is using this data directory ({}): held by {holder}. \
+                     Stop it first, or point KARUCODE_DATA_DIR at a different directory.",
+                    data_dir.display()
+                )));
+            }
+            return Err(Error::io(&lock_path, err));
+        }
+        // Best effort: the lock is what matters, the pid is only diagnostics.
+        let _ = file.set_len(0);
+        let _ = write!(&file, "pid {}", std::process::id());
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = &lock_path;
+    }
+    Ok(file)
+}
+
+/// Apply the connection pragmas and *verify* them.
+///
+/// These used to be `.ok()`, which meant a filesystem without WAL support
+/// silently ran in rollback-journal mode, and a failed `foreign_keys` silently
+/// disabled `ON DELETE CASCADE` — leaving orphaned messages, runs, agents and
+/// approvals behind forever. The two pragmas that change correctness are fatal;
+/// `synchronous` is only a durability trade-off, so it warns.
+fn configure_connection(conn: &rusqlite::Connection, path: &Path) -> Result<()> {
+    let shown = path.display();
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| Error::Store(format!("set busy_timeout on {shown}: {e}")))?;
+
+    // `auto_vacuum` must be set *before* the database switches to WAL: once the
+    // file is in WAL mode SQLite ignores the pragma, and on a non-empty database
+    // it only takes effect after a full VACUUM. So: set it while the file is
+    // still empty, and tell the operator when an older file still has it off.
+    let auto_vacuum: i64 = conn
+        .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+        .map_err(|e| db_err("read auto_vacuum", e))?;
+    if auto_vacuum == 0 {
+        let objects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
+            .map_err(|e| db_err("count sqlite_master", e))?;
+        if objects == 0 {
+            conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")
+                .map_err(|e| Error::Store(format!("enable auto_vacuum on {shown}: {e}")))?;
+        } else {
+            tracing::warn!(
+                path = %shown,
+                "database was created without auto_vacuum=INCREMENTAL: incremental_vacuum() \
+                 will not reclaim space until a one-time `VACUUM` runs (SqliteStore::vacuum)"
+            );
+        }
+    }
+
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .map_err(|e| Error::Store(format!("enable WAL on {shown}: {e}")))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(Error::Store(format!(
+            "{shown}: journal_mode is {mode:?}, not \"wal\". WAL is required for the \
+             reader/writer concurrency this store relies on and is unavailable on some \
+             network filesystems; move the data directory to a local disk."
+        )));
+    }
+
+    if let Err(e) = conn.pragma_update(None, "synchronous", "NORMAL") {
+        tracing::warn!(error = %e, "could not set synchronous=NORMAL; keeping the default");
+    }
+
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .map_err(|e| Error::Store(format!("enable foreign_keys on {shown}: {e}")))?;
+    let foreign_keys: i64 = conn
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .map_err(|e| db_err("read foreign_keys", e))?;
+    if foreign_keys != 1 {
+        return Err(Error::Store(format!(
+            "{shown}: foreign_keys is still off after enabling it; ON DELETE CASCADE would \
+             silently leave orphaned messages, runs, agents and approvals behind"
+        )));
+    }
+    Ok(())
+}
+
+/// Actionable error for a database that failed `PRAGMA quick_check` or
+/// `integrity_check`. A raw rusqlite string tells the operator nothing about
+/// what to do next.
+fn corruption_error(path: &Path, problems: &[String]) -> Error {
+    let shown = path.display();
+    let detail = problems.join("; ");
+    Error::Store(format!(
+        "database {shown} failed its integrity check: {detail}. Likely causes: the process \
+         was killed mid-write, the disk filled up, or the file was copied while in use. \
+         Recover with `sqlite3 {shown} \".recover\" | sqlite3 {shown}.recovered`, then move \
+         {shown}.recovered over {shown} (keep a copy of the original first)."
+    ))
+}
+
+/// Open the read-only connections used by the `list_*` / `get_*` paths.
+async fn open_read_connections(path: &Path) -> Result<Vec<Mutex<rusqlite::Connection>>> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<Vec<Mutex<rusqlite::Connection>>> {
+        let mut out = Vec::with_capacity(READ_POOL_SIZE);
+        for _ in 0..READ_POOL_SIZE {
+            let conn = rusqlite::Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .map_err(|e| Error::Store(format!("open read-only {}: {e}", path.display())))?;
+            conn.busy_timeout(Duration::from_secs(5))
+                .map_err(|e| db_err("read connection busy_timeout", e))?;
+            out.push(Mutex::new(conn));
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| Error::Store(format!("join: {e}")))?
+}
+
 impl SqliteStore {
+    /// Open (creating if needed) the database at `path`.
+    ///
+    /// Takes the exclusive advisory lock on `<data_dir>/karucode.lock` first, so
+    /// a second server pointed at the same data directory fails here with a
+    /// clear message instead of racing migrations and crash recovery.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                let existed = parent.exists();
-                std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
-                if !existed {
-                    // Settings may hold an API key: never leave the directory
-                    // readable by other local users.
-                    restrict_permissions(parent, 0o700)?;
-                }
+        let data_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        if !data_dir.as_os_str().is_empty() {
+            let existed = data_dir.exists();
+            std::fs::create_dir_all(&data_dir).map_err(|e| Error::io(&data_dir, e))?;
+            if !existed {
+                // Settings may hold an API key: never leave the directory
+                // readable by other local users.
+                restrict_permissions(&data_dir, 0o700)?;
             }
         }
+        let lock = acquire_instance_lock(&data_dir)?;
+        let instance_id = uuid::Uuid::new_v4().to_string();
+
         let db_path = path.clone();
         let conn = tokio::task::spawn_blocking(move || -> Result<rusqlite::Connection> {
             let conn = rusqlite::Connection::open(&db_path)
@@ -407,19 +705,25 @@ impl SqliteStore {
             // Tighten the file mode before WAL/journal files are created so they
             // inherit it (SQLite copies the database file's permissions).
             restrict_permissions(&db_path, 0o600)?;
-            conn.pragma_update(None, "journal_mode", "WAL").ok();
-            conn.pragma_update(None, "synchronous", "NORMAL").ok();
-            conn.pragma_update(None, "foreign_keys", "ON").ok();
-            conn.busy_timeout(std::time::Duration::from_secs(5)).ok();
+            configure_connection(&conn, &db_path)?;
             Ok(conn)
         })
         .await
         .map_err(|e| Error::Store(format!("join: {e}")))??;
-        let store = Self {
+
+        let mut store = Self {
             conn: Arc::new(Mutex::new(conn)),
+            readers: Arc::new(Vec::new()),
+            next_reader: AtomicUsize::new(0),
             path,
+            instance_id,
+            _lock: Some(lock),
+            last_integrity_check: AtomicI64::new(0),
         };
+        // Before any migration: a corrupt file must be reported, not written to.
+        store.check_integrity_on_open().await?;
         store.migrate().await?;
+        store.open_read_pool().await?;
         Ok(store)
     }
 
@@ -427,7 +731,13 @@ impl SqliteStore {
         &self.path
     }
 
-    /// Run a blocking closure with exclusive access to the connection.
+    /// Identity this process stamps on the runs and agents it creates. Crash
+    /// recovery only touches rows carrying this id.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// Run a blocking closure with exclusive access to the writer connection.
     pub(crate) async fn with<T, F>(&self, f: F) -> Result<T>
     where
         T: Send + 'static,
@@ -442,6 +752,80 @@ impl SqliteStore {
         })
         .await
         .map_err(|e| Error::Store(format!("blocking task failed: {e}")))?
+    }
+
+    /// Run a blocking closure on a read-only connection.
+    ///
+    /// WAL gives every reader a consistent snapshot without blocking the
+    /// writer, so the `list_*` / `get_*` paths use this instead of [`Self::with`].
+    /// Falls back to the writer connection when the pool is empty (a store built
+    /// without [`Self::open_read_pool`], e.g. in a unit test).
+    pub(crate) async fn read<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&rusqlite::Connection) -> Result<T> + Send + 'static,
+    {
+        if self.readers.is_empty() {
+            return self.with(move |conn| f(conn)).await;
+        }
+        let readers = self.readers.clone();
+        let index = self.next_reader.fetch_add(1, Ordering::Relaxed) % readers.len();
+        tokio::task::spawn_blocking(move || {
+            let guard = readers[index]
+                .lock()
+                .map_err(|_| Error::Store("read connection mutex poisoned".into()))?;
+            f(&guard)
+        })
+        .await
+        .map_err(|e| Error::Store(format!("blocking task failed: {e}")))?
+    }
+
+    /// Open the read-only pool. Failure is not fatal: the store keeps working
+    /// with the writer connection, only without reader/writer concurrency.
+    async fn open_read_pool(&mut self) -> Result<()> {
+        match open_read_connections(&self.path).await {
+            Ok(readers) => {
+                self.readers = Arc::new(readers);
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "read-only connection pool unavailable; reads will use the writer connection"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// `PRAGMA quick_check` before the first migration. Cheap (it skips the
+    /// index/row cross-checks) and enough to catch a truncated or overwritten
+    /// file before we write to it.
+    async fn check_integrity_on_open(&self) -> Result<()> {
+        let path = self.path.clone();
+        let result = self
+            .with(move |conn| {
+                let mut stmt = conn
+                    .prepare("PRAGMA quick_check")
+                    .map_err(|e| db_err("quick_check prepare", e))?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|e| db_err("quick_check query", e))?;
+                let mut problems = Vec::new();
+                for row in rows {
+                    let line = row.map_err(|e| db_err("quick_check row", e))?;
+                    if !line.eq_ignore_ascii_case("ok") {
+                        problems.push(line);
+                    }
+                }
+                Ok(problems)
+            })
+            .await?;
+        if result.is_empty() {
+            self.last_integrity_check.store(now_ms(), Ordering::Relaxed);
+            return Ok(());
+        }
+        Err(corruption_error(&path, &result))
     }
 
     /// Forward-only, idempotent migrations driven by `PRAGMA user_version`.
@@ -477,6 +861,15 @@ impl SqliteStore {
                     3 => tx
                         .execute_batch(MIGRATION_3)
                         .map_err(|e| db_err("migration v3", e))?,
+                    4 => tx
+                        .execute_batch(MIGRATION_4)
+                        .map_err(|e| db_err("migration v4", e))?,
+                    5 => tx
+                        .execute_batch(MIGRATION_5)
+                        .map_err(|e| db_err("migration v5", e))?,
+                    6 => tx
+                        .execute_batch(MIGRATION_6)
+                        .map_err(|e| db_err("migration v6", e))?,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -526,18 +919,18 @@ impl Store for SqliteStore {
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
-        self.with(|conn| summarize_sessions(conn, None)).await
+        self.read(|conn| summarize_sessions(conn, None)).await
     }
 
     async fn list_sessions_for_project(&self, project_id: &str) -> Result<Vec<SessionSummary>> {
         let project_id = project_id.to_string();
-        self.with(move |conn| summarize_sessions(conn, Some(&project_id)))
+        self.read(move |conn| summarize_sessions(conn, Some(&project_id)))
             .await
     }
 
     async fn get_session(&self, id: &str) -> Result<Option<Session>> {
         let id = id.to_string();
-        self.with(move |conn| {
+        self.read(move |conn| {
             let mut stmt = conn
                 .prepare("SELECT id, title, workspace, project_id, model, created_at, updated_at FROM sessions WHERE id = ?1")
                 .map_err(|e| db_err("get_session prepare", e))?;
@@ -674,7 +1067,7 @@ impl Store for SqliteStore {
     }
 
     async fn list_projects(&self) -> Result<Vec<Project>> {
-        self.with(|conn| {
+        self.read(|conn| {
             let mut stmt = conn
                 .prepare(
                     "SELECT p.id, p.name, p.path, p.created_at, p.updated_at,
@@ -694,7 +1087,7 @@ impl Store for SqliteStore {
 
     async fn get_project(&self, id: &str) -> Result<Option<Project>> {
         let id = id.to_string();
-        self.with(move |conn| {
+        self.read(move |conn| {
             let mut stmt = conn
                 .prepare(
                     "SELECT p.id, p.name, p.path, p.created_at, p.updated_at,
@@ -762,11 +1155,15 @@ impl Store for SqliteStore {
                         .map_err(|e| Error::Store(format!("encode tool_calls: {e}")))?,
                 )
             };
+            // Always a JSON array, never NULL: the column is NOT NULL so a row
+            // written before v5 (`'[]'`) and a new one read back identically.
+            let images = serde_json::to_string(&message.images)
+                .map_err(|e| Error::Store(format!("encode images: {e}")))?;
             let tx = conn.transaction().map_err(|e| db_err("append_message begin", e))?;
             tx.execute(
                 "INSERT INTO messages
-                    (session_id, run_id, agent_id, role, content, tool_calls, tool_call_id, name, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    (session_id, run_id, agent_id, role, content, tool_calls, tool_call_id, name, images, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     message.session_id,
                     message.run_id,
@@ -776,6 +1173,7 @@ impl Store for SqliteStore {
                     tool_calls,
                     message.tool_call_id,
                     message.name,
+                    images,
                     now
                 ],
             )
@@ -797,14 +1195,14 @@ impl Store for SqliteStore {
     async fn list_messages(&self, session_id: &str, limit: usize) -> Result<Vec<StoredMessage>> {
         let session_id = session_id.to_string();
         let limit = limit_i64(limit);
-        self.with(move |conn| {
+        self.read(move |conn| {
             // Newest N by id, then re-sorted ascending: the caller gets the tail
             // of the conversation in chronological order.
             let mut stmt = conn
                 .prepare(
                     "SELECT * FROM (
                          SELECT id, session_id, run_id, agent_id, role, content, tool_calls,
-                                tool_call_id, name, created_at
+                                tool_call_id, name, images, created_at
                            FROM messages WHERE session_id = ?1
                           ORDER BY id DESC LIMIT ?2
                      ) ORDER BY id ASC",
@@ -827,11 +1225,11 @@ impl Store for SqliteStore {
     ) -> Result<Vec<StoredMessage>> {
         let session_id = session_id.to_string();
         let limit = limit_i64(limit);
-        self.with(move |conn| {
+        self.read(move |conn| {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, session_id, run_id, agent_id, role, content, tool_calls,
-                            tool_call_id, name, created_at
+                            tool_call_id, name, images, created_at
                        FROM messages
                       WHERE session_id = ?1 AND id > ?2
                       ORDER BY id ASC LIMIT ?3",
@@ -857,13 +1255,23 @@ impl Store for SqliteStore {
         let session_id = session_id.to_string();
         let model = model.to_string();
         let prompt = prompt.to_string();
+        let instance_id = self.instance_id.clone();
         self.with(move |conn| {
             let now = now_ms();
             conn.execute(
-                "INSERT INTO runs (id, session_id, status, model, prompt, error, started_at, finished_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, NULL)
+                "INSERT INTO runs
+                    (id, session_id, status, model, prompt, error, started_at, finished_at, instance_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, NULL, ?7)
                  ON CONFLICT(id) DO NOTHING",
-                params![id, session_id, RunStatus::Running.as_str(), model, prompt, now],
+                params![
+                    id,
+                    session_id,
+                    RunStatus::Running.as_str(),
+                    model,
+                    prompt,
+                    now,
+                    instance_id
+                ],
             )
             .map_err(|e| db_err("create_run", e))?;
             Ok(())
@@ -894,12 +1302,21 @@ impl Store for SqliteStore {
     }
 
     async fn mark_interrupted_runs(&self) -> Result<usize> {
-        self.with(|conn| {
+        // Scoped to *other* instances, not this one. The exclusive data-dir lock
+        // means no other process can be live, so any `running` row stamped with a
+        // different `instance_id` belongs to a previous incarnation that died —
+        // exactly what recovery is for. Filtering on `instance_id = ?` instead
+        // would match nothing after a restart (the id is regenerated per process)
+        // and silently disable crash recovery. Excluding our own id keeps a live
+        // run in this process safe if recovery is ever called mid-flight.
+        let instance_id = self.instance_id.clone();
+        self.with(move |conn| {
             let now = now_ms();
             let n = conn
                 .execute(
-                    "UPDATE runs SET status = ?1, finished_at = ?2 WHERE status = 'running'",
-                    params![RunStatus::Interrupted.as_str(), now],
+                    "UPDATE runs SET status = ?1, finished_at = ?2
+                      WHERE status = 'running' AND instance_id != ?3",
+                    params![RunStatus::Interrupted.as_str(), now, instance_id],
                 )
                 .map_err(|e| db_err("mark_interrupted_runs", e))?;
             Ok(n)
@@ -910,7 +1327,7 @@ impl Store for SqliteStore {
     async fn list_runs(&self, session_id: &str, limit: usize) -> Result<Vec<RunRecord>> {
         let session_id = session_id.to_string();
         let limit = limit_i64(limit);
-        self.with(move |conn| {
+        self.read(move |conn| {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, session_id, status, model, prompt, error, started_at, finished_at
@@ -929,17 +1346,27 @@ impl Store for SqliteStore {
 
     async fn upsert_agent(&self, agent: &AgentRecord) -> Result<()> {
         let agent = agent.clone();
+        let instance_id = self.instance_id.clone();
         self.with(move |conn| {
             let now = now_ms();
             let owned_paths = serde_json::to_string(&agent.owned_paths)
                 .map_err(|e| Error::Store(format!("encode owned_paths: {e}")))?;
-            let updated_at = if agent.updated_at > 0 { agent.updated_at } else { now };
-            let created_at = if agent.created_at > 0 { agent.created_at } else { now };
+            let updated_at = if agent.updated_at > 0 {
+                agent.updated_at
+            } else {
+                now
+            };
+            let created_at = if agent.created_at > 0 {
+                agent.created_at
+            } else {
+                now
+            };
             conn.execute(
                 "INSERT INTO agents
                     (id, session_id, parent_run_id, parent_agent_id, name, role, task, status,
-                     model, iterations, summary, error, owned_paths, created_at, updated_at, finished_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                     model, iterations, summary, error, owned_paths, created_at, updated_at,
+                     finished_at, instance_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                  ON CONFLICT(id) DO UPDATE SET
                      session_id      = excluded.session_id,
                      parent_run_id   = excluded.parent_run_id,
@@ -954,7 +1381,8 @@ impl Store for SqliteStore {
                      error           = excluded.error,
                      owned_paths     = excluded.owned_paths,
                      updated_at      = excluded.updated_at,
-                     finished_at     = excluded.finished_at",
+                     finished_at     = excluded.finished_at,
+                     instance_id     = excluded.instance_id",
                 params![
                     agent.id,
                     agent.session_id,
@@ -971,7 +1399,8 @@ impl Store for SqliteStore {
                     owned_paths,
                     created_at,
                     updated_at,
-                    agent.finished_at
+                    agent.finished_at,
+                    instance_id
                 ],
             )
             .map_err(|e| db_err("upsert_agent", e))?;
@@ -982,7 +1411,7 @@ impl Store for SqliteStore {
 
     async fn list_agents(&self, session_id: &str) -> Result<Vec<AgentRecord>> {
         let session_id = session_id.to_string();
-        self.with(move |conn| {
+        self.read(move |conn| {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, session_id, parent_run_id, parent_agent_id, name, role, task,
@@ -1001,14 +1430,95 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn list_agents_all(&self, project_id: Option<&str>) -> Result<Vec<AgentSummary>> {
+        let project_id = project_id.map(str::to_string);
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT a.id, a.session_id, a.parent_run_id, a.parent_agent_id, a.name,
+                            a.role, a.task, a.status, a.model, a.iterations, a.summary, a.error,
+                            a.owned_paths, a.created_at, a.updated_at, a.finished_at,
+                            s.title AS session_title, s.workspace AS workspace,
+                            s.project_id AS project_id
+                       FROM agents a JOIN sessions s ON s.id = a.session_id
+                      WHERE (?1 IS NULL OR s.project_id = ?1)
+                      ORDER BY a.created_at DESC, a.id DESC",
+                )
+                .map_err(|e| db_err("list_agents_all prepare", e))?;
+            let rows = stmt
+                .query_map(params![project_id], map_agent_summary)
+                .map_err(|e| db_err("list_agents_all query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("list_agents_all rows", e))
+        })
+        .await
+    }
+
+    async fn get_agent(&self, id: &str) -> Result<Option<AgentSummary>> {
+        let id = id.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT a.id, a.session_id, a.parent_run_id, a.parent_agent_id, a.name,
+                            a.role, a.task, a.status, a.model, a.iterations, a.summary, a.error,
+                            a.owned_paths, a.created_at, a.updated_at, a.finished_at,
+                            s.title AS session_title, s.workspace AS workspace,
+                            s.project_id AS project_id
+                       FROM agents a JOIN sessions s ON s.id = a.session_id
+                      WHERE a.id = ?1",
+                )
+                .map_err(|e| db_err("get_agent prepare", e))?;
+            let mut rows = stmt
+                .query_map(params![id], map_agent_summary)
+                .map_err(|e| db_err("get_agent query", e))?;
+            match rows.next() {
+                Some(row) => Ok(Some(row.map_err(|e| db_err("get_agent row", e))?)),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    async fn list_agent_messages(
+        &self,
+        agent_id: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        let agent_id = agent_id.to_string();
+        let limit = limit_i64(limit);
+        self.read(move |conn| {
+            // Same tail-then-sort shape as `list_messages`, filtered to one agent.
+            let mut stmt = conn
+                .prepare(
+                    "SELECT * FROM (
+                         SELECT id, session_id, run_id, agent_id, role, content, tool_calls,
+                                tool_call_id, name, images, created_at
+                           FROM messages WHERE agent_id = ?1
+                          ORDER BY id DESC LIMIT ?2
+                     ) ORDER BY id ASC",
+                )
+                .map_err(|e| db_err("list_agent_messages prepare", e))?;
+            let rows = stmt
+                .query_map(params![agent_id, limit], map_stored_message)
+                .map_err(|e| db_err("list_agent_messages query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("list_agent_messages rows", e))
+        })
+        .await
+    }
+
     async fn mark_interrupted_agents(&self) -> Result<usize> {
-        self.with(|conn| {
+        // Scoped to *other* instances, like `mark_interrupted_runs`: the
+        // data-dir lock guarantees no peer is live, so a `running` agent from a
+        // different instance is a leftover from a process that died.
+        let instance_id = self.instance_id.clone();
+        self.with(move |conn| {
             let now = now_ms();
             let n = conn
                 .execute(
                     "UPDATE agents SET status = ?1, updated_at = ?2, finished_at = ?2
-                      WHERE status = 'running'",
-                    params![AgentStatus::Interrupted.as_str(), now],
+                      WHERE status = 'running' AND instance_id != ?3",
+                    params![AgentStatus::Interrupted.as_str(), now, instance_id],
                 )
                 .map_err(|e| db_err("mark_interrupted_agents", e))?;
             Ok(n)
@@ -1101,7 +1611,7 @@ impl Store for SqliteStore {
         session_id: Option<&str>,
     ) -> Result<Vec<ApprovalRecord>> {
         let session_id = session_id.map(|s| s.to_string());
-        self.with(move |conn| {
+        self.read(move |conn| {
             let sql = match session_id {
                 Some(_) => {
                     "SELECT id, session_id, run_id, agent_id, kind, title, detail, payload, status,
@@ -1141,7 +1651,7 @@ impl Store for SqliteStore {
 
     async fn get_setting(&self, key: &str) -> Result<Option<String>> {
         let key = key.to_string();
-        self.with(move |conn| {
+        self.read(move |conn| {
             let mut stmt = conn
                 .prepare("SELECT value FROM settings WHERE key = ?1")
                 .map_err(|e| db_err("get_setting prepare", e))?;
@@ -1173,7 +1683,7 @@ impl Store for SqliteStore {
     }
 
     async fn all_settings(&self) -> Result<Vec<(String, String)>> {
-        self.with(|conn| {
+        self.read(|conn| {
             let mut stmt = conn
                 .prepare("SELECT key, value FROM settings ORDER BY key ASC")
                 .map_err(|e| db_err("all_settings prepare", e))?;
@@ -1184,6 +1694,150 @@ impl Store for SqliteStore {
                 .map_err(|e| db_err("all_settings query", e))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|e| db_err("all_settings rows", e))
+        })
+        .await
+    }
+
+    async fn create_terminal(&self, terminal: &TerminalSession) -> Result<TerminalSession> {
+        let row = terminal.clone();
+        self.with(move |conn| {
+            let now = now_ms();
+            conn.execute(
+                "INSERT INTO terminals
+                    (id, title, cwd, project_id, position, created_at, updated_at, last_used_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    row.id,
+                    row.title,
+                    row.cwd,
+                    row.project_id,
+                    row.position,
+                    now,
+                    now,
+                    now
+                ],
+            )
+            .map_err(|e| db_err("create_terminal", e))?;
+            conn.query_row(
+                "SELECT id, title, cwd, project_id, position, created_at, updated_at, last_used_at
+                   FROM terminals WHERE id = ?1",
+                params![row.id],
+                map_terminal,
+            )
+            .map_err(|e| db_err("create_terminal read back", e))
+        })
+        .await
+    }
+
+    async fn list_terminals(&self) -> Result<Vec<TerminalSession>> {
+        self.read(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, title, cwd, project_id, position, created_at, updated_at, last_used_at
+                       FROM terminals
+                      ORDER BY position ASC, created_at ASC, id ASC",
+                )
+                .map_err(|e| db_err("list_terminals prepare", e))?;
+            let rows = stmt
+                .query_map([], map_terminal)
+                .map_err(|e| db_err("list_terminals query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("list_terminals rows", e))
+        })
+        .await
+    }
+
+    async fn get_terminal(&self, id: &str) -> Result<Option<TerminalSession>> {
+        let id = id.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, title, cwd, project_id, position, created_at, updated_at, last_used_at
+                       FROM terminals WHERE id = ?1",
+                )
+                .map_err(|e| db_err("get_terminal prepare", e))?;
+            let mut rows = stmt
+                .query_map(params![id], map_terminal)
+                .map_err(|e| db_err("get_terminal query", e))?;
+            match rows.next() {
+                Some(row) => row.map(Some).map_err(|e| db_err("get_terminal row", e)),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    async fn rename_terminal(&self, id: &str, title: Option<&str>) -> Result<()> {
+        let id = id.to_string();
+        // The default title is derived, not stored twice: reading the row back
+        // gives `rename_terminal` everything it needs, and a moved directory then
+        // relabels itself instead of keeping a stale name.
+        let lookup = id.clone();
+        let rows = self.read(move |conn| {
+            conn.query_row(
+                "SELECT id, title, cwd, project_id, position, created_at, updated_at, last_used_at
+                   FROM terminals WHERE id = ?1",
+                params![lookup],
+                map_terminal,
+            )
+            .optional()
+            .map_err(|e| db_err("rename_terminal read", e))
+        })
+        .await?;
+        let Some(existing) = rows else {
+            return Err(Error::NotFound(format!("no terminal with id `{id}`")));
+        };
+        let title = match title {
+            Some(title) => title.to_string(),
+            None => TerminalSession::default_title(&existing.cwd, existing.position),
+        };
+        let id = existing.id;
+        self.with(move |conn| {
+            let now = now_ms();
+            conn.execute(
+                "UPDATE terminals SET title = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, title, now],
+            )
+            .map_err(|e| db_err("rename_terminal", e))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn touch_terminal(&self, id: &str) -> Result<()> {
+        let id = id.to_string();
+        self.with(move |conn| {
+            let now = now_ms();
+            conn.execute(
+                "UPDATE terminals SET last_used_at = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, now, now],
+            )
+            .map_err(|e| db_err("touch_terminal", e))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn delete_terminal(&self, id: &str) -> Result<()> {
+        let id = id.to_string();
+        self.with(move |conn| {
+            conn.execute("DELETE FROM terminals WHERE id = ?1", params![id])
+                .map_err(|e| db_err("delete_terminal", e))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn terminal_ids(&self) -> Result<Vec<String>> {
+        self.read(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id FROM terminals ORDER BY position ASC, created_at ASC")
+                .map_err(|e| db_err("terminal_ids prepare", e))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| db_err("terminal_ids query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("terminal_ids rows", e))
         })
         .await
     }
@@ -1244,7 +1898,7 @@ impl Store for SqliteStore {
 
     async fn list_claims(&self, session_id: &str) -> Result<Vec<ClaimRecord>> {
         let session_id = session_id.to_string();
-        self.with(move |conn| {
+        self.read(move |conn| {
             let mut stmt = conn
                 .prepare(
                     "SELECT path, session_id, agent_id, mode, created_at
@@ -1268,6 +1922,172 @@ impl Store for SqliteStore {
             Ok(())
         })
         .await
+    }
+
+    async fn prune_messages_older_than(&self, days: u64) -> Result<PruneReport> {
+        if days == 0 {
+            // 0 means "keep everything": a retention pass must never be a
+            // surprise delete when the operator has not opted in.
+            return Ok(PruneReport::default());
+        }
+        let cutoff = retention_cutoff(days);
+        let keep = limit_i64(RETENTION_KEEP_MESSAGES);
+        self.with(move |conn| {
+            let tx = conn.transaction().map_err(|e| db_err("prune begin", e))?;
+            // Rank every message per session by id (insertion order) and delete
+            // the ones past the newest `keep` that are also older than the
+            // cutoff. The ranking deliberately covers *all* messages, not just
+            // the old ones: ranking only the old rows would keep the newest
+            // `keep` old messages and delete the recent ones.
+            let messages = tx
+                .execute(
+                    "DELETE FROM messages
+                      WHERE created_at < ?1
+                        AND id IN (
+                            SELECT id FROM (
+                                SELECT id,
+                                       ROW_NUMBER() OVER (
+                                           PARTITION BY session_id ORDER BY id DESC
+                                       ) AS rn
+                                  FROM messages
+                            ) ranked
+                            WHERE ranked.rn > ?2
+                        )",
+                    params![cutoff, keep],
+                )
+                .map_err(|e| db_err("prune messages", e))?;
+
+            // A run/agent whose transcript is gone is dead weight. Only
+            // terminal rows older than the cutoff are touched, so a run that is
+            // still executing (or one that just started and has not written its
+            // first message yet) is never deleted.
+            let runs = tx
+                .execute(
+                    "DELETE FROM runs
+                      WHERE status <> 'running'
+                        AND started_at < ?1
+                        AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.run_id = runs.id)",
+                    params![cutoff],
+                )
+                .map_err(|e| db_err("prune runs", e))?;
+            let agents = tx
+                .execute(
+                    "DELETE FROM agents
+                      WHERE status <> 'running'
+                        AND created_at < ?1
+                        AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.agent_id = agents.id)",
+                    params![cutoff],
+                )
+                .map_err(|e| db_err("prune agents", e))?;
+            // After the runs: an approval whose run was just pruned is orphaned.
+            let approvals = tx
+                .execute(
+                    "DELETE FROM approvals
+                      WHERE status <> 'pending'
+                        AND created_at < ?1
+                        AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.id = approvals.run_id)",
+                    params![cutoff],
+                )
+                .map_err(|e| db_err("prune approvals", e))?;
+            tx.commit().map_err(|e| db_err("prune commit", e))?;
+
+            let report = PruneReport {
+                messages,
+                runs,
+                agents,
+                approvals,
+            };
+            if !report.is_empty() {
+                tracing::info!(
+                    days,
+                    messages = report.messages,
+                    runs = report.runs,
+                    agents = report.agents,
+                    approvals = report.approvals,
+                    "pruned old rows"
+                );
+            }
+            Ok(report)
+        })
+        .await
+    }
+
+    fn retention_keep_messages(&self) -> usize {
+        RETENTION_KEEP_MESSAGES
+    }
+
+    async fn vacuum(&self) -> Result<()> {
+        // VACUUM cannot run inside a transaction, and `with` does not open one.
+        // It rewrites the whole file, so it also converts an old database to
+        // auto_vacuum=INCREMENTAL (see `configure_connection`).
+        self.with(|conn| {
+            conn.execute_batch("VACUUM")
+                .map_err(|e| db_err("vacuum", e))
+        })
+        .await
+    }
+
+    async fn incremental_vacuum(&self) -> Result<()> {
+        self.with(|conn| {
+            conn.execute_batch("PRAGMA incremental_vacuum")
+                .map_err(|e| db_err("incremental_vacuum", e))
+        })
+        .await
+    }
+
+    async fn db_size_bytes(&self) -> Result<u64> {
+        // The database plus its WAL: the WAL is where recent writes live until
+        // the next checkpoint, so reporting only the main file would understate
+        // the footprint of a busy store.
+        let mut total = file_size(&self.path)?;
+        let wal = self.path.with_extension("db-wal");
+        if let Ok(size) = std::fs::metadata(&wal) {
+            total += size.len();
+        }
+        Ok(total)
+    }
+
+    async fn integrity_check(&self) -> Result<IntegrityReport> {
+        let path = self.path.clone();
+        let problems = self
+            .with(|conn| {
+                let mut stmt = conn
+                    .prepare("PRAGMA integrity_check")
+                    .map_err(|e| db_err("integrity_check prepare", e))?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|e| db_err("integrity_check query", e))?;
+                let mut problems = Vec::new();
+                for row in rows {
+                    let line = row.map_err(|e| db_err("integrity_check row", e))?;
+                    if !line.eq_ignore_ascii_case("ok") {
+                        problems.push(line);
+                    }
+                }
+                Ok(problems)
+            })
+            .await?;
+        let checked_at = now_ms();
+        self.last_integrity_check
+            .store(checked_at, Ordering::Relaxed);
+        let ok = problems.is_empty();
+        if !ok {
+            // The report is still returned so a health endpoint can show
+            // `ok: false`; the actionable recovery text goes to the log.
+            tracing::error!("{}", corruption_error(&path, &problems));
+        }
+        Ok(IntegrityReport {
+            ok,
+            problems,
+            checked_at,
+        })
+    }
+
+    fn last_integrity_check(&self) -> Option<i64> {
+        match self.last_integrity_check.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(ms),
+        }
     }
 }
 
@@ -1312,6 +2132,7 @@ mod tests {
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
+            images: Vec::new(),
         }
     }
 
@@ -1747,6 +2568,80 @@ mod tests {
         assert!(beyond.is_empty());
     }
 
+    /// Images are stored beside the text and survive a reload: a vision result
+    /// that only lived in memory would come back as a tool result with no pixels
+    /// after a restart, and the model would describe an image it cannot see.
+    #[tokio::test]
+    async fn message_images_roundtrip() {
+        let db = TempDb::new("message-images");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+
+        let mut tool = new_message("s_1", "tool", "assets/logo.png — image/png");
+        tool.tool_call_id = Some("call_1".to_string());
+        tool.name = Some("read_file".to_string());
+        tool.images = vec![ImageAttachment {
+            media_type: "image/png".into(),
+            data: "iVBORw0KGgo=".into(),
+            bytes: 8,
+            name: Some("assets/logo.png".into()),
+        }];
+        store.append_message(&tool).await.expect("append image");
+        // A text-only row keeps the default, so old and new rows read the same.
+        store
+            .append_message(&new_message("s_1", "user", "plain"))
+            .await
+            .expect("append text");
+
+        let rows = store.list_messages("s_1", 10).await.expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].images.len(), 1);
+        assert_eq!(rows[0].images[0].media_type, "image/png");
+        assert_eq!(rows[0].images[0].data, "iVBORw0KGgo=");
+        assert_eq!(rows[0].images[0].bytes, 8);
+        assert_eq!(rows[0].images[0].name.as_deref(), Some("assets/logo.png"));
+        assert!(rows[1].images.is_empty());
+        assert_eq!(rows[0].to_message().images.len(), 1);
+    }
+
+    /// A transcript written before v5 has no `images` column. Opening it must add
+    /// the column with an empty default, not fail or scramble the old rows.
+    #[tokio::test]
+    async fn migration_from_v4_adds_an_empty_images_column() {
+        let db = TempDb::new("migrate-v4-images");
+        std::fs::create_dir_all(db.path.parent().expect("parent")).expect("data dir");
+        {
+            let conn = rusqlite::Connection::open(&db.path).expect("raw open");
+            conn.execute_batch(MIGRATION_1).expect("v1");
+            conn.execute_batch(MIGRATION_2).expect("v2");
+            conn.execute_batch(MIGRATION_3).expect("v3");
+            conn.execute_batch(MIGRATION_4).expect("v4");
+            conn.pragma_update(None, "user_version", 4)
+                .expect("version");
+            conn.execute(
+                "INSERT INTO sessions (id, title, workspace, created_at, updated_at)
+                 VALUES ('s_old', 'Old', '/w', 1, 2)",
+                [],
+            )
+            .expect("insert session");
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, created_at)
+                 VALUES ('s_old', 'user', 'hello from v4', 1)",
+                [],
+            )
+            .expect("insert message");
+        }
+
+        let store = db.open().await;
+        let rows = store.list_messages("s_old", 10).await.expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, "hello from v4");
+        assert!(rows[0].images.is_empty(), "old rows default to no images");
+    }
+
     #[tokio::test]
     async fn settings_are_upserted_and_ordered() {
         let db = TempDb::new("settings");
@@ -1775,6 +2670,113 @@ mod tests {
             ]
         );
         assert_eq!(count(&store, "SELECT COUNT(*) FROM settings").await, 2);
+    }
+
+    fn new_terminal(id: &str, cwd: &str, position: i64) -> TerminalSession {
+        TerminalSession {
+            id: id.to_string(),
+            title: TerminalSession::default_title(cwd, position),
+            cwd: cwd.to_string(),
+            project_id: None,
+            position,
+            created_at: 0,
+            updated_at: 0,
+            last_used_at: 0,
+        }
+    }
+
+    /// A terminal row is what makes the tab strip global: it must come back in
+    /// tab order after a reopen, with its title and directory intact, because
+    /// that is all a fresh browser has to go on.
+    #[tokio::test]
+    async fn terminals_are_created_listed_renamed_and_deleted() {
+        let db = TempDb::new("terminals");
+        let path = db.path.clone();
+        {
+            let store = db.open().await;
+            let first = store
+                .create_terminal(&new_terminal("t_2", "/work/karucode", 2))
+                .await
+                .expect("create second");
+            assert_eq!(first.title, "karucode-2");
+            assert_eq!(first.cwd, "/work/karucode");
+            assert_eq!(first.project_id, None);
+            assert!(first.created_at > 0);
+            // Inserted out of order on purpose: the list is ordered by position,
+            // not by insertion.
+            store
+                .create_terminal(&new_terminal("t_1", "/work/other", 1))
+                .await
+                .expect("create first");
+
+            let listed = store.list_terminals().await.expect("list");
+            assert_eq!(
+                listed.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+                vec!["t_1", "t_2"]
+            );
+            assert_eq!(listed[0].title, "other-1");
+        }
+
+        // Reopen: the rows are durable, which is the whole point of the table.
+        let reopened = SqliteStore::open(&path).await.expect("reopen");
+        let listed = reopened.list_terminals().await.expect("list after reopen");
+        assert_eq!(listed.len(), 2, "terminals survive a restart");
+        assert_eq!(listed[1].cwd, "/work/karucode");
+        assert_eq!(listed[1].title, "karucode-2");
+
+        reopened
+            .rename_terminal("t_2", Some("build watcher"))
+            .await
+            .expect("rename");
+        let renamed = reopened
+            .get_terminal("t_2")
+            .await
+            .expect("get")
+            .expect("exists");
+        assert_eq!(renamed.title, "build watcher");
+        // Clearing the name restores the derived one rather than an empty tab.
+        reopened
+            .rename_terminal("t_2", None)
+            .await
+            .expect("reset title");
+        assert_eq!(
+            reopened.get_terminal("t_2").await.unwrap().unwrap().title,
+            "karucode-2"
+        );
+
+        reopened.touch_terminal("t_2").await.expect("touch");
+        assert!(
+            reopened.get_terminal("t_2").await.unwrap().unwrap().last_used_at
+                >= renamed.last_used_at
+        );
+
+        reopened.delete_terminal("t_2").await.expect("delete");
+        assert_eq!(
+            reopened.terminal_ids().await.expect("ids"),
+            vec!["t_1".to_string()]
+        );
+        assert!(reopened.get_terminal("t_2").await.expect("get").is_none());
+        // An unknown id is a clear NotFound, not a silent success.
+        assert!(reopened
+            .rename_terminal("t_404", Some("x"))
+            .await
+            .is_err());
+    }
+
+    /// `default_title` names a tab after its directory, and copes with the root
+    /// (which has no basename) instead of producing an empty label.
+    #[test]
+    fn terminal_default_titles_come_from_the_directory() {
+        assert_eq!(
+            TerminalSession::default_title("/home/me/project", 1),
+            "project-1"
+        );
+        assert_eq!(TerminalSession::default_title("/", 3), "/-3");
+        assert_eq!(TerminalSession::default_title("", 0), "-1");
+        assert_eq!(
+            TerminalSession::default_title("/tmp/trailing/", 2),
+            "trailing-2"
+        );
     }
 
     #[tokio::test]
@@ -1811,7 +2813,21 @@ mod tests {
         assert_eq!(r1.error.as_deref(), Some("boom"));
         assert!(r1.finished_at.is_some());
 
-        // Only the still-running run is interrupted.
+        // Only the still-running run is interrupted. A restart leaves the row
+        // stamped with the *previous* process's instance id, so simulate that:
+        // recovery marks rows that are not this instance's, because the data-dir
+        // lock guarantees no peer is live.
+        store
+            .with(|conn| {
+                conn.execute(
+                    "UPDATE runs SET instance_id = 'previous-process' WHERE id = 'r_2'",
+                    [],
+                )
+                .map_err(|e| db_err("stamp foreign run", e))?;
+                Ok(())
+            })
+            .await
+            .expect("stamp foreign run");
         let interrupted = store.mark_interrupted_runs().await.expect("interrupt");
         assert_eq!(interrupted, 1);
         let runs = store.list_runs("s_1", 10).await.expect("list");
@@ -1905,17 +2921,82 @@ mod tests {
             "created_at is preserved on update"
         );
 
-        // a_2 completed -> not interrupted; flip it back to running to test counting.
+        // a_2 completed -> not interrupted; flip it back to running to test
+        // counting, stamped as a previous process left it.
         store
             .upsert_agent(&agent("a_2", "s_1", "running"))
             .await
             .expect("reopen");
+        store
+            .with(|conn| {
+                conn.execute(
+                    "UPDATE agents SET instance_id = 'previous-process' WHERE id = 'a_2'",
+                    [],
+                )
+                .map_err(|e| db_err("stamp foreign agent", e))?;
+                Ok(())
+            })
+            .await
+            .expect("stamp foreign agent");
         assert_eq!(store.mark_interrupted_agents().await.expect("interrupt"), 1);
         let agents = store.list_agents("s_1").await.expect("list");
         let a2 = agents.iter().find(|a| a.id == "a_2").expect("a2");
         assert_eq!(a2.status, "interrupted");
         assert!(a2.finished_at.is_some());
         assert_eq!(store.mark_interrupted_agents().await.expect("noop"), 0);
+    }
+
+    #[tokio::test]
+    async fn agents_list_workspace_wide_and_carry_session_context() {
+        let db = TempDb::new("agents-all");
+        let store = db.open().await;
+        let p1 = store
+            .create_project("p_1", "one", "/w/one")
+            .await
+            .expect("p1");
+        let p2 = store
+            .create_project("p_2", "two", "/w/two")
+            .await
+            .expect("p2");
+        store
+            .create_session("s_1", "Alpha", "/w/one", Some(&p1.id))
+            .await
+            .expect("s1");
+        store
+            .create_session("s_2", "Beta", "/w/two", Some(&p2.id))
+            .await
+            .expect("s2");
+        store
+            .upsert_agent(&agent("a_1", "s_1", "running"))
+            .await
+            .expect("a1");
+        store
+            .upsert_agent(&agent("a_2", "s_2", "completed"))
+            .await
+            .expect("a2");
+
+        let all = store.list_agents_all(None).await.expect("all");
+        assert_eq!(all.len(), 2);
+        let one = all
+            .iter()
+            .find(|summary| summary.agent.id == "a_1")
+            .expect("a_1");
+        assert_eq!(one.session_title, "Alpha");
+        assert_eq!(one.workspace, "/w/one");
+        assert_eq!(one.project_id.as_deref(), Some("p_1"));
+
+        // `Some(project)` is a real filter, not a hint.
+        let scoped = store.list_agents_all(Some(&p2.id)).await.expect("scoped");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].agent.id, "a_2");
+
+        let got = store
+            .get_agent("a_2")
+            .await
+            .expect("get")
+            .expect("a_2 present");
+        assert_eq!(got.session_title, "Beta");
+        assert!(store.get_agent("a_missing").await.expect("get").is_none());
     }
 
     #[tokio::test]
@@ -2489,6 +3570,650 @@ mod tests {
         let db = TempDb::new("path");
         let store = db.open().await;
         assert_eq!(store.path(), db.path.as_path());
+    }
+
+    // ---- retention, maintenance and diagnostics -------------------------
+
+    /// Backdate every message of `session_id` so it falls outside a `days`
+    /// retention window.
+    async fn age_messages(store: &SqliteStore, session_id: &str, days: u64) {
+        let cutoff = retention_cutoff(days) - 1_000;
+        let session_id = session_id.to_string();
+        store
+            .with(move |conn| {
+                conn.execute(
+                    "UPDATE messages SET created_at = ?2 WHERE session_id = ?1",
+                    params![session_id, cutoff],
+                )
+                .map_err(|e| db_err("age messages", e))?;
+                Ok(())
+            })
+            .await
+            .expect("age messages");
+    }
+
+    async fn index_names(store: &SqliteStore, table: &str) -> Vec<String> {
+        let sql = format!("PRAGMA index_list('{table}')");
+        store
+            .with(move |conn| {
+                let mut stmt = conn
+                    .prepare(&sql)
+                    .map_err(|e| db_err("index_list prepare", e))?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .map_err(|e| db_err("index_list query", e))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(|e| db_err("index_list rows", e))
+            })
+            .await
+            .expect("index_list")
+    }
+
+    #[tokio::test]
+    async fn pruning_removes_old_messages_but_keeps_the_newest_per_session() {
+        let db = TempDb::new("prune-keep-newest");
+        let store = db.open().await;
+        let keep = store.retention_keep_messages();
+        assert!(keep > 0, "a retention pass must always keep some context");
+
+        store
+            .create_session("s_big", "big", "/w", None)
+            .await
+            .expect("big session");
+        store
+            .create_session("s_small", "small", "/w", None)
+            .await
+            .expect("small session");
+
+        // One session well over the keep-window, one comfortably under it.
+        for i in 0..(keep + 50) {
+            store
+                .append_message(&new_message("s_big", "user", &format!("old{i}")))
+                .await
+                .expect("append big");
+        }
+        for i in 0..5 {
+            store
+                .append_message(&new_message("s_small", "user", &format!("small{i}")))
+                .await
+                .expect("append small");
+        }
+        age_messages(&store, "s_big", 30).await;
+        age_messages(&store, "s_small", 30).await;
+
+        // A message written now must survive even though the session is old.
+        store
+            .append_message(&new_message("s_big", "user", "recent"))
+            .await
+            .expect("append recent");
+
+        let report = store.prune_messages_older_than(30).await.expect("prune");
+        assert_eq!(
+            report.messages, 51,
+            "only the aged messages past the keep-window are deleted"
+        );
+
+        let big = store.list_messages("s_big", 10_000).await.expect("big");
+        assert_eq!(big.len(), keep, "the newest {keep} messages are kept");
+        assert_eq!(
+            big.last().expect("last").content,
+            "recent",
+            "the newest message always survives"
+        );
+        assert!(
+            big.windows(2).all(|w| w[0].id < w[1].id),
+            "kept messages stay in order"
+        );
+
+        let small = store.list_messages("s_small", 10_000).await.expect("small");
+        assert_eq!(small.len(), 5, "a session under the window loses nothing");
+
+        // A second pass has nothing left to do.
+        let again = store.prune_messages_older_than(30).await.expect("prune");
+        assert_eq!(again.messages, 0);
+    }
+
+    #[tokio::test]
+    async fn pruning_with_zero_days_is_a_noop() {
+        let db = TempDb::new("prune-zero");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        for i in 0..10 {
+            store
+                .append_message(&new_message("s_1", "user", &format!("m{i}")))
+                .await
+                .expect("append");
+        }
+        // Even ancient rows survive: 0 means "keep everything".
+        age_messages(&store, "s_1", 3650).await;
+
+        let report = store.prune_messages_older_than(0).await.expect("prune");
+        assert!(report.is_empty(), "0 days must delete nothing: {report:?}");
+        assert_eq!(report.total(), 0);
+        assert_eq!(
+            store
+                .list_messages("s_1", 100)
+                .await
+                .expect("messages")
+                .len(),
+            10
+        );
+    }
+
+    #[tokio::test]
+    async fn pruning_removes_orphaned_runs_agents_and_approvals() {
+        let db = TempDb::new("prune-orphans");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+
+        // A finished run/agent/approval whose transcript is about to be pruned.
+        // The message carries the run and agent ids, so the run and agent really
+        // do have a transcript until the message goes.
+        let mut old = new_message("s_1", "assistant", "old");
+        old.run_id = Some("r_old".to_string());
+        old.agent_id = Some("a_old".to_string());
+        store.append_message(&old).await.expect("message");
+        store
+            .create_run("r_old", "s_1", "m", "p")
+            .await
+            .expect("run");
+        store
+            .finish_run("r_old", RunStatus::Completed, None)
+            .await
+            .expect("finish");
+        store
+            .upsert_agent(&agent("a_old", "s_1", "completed"))
+            .await
+            .expect("agent");
+        store
+            .create_approval(&approval("ap_old", "s_1", "r_old"))
+            .await
+            .expect("approval");
+        store
+            .resolve_approval("ap_old", "allow_once")
+            .await
+            .expect("resolve");
+
+        // A live run must never be pruned, however old the session looks. It is
+        // created after the aging step below so its `started_at` stays current.
+        age_messages(&store, "s_1", 30).await;
+        store
+            .with(|conn| {
+                conn.execute("UPDATE runs SET started_at = 1", [])
+                    .map_err(|e| db_err("age runs", e))?;
+                conn.execute("UPDATE agents SET created_at = 1", [])
+                    .map_err(|e| db_err("age agents", e))?;
+                conn.execute("UPDATE approvals SET created_at = 1", [])
+                    .map_err(|e| db_err("age approvals", e))?;
+                Ok(())
+            })
+            .await
+            .expect("age rows");
+        store
+            .create_run("r_live", "s_1", "m", "p")
+            .await
+            .expect("live run");
+
+        // The newest message of a session is always kept, so the first pass
+        // leaves the transcript (and therefore the run) in place.
+        let report = store.prune_messages_older_than(30).await.expect("prune");
+        assert_eq!(report.messages, 0, "the newest message is always kept");
+        assert_eq!(report.runs, 0, "a run with a transcript is not orphaned");
+
+        // Drop the transcript and prune again to exercise the orphan path.
+        store
+            .with(|conn| {
+                conn.execute("DELETE FROM messages", [])
+                    .map_err(|e| db_err("drop messages", e))?;
+                Ok(())
+            })
+            .await
+            .expect("drop messages");
+        let report = store
+            .prune_messages_older_than(30)
+            .await
+            .expect("prune orphans");
+        assert_eq!(report.runs, 1, "the finished, transcript-less run goes");
+        assert_eq!(report.agents, 1, "the finished, transcript-less agent goes");
+        assert_eq!(report.approvals, 1, "the approval of the pruned run goes");
+
+        let runs = store.list_runs("s_1", 10).await.expect("runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "r_live", "a running run is never pruned");
+    }
+
+    #[tokio::test]
+    async fn db_size_bytes_returns_a_plausible_value() {
+        let db = TempDb::new("db-size");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        for i in 0..20 {
+            store
+                .append_message(&new_message("s_1", "user", &format!("m{i}")))
+                .await
+                .expect("append");
+        }
+
+        let size = store.db_size_bytes().await.expect("db size");
+        let on_disk = std::fs::metadata(&db.path).expect("metadata").len();
+        assert!(size > 0, "a populated database has a size");
+        assert!(
+            size >= on_disk,
+            "the reported size includes the WAL ({size} < {on_disk})"
+        );
+        assert!(
+            size < 64 * 1024 * 1024,
+            "a fresh test database is not huge: {size}"
+        );
+    }
+
+    #[tokio::test]
+    async fn vacuum_and_incremental_vacuum_succeed_and_keep_the_data() {
+        let db = TempDb::new("vacuum");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        for i in 0..200 {
+            store
+                .append_message(&new_message("s_1", "user", &format!("m{i}")))
+                .await
+                .expect("append");
+        }
+        let before = store.db_size_bytes().await.expect("size");
+
+        store
+            .incremental_vacuum()
+            .await
+            .expect("incremental vacuum");
+        store.vacuum().await.expect("vacuum");
+
+        let after = store.db_size_bytes().await.expect("size");
+        assert!(after > 0);
+        assert!(
+            after <= before,
+            "vacuum must not grow the file ({before} -> {after})"
+        );
+        assert_eq!(
+            store
+                .list_messages("s_1", 1000)
+                .await
+                .expect("messages")
+                .len(),
+            200,
+            "vacuum preserves the rows"
+        );
+        assert!(store.integrity_check().await.expect("check").ok);
+    }
+
+    #[tokio::test]
+    async fn a_second_open_on_the_same_data_dir_is_refused() {
+        let db = TempDb::new("single-instance");
+        let store = db.open().await;
+
+        match SqliteStore::open(&db.path).await {
+            Err(Error::Config(message)) => {
+                assert!(
+                    message.contains("another karucode instance"),
+                    "the error must name the cause: {message}"
+                );
+                assert!(
+                    message.contains("data directory"),
+                    "the error must name the data directory: {message}"
+                );
+            }
+            Err(other) => panic!("expected a Config error, got {other}"),
+            Ok(_) => panic!("two stores must not share one data directory"),
+        }
+
+        // The lock is released when the store is dropped, so a restart works.
+        drop(store);
+        let reopened = SqliteStore::open(&db.path).await.expect("reopen");
+        assert!(!reopened.instance_id().is_empty());
+    }
+
+    #[tokio::test]
+    async fn recovery_marks_dead_instances_rows_and_spares_this_one() {
+        let db = TempDb::new("instance-scoped-recovery");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+
+        // Rows this instance owns: a live run in this process. Recovery must not
+        // touch them, because this process is the one running them.
+        store
+            .create_run("r_mine", "s_1", "m", "p")
+            .await
+            .expect("run");
+        store
+            .upsert_agent(&agent("a_mine", "s_1", "running"))
+            .await
+            .expect("agent");
+
+        // Rows a *previous* process left behind. The exclusive data-dir lock
+        // guarantees that process is gone, so these are exactly what recovery
+        // exists to clean up.
+        let mine = store.instance_id().to_string();
+        store
+            .with(|conn| {
+                conn.execute(
+                    "INSERT INTO runs (id, session_id, status, model, prompt, started_at, instance_id)
+                     VALUES ('r_theirs', 's_1', 'running', 'm', 'p', 1, 'dead-instance')",
+                    [],
+                )
+                .map_err(|e| db_err("insert foreign run", e))?;
+                conn.execute(
+                    "INSERT INTO agents (id, session_id, parent_run_id, name, role, task, status,
+                                         created_at, updated_at, instance_id)
+                     VALUES ('a_theirs', 's_1', 'r', 'n', 'r', 't', 'running', 1, 1, 'dead-instance')",
+                    [],
+                )
+                .map_err(|e| db_err("insert foreign agent", e))?;
+                Ok(())
+            })
+            .await
+            .expect("seed foreign rows");
+
+        assert_eq!(store.mark_interrupted_runs().await.expect("runs"), 1);
+        assert_eq!(store.mark_interrupted_agents().await.expect("agents"), 1);
+
+        let runs = store.list_runs("s_1", 10).await.expect("runs");
+        let mine_run = runs.iter().find(|r| r.id == "r_mine").expect("r_mine");
+        let their_run = runs.iter().find(|r| r.id == "r_theirs").expect("r_theirs");
+        assert_eq!(
+            mine_run.status, "running",
+            "this process's own live run must survive recovery"
+        );
+        assert_eq!(
+            their_run.status, "interrupted",
+            "a dead instance's leftover run must be recovered"
+        );
+
+        let agents = store.list_agents("s_1").await.expect("agents");
+        let mine_agent = agents.iter().find(|a| a.id == "a_mine").expect("a_mine");
+        let their_agent = agents
+            .iter()
+            .find(|a| a.id == "a_theirs")
+            .expect("a_theirs");
+        assert_eq!(mine_agent.status, "running");
+        assert_eq!(their_agent.status, "interrupted");
+
+        // The instance id is stamped on everything this store writes.
+        let stamped: i64 = store
+            .with(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM runs WHERE instance_id = ?1",
+                    params![mine],
+                    |row| row.get(0),
+                )
+                .map_err(|e| db_err("count stamped", e))
+            })
+            .await
+            .expect("count stamped");
+        assert_eq!(stamped, 1);
+    }
+
+    #[tokio::test]
+    async fn open_pragmas_are_actually_in_effect() {
+        let db = TempDb::new("pragmas-verified");
+        let store = db.open().await;
+
+        let (mode, fk, timeout, auto_vacuum) = store
+            .with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT * FROM pragma_journal_mode),
+                            (SELECT * FROM pragma_foreign_keys),
+                            (SELECT * FROM pragma_busy_timeout),
+                            (SELECT * FROM pragma_auto_vacuum)",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .map_err(|e| db_err("pragmas", e))
+            })
+            .await
+            .expect("pragmas");
+        assert_eq!(mode.to_lowercase(), "wal");
+        assert_eq!(fk, 1, "foreign_keys must really be on for cascades");
+        assert_eq!(timeout, 5000);
+        assert_eq!(
+            auto_vacuum, 2,
+            "a new database is created with auto_vacuum=INCREMENTAL"
+        );
+
+        // The read-only pool must see the same WAL database.
+        let reader_mode: String = store
+            .read(|conn| {
+                conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                    .map_err(|e| db_err("reader journal_mode", e))
+            })
+            .await
+            .expect("reader pragma");
+        assert_eq!(reader_mode.to_lowercase(), "wal");
+    }
+
+    #[tokio::test]
+    async fn a_healthy_database_passes_quick_check_and_integrity_check() {
+        let db = TempDb::new("integrity");
+        let store = db.open().await;
+        // `open` ran quick_check before migrating.
+        assert!(
+            store.last_integrity_check().is_some(),
+            "open records when it last checked the file"
+        );
+
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .append_message(&new_message("s_1", "user", "hi"))
+            .await
+            .expect("append");
+
+        let report = store.integrity_check().await.expect("integrity check");
+        assert!(report.ok, "a healthy database reports ok: {report:?}");
+        assert!(report.problems.is_empty());
+        assert!(report.checked_at > 0);
+        assert!(store.last_integrity_check().expect("stamp") >= report.checked_at);
+    }
+
+    #[tokio::test]
+    async fn hot_query_indexes_exist() {
+        let db = TempDb::new("indexes");
+        let store = db.open().await;
+
+        let messages = index_names(&store, "messages").await;
+        assert!(
+            messages.iter().any(|n| n == "idx_messages_agent_id"),
+            "list_agent_messages needs messages(agent_id, id): {messages:?}"
+        );
+        assert!(messages.iter().any(|n| n == "idx_messages_session_id"));
+
+        let approvals = index_names(&store, "approvals").await;
+        assert!(
+            approvals.iter().any(|n| n == "idx_approvals_run_id"),
+            "expire_pending_approvals needs approvals(run_id): {approvals:?}"
+        );
+        assert!(
+            approvals
+                .iter()
+                .any(|n| n == "idx_approvals_session_status"),
+            "list_pending_approvals needs approvals(session_id, status): {approvals:?}"
+        );
+
+        let sessions = index_names(&store, "sessions").await;
+        assert!(
+            sessions.iter().any(|n| n == "idx_sessions_updated_at"),
+            "list_sessions orders by sessions.updated_at: {sessions:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_from_v3_adds_instance_id_and_indexes() {
+        let db = TempDb::new("migrate-v3");
+        std::fs::create_dir_all(db.path.parent().expect("parent")).expect("data dir");
+        {
+            // A database written by the previous build: v1..v3, no instance_id.
+            let conn = rusqlite::Connection::open(&db.path).expect("raw open");
+            conn.execute_batch(MIGRATION_1).expect("v1");
+            conn.execute_batch(MIGRATION_2).expect("v2");
+            conn.execute_batch(MIGRATION_3).expect("v3");
+            conn.pragma_update(None, "user_version", 3)
+                .expect("version");
+            conn.execute(
+                "INSERT INTO sessions (id, title, workspace, created_at, updated_at)
+                 VALUES ('s_old', 'Old', '/w', 1, 2)",
+                [],
+            )
+            .expect("insert session");
+            conn.execute(
+                "INSERT INTO runs (id, session_id, status, model, prompt, started_at)
+                 VALUES ('r_old', 's_old', 'running', 'm', 'p', 1)",
+                [],
+            )
+            .expect("insert run");
+            conn.execute(
+                "INSERT INTO agents (id, session_id, parent_run_id, name, role, task, status,
+                                     created_at, updated_at)
+                 VALUES ('a_old', 's_old', 'r_old', 'n', 'r', 't', 'running', 1, 1)",
+                [],
+            )
+            .expect("insert agent");
+        }
+
+        let store = db.open().await;
+        let version: i64 = store
+            .with(|conn| {
+                conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+                    .map_err(|e| db_err("user_version", e))
+            })
+            .await
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(
+            version >= 4,
+            "v4 is the migration that added instance_id (this fixture starts at v3)"
+        );
+
+        // Pre-v4 rows keep the empty instance id. That is not this process's id,
+        // so recovery treats them as a dead process's leftovers and marks them
+        // interrupted — which is correct: they were `running` when the old
+        // binary died.
+        let legacy: String = store
+            .with(|conn| {
+                conn.query_row(
+                    "SELECT instance_id FROM runs WHERE id = 'r_old'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| db_err("legacy instance_id", e))
+            })
+            .await
+            .expect("legacy instance_id");
+        assert_eq!(legacy, "");
+        assert_eq!(
+            store.mark_interrupted_runs().await.expect("recovery"),
+            1,
+            "a pre-v4 running row belongs to a dead process and must be recovered"
+        );
+
+        // The upgraded database is fully usable.
+        store
+            .create_session("s_new", "New", "/w", None)
+            .await
+            .expect("create after upgrade");
+        store
+            .append_message(&new_message("s_new", "user", "hi"))
+            .await
+            .expect("append after upgrade");
+        assert!(store.integrity_check().await.expect("check").ok);
+        assert!(index_names(&store, "messages")
+            .await
+            .iter()
+            .any(|n| n == "idx_messages_agent_id"));
+    }
+
+    // A multi-thread runtime, not `#[tokio::test]`: the point of the test is
+    // that a blocked read on one worker does not stall the write on another.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_long_read_does_not_block_a_concurrent_write() {
+        let db = TempDb::new("read-write-concurrency");
+        let store = Arc::new(db.open().await);
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        for i in 0..50 {
+            store
+                .append_message(&new_message("s_1", "user", &format!("m{i}")))
+                .await
+                .expect("append");
+        }
+
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (release_tx, mut release_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let reader = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                store
+                    .read(move |conn| {
+                        let n: i64 = conn
+                            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+                            .map_err(|e| db_err("count", e))?;
+                        started_tx.blocking_send(()).ok();
+                        // Hold the read connection until the test releases it.
+                        release_rx.blocking_recv();
+                        Ok(n)
+                    })
+                    .await
+            })
+        };
+
+        tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
+            .await
+            .expect("the read must start")
+            .expect("reader signalled");
+
+        // With one connection behind one mutex this write would queue behind the
+        // read and time out; with the read-only pool it commits immediately.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            store.append_message(&new_message("s_1", "user", "written during the read")),
+        )
+        .await
+        .expect("a write must not queue behind a long read")
+        .expect("append during read");
+
+        release_tx.send(()).await.ok();
+        let read = reader.await.expect("reader task").expect("read");
+        assert_eq!(read, 50, "the read saw the pre-write snapshot");
+        assert_eq!(
+            store
+                .list_messages("s_1", 100)
+                .await
+                .expect("messages")
+                .len(),
+            51
+        );
     }
 }
 

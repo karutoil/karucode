@@ -95,6 +95,11 @@ pub struct ToolOutcome {
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
+    /// Images this result wants the model to look at. Only the built-in tools
+    /// produce them (plugin/MCP results decode with an empty list), and only when
+    /// [`ToolCtx::supports_images`] says the active model accepts image input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::message::ImageAttachment>,
 }
 
 impl ToolOutcome {
@@ -104,6 +109,7 @@ impl ToolOutcome {
             content: content.into(),
             truncated: false,
             meta: None,
+            images: Vec::new(),
         }
     }
 
@@ -113,11 +119,17 @@ impl ToolOutcome {
             content: content.into(),
             truncated: false,
             meta: None,
+            images: Vec::new(),
         }
     }
 
     pub fn with_meta(mut self, meta: serde_json::Value) -> Self {
         self.meta = Some(meta);
+        self
+    }
+
+    pub fn with_images(mut self, images: Vec<crate::message::ImageAttachment>) -> Self {
+        self.images = images;
         self
     }
 
@@ -196,6 +208,14 @@ pub struct ToolCtx {
     pub settings: Arc<dyn Settings>,
     /// Subagent nesting depth; 0 for the main agent.
     pub depth: u8,
+    /// Whether the model running this turn accepts image input.
+    ///
+    /// The runtime resolves it from the session's effective model
+    /// (`model.supports_images`), so a session pinned to a vision model gets
+    /// images even when the install-wide default is a text-only one. A tool that
+    /// would otherwise return pixels must check this and explain the limitation
+    /// instead of sending an image the endpoint will reject.
+    pub supports_images: bool,
 }
 
 impl ToolCtx {

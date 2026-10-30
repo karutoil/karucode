@@ -24,6 +24,15 @@ pub enum Event {
     SessionDeleted {
         session_id: String,
     },
+    /// A steering message the user sent mid-run has been taken into the
+    /// conversation. Emitted by the loop at the moment the message joins the
+    /// request, so the transcript can show it where the model saw it rather than
+    /// where the client optimistically rendered it.
+    SteerApplied {
+        /// The id `POST /api/sessions/:id/messages?mode=steer` returned.
+        steer_id: String,
+        content: String,
+    },
     RunStarted {
         run_id: String,
         prompt: String,
@@ -62,6 +71,11 @@ pub enum Event {
     Usage {
         input_tokens: u32,
         output_tokens: u32,
+        /// Prompt tokens the provider served from its prefix cache. `None` when
+        /// the endpoint does not report it, so the UI can show "unknown"
+        /// instead of a fake 0% hit rate.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cached_tokens: Option<u32>,
     },
     ToolCallStarted {
         call_id: String,
@@ -75,6 +89,11 @@ pub enum Event {
         output: String,
         truncated: bool,
         duration_ms: u64,
+        /// Images the tool returned for the model to look at (base64). Sent to
+        /// every client so the chat can show the preview live; a text-only
+        /// model never produces them, because the tool refuses instead.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::message::ImageAttachment>,
     },
     CommandStarted {
         call_id: String,

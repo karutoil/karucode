@@ -91,10 +91,35 @@ pub struct ModelConfig {
     pub api_key: Option<String>,
     #[serde(default = "default_model")]
     pub model: String,
+    /// The temperature to send **when [`ModelConfig::send_temperature`] is on**.
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    /// Whether to send `temperature` at all. Off by default: a sampling value
+    /// the model was not tuned for can push a reasoning model into repeating
+    /// itself (measured: with a 140-message history at the point where the model
+    /// was about to write a file, `temperature: 0.2` produced 8k tokens of
+    /// reasoning and no action, while omitting the field produced the
+    /// `write_file` call). Endpoints that want a fixed temperature can turn it
+    /// on; nobody gets one invented for them.
+    #[serde(default)]
+    pub send_temperature: bool,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Total context window in tokens, when the model declares one.
+    ///
+    /// This is the **source of truth for the request budget**: the runtime
+    /// derives how much conversation it may send from this window (minus the
+    /// room the answer needs), so a 1M-token model is not held to a number that
+    /// was chosen for a 32k one. `[model]` can set it directly, and a
+    /// `[[providers.models]]` entry fills it in when the profile is resolved.
+    /// Unknown means "fall back to `limits.context_max_chars`".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Maximum output tokens the endpoint will generate. Reserved out of the
+    /// window so the answer always has room; falls back to `max_tokens`, then to
+    /// an eighth of the window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     #[serde(default)]
     pub top_p: Option<f32>,
     #[serde(default = "default_request_timeout")]
@@ -117,6 +142,14 @@ pub struct ModelConfig {
     /// this cap — not the attempt count — bounds the total wait.
     #[serde(default = "default_retry_max_delay_ms")]
     pub retry_max_delay_ms: u64,
+    /// Wall-clock ceiling for the whole retry chain, in seconds.
+    ///
+    /// The attempt count alone is not a bound: 50 attempts with a 30 s backoff
+    /// cap is over twenty minutes of a run spent waiting on an endpoint that is
+    /// never going to answer. This stops the chain and surfaces the real error
+    /// instead. Zero disables the wall-clock bound (attempts only).
+    #[serde(default = "default_retry_max_total_secs")]
+    pub retry_max_total_secs: u64,
     /// How many times one turn may restart its stream *after* the answer
     /// started arriving. `retry_max_retries` only covers attempts that died
     /// before the first chunk, because replaying a started answer would
@@ -134,6 +167,26 @@ pub struct ModelConfig {
     /// Enables parallel tool calls in the request when the endpoint supports it.
     #[serde(default = "default_parallel_tool_calls")]
     pub parallel_tool_calls: bool,
+    /// Whether this model accepts **image input** (a vision-capable model).
+    ///
+    /// Off by default, and deliberately not guessed from the model id: an
+    /// OpenAI-compatible gateway will happily accept a request carrying an image
+    /// for a text-only model and either drop it or fail the whole turn, and
+    /// `read_file` on a PNG would then look like it worked while the model saw
+    /// nothing. With this off, `read_file` refuses an image with a message the
+    /// model can repeat to the user, so "I cannot see images" is stated instead
+    /// of hallucinated.
+    ///
+    /// A `[[providers.models]]` entry's `vision` flag (prefilled from models.dev
+    /// when the model is picked from the catalog) overrides it for that model.
+    /// `KARUCODE_MODEL_SUPPORTS_IMAGES` sets the flat default.
+    #[serde(default)]
+    pub supports_images: bool,
+    /// This endpoint is a multi-channel aggregator; see
+    /// [`ProviderProfile::aggregator`]. Copied from the active profile by
+    /// [`Config::model_for_profile`] so the retry layer can see it.
+    #[serde(default)]
+    pub aggregator: bool,
 }
 
 fn default_provider() -> String {
@@ -160,6 +213,9 @@ fn default_retry_base_delay_ms() -> u64 {
 fn default_retry_max_delay_ms() -> u64 {
     30_000
 }
+fn default_retry_max_total_secs() -> u64 {
+    300
+}
 fn default_retry_max_stream_restarts() -> u32 {
     3
 }
@@ -175,16 +231,22 @@ impl Default for ModelConfig {
             api_key: None,
             model: default_model(),
             temperature: default_temperature(),
+            send_temperature: false,
             max_tokens: None,
+            context_window: None,
+            max_output_tokens: None,
             top_p: None,
             request_timeout_secs: default_request_timeout(),
             retry_max_retries: default_retry_max_retries(),
             retry_base_delay_ms: default_retry_base_delay_ms(),
             retry_max_delay_ms: default_retry_max_delay_ms(),
+            retry_max_total_secs: default_retry_max_total_secs(),
             retry_max_stream_restarts: default_retry_max_stream_restarts(),
             extra_headers: BTreeMap::new(),
             extra_body: BTreeMap::new(),
             parallel_tool_calls: default_parallel_tool_calls(),
+            supports_images: false,
+            aggregator: false,
         }
     }
 }
@@ -198,9 +260,13 @@ impl ModelConfig {
             "model": self.model,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "context_window": self.context_window,
+            "max_output_tokens": self.max_output_tokens,
             "top_p": self.top_p,
             "request_timeout_secs": self.request_timeout_secs,
             "parallel_tool_calls": self.parallel_tool_calls,
+            "supports_images": self.supports_images,
+            "aggregator": self.aggregator,
             "api_key_set": self.api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false),
         })
     }
@@ -230,6 +296,15 @@ pub struct ModelEntry {
     pub tool_call: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<bool>,
+    /// Whether the model accepts image input. `None` means "not declared", so
+    /// the install-wide `model.supports_images` applies.
+    ///
+    /// The settings screen prefills it from models.dev (`modalities.input`
+    /// containing `image`, or a legacy `attachment: true`); it stays editable
+    /// because a self-hosted gateway may serve a vision model under a text-only
+    /// id, or the other way round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
     /// USD per million input tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_input: Option<f64>,
@@ -285,6 +360,18 @@ pub struct ProviderProfile {
     pub extra_headers: BTreeMap<String, String>,
     #[serde(default)]
     pub extra_body: BTreeMap<String, serde_json::Value>,
+    /// This endpoint is a multi-channel aggregator (a proxy that fronts several
+    /// upstream providers and fails over between them).
+    ///
+    /// It changes one thing: whether a 401/403/404 is retried. On a direct
+    /// vendor API those are permanent — a revoked key or a model id that does
+    /// not exist stays that way, and retrying 50 times turns a clear error into
+    /// a twenty-minute hang. On an aggregator the same status often means *this
+    /// channel's* key is dead and the next attempt lands on a different channel,
+    /// so retrying is correct. Off by default: the safe reading of a 401 is
+    /// "stop and tell the operator".
+    #[serde(default)]
+    pub aggregator: bool,
 }
 
 impl Default for ProviderProfile {
@@ -299,6 +386,7 @@ impl Default for ProviderProfile {
             request_timeout_secs: default_request_timeout(),
             extra_headers: BTreeMap::new(),
             extra_body: BTreeMap::new(),
+            aggregator: false,
         }
     }
 }
@@ -469,11 +557,26 @@ pub struct Limits {
     /// Bytes returned by a single file read.
     #[serde(default = "d_file_read")]
     pub max_file_read_bytes: usize,
+    /// Largest image `read_file` will hand to a vision model, in bytes.
+    ///
+    /// The bytes are base64-encoded into the transcript and resent on every turn
+    /// of the session, so this is a real cost knob, not just a read limit. A
+    /// screenshot (a few hundred KB) fits comfortably; a RAW photo or a 40 MB
+    /// PNG does not, and `read_file` refuses it with the size and this key's name
+    /// so the model can ask for a smaller file instead of silently burning the
+    /// context window.
+    #[serde(default = "d_image_read")]
+    pub max_image_read_bytes: usize,
     /// Maximum results returned by the search tool.
     #[serde(default = "d_search")]
     pub search_max_results: usize,
-    /// Character budget for the conversation sent to the model; older tool
-    /// results are elided first when this is exceeded.
+    /// Character budget for the conversation sent to the model.
+    ///
+    /// `0` (the default) means **derive it from the model**: the window the
+    /// provider declares minus the room its answer needs, converted at four
+    /// characters per token. A non-zero value is an explicit ceiling for the
+    /// whole install (it can only lower the derived budget, never raise it past
+    /// what the model can actually take).
     #[serde(default = "d_context_chars")]
     pub context_max_chars: usize,
     /// Maximum number of tool calls executed from a single assistant message.
@@ -481,6 +584,17 @@ pub struct Limits {
     /// safety valve against a runaway batch, not a work budget: leave it high.
     #[serde(default = "d_parallel_calls")]
     pub max_tool_calls_per_turn: usize,
+    /// Extra environment variable *names* passed through to `run_command`.
+    ///
+    /// The child never inherits the server's environment: it gets a fixed
+    /// allowlist (`PATH`, `HOME`, `USER`, `LANG`, `TERM`, `TMPDIR`, `PWD`, `TZ`,
+    /// ...) so the harness bearer token and the provider API key cannot be
+    /// exfiltrated by a prompt-injected `curl`. Names listed here are added on
+    /// top of that allowlist, but a name that looks like a credential
+    /// (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `KARUCODE_*`, `AWS_*`)
+    /// is still dropped.
+    #[serde(default)]
+    pub command_env_passthrough: Vec<String>,
 }
 
 fn d_iterations() -> u32 {
@@ -507,11 +621,18 @@ fn d_cmd_timeout_max() -> u64 {
 fn d_file_read() -> usize {
     200_000
 }
+fn d_image_read() -> usize {
+    // 4 MiB: a full-screen PNG screenshot is usually 0.2-2 MB, and base64 adds
+    // a third on top. Big enough for real UI/asset work, small enough that one
+    // read cannot swallow a 128k-token window.
+    4 * 1024 * 1024
+}
 fn d_search() -> usize {
     200
 }
 fn d_context_chars() -> usize {
-    240_000
+    // 0 = derive the budget from the resolved model's context window.
+    0
 }
 fn d_parallel_calls() -> usize {
     32
@@ -529,11 +650,82 @@ impl Default for Limits {
             command_timeout_secs: d_cmd_timeout(),
             max_command_timeout_secs: d_cmd_timeout_max(),
             max_file_read_bytes: d_file_read(),
+            max_image_read_bytes: d_image_read(),
             search_max_results: d_search(),
             context_max_chars: d_context_chars(),
             max_tool_calls_per_turn: d_parallel_calls(),
+            command_env_passthrough: Vec::new(),
         }
     }
+}
+
+/// Characters per token used to turn a model's token window into a character
+/// budget. Four is the usual English/code estimate; the safety factor below
+/// absorbs the cases where it is optimistic.
+const CHARS_PER_TOKEN: f64 = 4.0;
+/// Shrink the derived budget a little: token counts are estimates, and a request
+/// that overruns the window is rejected outright rather than truncated.
+const CONTEXT_SAFETY: f64 = 0.95;
+/// Budget used when neither the model nor the operator declares anything.
+///
+/// Deliberately conservative. This used to be 240_000 (~60k tokens at four
+/// characters per token), which is larger than the window of most small models:
+/// a hand-added model on a 32k endpoint got a prompt roughly twice its window
+/// and the provider rejected the request outright. A budget that is too small
+/// costs a compaction; a budget that is too large costs a hard failure.
+const CONTEXT_FALLBACK_CHARS: usize = 32_000;
+/// Never derive a budget smaller than this, even from a tiny window: below it
+/// nothing useful fits and the run would compact on every turn.
+const CONTEXT_MIN_CHARS: usize = 32_000;
+
+impl Limits {
+    /// How much conversation this model may be sent, in characters.
+    ///
+    /// The model's own window decides, because it is the only number that is
+    /// actually true: a global cap smaller than the window makes the harness
+    /// compact (and re-read) work the model could have held, which is the single
+    /// most expensive thing a long session can do. `context_max_chars` is still
+    /// honoured as an explicit ceiling when an operator sets it, but it is
+    /// clamped to what the model can take, never used to invent a smaller window
+    /// when the model already declares a bigger one and the operator left it
+    /// alone (`0`).
+    pub fn context_chars_for(&self, model: &ModelConfig) -> usize {
+        let derived = derived_context_chars(model);
+        match (self.context_max_chars, derived) {
+            (0, Some(derived)) => derived,
+            (0, None) => {
+                // Falling back means the model's window is unknown, so the
+                // budget is a guess. Say so once per call site rather than
+                // letting an operator wonder why a long session compacts early.
+                tracing::warn!(
+                    model = %model.model,
+                    fallback_chars = CONTEXT_FALLBACK_CHARS,
+                    "model declares no context_window; using the conservative fallback budget. \
+                     Set `context_window` on the model entry to use the real window."
+                );
+                CONTEXT_FALLBACK_CHARS
+            }
+            // An explicit ceiling is an instruction: respect it exactly, but
+            // never above what the model can accept. No floor here - an operator
+            // who asks for a deliberately tiny budget gets it.
+            (explicit, Some(derived)) => explicit.min(derived).max(1),
+            (explicit, None) => explicit,
+        }
+    }
+}
+
+/// `context_window` minus what the answer needs, as characters.
+fn derived_context_chars(model: &ModelConfig) -> Option<usize> {
+    let window = model.context_window.filter(|window| *window > 0)?;
+    let reserve = model
+        .max_output_tokens
+        .or(model.max_tokens.map(u64::from))
+        // A model that declares neither still needs room to answer.
+        .unwrap_or(window / 8)
+        // An answer can never be allowed to eat the whole window.
+        .min(window / 2);
+    let usable = window.saturating_sub(reserve) as f64;
+    Some(((usable * CHARS_PER_TOKEN * CONTEXT_SAFETY) as usize).max(CONTEXT_MIN_CHARS))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -593,6 +785,232 @@ impl Default for SubagentConfig {
         }
     }
 }
+
+/// `[terminals]`: the browser terminal.
+///
+/// A terminal is a real PTY running the configured shell as the server user, in
+/// the current project's directory. It is a general-purpose shell for the human
+/// operating the machine - not a tool the model can call, and not an approval
+/// gate: the person typing at it is already authorised to run commands, which is
+/// exactly what `run_command` asks *them* about.
+///
+/// Three limits keep it from becoming a liability: [`TerminalConfig::max_terminals`]
+/// bounds how many PTYs one install can hold, [`TerminalConfig::scrollback_bytes`]
+/// bounds the replay buffer per terminal, and [`TerminalConfig::shell`] pins what
+/// gets spawned (an empty value picks `$SHELL`, then `/bin/sh`).
+///
+/// **The shell outlives the browser, not the server.** Sessions are kept in
+/// SQLite so the tab strip, its titles and a numbered log of the terminal
+/// survive a reload, another browser, a cleared cache and a restart - but a
+/// shell process is a child of this process, so a restart of karucode ends every
+/// terminal's *process*. Reopening one starts a fresh shell in the same
+/// directory with the same title. That is the honest boundary: the alternative
+/// is a detached daemon, and a terminal that survives `systemctl restart
+/// karucode` cannot be killed with it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TerminalConfig {
+    /// Offer the terminal tab at all. Off means `GET /api/terminals` answers an
+    /// empty list and a create is refused, so a locked-down install can leave no
+    /// PTY surface in the UI.
+    #[serde(default = "d_true")]
+    pub enabled: bool,
+    /// Shell to spawn. Empty means `$SHELL` from the server's environment, and
+    /// `/bin/sh` when that is unset or unusable. A relative name is looked up on
+    /// `PATH` (so `"bash"` works); an absolute path must exist and be executable.
+    ///
+    /// The value is validated at settings-save time, not per spawn, so a typo
+    /// cannot leave the tab broken with only a failed websocket to show for it.
+    #[serde(default)]
+    pub shell: String,
+    /// Bytes of output kept per terminal for the replay a reconnecting browser
+    /// gets. The newest bytes win and the oldest are dropped, so a terminal that
+    /// streamed a 200 MB build log still replays its last screenful.
+    #[serde(default = "d_terminal_scrollback")]
+    pub scrollback_bytes: usize,
+    /// How many terminals may exist at once. Each one is a PTY plus a shell, so
+    /// this is a file-descriptor and memory bound, not a taste one.
+    #[serde(default = "d_terminal_max")]
+    pub max_terminals: usize,
+    /// Close a terminal that has had no connected browser for this long, in
+    /// seconds. `0` keeps it forever (until the server restarts).
+    ///
+    /// This is what stops a forgotten tab from holding a shell open on a
+    /// laptop that is closed every evening. The database row and its title
+    /// survive; only the process is reaped, and the tab reopens a new shell.
+    #[serde(default = "d_terminal_idle")]
+    pub idle_timeout_secs: u64,
+}
+
+fn d_terminal_scrollback() -> usize {
+    // 256 KiB: about 3000 lines of ordinary shell output, which is several
+    // screenfuls of scrollback on a reconnecting laptop screen.
+    256 * 1024
+}
+fn d_terminal_max() -> usize {
+    16
+}
+fn d_terminal_idle() -> u64 {
+    // A shell only costs memory while it has output to keep; an idle one is
+    // cheap, but a morning-after tab strip of eight forgotten shells is not.
+    12 * 3600
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            shell: String::new(),
+            scrollback_bytes: d_terminal_scrollback(),
+            max_terminals: d_terminal_max(),
+            idle_timeout_secs: d_terminal_idle(),
+        }
+    }
+}
+
+impl TerminalConfig {
+    /// The shell to spawn: the configured one, else `$SHELL`, else `/bin/sh`.
+    ///
+    /// A configured value wins even when `$SHELL` names something else - an
+    /// operator who pinned `bash` did not ask for the container's `sh`. The
+    /// fallbacks only apply to an empty setting.
+    pub fn shell_program(&self) -> String {
+        let configured = self.shell.trim();
+        if !configured.is_empty() {
+            return configured.to_string();
+        }
+        match std::env::var("SHELL") {
+            Ok(shell) if !shell.trim().is_empty() => shell.trim().to_string(),
+            _ => "/bin/sh".to_string(),
+        }
+    }
+
+    /// `scrollback_bytes` clamped to a range one terminal can actually hold.
+    pub fn replay_capacity(&self) -> usize {
+        self.scrollback_bytes.clamp(MIN_TERMINAL_SCROLLBACK, MAX_TERMINAL_SCROLLBACK)
+    }
+
+    /// `max_terminals` clamped so the setting cannot be `0` (a tab that never
+    /// works) or absurd.
+    pub fn terminal_budget(&self) -> usize {
+        self.max_terminals.clamp(1, MAX_TERMINALS_HINT)
+    }
+}
+
+/// Smallest replay buffer worth keeping: one wide screen of dense output.
+pub const MIN_TERMINAL_SCROLLBACK: usize = 4 * 1024;
+/// Largest replay buffer per terminal. Past this the memory of an idle tab strip
+/// is worse than losing scrollback nobody will read.
+pub const MAX_TERMINAL_SCROLLBACK: usize = 4 * 1024 * 1024;
+/// Upper bound for [`TerminalConfig::max_terminals`].
+pub const MAX_TERMINALS_HINT: usize = 64;
+
+/// AI-written session titles: on by default.
+///
+/// A long session's rail entry is its title, and the first message is usually a
+/// wall of context ("we need to add the functionality for steering/follow up,
+/// and also ..."). The heuristic title (see `kc-server`) keeps the first 60
+/// characters of that, which is readable but not *understandable*. With this on,
+/// one cheap extra request after the first user message asks a model for a
+/// short, plain-language title and renames the session with it.
+///
+/// Three properties make it safe to leave on by default:
+///
+/// * **it never blocks the run** - the request is spawned after `submit` returns
+///   and a failure is logged, not surfaced;
+/// * **it never overwrites a human** - the rename is refused unless the session
+///   still carries the title it had when the request started, so a manual rename
+///   (or a second message) wins the race;
+/// * **it costs one short turn** - `max_tokens` is set from [`TitlesConfig::max_chars`],
+///   the prompt is the first user message truncated to [`TITLE_PROMPT_CHARS`], and
+///   the model is whatever [`TitlesConfig::model`] names or, by default, the very
+///   model the session is already running on (no second provider to configure).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TitlesConfig {
+    /// Generate titles with a model. Off leaves every session with the
+    /// deterministic title derived from its first message.
+    #[serde(default = "d_true")]
+    pub enabled: bool,
+    /// Provider profile id to ask. Empty means "inherit": use the session's own
+    /// resolved model, which is what makes this zero-configuration.
+    ///
+    /// A separate model is worth setting when the session model is expensive or
+    /// slow, because a title only needs a handful of tokens and the fastest cheap
+    /// model on the install is usually a different one.
+    #[serde(default)]
+    pub provider: String,
+    /// Model id to ask. Empty means "inherit", exactly like `provider`. Both
+    /// must be set together: a provider without a model falls back to that
+    /// profile's default model, and a model without a provider inherits the
+    /// session's provider.
+    #[serde(default)]
+    pub model: String,
+    /// Hard cap on the generated title, in characters. The model is told a
+    /// number a little below this and the answer is truncated on a char boundary,
+    /// so a chatty model cannot push the rail out of shape.
+    #[serde(default = "d_title_chars")]
+    pub max_chars: usize,
+    /// Give up (and keep the heuristic title) after this many seconds.
+    ///
+    /// The request runs in the background, but not forever: an endpoint that
+    /// hangs would otherwise hold a connection and a task for the life of the
+    /// process.
+    #[serde(default = "d_title_timeout")]
+    pub timeout_secs: u64,
+}
+
+/// Characters of the first user message sent to the titling model.
+///
+/// A title needs the gist, not the whole paste; 2000 characters covers the
+/// opening paragraph of even a very detailed request. Truncating here is what
+/// keeps the extra turn cheap on a session that starts with a 50 KB log.
+pub const TITLE_PROMPT_CHARS: usize = 2_000;
+
+fn d_title_chars() -> usize {
+    60
+}
+fn d_title_timeout() -> u64 {
+    20
+}
+
+impl Default for TitlesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: String::new(),
+            model: String::new(),
+            max_chars: d_title_chars(),
+            timeout_secs: d_title_timeout(),
+        }
+    }
+}
+
+impl TitlesConfig {
+    /// The provider profile explicitly configured for titles, if any.
+    pub fn provider_id(&self) -> Option<&str> {
+        let provider = self.provider.trim();
+        (!provider.is_empty()).then_some(provider)
+    }
+
+    /// The model id explicitly configured for titles, if any.
+    pub fn model_id(&self) -> Option<&str> {
+        let model = self.model.trim();
+        (!model.is_empty()).then_some(model)
+    }
+
+    /// True when titles inherit the session's own model.
+    pub fn inherits_session_model(&self) -> bool {
+        self.provider_id().is_none() && self.model_id().is_none()
+    }
+
+    /// `max_chars` clamped to a range the rail can actually render.
+    pub fn title_budget(&self) -> usize {
+        self.max_chars.clamp(8, MAX_TITLE_CHARS_HINT)
+    }
+}
+
+/// Upper bound for [`TitlesConfig::max_chars`]. Beyond this a "title" is a
+/// paragraph, and the session rail truncates it anyway.
+pub const MAX_TITLE_CHARS_HINT: usize = 120;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginConfig {
@@ -673,10 +1091,47 @@ pub struct ConfigFile {
     pub approvals: Option<ApprovalPolicy>,
     #[serde(default)]
     pub subagents: Option<SubagentConfig>,
+    /// `[titles]`: AI-written session titles (on by default).
+    #[serde(default)]
+    pub titles: Option<TitlesConfig>,
+    /// `[terminals]`: the browser terminal (a PTY running a shell as the server
+    /// user). On by default; see [`TerminalConfig`].
+    #[serde(default)]
+    pub terminals: Option<TerminalConfig>,
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
+    /// Re-read the plugin sources in the background and apply adds, removals and
+    /// upgrades without restarting the server.
+    #[serde(default)]
+    pub plugins_watch: Option<bool>,
+    /// How often the watcher polls, in seconds (clamped to
+    /// [`MIN_PLUGINS_WATCH_SECS`]`..=`[`MAX_PLUGINS_WATCH_SECS`]).
+    #[serde(default)]
+    pub plugins_watch_secs: Option<u64>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Allowlist for directories a project may be created in. `None`/empty -
+    /// the default - means **no allowlist**: any existing directory is a valid
+    /// project, which is what a single-operator install wants, since the obvious
+    /// second project is a sibling of the workspace. Set it to restrict project
+    /// creation on a shared or remotely reachable deployment. `/` itself is
+    /// refused either way.
+    #[serde(default)]
+    pub project_roots: Option<Vec<PathBuf>>,
+    /// Let the file tools reach the system temporary directory as well as the
+    /// project. On by default: scratch files, build caches, screenshots and
+    /// browser profiles land in `/tmp` constantly, and refusing them is a wall
+    /// of failed tool calls for no security gain.
+    #[serde(default)]
+    pub allow_temp_dir: Option<bool>,
+    /// Separate credential required to change the approval mode, the model
+    /// endpoint or the provider list. Without it, any ordinary API client can
+    /// remove the human gate and then repoint the provider at itself.
+    #[serde(default)]
+    pub admin_token: Option<String>,
+    /// Delete messages older than this many days. `0` keeps everything.
+    #[serde(default)]
+    pub retention_days: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -698,10 +1153,32 @@ pub struct Config {
     pub limits: Limits,
     pub approvals: ApprovalPolicy,
     pub subagents: SubagentConfig,
+    /// AI-written session titles (see [`TitlesConfig`]). On by default.
+    pub titles: TitlesConfig,
+    /// The browser terminal (see [`TerminalConfig`]). On by default.
+    pub terminals: TerminalConfig,
     pub plugins: Vec<PluginConfig>,
+    /// Poll the plugin sources and apply changes without a restart. Off by
+    /// default: a reload replaces processes, and an operator who edits a plugin's
+    /// files mid-session should opt into that happening on its own.
+    pub plugins_watch: bool,
+    /// Poll interval for the watcher, in seconds.
+    pub plugins_watch_secs: u64,
     pub mcp_servers: Vec<McpServerConfig>,
     pub web_dir: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
+    /// Allowlist for directories a project may be created in. **Empty means no
+    /// allowlist**: `POST /api/projects` accepts any existing directory except
+    /// `/`. Set it to restrict project creation on a shared or remotely
+    /// reachable deployment.
+    pub project_roots: Vec<PathBuf>,
+    /// Allow the file tools to reach the system temporary directory in addition
+    /// to the project root. See [`Config::extra_roots`].
+    pub allow_temp_dir: bool,
+    /// Credential required for security-relevant settings changes.
+    pub admin_token: Option<String>,
+    /// Message retention in days; `0` keeps everything.
+    pub retention_days: u64,
 }
 
 impl Default for Config {
@@ -721,13 +1198,36 @@ impl Default for Config {
             limits: Limits::default(),
             approvals: ApprovalPolicy::default(),
             subagents: SubagentConfig::default(),
+            titles: TitlesConfig::default(),
+            terminals: TerminalConfig::default(),
             plugins: Vec::new(),
+            plugins_watch: false,
+            plugins_watch_secs: DEFAULT_PLUGINS_WATCH_SECS,
             mcp_servers: Vec::new(),
             web_dir: None,
             config_path: None,
+            project_roots: Vec::new(),
+            allow_temp_dir: true,
+            admin_token: None,
+            retention_days: 0,
         }
     }
 }
+
+/// Fastest the plugin watcher may poll, in seconds.
+///
+/// One poll is a `read_dir` of `<data_dir>/plugins` plus a `stat` per configured
+/// command, so it is cheap — but a busy loop over a directory that changes a few
+/// times an hour buys nothing and makes the log a metronome.
+pub const MIN_PLUGINS_WATCH_SECS: u64 = 1;
+/// Default poll interval for the plugin watcher, in seconds.
+///
+/// Two seconds is fast enough that saving a plugin file feels like it took
+/// effect, and slow enough that a build writing its binary in several steps is
+/// seen once rather than mid-write.
+pub const DEFAULT_PLUGINS_WATCH_SECS: u64 = 2;
+/// Slowest the plugin watcher may poll, in seconds.
+pub const MAX_PLUGINS_WATCH_SECS: u64 = 600;
 
 fn default_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("KARUCODE_DATA_DIR") {
@@ -832,11 +1332,35 @@ impl Config {
         if let Some(v) = file.subagents {
             cfg.subagents = v;
         }
+        if let Some(v) = file.titles {
+            cfg.titles = v;
+        }
+        if let Some(v) = file.terminals {
+            cfg.terminals = v;
+        }
         if !file.plugins.is_empty() {
             cfg.plugins = file.plugins;
         }
+        if let Some(v) = file.plugins_watch {
+            cfg.plugins_watch = v;
+        }
+        if let Some(v) = file.plugins_watch_secs {
+            cfg.plugins_watch_secs = v;
+        }
         if !file.mcp_servers.is_empty() {
             cfg.mcp_servers = file.mcp_servers;
+        }
+        if let Some(v) = file.project_roots {
+            cfg.project_roots = v;
+        }
+        if let Some(v) = file.allow_temp_dir {
+            cfg.allow_temp_dir = v;
+        }
+        if let Some(v) = file.admin_token {
+            cfg.admin_token = Some(v);
+        }
+        if let Some(v) = file.retention_days {
+            cfg.retention_days = v;
         }
 
         // Environment overrides.
@@ -863,6 +1387,60 @@ impl Config {
         }
         if let Some(v) = env_str("KARUCODE_WEB_DIR") {
             cfg.web_dir = Some(PathBuf::from(v));
+        }
+        if let Some(v) = env_str("KARUCODE_ADMIN_TOKEN") {
+            cfg.admin_token = Some(v);
+        }
+        if let Some(v) = env_parse("KARUCODE_RETENTION_DAYS") {
+            cfg.retention_days = v;
+        }
+        if let Some(v) = env_bool("KARUCODE_PLUGINS_WATCH") {
+            cfg.plugins_watch = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_PLUGINS_WATCH_SECS") {
+            cfg.plugins_watch_secs = v;
+        }
+        // AI titles: one switch plus an optional second model. The env spelling
+        // is `KARUCODE_TITLES_*` so an operator can turn the extra turn off in a
+        // locked deployment without editing `[titles]`.
+        if let Some(v) = env_bool("KARUCODE_TITLES") {
+            cfg.titles.enabled = v;
+        }
+        if let Some(v) = env_str("KARUCODE_TITLES_PROVIDER") {
+            cfg.titles.provider = v;
+        }
+        if let Some(v) = env_str("KARUCODE_TITLES_MODEL") {
+            cfg.titles.model = v;
+        }
+        // The browser terminal. `KARUCODE_TERMINALS=0` is the switch a locked
+        // deployment needs: with it off there is no PTY surface at all, so an
+        // install that must not offer a shell does not have to rely on the UI
+        // hiding the tab.
+        if let Some(v) = env_bool("KARUCODE_TERMINALS") {
+            cfg.terminals.enabled = v;
+        }
+        if let Some(v) = env_str("KARUCODE_TERMINALS_SHELL") {
+            cfg.terminals.shell = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_TERMINALS_SCROLLBACK_BYTES") {
+            cfg.terminals.scrollback_bytes = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_TERMINALS_MAX") {
+            cfg.terminals.max_terminals = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_TERMINAL_IDLE_SECS") {
+            cfg.terminals.idle_timeout_secs = v;
+        }
+        // Colon-separated so a path containing a comma still works. Unset means
+        // "no allowlist", not "the default workspace only" - the latter made the
+        // ordinary second project (a sibling of the workspace) a 400.
+        if let Some(v) = env_str("KARUCODE_PROJECT_ROOTS") {
+            cfg.project_roots = std::env::split_paths(&v)
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect();
+        }
+        if let Some(v) = env_bool("KARUCODE_ALLOW_TEMP_DIR") {
+            cfg.allow_temp_dir = v;
         }
 
         let env_model = env_str("KARUCODE_MODEL");
@@ -917,6 +1495,9 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_RETRY_MAX_STREAM_RESTARTS") {
             cfg.model.retry_max_stream_restarts = v;
         }
+        if let Some(v) = env_parse("KARUCODE_MODEL_SUPPORTS_IMAGES") {
+            cfg.model.supports_images = v;
+        }
 
         if let Some(v) = env_parse("KARUCODE_MAX_ITERATIONS") {
             cfg.limits.max_iterations = v;
@@ -938,6 +1519,9 @@ impl Config {
         }
         if let Some(v) = env_parse("KARUCODE_MAX_FILE_READ_BYTES") {
             cfg.limits.max_file_read_bytes = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_MAX_IMAGE_READ_BYTES") {
+            cfg.limits.max_image_read_bytes = v;
         }
         if let Some(v) = env_parse("KARUCODE_CONTEXT_MAX_CHARS") {
             cfg.limits.context_max_chars = v;
@@ -1008,11 +1592,81 @@ impl Config {
         if cfg.subagents.max_concurrent == 0 {
             cfg.subagents.max_concurrent = 1;
         }
+        // A watcher interval is a promise about latency, so keep it inside the
+        // range the docs describe instead of accepting `0` (a busy loop over the
+        // plugin directory) or `86400` (a "hot" reload that takes a day).
+        cfg.plugins_watch_secs = cfg
+            .plugins_watch_secs
+            .clamp(MIN_PLUGINS_WATCH_SECS, MAX_PLUGINS_WATCH_SECS);
         Ok(cfg)
+    }
+
+    /// Re-read just the `[[plugins]]` entries from the config file.
+    ///
+    /// Plugin sources are the config file *and* `<data_dir>/plugins`, and the
+    /// only authority on the config file is the file itself: `PATCH /api/config`
+    /// deliberately cannot change `[[plugins]]` (installing a plugin is not a
+    /// settings tweak). So a hot reload looks at the file again and falls back to
+    /// the in-memory list only when there is nothing to read — no config file, an
+    /// unreadable one, or a parse error, each logged where it happens.
+    pub fn reload_plugin_entries(&self) -> Vec<PluginConfig> {
+        let Some(path) = &self.config_path else {
+            return self.plugins.clone();
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return self.plugins.clone();
+        };
+        match toml::from_str::<ConfigFile>(&text) {
+            Ok(file) => file.plugins,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "cannot re-read the plugin entries from the config file; keeping the ones \
+                     already loaded: {e}"
+                );
+                self.plugins.clone()
+            }
+        }
     }
 
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("karucode.db")
+    }
+
+    /// Extra roots the file tools may reach in addition to a project's directory.
+    ///
+    /// This is the *tool* confinement allowlist, not [`Config::project_roots`]
+    /// (which only decides where a project may be created). With
+    /// [`Config::allow_temp_dir`] on - the default - it is the system temporary
+    /// directory resolved the same way the tools' children resolve it:
+    /// `TMPDIR` when it is set and absolute, otherwise [`std::env::temp_dir`],
+    /// plus the platform default when the two differ.
+    ///
+    /// `/tmp` is deliberately not a security boundary here: `run_command` already
+    /// runs as the server user with that user's full filesystem access, so the
+    /// confinement rule protects against a *model* wandering out of its project,
+    /// not against an attacker who can already execute commands. Allowing a
+    /// scratch directory that every process on the machine can already write to
+    /// costs nothing and stops `write_file`/`read_file` from failing on the
+    /// files that build tools put there.
+    ///
+    /// The roots are still checked as roots: `..` cannot climb from `/tmp` to
+    /// `/etc`, and a symlink inside `/tmp` that points somewhere else is refused.
+    pub fn extra_roots(&self) -> Vec<PathBuf> {
+        if !self.allow_temp_dir {
+            return Vec::new();
+        }
+        let mut roots: Vec<PathBuf> = Vec::new();
+        if let Some(tmpdir) = std::env::var_os("TMPDIR").map(PathBuf::from) {
+            if tmpdir.is_absolute() {
+                roots.push(tmpdir);
+            }
+        }
+        let default = std::env::temp_dir();
+        if default.is_absolute() && !roots.contains(&default) {
+            roots.push(default);
+        }
+        roots
     }
 
     /// Make `providers` / `active_provider` / `active_model` consistent and
@@ -1044,6 +1698,7 @@ impl Config {
                 request_timeout_secs: self.model.request_timeout_secs,
                 extra_headers: self.model.extra_headers.clone(),
                 extra_body: self.model.extra_body.clone(),
+                aggregator: false,
             });
             self.active_provider = Some(DEFAULT_PROFILE_ID.to_string());
             self.active_model = Some(self.model.model.clone());
@@ -1110,6 +1765,34 @@ impl Config {
             .unwrap_or_else(|| self.model.model.clone())
     }
 
+    /// The `[[providers.models]]` entry for `model_id` on `profile`, if listed.
+    pub fn model_entry_for<'a>(
+        &self,
+        profile: &'a ProviderProfile,
+        model_id: &str,
+    ) -> Option<&'a ModelEntry> {
+        profile
+            .models
+            .iter()
+            .find(|entry| entry.id.trim() == model_id.trim())
+    }
+
+    /// Whether `model_id` on `profile` accepts image input.
+    ///
+    /// A per-model `vision` declaration wins over the install-wide
+    /// `model.supports_images`, so one session can read images while the default
+    /// model stays text-only. A model the profile does not list (or one whose
+    /// `vision` is `None`) falls back to the install-wide flag.
+    ///
+    /// This is the only place the rule lives: [`Config::model_for`] and the
+    /// session-selection resolver both go through it, so a pinned model and the
+    /// profile default cannot disagree about whether the pixels are sendable.
+    pub fn supports_images_for(&self, profile: &ProviderProfile, model_id: &str) -> bool {
+        self.model_entry_for(profile, model_id)
+            .and_then(|entry| entry.vision)
+            .unwrap_or(self.model.supports_images)
+    }
+
     /// Resolve one profile into the live [`ModelConfig`] the runtime reads.
     /// The active profile uses the active model; any other profile uses its
     /// first model (used by provider probes on a profile that is not selected).
@@ -1123,12 +1806,29 @@ impl Config {
                 .map(|entry| entry.id.clone())
                 .unwrap_or_else(|| self.model.model.clone())
         };
+        self.model_for(profile, &model)
+    }
+
+    /// Resolve `profile` **and** one of its model ids into the live
+    /// [`ModelConfig`] the runtime reads.
+    ///
+    /// The per-model metadata (context window, output cap, image support) is
+    /// looked up for `model_id`, not for the profile's default model. That
+    /// distinction matters for a session whose pin differs from the install-wide
+    /// active model: resolving the profile alone and then rewriting `model`
+    /// would keep the *default* model's limits and capabilities, which is how a
+    /// session pinned to a vision model was told it could not see images.
+    pub fn model_for(&self, profile: &ProviderProfile, model_id: &str) -> ModelConfig {
+        let entry = self.model_entry_for(profile, model_id);
         ModelConfig {
             provider: profile.provider.clone(),
             base_url: profile.base_url.clone(),
             api_key: profile.api_key.clone(),
-            model,
+            context_window: entry.and_then(|entry| entry.context_window),
+            max_output_tokens: entry.and_then(|entry| entry.max_output_tokens),
+            model: model_id.trim().to_string(),
             temperature: self.model.temperature,
+            send_temperature: self.model.send_temperature,
             max_tokens: self.model.max_tokens,
             top_p: self.model.top_p,
             request_timeout_secs: profile.request_timeout_secs,
@@ -1137,10 +1837,13 @@ impl Config {
             retry_max_retries: self.model.retry_max_retries,
             retry_base_delay_ms: self.model.retry_base_delay_ms,
             retry_max_delay_ms: self.model.retry_max_delay_ms,
+            retry_max_total_secs: self.model.retry_max_total_secs,
             retry_max_stream_restarts: self.model.retry_max_stream_restarts,
             extra_headers: profile.extra_headers.clone(),
             extra_body: profile.extra_body.clone(),
             parallel_tool_calls: self.model.parallel_tool_calls,
+            aggregator: profile.aggregator,
+            supports_images: self.supports_images_for(profile, model_id),
         }
     }
 
@@ -1162,6 +1865,131 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model_with_window(window: Option<u64>, output: Option<u64>) -> ModelConfig {
+        ModelConfig {
+            context_window: window,
+            max_output_tokens: output,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_temp_dir_is_an_extra_root_by_default() {
+        let config = Config::default();
+        assert!(config.allow_temp_dir, "the temp dir is allowed by default");
+        let roots = config.extra_roots();
+        let temp = std::env::temp_dir();
+        assert!(
+            roots.contains(&temp),
+            "the temp dir {temp:?} should be allowed, got {roots:?}"
+        );
+        // Every root is absolute: a relative one would resolve against whatever
+        // directory the server happened to start in.
+        assert!(roots.iter().all(|root| root.is_absolute()), "{roots:?}");
+    }
+
+    #[test]
+    fn the_temp_dir_can_be_turned_off() {
+        let config = Config {
+            allow_temp_dir: false,
+            ..Config::default()
+        };
+        assert!(config.extra_roots().is_empty());
+    }
+
+    #[test]
+    fn the_config_file_key_is_read_and_defaults_on() {
+        let file: ConfigFile = toml::from_str("").unwrap();
+        assert_eq!(file.allow_temp_dir, None, "absent means the default");
+
+        let file: ConfigFile = toml::from_str("allow_temp_dir = false").unwrap();
+        assert_eq!(file.allow_temp_dir, Some(false));
+
+        // And the env spelling, which shares the same normalisation as the
+        // other booleans (`1/true/yes/on`).
+        assert_eq!(env_bool("KARUCODE_ALLOW_TEMP_DIR_NOPE_NOT_SET"), None);
+    }
+
+    #[test]
+    fn the_models_window_decides_the_budget_by_default() {
+        let limits = Limits::default();
+        assert_eq!(limits.context_max_chars, 0, "0 means derive from the model");
+        // 1M-token window with 384k reserved for the answer.
+        let chars = limits.context_chars_for(&model_with_window(Some(1_048_576), Some(384_000)));
+        assert!(
+            (2_400_000..=2_600_000).contains(&chars),
+            "a 1M-token model should get ~2.5M chars, got {chars}"
+        );
+        // A 32k model must never be handed the same budget.
+        let small = limits.context_chars_for(&model_with_window(Some(32_768), Some(4_096)));
+        assert!(
+            (90_000..130_000).contains(&small),
+            "a 32k-token model should get ~110k chars, got {small}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_window_falls_back_to_the_documented_budget() {
+        assert_eq!(
+            Limits::default().context_chars_for(&model_with_window(None, None)),
+            CONTEXT_FALLBACK_CHARS
+        );
+    }
+
+    #[test]
+    fn an_explicit_budget_is_a_ceiling_that_never_exceeds_the_window() {
+        let explicit = Limits {
+            context_max_chars: 400_000,
+            ..Default::default()
+        };
+        // Smaller than the derived budget: honoured exactly.
+        assert_eq!(
+            explicit.context_chars_for(&model_with_window(Some(1_048_576), Some(384_000))),
+            400_000
+        );
+        // Larger than what a small model can take: clamped down to its window.
+        let clamped = explicit.context_chars_for(&model_with_window(Some(32_768), Some(4_096)));
+        assert!(
+            clamped < 400_000 && clamped > 50_000,
+            "an over-window request survived: {clamped}"
+        );
+        // A deliberately tiny explicit budget is an instruction, not a mistake.
+        let tiny = Limits {
+            context_max_chars: 600,
+            ..Default::default()
+        };
+        assert_eq!(
+            tiny.context_chars_for(&model_with_window(Some(1_048_576), None)),
+            600
+        );
+    }
+
+    #[test]
+    fn a_profile_model_carries_its_window_into_the_resolved_config() {
+        let mut config = Config {
+            providers: vec![ProviderProfile {
+                id: "gw".into(),
+                base_url: "http://h/v1".into(),
+                models: vec![ModelEntry {
+                    id: "big-model".into(),
+                    context_window: Some(200_000),
+                    max_output_tokens: Some(8_000),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        config.active_provider = Some("gw".into());
+        let model = config.model_for_profile(&config.providers[0]);
+        assert_eq!(model.model, "big-model");
+        assert_eq!(model.context_window, Some(200_000));
+        assert_eq!(model.max_output_tokens, Some(8_000));
+        // ... and the budget is derived from it, not from a global constant.
+        let chars = Limits::default().context_chars_for(&model);
+        assert!(chars > 600_000, "expected ~730k chars, got {chars}");
+    }
 
     #[test]
     fn defaults_are_sane() {
@@ -1290,6 +2118,64 @@ mod tests {
 
         assert_eq!(cfg.active_model.as_deref(), Some("legacy-id"));
         assert_eq!(cfg.effective_model().model, "legacy-id");
+    }
+
+    /// The reported bug: a session pinned to a vision model on a profile whose
+    /// *default* model is text-only used to inherit the default's
+    /// `supports_images = false`, so `read_file` told the model it could not see
+    /// the image the endpoint would have accepted.
+    #[test]
+    fn a_vision_model_resolves_as_vision_even_under_a_text_only_default() {
+        let mut cfg = Config::default();
+        cfg.model.supports_images = false;
+        let mut gateway = profile("gateway", &["text-default", "gpt-4o"]);
+        gateway.models[1].vision = Some(true);
+        gateway.models[1].context_window = Some(128_000);
+        cfg.providers = vec![gateway];
+        cfg.active_provider = Some("gateway".into());
+        cfg.active_model = Some("text-default".into());
+        cfg.normalize_providers();
+
+        // The install-wide default model stays text-only...
+        assert!(!cfg.effective_model().supports_images);
+        assert!(!cfg.model_for_profile(&cfg.providers[0]).supports_images);
+        // ...while the same profile resolved *at the vision model* is vision, and
+        // gets that model's own limits rather than the default's.
+        let pinned = cfg.model_for(&cfg.providers[0], "gpt-4o");
+        assert!(pinned.supports_images);
+        assert_eq!(pinned.model, "gpt-4o");
+        assert_eq!(pinned.context_window, Some(128_000));
+        assert!(cfg.supports_images_for(&cfg.providers[0], "gpt-4o"));
+        assert!(!cfg.supports_images_for(&cfg.providers[0], "text-default"));
+    }
+
+    #[test]
+    fn a_per_model_vision_flag_overrides_both_ways() {
+        let mut cfg = Config::default();
+        cfg.model.supports_images = true;
+        let mut local = profile("local", &["declared-text-only", "undeclared"]);
+        local.models[0].vision = Some(false);
+        cfg.providers = vec![local];
+        cfg.active_provider = Some("local".into());
+        cfg.active_model = Some("undeclared".into());
+        cfg.normalize_providers();
+
+        // An explicit `vision = false` wins over the install-wide true: a gateway
+        // can serve a vision id as text-only.
+        assert!(
+            !cfg.model_for(&cfg.providers[0], "declared-text-only")
+                .supports_images
+        );
+        // "Not declared" means the install-wide default applies.
+        assert!(
+            cfg.model_for(&cfg.providers[0], "undeclared")
+                .supports_images
+        );
+        // A model the profile does not list at all falls back to the default.
+        assert!(
+            cfg.model_for(&cfg.providers[0], "not-listed")
+                .supports_images
+        );
     }
 
     #[test]
@@ -1546,5 +2432,85 @@ retry_max_stream_restarts = 0
             serde_json::from_str(r#"{"provider":"local","model":"tiny"}"#).unwrap();
         assert_eq!(parsed.provider, "local");
         assert!(parsed.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn the_plugin_watcher_interval_is_clamped_to_the_documented_range() {
+        // 0 would busy-loop over the plugin directory; a day would make a "hot"
+        // reload indistinguishable from not having one.
+        let file = ConfigFile {
+            plugins_watch: Some(true),
+            plugins_watch_secs: Some(0),
+            ..ConfigFile::default()
+        };
+        let cfg = Config::from_parts(file, None).unwrap();
+        assert!(cfg.plugins_watch);
+        assert_eq!(cfg.plugins_watch_secs, MIN_PLUGINS_WATCH_SECS);
+
+        let file = ConfigFile {
+            plugins_watch_secs: Some(86_400),
+            ..ConfigFile::default()
+        };
+        let cfg = Config::from_parts(file, None).unwrap();
+        assert_eq!(cfg.plugins_watch_secs, MAX_PLUGINS_WATCH_SECS);
+        assert!(!cfg.plugins_watch, "watching is opt-in");
+
+        let file = ConfigFile {
+            plugins_watch_secs: Some(5),
+            ..ConfigFile::default()
+        };
+        let cfg = Config::from_parts(file, None).unwrap();
+        assert_eq!(cfg.plugins_watch_secs, 5);
+    }
+
+    #[test]
+    fn reloading_plugin_entries_reads_the_config_file_again() {
+        let dir = std::env::temp_dir().join(format!(
+            "kc-config-plugins-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[[plugins]]\nname = \"one\"\ncommand = [\"/bin/one\"]\n",
+        )
+        .unwrap();
+
+        let cfg = Config {
+            config_path: Some(path.clone()),
+            plugins: vec![PluginConfig {
+                name: "stale".into(),
+                enabled: true,
+                command: vec!["/bin/stale".into()],
+                env: Default::default(),
+                permissions: Vec::new(),
+                settings: Default::default(),
+            }],
+            ..Config::default()
+        };
+        let entries = cfg.reload_plugin_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].name, "one",
+            "the file wins over the in-memory copy"
+        );
+
+        // Removing every entry from the file is how an operator uninstalls one:
+        // the empty list must be honoured, not treated as "keep what we had".
+        std::fs::write(&path, "port = 8787\n").unwrap();
+        assert!(cfg.reload_plugin_entries().is_empty());
+
+        // With no readable file the in-memory list is the only truth left.
+        std::fs::remove_file(&path).unwrap();
+        let entries = cfg.reload_plugin_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "stale");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

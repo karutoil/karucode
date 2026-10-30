@@ -56,6 +56,7 @@ id_type!(RunId, "r");
 id_type!(AgentId, "a");
 id_type!(ProjectId, "p");
 id_type!(ApprovalId, "ap");
+id_type!(TerminalId, "t");
 
 #[cfg(test)]
 mod tests {
@@ -69,6 +70,7 @@ mod tests {
         assert!(a.as_str().starts_with("s_"));
         assert_eq!(a.to_string(), a.0);
         assert!(ProjectId::new().as_str().starts_with("p_"));
+        assert!(TerminalId::new().as_str().starts_with("t_"));
     }
 
     #[test]

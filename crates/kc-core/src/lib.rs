@@ -11,6 +11,7 @@ pub mod events;
 pub mod hooks;
 pub mod ids;
 pub mod message;
+pub mod metrics;
 pub mod paths;
 pub mod plugin;
 pub mod prompt;

@@ -13,6 +13,8 @@ pub struct ChatRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
     pub temperature: f32,
+    /// Send `temperature` to the provider at all (see `ModelConfig`).
+    pub send_temperature: bool,
     pub max_tokens: Option<u32>,
     pub top_p: Option<f32>,
     pub parallel_tool_calls: bool,
@@ -33,6 +35,9 @@ pub enum ProviderChunk {
     Usage {
         input_tokens: u32,
         output_tokens: u32,
+        /// Prompt tokens served from the provider's prefix cache, when the
+        /// endpoint reports them. `None` means "not reported" - not "zero".
+        cached_tokens: Option<u32>,
     },
     Finish {
         reason: String,
@@ -81,6 +86,15 @@ pub struct ToolCallAccumulator {
     calls: Vec<ToolCall>,
 }
 
+/// Upper bound on the tool-call index a provider may address.
+///
+/// `index` arrives straight from the gateway's JSON. Growing the vector to fit
+/// it (`while len <= index { push }`) means a malicious or buggy endpoint that
+/// sends `index: 1_000_000_000` makes the runtime allocate a billion entries:
+/// an OOM with no error and no bound. Real providers number calls from zero
+/// within a single assistant turn, so anything past this is a protocol error.
+pub const MAX_TOOL_CALLS: usize = 256;
+
 impl ToolCallAccumulator {
     pub fn apply(
         &mut self,
@@ -89,6 +103,12 @@ impl ToolCallAccumulator {
         name: Option<String>,
         args: Option<String>,
     ) {
+        // Ignore an out-of-range index instead of allocating for it. The call is
+        // dropped rather than the whole turn: a single bad delta should not
+        // discard the text the model already produced.
+        if index >= MAX_TOOL_CALLS {
+            return;
+        }
         while self.calls.len() <= index {
             self.calls.push(ToolCall::default());
         }
@@ -170,5 +190,42 @@ mod tests {
         let mut acc = ToolCallAccumulator::default();
         acc.apply(0, Some("x".into()), None, Some("{}".into()));
         assert!(acc.finish().is_empty());
+    }
+
+    #[test]
+    fn accumulator_ignores_an_out_of_range_index_instead_of_allocating() {
+        // `index` comes straight from the gateway's JSON. Growing the vector to
+        // fit it would let a malicious or buggy endpoint ask for a billion
+        // entries; the delta must be ignored instead.
+        let mut acc = ToolCallAccumulator::default();
+        acc.apply(
+            usize::MAX,
+            Some("evil".into()),
+            Some("run_command".into()),
+            Some("{}".into()),
+        );
+        acc.apply(
+            MAX_TOOL_CALLS,
+            Some("evil2".into()),
+            Some("run_command".into()),
+            Some("{}".into()),
+        );
+        assert!(
+            acc.finish().is_empty(),
+            "an out-of-range index must not create a call"
+        );
+
+        // A legitimate call in the same turn still lands.
+        let mut acc = ToolCallAccumulator::default();
+        acc.apply(usize::MAX, Some("evil".into()), Some("x".into()), None);
+        acc.apply(
+            0,
+            Some("ok".into()),
+            Some("read_file".into()),
+            Some("{}".into()),
+        );
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "ok");
     }
 }
