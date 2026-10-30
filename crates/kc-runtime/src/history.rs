@@ -75,6 +75,7 @@ pub(crate) async fn repair_history(
             tool_calls: Vec::new(),
             tool_call_id: Some(missing.call.id),
             name: Some(missing.call.name),
+            images: Vec::new(),
         };
         store.append_message(&record).await?;
     }
@@ -90,7 +91,7 @@ pub(crate) async fn repair_history(
 /// newest message is always kept, so a single oversized result cannot empty the
 /// window.
 pub(crate) fn trim_front_to_chars(messages: &mut Vec<Message>, max_chars: usize) {
-    let chars = |m: &Message| m.content.chars().count();
+    let chars = crate::context::message_chars;
     let mut total: usize = messages.iter().map(chars).sum();
     let mut start = 0usize;
     while total > max_chars && start + 1 < messages.len() {
@@ -195,6 +196,7 @@ mod tests {
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
+            images: Vec::new(),
             created_at: id,
         }
     }

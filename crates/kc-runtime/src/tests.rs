@@ -8,8 +8,9 @@
 use crate::approvals::{ApprovalRegistry, RuntimeApprovalGate};
 use crate::subagent::SPAWN_AGENT_TOOL;
 use crate::tests_support::{
-    test_inner_with_settings, ApprovalTool, EchoTool, ExternalTool, FakeSettings, Harness,
-    HarnessBuilder, PanicTool, Script, ScriptedFactory, SlowCancelTool,
+    test_inner_with_settings, ApprovalTool, BigOutputTool, EchoTool, ExternalTool, FakeSettings,
+    FollowUpTool, Harness, HarnessBuilder, ImageTool, PanicTool, Script, ScriptedFactory,
+    SlowCancelTool, SteerTool,
 };
 use crate::{ActiveRun, RecoveryReport, Runtime, RuntimeDeps};
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, ApprovalRequest};
@@ -38,6 +39,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::SessionRenamed { .. } => "session_renamed",
         Event::SessionModelChanged { .. } => "session_model_changed",
         Event::SessionDeleted { .. } => "session_deleted",
+        Event::SteerApplied { .. } => "steer_applied",
         Event::RunStarted { .. } => "run_started",
         Event::RunFinished { .. } => "run_finished",
         Event::RunCancelled { .. } => "run_cancelled",
@@ -152,6 +154,7 @@ async fn plain_text_run_persists_messages_and_completes() {
         ProviderChunk::Usage {
             input_tokens: 11,
             output_tokens: 4,
+            cached_tokens: None,
         },
         ProviderChunk::Finish {
             reason: "stop".into(),
@@ -271,6 +274,308 @@ async fn a_subagent_inherits_the_sessions_model_selection() {
 }
 
 #[tokio::test]
+async fn usage_is_read_when_it_arrives_after_the_finish_chunk() {
+    // Real OpenAI-compatible endpoints put `usage` in a chunk *after* the one
+    // that carries `finish_reason`. Breaking out of the stream at the finish
+    // chunk is how a harness silently stops accounting for tokens (and caches).
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![
+        ProviderChunk::Text("ok".into()),
+        ProviderChunk::Finish {
+            reason: "stop".into(),
+        },
+        ProviderChunk::Usage {
+            input_tokens: 100,
+            output_tokens: 4,
+            cached_tokens: Some(98),
+        },
+    ])])
+    .build()
+    .await;
+
+    let events = h.run_to_finish("hi").await;
+    assert_eq!(finished_status(&events), "completed");
+    let usage = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::Usage {
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+            } => Some((*input_tokens, *output_tokens, *cached_tokens)),
+            _ => None,
+        })
+        .expect("the usage event must survive a finish chunk that came first");
+    assert_eq!(usage, (100, 4, Some(98)));
+}
+
+#[tokio::test]
+async fn a_degenerate_reasoning_loop_is_abandoned_and_retried() {
+    // A reasoning model can repeat one short block in `reasoning_content` for
+    // hundreds of thousands of tokens. That channel is streamed and discarded,
+    // so nothing downstream can notice - the turn has to be cut here. The second
+    // attempt answers normally, so the run still completes.
+    let looped: String = "Let me write. Go. Now. OK. ".repeat(40);
+    let mut h = HarnessBuilder::new(vec![
+        Script::Chunks(vec![
+            ProviderChunk::Reasoning(looped),
+            ProviderChunk::Text("never reached".into()),
+        ]),
+        Script::text("Here is the answer."),
+    ])
+    .build()
+    .await;
+
+    let events = h.run_to_finish("write the thing").await;
+    assert_eq!(finished_status(&events), "completed");
+    let retry = events.iter().find_map(|e| match &e.event {
+        Event::StreamRetry { reason, .. } => Some(reason.clone()),
+        _ => None,
+    });
+    let reason = retry.expect("a degenerate reasoning loop must be retried, not consumed");
+    assert!(reason.contains("reasoning repeated"), "{reason}");
+    // The loop's text never reached the transcript.
+    let messages = h.session_messages().await;
+    assert!(
+        !messages.iter().any(|m| m.content.contains("Let me write")),
+        "{messages:?}"
+    );
+    assert!(messages.iter().any(|m| m.content == "Here is the answer."));
+    // Two attempts were made, not forty tokens' worth of loop.
+    assert_eq!(h.factory.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn a_degenerate_text_loop_is_trimmed_and_the_turn_still_completes() {
+    // Repetition in the answer itself is trimmed instead of retried: the model
+    // did produce something, and stopping the run over it would be worse than
+    // keeping the part that was not a loop.
+    let mut chunks: Vec<ProviderChunk> = Vec::new();
+    chunks.push(ProviderChunk::Text("Nine findings follow. ".into()));
+    for _ in 0..10 {
+        chunks.push(ProviderChunk::Text("Let me write. Go. Now. OK. ".into()));
+    }
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(chunks)])
+        .build()
+        .await;
+
+    let events = h.run_to_finish("write").await;
+    assert_eq!(finished_status(&events), "completed");
+    let messages = h.session_messages().await;
+    let answer = messages
+        .iter()
+        .find(|m| m.role == "assistant")
+        .expect("an assistant turn");
+    assert!(
+        answer.content.starts_with("Nine findings follow."),
+        "answer was {:?}",
+        answer.content
+    );
+    assert!(
+        !answer.content.contains("Let me write"),
+        "the repeated tail was persisted: {}",
+        answer.content
+    );
+}
+
+#[test]
+fn the_repetition_detector_ignores_normal_text() {
+    use crate::agent::{repeated_phrase, REASONING_REPEATS, TEXT_REPEATS};
+
+    // Ordinary code, layout and a line or two repeated are not loops.
+    assert!(repeated_phrase(
+        "fn main() {\n    let x = compute();\n    println!(\"{x}\");\n}\n",
+        REASONING_REPEATS
+    )
+    .is_none());
+    assert!(repeated_phrase(&"- ".repeat(200), REASONING_REPEATS).is_some());
+    assert!(repeated_phrase(&"| flaky | rerun |\n".repeat(3), REASONING_REPEATS).is_none());
+
+    // What the model actually did: the same few words, over and over.
+    let looped = "Let me write. Go. Now. OK. ".repeat(12);
+    let sample = repeated_phrase(&looped, REASONING_REPEATS).expect("a loop must be caught");
+    assert!(sample.contains("Let me write"), "{sample}");
+
+    // The same loop with the whitespace varied - which is what defeated the
+    // first, exact-cycle version of this detector.
+    let varied = "Let me write.\n\nGo.\nNow.\n\nOK.\n\n".repeat(10);
+    assert!(repeated_phrase(&varied, REASONING_REPEATS).is_some());
+
+    // A single character forever, and a whole paragraph ten times, are both loops.
+    assert!(repeated_phrase(&"a".repeat(600), REASONING_REPEATS).is_some());
+    let para = "the parser rejects an empty path and returns a bad request error ";
+    assert!(repeated_phrase(&para.repeat(10), REASONING_REPEATS).is_some());
+
+    // Answer text is content, so it needs ten repeats before anything is cut:
+    // eight is enough for reasoning, not for the answer.
+    assert!(repeated_phrase(&looped, TEXT_REPEATS).is_some());
+    assert!(repeated_phrase(&"Let me write. Go. Now. OK. ".repeat(8), TEXT_REPEATS).is_none());
+}
+
+#[tokio::test]
+async fn a_provider_that_never_closes_after_finish_does_not_stall_the_turn() {
+    // The runtime keeps reading after `finish_reason` to catch the trailing
+    // usage block, but a gateway that holds the SSE connection open must not
+    // keep the turn waiting: the window is bounded.
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![
+        ProviderChunk::Text("answer".into()),
+        ProviderChunk::Finish {
+            reason: "stop".into(),
+        },
+    ])])
+    .build()
+    .await;
+
+    let started = std::time::Instant::now();
+    let events = h.run_to_finish("hi").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the turn waited {:?} for a stream that never closed",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn nothing_is_ever_sent_after_the_conversation() {
+    // Hard-won: appending a runtime note (``system`` or ``user``, and even folded
+    // into the last tool result) after a long history made this model deliberate
+    // instead of acting - it burned its whole output budget on reasoning and never
+    // emitted the write it was about to make. The same history without the note
+    // committed immediately. So the request must be exactly the conversation:
+    // one system prompt, then turns, and nothing synthetic at the end.
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "echo", "{\"path\":\"a.txt\"}")]),
+        Script::call(&[("call_2", "echo", "{\"path\":\"b.txt\"}")]),
+        Script::text("done"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .build()
+    .await;
+
+    let _ = h.run_to_finish("read both").await;
+    for (i, request) in h.factory.requests().iter().enumerate() {
+        let messages = &request.messages;
+        assert_eq!(
+            messages.iter().filter(|m| m.role == Role::System).count(),
+            1,
+            "request {i} carries an extra system message: it must be the only one"
+        );
+        assert_eq!(messages[0].role, Role::System);
+        assert_ne!(
+            messages.last().unwrap().role,
+            Role::System,
+            "request {i} ends with a synthetic system message"
+        );
+        assert!(
+            !messages.iter().any(|m| {
+                m.content.contains("runtime note") || m.content.contains("already opened")
+            }),
+            "request {i} carries a runtime note"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_identical_read_is_blocked_instead_of_re_executed() {
+    let arg = "{\"path\":\"a.txt\"}";
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "echo", arg)]),
+        Script::call(&[("call_2", "echo", arg)]),
+        Script::call(&[("call_3", "echo", arg)]),
+        Script::call(&[("call_4", "echo", arg)]),
+        Script::call(&[("call_5", "echo", arg)]),
+        Script::text("fine"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .build()
+    .await;
+
+    let _ = h.run_to_finish("read a.txt").await;
+    let messages = h.session_messages().await;
+    let tools: Vec<_> = messages.iter().filter(|m| m.role == "tool").collect();
+    assert_eq!(tools.len(), 5);
+    // 1-3 run and are answered identically; 4 and 5 are refused rather than
+    // paying for the same page again.
+    // The third identical answer is plain output (no note appended).
+    assert!(!tools[2].content.contains("blocked"));
+    assert!(
+        tools[3].content.starts_with("[blocked:"),
+        "{}",
+        tools[3].content
+    );
+    assert!(
+        tools[4].content.starts_with("[blocked:"),
+        "{}",
+        tools[4].content
+    );
+    // A block is a tool result, not a run failure.
+    assert_eq!(h.store.runs()[0].status, "completed");
+}
+
+#[tokio::test]
+async fn an_image_tool_result_reaches_the_transcript_and_the_next_request() {
+    // The pixels have to survive both hops: the persisted tool row (so a reload
+    // still shows what the model saw) and the next request's messages, where
+    // `kc-provider` re-emits them as a `user` message with an `image_url` part.
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "screenshot", "{}")]),
+        Script::text("that is a blue button"),
+    ])
+    .tool(ImageTool::boxed("screenshot"))
+    .model(kc_core::config::ModelConfig {
+        supports_images: true,
+        ..kc_core::config::ModelConfig::default()
+    })
+    .build()
+    .await;
+
+    let _ = h.run_to_finish("look at shot.png").await;
+    let messages = h.session_messages().await;
+    let tool_row = messages
+        .iter()
+        .find(|m| m.role == "tool")
+        .expect("the tool result was persisted");
+    assert_eq!(tool_row.images.len(), 1, "the image must be stored");
+    assert_eq!(tool_row.images[0].media_type, "image/png");
+    assert_eq!(tool_row.images[0].data, "iVBORw0KGgo=");
+
+    let requests = h.factory.requests();
+    assert_eq!(requests.len(), 2, "tool call, then the answer");
+    let carried = requests[1]
+        .messages
+        .iter()
+        .find(|m| m.role == kc_core::message::Role::Tool)
+        .expect("the tool result is replayed");
+    assert_eq!(carried.images.len(), 1, "the image is resent to the model");
+}
+
+#[tokio::test]
+async fn a_text_only_model_gets_a_refusal_not_an_image() {
+    // The runtime passes the session's effective model capability into the tool
+    // context; with it off, no pixels are produced or stored.
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "screenshot", "{}")]),
+        Script::text("I cannot see images"),
+    ])
+    .tool(ImageTool::boxed("screenshot"))
+    .build()
+    .await;
+
+    let _ = h.run_to_finish("look at shot.png").await;
+    let messages = h.session_messages().await;
+    let tool_row = messages
+        .iter()
+        .find(|m| m.role == "tool")
+        .expect("the refusal was persisted");
+    assert!(tool_row.images.is_empty());
+    assert!(
+        tool_row.content.contains("cannot see images"),
+        "{}",
+        tool_row.content
+    );
+}
+
+#[tokio::test]
 async fn tool_call_result_is_fed_back_for_a_second_turn() {
     let mut h = HarnessBuilder::new(vec![
         Script::call(&[("call_1", "echo", "{\"path\":\"a.txt\"}")]),
@@ -312,6 +617,47 @@ async fn tool_call_result_is_fed_back_for_a_second_turn() {
         .iter()
         .any(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("call_1")));
     assert_eq!(requests[1].model, "fake-model");
+}
+
+#[tokio::test]
+async fn a_turn_cannot_exceed_its_byte_share() {
+    // Half the context budget is this turn's allowance: a turn that returns more
+    // would have its own results evicted before the model could read them.
+    let limits = Limits {
+        context_max_chars: 20_000,
+        max_tool_calls_per_turn: 8,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            ("call_a", "big", "{\"bytes\":20000}"),
+            ("call_b", "big", "{\"bytes\":20000}"),
+        ]),
+        Script::text("done"),
+    ])
+    .settings(FakeSettings::default().with_limits(limits))
+    .tool(BigOutputTool::boxed("big"))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("read two big files").await;
+    assert_eq!(finished_status(&events), "completed");
+
+    let messages = h.session_messages().await;
+    let tools: Vec<&kc_core::store::StoredMessage> =
+        messages.iter().filter(|m| m.role == "tool").collect();
+    assert_eq!(tools.len(), 2);
+    let total: usize = tools.iter().map(|m| m.content.len()).sum();
+    // 10_000 for the first call, the 2_000 floor for the second: the whole turn
+    // stays inside one context budget instead of blowing through it.
+    assert!(
+        total <= 12_500,
+        "two 20k results were kept whole: {total} bytes"
+    );
+    assert!(
+        tools[0].content.contains("bytes omitted"),
+        "the first result should be truncated, not dropped"
+    );
 }
 
 #[tokio::test]
@@ -1427,6 +1773,49 @@ async fn a_stream_that_ends_without_a_finish_reason_fails_visibly() {
 }
 
 #[tokio::test]
+async fn a_stream_that_ends_with_the_providers_eof_reason_is_not_success() {
+    // The real provider does not leave `finish_reason` as `None` when the body
+    // is cut: `stream.rs` synthesises `Finish { reason: "eof" }` so the runtime
+    // can tell "the gateway stopped talking" from "the model finished". If the
+    // runtime only checks for `None`, that synthesis makes every truncated
+    // stream look like a clean stop and the partial answer is persisted as a
+    // normal, successful turn.
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![
+        ProviderChunk::Text("half an answer".into()),
+        ProviderChunk::Finish {
+            reason: "eof".into(),
+        },
+    ])])
+    .model(restarts(0))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("answer").await;
+    assert_eq!(
+        finished_status(&events),
+        "failed",
+        "an `eof` finish is a cut stream, not a completed answer"
+    );
+    let error = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("an explicit provider error");
+    assert!(
+        error.contains("finish_reason"),
+        "unexpected error message: {error}"
+    );
+    // The partial text is still kept: losing it would be worse than showing it.
+    assert!(h
+        .session_messages()
+        .await
+        .iter()
+        .any(|m| m.role == "assistant" && m.content == "half an answer"));
+}
+
+#[tokio::test]
 async fn second_submit_for_the_same_session_is_rejected() {
     let mut h = HarnessBuilder::new(vec![
         Script::Hang(vec![ProviderChunk::Text("busy".into())]),
@@ -1578,6 +1967,91 @@ async fn a_panicking_provider_fails_the_run_without_wedging_the_session() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn the_context_budget_comes_from_the_models_window() {
+    // A model that declares a 200k-token window with 8k of output room gets
+    // ~730k chars to work with, so a 320k-char history must NOT be compacted.
+    // The old global default (240k) would have digested it.
+    let model = ModelConfig {
+        model: "fake-model".into(),
+        context_window: Some(200_000),
+        max_output_tokens: Some(8_000),
+        ..Default::default()
+    };
+    let limits = Limits {
+        context_max_chars: 0,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![Script::text("thanks")])
+        .settings(
+            FakeSettings::default()
+                .with_limits(limits.clone())
+                .with_model(model.clone()),
+        )
+        .build()
+        .await;
+
+    // ~320k chars of history: comfortably over the old 240k default.
+    for i in 0..40 {
+        let body = format!("old question {i} {}", "x".repeat(8_000));
+        let mut user = crate::tests_support::new_message(h.session(), "user", &body);
+        user.run_id = Some("r_old".into());
+        h.store.append_message(&user).await.unwrap();
+        let mut assistant =
+            crate::tests_support::new_message(h.session(), "assistant", &"y".repeat(200));
+        assistant.run_id = Some("r_old".into());
+        h.store.append_message(&assistant).await.unwrap();
+    }
+
+    let events = h.run_to_finish("the current question").await;
+    assert_eq!(finished_status(&events), "completed");
+    let sent = &h.factory.requests()[0].messages;
+    assert!(
+        !sent
+            .iter()
+            .any(|m| m.content.starts_with("[context digest:")),
+        "a 320k-char history was compacted under a 730k-char budget"
+    );
+    assert!(
+        sent.iter().any(|m| m.content.contains("old question 0 ")),
+        "the oldest turn should still be in the request"
+    );
+    let total: usize = sent.iter().map(|m| m.content.chars().count()).sum();
+    assert!(total > 300_000, "only {total} chars survived");
+
+    // The same history under an explicit 240k ceiling is compacted, which proves
+    // the assertion above is measuring the budget and not a no-op.
+    let mut h2 = HarnessBuilder::new(vec![Script::text("thanks")])
+        .settings(
+            FakeSettings::default()
+                .with_limits(Limits {
+                    context_max_chars: 240_000,
+                    ..Default::default()
+                })
+                .with_model(model),
+        )
+        .build()
+        .await;
+    for i in 0..40 {
+        let body = format!("old question {i} {}", "x".repeat(8_000));
+        let mut user = crate::tests_support::new_message(h2.session(), "user", &body);
+        user.run_id = Some("r_old".into());
+        h2.store.append_message(&user).await.unwrap();
+        let mut assistant =
+            crate::tests_support::new_message(h2.session(), "assistant", &"y".repeat(200));
+        assistant.run_id = Some("r_old".into());
+        h2.store.append_message(&assistant).await.unwrap();
+    }
+    let _ = h2.run_to_finish("the current question").await;
+    let sent2 = &h2.factory.requests()[0].messages;
+    assert!(
+        sent2
+            .iter()
+            .any(|m| m.content.starts_with("[context digest:")),
+        "an explicit 240k ceiling should still compact"
+    );
+}
+
+#[tokio::test]
 async fn old_history_is_trimmed_but_system_and_last_user_survive() {
     let limits = Limits {
         context_max_chars: 600,
@@ -1612,9 +2086,11 @@ async fn old_history_is_trimmed_but_system_and_last_user_survive() {
     assert!(sent[0].content.contains("You are karucode"));
     let trim_notice = sent
         .iter()
-        .find(|m| m.content.starts_with("[compacted earlier conversation:"))
+        .find(|m| m.content.starts_with("[context digest: "))
         .expect("compaction notice in the request");
-    assert_eq!(trim_notice.role, Role::Assistant);
+    // A digest is a `user` turn: the model never said it, and a transcript that
+    // claims it did makes the model believe it already summarised the work.
+    assert_eq!(trim_notice.role, Role::User);
     // The load itself is now bounded by the char budget (`history::trim_front_to_chars`),
     // so only the newest old messages are ever in memory; the notice counts what
     // was dropped from that window, not the whole stored transcript.
@@ -1625,9 +2101,9 @@ async fn old_history_is_trimmed_but_system_and_last_user_survive() {
     );
     assert_eq!(sent.last().unwrap().role, Role::User);
     assert_eq!(sent.last().unwrap().content, "the current question");
-    // Only the system prompt, the digest and the last user turn survive: the
-    // budget is smaller than everything else that was loaded.
-    assert_eq!(sent.len(), 3, "unexpected survivors: {sent:?}");
+    // System prompt, the pinned opening question, the digest and the current
+    // turn: the budget is smaller than everything else that was loaded.
+    assert_eq!(sent.len(), 4, "unexpected survivors: {sent:?}");
     // The digest may name what was dropped, but it may never smuggle the
     // transcript back in: the notice is a summary, bounded with the budget.
     let digest_lines = trim_notice.content.lines().count();
@@ -1983,9 +2459,16 @@ async fn a_subagent_without_continuation_still_stops_at_its_budget() {
     assert_eq!(agents[0].status, "failed");
     assert_eq!(agents[0].iterations, 2);
     let error = agents[0].error.clone().unwrap_or_default();
-    assert!(error.contains("settings.subagents.max_iterations"), "{error}");
+    assert!(
+        error.contains("settings.subagents.max_iterations"),
+        "{error}"
+    );
     assert!(error.contains("max_continues"), "{error}");
-    assert_eq!(h.factory.requests().len(), 4, "the child stopped at two turns");
+    assert_eq!(
+        h.factory.requests().len(),
+        4,
+        "the child stopped at two turns"
+    );
 }
 
 #[tokio::test]
@@ -2843,4 +3326,332 @@ async fn a_reused_tool_call_id_does_not_grow_the_transcript() {
         .map(|m| m.content.as_str())
         .collect();
     assert_eq!(results, vec!["result 0", "result 1", "result 2"]);
+}
+
+// ===========================================================================
+// Steering and follow-ups
+// ===========================================================================
+
+/// A steer accepted mid-run becomes a real `user` message in the conversation,
+/// in the request the model sees on its next turn.
+///
+/// The steer is issued from *inside* the tool call, which is the honest
+/// reproduction of a user typing while the agent works - the run is provably in
+/// flight, so the acceptance path is exercised rather than raced.
+#[tokio::test]
+async fn a_steer_sent_mid_run_joins_the_conversation() {
+    let mut h = HarnessBuilder::new(vec![
+        // Turn 1 asks for the tool that steers; turn 2 answers.
+        Script::call(&[("call_1", "steer_now", "{}")]),
+        Script::text("done, and I also renamed the test"),
+    ])
+    .build()
+    .await;
+    // The tool needs the runtime, which only exists after `build`, and the runtime
+    // needs the tool. Registering it afterwards is exactly what `set_tools` is
+    // for, and it is what the server does when a plugin loads.
+    let steer = SteerTool::boxed(
+        "steer_now",
+        Arc::clone(&h.runtime),
+        h.session(),
+        "also rename the test to snake_case",
+    );
+    let mut registry = ToolRegistry::new();
+    registry.register(steer);
+    h.runtime.set_tools(Arc::new(registry));
+
+    let events = h.run_to_finish("do the work").await;
+
+    // The tool call ran and the steer was accepted (not refused as "no run").
+    let tool_result = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "tool")
+        .expect("the steering tool ran");
+    assert!(
+        tool_result.content.starts_with("steered:"),
+        "the steer was refused mid-run: {}",
+        tool_result.content
+    );
+
+    // The transcript carries the steer as a plain user turn, positioned after the
+    // tool call it was sent during - not at the end of the run.
+    let messages = h.session_messages().await;
+    let user_texts: Vec<&str> = messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(
+        user_texts,
+        vec!["do the work", "also rename the test to snake_case"],
+        "the steer must be persisted as an ordinary user message"
+    );
+
+    // ...and the model saw it: the request for turn 2 contains it.
+    let requests = h.factory.requests();
+    assert!(requests.len() >= 2, "there must have been a second turn");
+    let second = &requests[1].messages;
+    assert!(
+        second
+            .iter()
+            .any(|m| m.role == Role::User && m.content.contains("rename the test")),
+        "the second request must carry the steer"
+    );
+
+    // The client was told when it landed.
+    let applied: Vec<&EventEnvelope> = events
+        .iter()
+        .filter(|e| matches!(e.event, Event::SteerApplied { .. }))
+        .collect();
+    assert_eq!(applied.len(), 1, "exactly one steer was applied");
+    match &applied[0].event {
+        Event::SteerApplied { content, .. } => {
+            assert_eq!(content, "also rename the test to snake_case")
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// A steer is *not* a trailing note: nothing may be appended after the
+/// conversation, because that makes a reasoning model deliberate instead of act.
+/// The steer must sit where a user turn belongs.
+#[tokio::test]
+async fn a_steer_is_never_a_trailing_system_note() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("c1", "steer_now", "{}")]),
+        Script::text("handled"),
+    ])
+    .build()
+    .await;
+    let steer = SteerTool::boxed(
+        "steer_now",
+        Arc::clone(&h.runtime),
+        h.session(),
+        "one more thing",
+    );
+    let mut registry = ToolRegistry::new();
+    registry.register(steer);
+    h.runtime.set_tools(Arc::new(registry));
+
+    let _ = h.run_to_finish("start").await;
+
+    let requests = h.factory.requests();
+    assert!(requests.len() >= 2, "the steer must have produced a turn");
+    for request in requests {
+        assert_eq!(
+            request
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::System)
+                .count(),
+            1,
+            "the steer added a second system message"
+        );
+        assert_ne!(
+            request.messages.last().map(|m| m.role),
+            Some(Role::System),
+            "a steer must never be appended after the conversation"
+        );
+    }
+}
+
+/// A steer with no run in flight is refused rather than silently queued.
+#[tokio::test]
+async fn steering_with_nothing_running_is_refused() {
+    let h = HarnessBuilder::new(vec![Script::text("unused")]).build().await;
+    let error = h
+        .runtime
+        .steer(h.session(), "anyone there?".into())
+        .expect_err("a steer without a run has no meaning");
+    assert!(matches!(error, Error::BadRequest(_)), "{error:?}");
+    assert!(
+        error.to_string().contains("no run in flight"),
+        "the message must say what is wrong: {error}"
+    );
+    // Nothing was queued, so a later run does not inherit it.
+    assert!(h.runtime.queued_steers(h.session()).is_empty());
+}
+
+/// The steer queue is bounded, so one session cannot grow it without limit.
+#[tokio::test]
+async fn the_steer_queue_is_bounded() {
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text(
+        "thinking".into(),
+    )])])
+    .build()
+    .await;
+    h.submit("long job").await;
+    // Wait for the run to be registered before steering at it.
+    let _ = h.wait_idle().await;
+
+    let mut accepted = 0usize;
+    for i in 0..(crate::MAX_QUEUED_STEERS + 5) {
+        match h.runtime.steer(h.session(), format!("steer {i}")) {
+            Ok(_) => accepted += 1,
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("already has"),
+                    "the rejection must name the limit: {error}"
+                );
+                break;
+            }
+        }
+    }
+    assert_eq!(accepted, crate::MAX_QUEUED_STEERS);
+    assert_eq!(
+        h.runtime.queued_steers(h.session()).len(),
+        crate::MAX_QUEUED_STEERS
+    );
+    h.runtime.cancel(h.session());
+}
+
+/// A steer that never lands (the run ended first) is simply absent: it is not
+/// persisted, so the transcript has no dangling user turn.
+///
+/// This is the race the acceptance guard exists for: `steer` checks `is_running`
+/// and refuses once the run is gone, so a message can never be accepted into a
+/// queue that nothing will ever drain. What matters for the transcript is that an
+/// accepted-but-undrained message is *not* a stored turn - it only becomes one at
+/// the moment the loop folds it in.
+#[tokio::test]
+async fn a_steer_after_the_run_is_refused_and_leaves_no_turn() {
+    let mut h = HarnessBuilder::new(vec![Script::text("finished quickly")])
+        .build()
+        .await;
+    let _ = h.run_to_finish("quick job").await;
+    let _ = h.wait_idle().await;
+
+    // The run is over: a steer now is refused, not queued.
+    let error = h
+        .runtime
+        .steer(h.session(), "too late".into())
+        .expect_err("a steer after the run must be refused");
+    assert!(error.to_string().contains("no run in flight"), "{error}");
+    assert!(
+        h.runtime.queued_steers(h.session()).is_empty(),
+        "nothing may be left waiting for a run that has ended"
+    );
+
+    // ...and the transcript holds exactly the original prompt.
+    let users: Vec<String> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content)
+        .collect();
+    assert_eq!(users, vec!["quick job".to_string()]);
+}
+
+/// A follow-up queued mid-run starts a *new run* once the current one finishes,
+/// and its own user message is persisted by that next run.
+#[tokio::test]
+async fn a_queued_follow_up_starts_the_next_run() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("c1", "queue_next", "{}")]),
+        Script::text("first answer"),
+        Script::text("second answer"),
+    ])
+    .build()
+    .await;
+    let tool = FollowUpTool::boxed(
+        "queue_next",
+        Arc::clone(&h.runtime),
+        h.session(),
+        "now run the tests",
+    );
+    let mut registry = ToolRegistry::new();
+    registry.register(tool);
+    h.runtime.set_tools(Arc::new(registry));
+
+    let first = h.run_to_finish("do the first job").await;
+    // The follow-up run starts only after the first finishes, so its events are
+    // collected separately.
+    let second = h.collect_until_finished().await;
+
+    let first_done = first
+        .iter()
+        .any(|e| matches!(&e.event, Event::RunFinished { status, .. } if status == "completed"));
+    assert!(first_done, "the first run must finish normally");
+    assert!(
+        second
+            .iter()
+            .any(|e| matches!(e.event, Event::RunStarted { .. })),
+        "the follow-up must start a run"
+    );
+
+    // Two runs, each with its own user message.
+    let users: Vec<String> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content)
+        .collect();
+    assert_eq!(
+        users,
+        vec!["do the first job".to_string(), "now run the tests".to_string()]
+    );
+    // The queue is empty: the follow-up was taken, not left to re-fire.
+    assert!(h.runtime.queued_follow_ups(h.session()).is_empty());
+}
+
+/// A follow-up with nothing running is refused; a plain `send` is what it means.
+#[tokio::test]
+async fn a_follow_up_with_nothing_running_is_refused() {
+    let h = HarnessBuilder::new(vec![Script::text("unused")]).build().await;
+    let error = h
+        .runtime
+        .enqueue_follow_up(h.session(), "after".into())
+        .expect_err("a follow-up without a run has no meaning");
+    assert!(matches!(error, Error::BadRequest(_)), "{error:?}");
+    assert!(h.runtime.queued_follow_ups(h.session()).is_empty());
+}
+
+/// The follow-up queue is bounded (each entry is a whole run).
+#[tokio::test]
+async fn the_follow_up_queue_is_bounded() {
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text(
+        "busy".into(),
+    )])])
+    .build()
+    .await;
+    h.submit("long job").await;
+    let _ = h.wait_idle().await;
+
+    let mut accepted = 0usize;
+    for i in 0..(crate::MAX_QUEUED_FOLLOW_UPS + 3) {
+        match h.runtime.enqueue_follow_up(h.session(), format!("then {i}")) {
+            Ok(_) => accepted += 1,
+            Err(error) => {
+                assert!(error.to_string().contains("already has"), "{error}");
+                break;
+            }
+        }
+    }
+    assert_eq!(accepted, crate::MAX_QUEUED_FOLLOW_UPS);
+    h.runtime.cancel(h.session());
+}
+
+/// Empty content is rejected by both queues, before reaching any storage.
+#[tokio::test]
+async fn an_empty_queued_message_is_rejected() {
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text(
+        "busy".into(),
+    )])])
+    .build()
+    .await;
+    h.submit("job").await;
+    let _ = h.wait_idle().await;
+
+    assert!(h.runtime.steer(h.session(), "   \n ".into()).is_err());
+    assert!(h
+        .runtime
+        .enqueue_follow_up(h.session(), "\t".into())
+        .is_err());
+    assert!(h.runtime.queued_steers(h.session()).is_empty());
+    assert!(h.runtime.queued_follow_ups(h.session()).is_empty());
+    h.runtime.cancel(h.session());
 }

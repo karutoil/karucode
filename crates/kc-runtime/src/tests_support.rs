@@ -20,8 +20,8 @@ use kc_core::paths::Workspace;
 use kc_core::provider::{ChatRequest, Provider, ProviderChunk, ProviderFactory, ProviderStream};
 use kc_core::settings::Settings;
 use kc_core::store::{
-    AgentRecord, ApprovalRecord, ClaimRecord, NewMessage, Project, RunRecord, RunStatus, Session,
-    SessionSummary, Store, StoredMessage,
+    AgentRecord, AgentSummary, ApprovalRecord, ClaimRecord, NewMessage, Project, RunRecord,
+    RunStatus, Session, SessionSummary, Store, StoredMessage, TerminalSession,
 };
 use kc_core::tool::{
     Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOrigin, ToolOutcome, ToolRegistry, ToolSpec,
@@ -80,6 +80,7 @@ struct Db {
     approvals: Vec<ApprovalRecord>,
     claims: Vec<ClaimRecord>,
     settings: BTreeMap<String, String>,
+    terminals: BTreeMap<String, TerminalSession>,
 }
 
 pub(crate) struct FakeStore {
@@ -120,6 +121,10 @@ impl FakeStore {
     }
 
     fn db(&self) -> std::sync::MutexGuard<'_, Db> {
+        self.db.lock().expect("fake store lock")
+    }
+
+    fn db_mut(&self) -> std::sync::MutexGuard<'_, Db> {
         self.db.lock().expect("fake store lock")
     }
 
@@ -358,6 +363,7 @@ impl Store for FakeStore {
             tool_calls: message.tool_calls.clone(),
             tool_call_id: message.tool_call_id.clone(),
             name: message.name.clone(),
+            images: message.images.clone(),
             created_at: now_ms(),
         };
         db.messages.push(stored);
@@ -473,6 +479,71 @@ impl Store for FakeStore {
             .collect())
     }
 
+    async fn list_agents_all(&self, project_id: Option<&str>) -> Result<Vec<AgentSummary>> {
+        let db = self.db();
+        let session_for =
+            |agent: &AgentRecord| db.sessions.iter().find(|s| s.id == agent.session_id);
+        let mut out: Vec<AgentSummary> = db
+            .agents
+            .iter()
+            .filter(|agent| match project_id {
+                None => true,
+                Some(project) => {
+                    session_for(agent).and_then(|s| s.project_id.as_deref()) == Some(project)
+                }
+            })
+            .map(|agent| {
+                let session = session_for(agent);
+                AgentSummary {
+                    agent: agent.clone(),
+                    session_title: session.map(|s| s.title.clone()).unwrap_or_default(),
+                    workspace: session.map(|s| s.workspace.clone()).unwrap_or_default(),
+                    project_id: session.and_then(|s| s.project_id.clone()),
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.agent
+                .created_at
+                .cmp(&a.agent.created_at)
+                .then_with(|| b.agent.id.cmp(&a.agent.id))
+        });
+        Ok(out)
+    }
+
+    async fn get_agent(&self, id: &str) -> Result<Option<AgentSummary>> {
+        let db = self.db();
+        let Some(agent) = db.agents.iter().find(|a| a.id == id) else {
+            return Ok(None);
+        };
+        let session = db.sessions.iter().find(|s| s.id == agent.session_id);
+        Ok(Some(AgentSummary {
+            agent: agent.clone(),
+            session_title: session.map(|s| s.title.clone()).unwrap_or_default(),
+            workspace: session.map(|s| s.workspace.clone()).unwrap_or_default(),
+            project_id: session.and_then(|s| s.project_id.clone()),
+        }))
+    }
+
+    async fn list_agent_messages(
+        &self,
+        agent_id: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        let db = self.db();
+        let mut out: Vec<StoredMessage> = db
+            .messages
+            .iter()
+            .filter(|m| m.agent_id.as_deref() == Some(agent_id))
+            .cloned()
+            .collect();
+        out.sort_by_key(|m| m.id);
+        if limit > 0 && out.len() > limit {
+            out = out.split_off(out.len() - limit);
+        }
+        Ok(out)
+    }
+
     async fn mark_interrupted_agents(&self) -> Result<usize> {
         let mut db = self.db();
         let mut count = 0;
@@ -553,6 +624,78 @@ impl Store for FakeStore {
             .collect())
     }
 
+    async fn create_terminal(&self, terminal: &TerminalSession) -> Result<TerminalSession> {
+        let mut db = self.db_mut();
+        let stored = TerminalSession {
+            created_at: if terminal.created_at == 0 {
+                now_ms()
+            } else {
+                terminal.created_at
+            },
+            updated_at: now_ms(),
+            last_used_at: now_ms(),
+            ..terminal.clone()
+        };
+        db.terminals.insert(stored.id.clone(), stored.clone());
+        Ok(stored)
+    }
+
+    async fn list_terminals(&self) -> Result<Vec<TerminalSession>> {
+        let db = self.db_mut();
+        let mut terminals: Vec<TerminalSession> = db.terminals.values().cloned().collect();
+        terminals.sort_by(|a, b| a.position.cmp(&b.position).then(a.created_at.cmp(&b.created_at)));
+        Ok(terminals)
+    }
+
+    async fn get_terminal(&self, id: &str) -> Result<Option<TerminalSession>> {
+        Ok(self.db_mut().terminals.get(id).cloned())
+    }
+
+    async fn rename_terminal(&self, id: &str, title: Option<&str>) -> Result<()> {
+        let mut db = self.db_mut();
+        let Some(existing) = db.terminals.get(id).cloned() else {
+            return Err(Error::NotFound(format!("no terminal with id `{id}`")));
+        };
+        let title = match title {
+            Some(title) => title.to_string(),
+            None => TerminalSession::default_title(&existing.cwd, existing.position),
+        };
+        db.terminals
+            .insert(id.to_string(), TerminalSession { title, ..existing });
+        Ok(())
+    }
+
+    async fn touch_terminal(&self, id: &str) -> Result<()> {
+        let mut db = self.db_mut();
+        if let Some(existing) = db.terminals.get(id).cloned() {
+            db.terminals.insert(
+                id.to_string(),
+                TerminalSession {
+                    last_used_at: now_ms(),
+                    updated_at: now_ms(),
+                    ..existing
+                },
+            );
+        }
+        Ok(())
+    }
+
+    async fn delete_terminal(&self, id: &str) -> Result<()> {
+        self.db_mut().terminals.remove(id);
+        Ok(())
+    }
+
+    async fn terminal_ids(&self) -> Result<Vec<String>> {
+        let db = self.db_mut();
+        let mut ids: Vec<(i64, i64, String)> = db
+            .terminals
+            .values()
+            .map(|t| (t.position, t.created_at, t.id.clone()))
+            .collect();
+        ids.sort();
+        Ok(ids.into_iter().map(|(_, _, id)| id).collect())
+    }
+
     async fn claim_paths(
         &self,
         session_id: &str,
@@ -607,6 +750,40 @@ impl Store for FakeStore {
     async fn release_claims(&self, agent_id: &str) -> Result<()> {
         self.db().claims.retain(|c| c.agent_id != agent_id);
         Ok(())
+    }
+    async fn prune_messages_older_than(&self, _days: u64) -> Result<kc_core::store::PruneReport> {
+        // The in-memory double never retains on disk, so a retention pass has
+        // nothing to delete. Implemented (rather than todo!()) so tests that walk
+        // every Store method cannot panic on the fake.
+        Ok(kc_core::store::PruneReport::default())
+    }
+
+    fn retention_keep_messages(&self) -> usize {
+        0
+    }
+
+    async fn vacuum(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn incremental_vacuum(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn db_size_bytes(&self) -> Result<u64> {
+        Ok(0)
+    }
+
+    async fn integrity_check(&self) -> Result<kc_core::store::IntegrityReport> {
+        Ok(kc_core::store::IntegrityReport {
+            ok: true,
+            problems: vec!["ok".to_string()],
+            checked_at: 0,
+        })
+    }
+
+    fn last_integrity_check(&self) -> Option<i64> {
+        None
     }
 }
 
@@ -775,6 +952,11 @@ impl FakeSettings {
         self
     }
 
+    pub(crate) fn with_model(mut self, model: ModelConfig) -> Self {
+        self.model = model;
+        self
+    }
+
     pub(crate) fn with_policy(mut self, policy: ApprovalPolicy) -> Self {
         self.policy = policy;
         self
@@ -852,6 +1034,182 @@ impl Tool for EchoTool {
 
     async fn invoke(&self, request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
         ToolOutcome::ok(format!("echoed:{}", request.arguments))
+    }
+}
+
+/// Steers the session from *inside* a tool call.
+///
+/// This is the honest reproduction of a user typing while the agent works: the
+/// run is in flight (a tool is executing), so `steer` must be accepted, and the
+/// next iteration must pick the message up. Doing it from the test body instead
+/// would race the loop and make the test flaky in the direction of "sometimes
+/// accepted after the run ended", which proves nothing.
+pub(crate) struct SteerTool {
+    pub name: String,
+    pub runtime: Arc<crate::Runtime>,
+    pub session: String,
+    pub message: String,
+}
+
+impl SteerTool {
+    pub(crate) fn boxed(
+        name: &str,
+        runtime: Arc<crate::Runtime>,
+        session: &str,
+        message: &str,
+    ) -> Arc<dyn Tool> {
+        Arc::new(Self {
+            name: name.to_string(),
+            runtime,
+            session: session.to_string(),
+            message: message.to_string(),
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for SteerTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Steer the session, as if the user typed mid-run.".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            origin: kc_core::tool::ToolOrigin::Builtin,
+        }
+    }
+
+    async fn invoke(&self, _request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+        match self.runtime.steer(&self.session, self.message.clone()) {
+            Ok(steer) => ToolOutcome::ok(format!("steered:{}", steer.id)),
+            Err(error) => ToolOutcome::err(format!("steer refused: {error}")),
+        }
+    }
+}
+
+/// Queues a follow-up from *inside* a tool call, for the same reason as
+/// [`SteerTool`].
+pub(crate) struct FollowUpTool {
+    pub name: String,
+    pub runtime: Arc<crate::Runtime>,
+    pub session: String,
+    pub message: String,
+}
+
+impl FollowUpTool {
+    pub(crate) fn boxed(
+        name: &str,
+        runtime: Arc<crate::Runtime>,
+        session: &str,
+        message: &str,
+    ) -> Arc<dyn Tool> {
+        Arc::new(Self {
+            name: name.to_string(),
+            runtime,
+            session: session.to_string(),
+            message: message.to_string(),
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for FollowUpTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Queue a follow-up prompt for this session.".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            origin: kc_core::tool::ToolOrigin::Builtin,
+        }
+    }
+
+    async fn invoke(&self, _request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+        match self
+            .runtime
+            .enqueue_follow_up(&self.session, self.message.clone())
+        {
+            Ok(follow_up) => ToolOutcome::ok(format!("queued:{}", follow_up.id)),
+            Err(error) => ToolOutcome::err(format!("follow-up refused: {error}")),
+        }
+    }
+}
+
+/// Returns a body of the size it is asked for (`{"bytes": N}`), so a test can
+/// drive the context budget without carrying a megabyte fixture.
+pub(crate) struct BigOutputTool {
+    pub name: String,
+}
+
+impl BigOutputTool {
+    pub(crate) fn boxed(name: &str) -> Arc<dyn Tool> {
+        Arc::new(Self {
+            name: name.to_string(),
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for BigOutputTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Return a body of `bytes` characters.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "bytes": { "type": "integer" } }
+            }),
+            origin: kc_core::tool::ToolOrigin::Builtin,
+        }
+    }
+
+    async fn invoke(&self, request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+        let bytes = request
+            .arguments
+            .get("bytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1_000) as usize;
+        ToolOutcome::ok("a".repeat(bytes))
+    }
+}
+
+/// Returns an image, but only when the tool context says the model accepts one.
+///
+/// Mirrors what `read_file` does: the decision is the tool's, the capability is
+/// the runtime's, and a text-only model must get a refusal rather than pixels.
+pub(crate) struct ImageTool {
+    pub name: String,
+}
+
+impl ImageTool {
+    pub(crate) fn boxed(name: &str) -> Arc<dyn Tool> {
+        Arc::new(Self {
+            name: name.to_string(),
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for ImageTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Return an image for the model to look at.".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            origin: kc_core::tool::ToolOrigin::Builtin,
+        }
+    }
+
+    async fn invoke(&self, _request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        if !ctx.supports_images {
+            return ToolOutcome::err("the active model cannot see images");
+        }
+        ToolOutcome::ok("shot.png — image/png").with_images(vec![
+            kc_core::message::ImageAttachment {
+                media_type: "image/png".into(),
+                data: "iVBORw0KGgo=".into(),
+                bytes: 8,
+                name: Some("shot.png".into()),
+            },
+        ])
     }
 }
 
@@ -1249,6 +1607,20 @@ impl Harness {
             .filter(|m| m.session_id == self.session_id)
             .collect()
     }
+
+    /// Accept a steering message for the session, as the HTTP route does.
+    pub(crate) fn steer(&self, content: &str) -> crate::QueuedSteer {
+        self.runtime
+            .steer(&self.session_id, content.to_string())
+            .expect("steering message accepted")
+    }
+
+    /// Accept a follow-up prompt for the session, as the HTTP route does.
+    pub(crate) fn follow_up(&self, content: &str) -> crate::QueuedFollowUp {
+        self.runtime
+            .enqueue_follow_up(&self.session_id, content.to_string())
+            .expect("follow-up accepted")
+    }
 }
 
 impl Drop for Harness {
@@ -1281,6 +1653,8 @@ pub(crate) fn test_inner_with_settings(settings: FakeSettings) -> Arc<RuntimeInn
         seq: AtomicU64::new(0),
         events_emitted: AtomicU64::new(0),
         session_allow: Mutex::new(std::collections::HashSet::new()),
+        steers: Mutex::new(HashMap::new()),
+        follow_ups: Mutex::new(HashMap::new()),
     })
 }
 
@@ -1303,5 +1677,6 @@ pub(crate) fn new_message(session: &str, role: &str, content: &str) -> NewMessag
         tool_calls: Vec::new(),
         tool_call_id: None,
         name: None,
+        images: Vec::new(),
     }
 }

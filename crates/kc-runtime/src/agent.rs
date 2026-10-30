@@ -73,6 +73,11 @@ pub(crate) struct LoopSpec {
     /// each iteration from the current tool set and hook contributions.
     pub history: Vec<Message>,
     pub run_state: Option<Arc<RunState>>,
+    /// Characters of conversation this loop may send, derived once from the
+    /// resolved model (`limits.context_chars_for`). Carried on the loop rather
+    /// than read from `limits` everywhere so the budget cannot drift between the
+    /// request, the run window and the per-turn cap.
+    pub context_max_chars: usize,
 }
 
 impl LoopSpec {
@@ -176,6 +181,7 @@ pub(crate) async fn start_run(
         }
         runs.insert(key.clone(), Arc::clone(&state));
     }
+    kc_core::metrics::record_run_started();
 
     let history = match begin_run(&inner, &state, &model, &prompt).await {
         Ok(history) => history,
@@ -200,6 +206,10 @@ pub(crate) async fn start_run(
     let spawned_inner = Arc::clone(&inner);
     let spawned_state = Arc::clone(&state);
     let spawned_key = key.clone();
+    // Held across the run so a queued follow-up can start the next one. Cloning
+    // the caller's handle is what lets the chain continue after the HTTP request
+    // that started this run has returned.
+    let runtime_for_follow_up = Arc::clone(runtime);
     tokio::spawn(async move {
         // A panic in a tool or provider must not leak the run: catch it here so
         // the row becomes `failed` and the session accepts work again.
@@ -266,12 +276,80 @@ pub(crate) async fn start_run(
             .lock()
             .expect("runs lock")
             .remove(&spawned_key);
+
+        // The run is over and its state is gone, so `is_running` is false and a new
+        // `submit` is legal. Start the next follow-up, if the user queued one while
+        // this run was working.
+        //
+        // This is deliberately a chain, not a fresh `tokio::spawn`: the follow-up
+        // belongs to the same "user is waiting on this session" sequence, and a
+        // chain keeps the ordering honest (one run at a time, queued in order). The
+        // hop through [`start_run_boxed`] is what lets the compiler size the type -
+        // `start_run` awaiting `start_run` directly would be an infinitely sized
+        // future, and spawning it would be a `Send` cycle between the two.
+        let session_id = spawned_state.session_id.0.clone();
+        while let Some(next) = runtime_for_follow_up.take_follow_up(&session_id) {
+            let runtime = Arc::clone(&runtime_for_follow_up);
+            let prompt = next.content.clone();
+            let next_id = next.id.clone();
+            match start_run_boxed(runtime, session_id.clone(), prompt).await {
+                Ok(handle) => {
+                    runtime_for_follow_up.emit(
+                        Some(&session_id),
+                        Some(&handle.run_id),
+                        None,
+                        Event::Notice {
+                            level: "info".into(),
+                            message: "Starting the queued follow-up.".into(),
+                        },
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session = %session_id,
+                        follow_up = %next_id,
+                        error = %e,
+                        "could not start a queued follow-up"
+                    );
+                    runtime_for_follow_up.emit(
+                        Some(&session_id),
+                        None,
+                        None,
+                        Event::Notice {
+                            level: "warn".into(),
+                            message: format!(
+                                "A queued follow-up could not be started: {e}. Send it again when the session is ready."
+                            ),
+                        },
+                    );
+                    // Do not spin: the queue is cleared so the user gets the
+                    // notice rather than the same failure retried forever.
+                    runtime_for_follow_up.clear_follow_ups(&session_id);
+                    break;
+                }
+            }
+        }
     });
 
     Ok(RunHandle {
         run_id: run_id.0,
         session_id: session_id.to_string(),
     })
+}
+
+/// Type-erased [`start_run`].
+///
+/// `start_run`'s spawned task ends by starting the next queued follow-up through
+/// this function. Calling `start_run` directly from inside that task makes the
+/// future's type recursive (and its `Send`-ness circular through `submit`), which
+/// the compiler cannot size. Boxing the future breaks the cycle at the cost of one
+/// allocation per follow-up hop, which is nothing next to a model turn.
+fn start_run_boxed(
+    runtime: Arc<Runtime>,
+    session_id: String,
+    prompt: String,
+) -> futures_util::future::BoxFuture<'static, Result<RunHandle>> {
+    Box::pin(async move { start_run(&runtime, &session_id, prompt).await })
 }
 
 /// Write the run row + user message and load the prior conversation.
@@ -299,7 +377,7 @@ async fn begin_run(
         store,
         &state.session_id.0,
         HISTORY_LIMIT,
-        limits.context_max_chars,
+        limits.context_chars_for(model),
     )
     .await?;
     if history.is_empty() {
@@ -352,6 +430,7 @@ pub(crate) async fn run_top_level(
         is_subagent: false,
         budget: Budget::for_run(&limits),
         deadline: Instant::now() + Duration::from_secs(limits.max_run_secs.max(1)),
+        context_max_chars: limits.context_chars_for(&model),
         model,
         limits,
         approval_mode: policy.mode.as_str().to_string(),
@@ -365,6 +444,7 @@ pub(crate) async fn run_top_level(
     };
 
     let outcome = run_loop(Arc::clone(&inner), spec).await;
+    kc_core::metrics::record_run_finished();
 
     let mut finish_error: Option<Error> = None;
     if let Err(e) = inner
@@ -445,11 +525,54 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
     let mut continues = 0u32;
     let max_segments = spec.budget.max_continues.saturating_add(1);
     let mut last_text = String::new();
+    // Identical calls seen in this run, with the hash of the result they
+    // returned and how many mutating calls had happened when that result was
+    // produced. A model stuck in a loop re-issues the same call and gets the same
+    // answer; the note below is the cheapest way to make that visible to it
+    // (and to the transcript) instead of letting it burn the budget silently.
+    let mut repeats: std::collections::HashMap<String, (u32, u64, u64)> =
+        std::collections::HashMap::new();
+    let mut mutations: u64 = 0;
 
     loop {
         if spec.cancel.is_cancelled() {
             ctx.notice("info", "run cancelled");
             return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
+        }
+        // --- steering ---------------------------------------------------------
+        // A message the user sent *while this run was working*. It becomes an
+        // ordinary `user` turn here, before the request is built, so the model
+        // sees it exactly where a follow-up would sit if the user had waited.
+        //
+        // Deliberately at the top of the iteration and not mid-stream: the turn
+        // in flight is allowed to finish, because aborting it throws away the
+        // model's tool plan and can persist a tool call with no result. Only a
+        // top-level run takes steers; a subagent has its own transcript and no
+        // user watching it.
+        if !spec.is_subagent {
+            let steers = inner.drain_steers(&spec.session_id.0);
+            for steer in steers {
+                let message = Message::user(&steer.content);
+                if let Err(e) = persist(
+                    &inner,
+                    &spec.session_id,
+                    &spec.run_id,
+                    spec.agent_id.as_ref(),
+                    &message,
+                )
+                .await
+                {
+                    ctx.error("store", format!("could not persist a steering message: {e}"));
+                }
+                // The transcript and the request must agree: an unpersisted steer
+                // is still one the model acted on, so it goes into `history`
+                // either way - exactly like the continuation note below.
+                history.push(message);
+                ctx.emit(Event::SteerApplied {
+                    steer_id: steer.id.clone(),
+                    content: steer.content.clone(),
+                });
+            }
         }
         if segment_iterations >= spec.budget.max_iterations {
             let message = if spec.is_subagent {
@@ -549,25 +672,72 @@ segment, limits.max_continues is {})",
         }
 
         // --- build the request ------------------------------------------------
-        let extra = inner
-            .deps
-            .hooks
-            .before_prompt(&spec.session_id.0, &spec.workspace.root().to_string_lossy())
-            .await;
+        // Bounded like a tool call: `Hooks` is a public trait, and a plugin hook
+        // that never returns would otherwise stall the loop with no deadline and
+        // no way to cancel. On timeout the run continues with no extra context
+        // rather than failing: the hook is advisory, and losing its notes is
+        // cheaper than losing the run.
+        // Bound before the `select!`: a `to_string_lossy()` temporary cannot be
+        // borrowed across the await point.
+        let workspace_label = spec.workspace.root().to_string_lossy().to_string();
+        let extra = tokio::select! {
+            biased;
+            _ = spec.cancel.cancelled() => Vec::new(),
+            _ = tokio::time::sleep_until(spec.deadline) => Vec::new(),
+            notes = tokio::time::timeout(
+                HOOK_BUDGET,
+                inner
+                    .deps
+                    .hooks
+                    .before_prompt(&spec.session_id.0, &workspace_label),
+            ) => match notes {
+                Ok(notes) => notes,
+                Err(_) => {
+                    ctx.notice(
+                        "warn",
+                        format!(
+                            "a plugin hook did not answer within {}s; continuing without its notes",
+                            HOOK_BUDGET.as_secs()
+                        ),
+                    );
+                    Vec::new()
+                }
+            },
+        };
         let tool_specs = spec.tools.specs();
-        let system = kc_core::prompt::system_prompt(
+        let system = kc_core::prompt::system_prompt_with_roots(
             &spec.workspace.root().to_string_lossy(),
+            spec.workspace.extra_roots(),
             &tool_specs,
             &spec.approval_mode,
             &spec.budget,
             &extra,
         );
-        let mut messages = Vec::with_capacity(history.len() + 1);
+        let mut messages = Vec::with_capacity(history.len() + 2);
         messages.push(Message::system(system));
         messages.extend(history.iter().cloned());
+        // The tail note is appended *after* the fitted conversation, so it can
+        // never disturb the cached prefix: it costs its own few hundred tokens
+        // and nothing else. Its size is reserved out of the context budget so the
+        // request still respects the limit.
+        // Deliberately NOTHING is appended after the conversation.
+        //
+        // Measured on a real 140-message session against this gateway, at the
+        // point where the model decides to write a file:
+        //   * the history alone                     -> `write_file(8308B)`, 4.0k tokens out
+        //   * + a trailing `system` note            -> 8.0k tokens, reasoning only, NO action
+        //   * + the same note folded into the last
+        //     tool result                          -> 8.0k tokens, reasoning only, NO action
+        //   * the same history at temperature 1.0   -> no action
+        // A two-line note did the same thing. Any text after the last turn makes
+        // this model deliberate instead of acting, and it can burn the whole
+        // output budget reasoning about it. The same note at the FRONT of the
+        // request committed normally, but a note that changes mid-run costs a
+        // prompt-cache miss from position 1, so karucode sends no runtime notes
+        // at all: the request is exactly the conversation.
         let messages = context::fit(
             messages,
-            spec.limits.context_max_chars,
+            spec.context_max_chars,
             spec.limits.max_tool_output_bytes,
         );
 
@@ -576,6 +746,7 @@ segment, limits.max_continues is {})",
             messages,
             tools: tool_specs,
             temperature: spec.model.temperature,
+            send_temperature: spec.model.send_temperature,
             max_tokens: spec.model.max_tokens,
             top_p: spec.model.top_p,
             parallel_tool_calls: spec.model.parallel_tool_calls,
@@ -752,7 +923,7 @@ segment, limits.max_continues is {})",
             ctx.error("store", message.clone());
             return LoopOutcome::new(RunStatus::Failed, Some(message), last_text, iterations);
         }
-        history.push(assistant);
+        history.push(assistant.clone());
 
         if calls.is_empty() {
             if hit_token_limit {
@@ -772,6 +943,14 @@ segment, limits.max_continues is {})",
         // --- tools ------------------------------------------------------------
         let per_turn = spec.limits.max_tool_calls_per_turn.max(1);
         let skipped_by_cap = calls.len().saturating_sub(per_turn);
+        // A turn is bounded in *bytes*, not only in call count: 32 parallel
+        // calls at the 24 KB per-call cap is three context budgets in one
+        // request, and a turn that cannot fit is a turn whose results get
+        // evicted before the model sees them - which is what makes a model
+        // re-read the same file forever. Half the budget per turn keeps every
+        // call visible and leaves the other half for history.
+        let turn_cap = context::turn_budget(spec.context_max_chars);
+        let mut turn_chars = 0usize;
         if skipped_by_cap > 0 {
             ctx.notice(
                 "warn",
@@ -818,9 +997,131 @@ segment, limits.max_continues is {})",
                 continue;
             }
 
-            let result = run_one_tool(&inner, &spec, &ctx, call).await;
+            // A read-only call whose exact arguments already returned the same
+            // answer, with no mutation in between, cannot produce anything new:
+            // invoking it again only re-bills the same bytes. Walk the model
+            // forward instead of paying for the same page twice.
+            let repeat_key = format!("{}\u{1}{}", call.name, call.arguments);
+            let read_only = spec
+                .tools
+                .get(&call.name)
+                .map(|tool| tool.class() == kc_core::tool::ToolClass::ReadOnly)
+                .unwrap_or(false);
+            let repeat_stale = read_only
+                && repeats.get(&repeat_key).is_some_and(|(count, _, seen_at)| {
+                    // The third identical answer carries the warning; the
+                    // fourth is refused rather than paying for the same page
+                    // again (measured: one review run re-read the same file
+                    // 27 times while ignoring the warning).
+                    *count >= REPEAT_NOTE_AFTER && *seen_at == mutations
+                });
+            if repeat_stale {
+                let count = repeats.get(&repeat_key).map(|(c, _, _)| *c).unwrap_or(0);
+                let note = format!(
+                    "[blocked: this exact call has already returned the same result {count} times \
+                     in this run, and nothing has been written since. Re-issuing it cannot produce \
+                     new information. Use what you already have, or read a range you have not seen.]"
+                );
+                ctx.emit(Event::ToolCallFinished {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    ok: false,
+                    output: note.clone(),
+                    truncated: false,
+                    duration_ms: 0,
+                    // A blocked repeat is refused, so there is nothing to show.
+                    images: Vec::new(),
+                });
+                ctx.notice(
+                    "warn",
+                    format!(
+                        "blocked a repeated identical `{}` call ({count}x): nothing changed since",
+                        call.name
+                    ),
+                );
+                let message = Message::tool_result(call.id.clone(), call.name.clone(), note);
+                if let Err(e) = persist(
+                    &inner,
+                    &spec.session_id,
+                    &spec.run_id,
+                    spec.agent_id.as_ref(),
+                    &message,
+                )
+                .await
+                {
+                    let message = format!("could not persist the tool message: {e}");
+                    ctx.error("store", message.clone());
+                    return LoopOutcome::new(
+                        RunStatus::Failed,
+                        Some(message),
+                        last_text,
+                        iterations,
+                    );
+                }
+                history.push(message);
+                continue;
+            }
+
+            let remaining = turn_cap
+                .saturating_sub(turn_chars)
+                .max(TURN_RESULT_FLOOR_BYTES);
+            let result = run_one_tool(&inner, &spec, &ctx, call, remaining).await;
             match result {
-                Ok(message) => history.push(message),
+                Ok(message) => {
+                    // Same call, same answer: say so instead of pretending it is
+                    // new information.
+                    let key = repeat_key;
+                    let hash = content_hash(&message.content);
+                    let count = match repeats.get_mut(&key) {
+                        Some((count, previous, seen_at)) if *previous == hash => {
+                            *count = count.saturating_add(1);
+                            *seen_at = mutations;
+                            *count
+                        }
+                        _ => {
+                            repeats.insert(key, (1, hash, mutations));
+                            1
+                        }
+                    };
+                    // No note is appended to the result itself: adding text to a
+                    // tool result is one of the shapes that pushes this model into
+                    // a reasoning stall (see the request-building comment). The
+                    // fourth identical call is refused outright instead.
+                    if count >= REPEAT_NOTE_AFTER && read_only {
+                        ctx.notice(
+                            "warn",
+                            format!(
+                                "`{}` returned an identical result {count} times in this run",
+                                call.name
+                            ),
+                        );
+                    }
+                    if !read_only {
+                        mutations = mutations.saturating_add(1);
+                    }
+                    turn_chars = turn_chars.saturating_add(
+                        message.content.len() + message.images.len() * context::IMAGE_CONTEXT_CHARS,
+                    );
+                    if let Err(e) = persist(
+                        &inner,
+                        &spec.session_id,
+                        &spec.run_id,
+                        spec.agent_id.as_ref(),
+                        &message,
+                    )
+                    .await
+                    {
+                        let message = format!("could not persist the tool message: {e}");
+                        ctx.error("store", message.clone());
+                        return LoopOutcome::new(
+                            RunStatus::Failed,
+                            Some(message),
+                            last_text,
+                            iterations,
+                        );
+                    }
+                    history.push(message)
+                }
                 Err(e) => {
                     ctx.error("store", format!("could not persist the tool message: {e}"));
                     return LoopOutcome::new(
@@ -842,7 +1143,7 @@ segment, limits.max_continues is {})",
         // re-clone, every iteration) a transcript far past the request budget.
         // The dropped turns survive in the persisted transcript and in the
         // digest notice, so nothing is lost, only unbounded memory growth.
-        context::compact_run_window(&mut history, spec.limits.context_max_chars);
+        context::compact_run_window(&mut history, spec.context_max_chars);
     }
 }
 
@@ -1011,12 +1312,17 @@ fn truncate_detail(text: &str, max_bytes: usize) -> String {
     format!("{}... [truncated]", &text[..end])
 }
 
-/// Execute a single tool call: emit start/finish, invoke, truncate, persist.
+/// Execute a single tool call: emit start/finish, invoke, truncate.
+///
+/// `remaining` is what is left of the turn's byte budget; a result larger than
+/// that is truncated here, before it is persisted, so the transcript and the
+/// request always agree about every byte.
 async fn run_one_tool(
     inner: &Arc<RuntimeInner>,
     spec: &LoopSpec,
     ctx: &EmitCtx,
     call: &ToolCall,
+    remaining: usize,
 ) -> Result<Message> {
     let started = Instant::now();
     let parsed: Option<serde_json::Value> = if call.arguments.trim().is_empty() {
@@ -1032,7 +1338,7 @@ async fn run_one_tool(
             .unwrap_or_else(|| serde_json::Value::String(call.arguments.clone())),
     });
 
-    let max_bytes = spec.limits.max_tool_output_bytes;
+    let max_bytes = spec.limits.max_tool_output_bytes.min(remaining);
     let outcome = match (parsed, spec.tools.get(&call.name)) {
         (None, _) => kc_core::tool::ToolOutcome::err(format!(
             "invalid JSON arguments for tool `{}`: {}",
@@ -1066,22 +1372,64 @@ async fn run_one_tool(
                     events: ctx.sink(),
                     settings: inner.deps.settings.clone(),
                     depth: spec.depth,
+                    supports_images: spec.model.supports_images,
                 };
                 let request = kc_core::tool::ToolCallRequest {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
                     arguments,
                 };
-                match std::panic::AssertUnwindSafe(tool.invoke(request, tool_ctx))
-                    .catch_unwind()
-                    .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(payload) => kc_core::tool::ToolOutcome::err(format!(
-                        "tool `{}` panicked: {}",
-                        call.name,
-                        panic_message(payload.as_ref())
-                    )),
+                // A tool call must be bounded. The cancel token is only *offered*
+                // to the tool through `ToolCtx`; a tool that ignores it (any
+                // plugin or MCP tool, or a buggy built-in) would otherwise block
+                // this loop forever. `Runtime::cancel` only fires the token and
+                // returns, and `is_running` keeps reporting `true` for a
+                // cancelled-but-unwinding run, so every later `submit` on this
+                // session would be rejected with a 409 and the session would be
+                // bricked for the life of the process. Racing the invocation
+                // against cancellation and the run deadline turns that into an
+                // ordinary failed tool result, which keeps the transcript valid
+                // (the call still gets a result row) and lets the loop exit.
+                let invoke =
+                    std::panic::AssertUnwindSafe(tool.invoke(request, tool_ctx)).catch_unwind();
+                tokio::pin!(invoke);
+                tokio::select! {
+                    biased;
+                    _ = spec.cancel.cancelled() => {
+                        // Fire-and-forget cancellation is not enough: a tool that
+                        // *does* honour the token (every built-in, and the shell
+                        // tool's process-group kill) needs a moment to unwind and
+                        // report what it observed. Cutting it off here would drop
+                        // the future mid-flight and lose that. So give it the same
+                        // grace the subagent supervisor uses, and only synthesise a
+                        // result for a tool that ignores the token entirely.
+                        match tokio::time::timeout(TOOL_CANCEL_GRACE, &mut invoke).await {
+                            Ok(Ok(outcome)) => outcome,
+                            Ok(Err(payload)) => kc_core::tool::ToolOutcome::err(format!(
+                                "tool `{}` panicked: {}",
+                                call.name,
+                                panic_message(payload.as_ref())
+                            )),
+                            Err(_) => kc_core::tool::ToolOutcome::err(format!(
+                                "tool `{}` was cancelled before it finished",
+                                call.name
+                            )),
+                        }
+                    }
+                    _ = tokio::time::sleep_until(spec.deadline) => {
+                        kc_core::tool::ToolOutcome::err(format!(
+                            "tool `{}` did not finish before the run deadline",
+                            call.name
+                        ))
+                    }
+                    result = &mut invoke => match result {
+                        Ok(outcome) => outcome,
+                        Err(payload) => kc_core::tool::ToolOutcome::err(format!(
+                            "tool `{}` panicked: {}",
+                            call.name,
+                            panic_message(payload.as_ref())
+                        )),
+                    },
                 }
             }
         }
@@ -1098,6 +1446,9 @@ async fn run_one_tool(
         output: output.clone(),
         truncated,
         duration_ms,
+        // The same bytes the model gets, so the chat can show what it saw
+        // without a second round-trip to the transcript endpoint.
+        images: outcome.images.clone(),
     });
     inner
         .deps
@@ -1105,21 +1456,60 @@ async fn run_one_tool(
         .on_tool_result(&spec.session_id.0, &call.name, outcome.ok)
         .await;
 
-    let message = Message::tool_result(call.id.clone(), call.name.clone(), output);
-    persist(
-        inner,
-        &spec.session_id,
-        &spec.run_id,
-        spec.agent_id.as_ref(),
-        &message,
-    )
-    .await?;
+    let message = Message::tool_result(call.id.clone(), call.name.clone(), output)
+        // Pixels travel beside the text: the store keeps them and `kc-provider`
+        // re-emits them as a follow-up `user` message, because a `tool` message
+        // cannot carry an image on the OpenAI-compatible wire format.
+        .with_images(outcome.images);
     Ok(message)
 }
 
+/// Identical results after how many repeats earn a note in the tool result.
+const REPEAT_NOTE_AFTER: u32 = 3;
+
+/// Floor for one tool result when the turn is already over its share: enough to
+/// see what came back, not enough to blow the budget.
+const TURN_RESULT_FLOOR_BYTES: usize = 2_000;
+
+fn content_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Appended to a tool result when the model repeats a call it already made.
+///
+/// It does not block the call - a re-read after an edit legitimately returns new
+/// content - but it stops the loop from being invisible: the model is told the
+/// answer has not changed, which is the one piece of information a stuck model
+/// does not otherwise get.
 /// Notice emitted when the model stopped because it hit its output budget.
 pub(crate) const TOKEN_LIMIT_NOTICE: &str =
     "response hit the model's max_tokens limit; the answer may be incomplete and its final text is truncated";
+
+/// How long to keep reading after `finish_reason` for the trailing `usage`
+/// block. Generous for a same-connection frame, short enough that a gateway
+/// holding the stream open cannot stall the turn.
+const USAGE_WINDOW: Duration = Duration::from_secs(3);
+
+/// How long a tool gets to unwind after the run is cancelled.
+/// A tool that honours the cancel token (every built-in, and the shell tool's
+/// process-group kill) needs a moment to stop and report what it observed.
+/// Dropping its future the instant the token fires would lose that report, so
+/// the loop waits this long before synthesising a "cancelled" result. A tool
+/// that ignores the token entirely is cut off here rather than blocking the
+/// session forever. Matches the subagent supervisor's grace period.
+const TOOL_CANCEL_GRACE: Duration = Duration::from_millis(500);
+
+/// How long the `before_prompt` hook may take before the run continues without
+/// its notes.
+///
+/// `Hooks` is a public trait and the plugin host fans out to every plugin, so a
+/// hook that never returns would stall the loop on every iteration with no
+/// deadline. The hook is advisory: losing its notes is cheaper than losing the
+/// run, so a timeout is a warning, not a failure.
+const HOOK_BUDGET: Duration = Duration::from_secs(5);
 
 /// Consume the provider stream, emitting deltas live.
 async fn consume(
@@ -1132,8 +1522,29 @@ async fn consume(
     let mut accumulator = kc_core::provider::ToolCallAccumulator::default();
     let mut end = StreamEnd::Complete;
     let mut finish_reason: Option<String> = None;
+    // Rolling tails of both channels, so a stream that degenerates into
+    // repeating one short block can be caught while it happens. A reasoning
+    // model can loop in `reasoning_content` for hundreds of thousands of tokens
+    // without ever writing a word of content, and that channel is discarded, so
+    // nothing downstream can notice: it has to be caught here.
+    let mut text_tail = String::new();
+    let mut reason_tail = String::new();
+    let mut degenerate: Option<Degenerate> = None;
+    // Tool-call arguments stream too, and a runaway one is a loop with no text.
+    let mut arguments_seen = String::new();
+    // Once the provider says why it stopped, keep reading for a moment: the
+    // `usage` block (tokens, and the prompt-cache counts) arrives in the chunk
+    // *after* the one carrying `finish_reason`. The window is bounded so a
+    // gateway that holds the SSE connection open cannot stall the turn.
+    let mut usage_window: Option<Instant> = None;
 
     loop {
+        let usage_deadline = async {
+            match usage_window {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
@@ -1144,29 +1555,93 @@ async fn consume(
                 end = StreamEnd::TimedOut;
                 break;
             }
+            _ = usage_deadline => {
+                // The provider finished and did not send a usage block.
+                break;
+            }
             item = stream.next() => {
                 let Some(item) = item else { break };
                 match item {
                     Ok(ProviderChunk::Text(delta)) => {
                         if !delta.is_empty() {
                             text.push_str(&delta);
-                            ctx.emit(Event::TextDelta { delta });
+                            ctx.emit(Event::TextDelta { delta: delta.clone() });
+                            push_tail(&mut text_tail, &delta);
+                            if let Some(sample) = repeated_phrase(&text_tail, TEXT_REPEATS) {
+                                // The answer degenerated into the same block over
+                                // and over. Keep what came before it, drop the
+                                // loop, and end the turn: persisting the
+                                // repetition would feed it back on the next
+                                // request and make it the model's own habit.
+                                text = drop_trailing_repetition(&text, &sample);
+                                degenerate = Some(Degenerate::Text(sample));
+                                break;
+                            }
                         }
                     }
                     Ok(ProviderChunk::Reasoning(delta)) => {
                         if !delta.is_empty() {
-                            ctx.emit(Event::ReasoningDelta { delta });
+                            ctx.emit(Event::ReasoningDelta { delta: delta.clone() });
+                            push_tail(&mut reason_tail, &delta);
+                            if let Some(sample) = repeated_phrase(&reason_tail, REASONING_REPEATS) {
+                                // Reasoning is streamed and then discarded, so
+                                // there is nothing to save here - only a turn to
+                                // abandon. Re-issuing the identical request is
+                                // the cheapest escape: the loop is a sampling
+                                // accident, and the alternative is burning the
+                                // whole output budget on it.
+                                degenerate = Some(Degenerate::Reasoning(sample));
+                                break;
+                            }
                         }
                     }
                     Ok(ProviderChunk::ToolCallDelta { index, id, name, arguments_delta }) => {
+                        if let Some(fragment) = &arguments_delta {
+                            arguments_seen.push_str(fragment);
+                            if arguments_seen.chars().count() > ARGUMENT_TAIL_CHARS {
+                                // A tool call whose arguments grow past this is
+                                // not a call any more; it is the same runaway
+                                // generation with no text to catch it by.
+                                degenerate = Some(Degenerate::Arguments(
+                                    arguments_seen.chars().count(),
+                                ));
+                                break;
+                            }
+                        }
                         accumulator.apply(index, id, name, arguments_delta);
                     }
-                    Ok(ProviderChunk::Usage { input_tokens, output_tokens }) => {
-                        ctx.emit(Event::Usage { input_tokens, output_tokens });
+                    Ok(ProviderChunk::Usage { input_tokens, output_tokens, cached_tokens }) => {
+                        // The prefix cache is the single biggest cost lever in a
+                        // long run, and the only way to know it still works is
+                        // to read it back from the provider on every call.
+                        if let Some(cached) = cached_tokens {
+                            let ratio = if input_tokens == 0 {
+                                0.0
+                            } else {
+                                f64::from(cached) * 100.0 / f64::from(input_tokens)
+                            };
+                            tracing::debug!(
+                                input_tokens,
+                                cached_tokens = cached,
+                                cache_hit_percent = format_args!("{ratio:.1}"),
+                                "prompt cache"
+                            );
+                        }
+                        ctx.emit(Event::Usage { input_tokens, output_tokens, cached_tokens });
+                        // The usage block is the last thing the provider sends;
+                        // do not wait out the rest of the window for it.
+                        if usage_window.is_some() {
+                            break;
+                        }
                     }
                     Ok(ProviderChunk::Finish { reason }) => {
+                        // Record it and keep reading: OpenAI-compatible endpoints
+                        // send the `usage` block in a chunk *after* the one that
+                        // carries `finish_reason`, so breaking here would throw
+                        // away the token counts (and the prompt-cache numbers)
+                        // of every real call. The window below bounds the wait.
                         finish_reason = Some(reason);
-                        break;
+                        usage_window = Some(Instant::now() + USAGE_WINDOW);
                     }
                     Ok(ProviderChunk::Error { message, retryable }) => {
                         let suffix = if retryable { " (retryable)" } else { "" };
@@ -1202,7 +1677,16 @@ async fn consume(
     // A clean EOF without any finish_reason is not success: the stream was cut
     // before the provider told us why it stopped. The body died mid-flight, so
     // it is exactly the failure class a restart is for.
-    if matches!(end, StreamEnd::Complete) && finish_reason.is_none() {
+    //
+    // `"eof"` is the provider's own name for this case: `stream.rs` synthesises
+    // `Finish { reason: "eof" }` when the body ends without a `finish_reason`.
+    // It must be treated as incomplete here too, otherwise a proxy that cuts the
+    // body at an event boundary produces a `completed` run with silently
+    // truncated text persisted as a normal answer.
+    let ended_without_reason = finish_reason
+        .as_deref()
+        .is_none_or(|reason| reason.eq_ignore_ascii_case("eof"));
+    if matches!(end, StreamEnd::Complete) && ended_without_reason {
         end = StreamEnd::Failed {
             message: "provider stream ended without a finish_reason; the response is incomplete"
                 .into(),
@@ -1210,7 +1694,193 @@ async fn consume(
         };
     }
 
+    match degenerate {
+        // Reasoning that loops is worth one more attempt with the same prompt:
+        // nothing was persisted, and the alternative is paying for the loop.
+        Some(Degenerate::Reasoning(sample)) => {
+            ctx.notice(
+                "warn",
+                format!(
+                    "the model's reasoning started repeating `{sample}`; abandoning this attempt"
+                ),
+            );
+            end = StreamEnd::Failed {
+                message: format!(
+                    "the model's reasoning repeated `{sample}` over and over; the turn was abandoned"
+                ),
+                transient: true,
+            };
+        }
+        // Text that loops is trimmed above; the rest of the answer stands.
+        Some(Degenerate::Text(sample)) => {
+            ctx.notice(
+                "warn",
+                format!("the answer started repeating `{sample}`; the repetition was dropped"),
+            );
+            end = StreamEnd::Complete;
+            finish_reason = finish_reason.or(Some("degenerate".into()));
+        }
+        // A tool call whose arguments never end is the same runaway.
+        Some(Degenerate::Arguments(chars)) => {
+            ctx.notice(
+                "warn",
+                format!(
+                    "a tool call's arguments grew past {chars} characters; the turn was abandoned"
+                ),
+            );
+            end = StreamEnd::Failed {
+                message: format!(
+                    "a tool call's arguments grew past {chars} characters without ending; the turn was abandoned"
+                ),
+                transient: true,
+            };
+        }
+        None => {}
+    }
+
     (text, accumulator.finish(), end, finish_reason)
+}
+
+/// What kind of repetition a stream fell into. Carries the repeated sample so the
+/// reason shown to the user names what the model was saying.
+#[derive(Debug, Clone)]
+enum Degenerate {
+    Text(String),
+    Reasoning(String),
+    Arguments(usize),
+}
+
+/// How many times a phrase must repeat before a stream counts as degenerate.
+///
+/// Different per channel on purpose: reasoning is discarded, so cutting it is
+/// free and 8 repetitions is enough to be sure; answer text is content, so the
+/// bar is higher (a table or a list may repeat a line several times).
+pub(crate) const REASONING_REPEATS: usize = 8;
+pub(crate) const TEXT_REPEATS: usize = 10;
+/// The phrase length compared. Short enough that a loop is caught in its first
+/// few hundred characters, long enough that ordinary repeated words ("the", "and") do
+/// not count.
+const DEGENERATE_NGRAM: usize = 24;
+/// How much of the recent stream is examined.
+const DEGENERATE_TAIL_CHARS: usize = 4_096;
+/// Tool-call arguments are capped as well: a runaway JSON blob is a loop that
+/// carries no text at all.
+const ARGUMENT_TAIL_CHARS: usize = 256_000;
+
+fn push_tail(tail: &mut String, delta: &str) {
+    tail.push_str(delta);
+    if tail.chars().count() > DEGENERATE_TAIL_CHARS {
+        let excess = tail.chars().count() - DEGENERATE_TAIL_CHARS;
+        let byte_cut = tail
+            .char_indices()
+            .nth(excess)
+            .map(|(at, _)| at)
+            .unwrap_or(tail.len());
+        tail.drain(..byte_cut);
+    }
+}
+
+/// The phrase the tail is stuck on, if one repeats often enough.
+///
+/// Counting a rolling n-gram rather than matching an exact cycle is deliberate:
+/// a stuck model varies the whitespace (`Let me write.` / `Let me write.\n\nGo.`),
+/// so an exact-period detector sees "different" text every time while a reader
+/// sees the same five words forever. A 24-character window that repeats 8+ times
+/// inside the last 4k characters is a loop whatever the punctuation does.
+pub(crate) fn repeated_phrase(tail: &str, repeats: usize) -> Option<String> {
+    let chars: Vec<char> = tail.chars().collect();
+    let k = DEGENERATE_NGRAM;
+    if chars.len() < k * repeats {
+        return None;
+    }
+    // Rolling hash of every k-gram, so the scan stays linear in the tail.
+    const BASE: u64 = 131;
+    let mut power: u64 = 1;
+    for _ in 1..k {
+        power = power.wrapping_mul(BASE);
+    }
+    let mut hash: u64 = 0;
+    for &c in &chars[..k] {
+        hash = hash.wrapping_mul(BASE).wrapping_add(c as u64);
+    }
+    let mut counts: std::collections::HashMap<u64, (usize, usize)> =
+        std::collections::HashMap::new();
+    let mut best: Option<(usize, usize)> = None; // (count, start of the last hit)
+    let mut record = |hash: u64, start: usize| {
+        let entry = counts.entry(hash).or_insert((0, start));
+        entry.0 += 1;
+        entry.1 = start;
+        if entry.0 >= repeats && best.map(|(c, _)| entry.0 > c).unwrap_or(true) {
+            best = Some((entry.0, start));
+        }
+    };
+    record(hash, 0);
+    for start in 1..=chars.len() - k {
+        hash = hash
+            .wrapping_sub((chars[start - 1] as u64).wrapping_mul(power))
+            .wrapping_mul(BASE)
+            .wrapping_add(chars[start + k - 1] as u64);
+        record(hash, start);
+    }
+    let (_, at) = best?;
+    let candidate: String = chars[at..at + k].iter().collect();
+    // Verify against a real repeat (hash collisions would otherwise cut a good
+    // answer): the window must appear `repeats` times as an exact substring.
+    if tail.matches(&candidate).count() >= repeats {
+        Some(condense(&candidate))
+    } else {
+        None
+    }
+}
+
+/// Drop the repeated tail from an answer, keeping everything before the loop.
+///
+/// The sample is whitespace-condensed, so it cannot be matched byte-for-byte
+/// against the raw text; a short anchor of it can. Only the tail is searched, so
+/// a legitimate sentence earlier in the answer that happens to start the same way
+/// is not cut.
+fn drop_trailing_repetition(text: &str, sample: &str) -> String {
+    // The sample is a fixed-width window, so it usually begins mid-sentence with
+    // the punctuation that ended the *previous* one (`. Let me write. Go. Now.`).
+    // Anchoring on that punctuation would cut the preceding sentence's full stop
+    // along with the loop, turning "Nine findings follow." into "Nine findings
+    // follow". Start the anchor at the first word character instead, so the cut
+    // lands on the whitespace before the loop and the sentence before it stays
+    // intact.
+    let anchor: String = sample
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .chars()
+        .take(12)
+        .collect();
+    if anchor.trim().is_empty() {
+        return text.to_string();
+    }
+    const SEARCH_CHARS: usize = 2_048;
+    let total = text.chars().count();
+    let from_char = total.saturating_sub(SEARCH_CHARS);
+    let from_byte = text
+        .char_indices()
+        .nth(from_char)
+        .map(|(byte, _)| byte)
+        .unwrap_or(0);
+    match text[from_byte..].find(&anchor) {
+        Some(at) => text[..from_byte + at].trim_end().to_string(),
+        None => text.to_string(),
+    }
+}
+
+/// One-line form of a sample, for a notice or a retry reason.
+fn condense(sample: &str) -> String {
+    let cleaned: String = sample
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let squeezed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if squeezed.chars().count() > 60 {
+        format!("{}…", squeezed.chars().take(60).collect::<String>())
+    } else {
+        squeezed
+    }
 }
 
 /// Best-effort text for a caught panic payload.

@@ -21,9 +21,9 @@ use kc_core::ids::{AgentId, RunId, SessionId};
 use kc_core::paths::Workspace;
 use kc_core::provider::ProviderFactory;
 use kc_core::settings::Settings;
-use kc_core::store::Store;
+use kc_core::store::{AgentStatus, SessionSummary, Store};
 use kc_core::tool::ToolRegistry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::broadcast;
@@ -51,6 +51,31 @@ mod tests_support;
 /// value is now high enough that a day of work fits; a session that somehow
 /// exceeds it still keeps its newest turns and the trim notice names the cut.
 pub const HISTORY_LIMIT: usize = 20_000;
+
+/// How old (in days) a session may be and still be repaired at startup.
+///
+/// Startup repair is not the only repair: `begin_run` calls `repair_history`
+/// before every run, so a session that is skipped here is still normalised
+/// before the model ever sees it. The startup pass exists only to keep the
+/// *first* turn after a restart from replaying a broken exchange, and a session
+/// nobody has touched in a month is not about to be the first turn. Bounding by
+/// recency is what keeps boot from reading every row of every session ever
+/// created: `HISTORY_LIMIT` rows per session times hundreds of sessions is
+/// millions of rows parsed before the port is even open.
+pub const RECOVERY_MAX_AGE_DAYS: i64 = 30;
+
+/// Hard cap on how many sessions one startup pass repairs.
+///
+/// Recency alone is not a bound - a busy install can touch hundreds of sessions
+/// inside the window - so the pass also stops after this many. Sessions past the
+/// cap are repaired lazily on their first run, exactly like the old ones.
+pub const RECOVERY_MAX_SESSIONS: usize = 64;
+
+/// Environment escape hatch: set to `1`/`true` to skip the startup transcript
+/// repair entirely. Interrupted runs and agents are still marked and their
+/// claims still released; only the per-session transcript pass is skipped, and
+/// every session is then repaired by its first run.
+pub const SKIP_RECOVERY_ENV: &str = "KARUCODE_SKIP_RECOVERY";
 
 /// Broadcast channel capacity: a slow SSE consumer lags and is skipped rather
 /// than blocking the run.
@@ -118,6 +143,18 @@ pub struct RecoveryReport {
     pub interrupted_runs: usize,
     pub interrupted_agents: usize,
     pub expired_approvals: usize,
+    /// Sessions whose transcript repair failed. Recovery is best-effort per
+    /// session: one unreadable or unwritable session must not stop the server
+    /// from starting, and the next run in that session repairs it again.
+    pub failed_sessions: usize,
+    /// Sessions whose transcript was repaired at startup.
+    pub repaired_sessions: usize,
+    /// Sessions skipped at startup because they were not interrupted and are
+    /// older than [`RECOVERY_MAX_AGE_DAYS`]. They are repaired lazily by the
+    /// first run in the session, which always calls `repair_history`.
+    pub skipped_sessions: usize,
+    /// Path claims released for agents that recovery marked `interrupted`.
+    pub released_claims: usize,
 }
 
 pub struct Runtime {
@@ -138,7 +175,87 @@ pub(crate) struct RuntimeInner {
     pub events_emitted: AtomicU64,
     /// `allow_session` approvals, keyed by session + kind + target.
     pub session_allow: Mutex<HashSet<String>>,
+    /// Steering messages accepted while a run was in flight, per session.
+    ///
+    /// A *steer* is a user message that arrives mid-run: "also rename the test",
+    /// "stop using the mock, hit the real endpoint". It cannot start a second run
+    /// (one run per session), and it must not interrupt the turn in flight -
+    /// killing the model mid-tool-call throws away work and can leave a tool call
+    /// without a result. So it is queued here and drained by the loop at the top
+    /// of its next iteration, where it becomes an ordinary persisted `user`
+    /// message in the conversation.
+    ///
+    /// Why a real message and not a trailing note: see the long comment at
+    /// `agent::run_loop_inner` - any text appended *after* the last turn makes a
+    /// reasoning model deliberate instead of act, so a steer is inserted where a
+    /// user turn belongs, which costs a prompt-cache miss once and then behaves
+    /// exactly like something the user typed.
+    pub steers: Mutex<HashMap<String, VecDeque<QueuedSteer>>>,
+    /// Follow-up prompts accepted while a run was in flight, per session.
+    ///
+    /// A *follow-up* is the other half of steering: it does not want to change the
+    /// turn in progress, it wants the next one. "Run the tests when you are done",
+    /// "then commit it". Queueing it here rather than rejecting the request means
+    /// the user can type while the agent works and walk away.
+    ///
+    /// Unlike a steer, a follow-up starts a *new run* once the current one ends,
+    /// which is why it is kept apart: a steer is folded into a conversation, a
+    /// follow-up begins one.
+    pub follow_ups: Mutex<HashMap<String, VecDeque<QueuedFollowUp>>>,
 }
+
+/// One accepted follow-up prompt, waiting for the current run to finish.
+#[derive(Debug, Clone)]
+pub struct QueuedFollowUp {
+    pub id: String,
+    pub content: String,
+    pub accepted_at: i64,
+}
+
+impl QueuedFollowUp {
+    pub fn public_view(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "content": self.content,
+            "accepted_at": self.accepted_at,
+        })
+    }
+}
+
+/// One accepted steering message, waiting for the run loop to pick it up.
+#[derive(Debug, Clone)]
+pub struct QueuedSteer {
+    pub id: String,
+    pub content: String,
+    pub accepted_at: i64,
+}
+
+impl QueuedSteer {
+    /// Browser view of a queued steer.
+    pub fn public_view(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "content": self.content,
+            "accepted_at": self.accepted_at,
+        })
+    }
+}
+
+/// How many steering messages one session may queue.
+///
+/// A queue that grows without bound would let a stuck client fill memory, and the
+/// run loop drains it one turn at a time; past a couple of dozen the user is
+/// typing a new prompt, not steering. `POST .../messages?mode=steer` reports the
+/// documented 409 when this is reached.
+pub const MAX_QUEUED_STEERS: usize = 32;
+
+/// How many follow-up prompts one session may queue.
+///
+/// Each one is a whole run, so the useful ceiling is much lower than the steer
+/// queue: three "and then..." instructions is a plan, thirty is a paste of
+/// intentions that the user has not thought through. `POST .../mode=follow_up`
+/// reports the documented 409 past this.
+pub const MAX_QUEUED_FOLLOW_UPS: usize = 8;
 
 pub(crate) struct RunState {
     pub run_id: RunId,
@@ -190,6 +307,8 @@ impl Runtime {
             seq: AtomicU64::new(0),
             events_emitted: AtomicU64::new(0),
             session_allow: Mutex::new(HashSet::new()),
+            steers: Mutex::new(HashMap::new()),
+            follow_ups: Mutex::new(HashMap::new()),
             deps,
         });
         let view = Arc::new(Self::tool_view_with_builtins(&inner, &inner.deps.tools));
@@ -264,18 +383,130 @@ impl Runtime {
     }
 
     /// Startup recovery: leftover `running` runs and agents become
-    /// `interrupted`; approvals still pending become `expired`. Returns counts.
+    /// `interrupted`, the path claims those agents held are released, and
+    /// approvals still pending become `expired`. Returns counts.
+    ///
+    /// The transcript repair pass is bounded and best-effort by design:
+    ///
+    /// * only sessions a crash could have left mid-exchange are repaired at
+    ///   startup - one with a `running` run or agent, or one updated inside
+    ///   [`RECOVERY_MAX_AGE_DAYS`] - and at most [`RECOVERY_MAX_SESSIONS`] of
+    ///   them. `HISTORY_LIMIT` rows per session is not a bound an install with
+    ///   hundreds of long sessions can afford to read before the port is open;
+    /// * a session whose repair fails is logged and counted, never propagated.
+    ///   One corrupt row or a full disk must not stop the server from starting.
+    ///
+    /// Skipping a session is safe because `begin_run` repairs the transcript
+    /// before every run, so a session that is not repaired here is still
+    /// normalised before the model sees it. Only an unopenable store fails
+    /// recovery.
     pub async fn recover(&self) -> Result<RecoveryReport> {
         let store = &self.inner.deps.store;
+        let started = std::time::Instant::now();
+
+        // Snapshot what a crash could have left mid-exchange *before* the
+        // statuses are rewritten: `list_sessions().running` is derived from
+        // `runs.status = 'running'`, so once `mark_interrupted_runs` has run
+        // nothing looks interrupted any more.
+        let sessions = store.list_sessions().await?;
+        // Best-effort: this snapshot only decides which claims to release and
+        // which sessions to repair first. A store that cannot answer it must not
+        // stop the server from starting.
+        let running_agents: Vec<(String, String)> = match store.list_agents_all(None).await {
+            Ok(agents) => agents
+                .into_iter()
+                .filter(|summary| summary.agent.status == AgentStatus::Running.as_str())
+                .map(|summary| (summary.agent.session_id, summary.agent.id))
+                .collect(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "startup recovery: could not list agents; \
+                     interrupted agents' path claims will not be released"
+                );
+                Vec::new()
+            }
+        };
+        let interrupted_sessions: HashSet<&str> = running_agents
+            .iter()
+            .map(|(session_id, _)| session_id.as_str())
+            .collect();
+
         let interrupted_runs = store.mark_interrupted_runs().await?;
         let interrupted_agents = store.mark_interrupted_agents().await?;
 
+        // A dead agent's claims are not advisory history, they are a lie: every
+        // later subagent touching the same path would be warned about an agent
+        // that no longer exists, which trains the model and the operator to
+        // ignore the one overlap signal `owned_paths` provides. Release them for
+        // exactly the agents this pass marked interrupted.
+        let mut released_claims = 0usize;
+        for (_, agent_id) in &running_agents {
+            match store.release_claims(agent_id).await {
+                Ok(()) => released_claims += 1,
+                Err(e) => tracing::warn!(
+                    agent = %agent_id,
+                    error = %e,
+                    "startup recovery: could not release the path claims of an interrupted agent"
+                ),
+            }
+        }
+
         // A crash can leave an assistant turn whose tool result was never
-        // persisted. Repair every session's transcript before serving requests,
-        // so the first run after a restart does not replay an invalid exchange.
-        let max_chars = self.inner.deps.settings.limits().await.context_max_chars;
-        for session in store.list_sessions().await? {
-            history::repair_history(store, &session.id, HISTORY_LIMIT, max_chars).await?;
+        // persisted. Repair the transcripts a restart could have broken, so the
+        // first run after a restart does not replay an invalid exchange. The cap
+        // is the one the resolved model actually gets, not a global constant: a
+        // repaired window that is smaller than the model's window makes the
+        // first turn of the next run compact work it could have kept.
+        let limits = self.inner.deps.settings.limits().await;
+        let model = self.inner.deps.settings.resolve_model(None).await;
+        let max_chars = limits.context_chars_for(&model);
+
+        let mut repaired_sessions = 0usize;
+        let mut failed_sessions = 0usize;
+        let skipped_sessions: usize;
+        if skip_recovery_requested() {
+            skipped_sessions = sessions.len();
+            tracing::info!(
+                sessions = sessions.len(),
+                env = SKIP_RECOVERY_ENV,
+                "startup recovery: transcript repair skipped; every session is repaired by its first run"
+            );
+        } else {
+            let cutoff = events::now_ms() - RECOVERY_MAX_AGE_DAYS * 86_400_000;
+            // Interrupted sessions first: they are the ones a crash could have
+            // left mid-exchange, so they must not lose the cap to a busy install.
+            let mut candidates: Vec<&SessionSummary> = sessions
+                .iter()
+                .filter(|s| s.running || interrupted_sessions.contains(s.id.as_str()))
+                .collect();
+            let mut recent: Vec<&SessionSummary> = sessions
+                .iter()
+                .filter(|s| {
+                    !s.running
+                        && !interrupted_sessions.contains(s.id.as_str())
+                        && s.updated_at >= cutoff
+                })
+                .collect();
+            recent.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+            candidates.extend(recent);
+
+            let to_repair = candidates.len().min(RECOVERY_MAX_SESSIONS);
+            skipped_sessions = sessions.len().saturating_sub(to_repair);
+            for session in candidates.into_iter().take(to_repair) {
+                match history::repair_history(store, &session.id, HISTORY_LIMIT, max_chars).await {
+                    Ok(_) => repaired_sessions += 1,
+                    Err(e) => {
+                        failed_sessions += 1;
+                        tracing::warn!(
+                            session = %session.id,
+                            error = %e,
+                            "startup recovery: could not repair this session's transcript; \
+                             its next run will repair it"
+                        );
+                    }
+                }
+            }
         }
 
         let pending = store.list_pending_approvals(None).await?;
@@ -292,10 +523,29 @@ impl Runtime {
                 .await?;
         }
 
+        let elapsed = started.elapsed();
+        tracing::info!(
+            repaired_sessions,
+            failed_sessions,
+            skipped_sessions,
+            interrupted_runs,
+            interrupted_agents,
+            released_claims,
+            expired_approvals,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "startup recovery: repaired {repaired_sessions} session(s) in {}ms \
+             ({failed_sessions} failed, {skipped_sessions} deferred to their first run)",
+            elapsed.as_millis()
+        );
+
         Ok(RecoveryReport {
             interrupted_runs,
             interrupted_agents,
             expired_approvals,
+            failed_sessions,
+            repaired_sessions,
+            skipped_sessions,
+            released_claims,
         })
     }
 
@@ -320,6 +570,126 @@ impl Runtime {
             }
         }
         cancelled
+    }
+
+    /// Accept a steering message for a running session.
+    ///
+    /// Queues `content` for the run loop to pick up at the top of its next
+    /// iteration. Fails when nothing is running (a steer with no run has no
+    /// meaning - the caller should `submit` instead) or when the queue is full.
+    ///
+    /// The message is *not* persisted here. It becomes a stored `user` message
+    /// when the loop drains it, which is what keeps the transcript in the order
+    /// the model actually saw it, and what makes a steer that never lands (the run
+    /// finished first) simply absent rather than a dangling turn.
+    pub fn steer(&self, session_id: &str, content: String) -> Result<QueuedSteer> {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return Err(kc_core::Error::BadRequest(
+                "a steering message may not be empty".into(),
+            ));
+        }
+        if !self.is_running(session_id) {
+            return Err(kc_core::Error::BadRequest(format!(
+                "session {session_id} has no run in flight; send a normal message instead"
+            )));
+        }
+        let mut queues = self.inner.steers.lock().expect("steers lock");
+        let queue = queues.entry(session_id.to_string()).or_default();
+        if queue.len() >= MAX_QUEUED_STEERS {
+            return Err(kc_core::Error::BadRequest(format!(
+                "session {session_id} already has {MAX_QUEUED_STEERS} steering messages queued"
+            )));
+        }
+        let steer = QueuedSteer {
+            id: format!("steer_{}", uuid::Uuid::new_v4().simple()),
+            content: trimmed.to_string(),
+            accepted_at: events::now_ms(),
+        };
+        queue.push_back(steer.clone());
+        Ok(steer)
+    }
+
+    /// Steering messages still waiting for a running session, oldest first.
+    pub fn queued_steers(&self, session_id: &str) -> Vec<QueuedSteer> {
+        let queues = self.inner.steers.lock().expect("steers lock");
+        queues
+            .get(session_id)
+            .map(|queue| queue.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Drop anything still queued for a session (its run ended or it was deleted).
+    pub fn clear_steers(&self, session_id: &str) {
+        self.inner
+            .steers
+            .lock()
+            .expect("steers lock")
+            .remove(session_id);
+    }
+
+    /// Accept a follow-up prompt for a running session.
+    ///
+    /// Queued and submitted automatically when the current run ends. Rejected when
+    /// nothing is running, because the caller should simply `submit` (that is what
+    /// a follow-up with no run *is*), and when the queue is full.
+    pub fn enqueue_follow_up(&self, session_id: &str, content: String) -> Result<QueuedFollowUp> {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return Err(kc_core::Error::BadRequest(
+                "a follow-up message may not be empty".into(),
+            ));
+        }
+        if !self.is_running(session_id) {
+            return Err(kc_core::Error::BadRequest(format!(
+                "session {session_id} has no run in flight; send a normal message instead"
+            )));
+        }
+        let mut queues = self.inner.follow_ups.lock().expect("follow ups lock");
+        let queue = queues.entry(session_id.to_string()).or_default();
+        if queue.len() >= MAX_QUEUED_FOLLOW_UPS {
+            return Err(kc_core::Error::BadRequest(format!(
+                "session {session_id} already has {MAX_QUEUED_FOLLOW_UPS} follow-ups queued"
+            )));
+        }
+        let follow_up = QueuedFollowUp {
+            id: format!("followup_{}", uuid::Uuid::new_v4().simple()),
+            content: trimmed.to_string(),
+            accepted_at: events::now_ms(),
+        };
+        queue.push_back(follow_up.clone());
+        Ok(follow_up)
+    }
+
+    /// Follow-up prompts still waiting for a running session, oldest first.
+    pub fn queued_follow_ups(&self, session_id: &str) -> Vec<QueuedFollowUp> {
+        let queues = self.inner.follow_ups.lock().expect("follow ups lock");
+        queues
+            .get(session_id)
+            .map(|queue| queue.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Take the next follow-up for a session, if any.
+    ///
+    /// Taken one at a time, because each one becomes a run and a run has to
+    /// finish before the next may start.
+    pub fn take_follow_up(&self, session_id: &str) -> Option<QueuedFollowUp> {
+        let mut queues = self.inner.follow_ups.lock().expect("follow ups lock");
+        let next = queues.get_mut(session_id).and_then(VecDeque::pop_front);
+        if queues.get(session_id).is_some_and(VecDeque::is_empty) {
+            queues.remove(session_id);
+        }
+        next
+    }
+
+    /// Drop every follow-up queued for a session (it was deleted).
+    pub fn clear_follow_ups(&self, session_id: &str) {
+        self.inner
+            .follow_ups
+            .lock()
+            .expect("follow ups lock")
+            .remove(session_id);
     }
 
     /// Every in-flight loop: user runs (`agent_id: None`) and nested subagent
@@ -388,5 +758,213 @@ impl Runtime {
 impl RuntimeInner {
     pub(crate) fn tool_view(&self) -> Arc<ToolRegistry> {
         self.tools.read().expect("tools lock").clone()
+    }
+
+    /// Take everything queued for a session. Called by the run loop.
+    pub(crate) fn drain_steers(&self, session_id: &str) -> Vec<QueuedSteer> {
+        let mut queues = self.steers.lock().expect("steers lock");
+        let drained: Vec<QueuedSteer> = queues
+            .get_mut(session_id)
+            .map(|queue| queue.drain(..).collect())
+            .unwrap_or_default();
+        if queues.get(session_id).is_some_and(VecDeque::is_empty) {
+            queues.remove(session_id);
+        }
+        drained
+    }
+}
+
+/// True when [`SKIP_RECOVERY_ENV`] asks startup recovery to skip the transcript
+/// repair pass. Unset, empty, `0` and `false` all mean "do the repair".
+fn skip_recovery_requested() -> bool {
+    parse_skip_recovery(std::env::var(SKIP_RECOVERY_ENV).ok().as_deref())
+}
+
+/// The parsing half of [`skip_recovery_requested`], split out so it can be
+/// tested without mutating the process environment (which parallel tests share).
+fn parse_skip_recovery(value: Option<&str>) -> bool {
+    match value {
+        Some(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            !(value.is_empty() || value == "0" || value == "false" || value == "no")
+        }
+        None => false,
+    }
+}
+
+/// Startup-recovery behaviour: best-effort repair, bounded work, claim release.
+///
+/// These live here rather than in `tests.rs` because they exercise `recover()`
+/// itself and the recovery policy constants in this module.
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::history::MISSING_TOOL_RESULT;
+    use crate::tests_support::{new_message, HarnessBuilder, Script};
+    use kc_core::message::ToolCall;
+    use kc_core::store::{AgentRecord, Store};
+
+    /// An assistant turn that asked for a tool and never got a result: exactly
+    /// what a crash mid-exchange leaves behind, and what repair must synthesize.
+    async fn broken_exchange(store: &FakeStoreHandle, session: &str, call_id: &str) {
+        let mut assistant = new_message(session, "assistant", "");
+        assistant.tool_calls = vec![ToolCall {
+            id: call_id.to_string(),
+            name: "shell".into(),
+            arguments: "{}".into(),
+        }];
+        store.append_message(&assistant).await.expect("append");
+    }
+
+    type FakeStoreHandle = Arc<crate::tests_support::FakeStore>;
+
+    fn agent(id: &str, session: &str, status: &str) -> AgentRecord {
+        AgentRecord {
+            id: id.to_string(),
+            session_id: session.to_string(),
+            parent_run_id: "r_1".into(),
+            parent_agent_id: None,
+            name: id.to_string(),
+            role: "worker".into(),
+            task: "task".into(),
+            status: status.to_string(),
+            model: "fake-model".into(),
+            iterations: 1,
+            summary: String::new(),
+            error: None,
+            owned_paths: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+            finished_at: None,
+        }
+    }
+
+    /// One session's repair fails (its synthesized tool result cannot be
+    /// persisted); the pass must log and count it, keep going, and still return
+    /// `Ok` so the server starts.
+    #[tokio::test]
+    async fn recover_continues_past_a_session_whose_repair_fails() {
+        let h = HarnessBuilder::new(vec![Script::text("unused")])
+            .build()
+            .await;
+        let store: FakeStoreHandle = h.store.clone();
+
+        // Session A needs a synthesized result, so its repair must append.
+        broken_exchange(&store, h.session(), "call_a").await;
+
+        // Session B also needs repair, but the synthesized row is already on
+        // disk, so its repair succeeds without appending anything.
+        let other = "s_other";
+        store
+            .create_session(other, "other", "/tmp", None)
+            .await
+            .expect("create session");
+        broken_exchange(&store, other, "call_b").await;
+        let mut persisted = new_message(other, "tool", MISSING_TOOL_RESULT);
+        persisted.tool_call_id = Some("call_b".into());
+        persisted.name = Some("shell".into());
+        store.append_message(&persisted).await.expect("append");
+
+        // Every append now fails: only session A's repair needs one.
+        store.fail_appends(true);
+        let report = h.runtime.recover().await.expect("recovery must not abort");
+
+        assert_eq!(report.failed_sessions, 1, "the failing session is counted");
+        assert_eq!(
+            report.repaired_sessions, 1,
+            "the other session still recovers"
+        );
+        assert_eq!(report.skipped_sessions, 0);
+
+        // The failure is not sticky: once the store accepts writes again the
+        // next startup repairs the session it could not repair before.
+        store.fail_appends(false);
+        let again = h.runtime.recover().await.expect("recover again");
+        assert_eq!(again.failed_sessions, 0);
+        assert_eq!(again.repaired_sessions, 2);
+        assert!(
+            store
+                .messages()
+                .iter()
+                .any(|m| m.role == "tool" && m.content == MISSING_TOOL_RESULT),
+            "the retried repair must persist the synthesized result"
+        );
+    }
+
+    /// A crash leaves a subagent's claims behind. Recovery must release them for
+    /// the agents it marks interrupted - and only for those.
+    #[tokio::test]
+    async fn recover_releases_claims_of_interrupted_agents_only() {
+        let h = HarnessBuilder::new(vec![Script::text("unused")])
+            .build()
+            .await;
+        let store: FakeStoreHandle = h.store.clone();
+        let session = h.session();
+
+        store
+            .upsert_agent(&agent("a_dead", session, "running"))
+            .await
+            .expect("upsert");
+        store
+            .upsert_agent(&agent("a_done", session, "completed"))
+            .await
+            .expect("upsert");
+        store
+            .claim_paths(session, "a_dead", &["src/lib.rs".into()], "write")
+            .await
+            .expect("claim");
+        store
+            .claim_paths(session, "a_done", &["src/other.rs".into()], "write")
+            .await
+            .expect("claim");
+
+        let report = h.runtime.recover().await.expect("recover");
+        assert_eq!(report.interrupted_agents, 1);
+        assert_eq!(report.released_claims, 1);
+
+        let claims = store.claims();
+        assert!(
+            !claims.iter().any(|c| c.agent_id == "a_dead"),
+            "a dead agent's claims must not outlive it: {claims:?}"
+        );
+        assert!(
+            claims.iter().any(|c| c.agent_id == "a_done"),
+            "a finished agent's claims are not recovery's business: {claims:?}"
+        );
+    }
+
+    /// The startup pass is capped, so a large install cannot spend boot reading
+    /// every row of every session. The rest are repaired by their first run.
+    #[tokio::test]
+    async fn recover_caps_how_many_sessions_it_repairs() {
+        let h = HarnessBuilder::new(vec![Script::text("unused")])
+            .build()
+            .await;
+        let store: FakeStoreHandle = h.store.clone();
+
+        // The harness already made one session; add enough to exceed the cap.
+        for i in 0..RECOVERY_MAX_SESSIONS {
+            store
+                .create_session(&format!("s_cap_{i}"), "cap", "/tmp", None)
+                .await
+                .expect("create session");
+        }
+        let total = RECOVERY_MAX_SESSIONS + 1;
+
+        let report = h.runtime.recover().await.expect("recover");
+        assert_eq!(report.repaired_sessions, RECOVERY_MAX_SESSIONS);
+        assert_eq!(report.skipped_sessions, total - RECOVERY_MAX_SESSIONS);
+        assert_eq!(report.failed_sessions, 0);
+    }
+
+    #[test]
+    fn skip_recovery_env_parsing() {
+        for on in ["1", "true", "TRUE", "yes", " on "] {
+            assert!(parse_skip_recovery(Some(on)), "{on:?} must skip recovery");
+        }
+        for off in ["", "0", "false", "no", "  "] {
+            assert!(!parse_skip_recovery(Some(off)), "{off:?} must not skip");
+        }
+        assert!(!parse_skip_recovery(None), "unset must not skip recovery");
     }
 }
