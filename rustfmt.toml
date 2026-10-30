@@ -1,0 +1,4 @@
+# Pinned so formatting is stable across toolchains and CI matches local runs.
+# `cargo fmt --all -- --check` is a required gate (see AGENTS.md).
+edition = "2021"
+max_width = 100

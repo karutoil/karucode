@@ -1,0 +1,44 @@
+# Dependency policy. `cargo deny check` runs in CI (see .github/workflows/ci.yml).
+#
+# The goal is not a zero-dependency tree; it is that every dependency is a
+# deliberate choice with a known licence and no open advisory.
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Fail on vulnerabilities and on unmaintained crates we can act on. Warnings
+# that need an upstream release are ignored explicitly below rather than by
+# turning the whole class off.
+yanked = "deny"
+ignore = []
+
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+  "MPL-2.0",
+  "CC0-1.0",
+  "OpenSSL",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+  # A second TLS stack or HTTP client would double the audit surface.
+  { name = "openssl-sys" },
+]
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

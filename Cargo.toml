@@ -19,6 +19,12 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.82"
+authors = ["karucode contributors"]
+repository = "https://github.com/karutoil/karucode"
+homepage = "https://github.com/karutoil/karucode"
+readme = "README.md"
+keywords = ["agent", "llm", "coding-agent", "self-hosted"]
+categories = ["development-tools", "web-programming::http-server"]
 
 [workspace.dependencies]
 kc-core = { path = "crates/kc-core" }
@@ -33,6 +39,7 @@ kc-docs = { path = "crates/kc-docs" }
 
 anyhow = "1"
 async-trait = "0.1"
+base64 = "0.22"
 bytes = "1"
 futures-util = "0.3"
 futures-core = "0.3"
@@ -53,7 +60,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 walkdir = "2"
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace", "cors", "compression-gzip"] }
 # `debug-embed` makes dev builds embed the UI too: rust-embed's default is to
@@ -68,7 +75,14 @@ opt-level = 2
 lto = "thin"
 codegen-units = 4
 strip = true
-panic = "abort"
+# `unwind`, not `abort`: the runtime contains panics from tools, providers and
+# subagents with `catch_unwind` (kc-runtime/src/agent.rs, subagent.rs). Under
+# `panic = "abort"` those guards cannot catch, so one panicking tool would abort
+# the whole server and kill every in-flight run and SSE client. The tests run
+# under the dev profile, so `abort` here made the release binary behave
+# differently from the tested one on exactly the failure path the guards exist
+# for. `cargo test --release -p kc-runtime` in CI keeps this honest.
+panic = "unwind"
 
 [profile.dev]
 opt-level = 0
