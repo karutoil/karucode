@@ -1,0 +1,166 @@
+# karucode - self-hosted coding-agent harness.
+#
+# Install (this writes a drop-in with your workspace, data dir and binary path -
+# see packaging/install.sh):
+#     sudo sh install.sh --workspace /srv/karucode/workspace
+#
+# Install by hand:
+#     install -m 0644 packaging/karucode.service /etc/systemd/system/karucode.service
+#     install -d -m 0755 /etc/systemd/system/karucode.service.d
+#     # ... then put WorkingDirectory=/ReadWritePaths= in a drop-in, not in this file
+#     systemctl daemon-reload
+#     systemctl enable --now karucode
+#
+# Do not edit the two paths below in place: install.sh rewrites the unit on every
+# upgrade, and the file you edited is exactly the configuration that stops the
+# service from starting afterwards. Site-specific settings belong in
+# /etc/systemd/system/karucode.service.d/20-local.conf, which no tool touches.
+#
+# Before the first start, create /etc/karucode/karucode.env with the provider
+# credentials (see packaging/README.md).
+#
+# =============================================================================
+# READ THIS BEFORE YOU CHANGE THE HARDENING
+# =============================================================================
+#
+# karucode runs the shell commands the model asks for with `/bin/sh -c <command>`
+# as User=karucode. There is no sandbox inside the process (docs/SECURITY.md,
+# "What is NOT protected"): the approval policy is a convenience, not a boundary.
+# The unit file is therefore the operator's main containment lever, and it works
+# through two settings:
+#
+#   ProtectSystem=strict + ReadWritePaths=
+#       The whole filesystem is mounted read-only for this service except the
+#       paths listed in ReadWritePaths= (and the StateDirectory=, which systemd
+#       excludes automatically). So even an `rm -rf /` from the agent cannot
+#       damage the host: it can only write inside the workspace you granted.
+#       This is the single most valuable line in this file. Do not widen it to
+#       `/`, and do not add the data directory's parent, /etc, /usr or /var.
+#
+#   NoNewPrivileges=yes
+#       Stops the agent from escalating: no setuid/setgid binaries, no file
+#       capabilities, no gaining privileges through sudo or a helper. Combined
+#       with User=karucode (unprivileged, no shell login) the agent cannot become
+#       root even if it finds a local privilege-escalation vector that needs a
+#       privileged exec.
+#
+# Neither setting stops the agent from reading files that are world-readable, or
+# from using the network. If you need more, run it in a container or VM with only
+# the project mounted (see the Dockerfile) - that is the only real isolation.
+#
+# ProtectHome=read-only makes /home, /root and /run/user read-only - it does NOT
+# make them invisible. The agent can still READ ~/.ssh and ~/.aws of other users
+# if the file permissions allow it. Use ProtectHome=yes (which hides them
+# entirely) if the workspace does not live under /home. If it does, keep
+# read-only and rely on ReadWritePaths=: systemd nests a writable path inside a
+# read-only one, so the workspace stays writable while the rest of /home does not.
+
+[Unit]
+Description=karucode - self-hosted coding agent
+Documentation=https://github.com/karutoil/karucode
+# The server needs nothing else at boot; it opens SQLite and binds a port.
+After=network-online.target
+Wants=network-online.target
+# Restart=on-failure without a start limit loops forever at boot when the unit
+# cannot start (a missing workspace, a bad env file), and that is both a journal
+# flood and a machine that looks busy but serves nothing. Five attempts per five
+# minutes, then systemd gives up and reports the failure.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# --- identity ---------------------------------------------------------------
+# Dedicated unprivileged user. Create it with:
+#     useradd --system --home-dir /var/lib/karucode --shell /usr/sbin/nologin karucode
+# Do NOT run this service as root: the agent executes arbitrary commands.
+User=karucode
+Group=karucode
+
+# --- filesystem layout ------------------------------------------------------
+# StateDirectory creates /var/lib/karucode (mode 0700, owned by karucode) and
+# excludes it from ProtectSystem=strict. That is where the SQLite database
+# (karucode.db, WAL) and plugin data live - and where the provider API key is
+# stored, so treat it as a secret.
+StateDirectory=karucode
+StateDirectoryMode=0700
+# ConfigurationDirectory creates /etc/karucode for karucode.env and an optional
+# config.toml. It stays read-only for the service (ProtectSystem=strict); the
+# environment file is read by systemd, not by the process.
+ConfigurationDirectory=karucode
+
+# Site default: the directory the agent may read and edit. It must already exist
+# and be owned by the service user. install.sh creates it and overrides this in
+# /etc/systemd/system/karucode.service.d/10-install.conf; keep it narrow (one
+# project, never your home directory).
+WorkingDirectory=/srv/karucode/workspace
+
+# --- environment ------------------------------------------------------------
+# The data dir must be the StateDirectory: the default is
+# $HOME/.local/share/karucode, and $HOME is not writable under this unit.
+Environment=KARUCODE_DATA_DIR=/var/lib/karucode
+# Bind loopback and let a reverse proxy terminate TLS. The binary has no TLS of
+# its own. If you must bind a non-loopback address, the server refuses to start
+# without KARUCODE_AUTH_TOKEN (>= 16 chars) - set it in the env file below.
+Environment=KARUCODE_HOST=127.0.0.1
+Environment=KARUCODE_PORT=8787
+# `-` = do not fail if the file is missing. Put KARUCODE_AUTH_TOKEN,
+# KARUCODE_ADMIN_TOKEN, KARUCODE_BASE_URL, KARUCODE_API_KEY, KARUCODE_MODEL,
+# KARUCODE_PROJECT_ROOTS, KARUCODE_ALLOWED_HOSTS and friends here, mode 0600.
+# This file is read AFTER the Environment= lines above, so it can override them.
+EnvironmentFile=-/etc/karucode/karucode.env
+
+ExecStart=/usr/local/bin/karucode
+
+# --- restart ----------------------------------------------------------------
+# on-failure, not always: a clean exit (SIGTERM from `systemctl stop`) must stay
+# stopped. The server drains gracefully on SIGTERM (bounded at 10s) and
+# checkpoints SQLite, so give it room before the SIGKILL.
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# --- hardening --------------------------------------------------------------
+# The agent's shell inherits all of this. See the header for what matters most.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Same path as WorkingDirectory= (and any other path the agent needs to write,
+# e.g. a build cache). This is the ONLY writable area outside the state
+# directory. Space-separated; prefix a path with `-` to tolerate a missing one.
+# install.sh overrides this in its drop-in, so editing this line does nothing
+# after an install: use karucode.service.d/20-local.conf instead.
+ReadWritePaths=/srv/karucode/workspace
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+# Rust does not need writable+executable memory, so this is safe for the server
+# itself. Caveat: it also applies to the commands the agent runs, so JIT runtimes
+# (node, the JVM, some Python C extensions) will crash with it enabled. If you
+# expect the agent to run those, set this to `no` - you are trading a hardening
+# knob for the ability to run JavaScript/Java at all.
+MemoryDenyWriteExecute=yes
+# @system-service is the standard allowlist for a long-running network service.
+# It is broad enough for the usual build/test commands (fork/exec, file I/O,
+# sockets) but blocks module loading and other kernel-level tricks. If a specific
+# tool the agent needs trips it, check `journalctl -u karucode` for EPERM and add
+# a narrow `SystemCallFilter=~@...` exception rather than removing the filter.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+# No new privileges via user namespaces either.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

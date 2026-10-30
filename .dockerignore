@@ -1,0 +1,49 @@
+# Build context for the karucode image.
+#
+# Keep this list tight: the context is sent to the daemon on every build, and a
+# stray `target/` or `node_modules/` is hundreds of megabytes.
+#
+# DO NOT add any of these - they are build inputs, not noise:
+#   crates/            kc-docs/build.rs scans it for @kc-doc blocks
+#   plugins/           same (the example plugin is a workspace member)
+#   web/src/           same, and it is what `npm run build` compiles
+#   web/.npmrc         sets `include=dev`; without it vite is not installed
+#   web/package*.json  `npm ci` needs both, and the lockfile pins the tree
+#   Cargo.toml/lock, rust-toolchain.toml
+
+# --- build output -----------------------------------------------------------
+target/
+web/dist/
+web/node_modules/
+
+# --- VCS --------------------------------------------------------------------
+.git/
+.gitignore
+
+# --- local state and secrets -------------------------------------------------
+# The SQLite database, its WAL sidecars and the data dir hold sessions and the
+# provider API key. Never bake them into an image layer.
+*.db
+*.db-wal
+*.db-shm
+.data/
+.env
+.env.local
+
+# --- generated evidence / local scratch --------------------------------------
+reports/
+karucode-v3-themes.html
+
+# --- not build inputs --------------------------------------------------------
+# docs/ is documentation only: kc-docs/build.rs scans `crates`, `plugins` and
+# `web/src` (SCAN_ROOTS), never `docs/`.
+docs/
+examples/
+scripts/
+tests/
+.github/
+
+# --- packaging itself --------------------------------------------------------
+Dockerfile
+.dockerignore
+packaging/
