@@ -44,6 +44,14 @@ __pycache__/
 venv/
 *.tsbuildinfo
 
+# --- scratch pages -----------------------------------------------------------
+# `web/mock/` is where a hand-written page goes when a CSS question can only be
+# answered by a real browser (does the rail render, what computed style wins).
+# It loads stylesheets out of web/src by relative path and is referenced by no
+# source, test or script — the answer comes back through the console, not the
+# file. Never a build input.
+web/mock/
+
 # --- editor and patch debris -------------------------------------------------
 .DS_Store
 Thumbs.db
