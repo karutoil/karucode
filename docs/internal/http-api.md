@@ -7,7 +7,7 @@
 
 - **Slug:** `http-api`
 - **Tags:** api, http, rest, sse, curl, endpoints
-- **Applies to:** `route:GET /api/health`, `route:GET /api/config`, `route:PATCH /api/config`, `route:POST /api/provider/test`, `route:GET /api/models/catalog`, `route:GET /api/models/lookup`, `route:GET /api/stats`, `route:GET /api/projects`, `route:POST /api/projects`, `route:GET /api/projects/:id/favicon`, `route:GET /api/sessions`, `route:POST /api/sessions`, `route:GET /api/sessions/:id`, `route:PATCH /api/sessions/:id`, `route:PATCH /api/sessions/:id/model`, `route:POST /api/sessions/:id/messages`, `route:POST /api/sessions/:id/cancel`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:GET /api/approvals`, `route:POST /api/approvals/:id`, `route:GET /api/workspace/tree`, `route:GET /api/workspace/file`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:POST /api/workspace/upload`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `route:GET /api/mcp`, `config:plugin_panels`, `route:GET /api/events`, `event:notification`, `config:[notifications]`, `header:X-Karucode-Client`, `env:KARUCODE_AUTH_TOKEN`, `doc:docs/API.md`
+- **Applies to:** `route:GET /api/health`, `route:GET /api/config`, `route:PATCH /api/config`, `route:POST /api/provider/test`, `route:GET /api/models/catalog`, `route:GET /api/models/lookup`, `route:GET /api/stats`, `route:GET /api/projects`, `route:POST /api/projects`, `route:GET /api/projects/:id/favicon`, `route:GET /api/sessions`, `route:POST /api/sessions`, `route:GET /api/sessions/:id`, `route:GET /api/sessions/:id/info`, `route:PATCH /api/sessions/:id`, `route:PATCH /api/sessions/:id/model`, `route:POST /api/sessions/:id/messages`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `route:POST /api/sessions/:id/cancel`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:GET /api/approvals`, `route:POST /api/approvals/:id`, `route:GET /api/workspace/tree`, `route:GET /api/workspace/file`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:POST /api/workspace/upload`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `route:GET /api/mcp`, `config:plugin_panels`, `route:GET /api/events`, `event:notification`, `event:queued_messages`, `event:session_rewound`, `config:[notifications]`, `header:X-Karucode-Client`, `env:KARUCODE_AUTH_TOKEN`, `doc:docs/API.md`
 - **Source:** `crates/kc-server/src/lib.rs:21`
 
 ---
@@ -39,9 +39,12 @@ curl -s -X POST localhost:8787/api/sessions/abc/messages \
 | `GET`/`POST /api/projects` | list and create projects; `GET /api/projects/:id/favicon` serves the project's own `favicon.ico` as `image/*` (`204` when it has none) |
 | `GET`/`POST /api/sessions` | list, create, load sessions |
 | `GET /api/sessions/:id` | one session with its transcript (`?messages=N`, default 5000, max 50000) |
+| `GET /api/sessions/:id/info` | the session's counts and token totals: messages, turns, tool calls, working time, per-agent usage, window fill |
 | `PATCH /api/sessions/:id`, `PATCH /api/sessions/:id/model` | rename, and pin or clear this session's model |
-| `POST /api/sessions/:id/messages` | start a run (SSE progress arrives on `/api/events`) |
+| `POST /api/sessions/:id/messages` | start a run (SSE progress arrives on `/api/events`); `?mode=steer` folds the message into the run in flight, `?mode=follow_up` starts one after it |
+| `GET /api/sessions/:id/queues`, `DELETE /api/sessions/:id/queues/:queued_id` | the messages waiting for the run, and recall one (it never reaches the model) |
 | `POST /api/sessions/:id/cancel` | cancel the active run |
+| `GET`/`POST /api/sessions/:id/rewind` | preview, then hide the transcript after a message (optionally reverting its file changes, retrying it, or replacing it with a note) |
 | `GET /api/agents`, `GET /api/agents/:id` | every subagent in a project, and one agent's own transcript |
 | `GET /api/approvals`, `POST /api/approvals/:id` | list and answer pending approvals |
 | `GET /api/workspace/tree`, `/api/workspace/file` | workspace explorer, confined to the project |
@@ -95,6 +98,72 @@ session, so concurrent sessions use different models. If the pinned profile or
 model is deleted later, the run falls back to the default instead of failing.
 Subagents inherit their session's pin. `reasoning_effort` accepts `none`,
 `minimal`, `low`, `medium`, `high` or `max` and is forwarded to the endpoint.
+
+## Rewinding a session
+
+Rewinding sends a conversation back to an earlier message: everything after it
+stops being part of the conversation, and optionally the files the agent
+changed since then are put back.
+
+#### Preview (read-only)
+
+```bash
+curl -s "localhost:8787/api/sessions/s_ab12/rewind?message=412" | jq
+```
+
+```json
+{ "session_id": "s_ab12",
+  "point": { "user_message_id": 412, "prompt": "add a login page",
+             "keep_through": 412, "before_prompt": 411, "messages_removed": 6 },
+  "preview": { "files": [ { "path": "src/auth.rs", "restore": "…",
+                            "removes_file": false, "changes": 2,
+                            "tools": ["write_file","edit_file"], "incomplete": false } ],
+               "incomplete": false, "opaque_tools": ["run_command"] },
+  "running": false }
+```
+
+`message` is required and must be an id in *this* session. An assistant
+message is normalised to the user prompt that produced it - `point` always
+describes a prompt, so "rewind to this answer" and "rewind to the request
+behind it" are the same operation. The preview writes nothing; a client may
+call it on hover.
+
+#### Perform
+
+```bash
+curl -s -X POST localhost:8787/api/sessions/s_ab12/rewind \
+  -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+  -d '{"message_id":412,"mode":"retry","revert":true}'
+```
+
+| Field | Meaning |
+| --- | --- |
+| `message_id` | required; the message to rewind to |
+| `mode` | `none` (default) hides the tail and stops, `retry` re-sends the original prompt, `note` sends `note` instead |
+| `revert` | `false` by default. `true` restores the files the journal recorded before each change, newest first |
+| `note` | required for `mode: "note"`; also overrides the prompt for `retry` |
+| `keep_prompt` | defaults to `true` for `none` and `false` for `retry`/`note`, because a replacement prompt must not follow the one it replaces |
+
+The response carries `point`, `preview`, `outcomes` (`restored`, `removed`,
+`not_captured` or `failed`, one per journal row, newest first), `run_id` (set
+by `retry` and `note`), and `files_restored` / `files_skipped`. Every client
+on `/api/events` also receives `session_rewound`.
+
+#### What a rewind does and does not do
+
+* Messages are **hidden, not deleted**: `rewound_at` is stamped and every
+  transcript read filters it. A reload, the model's next request and the
+  session's message count all agree, and the rows are still in SQLite.
+* A running session is refused with `409` - a live loop holds the conversation
+  in memory and would write back what the rewind hid. Cancel first.
+* Files are only restored for tools that journal a before-image
+  (`write_file`, `edit_file`, and any future tool that does the same). A file
+  over 4 MiB, or one that is not valid UTF-8, is recorded as *not captured* and
+  reported as `incomplete` rather than half-restored.
+* `opaque_tools` names the calls a revert cannot reach - `run_command`, a
+  plugin, an MCP tool. Their effects stay; a client should say so instead of
+  implying a clean revert.
+* An unknown `mode` or an unknown field is `400`; neither is silently ignored.
 
 ## Project scoping
 
@@ -222,6 +291,76 @@ must exist, the body must be non-empty and at most 8 MiB (`413
 payload_too_large` otherwise), and form encodings are refused because they
 would be stored verbatim. `path` is workspace-relative - feed it back to
 `GET /api/workspace/file` or mention it in a prompt.
+
+## A session's numbers
+
+`GET /api/sessions/:id/info` answers "how much work was this, and where did
+the tokens go" without shipping a transcript. It is what the inspector's
+**Session** tab reads, and it is separate from `GET /api/sessions/:id` because
+that route exists to load a transcript: it carries up to 50 000 message rows,
+while this one carries counts and totals and stays cheap to poll on a long run.
+
+```json
+{ "session": Session, "running": false,
+  "stats": { "messages_total": 481, "messages_main": 402, "messages_subagent": 79,
+             "messages_by_role": {"user": 12, "assistant": 61, "tool": 408},
+             "messages_main_by_role": {"user": 9, "assistant": 40, "tool": 353},
+             "tool_calls_total": 408,
+             "tool_calls": {"read_file": 210, "run_command": 96, "edit_file": 74, ...},
+             "runs_by_status": {"completed": 11, "failed": 1}, "runs_total": 12,
+             "working_ms": 1_842_119 },
+  "usage": { "main": UsageTotals, "by_agent": {"a_x": UsageTotals},
+             "total": UsageTotals },
+  "context": { "model": "gpt-4o-mini", "window": 128000, "used": 41023 },
+  "agents": [ { "id": "a_x", "name": "reviewer", "role": "reviewer",
+                "status": "completed", "model": "gpt-4o-mini", "iterations": 7,
+                "duration_ms": 61234, "created_at": 0, "finished_at": 0,
+                "messages": 79, "usage": UsageTotals } ],
+  "messages": { ... }, "tools": { "total": 408, "by_name": [{"name","count"}],
+                                  "truncated": false },
+  "runs": { "total": 12, "by_status": {...}, "working_ms": 1842119,
+            "recent": [RunRecord] } }
+```
+
+What each part answers:
+
+* **messages** - whole-session counts, which a bounded transcript window cannot
+  give. `messages_main` is the conversation you see; `messages_subagent` is
+  everything delegated. Rewound rows are excluded, so the counts match the
+  transcript. A "turn" has no stored row of its own: it is a `user` row in
+  `messages_main_by_role`, and `runs_total` is the number of times the agent
+  actually looped over it.
+* **tools** - one entry per call, counted from the `tool_calls` JSON on each
+  assistant row, capped at 40 names (`truncated: true` when more exist). The
+  total always counts every call.
+* **runs.working_ms** - the sum of `finished_at - started_at` over runs that
+  finished. That is time the agent was *working*: idle gaps between runs are
+  not included, and an in-flight run is not counted until it ends (otherwise
+  the number would shrink when it finished).
+* **usage** - token totals **per agent**, from one persisted row per provider
+  call (see `UsageTotals` below). `main` is the run's own model calls;
+  `by_agent` is each subagent's; `total` is the session's whole spend and is
+  exactly main plus every agent. This survives a reload, which the `usage`
+  event cannot: that event is live-only.
+* **context** - how full the window is. `used` is the **newest main-agent
+  call's** prompt size (the fill), not a sum of every call (that is `usage`),
+  and `window` is the resolved model's `context_window` or `null` when the
+  entry does not declare one - the UI hides the percentage rather than
+  inventing a denominator. A subagent's prompt is never reported here: it has
+  its own, much smaller, window.
+
+`UsageTotals` is
+`{"calls","input_tokens","output_tokens","cached_tokens","cached_known_calls","cache_hit_ratio","last_input_tokens"}`.
+`cache_hit_ratio` is `null` when no call reported a prefix-cache figure -
+**unknown, which is not 0%** - and `cached_known_calls` is the denominator, so
+a client can say "no cache data" instead of drawing an empty bar. A reported
+`0` is a real miss and stays `0.0`.
+
+An unknown session id is `404 not_found`, not a page of zeros.
+
+```bash
+curl -s localhost:8787/api/sessions/abc/info | jq '.usage.total, .context'
+```
 
 ## Inspecting subagents
 

@@ -21,7 +21,7 @@ use kc_core::provider::{ChatRequest, Provider, ProviderChunk, ProviderFactory, P
 use kc_core::settings::Settings;
 use kc_core::store::{
     AgentRecord, AgentSummary, ApprovalRecord, ClaimRecord, NewMessage, Project, RunRecord,
-    RunStatus, Session, SessionSummary, Store, StoredMessage, TerminalSession,
+    RunStatus, Session, SessionSummary, Store, StoredMessage, TerminalSession, UsageRecord,
 };
 use kc_core::tool::{
     Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOrigin, ToolOutcome, ToolRegistry, ToolSpec,
@@ -81,6 +81,10 @@ struct Db {
     claims: Vec<ClaimRecord>,
     settings: BTreeMap<String, String>,
     terminals: BTreeMap<String, TerminalSession>,
+    checkpoints: Vec<kc_core::checkpoint::FileCheckpoint>,
+    next_checkpoint_id: i64,
+    /// One entry per recorded provider call, in arrival order.
+    usage: Vec<UsageRecord>,
 }
 
 pub(crate) struct FakeStore {
@@ -155,6 +159,11 @@ impl FakeStore {
 
     pub(crate) fn claims(&self) -> Vec<ClaimRecord> {
         self.db().claims.clone()
+    }
+
+    /// Every provider call the runtime recorded, in arrival order.
+    pub(crate) fn usage(&self) -> Vec<UsageRecord> {
+        self.db().usage.clone()
     }
 }
 
@@ -364,6 +373,7 @@ impl Store for FakeStore {
             tool_call_id: message.tool_call_id.clone(),
             name: message.name.clone(),
             images: message.images.clone(),
+            rewound_at: None,
             created_at: now_ms(),
         };
         db.messages.push(stored);
@@ -375,7 +385,7 @@ impl Store for FakeStore {
         let mut out: Vec<StoredMessage> = db
             .messages
             .iter()
-            .filter(|m| m.session_id == session_id)
+            .filter(|m| m.session_id == session_id && m.rewound_at.is_none())
             .cloned()
             .collect();
         if limit > 0 && out.len() > limit {
@@ -394,7 +404,7 @@ impl Store for FakeStore {
         Ok(db
             .messages
             .iter()
-            .filter(|m| m.session_id == session_id && m.id > after_id)
+            .filter(|m| m.session_id == session_id && m.id > after_id && m.rewound_at.is_none())
             .take(limit)
             .cloned()
             .collect())
@@ -555,6 +565,11 @@ impl Store for FakeStore {
             }
         }
         Ok(count)
+    }
+
+    async fn record_usage(&self, record: &UsageRecord) -> Result<()> {
+        self.db().usage.push(record.clone());
+        Ok(())
     }
 
     async fn create_approval(&self, record: &ApprovalRecord) -> Result<()> {
@@ -755,6 +770,131 @@ impl Store for FakeStore {
         self.db().claims.retain(|c| c.agent_id != agent_id);
         Ok(())
     }
+
+    // ---- rewind ----------------------------------------------------------
+
+    async fn rewind_point(
+        &self,
+        session_id: &str,
+        message_id: i64,
+    ) -> Result<kc_core::store::RewindPoint> {
+        let db = self.db();
+        let row = db
+            .messages
+            .iter()
+            .find(|m| m.id == message_id)
+            .ok_or_else(|| Error::NotFound(format!("no message with id {message_id}")))?;
+        if row.session_id != session_id {
+            return Err(Error::NotFound(format!(
+                "message {message_id} does not belong to session {session_id}"
+            )));
+        }
+        let (user_id, prompt) = if row.role == "user" {
+            (row.id, row.content.clone())
+        } else {
+            let before = db
+                .messages
+                .iter()
+                .filter(|m| m.session_id == session_id && m.id < message_id && m.role == "user")
+                .max_by_key(|m| m.id)
+                .ok_or_else(|| {
+                    Error::BadRequest(format!(
+                        "message {message_id} has no user message before it; \
+                         there is nothing to rewind to"
+                    ))
+                })?;
+            (before.id, before.content.clone())
+        };
+        let messages_removed = db
+            .messages
+            .iter()
+            .filter(|m| m.session_id == session_id && m.id > user_id && m.rewound_at.is_none())
+            .count();
+        Ok(kc_core::store::RewindPoint {
+            session_id: session_id.to_string(),
+            user_message_id: user_id,
+            prompt,
+            keep_through: user_id,
+            before_prompt: db
+                .messages
+                .iter()
+                .filter(|m| m.session_id == session_id && m.id < user_id)
+                .map(|m| m.id)
+                .max()
+                .unwrap_or(0),
+            messages_removed,
+        })
+    }
+
+    async fn mark_messages_rewound(&self, session_id: &str, keep_through: i64) -> Result<usize> {
+        let mut db = self.db();
+        let now = now_ms();
+        let mut hidden = 0;
+        for message in db.messages.iter_mut() {
+            if message.session_id == session_id
+                && message.id > keep_through
+                && message.rewound_at.is_none()
+            {
+                message.rewound_at = Some(now);
+                hidden += 1;
+            }
+        }
+        Ok(hidden)
+    }
+
+    async fn record_checkpoint(
+        &self,
+        checkpoint: &kc_core::checkpoint::FileCheckpoint,
+    ) -> Result<i64> {
+        let mut db = self.db();
+        db.next_checkpoint_id += 1;
+        let mut row = checkpoint.clone();
+        row.id = db.next_checkpoint_id;
+        // Like the real store, the placement happens in a second step.
+        row.message_id = 0;
+        db.checkpoints.push(row);
+        Ok(db.next_checkpoint_id)
+    }
+
+    async fn list_checkpoints(
+        &self,
+        session_id: &str,
+        after_id: i64,
+    ) -> Result<Vec<kc_core::checkpoint::FileCheckpoint>> {
+        let db = self.db();
+        Ok(db
+            .checkpoints
+            .iter()
+            .filter(|c| {
+                c.session_id == session_id && (c.message_id == 0 || c.message_id > after_id)
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn delete_checkpoint(&self, id: i64) -> Result<()> {
+        self.db().checkpoints.retain(|c| c.id != id);
+        Ok(())
+    }
+
+    async fn set_checkpoint_message_id(&self, id: i64, message_id: i64) -> Result<()> {
+        let mut db = self.db();
+        if let Some(row) = db.checkpoints.iter_mut().find(|c| c.id == id) {
+            row.message_id = message_id;
+        }
+        Ok(())
+    }
+
+    async fn last_rewind_at(&self, session_id: &str) -> Result<Option<i64>> {
+        let db = self.db();
+        Ok(db
+            .messages
+            .iter()
+            .filter(|m| m.session_id == session_id)
+            .filter_map(|m| m.rewound_at)
+            .max())
+    }
+
     async fn prune_messages_older_than(&self, _days: u64) -> Result<kc_core::store::PruneReport> {
         // The in-memory double never retains on disk, so a retention pass has
         // nothing to delete. Implemented (rather than todo!()) so tests that walk

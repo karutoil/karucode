@@ -12,6 +12,8 @@ libc.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Content hash for the rewind journal's blob dedupe.
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -444,6 +444,7 @@ export function ChatView(): JSX.Element {
                         items={chat.items}
                         resolvingApprovals={store.resolvingApprovals.value}
                         onApprovalDecision={(id, decision) => void actions.resolveApproval(id, decision)}
+                        onRewind={actions.openRewind}
                       />
                     </ErrorBoundary>
                   ) : chat.running ? (
@@ -474,6 +475,10 @@ export function ChatView(): JSX.Element {
                 stopping={store.stopping.value}
                 status={store.activity.value}
                 onSend={actions.sendChatMessage}
+                onQueue={actions.queueChatMessage}
+                queued={chat.queued}
+                onRecall={actions.recallQueuedMessage}
+                recalling={store.recallingQueued.value}
                 onStop={() => void actions.stopRun()}
                 onOpenSettings={actions.openSettings}
                 focusTick={store.composerFocusTick.value}

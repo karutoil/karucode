@@ -1283,6 +1283,14 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub workspace_root: PathBuf,
+    /// True when a workspace was named explicitly (`--workspace`,
+    /// `KARUCODE_WORKSPACE`, or `workspace =` in the config file).
+    ///
+    /// `workspace_root` always has a value (the current directory by default), so
+    /// this is what tells "the operator asked for /srv/x" apart from "nothing was
+    /// configured". The bootstrap uses it to decide whether an unusable workspace
+    /// is a fatal typo or just means "start with no project".
+    pub workspace_explicit: bool,
     pub data_dir: PathBuf,
     pub auth_token: Option<String>,
     pub lock_settings: bool,
@@ -1333,6 +1341,7 @@ impl Default for Config {
             host: "127.0.0.1".into(),
             port: 8787,
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            workspace_explicit: false,
             data_dir: default_data_dir(),
             auth_token: None,
             lock_settings: false,
@@ -1445,6 +1454,7 @@ impl Config {
         }
         if let Some(v) = file.workspace {
             cfg.workspace_root = v;
+            cfg.workspace_explicit = true;
         }
         if let Some(v) = file.data_dir {
             cfg.data_dir = v;
@@ -1522,6 +1532,7 @@ impl Config {
         }
         if let Some(v) = env_str("KARUCODE_WORKSPACE") {
             cfg.workspace_root = PathBuf::from(v);
+            cfg.workspace_explicit = true;
         }
         if let Some(v) = env_str("KARUCODE_DATA_DIR") {
             cfg.data_dir = PathBuf::from(v);

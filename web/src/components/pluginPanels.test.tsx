@@ -358,7 +358,7 @@ describe('the inspector tab strip', () => {
     // The built-in tabs are untouched.
     expect(screen.getByRole('tab', { name: /Files/ })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /Changes/ })).toBeTruthy();
-    expect(screen.getByRole('tab', { name: /Commands/ })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /Session/ })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /Agents/ })).toBeTruthy();
   });
 

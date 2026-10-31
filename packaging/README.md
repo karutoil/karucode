@@ -17,22 +17,56 @@ Files in this directory:
 container: it installs, reboots the container, upgrades, and checks that the
 service comes back on its own each time.
 
-## Read this first: the agent's shell is not sandboxed
+## Read this first: there is no filesystem sandbox
 
 karucode runs the commands the model asks for with `/bin/sh -c <command>` **as the
-service user**. Workspace path confinement applies to the file tools, not to shell
-commands: a command can read `~/.ssh`, write outside the workspace, or reach the
+service user**. The file tools are confined to the project, but shell commands are
+not: a command can read `~/.ssh`, write anywhere the service user can, or reach the
 network. The approval policy is a convenience, not a security boundary.
 
-So the deployment is only as safe as the account and the filesystem you give it:
+The shipped unit does **not** put a filesystem sandbox around that. `mv`, `cp` and
+`rm` work across the filesystem, and no build fails with `EROFS` — which is the
+point: a read-only root is a real wall in front of ordinary work, and keeping its
+allowlist correct for every toolchain was a permanent maintenance burden.
 
-* run it as a dedicated unprivileged user (`karucode`), never as root;
-* `ProtectSystem=strict` + `ReadWritePaths=` in the unit is your main lever — the
-  agent can only write inside the paths you list there;
-* `NoNewPrivileges=yes` stops it from escalating to root through a setuid binary;
-* mount or expose only the project directory you want it to touch;
+So the deployment is only as safe as the account you give it:
+
+* run it as **yourself** (the default — `install.sh` uses whoever ran it), never
+  as root. This is the lever that replaces the filesystem sandbox: the agent
+  cannot touch anything that account cannot. Running as a separate `karucode`
+  account is *worse*, not better: it cuts the agent off from your toolchains,
+  `~/.cargo`, `~/.local/bin` and your project directories, which is exactly the
+  class of `Permission denied` failures this default avoids;
+* `NoNewPrivileges=yes` stays on, so a setuid binary cannot escalate it to root;
+* mount or expose only the directories you actually want it working in;
 * if you need real isolation, run it in a container or VM with just the project
   mounted (see the `Dockerfile` at the repository root).
+
+### Adding a filesystem sandbox yourself
+
+If you *do* want one, add it in `20-local.conf`, which no tool rewrites:
+
+```ini
+# /etc/systemd/system/karucode.service.d/20-local.conf
+[Service]
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/srv/karucode/workspace /var/lib/karucode
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart karucode
+```
+
+Two things to know before you do:
+
+* that `ReadWritePaths=` list is now yours to maintain. Every new toolchain
+  (`~/.cargo`, `~/.npm`, `~/.pnpm`, `~/.bun`, `~/.rustup`, plugin checkouts, a
+  screenshot directory) needs an entry, and each omission surfaces as `EROFS`
+  somewhere deep inside a build.
+* use `ProtectSystem=no` / `ProtectHome=no` to switch either off later — an empty
+  `ProtectSystem=` is *rejected* by systemd (`Failed to parse ProtectSystem=,
+  ignoring: Invalid argument`) and silently leaves the strict value in force.
 
 ## Install
 
@@ -59,16 +93,18 @@ What a systemd install does, in order:
 
 1. installs the binary to `<prefix>/bin/karucode`, keeping the previous one as
    `karucode.old`;
-2. creates the `karucode` system group and user if they are missing (an explicit
-   group, because `Group=` in the unit is explicit);
-3. creates `--workspace` and `--data-dir` if they are missing, owned by that
-   user, and warns instead of re-owning a directory that already exists;
+2. resolves the account to run as — the human who invoked it (see below) — and its
+   real primary group. It creates the `karucode` system group and user *only* on
+   the fallback path, when no human could be identified;
+3. creates `--data-dir` if it is missing, owned by that account (and `--workspace`
+   too, but only if you asked for one), warning instead of re-owning a directory
+   that already exists;
 4. writes a commented template to `/etc/karucode/karucode.env` **only if the file
    does not exist** — an existing one is never touched;
 5. installs the unit to `/etc/systemd/system/karucode.service` (previous copy kept
    as `.bak`);
-6. writes the site configuration — the workspace, the data dir, the port and the
-   `ExecStart=` path — to
+6. writes the site configuration — `User=`, `Group=`, the working directory, the
+   data dir, the port and the `ExecStart=` path — to
    `/etc/systemd/system/karucode.service.d/10-install.conf`;
 7. `daemon-reload`, `enable` (so it starts on boot), then `start` — or `restart`
    if the service was already running, so an upgrade does not leave the old
@@ -81,15 +117,33 @@ If step 5–7 fails, the previous unit and drop-in are restored. Exit codes:
 but the service did not come up — the script then prints the four things worth
 checking.
 
-Useful flags: `--workspace DIR`, `--data-dir DIR`, `--port N`, `--host ADDR`,
-`--service-user NAME`, `--no-start`, `--no-enable`, `--no-restart`,
-`--allow-jit`, `--binary PATH` (install a build you already have),
-`--tarball PATH`, `--unit-file PATH`. `install.sh --help` lists them all.
+**Everything except the binary has a default**, so `sudo sh install.sh` is the
+whole install. There is no default workspace: the server starts with no project
+and you add the first one in the web UI, which is also where the model endpoint
+and key are set. Pick a directory for it wherever you keep projects.
+
+Useful flags, all optional: `--workspace DIR` (pre-create and adopt one
+directory as the first project), `--data-dir DIR` (default
+`~/.local/share/karucode`, or the account's own home for a system account),
+`--port N`, `--host ADDR`, `--service-user NAME` / `--service-group NAME` (default:
+the account that ran the installer, and its real primary group; never root, never
+created, never re-owned), `--no-start`, `--no-enable`, `--no-restart`, `--no-jit`,
+`--binary PATH` (install a build you already have), `--tarball PATH`,
+`--unit-file PATH`. `install.sh --help` lists them all.
+
+`--dry-run` changes nothing and prints the `10-install.conf` it *would* write, so
+the resolved `User=`, `Group=` and `KARUCODE_DATA_DIR=` can be checked before
+anything is installed. It works without root.
+
+`MemoryDenyWriteExecute=no` is written by default because V8, the JVM and some
+Python C extensions allocate executable memory: with the knob on, every `node`,
+`java` or `vite build` in an agent session dies with a V8 fatal error. Pass
+`--no-jit` if you want the stricter setting and never run those.
 
 ### Why the unit is not edited in place
 
-The two paths that must match your machine (`WorkingDirectory=`,
-`ReadWritePaths=`) live in a drop-in, not in the unit:
+The paths that must match your machine (`WorkingDirectory=`, the data dir and
+`ExecStart=`) live in a drop-in, not in the unit:
 
 ```
 /etc/systemd/system/karucode.service        # shipped, replaced on every install
@@ -106,43 +160,80 @@ overrides in `20-local.conf`, for example:
 ```ini
 # /etc/systemd/system/karucode.service.d/20-local.conf
 [Service]
-# A build cache the agent needs to write to, on top of the workspace.
-ReadWritePaths=/srv/karucode/.cargo
+# The toolchain PATH the agent's shell needs (see below).
+Environment=PATH=/srv/karucode/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 # The agent builds the frontend, so it needs to run node.
 MemoryDenyWriteExecute=no
 ```
 
 `sudo systemctl daemon-reload && sudo systemctl restart karucode` after editing it.
 
-### Running as an existing account
+### Running as an existing account (the default)
 
-If you already ran karucode by hand, point the unit at the same account and data
-directory instead of creating a fresh one — the provider API key and every
-setting live in the database, not in the env file, so a new data directory is a
-different (empty) instance:
+That is what happens out of the box: the unit runs as the account that invoked the
+installer, with the data directory in that account's `~/.local/share/karucode`. If
+you already ran karucode by hand, this keeps your existing database — the provider
+API key and every setting live in the database, not in the env file, so pointing at
+a *different* data directory would be a different (empty) instance.
 
 ```bash
-sudo sh install.sh --service-user "$USER" \
-     --data-dir "$HOME/.local/share/karucode" \
-     --workspace "$HOME/karucode" --port 8787 --allow-jit
+# what a plain install already does
+sudo sh install.sh
 ```
 
-Two things the unit then needs, both in `20-local.conf`:
+The installer resolves "the account that invoked it" from, in order, `$SUDO_USER`,
+`$LOGNAME`, and the session login uid (`/proc/self/loginuid`); `$USER` counts only
+when it is not `root`, because under `sudo` it always is. Every candidate has to be
+an existing, non-root account. **Root is never used, in any spelling**: passing
+`--service-user root`, `0`, `00`, `root:root` or `0:0` exits `1`.
 
-1. **`Environment=PATH=…`.** systemd hands the service the bare default
-   `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`, not your interactive
-   one. `cargo` (in `~/.cargo/bin`), `pnpm`, `bun` and the nvm `node` are then
-   *not found* by the agent's shell, even though they work in your terminal.
-2. **`ReadWritePaths=` for the toolchain caches.** `ProtectHome=read-only` makes
-   `~/.cargo`, `~/.npm` and `~/.cache` read-only, so `cargo add` / `npm install`
-   fail with `EPERM`. Grant those three (caches only — never the whole home).
+The final summary names the account it settled on, so you can check it instead of
+trusting it:
+
+```
+Service account: you:you (who ran this installer)
+Data directory:  /home/you/.local/share/karucode
+```
+
+`systemctl show -p User -p Group karucode` must agree. The group is the account's
+real primary gid from `/etc/passwd` — not a group assumed to share the account's
+name — and `--service-group` overrides it.
+
+`--service-user` names an account that already exists; the installer does not
+create accounts, and it exits `1` for a name it cannot resolve rather than letting
+systemd fail later with `status=217/USER`. Nothing about that account is re-owned.
+
+**The one silent failure mode, made loud:** a bare root shell — `sudo -i`, or a
+container/image build — has no `$SUDO_USER` and no login uid, so there is no human
+to name. The installer then falls back to the dedicated `karucode` system account
+(creating it and `/var/lib/karucode` if missing) and prints a six-line warning
+saying so, plus `(fallback: no human could be identified)` in the summary. If you
+see that and did not mean it, re-run as yourself, or pass `--service-user <name>`.
+
+A dedicated system account is still selectable for a shared or locked-down host, but
+then you own the consequences: give it read access to the directories it must work
+in, or it will fail with `Permission denied` exactly where a real user's home is
+private (`~/.local/bin` is `700` on many systems). Its data directory defaults to
+that account's own home, which for a system account created by `useradd --system
+--home-dir /var/lib/karucode` is `/var/lib/karucode` — not
+`/var/lib/karucode/.local/share/karucode` — because a service account's home *is*
+its data directory.
+
+```bash
+sudo sh install.sh --service-user karucode     # -> /var/lib/karucode
+```
+
+One thing the unit needs in `20-local.conf`:
+
+**`Environment=PATH=…`.** systemd hands the service the bare default
+`PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`, not your interactive one.
+`cargo` (in `~/.cargo/bin`), `pnpm`, `bun` and the nvm `node` are then *not found*
+by the agent's shell, even though they work in your terminal. The toolchain caches
+themselves need no grants: the unit does not sandbox the filesystem.
 
 ```ini
 [Service]
 Environment=PATH=/home/you/.local/bin:/home/you/.cargo/bin:/home/you/.nvm/versions/node/v22.22.2/bin:/usr/local/bin:/usr/bin:/bin
-ReadWritePaths=/home/you/.cargo
-ReadWritePaths=/home/you/.npm
-ReadWritePaths=/home/you/.cache
 ```
 
 ### Manually
@@ -170,8 +261,6 @@ sudo install -d -m 0755 /etc/systemd/system/karucode.service.d
 sudo tee /etc/systemd/system/karucode.service.d/10-install.conf >/dev/null <<'EOF'
 [Service]
 WorkingDirectory=/srv/karucode/workspace
-ReadWritePaths=
-ReadWritePaths=/srv/karucode/workspace
 EOF
 
 sudo systemctl daemon-reload
@@ -238,9 +327,10 @@ Notes:
 * `KARUCODE_AUTH_TOKEN` must be at least 16 characters. The server **refuses to
   start** on a non-loopback bind without it, so it is mandatory if you change
   `KARUCODE_HOST` away from `127.0.0.1`.
-* `KARUCODE_DATA_DIR` must be `/var/lib/karucode` under this unit: the default is
-  `$HOME/.local/share/karucode`, and `$HOME` is not writable with
-  `ProtectSystem=strict`.
+* `KARUCODE_DATA_DIR` should be `/var/lib/karucode` under this unit: the default is
+  `$HOME/.local/share/karucode`, and the service user's `$HOME` is
+  `/var/lib/karucode` with no login shell. Any directory works as long as the
+  service user owns it.
 * The data directory holds the SQLite database **and the provider API key** (it is
   stored in the settings table). Treat it as a secret; the server forces mode
   `0700`.
@@ -259,13 +349,11 @@ write it to the drop-in (not the unit, which is replaced on upgrade):
 # /etc/systemd/system/karucode.service.d/10-install.conf
 [Service]
 WorkingDirectory=/srv/karucode/workspace
-ReadWritePaths=
-ReadWritePaths=/srv/karucode/workspace
 ```
 
-Both paths must name the same directory, it must exist, and it must be owned by
-`karucode`. `ReadWritePaths=` is the only place outside the state directory the
-agent can write to — keep it narrow.
+It must exist and be owned by `karucode`. That is where sessions start; the agent
+is not confined to it, so run the service as an account that cannot reach anything
+you would mind it touching.
 
 ```bash
 sudo install -d -m 0750 -o karucode -g karucode /srv/karucode/workspace
@@ -625,4 +713,4 @@ docker run --rm -v karucode-data:/data -v /var/backups/karucode:/backup \
 | it works, but it is not running after a reboot | `systemctl is-enabled karucode` must print `enabled`; if it prints `disabled`, the install ran with `--no-enable` |
 | a change to `20-local.conf` had no effect | `sudo systemctl daemon-reload` is required, and drop-in filenames must end in `.conf` |
 | the agent cannot run `cargo`, `node`, `pnpm` or `bun` inside a session, though they work in your terminal | systemd gives the service the *default* PATH, not yours: set `Environment=PATH=…` in `20-local.conf` |
-| `cargo add` / `npm install` fail with `EPERM` | `ProtectHome=read-only`; add `ReadWritePaths=` for `~/.cargo`, `~/.npm`, `~/.cache` |
+| `mv`/`cp`/`rm` fail with `Read-only file system` (`EROFS`) | you added a filesystem sandbox in `20-local.conf`: widen `ReadWritePaths=` there, or set `ProtectSystem=no` |

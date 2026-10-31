@@ -10,7 +10,7 @@ import * as store from '../state/store';
 import { TabPanel, Tabs, type TabItem } from './Tabs';
 import { WorkspaceTab } from './WorkspaceTab';
 import { ChangesTab } from './ChangesTab';
-import { CommandsTab } from './CommandsTab';
+import { SessionInfoTab, sessionInfoTooltip } from './SessionInfoTab';
 import { AgentsTab } from './AgentsTab';
 import { PluginPanelView } from './PluginPanelView';
 import { BranchIcon, CircleCheckIcon, CloseIcon, PanelIcon, pluginPanelIcon } from './icons';
@@ -83,11 +83,9 @@ export function Inspector(): JSX.Element {
   const items: TabItem<InspectorTab>[] = [
     { id: 'workspace', label: 'Files' },
     { id: 'changes', label: 'Changes' },
-    {
-      id: 'commands',
-      label: 'Commands',
-      count: store.chat.value.items.filter((item) => item.kind === 'command').length,
-    },
+    // The session's own numbers, not a second place to read commands: the
+    // transcript already renders every command card inline, with its output.
+    { id: 'session', label: 'Session', title: sessionInfoTooltip(store.sessionInfo.value) },
     { id: 'agents', label: 'Agents', count: store.runningAgents.value },
     // One tab per panel a plugin declared. The plugin supplies a data payload,
     // never markup: see `pluginPanels.ts` for why that matters.
@@ -147,8 +145,8 @@ export function Inspector(): JSX.Element {
         <TabPanel idPrefix="inspector" id="changes" active={active === 'changes'}>
           <ChangesTab />
         </TabPanel>
-        <TabPanel idPrefix="inspector" id="commands" active={active === 'commands'}>
-          <CommandsTab />
+        <TabPanel idPrefix="inspector" id="session" active={active === 'session'}>
+          <SessionInfoTab />
         </TabPanel>
         <TabPanel idPrefix="inspector" id="agents" active={active === 'agents'}>
           <AgentsTab />

@@ -21,18 +21,21 @@
 //!   rusqlite string.
 
 use async_trait::async_trait;
+use kc_core::checkpoint::FileCheckpoint;
 use kc_core::config::SessionModelSelection;
 use kc_core::error::{Error, Result};
 use kc_core::message::{ImageAttachment, ToolCall};
 use kc_core::store::*;
 use rusqlite::{params, OptionalExtension, Row};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -220,6 +223,79 @@ CREATE TABLE IF NOT EXISTS terminals (
 CREATE INDEX IF NOT EXISTS idx_terminals_position ON terminals(position, created_at);
 "#;
 
+/// Schema v7: rewind.
+///
+/// `messages.rewound_at` is the mark a rewind leaves. Rows are never deleted -
+/// `repair_history`, retention and every client read the transcript as a
+/// monotonic log, and deleting from the middle of it would renumber the tail a
+/// second browser is currently rendering. `NULL` means "visible", which is the
+/// value every existing row already has, so an upgraded database behaves exactly
+/// as it did before.
+///
+/// `checkpoints` is the file journal: one row per mutating file operation,
+/// holding the bytes the file had *before* the tool ran. `content_id` points at
+/// the deduplicated payload in `checkpoint_blobs`, because a run that edits one
+/// file five times stores four identical before-images and a large session can
+/// hold hundreds of megabytes of them.
+///
+/// `(session_id, message_id)` is the access path every rewind uses: "everything
+/// that happened after this message". `checkpoint_blobs` is swept by both
+/// retention and the rewind itself, since a deleted journal row must not leave
+/// its payload behind.
+const MIGRATION_7: &str = r#"
+ALTER TABLE messages ADD COLUMN rewound_at INTEGER;
+
+CREATE TABLE IF NOT EXISTS checkpoint_blobs (
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    sha  TEXT NOT NULL,
+    data BLOB NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoint_blobs_sha ON checkpoint_blobs(sha);
+
+CREATE TABLE IF NOT EXISTS checkpoints (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    run_id       TEXT NOT NULL DEFAULT '',
+    agent_id     TEXT,
+    call_id      TEXT NOT NULL DEFAULT '',
+    tool         TEXT NOT NULL DEFAULT '',
+    path         TEXT NOT NULL,
+    existed      INTEGER NOT NULL DEFAULT 0,
+    content_id   INTEGER REFERENCES checkpoint_blobs(id),
+    capture_failed INTEGER NOT NULL DEFAULT 0,
+    message_id   INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_region ON checkpoints(session_id, message_id);
+"#;
+
+/// Schema v8: per-call token accounting.
+///
+/// One row per provider call, written when the runtime receives the endpoint's
+/// `usage` block. The `usage` *event* is live-only, so before this table the
+/// answer to "what has this session cost" existed only in the browser tab that
+/// happened to be open. `agent_id` is `NULL` for a run's own model calls and set
+/// for a subagent's, which is what lets the session information view show the
+/// main agent and each subagent separately without a second table.
+///
+/// No foreign keys beyond the session. A usage row is a *measurement*, not a
+/// parent of anything: cascading from `runs` or `agents` would silently rewrite
+/// history when retention prunes an old run, and the numbers stay meaningful
+/// after the transcript rows they describe are gone.
+const MIGRATION_8: &str = r#"
+CREATE TABLE IF NOT EXISTS usage_calls (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    run_id        TEXT NOT NULL DEFAULT '',
+    agent_id      TEXT,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER,
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_calls_session ON usage_calls(session_id, id);
+"#;
+
 pub struct SqliteStore {
     /// The single writer connection. Every mutation takes this mutex.
     conn: Arc<Mutex<rusqlite::Connection>>,
@@ -287,6 +363,32 @@ fn db_err(context: &str, e: rusqlite::Error) -> Error {
 
 fn limit_i64(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
+}
+
+/// A SQLite `INTEGER` token count back into the `u32` the wire type uses.
+///
+/// Saturating rather than panicking: a provider that reports a count above
+/// `u32::MAX` is telling us the call was enormous, and refusing to show its
+/// cost would be worse than capping the number.
+fn u32_of(value: i64) -> u32 {
+    u32::try_from(value.max(0)).unwrap_or(u32::MAX)
+}
+
+/// A SQLite `INTEGER` sum back into a `u64`. `SUM` over the table can exceed
+/// `i64` only after ~9·10¹⁸ tokens, so saturating is honest, not a limit.
+fn u64_of(value: i64) -> u64 {
+    u64::try_from(value.max(0)).unwrap_or(u64::MAX)
+}
+
+/// Lowercase hex SHA-256, used as the content key of the rewind journal.
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Decode a JSON array column, falling back to the default on NULL/garbage.
@@ -389,7 +491,8 @@ fn summarize_sessions(
 ) -> Result<Vec<SessionSummary>> {
     let base =
         "SELECT s.id, s.title, s.workspace, s.project_id, s.model, s.created_at, s.updated_at,
-                       (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
+                       (SELECT COUNT(*) FROM messages m
+                         WHERE m.session_id = s.id AND m.rewound_at IS NULL) AS message_count,
                        (SELECT r.status FROM runs r
                          WHERE r.session_id = s.id
                          ORDER BY r.started_at DESC, r.id DESC LIMIT 1) AS last_run_status,
@@ -426,6 +529,7 @@ fn map_stored_message(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
         images,
         tool_call_id: row.get("tool_call_id")?,
         name: row.get("name")?,
+        rewound_at: row.get("rewound_at")?,
         created_at: row.get("created_at")?,
     })
 }
@@ -870,6 +974,12 @@ impl SqliteStore {
                     6 => tx
                         .execute_batch(MIGRATION_6)
                         .map_err(|e| db_err("migration v6", e))?,
+                    7 => tx
+                        .execute_batch(MIGRATION_7)
+                        .map_err(|e| db_err("migration v7", e))?,
+                    8 => tx
+                        .execute_batch(MIGRATION_8)
+                        .map_err(|e| db_err("migration v8", e))?,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -1202,8 +1312,9 @@ impl Store for SqliteStore {
                 .prepare(
                     "SELECT * FROM (
                          SELECT id, session_id, run_id, agent_id, role, content, tool_calls,
-                                tool_call_id, name, images, created_at
-                           FROM messages WHERE session_id = ?1
+                                tool_call_id, name, images, rewound_at, created_at
+                           FROM messages
+                          WHERE session_id = ?1 AND rewound_at IS NULL
                           ORDER BY id DESC LIMIT ?2
                      ) ORDER BY id ASC",
                 )
@@ -1229,9 +1340,9 @@ impl Store for SqliteStore {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, session_id, run_id, agent_id, role, content, tool_calls,
-                            tool_call_id, name, images, created_at
+                            tool_call_id, name, images, rewound_at, created_at
                        FROM messages
-                      WHERE session_id = ?1 AND id > ?2
+                      WHERE session_id = ?1 AND id > ?2 AND rewound_at IS NULL
                       ORDER BY id ASC LIMIT ?3",
                 )
                 .map_err(|e| db_err("list_messages_after prepare", e))?;
@@ -1340,6 +1451,291 @@ impl Store for SqliteStore {
                 .map_err(|e| db_err("list_runs query", e))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|e| db_err("list_runs rows", e))
+        })
+        .await
+    }
+
+    // ---- rewind ----------------------------------------------------------
+
+    async fn rewind_point(&self, session_id: &str, message_id: i64) -> Result<RewindPoint> {
+        let session_id = session_id.to_string();
+        self.read(move |conn| {
+            let (row_session, role, content): (String, String, String) = conn
+                .query_row(
+                    "SELECT session_id, role, content FROM messages WHERE id = ?1",
+                    params![message_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => {
+                        Error::NotFound(format!("no message with id {message_id}"))
+                    }
+                    other => db_err("rewind_point lookup", other),
+                })?;
+            if row_session != session_id {
+                // A message id from another session must not be a way to rewind
+                // this one: ids are global, so this is a real mistake, not a
+                // 404-worthy guess.
+                return Err(Error::NotFound(format!(
+                    "message {message_id} does not belong to session {session_id}"
+                )));
+            }
+
+            // Normalise to the user turn. An assistant message, a tool result or
+            // a steering note belongs to the prompt that started it, and rewinding
+            // to "some point inside a turn" would leave the model a transcript
+            // starting with a tool result.
+            let (user_id, prompt) = match role.as_str() {
+                "user" => (message_id, content),
+                _ => conn
+                    .query_row(
+                        "SELECT id, content FROM messages
+                          WHERE session_id = ?1 AND id < ?2 AND role = 'user'
+                          ORDER BY id DESC LIMIT 1",
+                        params![session_id, message_id],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .map_err(|e| match e {
+                        rusqlite::Error::QueryReturnedNoRows => Error::BadRequest(format!(
+                            "message {message_id} has no user message before it; there is nothing to rewind to"
+                        )),
+                        other => db_err("rewind_point user lookup", other),
+                    })?,
+            };
+
+            // The next message after the chosen prompt is where the rewind cuts.
+            // `keep_through` is that id minus one, expressed as the id of the
+            // prompt itself: it *survives*, because the user wants to rewrite it
+            // or have it retried. `before_prompt` is the id of the message in
+            // front of it, for the two modes that replace the prompt.
+            let before_prompt: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(id), 0) FROM messages
+                      WHERE session_id = ?1 AND id < ?2",
+                    params![session_id, user_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| db_err("rewind_point before", e))?;
+            let messages_removed: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages
+                      WHERE session_id = ?1 AND id > ?2 AND rewound_at IS NULL",
+                    params![session_id, user_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| db_err("rewind_point count", e))?;
+
+            Ok(RewindPoint {
+                session_id: session_id.clone(),
+                user_message_id: user_id,
+                prompt,
+                keep_through: user_id,
+                before_prompt,
+                messages_removed: messages_removed.max(0) as usize,
+            })
+        })
+        .await
+    }
+
+    async fn mark_messages_rewound(&self, session_id: &str, keep_through: i64) -> Result<usize> {
+        let session_id = session_id.to_string();
+        self.with(move |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("mark_messages_rewound begin", e))?;
+            let now = now_ms();
+            // Only rows that are still visible are counted, so re-running the
+            // same rewind reports 0 instead of pretending it hid the transcript
+            // a second time.
+            let hidden = tx
+                .execute(
+                    "UPDATE messages SET rewound_at = ?3
+                      WHERE session_id = ?1 AND id > ?2 AND rewound_at IS NULL",
+                    params![session_id, keep_through, now],
+                )
+                .map_err(|e| db_err("mark_messages_rewound", e))?;
+            tx.commit()
+                .map_err(|e| db_err("mark_messages_rewound commit", e))?;
+            Ok(hidden)
+        })
+        .await
+    }
+
+    async fn record_checkpoint(&self, checkpoint: &FileCheckpoint) -> Result<i64> {
+        let checkpoint = checkpoint.clone();
+        self.with(move |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("record_checkpoint begin", e))?;
+            // Deduplicate the payload: an edit that changes one line of a 40 KB
+            // file stores that file once per edit without this.
+            let content_id: Option<i64> =
+                if checkpoint.capture_failed || checkpoint.content.is_empty() {
+                    None
+                } else {
+                    let sha = hex_digest(checkpoint.content.as_bytes());
+                    tx.execute(
+                        "INSERT OR IGNORE INTO checkpoint_blobs (sha, data) VALUES (?1, ?2)",
+                        params![sha, checkpoint.content.as_bytes()],
+                    )
+                    .map_err(|e| db_err("record_checkpoint blob", e))?;
+                    Some(
+                        tx.query_row(
+                            "SELECT id FROM checkpoint_blobs WHERE sha = ?1",
+                            params![sha],
+                            |row| row.get(0),
+                        )
+                        .map_err(|e| db_err("record_checkpoint blob id", e))?,
+                    )
+                };
+            // An empty before-image is ambiguous: it can mean "the file was
+            // empty" or "there is no payload". A blob row is the marker, so an
+            // empty file is stored as a zero-byte blob rather than as NULL.
+            let content_id = match content_id {
+                Some(id) => Some(id),
+                None if checkpoint.existed && !checkpoint.capture_failed => {
+                    let sha = hex_digest(b"");
+                    tx.execute(
+                        "INSERT OR IGNORE INTO checkpoint_blobs (sha, data) VALUES (?1, x'')",
+                        params![sha],
+                    )
+                    .map_err(|e| db_err("record_checkpoint empty blob", e))?;
+                    Some(
+                        tx.query_row(
+                            "SELECT id FROM checkpoint_blobs WHERE sha = ?1",
+                            params![sha],
+                            |row| row.get(0),
+                        )
+                        .map_err(|e| db_err("record_checkpoint empty blob id", e))?,
+                    )
+                }
+                None => None,
+            };
+
+            tx.execute(
+                "INSERT INTO checkpoints
+                    (session_id, run_id, agent_id, call_id, tool, path, existed,
+                     content_id, capture_failed, message_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    checkpoint.session_id,
+                    checkpoint.run_id,
+                    checkpoint.agent_id,
+                    checkpoint.call_id,
+                    checkpoint.tool,
+                    checkpoint.path,
+                    i64::from(checkpoint.existed),
+                    content_id,
+                    i64::from(checkpoint.capture_failed),
+                    checkpoint.message_id,
+                    now_ms()
+                ],
+            )
+            .map_err(|e| db_err("record_checkpoint", e))?;
+            let id = tx.last_insert_rowid();
+            tx.commit()
+                .map_err(|e| db_err("record_checkpoint commit", e))?;
+            Ok(id)
+        })
+        .await
+    }
+
+    async fn list_checkpoints(
+        &self,
+        session_id: &str,
+        after_id: i64,
+    ) -> Result<Vec<FileCheckpoint>> {
+        let session_id = session_id.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT c.id, c.session_id, c.run_id, c.agent_id, c.call_id, c.tool,
+                            c.path, c.existed, c.capture_failed, c.message_id, c.created_at,
+                            CAST(b.data AS TEXT) AS content
+                       FROM checkpoints c
+                       LEFT JOIN checkpoint_blobs b ON b.id = c.content_id
+                      WHERE c.session_id = ?1 AND (c.message_id = 0 OR c.message_id > ?2)
+                      ORDER BY c.id ASC",
+                )
+                .map_err(|e| db_err("list_checkpoints prepare", e))?;
+            let rows = stmt
+                .query_map(params![session_id, after_id], |row| {
+                    Ok(FileCheckpoint {
+                        id: row.get("id")?,
+                        session_id: row.get("session_id")?,
+                        run_id: row.get("run_id")?,
+                        agent_id: row.get("agent_id")?,
+                        call_id: row.get("call_id")?,
+                        tool: row.get("tool")?,
+                        path: row.get("path")?,
+                        existed: row.get::<_, i64>("existed")? != 0,
+                        content: row.get::<_, Option<String>>("content")?.unwrap_or_default(),
+                        capture_failed: row.get::<_, i64>("capture_failed")? != 0,
+                        message_id: row.get("message_id")?,
+                        created_at: row.get("created_at")?,
+                    })
+                })
+                .map_err(|e| db_err("list_checkpoints query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("list_checkpoints rows", e))
+        })
+        .await
+    }
+
+    async fn delete_checkpoint(&self, id: i64) -> Result<()> {
+        self.with(move |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("delete_checkpoint begin", e))?;
+            // Remember the payload before dropping the row so an unreferenced
+            // blob can go with it; a journal whose blobs outlive it grows
+            // without bound on a fresh database.
+            let content_id: Option<i64> = tx
+                .query_row(
+                    "SELECT content_id FROM checkpoints WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(None);
+            tx.execute("DELETE FROM checkpoints WHERE id = ?1", params![id])
+                .map_err(|e| db_err("delete_checkpoint", e))?;
+            if let Some(content_id) = content_id {
+                tx.execute(
+                    "DELETE FROM checkpoint_blobs
+                      WHERE id = ?1
+                        AND NOT EXISTS (SELECT 1 FROM checkpoints WHERE content_id = ?1)",
+                    params![content_id],
+                )
+                .map_err(|e| db_err("delete_checkpoint blob", e))?;
+            }
+            tx.commit()
+                .map_err(|e| db_err("delete_checkpoint commit", e))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn set_checkpoint_message_id(&self, id: i64, message_id: i64) -> Result<()> {
+        self.with(move |conn| {
+            conn.execute(
+                "UPDATE checkpoints SET message_id = ?2 WHERE id = ?1",
+                params![id, message_id],
+            )
+            .map_err(|e| db_err("set_checkpoint_message_id", e))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn last_rewind_at(&self, session_id: &str) -> Result<Option<i64>> {
+        let session_id = session_id.to_string();
+        self.read(move |conn| {
+            conn.query_row(
+                "SELECT MAX(rewound_at) FROM messages WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map_err(|e| db_err("last_rewind_at", e))
         })
         .await
     }
@@ -1492,7 +1888,7 @@ impl Store for SqliteStore {
                 .prepare(
                     "SELECT * FROM (
                          SELECT id, session_id, run_id, agent_id, role, content, tool_calls,
-                                tool_call_id, name, images, created_at
+                                tool_call_id, name, images, rewound_at, created_at
                            FROM messages WHERE agent_id = ?1
                           ORDER BY id DESC LIMIT ?2
                      ) ORDER BY id ASC",
@@ -1522,6 +1918,241 @@ impl Store for SqliteStore {
                 )
                 .map_err(|e| db_err("mark_interrupted_agents", e))?;
             Ok(n)
+        })
+        .await
+    }
+
+    async fn record_usage(&self, record: &UsageRecord) -> Result<()> {
+        let record = record.clone();
+        self.with(move |conn| {
+            conn.execute(
+                "INSERT INTO usage_calls
+                    (session_id, run_id, agent_id, input_tokens, output_tokens, cached_tokens, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    record.session_id,
+                    record.run_id,
+                    record.agent_id,
+                    i64::from(record.input_tokens),
+                    i64::from(record.output_tokens),
+                    record.cached_tokens.map(i64::from),
+                    now_ms(),
+                ],
+            )
+            .map_err(|e| db_err("record_usage", e))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn usage_totals(
+        &self,
+        session_id: &str,
+    ) -> Result<BTreeMap<Option<String>, UsageTotals>> {
+        let session_id = session_id.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT agent_id,
+                            COUNT(*)                                   AS calls,
+                            COALESCE(SUM(input_tokens), 0)             AS input_tokens,
+                            COALESCE(SUM(output_tokens), 0)            AS output_tokens,
+                            COALESCE(SUM(cached_tokens), 0)            AS cached_tokens,
+                            COALESCE(SUM(CASE WHEN cached_tokens IS NULL THEN 0 ELSE 1 END), 0)
+                                                                       AS cached_known_calls
+                       FROM usage_calls
+                      WHERE session_id = ?1
+                      GROUP BY agent_id",
+                )
+                .map_err(|e| db_err("usage_totals prepare", e))?;
+            let rows = stmt
+                .query_map(params![session_id], |row| {
+                    let agent_id: Option<String> = row.get("agent_id")?;
+                    Ok((
+                        agent_id,
+                        UsageTotals {
+                            calls: u32_of(row.get::<_, i64>("calls")?),
+                            input_tokens: u64_of(row.get::<_, i64>("input_tokens")?),
+                            output_tokens: u64_of(row.get::<_, i64>("output_tokens")?),
+                            cached_tokens: u64_of(row.get::<_, i64>("cached_tokens")?),
+                            cached_known_calls: u32_of(row.get::<_, i64>("cached_known_calls")?),
+                            last_input_tokens: 0,
+                        },
+                    ))
+                })
+                .map_err(|e| db_err("usage_totals query", e))?;
+            let mut out: BTreeMap<Option<String>, UsageTotals> = BTreeMap::new();
+            for row in rows {
+                let (agent_id, totals) = row.map_err(|e| db_err("usage_totals rows", e))?;
+                out.insert(agent_id, totals);
+            }
+
+            // The newest call's prompt size is how full the window is, which a
+            // group sum cannot answer. One `MAX(id)` per agent, `IS` so a NULL
+            // agent id matches NULL instead of being filtered out.
+            let mut last = conn
+                .prepare(
+                    "SELECT agent_id, input_tokens FROM usage_calls
+                      WHERE session_id = ?1
+                        AND id IN (SELECT MAX(id) FROM usage_calls
+                                    WHERE session_id = ?1 GROUP BY agent_id)",
+                )
+                .map_err(|e| db_err("usage_totals last prepare", e))?;
+            let rows = last
+                .query_map(params![session_id], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>("agent_id")?,
+                        row.get::<_, i64>("input_tokens")?,
+                    ))
+                })
+                .map_err(|e| db_err("usage_totals last query", e))?;
+            for row in rows {
+                let (agent_id, input_tokens) =
+                    row.map_err(|e| db_err("usage_totals last rows", e))?;
+                if let Some(totals) = out.get_mut(&agent_id) {
+                    totals.last_input_tokens = u32_of(input_tokens);
+                }
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    async fn session_stats(&self, session_id: &str) -> Result<SessionStats> {
+        let session_id = session_id.to_string();
+        self.read(move |conn| {
+            let mut stats = SessionStats::default();
+
+            // Messages: one query for the whole table's counts by (agent-ness,
+            // role), split in Rust. Two queries (main/subagent) would be two
+            // snapshots and could disagree.
+            let mut counts = conn
+                .prepare(
+                    "SELECT role, (agent_id IS NOT NULL) AS sub, COUNT(*) AS n
+                       FROM messages
+                      WHERE session_id = ?1 AND rewound_at IS NULL
+                      GROUP BY role, sub",
+                )
+                .map_err(|e| db_err("session_stats messages prepare", e))?;
+            let rows = counts
+                .query_map(params![session_id], |row| {
+                    Ok((
+                        row.get::<_, String>("role")?,
+                        row.get::<_, i64>("sub")? != 0,
+                        row.get::<_, i64>("n")?,
+                    ))
+                })
+                .map_err(|e| db_err("session_stats messages query", e))?;
+            for row in rows {
+                let (role, subagent, n) = row.map_err(|e| db_err("session_stats messages", e))?;
+                let n = u64_of(n);
+                stats.messages_total += n;
+                if subagent {
+                    stats.messages_subagent += n;
+                } else {
+                    stats.messages_main += n;
+                    *stats.messages_main_by_role.entry(role.clone()).or_insert(0) += n;
+                }
+                *stats.messages_by_role.entry(role).or_insert(0) += n;
+            }
+
+            // Tool calls. `tool_calls` is a JSON array on an assistant row; JSON1
+            // is compiled into the bundled SQLite. A malformed array (written by
+            // an older build, or hand-edited) must not fail the whole summary, so
+            // it contributes zero rather than erroring.
+            //
+            // The alias is `tool_name`, not `name`: `messages` has its own `name`
+            // column, and a bare `GROUP BY name` binds to that column (NULL on
+            // every assistant row) instead of the extracted field - which silently
+            // collapses every tool into one bucket.
+            let mut calls = conn
+                .prepare(
+                    "SELECT json_extract(call.value, '$.name') AS tool_name, COUNT(*) AS n
+                       FROM messages m, json_each(m.tool_calls) AS call
+                      WHERE m.session_id = ?1
+                        AND m.rewound_at IS NULL
+                        AND m.role = 'assistant'
+                        AND json_valid(m.tool_calls)
+                      GROUP BY tool_name",
+                )
+                .map_err(|e| db_err("session_stats tools prepare", e))?;
+            let rows = calls
+                .query_map(params![session_id], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>("tool_name")?,
+                        row.get::<_, i64>("n")?,
+                    ))
+                })
+                .map_err(|e| db_err("session_stats tools query", e))?;
+            for row in rows {
+                let (name, n) = row.map_err(|e| db_err("session_stats tools", e))?;
+                let n = u64_of(n);
+                stats.tool_calls_total += n;
+                // A call with no name is still a call; name it so the total and
+                // the breakdown cannot disagree.
+                let key = name
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| "(unnamed)".to_string());
+                *stats.tool_calls.entry(key).or_insert(0) += n;
+            }
+
+            // Runs. `working_ms` sums only finished runs: an in-flight run's
+            // duration is still growing, and counting it would make the number
+            // shrink when it ends.
+            let mut runs = conn
+                .prepare(
+                    "SELECT status,
+                            COUNT(*)                                              AS n,
+                            COALESCE(SUM(MAX(0, COALESCE(finished_at, started_at) - started_at)
+                                         * (finished_at IS NOT NULL)), 0)          AS ms
+                       FROM runs
+                      WHERE session_id = ?1
+                      GROUP BY status",
+                )
+                .map_err(|e| db_err("session_stats runs prepare", e))?;
+            let rows = runs
+                .query_map(params![session_id], |row| {
+                    Ok((
+                        row.get::<_, String>("status")?,
+                        row.get::<_, i64>("n")?,
+                        row.get::<_, i64>("ms")?,
+                    ))
+                })
+                .map_err(|e| db_err("session_stats runs query", e))?;
+            for row in rows {
+                let (status, n, ms) = row.map_err(|e| db_err("session_stats runs", e))?;
+                stats.runs_total += u64_of(n);
+                stats.working_ms += u64_of(ms);
+                *stats.runs_by_status.entry(status).or_insert(0) += u64_of(n);
+            }
+
+            Ok(stats)
+        })
+        .await
+    }
+
+    async fn agent_message_counts(&self, session_id: &str) -> Result<BTreeMap<String, u64>> {
+        let session_id = session_id.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT agent_id, COUNT(*) AS n
+                       FROM messages
+                      WHERE session_id = ?1 AND agent_id IS NOT NULL AND rewound_at IS NULL
+                      GROUP BY agent_id",
+                )
+                .map_err(|e| db_err("agent_message_counts prepare", e))?;
+            let rows = stmt
+                .query_map(params![session_id], |row| {
+                    Ok((row.get::<_, String>("agent_id")?, row.get::<_, i64>("n")?))
+                })
+                .map_err(|e| db_err("agent_message_counts query", e))?;
+            let mut out = BTreeMap::new();
+            for row in rows {
+                let (agent_id, n) = row.map_err(|e| db_err("agent_message_counts rows", e))?;
+                out.insert(agent_id, u64_of(n));
+            }
+            Ok(out)
         })
         .await
     }
@@ -1773,8 +2404,9 @@ impl Store for SqliteStore {
         // gives `rename_terminal` everything it needs, and a moved directory then
         // relabels itself instead of keeping a stale name.
         let lookup = id.clone();
-        let rows = self.read(move |conn| {
-            conn.query_row(
+        let rows = self
+            .read(move |conn| {
+                conn.query_row(
                 "SELECT id, title, cwd, project_id, position, created_at, updated_at, last_used_at
                    FROM terminals WHERE id = ?1",
                 params![lookup],
@@ -1782,8 +2414,8 @@ impl Store for SqliteStore {
             )
             .optional()
             .map_err(|e| db_err("rename_terminal read", e))
-        })
-        .await?;
+            })
+            .await?;
         let Some(existing) = rows else {
             return Err(Error::NotFound(format!("no terminal with id `{id}`")));
         };
@@ -1989,6 +2621,22 @@ impl Store for SqliteStore {
                     params![cutoff],
                 )
                 .map_err(|e| db_err("prune approvals", e))?;
+            // A rewound message is deleted by the retention window like any
+            // other old row, so the journal rows that point at it must go too.
+            // Sweeping here (rather than only when a rewind is undone) is what
+            // keeps `checkpoints` from outliving the transcript it describes.
+            tx.execute(
+                "DELETE FROM checkpoints
+                  WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = checkpoints.message_id)",
+                [],
+            )
+            .map_err(|e| db_err("prune checkpoints", e))?;
+            tx.execute(
+                "DELETE FROM checkpoint_blobs
+                  WHERE NOT EXISTS (SELECT 1 FROM checkpoints c WHERE c.content_id = checkpoint_blobs.id)",
+                [],
+            )
+            .map_err(|e| db_err("prune checkpoint blobs", e))?;
             tx.commit().map_err(|e| db_err("prune commit", e))?;
 
             let report = PruneReport {
@@ -2746,7 +3394,12 @@ mod tests {
 
         reopened.touch_terminal("t_2").await.expect("touch");
         assert!(
-            reopened.get_terminal("t_2").await.unwrap().unwrap().last_used_at
+            reopened
+                .get_terminal("t_2")
+                .await
+                .unwrap()
+                .unwrap()
+                .last_used_at
                 >= renamed.last_used_at
         );
 
@@ -2757,10 +3410,7 @@ mod tests {
         );
         assert!(reopened.get_terminal("t_2").await.expect("get").is_none());
         // An unknown id is a clear NotFound, not a silent success.
-        assert!(reopened
-            .rename_terminal("t_404", Some("x"))
-            .await
-            .is_err());
+        assert!(reopened.rename_terminal("t_404", Some("x")).await.is_err());
     }
 
     /// `default_title` names a tab after its directory, and copes with the root
@@ -4214,6 +4864,685 @@ mod tests {
                 .len(),
             51
         );
+    }
+
+    // ---- rewind ----------------------------------------------------------
+
+    /// A conversation of three prompt/answer pairs, returning the message ids in
+    /// order so a test can name a rewind point.
+    async fn conversation(store: &SqliteStore, session_id: &str) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for turn in 0..3 {
+            ids.push(
+                store
+                    .append_message(&new_message(session_id, "user", &format!("prompt {turn}")))
+                    .await
+                    .expect("append user"),
+            );
+            ids.push(
+                store
+                    .append_message(&new_message(
+                        session_id,
+                        "assistant",
+                        &format!("answer {turn}"),
+                    ))
+                    .await
+                    .expect("append assistant"),
+            );
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn rewinding_hides_the_tail_and_keeps_the_chosen_prompt() {
+        let db = TempDb::new("rewind-hide");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        let ids = conversation(&store, "s_1").await;
+        assert_eq!(ids.len(), 6);
+
+        // Rewind to the *second* prompt: everything after it disappears, and the
+        // prompt itself survives because the user wants to rewrite or retry it.
+        let point = store.rewind_point("s_1", ids[2]).await.expect("point");
+        assert_eq!(point.user_message_id, ids[2]);
+        assert_eq!(point.keep_through, ids[2]);
+        assert_eq!(point.prompt, "prompt 1");
+        assert_eq!(point.messages_removed, 3, "answer 1, prompt 2, answer 2");
+
+        assert_eq!(
+            store
+                .mark_messages_rewound("s_1", point.keep_through)
+                .await
+                .expect("rewind"),
+            3
+        );
+
+        let visible = store.list_messages("s_1", 100).await.expect("list");
+        assert_eq!(
+            visible
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["prompt 0", "answer 0", "prompt 1"],
+            "the tail is hidden and the chosen prompt is the last visible message"
+        );
+        assert!(
+            visible.iter().all(|m| m.rewound_at.is_none()),
+            "a visible row must not carry the mark"
+        );
+
+        // The rows still exist: a rewind is a mark, not a delete.
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM messages").await, 6);
+
+        // The session count the rail shows follows the visible transcript.
+        let summary = store.list_sessions().await.expect("sessions");
+        assert_eq!(summary[0].message_count, 3);
+
+        // Rewinding the same point again is a no-op, not a second hide.
+        assert_eq!(
+            store
+                .mark_messages_rewound("s_1", point.keep_through)
+                .await
+                .expect("second rewind"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn rewinding_an_assistant_turn_resolves_to_its_prompt() {
+        let db = TempDb::new("rewind-normalise");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        let ids = conversation(&store, "s_1").await;
+
+        // Picking the answer means "the turn that produced this answer", so the
+        // cut lands before the answer and keeps its prompt.
+        let point = store.rewind_point("s_1", ids[3]).await.expect("point");
+        assert_eq!(point.user_message_id, ids[2]);
+        assert_eq!(point.prompt, "prompt 1");
+
+        // A tool result behaves the same way.
+        let tool_id = store
+            .append_message(&new_message("s_1", "tool", "result"))
+            .await
+            .expect("tool");
+        let point = store.rewind_point("s_1", tool_id).await.expect("point");
+        assert_eq!(point.user_message_id, ids[4], "the newest prompt owns it");
+    }
+
+    #[tokio::test]
+    async fn a_rewind_point_must_belong_to_the_session_it_names() {
+        let db = TempDb::new("rewind-scope");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "one", "/w", None)
+            .await
+            .expect("session one");
+        store
+            .create_session("s_2", "two", "/w", None)
+            .await
+            .expect("session two");
+        let other = store
+            .append_message(&new_message("s_2", "user", "elsewhere"))
+            .await
+            .expect("message");
+
+        // Ids are global, so a cross-session id is a real mistake and must be
+        // refused rather than rewinding the wrong conversation.
+        let err = store.rewind_point("s_1", other).await.unwrap_err();
+        assert!(err.to_string().contains("does not belong"), "{err}");
+        assert!(store.rewind_point("s_1", 9999).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_rewind_before_any_prompt_is_refused() {
+        let db = TempDb::new("rewind-no-prompt");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        let assistant = store
+            .append_message(&new_message("s_1", "assistant", "unsolicited"))
+            .await
+            .expect("assistant");
+        let err = store.rewind_point("s_1", assistant).await.unwrap_err();
+        assert!(err.to_string().contains("nothing to rewind to"), "{err}");
+    }
+
+    fn checkpoint(session_id: &str, path: &str, content: &str, message_id: i64) -> FileCheckpoint {
+        FileCheckpoint {
+            id: 0,
+            session_id: session_id.to_string(),
+            run_id: "r_1".to_string(),
+            agent_id: None,
+            call_id: "call_1".to_string(),
+            tool: "edit_file".to_string(),
+            path: path.to_string(),
+            existed: true,
+            content: content.to_string(),
+            capture_failed: false,
+            message_id,
+            created_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoints_round_trip_identically_content_sharing_their_bytes() {
+        let db = TempDb::new("checkpoint-roundtrip");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+
+        store
+            .record_checkpoint(&checkpoint("s_1", "a.rs", "fn a() {}", 10))
+            .await
+            .expect("first");
+        store
+            .record_checkpoint(&checkpoint("s_1", "b.rs", "fn a() {}", 11))
+            .await
+            .expect("second");
+        store
+            .record_checkpoint(&checkpoint("s_1", "empty.rs", "", 12))
+            .await
+            .expect("empty file");
+
+        let rows = store.list_checkpoints("s_1", 0).await.expect("list");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].content, "fn a() {}");
+        assert_eq!(rows[1].content, "fn a() {}", "identical bytes survive");
+        assert_eq!(rows[2].content, "", "an empty file is empty, not missing");
+        assert_eq!(rows[2].path, "empty.rs");
+
+        // Identical content is stored once.
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoint_blobs").await,
+            2,
+            "one blob for the shared bytes, one for the empty file"
+        );
+
+        // The region filter is what a rewind uses: strictly after the message.
+        let after = store.list_checkpoints("s_1", 10).await.expect("after");
+        assert_eq!(
+            after.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(),
+            vec!["b.rs", "empty.rs"]
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_checkpoint_releases_an_unshared_blob_only() {
+        let db = TempDb::new("checkpoint-delete");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        let shared = store
+            .record_checkpoint(&checkpoint("s_1", "a.rs", "shared", 1))
+            .await
+            .expect("first");
+        store
+            .record_checkpoint(&checkpoint("s_1", "b.rs", "shared", 2))
+            .await
+            .expect("second");
+        let unique = store
+            .record_checkpoint(&checkpoint("s_1", "c.rs", "unique", 3))
+            .await
+            .expect("third");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoint_blobs").await,
+            2
+        );
+
+        // Deleting one of two rows that share a payload keeps the payload.
+        store
+            .delete_checkpoint(shared)
+            .await
+            .expect("delete shared");
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM checkpoints").await, 2);
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoint_blobs").await,
+            2
+        );
+
+        // Deleting the last user of a payload frees it.
+        store
+            .delete_checkpoint(unique)
+            .await
+            .expect("delete unique");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoint_blobs").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uncapturable_checkpoint_keeps_its_place_but_no_bytes() {
+        let db = TempDb::new("checkpoint-uncapturable");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        let mut row = checkpoint("s_1", "huge.bin", "", 1);
+        row.capture_failed = true;
+        store.record_checkpoint(&row).await.expect("record");
+
+        let rows = store.list_checkpoints("s_1", 0).await.expect("list");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].capture_failed);
+        assert!(
+            !rows[0].undoable(),
+            "a missing before-image cannot be undone"
+        );
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoint_blobs").await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_created_file_is_a_checkpoint_that_did_not_exist() {
+        let db = TempDb::new("checkpoint-created");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        let mut row = checkpoint("s_1", "new.rs", "", 1);
+        row.existed = false;
+        store.record_checkpoint(&row).await.expect("record");
+
+        let rows = store.list_checkpoints("s_1", 0).await.expect("list");
+        assert!(!rows[0].existed, "undoing a create removes the file");
+        assert!(rows[0].undoable());
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoint_blobs").await,
+            0,
+            "there is no before-image to store"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_sweeps_journal_rows_whose_message_is_gone() {
+        let db = TempDb::new("checkpoint-retention");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        let keep = store.retention_keep_messages();
+        let mut ids = Vec::new();
+        for i in 0..(keep + 10) {
+            let id = store
+                .append_message(&new_message("s_1", "user", &format!("m{i}")))
+                .await
+                .expect("append");
+            ids.push(id);
+        }
+        // One journal row on a message that will be pruned, one on a survivor.
+        store
+            .record_checkpoint(&checkpoint("s_1", "old.rs", "old", ids[0]))
+            .await
+            .expect("old checkpoint");
+        let survivor = *ids.last().expect("last");
+        store
+            .record_checkpoint(&checkpoint("s_1", "new.rs", "new", survivor))
+            .await
+            .expect("new checkpoint");
+
+        age_messages(&store, "s_1", 30).await;
+        store.prune_messages_older_than(30).await.expect("prune");
+
+        let rows = store.list_checkpoints("s_1", 0).await.expect("list");
+        assert_eq!(
+            rows.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(),
+            vec!["new.rs"],
+            "the journal must not outlive the transcript it describes"
+        );
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoint_blobs").await,
+            1,
+            "and its payload goes with it"
+        );
+    }
+
+    #[tokio::test]
+    async fn last_rewind_at_reports_the_newest_mark() {
+        let db = TempDb::new("rewind-timestamp");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        let ids = conversation(&store, "s_1").await;
+        assert_eq!(store.last_rewind_at("s_1").await.expect("none"), None);
+
+        store
+            .mark_messages_rewound("s_1", ids[2])
+            .await
+            .expect("rewind");
+        let at = store
+            .last_rewind_at("s_1")
+            .await
+            .expect("read")
+            .expect("some");
+        assert!(at > 0);
+
+        // A message appended after the rewind is visible and does not move the
+        // mark.
+        store
+            .append_message(&new_message("s_1", "user", "rewritten"))
+            .await
+            .expect("append");
+        assert_eq!(store.last_rewind_at("s_1").await.unwrap(), Some(at));
+    }
+
+    // ---- token accounting -------------------------------------------------
+
+    fn usage(
+        session_id: &str,
+        run_id: &str,
+        agent_id: Option<&str>,
+        input: u32,
+        output: u32,
+        cached: Option<u32>,
+    ) -> UsageRecord {
+        UsageRecord {
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            agent_id: agent_id.map(str::to_string),
+            input_tokens: input,
+            output_tokens: output,
+            cached_tokens: cached,
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_totals_are_summed_per_agent() {
+        let db = TempDb::new("usage-totals");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .create_session("s_2", "other", "/w", None)
+            .await
+            .expect("session");
+
+        // Two main-agent calls, one of which the endpoint reported no cache
+        // figure for: the ratio must not treat that as a 0% hit.
+        store
+            .record_usage(&usage("s_1", "r_1", None, 100, 10, Some(90)))
+            .await
+            .expect("usage");
+        store
+            .record_usage(&usage("s_1", "r_1", None, 200, 20, None))
+            .await
+            .expect("usage");
+        // One subagent with a single call, and one with none recorded at all.
+        store
+            .record_usage(&usage("s_1", "r_1", Some("a_1"), 50, 5, Some(10)))
+            .await
+            .expect("usage");
+        // Another session's call must not leak into s_1.
+        store
+            .record_usage(&usage("s_2", "r_9", None, 1_000, 100, Some(0)))
+            .await
+            .expect("usage");
+
+        let totals = store.usage_totals("s_1").await.expect("totals");
+        assert_eq!(totals.len(), 2, "main agent plus one subagent");
+
+        let main = totals.get(&None).expect("main agent").to_owned();
+        assert_eq!(main.calls, 2);
+        assert_eq!(main.input_tokens, 300);
+        assert_eq!(main.output_tokens, 30);
+        assert_eq!(main.cached_tokens, 90);
+        assert_eq!(main.cached_known_calls, 1, "only one call reported a cache");
+        assert_eq!(
+            main.last_input_tokens, 200,
+            "the newest call's prompt size is the window fill"
+        );
+        let ratio = main.cache_hit_ratio().expect("ratio");
+        assert!((ratio - 0.3).abs() < 1e-9, "ratio is 90/300, got {ratio}");
+
+        let child = totals.get(&Some("a_1".to_string())).expect("subagent");
+        assert_eq!(child.calls, 1);
+        assert_eq!(child.input_tokens, 50);
+        assert_eq!(child.output_tokens, 5);
+        assert_eq!(child.cached_tokens, 10);
+        assert_eq!(child.last_input_tokens, 50);
+
+        // A session with no recorded call answers "nothing", not an error.
+        assert!(store
+            .usage_totals("s_missing")
+            .await
+            .expect("totals")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_stats_count_the_whole_session_not_a_page() {
+        let db = TempDb::new("session-stats");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .create_session("s_2", "other", "/w", None)
+            .await
+            .expect("session");
+
+        // Two main-agent turns: a prompt, then an answer that calls two tools and
+        // whose results come back as tool rows.
+        store
+            .append_message(&new_message("s_1", "user", "do the thing"))
+            .await
+            .expect("user");
+        let mut assistant = new_message("s_1", "assistant", "working");
+        assistant.run_id = Some("r_1".to_string());
+        assistant.tool_calls = vec![
+            ToolCall {
+                id: "c1".to_string(),
+                name: "read_file".to_string(),
+                arguments: "{}".to_string(),
+            },
+            ToolCall {
+                id: "c2".to_string(),
+                name: "run_command".to_string(),
+                arguments: "{}".to_string(),
+            },
+        ];
+        store.append_message(&assistant).await.expect("assistant");
+        for (call, name) in [("c1", "read_file"), ("c2", "run_command")] {
+            let mut tool = new_message("s_1", "tool", "ok");
+            tool.tool_call_id = Some(call.to_string());
+            tool.name = Some(name.to_string());
+            store.append_message(&tool).await.expect("tool");
+        }
+
+        // A subagent's own turn, which must be counted separately from the main
+        // conversation.
+        let mut child = new_message("s_1", "assistant", "child work");
+        child.agent_id = Some("a_1".to_string());
+        child.tool_calls = vec![ToolCall {
+            id: "c3".to_string(),
+            name: "read_file".to_string(),
+            arguments: "{}".to_string(),
+        }];
+        store.append_message(&child).await.expect("child");
+        // Another session's rows must not be counted.
+        store
+            .append_message(&new_message("s_2", "user", "unrelated"))
+            .await
+            .expect("other");
+
+        // Two finished runs (so working time is their sum) and one still live.
+        store.create_run("r_1", "s_1", "m", "p").await.expect("run");
+        store
+            .finish_run("r_1", RunStatus::Completed, None)
+            .await
+            .expect("finish");
+        store.create_run("r_2", "s_1", "m", "p").await.expect("run");
+        store
+            .finish_run("r_2", RunStatus::Failed, Some("boom"))
+            .await
+            .expect("finish");
+        store.create_run("r_3", "s_1", "m", "p").await.expect("run");
+        // Give the finished runs a measurable duration: `finish_run` stamps now,
+        // which can land in the same millisecond. Add an in-flight run's start.
+        store
+            .with(|conn| {
+                conn.execute(
+                    "UPDATE runs SET started_at = 1000, finished_at = 1500 WHERE id = 'r_1'",
+                    [],
+                )
+                .map_err(|e| db_err("age r_1", e))?;
+                conn.execute(
+                    "UPDATE runs SET started_at = 2000, finished_at = 2400 WHERE id = 'r_2'",
+                    [],
+                )
+                .map_err(|e| db_err("age r_2", e))?;
+                Ok(())
+            })
+            .await
+            .expect("age runs");
+
+        let stats = store.session_stats("s_1").await.expect("stats");
+        assert_eq!(stats.messages_total, 5, "user, assistant, 2 tools, child");
+        assert_eq!(stats.messages_main, 4);
+        assert_eq!(stats.messages_subagent, 1);
+        assert_eq!(stats.messages_by_role.get("tool"), Some(&2));
+        assert_eq!(stats.messages_main_by_role.get("user"), Some(&1));
+        assert_eq!(
+            stats.messages_main_by_role.get("tool"),
+            Some(&2),
+            "the child made no tool result row"
+        );
+
+        assert_eq!(stats.tool_calls_total, 3, "two main + one child call");
+        assert_eq!(stats.tool_calls.get("read_file"), Some(&2));
+        assert_eq!(stats.tool_calls.get("run_command"), Some(&1));
+
+        assert_eq!(stats.runs_total, 3);
+        assert_eq!(stats.runs_by_status.get("completed"), Some(&1));
+        assert_eq!(stats.runs_by_status.get("failed"), Some(&1));
+        assert_eq!(stats.runs_by_status.get("running"), Some(&1));
+        assert_eq!(
+            stats.working_ms, 900,
+            "500ms + 400ms; the live run's duration is not counted"
+        );
+
+        // A session with nothing in it answers zeros rather than an error.
+        let empty = store.session_stats("s_missing").await.expect("stats");
+        assert_eq!(empty, SessionStats::default());
+    }
+
+    #[tokio::test]
+    async fn usage_without_a_cache_figure_reports_no_ratio() {
+        let db = TempDb::new("usage-no-cache");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .record_usage(&usage("s_1", "r_1", None, 40, 4, None))
+            .await
+            .expect("usage");
+
+        let totals = store.usage_totals("s_1").await.expect("totals");
+        let main = totals.get(&None).expect("main agent");
+        assert_eq!(main.calls, 1);
+        assert_eq!(main.cached_known_calls, 0);
+        assert!(
+            main.cache_hit_ratio().is_none(),
+            "unknown must not be reported as a 0% hit rate"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_removes_its_usage_rows() {
+        let db = TempDb::new("usage-cascade");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .record_usage(&usage("s_1", "r_1", None, 10, 1, Some(5)))
+            .await
+            .expect("usage");
+
+        store.delete_session("s_1").await.expect("delete");
+        // The rows go with the session rather than outliving it as an orphan
+        // measurement attributed to an id nothing can resolve any more.
+        let count: i64 = store
+            .with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM usage_calls", [], |row| row.get(0))
+                    .map_err(|e| db_err("count usage", e))
+            })
+            .await
+            .expect("count");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn a_v7_database_migrates_to_v8_without_losing_anything() {
+        let db = TempDb::new("migrate-v8");
+        std::fs::create_dir_all(&db.dir).expect("dir");
+        {
+            // Build a real v7 database by opening one and taking it back a
+            // version: the point is that the v8 step runs over populated tables.
+            let store = db.open().await;
+            store
+                .create_session("s_1", "Kept", "/w", None)
+                .await
+                .expect("session");
+            store
+                .append_message(&new_message("s_1", "user", "hello"))
+                .await
+                .expect("message");
+            store
+                .with(|conn| {
+                    conn.execute_batch("DROP TABLE usage_calls;")
+                        .map_err(|e| db_err("drop usage", e))?;
+                    conn.pragma_update(None, "user_version", 7)
+                        .map_err(|e| db_err("version", e))?;
+                    Ok(())
+                })
+                .await
+                .expect("downgrade to v7");
+        }
+
+        let store = db.open().await;
+        let session = store.get_session("s_1").await.unwrap().expect("session");
+        assert_eq!(session.title, "Kept");
+        assert_eq!(
+            store
+                .list_messages("s_1", 10)
+                .await
+                .expect("messages")
+                .len(),
+            1
+        );
+        // And the new table is usable straight away.
+        store
+            .record_usage(&usage("s_1", "r_1", None, 7, 1, None))
+            .await
+            .expect("usage");
+        assert_eq!(store.usage_totals("s_1").await.expect("totals").len(), 1);
     }
 }
 

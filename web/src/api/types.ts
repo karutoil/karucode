@@ -32,7 +32,11 @@ export interface Health {
   status: string;
   version: string;
   uptime_secs: number;
-  workspace: string;
+  /**
+   * The server's implicit workspace, or `null` on a fresh install: nothing is
+   * chosen until the operator creates a project in the web UI.
+   */
+  workspace: string | null;
   /** Every project the server can serve, newest counts included. */
   projects: Project[];
   auth_required: boolean;
@@ -53,8 +57,12 @@ export interface Project {
 
 export interface ProjectListResponse {
   projects: Project[];
-  /** The server's default workspace (KARUCODE_WORKSPACE / --workspace). */
-  workspace: string;
+  /**
+   * The server's implicit workspace (KARUCODE_WORKSPACE / --workspace), or `null`
+   * when it was started without one — then the project list is the only source of
+   * directories.
+   */
+  workspace: string | null;
 }
 
 /** One model the user keeps available on a provider profile. */
@@ -321,6 +329,7 @@ export interface Config {
   version: string;
 }
 
+
 export interface ModelConfigPatch {
   provider?: string;
   base_url?: string;
@@ -418,6 +427,11 @@ export interface StoredMessage {
   name: string | null;
   /** Images the tool returned for a vision model (base64, no `data:` prefix). */
   images?: ImageAttachment[] | null;
+  /**
+   * When set, a rewind hid this message. The server already filters hidden rows
+   * out of every read, so this is only present on a row a caller fetched by id.
+   */
+  rewound_at?: number | null;
   created_at: number;
 }
 
@@ -487,6 +501,105 @@ export interface AgentDetail {
   messages_limit: number;
 }
 
+/**
+ * Token totals from `GET /api/sessions/:id/info`.
+ *
+ * `cache_hit_ratio` is `null` when no call reported a prefix-cache figure —
+ * *unknown*, which is not the same as a 0% hit. `cached_known_calls` is the
+ * denominator, so the UI can say "no cache data" instead of drawing an empty bar.
+ */
+export interface UsageTotals {
+  /** Provider calls recorded in this scope. */
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  /** How many of `calls` reported a cache figure at all. */
+  cached_known_calls: number;
+  /** 0..1, or `null` when no call reported one. */
+  cache_hit_ratio: number | null;
+  /** The newest call's prompt size: the context-window fill, not a sum. */
+  last_input_tokens: number;
+}
+
+/** One subagent's share of a session, from `GET /api/sessions/:id/info`. */
+export interface SessionInfoAgent {
+  id: string;
+  name: string;
+  role: string;
+  status: AgentStatus;
+  model: string;
+  iterations: number;
+  /** `null` while the agent is still running. */
+  duration_ms: number | null;
+  created_at: number;
+  finished_at: number | null;
+  /** Messages in this agent's own transcript. */
+  messages: number;
+  usage: UsageTotals;
+}
+
+/** One row of the tool-call breakdown. */
+export interface SessionInfoTool {
+  name: string;
+  count: number;
+}
+
+/** `GET /api/sessions/:id/info` — counts and totals, never message bodies. */
+export interface SessionInfo {
+  session: Session;
+  running: boolean;
+  stats: {
+    messages_total: number;
+    messages_main: number;
+    messages_subagent: number;
+    messages_by_role: Record<string, number>;
+    messages_main_by_role: Record<string, number>;
+    tool_calls_total: number;
+    tool_calls: Record<string, number>;
+    runs_by_status: Record<string, number>;
+    runs_total: number;
+    /** Wall clock during which a run was in flight; idle gaps excluded. */
+    working_ms: number;
+  };
+  usage: {
+    main: UsageTotals;
+    /** Each subagent's totals, keyed by agent id. */
+    by_agent: Record<string, UsageTotals>;
+    /** The whole session: main plus every subagent. */
+    total: UsageTotals;
+  };
+  context: {
+    /** The model this session resolves to right now. */
+    model: string;
+    /** The model entry's `context_window`, or `null` when it declares none. */
+    window: number | null;
+    /** The newest main-agent call's prompt size (the window fill). */
+    used: number;
+  };
+  agents: SessionInfoAgent[];
+  messages: {
+    total: number;
+    main: number;
+    subagent: number;
+    by_role: Record<string, number>;
+    main_by_role: Record<string, number>;
+  };
+  tools: {
+    total: number;
+    /** Capped server-side; `truncated` says more names exist. */
+    by_name: SessionInfoTool[];
+    truncated: boolean;
+  };
+  runs: {
+    total: number;
+    by_status: Record<string, number>;
+    working_ms: number;
+    /** The newest few, for a timeline. */
+    recent: RunRecord[];
+  };
+}
+
 export type ApprovalKind =
   | 'shell_command'
   | 'file_write'
@@ -551,6 +664,181 @@ export interface SessionDetail {
   approvals: ApprovalRecord[];
   claims: ClaimRecord[];
   running: boolean;
+  /**
+   * Messages the user queued while a run was in flight, oldest first.
+   *
+   * They are not transcript rows: they reach the conversation only when the
+   * runtime folds a steer in, or starts the next run for a follow-up. Carried on
+   * the snapshot so a reload (or a second browser) shows the same pending work
+   * instead of silently losing it.
+   */
+  queued_steers?: QueuedMessage[];
+  queued_follow_ups?: QueuedMessage[];
+  /** When this session's transcript was last rewound, if it ever was. */
+  last_rewind_at?: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Queued messages (steer / follow-up / recall)
+// ---------------------------------------------------------------------------
+
+/** How a queued message relates to the run it was accepted during. */
+export type QueuedKind = 'steer' | 'follow_up';
+
+/**
+ * One file attached to a queued message.
+ *
+ * Only the chip: the bytes are already inside the message's `content`, which is
+ * what the model sees. `path` is where an upload landed (or the inline file's
+ * own path).
+ */
+export interface QueuedAttachment {
+  name: string;
+  path: string;
+  mode: 'inline' | 'upload';
+  /** Bytes; `0` means the server did not record a size. */
+  size: number;
+  /**
+   * The inlined text of an `inline` attachment.
+   *
+   * Sent back so a recall can rebuild the chip the composer drew: the browser
+   * read this from a local file the server never saw, so it is the only copy
+   * that can be inlined again. An upload has none - the file is on disk at
+   * `path`.
+   */
+  content?: string;
+}
+
+/** One message waiting for a run to pick it up. */
+export interface QueuedMessage {
+  /** `steer_…` or `followup_…`; what a recall names. */
+  id: string;
+  kind: QueuedKind;
+  /** The exact text the model will see (draft + one block per attachment). */
+  content: string;
+  /** The draft to restore on recall; the content when nothing was attached. */
+  draft: string;
+  attachments?: QueuedAttachment[];
+  accepted_at: number;
+}
+
+/** `GET /api/sessions/:id/queues` — both queues, without the transcript. */
+export interface QueuesResponse {
+  session_id: string;
+  running: boolean;
+  steers: QueuedMessage[];
+  follow_ups: QueuedMessage[];
+}
+
+/** `POST /api/sessions/:id/messages?mode=steer|follow_up` → `202`. */
+export interface QueuedAccepted {
+  mode: QueuedKind;
+  session_id: string;
+  /** Present for `steer`. */
+  steer_id?: string;
+  /** Present for `follow_up`. */
+  follow_up_id?: string;
+  queued: true;
+  /** The entry as it was queued, so the panel can draw it immediately. */
+  queued_message?: QueuedMessage;
+}
+
+/** `DELETE /api/sessions/:id/queues/:id` — the message, handed back. */
+export interface RecallResponse {
+  session_id: string;
+  recalled: QueuedMessage;
+}
+
+// ---------------------------------------------------------------------------
+// Rewind
+// ---------------------------------------------------------------------------
+
+/**
+ * Where a rewind cuts and what it hides.
+ *
+ * `keep_through` is the id of the last *visible* message. `before_prompt` is the
+ * id in front of it, used by the retry and note modes, which hide the chosen
+ * prompt as well so the replacement turn does not follow it directly.
+ */
+export interface RewindPoint {
+  session_id: string;
+  user_message_id: number;
+  prompt: string;
+  keep_through: number;
+  before_prompt: number;
+  messages_removed: number;
+}
+
+/** One file a rewind will touch. */
+export interface RewindFile {
+  path: string;
+  /** The bytes restored, or `null` when the file is removed instead. */
+  restore?: string | null;
+  /** True when the rewind deletes the file (the agent created it). */
+  removes_file: boolean;
+  /** How many journal rows in the region changed this path. */
+  changes: number;
+  /** Tools that touched it, in the order they ran. */
+  tools: string[];
+  /** True when a before-image is missing, so the file cannot be fully restored. */
+  incomplete: boolean;
+}
+
+/** What a rewind would do, computed by the server from the journal it will replay. */
+export interface RewindPreview {
+  session_id: string;
+  message_id: number;
+  messages_removed: number;
+  files: RewindFile[];
+  incomplete: boolean;
+  /**
+   * Tools the rewound turn called that cannot be undone — `run_command`, a
+   * plugin, an MCP call. Their effects stay; the dialog says so rather than
+   * implying a clean revert.
+   */
+  opaque_tools: string[];
+}
+
+/** `GET /api/sessions/:id/rewind?message=N`. Mutates nothing. */
+export interface RewindPreviewResponse {
+  session_id: string;
+  point: RewindPoint;
+  preview: RewindPreview;
+  running: boolean;
+}
+
+export type RewindUndoOutcome = 'restored' | 'removed' | 'not_captured' | 'failed';
+
+/** How a rewind relates to the turn it replaces. */
+export type RewindMode = 'none' | 'retry' | 'note';
+
+export interface RewindRequest {
+  message_id: number;
+  /** Undo the file changes made after the message. Off by default. */
+  revert?: boolean;
+  /**
+   * `none` hides the tail and stops, `retry` re-sends the original prompt,
+   * `note` sends `note` instead.
+   */
+  mode?: RewindMode;
+  /** The replacement prompt for `mode: 'note'`. */
+  note?: string;
+  /** Whether the chosen prompt survives. Defaults per mode on the server. */
+  keep_prompt?: boolean;
+}
+
+/** `POST /api/sessions/:id/rewind`. */
+export interface RewindResponse {
+  session_id: string;
+  point: RewindPoint;
+  preview: RewindPreview;
+  /** One entry per journal row, newest first. */
+  outcomes: RewindUndoOutcome[];
+  /** The run started by `retry` or `note`; `null` for `none`. */
+  run_id: string | null;
+  mode: RewindMode;
+  files_restored: number;
+  files_skipped: number;
 }
 
 export interface WorkspaceEntry {
@@ -720,7 +1008,25 @@ export type KnownEvent = EventEnvelope &
     | { type: 'session_renamed'; session_id: string; title: string }
     | { type: 'session_model_changed'; session_id: string; model: SessionModelSelection | null }
     | { type: 'session_deleted'; session_id: string }
+    | {
+        type: 'session_rewound';
+        session_id: string;
+        /** The prompt the rewind normalised to. */
+        message_id: number;
+        /** How many messages the rewind hid; `0` is a no-op (a retry of the newest prompt). */
+        messages_removed: number;
+      }
     | { type: 'steer_applied'; steer_id: string; content: string }
+    | {
+        /**
+         * A session's queues changed. Carries both lists in full: the newest frame
+         * is the truth, so a missed one cannot leave a stale pending panel.
+         */
+        type: 'queued_messages';
+        session_id: string;
+        steers: QueuedMessage[];
+        follow_ups: QueuedMessage[];
+      }
     | { type: 'run_started'; run_id: string; prompt: string }
     | { type: 'run_finished'; run_id: string; status: RunStatus; error?: string | null }
     | { type: 'run_cancelled'; run_id: string }

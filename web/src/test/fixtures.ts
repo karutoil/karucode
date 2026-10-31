@@ -1,6 +1,7 @@
 import type {
   ApprovalRecord,
   Config,
+  QueuedMessage,
   SessionDetail,
   SessionSummary,
   StoredMessage,
@@ -13,6 +14,18 @@ import { resetPromptTokens } from '../state/promptTokens';
 import * as store from '../state/store';
 
 export const NOW = 1_710_000_100_000;
+
+/** One queued message, as `GET /api/sessions/:id` reports it. */
+export function queuedFixture(overrides: Partial<QueuedMessage> = {}): QueuedMessage {
+  return {
+    id: 'steer_1',
+    kind: 'steer',
+    content: 'also check the fixtures',
+    draft: 'also check the fixtures',
+    accepted_at: NOW - 1_000,
+    ...overrides,
+  };
+}
 
 export const configFixture: Config = {
   workspace: '/home/me/project',
@@ -237,6 +250,7 @@ export function resetAppState(): void {
   store.inspectorTab.value = 'workspace';
   store.settingsOpen.value = false;
   store.paletteOpen.value = false;
+  store.rewindTarget.value = null;
   store.fileViewerPath.value = null;
   store.resolvingApprovals.value = {};
   store.stopping.value = false;
@@ -249,9 +263,17 @@ export function resetAppState(): void {
   store.agentActivities.value = {};
   store.agentDetailLoading.value = false;
   store.agentDetailError.value = null;
+  store.sessionInfo.value = null;
+  store.sessionInfoFor.value = null;
+  store.sessionInfoLoading.value = false;
+  store.sessionInfoError.value = null;
+  store.sessionInfoTick.value = 0;
   actions.resetPluginPanelData();
   store.composerFocusTick.value = 0;
   store.sentMessageTick.value = 0;
+  store.composerDraft.value = null;
+  store.composerHandoff.value = null;
+  store.recallingQueued.value = {};
   store.resetToastTimers();
 }
 

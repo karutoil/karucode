@@ -20,6 +20,7 @@ import {
   type TurnRow,
 } from '../state/transcriptLayout';
 import { formatDuration } from '../lib/format';
+import * as store from '../state/store';
 import { activeTheme, type ThemeGrouping, type ThemeThinking, type ThemeToolStyle } from '../theme';
 import { ApprovalCard } from './ApprovalCard';
 import { CommandCard } from './CommandCard';
@@ -28,12 +29,14 @@ import { ThinkingBlock } from './ThinkingBlock';
 import { ToolCard } from './ToolCard';
 import { ToolGroup } from './ToolGroup';
 import { TpsBadge } from './TpsBadge';
-import { ChevronDownIcon } from './icons';
+import { ChevronDownIcon, RewindIcon } from './icons';
 
 export interface ChatTranscriptProps {
   items: ChatItem[];
   resolvingApprovals: Record<string, boolean>;
   onApprovalDecision: (approvalId: string, decision: 'allow_once' | 'allow_session' | 'deny') => void;
+  /** Open the rewind dialog for one stored message. */
+  onRewind?: (target: store.RewindTarget) => void;
 }
 
 /** The transcript view options, read once per render from the theme. */
@@ -44,6 +47,19 @@ interface ViewOptions {
 }
 
 const DAY_MS = 86_400_000;
+
+/**
+ * The stored message id behind a transcript item, or `null`.
+ *
+ * Items carry ids like `msg:42` (a persisted row), `tool:call_1` (a live tool
+ * call) and `local:…` (an optimistic send). Only a persisted row can be a rewind
+ * point, so everything else is refused rather than guessed at.
+ */
+export function storedMessageId(id: string): number | null {
+  if (!id.startsWith('msg:')) return null;
+  const parsed = Number(id.slice(4));
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
 
 function validAt(at: number): boolean {
   return Number.isFinite(at) && at > 0;
@@ -348,7 +364,13 @@ function AssistantTurn({
 }
 
 /** A user message: avatar, author, time and the question in a raised bubble. */
-function UserRow({ item }: { item: MessageItem }): JSX.Element {
+function UserRow({
+  item,
+  onRewind,
+}: {
+  item: MessageItem;
+  onRewind?: ChatTranscriptProps['onRewind'];
+}): JSX.Element {
   return (
     <article class="msg msg-user" aria-label="Your message">
       <span class="msg-avatar" aria-hidden="true">
@@ -362,12 +384,50 @@ function UserRow({ item }: { item: MessageItem }): JSX.Element {
               {clockTime(item.at)}
             </time>
           ) : null}
+          <RewindButton item={item} isAssistant={false} onRewind={onRewind} />
         </div>
         <div class="msg-body user-question">
           <div class="user-text">{item.content}</div>
         </div>
       </div>
     </article>
+  );
+}
+
+/**
+ * "Recall to here" for one message.
+ *
+ * Shown for a persisted row only: a live tool call or an optimistic send has no
+ * message id the server could resolve, and offering the button would produce a
+ * 404 the reader cannot act on. It is also hidden while a run is in flight,
+ * because the server refuses to rewind a session that is still writing.
+ */
+function RewindButton({
+  item,
+  isAssistant,
+  onRewind,
+}: {
+  item: MessageItem;
+  isAssistant: boolean;
+  onRewind?: ChatTranscriptProps['onRewind'];
+}): JSX.Element | null {
+  if (!onRewind) return null;
+  const id = storedMessageId(item.id);
+  if (id === null) return null;
+  if (store.chat.value.running) return null;
+  return (
+    <button
+      type="button"
+      class="rewind-button"
+      title={isAssistant ? 'Rewind to the request that produced this' : 'Rewind to this message'}
+      aria-label={
+        isAssistant ? 'Rewind to the request that produced this answer' : 'Rewind to this message'
+      }
+      onClick={() => onRewind({ messageId: id, preview: item.content, isAssistant })}
+    >
+      <RewindIcon size={13} />
+      <span>Rewind</span>
+    </button>
   );
 }
 
@@ -426,6 +486,7 @@ export function ChatTranscript({
   items,
   resolvingApprovals,
   onApprovalDecision,
+  onRewind,
 }: ChatTranscriptProps): JSX.Element {
   const theme = activeTheme.value;
   const options: ViewOptions = {
@@ -445,12 +506,22 @@ export function ChatTranscript({
             </p>
           );
         }
-        if (entry.kind === 'user') return <UserRow item={entry.item} key={entry.key} />;
+        if (entry.kind === 'user') {
+          return <UserRow item={entry.item} key={entry.key} onRewind={onRewind} />;
+        }
 
         const streaming = entry.parts.some(isStreamingPart);
         // The same "is this turn still doing something" test the transcript uses
         // to keep a turn unfolded, so the badge and the Working chip agree.
         const turn = { key: entry.key, at: entry.at, parts: entry.parts };
+        // The answer a rewound turn produced: the button rides the turn's first
+        // prose, which is the message the reader means by "this answer". A turn
+        // with no prose (a tool-only turn) has no message id to rewind to, and
+        // nesting an optimistic send inside a turn is impossible, so this is
+        // always a persisted row when it exists.
+        const answer = entry.parts.find(
+          (part) => part.kind === 'message' && part.role === 'assistant',
+        ) as MessageItem | undefined;
         return (
           <article
             class={`msg msg-assistant${streaming ? ' is-streaming' : ''}`}
@@ -470,6 +541,9 @@ export function ChatTranscript({
                 ) : null}
                 {turnTag(entry.parts)}
                 <TpsBadge chars={turnOutputChars(turn)} working={turnWorking(turn)} />
+                {answer ? (
+                  <RewindButton item={answer} isAssistant onRewind={onRewind} />
+                ) : null}
               </div>
               <AssistantTurn
                 turnKey={entry.key}

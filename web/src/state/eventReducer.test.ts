@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { KarucodeEvent, SessionSummary } from '../api/types';
 import { emptyChatState, seedChatState, type ChatState, type MessageItem } from './chat';
 import { applyEventToChat, applyEventToSessions } from './eventReducer';
-import { detailFixture, NOW, summaryFixture, secondSummaryFixture } from '../test/fixtures';
+import { detailFixture, NOW, queuedFixture, summaryFixture, secondSummaryFixture } from '../test/fixtures';
 
 function state(): ChatState {
   return emptyChatState('s_ab12');
@@ -612,5 +612,80 @@ describe('seedChatState', () => {
     expect(first?.kind === 'notice' ? first.message : '').toBe(
       'Showing the most recent messages; earlier history is not loaded.',
     );
+  });
+});
+
+describe('queued messages', () => {
+  it('replaces the pending list from the whole-queue frame', () => {
+    const queued = applyEventToChat(state(), {
+      ...event(3, 'queued_messages'),
+      session_id: 's_ab12',
+      steers: [queuedFixture({ id: 'steer_1' })],
+      follow_ups: [queuedFixture({ id: 'followup_1', kind: 'follow_up' })],
+    } as unknown as KarucodeEvent);
+
+    // The frame carries both queues, so the list is exactly what it says.
+    expect(queued.queued.map((entry) => entry.id)).toEqual(['steer_1', 'followup_1']);
+  });
+
+  it('empties the pending list when the run drains it', () => {
+    const seeded: ChatState = {
+      ...state(),
+      queued: [queuedFixture({ id: 'steer_1' })],
+    };
+    const drained = applyEventToChat(seeded, {
+      ...event(4, 'queued_messages'),
+      session_id: 's_ab12',
+      steers: [],
+      follow_ups: [],
+    } as unknown as KarucodeEvent);
+    expect(drained.queued).toEqual([]);
+  });
+
+  it('drops a steer the moment the run applies it', () => {
+    const seeded: ChatState = {
+      ...state(),
+      queued: [queuedFixture({ id: 'steer_1' })],
+    };
+    const applied = applyEventToChat(seeded, {
+      ...event(5, 'steer_applied'),
+      session_id: 's_ab12',
+      steer_id: 'steer_1',
+      content: 'also check the fixtures',
+    } as unknown as KarucodeEvent);
+    // The transcript row is not added here (the message arrives on the next
+    // request), but the optimistic pending row must not outlive its acceptance.
+    expect(applied.queued).toEqual([]);
+  });
+
+  it('leaves other queued messages alone when one steer lands', () => {
+    const seeded: ChatState = {
+      ...state(),
+      queued: [
+        queuedFixture({ id: 'steer_1' }),
+        queuedFixture({ id: 'followup_1', kind: 'follow_up' }),
+      ],
+    };
+    const applied = applyEventToChat(seeded, {
+      ...event(6, 'steer_applied'),
+      session_id: 's_ab12',
+      steer_id: 'steer_1',
+      content: 'first',
+    } as unknown as KarucodeEvent);
+    expect(applied.queued.map((entry) => entry.id)).toEqual(['followup_1']);
+  });
+
+  it('ignores a queue frame from another session', () => {
+    const seeded: ChatState = {
+      ...state(),
+      queued: [queuedFixture({ id: 'steer_1' })],
+    };
+    const other = applyEventToChat(seeded, {
+      ...event(7, 'queued_messages'),
+      session_id: 's_other',
+      steers: [],
+      follow_ups: [],
+    } as unknown as KarucodeEvent);
+    expect(other).toBe(seeded);
   });
 });

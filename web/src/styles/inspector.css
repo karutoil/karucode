@@ -1674,3 +1674,408 @@
   font-family: var(--font-mono);
   font-size: 10px;
 }
+
+/* ---------- session information ---------------------------------------- */
+/*
+ * The tab answers three questions in order: how full is the window, what did
+ * this cost, and how much work was it. Numbers are loud, prose is quiet, and a
+ * figure the server did not report is a dash - never a zero.
+ */
+
+.si-info {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.si-section {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.si-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.si-metric[data-tone='ok'] .metric-num {
+  color: var(--success);
+}
+
+/* The shared `.metric-sub` sits flush against the number ("33calls"); in the
+ * inspector's narrow column it needs the gap to read as a unit label. */
+.si-metric .metric-sub {
+  margin-left: 4px;
+}
+
+.si-metric[data-tone='warn'] .metric-num {
+  color: var(--warn);
+}
+
+.si-metric[data-tone='danger'] .metric-num {
+  color: var(--danger);
+}
+
+/* The context-window meter. One bar, because there is one number. */
+.si-window {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.si-window-meter {
+  position: relative;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+
+.si-window-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width var(--transition);
+}
+
+.si-window-meter[data-tone='warn'] .si-window-fill {
+  background: var(--warn);
+}
+
+.si-window-meter[data-tone='hot'] .si-window-fill {
+  background: var(--danger);
+}
+
+.si-window-legend {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.si-window-percent {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.2px;
+}
+
+.si-window-numbers {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.si-note {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+/* Definition lists: label left, value right, hairline between rows. */
+.si-meta {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  gap: 0;
+}
+
+.si-meta > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.si-meta > div:last-child {
+  border-bottom: 0;
+}
+
+.si-meta dt {
+  flex: 0 0 auto;
+  color: var(--text-kicker);
+  font-size: 10.5px;
+}
+
+.si-meta dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.si-live {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
+/* Tool-call breakdown: name left, count right, no card per row. */
+.si-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.si-tool-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  gap: 1px;
+}
+
+.si-tool {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.si-tool:last-child {
+  border-bottom: 0;
+}
+
+.si-tool-name {
+  overflow: hidden;
+  color: var(--text-user);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.si-tool-count {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+/* Subagent rows: a compact card each, because each one is a separate actor. */
+.si-agent-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  gap: 6px;
+}
+
+.si-agent {
+  padding: 9px 10px;
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius);
+  background: var(--surface-command);
+}
+
+.si-agent[data-status='running'] {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line-card));
+}
+
+.si-agent[data-status='failed'] {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--line-card));
+}
+
+.si-agent-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.si-agent-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  background: var(--surface-inset);
+  color: var(--muted);
+}
+
+.si-agent-titles {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.si-agent-name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.si-agent-role {
+  overflow: hidden;
+  color: var(--text-subtle);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.si-agent-status {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-transform: lowercase;
+}
+
+.si-agent-status[data-status='running'] {
+  color: var(--accent);
+}
+
+.si-agent-status[data-status='completed'] {
+  color: var(--success);
+}
+
+.si-agent-status[data-status='failed'] {
+  color: var(--danger);
+}
+
+.si-agent-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px 8px;
+  margin: 8px 0 0;
+}
+
+.si-agent-meta > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.si-agent-meta dt {
+  color: var(--text-kicker);
+  font-size: 9px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.si-agent-meta dd {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.si-agent-share {
+  color: var(--text-subtle);
+}
+
+/* Recent runs: a one-line timeline. */
+.si-run-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  gap: 2px;
+}
+
+.si-run {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.si-run:last-child {
+  border-bottom: 0;
+}
+
+.si-run-status {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-transform: lowercase;
+}
+
+.si-run[data-status='completed'] .si-run-status {
+  color: var(--success);
+}
+
+.si-run[data-status='failed'] .si-run-status,
+.si-run[data-status='limit_reached'] .si-run-status {
+  color: var(--danger);
+}
+
+.si-run[data-status='running'] .si-run-status {
+  color: var(--accent);
+}
+
+.si-run-prompt {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.si-run-meta {
+  grid-column: 2;
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.si-error {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line-card));
+  border-radius: var(--radius);
+  background: var(--danger-bg);
+}
+
+.si-error p {
+  margin: 0;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.si-error .button {
+  align-self: flex-start;
+}
+
+@media (max-width: 520px) {
+  /* A phone inspector is narrow: three columns of mono numbers stop being
+     readable, and the values wrap mid-token. */
+  .si-agent-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

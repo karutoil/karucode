@@ -600,4 +600,205 @@ describe('Composer', () => {
       await waitFor(() => expect(loadMentionTree).toHaveBeenCalledTimes(2));
     });
   });
+
+  describe('steering a run in flight', () => {
+    /** The composer as it looks mid-run, with a queue handler wired up. */
+    function renderRunning(overrides: Partial<ComposerProps> = {}) {
+      return renderComposer({
+        running: true,
+        status: { kind: 'streaming', label: 'Streaming' },
+        onQueue: vi.fn(async () => true),
+        ...overrides,
+      });
+    }
+
+    it('offers Send only when idle and Steer when a run is working', () => {
+      const idle = renderComposer();
+      expect(screen.queryByRole('button', { name: /Steer/ })).toBeNull();
+      idle.unmount();
+
+      renderRunning();
+      // The box queues rather than starting a second run, which is what the API
+      // refuses: there is no Send button while the agent works.
+      expect(screen.queryByRole('button', { name: /Send message/ })).toBeNull();
+      expect(screen.getByRole('button', { name: /steer the running turn/ })).not.toBeNull();
+    });
+
+    it('queues the draft as a steer on Ctrl+Enter', async () => {
+      const { props, textarea } = renderRunning();
+      fireEvent.input(textarea, { target: { value: 'also check the fixtures' } });
+      fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
+
+      await waitFor(() => expect(props.onQueue).toHaveBeenCalledTimes(1));
+      const [mode, message] = (props.onQueue as unknown as { mock: { calls: [string, { content: string; draft: string; attachments: unknown[] }][] } })
+        .mock.calls[0]!;
+      expect(mode).toBe('steer');
+      expect(message.content).toBe('also check the fixtures');
+      expect(message.draft).toBe('also check the fixtures');
+      expect(message.attachments).toEqual([]);
+      // The box empties only once the queue accepted it.
+      await waitFor(() => expect(textarea.value).toBe(''));
+    });
+
+    it('switches to a follow-up and sends it as one', async () => {
+      const { props, textarea } = renderRunning();
+      fireEvent.input(textarea, { target: { value: 'then run the tests' } });
+
+      const followUp = screen.getByRole('radio', { name: 'Follow-up' });
+      fireEvent.click(followUp);
+      expect(followUp.getAttribute('aria-checked')).toBe('true');
+
+      fireEvent.click(screen.getByRole('button', { name: /queue this follow-up/i }));
+      await waitFor(() => expect(props.onQueue).toHaveBeenCalledTimes(1));
+      expect(
+        (props.onQueue as unknown as { mock: { calls: [string][] } }).mock.calls[0]?.[0],
+      ).toBe('follow_up');
+    });
+
+    it('keeps the draft when the queue refuses the message', async () => {
+      const onQueue = vi.fn(async () => false);
+      const { textarea } = renderRunning({ onQueue });
+      fireEvent.input(textarea, { target: { value: 'keep me' } });
+      fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
+      await waitFor(() => expect(onQueue).toHaveBeenCalled());
+      // A 409 means the run just ended: the text must still be there to send.
+      expect(textarea.value).toBe('keep me');
+    });
+
+    it('queues the attachment chips alongside the rendered content', async () => {
+      const { props, textarea, fileInput } = renderRunning();
+      fireEvent.change(fileInput, { target: { files: [textFile('notes.md', '# Note\n')] } });
+      await waitFor(() => expect(screen.getByText(/Inlined · 7 B/)).not.toBeNull());
+
+      fireEvent.input(textarea, { target: { value: 'summarise' } });
+      fireEvent.click(screen.getByRole('button', { name: /steer the running turn/i }));
+      await waitFor(() => expect(props.onQueue).toHaveBeenCalledTimes(1));
+      const message = (props.onQueue as unknown as { mock: { calls: [string, { content: string; draft: string; attachments: { content?: string }[] }][] } })
+        .mock.calls[0]![1];
+      // The model gets the rendered body; the chip keeps its source so a recall
+      // can rebuild it.
+      expect(message.content).toContain('### notes.md (inlined, 7 B)');
+      expect(message.draft).toBe('summarise');
+      expect(message.attachments).toEqual([
+        { name: 'notes.md', path: 'notes.md', mode: 'inline', size: 7, content: '# Note\n' },
+      ]);
+    });
+
+    it('hides the mode toggle while the box is empty', async () => {
+      const { textarea } = renderRunning();
+      expect(screen.queryByRole('radiogroup', { name: 'What this message does' })).toBeNull();
+      fireEvent.input(textarea, { target: { value: 'x' } });
+      await waitFor(() =>
+        expect(screen.getByRole('radiogroup', { name: 'What this message does' })).not.toBeNull(),
+      );
+    });
+
+    it('says what Ctrl+Enter will do, and still stops on Escape', () => {
+      const { props, container, textarea } = renderRunning();
+      const hint = container.querySelector('.composer-hint') as HTMLElement;
+      expect(hint.textContent?.replace(/\s+/g, ' ').trim()).toBe('Ctrl Enter to steer·Esc to stop');
+      fireEvent.keyDown(textarea, { key: 'Escape' });
+      expect(props.onStop).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('queued messages', () => {
+    const queuedSteer = {
+      id: 'steer_1',
+      kind: 'steer' as const,
+      content: 'also check the fixtures',
+      draft: 'also check the fixtures',
+      accepted_at: 1_710_000_000_000,
+    };
+
+    function renderWithQueue(overrides: Partial<ComposerProps> = {}) {
+      return renderComposer({
+        running: true,
+        status: { kind: 'streaming', label: 'Streaming' },
+        onQueue: vi.fn(async () => true),
+        queued: [queuedSteer],
+        onRecall: vi.fn(async () => true),
+        ...overrides,
+      });
+    }
+
+    it('lists what is waiting, with its kind and attachments', () => {
+      const { container } = renderWithQueue({
+        queued: [
+          queuedSteer,
+          {
+            id: 'followup_1',
+            kind: 'follow_up',
+            content: 'then run the tests',
+            draft: 'then run the tests',
+            accepted_at: 1_710_000_001_000,
+            attachments: [
+              { name: 'report.pdf', path: 'a/report.pdf', mode: 'upload', size: 4096 },
+            ],
+          },
+        ],
+      });
+      const panel = screen.getByRole('region', { name: 'Queued messages' });
+      expect(panel.textContent).toContain('2 messages waiting');
+      expect(within(panel).getByText('also check the fixtures')).not.toBeNull();
+      expect(within(panel).getByText('then run the tests')).not.toBeNull();
+      // The chip is how the user recognises which file went with it.
+      expect(within(panel).getByText('report.pdf')).not.toBeNull();
+      // A follow-up waits its turn, so it is drawn differently from a steer.
+      const rows = container.querySelectorAll('.queued-row');
+      expect(rows[0]?.getAttribute('data-kind')).toBe('steer');
+      expect(rows[1]?.getAttribute('data-kind')).toBe('follow_up');
+    });
+
+    it('renders nothing when the queue is empty', () => {
+      renderWithQueue({ queued: [] });
+      expect(screen.queryByRole('region', { name: 'Queued messages' })).toBeNull();
+    });
+
+    it('recalls a queued message by id', async () => {
+      const onRecall = vi.fn(async () => true);
+      renderWithQueue({ onRecall });
+      fireEvent.click(screen.getByRole('button', { name: /Recall steer: also check the fixtures/ }));
+      await waitFor(() => expect(onRecall).toHaveBeenCalledWith('steer_1'));
+    });
+
+    it('disables the button while a recall is in flight', () => {
+      renderWithQueue({ recalling: { steer_1: true } });
+      const button = screen.getByRole('button', { name: /Recall steer/ }) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      expect(button.textContent).toBe('Recalling…');
+    });
+
+    it('puts a recalled draft and its chips back in the composer', async () => {
+      const { textarea } = renderWithQueue({ queued: [] });
+      // What `actions.recallQueuedMessage` does with the server's answer.
+      await act(async () => {
+        store.composerHandoff.value = {
+          text: 'summarise this',
+          attachments: [
+            { name: 'notes.md', path: 'notes.md', mode: 'inline', size: 7, content: '# Note\n' },
+          ],
+          token: 1,
+        };
+      });
+
+      await waitFor(() => expect(textarea.value).toBe('summarise this'));
+      expect(store.composerHandoff.value).toBeNull();
+      // The chip is back, ready to send, so the next send is the same request.
+      expect(screen.getByText('notes.md')).not.toBeNull();
+      expect(screen.getByText(/Inlined · 7 B/)).not.toBeNull();
+    });
+
+    it('appends a recalled draft to what the user has typed since', async () => {
+      const { textarea } = renderWithQueue({ queued: [] });
+      fireEvent.input(textarea, { target: { value: 'new thought' } });
+
+      await act(async () => {
+        store.composerHandoff.value = { text: 'old thought', attachments: [], token: 2 };
+      });
+
+      // A recall must never silently replace a draft written after it was queued.
+      await waitFor(() => expect(textarea.value).toBe('new thought\n\nold thought'));
+    });
+  });
 });

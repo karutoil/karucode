@@ -510,6 +510,16 @@ async fn run_subagent(
         // Inherited from the parent's tool context: a subagent works in the
         // same project as the run that spawned it.
         workspace: Arc::clone(&ctx.workspace),
+        // A subagent changes the same files as its parent, so its writes go into
+        // the same journal - with its own `agent_id`, which is what lets a rewind
+        // name the delegated turn a change came from.
+        journal: Some(crate::rewind::StoreJournal::new(
+            inner.deps.store.clone(),
+            session_id.clone(),
+            parent_run_id.clone(),
+            Some(agent_id.clone()),
+            Arc::clone(&ctx.workspace),
+        )),
         history: vec![Message::user(task.clone())],
         run_state: Some(Arc::clone(&child_state)),
         context_max_chars,

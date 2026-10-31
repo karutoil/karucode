@@ -66,7 +66,8 @@ pub async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Valu
     let projects = state.store().list_projects().await?;
     Ok(Json(json!({
         "projects": projects,
-        "workspace": state.workspace().root().to_string_lossy(),
+        // `null` until the operator creates the first project.
+        "workspace": state.workspace_root_display(),
     })))
 }
 

@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { uploadAttachment } from '../api/endpoints';
 import {
+  attachForQueue,
   attachmentSummary,
+  attachmentsFromQueue,
   canSendAttachments,
   classifyByName,
   classifyFile,
@@ -201,6 +203,93 @@ describe('composeMessage', () => {
   it('says nothing about the size when it is unknown', () => {
     const message = composeMessage('hi', [attachment({ size: 0 })]);
     expect(message).toContain('(inlined, unknown size)');
+  });
+});
+
+describe('queue round trip', () => {
+  it('sends an inline file with its body, because the browser has the only copy', () => {
+    const queued = attachForQueue([
+      attachment({ name: 'notes.md', path: 'notes.md', content: '# Note\n', size: 7 }),
+    ]);
+    expect(queued).toEqual([
+      { name: 'notes.md', path: 'notes.md', mode: 'inline', size: 7, content: '# Note\n' },
+    ]);
+  });
+
+  it('sends only the path for an upload, which is still on disk', () => {
+    const queued = attachForQueue([
+      attachment({
+        mode: 'upload',
+        name: 'shot.png',
+        path: '.karucode/attachments/s_1/shot.png',
+        content: undefined,
+        size: 4096,
+      }),
+    ]);
+    expect(queued).toEqual([
+      {
+        name: 'shot.png',
+        path: '.karucode/attachments/s_1/shot.png',
+        mode: 'upload',
+        size: 4096,
+      },
+    ]);
+    expect(queued[0]).not.toHaveProperty('content');
+  });
+
+  it('leaves out attachments that never became ready', () => {
+    expect(
+      attachForQueue([
+        attachment({ id: 'a', status: 'uploading' }),
+        attachment({ id: 'b', status: 'error', error: 'boom' }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('rebuilds ready chips from a recalled message, body included', () => {
+    const chips = attachmentsFromQueue([
+      { name: 'notes.md', path: 'notes.md', mode: 'inline', size: 7, content: '# Note\n' },
+      {
+        name: 'shot.png',
+        path: '.karucode/attachments/s_1/shot.png',
+        mode: 'upload',
+        size: 4096,
+      },
+    ]);
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toMatchObject({
+      name: 'notes.md',
+      mode: 'inline',
+      path: 'notes.md',
+      size: 7,
+      content: '# Note\n',
+      status: 'ready',
+    });
+    expect(chips[0]?.content).toBe('# Note\n');
+    // The upload has no body: the file is in the workspace.
+    expect(chips[1]).toMatchObject({ mode: 'upload', status: 'ready' });
+    expect(chips[1]?.content).toBeUndefined();
+    // Distinct ids, so recalling the same file twice does not collapse the chips.
+    expect(chips[0]?.id).not.toBe(chips[1]?.id);
+  });
+
+  it('reproduces the same message when a recall is sent again', () => {
+    // The whole point of the round trip: recall, then send, and the model sees
+    // what the original queue entry would have sent.
+    const original = composeMessage('summarise', [
+      attachment({ name: 'notes.md', path: 'notes.md', content: 'x', size: 1 }),
+    ]);
+    const recalled = attachmentsFromQueue(
+      attachForQueue([attachment({ name: 'notes.md', path: 'notes.md', content: 'x', size: 1 })]),
+    );
+    expect(composeMessage('summarise', recalled)).toBe(original);
+  });
+
+  it('gives each recalled chip a fresh id so two recalls stay separate', () => {
+    const entry = { name: 'notes.md', path: 'notes.md', mode: 'inline' as const, size: 1, content: 'x' };
+    const first = attachmentsFromQueue([entry]);
+    const second = attachmentsFromQueue([entry]);
+    expect(first[0]?.id).not.toBe(second[0]?.id);
   });
 });
 describe('uploadAttachment helper', () => {

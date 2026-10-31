@@ -438,17 +438,149 @@ that project's directory. The optional `model` pins the new session immediately
 ```json
 { "session": Session, "messages": [StoredMessage], "runs": [RunRecord],
   "agents": [AgentRecord], "approvals": [ApprovalRecord],
-  "claims": [ClaimRecord], "running": false }
+  "claims": [ClaimRecord], "running": false,
+  "queued_steers": [QueuedMessage], "queued_follow_ups": [QueuedMessage],
+  "last_rewind_at": null }
 ```
 `approvals` contains **pending** approvals only; resolved and expired decisions are
 not exposed by any endpoint yet. `messages` is the most recent page (newest 400,
-returned in chronological order).
+returned in chronological order). `last_rewind_at` is the unix-ms timestamp of
+the session's newest rewind, or `null` if it was never rewound; `messages`
+already excludes the hidden rows, so it is informational.
+
+`queued_steers` and `queued_follow_ups` are the messages the user sent while a run
+was in flight and that the run has not applied yet (see *Steering a run, following
+up, and recalling* below). They are not transcript rows.
 
 When the model asks for more tool calls than `limits.max_tool_calls_per_turn` in
 one turn, the extra calls are not executed: each one gets a `tool` message
 `[skipped: per-turn tool call limit reached …]` and a `notice` event is emitted.
 
 `PATCH /api/sessions/:id` `{ "title": "..." }` → `Session`
+
+`GET /api/sessions/:id/info` → the numbers behind a session, without a transcript.
+This is what the web UI's inspector **Session** tab reads; it stays cheap to poll
+on a long run because it carries counts and totals instead of message rows.
+```json
+{ "session": Session, "running": false,
+  "stats": { "messages_total": 481, "messages_main": 402, "messages_subagent": 79,
+             "messages_by_role": { "user": 12, "assistant": 61, "tool": 408 },
+             "messages_main_by_role": { "user": 9, "assistant": 40, "tool": 353 },
+             "tool_calls_total": 408,
+             "tool_calls": { "read_file": 210, "run_command": 96 },
+             "runs_by_status": { "completed": 11, "failed": 1 }, "runs_total": 12,
+             "working_ms": 1842119 },
+  "usage": { "main": UsageTotals, "by_agent": { "a_x": UsageTotals },
+             "total": UsageTotals },
+  "context": { "model": "gpt-4o-mini", "window": 128000, "used": 41023 },
+  "agents": [ { "id": "a_x", "name": "reviewer", "role": "reviewer",
+                "status": "completed", "model": "gpt-4o-mini", "iterations": 7,
+                "duration_ms": 61234, "created_at": 0, "finished_at": 0,
+                "messages": 79, "usage": UsageTotals } ],
+  "messages": { "total": 481, "main": 402, "subagent": 79,
+                "by_role": { … }, "main_by_role": { … } },
+  "tools": { "total": 408, "by_name": [ { "name": "read_file", "count": 210 } ],
+             "truncated": false },
+  "runs": { "total": 12, "by_status": { … }, "working_ms": 1842119,
+            "recent": [RunRecord] } }
+```
+* `stats` counts the **whole** session, not the bounded transcript window, and
+  excludes rewound rows. A "turn" has no stored row of its own: it is a `user`
+  entry in `messages_main_by_role`, while `runs_total` is how many times the agent
+  actually looped over a prompt.
+* `tools.by_name` is capped at 40 entries (`truncated: true` when more exist);
+  `tools.total` always counts every call.
+* `runs.working_ms` sums `finished_at - started_at` over runs that **finished**,
+  so it is time the agent worked, excluding idle gaps. An in-flight run is not
+  counted until it ends. `recent` carries the newest 20 runs.
+* `usage` totals the persisted per-call rows, **per agent**: `main` is the run's
+  own model calls, `by_agent` each subagent's, `total` the whole session (exactly
+  main plus every agent). This survives a reload — the `usage` event does not.
+* `context.used` is the **newest main-agent call's** prompt size (the window
+  fill, not a sum) and `context.window` is the resolved model's `context_window`,
+  or `null` when the entry declares none. A subagent's prompt is never reported
+  here: it has its own, much smaller, window.
+* An unknown session id is `404 not_found`.
+
+`UsageTotals` is
+`{ "calls", "input_tokens", "output_tokens", "cached_tokens",
+   "cached_known_calls", "cache_hit_ratio", "last_input_tokens" }`.
+`cache_hit_ratio` is `null` when **no** call reported a prefix-cache figure
+(unknown, which is not 0%); `cached_known_calls` is the denominator. A reported
+`0` is a real miss and stays `0.0`.
+
+### Rewind
+
+Rewinding sends a conversation back to an earlier message. Everything after it
+stops being part of the conversation, and the files the agent changed since then
+can optionally be put back.
+
+`GET /api/sessions/:id/rewind?message=<id>` → preview. Read-only; it hides
+nothing and writes nothing.
+```json
+{ "session_id": "s_ab12", "running": false,
+  "point": { "session_id": "s_ab12", "user_message_id": 412,
+             "prompt": "add a login page", "keep_through": 412,
+             "before_prompt": 411, "messages_removed": 6 },
+  "preview": { "session_id": "s_ab12", "message_id": 412,
+               "messages_removed": 6, "incomplete": false,
+               "opaque_tools": ["run_command"],
+               "files": [ { "path": "src/auth.rs",
+                            "restore": "…before-image bytes…",
+                            "removes_file": false, "changes": 2,
+                            "tools": ["write_file", "edit_file"],
+                            "incomplete": false } ] } }
+```
+`message` is required and must name a message **in this session**; a foreign id
+is `404 not_found` and a non-numeric one is `400 bad_request`. An assistant
+message or a tool result is normalised to the user prompt that produced it, so
+`point.user_message_id` is always a prompt. `keep_through` is the last message
+that survives (the prompt); `before_prompt` is the message in front of it, used
+by the modes that replace the prompt. `files` lists every path the journal
+recorded in the rewound region: `restore` is the bytes the file is put back to,
+`removes_file` is true when the agent created it, and `incomplete` marks a path
+whose before-image was never captured (over 4 MiB, or not valid UTF-8).
+`opaque_tools` names the calls a revert cannot reach.
+
+`POST /api/sessions/:id/rewind` → the rewind, performed.
+```json
+{ "message_id": 412, "mode": "retry", "revert": true, "note": "optional" }
+```
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `message_id` | yes | The message to rewind to. |
+| `mode` | no | `none` (default) hides the tail and stops. `retry` re-sends the original prompt. `note` sends `note` instead. |
+| `revert` | no | `false` by default. `true` restores the files the journal recorded before each change, newest first, then retires those journal rows. |
+| `note` | for `note` | The replacement prompt. Also overrides the prompt for `retry`. An empty note is `400 bad_request`. |
+| `keep_prompt` | no | Whether the chosen prompt survives. Defaults to `true` for `none` and `false` for `retry`/`note` - a replacement prompt must not follow the prompt it replaces. |
+
+```json
+{ "session_id": "s_ab12", "mode": "retry",
+  "point": { … }, "preview": { … },
+  "outcomes": ["restored", "removed"],
+  "run_id": "r_9f3", "files_restored": 2, "files_skipped": 0 }
+```
+`outcomes` has one entry per journal row, newest first: `restored`, `removed`,
+`not_captured` or `failed`. `run_id` is set by `retry` and `note` and is `null`
+for `none`. `files_restored` counts the clean outcomes and `files_skipped` the
+rest.
+
+Rules:
+
+* **Messages are hidden, not deleted.** The rows gain a `rewound_at` stamp and
+  every transcript read filters them, so the model, the session detail and the
+  message count agree. Nothing is recoverable-and-gone: the rows are still in
+  SQLite and retention deletes them like any other old row.
+* A session with a run in flight is `409 bad_request`; cancel it first. A live
+  loop holds the conversation in memory and would write back what was hidden.
+* `revert` restores only files journaled by `write_file` and `edit_file`. A
+  `run_command`, a plugin tool or an MCP tool can change anything and journal
+  nothing; the preview lists it in `opaque_tools` so a client can say so.
+* `session_rewound` is emitted on `/api/events` for every client; a client should
+  refetch the session rather than splice the transcript, because the server owns
+  the normalisation and the journal's effects are not in the transcript at all.
+* An unknown `mode` or an unknown body field is `400 bad_request`; neither is
+  silently ignored.
 
 ### Per-session model selection
 
@@ -491,6 +623,72 @@ Starts a run in the background; progress arrives on the event stream.
 Returns `409` with `code: "bad_request"` if a run is already active for that
 session (the HTTP status carries the conflict, the code stays in the documented
 set).
+
+#### Steering a run, following up, and recalling
+
+`?mode=` decides what a message does to the run that may or may not be in flight.
+`send` (the default) starts a run; the other two require one, and answer `409`
+when there is nothing to queue against.
+
+| `mode` | Effect | Accepted while |
+| --- | --- | --- |
+| `send` (default) | start a run | idle |
+| `steer` | fold the message into the conversation at the running loop's next iteration | running |
+| `follow_up` (or `follow-up`) | start a new run once the current one finishes | running |
+
+`POST /api/sessions/:id/messages?mode=steer` (or `follow_up`)
+```json
+{ "content": "summarise\n\nAttached 1 file:\n\n### notes.md (inlined, 812 B)\n\n```md\n# Note\n```",
+  "draft": "summarise",
+  "attachments": [ { "name": "notes.md", "path": "notes.md", "mode": "inline",
+                     "size": 812, "content": "# Note\n" } ] }
+```
+→ `202 { "mode": "steer", "session_id": "s_ab12", "steer_id": "steer_…",
+         "queued": true, "queued_message": QueuedMessage }`
+(`follow_up` answers with `follow_up_id` instead of `steer_id`.)
+
+`content` is what the model will see. `draft` and `attachments` are what a
+**recall** puts back on screen, so recalling a message carrying a 40 KB inlined
+file does not paste that file into the textarea. `mode` defaults to `upload`;
+`inline` takes an optional `content` with the inlined text, which is the only copy
+of a file the browser read from disk (an `upload` may not send `content`: its
+bytes are at `path`). A queued message carries at most 16 attachments, an inline
+body is capped at 128 KiB, and a nameless or pathless attachment is
+`400 bad_request`.
+
+`GET /api/sessions/:id/queues` → both queues without the transcript:
+```json
+{ "session_id": "s_ab12", "running": true,
+  "steers": [QueuedMessage], "follow_ups": [QueuedMessage] }
+```
+The same pair `GET /api/sessions/:id` carries as `queued_steers` and
+`queued_follow_ups`, so a reload (or a second browser) shows the pending work
+instead of losing it.
+
+`DELETE /api/sessions/:id/queues/:queued_id`
+→ `{ "session_id": "s_ab12", "recalled": QueuedMessage }`
+
+Takes a queued message back out; it never reaches the model. An id that is not
+queued - it already landed, or another client recalled it first - is
+`404 not_found`, and the client is expected to refetch rather than revive a
+message the run has applied.
+
+`QueuedMessage`
+```json
+{ "id": "steer_7f2c…", "kind": "steer", "content": "…the rendered body…",
+  "draft": "summarise", "accepted_at": 1710000000000,
+  "attachments": [ { "name": "notes.md", "path": "notes.md", "mode": "inline",
+                     "size": 812, "content": "# Note\n" } ] }
+```
+`kind` ∈ `steer|follow_up`. `draft` always carries the text to put back in the
+composer (it equals `content` when nothing is attached), and `attachments` is
+absent when there are none. Nothing here is persisted: a queued message exists
+only until the run applies it, which is what makes one that never lands simply
+absent from the transcript rather than a dangling turn.
+
+Every queue mutation — accepted, recalled, drained into the conversation, taken
+as a follow-up, or dropped with the session — publishes a `queued_messages` event
+with the whole pair of lists, so a client that missed a frame cannot drift.
 
 `POST /api/sessions/:id/cancel` → `{ "cancelled": true }` — `false` when no run is
 active (already finished or never started).
@@ -879,6 +1077,9 @@ When a resume is not possible, the client has to notice what it missed:
 | `session_renamed` | `session_id`, `title` |
 | `session_model_changed` | `session_id`, `model` (the new pin, or `null` when cleared) |
 | `session_deleted` | `session_id` |
+| `session_rewound` | `session_id`, `message_id` (the prompt the rewind normalised to), `messages_removed` (`0` = no-op, e.g. a retry of the newest prompt). Refetch the session rather than splicing it: the server owns the normalisation and the file journal's effects are not in the transcript |
+| `steer_applied` | `steer_id`, `content` — a queued steer joined the conversation. It is now a user turn in the transcript, so drop it from the pending list |
+| `queued_messages` | `session_id`, `steers`, `follow_ups` — the whole pair of queues, published on every mutation (accepted, recalled, drained, taken as a follow-up, dropped with the session). Replace the local pending list with what the frame says: the newest frame is the truth, so a missed one cannot leave it stale |
 | `run_started` | `run_id`, `prompt` |
 | `run_finished` | `run_id`, `status`, `error` |
 | `run_cancelled` | `run_id` |

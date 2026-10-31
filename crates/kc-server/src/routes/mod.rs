@@ -6,9 +6,11 @@ pub mod config;
 pub mod events;
 pub mod git;
 pub mod health;
+pub mod info;
 pub mod models;
 pub mod plugins;
 pub mod projects;
+pub mod rewind;
 pub mod sessions;
 pub mod terminals;
 pub mod workspace;
@@ -70,8 +72,18 @@ pub fn api_router() -> Router<AppState> {
                 .patch(sessions::rename_session)
                 .delete(sessions::delete_session),
         )
+        .route("/sessions/:id/info", get(info::session_info))
         .route("/sessions/:id/messages", post(sessions::send_message))
+        .route("/sessions/:id/queues", get(sessions::list_queues))
+        .route(
+            "/sessions/:id/queues/:queued_id",
+            axum::routing::delete(sessions::recall_queued),
+        )
         .route("/sessions/:id/cancel", post(sessions::cancel_run))
+        .route(
+            "/sessions/:id/rewind",
+            get(rewind::preview).post(rewind::rewind),
+        )
         .route(
             "/sessions/:id/model",
             axum::routing::patch(sessions::set_session_model),
@@ -100,8 +112,7 @@ pub fn api_router() -> Router<AppState> {
         )
         .route(
             "/terminals/:id",
-            axum::routing::patch(terminals::rename_terminal)
-                .delete(terminals::delete_terminal),
+            axum::routing::patch(terminals::rename_terminal).delete(terminals::delete_terminal),
         )
         .route("/terminals/:id/restart", post(terminals::restart_terminal))
         .route("/terminals/:id/socket", get(terminals::terminal_socket))

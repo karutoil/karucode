@@ -182,6 +182,7 @@ mod tests {
             settings: Arc::new(TestSettings),
             depth: 0,
             supports_images: false,
+            checkpoints: None,
         }
     }
 

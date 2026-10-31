@@ -8,6 +8,7 @@
 
 use crate::RuntimeInner;
 use kc_core::events::{Event, EventEnvelope, EventSink};
+use kc_core::store::UsageRecord;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -114,6 +115,36 @@ impl EmitCtx {
             message: message.into(),
             kind: Some(kind.into()),
         });
+    }
+
+    /// Persist one provider call's token counts for the session information view.
+    ///
+    /// The `usage` event is live-only, so without this row a reload cannot answer
+    /// "what has this session cost, and how much of it was cached". Accounting is
+    /// strictly secondary to the run: a store failure is a warning, never an
+    /// error, because losing a run over a metric would be the wrong trade.
+    pub(crate) async fn record_usage(
+        &self,
+        input_tokens: u32,
+        output_tokens: u32,
+        cached_tokens: Option<u32>,
+    ) {
+        let record = UsageRecord {
+            session_id: self.session_id.clone(),
+            run_id: self.run_id.clone(),
+            agent_id: self.agent_id.clone(),
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+        };
+        if let Err(e) = self.inner.deps.store.record_usage(&record).await {
+            tracing::warn!(
+                session = %self.session_id,
+                run = %self.run_id,
+                error = %e,
+                "could not record provider usage"
+            );
+        }
     }
 }
 

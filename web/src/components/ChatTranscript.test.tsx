@@ -4,6 +4,7 @@ import { ChatTranscript } from './ChatTranscript';
 import type { ApprovalView, ChatItem, CommandItem, MessageItem, ToolItem } from '../state/chat';
 import { approvalFixture, NOW } from '../test/fixtures';
 import { resetTheme, updateTheme } from '../theme';
+import * as store from '../state/store';
 
 function message(overrides: Partial<MessageItem> = {}): MessageItem {
   return {
@@ -78,9 +79,18 @@ function approvalView(overrides: Partial<ApprovalView> = {}): ApprovalView {
   };
 }
 
-function renderTranscript(items: ChatItem[], onApprovalDecision = vi.fn()) {
+function renderTranscript(
+  items: ChatItem[],
+  onApprovalDecision = vi.fn(),
+  onRewind?: (target: { messageId: number; preview: string; isAssistant: boolean }) => void,
+) {
   return render(
-    <ChatTranscript items={items} resolvingApprovals={{}} onApprovalDecision={onApprovalDecision} />,
+    <ChatTranscript
+      items={items}
+      resolvingApprovals={{}}
+      onApprovalDecision={onApprovalDecision}
+      onRewind={onRewind}
+    />,
   );
 }
 
@@ -403,5 +413,55 @@ describe('ChatTranscript view options', () => {
     setOptions({ thinking: 'expanded' });
     renderTranscript([user(), assistantWithReasoning()]);
     expect(document.querySelector('.thinking')?.hasAttribute('open')).toBe(true);
+  });
+});
+
+describe('ChatTranscript rewind affordance', () => {
+  it('offers a rewind on a persisted user message and names its id', () => {
+    const onRewind = vi.fn();
+    renderTranscript([user('Build a plugin lifecycle.', { id: 'msg:412' })], vi.fn(), onRewind);
+
+    const button = screen.getByRole('button', { name: 'Rewind to this message' });
+    fireEvent.click(button);
+    expect(onRewind).toHaveBeenCalledWith({
+      messageId: 412,
+      preview: 'Build a plugin lifecycle.',
+      isAssistant: false,
+    });
+  });
+
+  it('offers a rewind on the answer, which means the request behind it', () => {
+    const onRewind = vi.fn();
+    renderTranscript(
+      [user('go', { id: 'msg:1' }), message({ id: 'msg:2', content: 'Done.' })],
+      vi.fn(),
+      onRewind,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rewind to the request that produced this answer' }));
+    expect(onRewind).toHaveBeenCalledWith({
+      messageId: 2,
+      preview: 'Done.',
+      isAssistant: true,
+    });
+  });
+
+  it('offers nothing for an item the server cannot resolve', () => {
+    const onRewind = vi.fn();
+    // `local:` is an optimistic send and `stream:` is a live placeholder; neither
+    // has a row the rewind endpoint could look up.
+    renderTranscript([user('pending', { id: 'local:1' })], vi.fn(), onRewind);
+    expect(screen.queryByRole('button', { name: /Rewind/ })).toBeNull();
+  });
+
+  it('hides the affordance while the agent is still writing', () => {
+    store.chat.value = { ...store.chat.value, running: true };
+    renderTranscript([user('go', { id: 'msg:1' })], vi.fn(), vi.fn());
+    expect(screen.queryByRole('button', { name: /Rewind/ })).toBeNull();
+  });
+
+  it('offers nothing when the transcript is read-only', () => {
+    renderTranscript([user('go', { id: 'msg:1' })]);
+    expect(screen.queryByRole('button', { name: /Rewind/ })).toBeNull();
   });
 });

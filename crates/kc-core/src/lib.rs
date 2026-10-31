@@ -5,6 +5,7 @@
 //! else in the workspace depends on this crate, never the other way around.
 
 pub mod approval;
+pub mod checkpoint;
 pub mod config;
 pub mod error;
 pub mod events;
@@ -17,6 +18,7 @@ pub mod paths;
 pub mod plugin;
 pub mod prompt;
 pub mod provider;
+pub mod queue;
 pub mod settings;
 pub mod store;
 pub mod tool;
@@ -29,13 +31,20 @@ pub mod tool;
 /// in the generated module.
 pub const PLUGIN_PROTOCOL_SOURCE: &str = include_str!("plugin.rs");
 
+pub use approval::{ApprovalDecision, ApprovalKind, ApprovalRequest};
+pub use checkpoint::{FileCheckpoint, RewindFile, RewindPreview, UndoOutcome};
 pub use error::{Error, Result};
 pub use events::{Event, EventEnvelope, EventSink};
 pub use ids::{AgentId, ApprovalId, RunId, SessionId};
 pub use message::{Message, Role, ToolCall};
 pub use notify::{Notify, NotifyKind};
 pub use paths::Workspace;
+pub use queue::{
+    AttachmentMode, QueuedAttachment, QueuedKind, QueuedMessage, MAX_QUEUED_ATTACHMENTS,
+};
 pub use settings::Settings;
+pub use store::{RewindPoint, StoredMessage};
 pub use tool::{
-    Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOrigin, ToolOutcome, ToolRegistry, ToolSpec,
+    capture_file, CapturedFile, JournalHandle, Tool, ToolCallRequest, ToolClass, ToolCtx,
+    ToolOrigin, ToolOutcome, ToolRegistry, ToolSpec,
 };

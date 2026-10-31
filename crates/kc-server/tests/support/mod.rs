@@ -432,7 +432,6 @@ impl HarnessBuilder {
             store,
             runtime,
             providers: factory.clone(),
-            workspace,
             projects,
             plugins,
             mcp,

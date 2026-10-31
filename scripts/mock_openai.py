@@ -129,6 +129,20 @@ def decide(messages):
         return ("tools", [call("call_run_1", "run_command", {"command": "echo karucode-e2e"})])
     if "[tool:read_file]" in last_user:
         return ("tools", [call("call_read_1", "read_file", {"path": "README.md", "limit": 20})])
+    if "[tool:write]" in last_user:
+        # A real mutation, so the rewind journal has something to undo. The path
+        # is fixed and workspace-relative: an e2e check can look for it, and a
+        # revert must remove it again.
+        return (
+            "tools",
+            [
+                call(
+                    "call_write_1",
+                    "write_file",
+                    {"path": "rewind-demo.txt", "content": "written by the agent\n"},
+                )
+            ],
+        )
     if "[tool:image]" in last_user:
         # A vision read: the runtime attaches the pixels only when the model says
         # it accepts images, which is what this marker exercises end to end.
@@ -280,7 +294,15 @@ class Handler(BaseHTTPRequestHandler):
                 "created": int(time.time()),
                 "model": model,
                 "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 7,
+                    "total_tokens": 18,
+                    # A prefix-cache hit, in OpenAI's own shape. Without one the
+                    # session view has no hit rate to show at all, and the
+                    # "not reported" branch is exercised instead.
+                    "prompt_tokens_details": {"cached_tokens": 8},
+                },
             },
         )
 
@@ -428,7 +450,12 @@ class Handler(BaseHTTPRequestHandler):
                 "created": int(time.time()),
                 "model": model,
                 "choices": [],
-                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 7,
+                    "total_tokens": 18,
+                    "prompt_tokens_details": {"cached_tokens": 8},
+                },
             }
         )
         data = b"data: [DONE]\n\n"

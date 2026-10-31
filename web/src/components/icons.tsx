@@ -107,6 +107,16 @@ export function CopyIcon(props: IconProps): JSX.Element {
   );
 }
 
+/** An arrow curving back on itself: "go back to here". */
+export function RewindIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M3 8h11a5 5 0 010 10H9" />
+      <path d="M7 4L3 8l4 4" />
+    </svg>
+  );
+}
+
 export function SendIcon(props: IconProps): JSX.Element {
   return (
     <svg {...svgProps(props)}>

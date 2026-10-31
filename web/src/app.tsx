@@ -2,7 +2,7 @@
 // @kc-title: Use the browser workspace
 // @kc-summary: Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary.
 // @kc-tags: ui, web, frontend, panels, shortcuts, preact
-// @kc-applies-to: ui:ProjectRail, ui:project-switcher, ui:mobile-sheet, ui:mobile-layout, route:GET /api/projects/:id/favicon, ui:SessionsRail, ui:ChatView, ui:Composer, ui:TpsBadge, ui:ContextPill, ui:Inspector, ui:SettingsSheet, ui:NotificationsSection, ui:ToastRegion, ui:CommandPalette, ui:FileViewer, ui:FilePreview, ui:plugin-panel, route:GET /api/workspace/tree, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:POST /api/workspace/upload, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, config:providers.models.context_window, config:[notifications], event:usage, event:notification, file:web/src/components/pluginPanels.ts, file:web/src/components/PluginPanelView.tsx, file:web/src/components/TpsBadge.tsx, file:web/src/components/NotificationsSettings.tsx, file:web/src/styles/mobile.test.ts, file:web/src/state/notifier.ts, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts, file:web/src/lib/tps.ts, file:web/src/state/promptTokens.ts, file:web/src/lib/dockHeight.ts, fn:registerPluginPanelRenderer, event:tool_call_finished, tool:read_file, config:model.supports_images, cmd:npm run dev, cmd:npm run build, file:web/dist, env:KARUCODE_WEB_DIR
+// @kc-applies-to: ui:ProjectRail, ui:project-switcher, ui:mobile-sheet, ui:mobile-layout, route:GET /api/projects/:id/favicon, ui:SessionsRail, ui:ChatView, ui:Composer, ui:TpsBadge, ui:ContextPill, ui:Inspector, ui:SessionInfoTab, route:GET /api/sessions/:id/info, file:web/src/components/SessionInfoTab.tsx, file:web/src/lib/sessionInfo.ts, ui:SettingsSheet, ui:NotificationsSection, ui:ToastRegion, ui:CommandPalette, ui:FileViewer, ui:FilePreview, ui:RewindDialog, ui:plugin-panel, route:GET /api/workspace/tree, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:POST /api/workspace/upload, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, event:session_rewound, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, config:providers.models.context_window, config:[notifications], event:usage, event:notification, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, event:queued_messages, event:steer_applied, file:web/src/components/pluginPanels.ts, file:web/src/state/queues.test.ts, file:web/src/styles/composer.css, file:scripts/verify_queues.py, file:web/src/components/PluginPanelView.tsx, file:web/src/components/RewindDialog.tsx, file:web/src/components/TpsBadge.tsx, file:web/src/components/NotificationsSettings.tsx, file:web/src/styles/mobile.test.ts, file:web/src/state/notifier.ts, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts, file:web/src/lib/tps.ts, file:web/src/state/promptTokens.ts, file:web/src/lib/dockHeight.ts, fn:registerPluginPanelRenderer, event:tool_call_finished, tool:read_file, config:model.supports_images, cmd:npm run dev, cmd:npm run build, file:web/dist, env:KARUCODE_WEB_DIR
 //
 // # Layout
 //
@@ -26,6 +26,22 @@
 //   expanding the card - and clicking one opens a lightbox with the full image.
 //   The bytes come from `tool_call_finished.images` live and from the stored
 //   `messages.images` on reload, so a preview never disappears after a refresh.
+// * **Rewind**: every persisted user message and every assistant turn carries a
+//   **Rewind** button in its header (hover or keyboard focus reveals it). It
+//   opens a dialog that hides the conversation from that message onwards and
+//   offers three choices: **Just remove it** (the conversation ends there; edit
+//   the prompt yourself), **Ask again** (the same request goes back to the
+//   agent) and **Send a note instead** (a different instruction replaces it).
+//   A separate *Revert* checkbox is **off** by default and lists every file the
+//   agent changed after that message, with **Restore** or **Remove** beside each
+//   one - and an explicit warning when a file has no saved before-image or when
+//   the turn ran a tool (`run_command`, a plugin, MCP) whose effects cannot be
+//   undone. The list comes from `GET /api/sessions/:id/rewind`, the same preview
+//   the server replays, so the dialog describes what will happen rather than an
+//   estimate of it. The button is hidden while a run is in flight (the server
+//   refuses a rewind of a live session) and for items with no stored row
+//   (optimistic sends, live placeholders). The `http-api` topic documents the
+//   request shapes.
 // * **Composer dock**: the composer *floats* over the bottom of the transcript
 //   instead of taking a band of its own, so the conversation keeps the full
 //   height of the pane. It starts on one line and grows with the draft. While you
@@ -51,9 +67,24 @@
 // * **Workspace tabs** (above the transcript): *Conversation* and *Changes*.
 //   *Changes* reuses the inspector's git diff list; the composer only shows on
 //   *Conversation*.
-// * **Inspector** (right): tabs for agents, changes (git diff), commands and
-//   workspace files, plus one tab per **plugin panel** (see below). Click a file
-//   to open the viewer.
+// * **Inspector** (right): tabs for agents, changes (git diff), the session's
+//   own numbers and workspace files, plus one tab per **plugin panel** (see
+//   below). Click a file to open the viewer.
+// * **Session tab** (inspector): what this session *is* and what it *cost*,
+//   read from `GET /api/sessions/:id/info` rather than folded from the
+//   transcript on screen, because the transcript is a bounded window and the
+//   token rows are persisted per provider call. It shows the context window fill
+//   (the newest main-agent prompt over the model's own `context_window`), input
+//   / output / cached tokens with a cache hit rate, an optional cost estimate
+//   when the model declares per-million prices, prompts vs turns vs model calls
+//   vs tool calls, runs by outcome, working time (sum of finished runs, so idle
+//   gaps are excluded), the per-tool breakdown, one row per subagent with its
+//   own tokens, cache rate, message count and duration, and the newest runs.
+//   It refreshes on every `usage`, `run_finished` and `agent_finished` frame,
+//   coalesced into one read. The rule throughout: a figure the server did not
+//   report reads as "—" or "Not reported", never as 0 — an unknown prompt-cache
+//   rate is not a 0% hit, and a model with no declared window gets no
+//   percentage.
 // * **File viewer** (modal): Markdown and HTML open on a rendered preview (with a
 //   *Preview*/*Source* toggle), images and PDFs render from
 //   `GET /api/workspace/raw`, and every complete text file can be edited and
@@ -138,6 +169,32 @@
 // can open with its file tools; names are never overwritten. Files above the 8 MiB
 // upload ceiling are refused before any request is made. Sending is blocked while
 // a chip is still reading or uploading, and a failed chip says why.
+//
+// # Steering a run, following up, and recalling
+//
+// While the agent works, the same box **queues** instead of sending, because the
+// API refuses a second run (`409`). Two kinds, chosen by the toggle that appears
+// beside the button once there is text: **Steer** folds the message into the turn
+// in flight ("also rename the test"), **Follow-up** starts the next turn once this
+// one finishes ("then run the tests"). The button says which one it will do and
+// the footnote hint follows the toggle. Nothing is added to the transcript
+// optimistically: a steer becomes a user turn only when the loop folds it in
+// (`steer_applied`), which is where the model actually saw it.
+//
+// Queued messages appear in a panel **above** the box, with their kind, draft and
+// attachment chips, each with **Recall**. Recalling takes the message out of the
+// queue (`DELETE /api/sessions/:id/queues/:id`) so it never reaches the model, and
+// puts the form back in the composer: the draft you typed, not the rendered body,
+// and the chips with their inlined text — so sending again produces exactly the
+// request the recall took back. A draft written since the message was queued is
+// kept, with the recalled text appended below it. If the run already applied the
+// message the server answers `404`: the panel says so and the session is
+// refetched rather than reviving something the model has seen.
+//
+// The pending list is part of the session snapshot (`queued_steers`,
+// `queued_follow_ups`), so a reload or a second tab shows the same work, and every
+// queue mutation arrives as a `queued_messages` frame carrying both lists in full
+// — the newest frame wins, so a missed one cannot leave the panel stale.
 //
 // # Live throughput and context usage
 //
@@ -328,6 +385,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { FileViewer } from './components/FileViewer';
 import { Inspector } from './components/Inspector';
 import { ProjectRail } from './components/ProjectRail';
+import { RewindDialog } from './components/RewindDialog';
 import { SessionsRail } from './components/SessionsRail';
 import { SettingsSheet } from './components/SettingsSheet';
 import { ThemeStudio } from './components/ThemeStudio';
@@ -338,6 +396,7 @@ function isDialogOpen(): boolean {
     store.settingsOpen.value ||
     store.paletteOpen.value ||
     store.themeStudioOpen.value ||
+    store.rewindTarget.value !== null ||
     store.fileViewerPath.value !== null
   );
 }
@@ -510,6 +569,7 @@ export function App(): JSX.Element {
       <SettingsSheet />
       <CommandPalette />
       <ThemeStudio />
+      <RewindDialog />
       <FileViewer />
       <ToastRegion />
     </div>

@@ -67,3 +67,38 @@ describe('inspector tab strip stylesheet', () => {
     expect(tab['height']).toBe('var(--tabs-h)');
   });
 });
+
+describe('session-info panel stylesheet', () => {
+  /* `session-` belongs to the sessions rail.
+   *
+   * `.session-meta` is the timestamp/message line inside a session row, styled as
+   * a one-line flex row in `layout.css`. The Session tab's definition list was
+   * also called `.session-meta`, and because `inspector.css` is imported from
+   * the same bundle, its `flex-direction: column` + `> div` rules won on source
+   * order and restyled every row in the rail: "13m ago" and "832 messages"
+   * stacked and centred. A stylesheet test cannot see the cascade, but it can
+   * insist the panel stays out of the rail's namespace.
+   */
+  const htmlSource = readFileSync(
+    new URL('../components/SessionInfoTab.tsx', import.meta.url),
+    'utf8',
+  );
+
+  it('does not use the sessions rail class namespace', () => {
+    const railClasses = /\bclass="[^"]*\bsession-[a-z-]+/g;
+    const used = [...htmlSource.matchAll(railClasses)].map((match) => match[0]);
+    expect(used, `SessionInfoTab must not use session-* classes: ${used.join(', ')}`).toEqual([]);
+    // ... and the stylesheet must not define any either.
+    expect(cssSource).not.toMatch(/\.session-[a-z-]+\s*[,{:]/);
+  });
+
+  it('scopes the panel to si- so a future rename cannot collide', () => {
+    expect(htmlSource).toContain('class="inspector-section si-info"');
+    expect(cssDeclarations('.si-meta')['flex-direction']).toBe('column');
+    // The rail's own rule is untouched and still a row.
+    const rail = readFileSync(new URL('./layout.css', import.meta.url), 'utf8');
+    const start = rail.indexOf('\n.session-meta {');
+    expect(start).toBeGreaterThan(-1);
+    expect(rail.slice(start, rail.indexOf('\n}', start))).toContain('display: flex');
+  });
+});

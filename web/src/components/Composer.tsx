@@ -4,9 +4,11 @@ import type { Activity } from '../state/selectors';
 import * as store from '../state/store';
 import * as api from '../api/endpoints';
 import { toErrorMessage } from '../api/client';
-import type { ApprovalMode, Config } from '../api/types';
+import type { ApprovalMode, Config, QueuedAttachment, QueuedKind, QueuedMessage } from '../api/types';
 import {
+  attachForQueue,
   attachmentSummary,
+  attachmentsFromQueue,
   canSendAttachments,
   classifyFile,
   composeMessage,
@@ -82,6 +84,123 @@ export interface UploadContext {
   project: string | null;
 }
 
+/** One-line label for each queue kind, used by the toggle and the rows. */
+const QUEUE_LABEL: Record<QueuedKind, string> = {
+  steer: 'Steer',
+  follow_up: 'Follow-up',
+};
+
+const QUEUE_TITLE: Record<QueuedKind, string> = {
+  steer:
+    'Steer: fold this into the turn that is already running. The model sees it at its next step, without losing the work in flight.',
+  follow_up:
+    'Follow-up: run this as a new turn once the current one finishes. The agent finishes what it is doing first.',
+};
+
+/**
+ * Which queue a message typed while the agent works goes into.
+ *
+ * Shown only while a run is in flight, because that is the only time the choice
+ * exists: with nothing running, sending *is* the follow-up. The two options are
+ * genuinely different - a steer changes the turn in progress, a follow-up begins
+ * the next one - so the toggle says which one is armed rather than hiding the
+ * choice behind a modifier key.
+ */
+function QueueModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: QueuedKind;
+  onChange: (next: QueuedKind) => void;
+}): JSX.Element {
+  return (
+    <div class="queue-mode" role="radiogroup" aria-label="What this message does">
+      {(Object.keys(QUEUE_LABEL) as QueuedKind[]).map((kind) => (
+        <button
+          key={kind}
+          type="button"
+          role="radio"
+          aria-checked={mode === kind}
+          class="queue-mode-option"
+          data-active={mode === kind ? 'true' : 'false'}
+          title={QUEUE_TITLE[kind]}
+          onClick={() => onChange(kind)}
+        >
+          {QUEUE_LABEL[kind]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The messages waiting for this run, with the one action that matters on each:
+ * take it back.
+ *
+ * A queued message is invisible in the transcript by design (a steer only becomes
+ * a turn when the loop folds it in), which made a mis-sent message impossible to
+ * undo before this panel existed. Recall is honest about the race: the server
+ * answers `404` if the run already applied the message, and the row says the same
+ * thing rather than pretending the click always works.
+ */
+function QueuedPanel({
+  queued,
+  recalling,
+  onRecall,
+}: {
+  queued: readonly QueuedMessage[];
+  recalling: Record<string, boolean>;
+  onRecall: (queuedId: string) => void;
+}): JSX.Element | null {
+  if (queued.length === 0) return null;
+  return (
+    <section class="queued-panel" aria-label="Queued messages">
+      <p class="queued-head">
+        {queued.length === 1 ? '1 message waiting' : `${queued.length} messages waiting`}
+        <span class="queued-head-hint"> · the agent sees them in this order</span>
+      </p>
+      <ul class="queued-list">
+        {queued.map((entry) => (
+          <li key={entry.id} class="queued-row" data-kind={entry.kind}>
+            <span class="queued-kind" title={QUEUE_TITLE[entry.kind]}>
+              {QUEUE_LABEL[entry.kind]}
+            </span>
+            <span class="queued-body">
+              <span class="queued-text" title={entry.content}>
+                {entry.draft || entry.content}
+              </span>
+              {entry.attachments && entry.attachments.length > 0 ? (
+                <span class="queued-attachments">
+                  {entry.attachments.map((attachment) => (
+                    <span
+                      key={`${entry.id}:${attachment.path}`}
+                      class="queued-attachment"
+                      title={attachment.path}
+                    >
+                      <FileIcon size={10} />
+                      {attachment.name}
+                    </span>
+                  ))}
+                </span>
+              ) : null}
+            </span>
+            <button
+              type="button"
+              class="queued-recall"
+              disabled={recalling[entry.id] === true}
+              onClick={() => onRecall(entry.id)}
+              aria-label={`Recall ${QUEUE_LABEL[entry.kind].toLowerCase()}: ${entry.draft || entry.content}`}
+              title="Take this back, with its attachments, and put it in the composer"
+            >
+              {recalling[entry.id] ? 'Recalling…' : 'Recall'}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 /**
  * `57.4%` of the context window, with a hairline meter in its background.
  *
@@ -121,6 +240,23 @@ export interface ComposerProps {
   status: Activity;
   /** Receives the final message text (draft + inlined/referenced attachments). */
   onSend: (text: string) => Promise<boolean>;
+  /**
+   * Queue a message against the run that is already working.
+   *
+   * `mode` is what the toggle asked for: a steer joins the turn in flight, a
+   * follow-up starts the run after it. The form is passed alongside the rendered
+   * content so a recall can put both back.
+   */
+  onQueue?: (
+    mode: QueuedKind,
+    message: { content: string; draft: string; attachments: QueuedAttachment[] },
+  ) => Promise<boolean>;
+  /** Messages waiting for the run, newest last. */
+  queued?: QueuedMessage[];
+  /** Take a queued message back out; resolves `true` when it was recalled. */
+  onRecall?: (queuedId: string) => Promise<boolean>;
+  /** Queued ids whose recall is in flight, so the button can say so. */
+  recalling?: Record<string, boolean>;
   onStop: () => void;
   onOpenSettings: () => void;
   focusTick: number;
@@ -172,6 +308,10 @@ export function Composer({
   stopping,
   status,
   onSend,
+  onQueue,
+  queued,
+  onRecall,
+  recalling,
   onStop,
   onOpenSettings,
   focusTick,
@@ -204,11 +344,53 @@ export function Composer({
       element.setSelectionRange(incomingDraft.length, incomingDraft.length);
     });
   }, [incomingDraft]);
+
+  // A recalled message comes in the same way, but restores the *form*: the draft
+  // is appended to whatever has been typed since (a recall must never silently
+  // replace a fresh draft), and the chips come back so sending again produces the
+  // same request the recall took back.
+  const handoff = store.composerHandoff.value;
+  useEffect(() => {
+    if (handoff === null) return;
+    store.composerHandoff.value = null;
+    setDraft((current) => {
+      if (current.trim() === '') return handoff.text;
+      return `${current.replace(/\s+$/, '')}\n\n${handoff.text}`;
+    });
+    setAttachments((current) => {
+      if (handoff.attachments.length === 0) return current;
+      // Two recalls of the same file must not collapse into one chip: the ids are
+      // regenerated per recall, and `attachmentsFromQueue` already does that.
+      return [...current, ...attachmentsFromQueue(handoff.attachments)];
+    });
+    setAnnouncement(
+      handoff.attachments.length > 0
+        ? `Recalled to the composer with ${handoff.attachments.length} ${
+            handoff.attachments.length === 1 ? 'attachment' : 'attachments'
+          }.`
+        : 'Recalled to the composer.',
+    );
+    requestAnimationFrame(() => {
+      const element = textarea.current;
+      if (!element) return;
+      element.focus();
+      element.setSelectionRange(element.value.length, element.value.length);
+    });
+  }, [handoff]);
   const [caret, setCaret] = useState(0);
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [announcement, setAnnouncement] = useState('');
   const [dragging, setDragging] = useState(false);
+  /**
+   * Which queue the next message goes into while a run is in flight.
+   *
+   * `steer` is the default because it is the more useful of the two mid-run ("also
+   * check the fixtures"), and a follow-up is the rarer intent: with nothing
+   * running the toggle is hidden and this value is unused, because sending *is*
+   * the follow-up then.
+   */
+  const [queueMode, setQueueMode] = useState<QueuedKind>('steer');
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
@@ -418,25 +600,54 @@ export function Composer({
 
   const canType = disabledReason === null;
   const attachmentReady = canSendAttachments(attachments);
-  const canSend =
-    canType &&
-    !running &&
-    !sending &&
-    attachmentReady &&
-    (draft.trim() !== '' || attachments.some((attachment) => attachment.status === 'ready'));
+  const hasContent = draft.trim() !== '' || attachments.some((attachment) => attachment.status === 'ready');
+  // While a run is in flight the same box sends into the queue instead of
+  // starting one, because starting one is exactly what the API refuses with a
+  // 409. `canQueue` is therefore the "running" half of `canSend`.
+  const canQueue = canType && running && !sending && attachmentReady && hasContent && onQueue !== undefined;
+  const canSend = canType && !running && !sending && attachmentReady && hasContent;
+
+  const clearComposer = (message: string): void => {
+    setDraft('');
+    setCaret(0);
+    setAttachments([]);
+    setDismissed(true);
+    setAnnouncement(message);
+  };
 
   const submit = async (): Promise<void> => {
+    // While the agent works, the same box queues: a steer joins the turn in
+    // flight, a follow-up starts the next one.
+    if (running) {
+      if (!canQueue) return;
+      setSending(true);
+      try {
+        const accepted = await onQueue(queueMode, {
+          content: composeMessage(draft, attachments),
+          draft,
+          attachments: attachForQueue(attachments),
+        });
+        if (accepted) {
+          const count = attachments.length;
+          const what = QUEUE_LABEL[queueMode].toLowerCase();
+          clearComposer(
+            count === 0
+              ? `Queued as a ${what}.`
+              : `Queued as a ${what} with ${count} ${count === 1 ? 'attachment' : 'attachments'}.`,
+          );
+        }
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
     if (!canSend) return;
     setSending(true);
     try {
       const accepted = await onSend(composeMessage(draft, attachments));
       if (accepted) {
         const sent = attachments.length;
-        setDraft('');
-        setCaret(0);
-        setAttachments([]);
-        setDismissed(true);
-        setAnnouncement(sent === 0 ? '' : `Sent with ${sent} ${sent === 1 ? 'attachment' : 'attachments'}.`);
+        clearComposer(sent === 0 ? '' : `Sent with ${sent} ${sent === 1 ? 'attachment' : 'attachments'}.`);
       }
     } finally {
       setSending(false);
@@ -459,8 +670,12 @@ export function Composer({
     ? (disabledReason ?? 'The composer is unavailable.')
     : running
       ? narrowViewport
-        ? 'Working — draft your next message…'
-        : 'The agent is working — draft the next message while you wait…'
+        ? queueMode === 'steer'
+          ? 'Steer the run…'
+          : 'Queue a follow-up…'
+        : queueMode === 'steer'
+          ? 'The agent is working — type to steer it, or press Enter to queue…'
+          : 'The agent is working — type the next thing to do once it finishes…'
       : narrowViewport
         ? 'Ask karucode anything…'
         : 'Ask karucode anything, or describe a change...';
@@ -480,6 +695,16 @@ export function Composer({
 
   return (
     <>
+      {/* Above the box, inside the dock: a message is only recallable while it is
+       * still queued, so the list has to be visible at the moment the user is
+       * typing the next one. */}
+      <QueuedPanel
+        queued={queued ?? []}
+        recalling={recalling ?? {}}
+        onRecall={(queuedId) => {
+          void onRecall?.(queuedId);
+        }}
+      />
       <form
         class="composer"
         onSubmit={(event) => {
@@ -662,16 +887,40 @@ export function Composer({
           ) : null}
 
           {running ? (
-            <button
-              type="button"
-              class="button button-stop"
-              onClick={onStop}
-              disabled={stopping}
-              aria-label="Stop run (Escape)"
-            >
-              <StopIcon size={13} />
-              {stopping ? 'Stopping…' : 'Stop'}
-            </button>
+            <>
+              {/* Two buttons, two outcomes: Stop ends the run, Queue sends this
+               * message into it. They sit side by side because an empty box
+               * disables Queue rather than removing it, so the row does not jump
+               * while the user is typing.
+               *
+               * The mode toggle only appears once there is text: with an empty box
+               * it is a choice about nothing, and the dock is short. */}
+              {hasContent ? <QueueModeToggle mode={queueMode} onChange={setQueueMode} /> : null}
+              <button
+                type="submit"
+                class="button button-primary button-send button-queue"
+                disabled={!canQueue}
+                aria-label={
+                  queueMode === 'steer'
+                    ? 'Queue this message and steer the running turn (Command or Control + Enter)'
+                    : 'Queue this follow-up for the next turn (Command or Control + Enter)'
+                }
+                title={QUEUE_TITLE[queueMode]}
+              >
+                <ArrowRightIcon size={15} />
+                {queueMode === 'steer' ? 'Steer' : 'Queue'}
+              </button>
+              <button
+                type="button"
+                class="button button-stop"
+                onClick={onStop}
+                disabled={stopping}
+                aria-label="Stop run (Escape)"
+              >
+                <StopIcon size={13} />
+                {stopping ? 'Stopping…' : 'Stop'}
+              </button>
+            </>
           ) : (
             <button
               type="submit"
@@ -745,6 +994,8 @@ export function Composer({
             <span class="composer-hint" aria-hidden="true">
               {running ? (
                 <>
+                  <strong>Ctrl Enter</strong> to {queueMode === 'steer' ? 'steer' : 'queue a follow-up'}
+                  <span class="composer-hint-sep">·</span>
                   <strong>Esc</strong> to stop
                 </>
               ) : (

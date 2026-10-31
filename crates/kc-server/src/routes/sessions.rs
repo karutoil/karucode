@@ -32,6 +32,13 @@ const MESSAGE_LIMIT: usize = 5000;
 /// window is in the database and reachable with a larger `messages`.
 const MESSAGE_LIMIT_MAX: usize = 50_000;
 const RUN_LIMIT: usize = 200;
+/// Ceiling for one inline attachment's text on a queued message.
+///
+/// The composer inlines text files up to 64 KiB (`INLINE_MAX_BYTES` in
+/// `web/src/lib/attachments.ts`); this sits above that so a legitimate chip is
+/// never refused, and below `MAX_PROMPT_BYTES` so a queue of sixteen of them
+/// still fits in one request.
+const MAX_ATTACHMENT_INLINE_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -118,6 +125,89 @@ where
 struct MessageBody {
     #[serde(default)]
     content: Option<String>,
+    /// The text the user typed, when `content` is the rendered form. Sent for
+    /// `mode=steer`/`mode=follow_up` so a recall can restore the draft without
+    /// the attachment blocks pasted in. Ignored by `mode=send`, whose content is
+    /// already what the transcript shows.
+    #[serde(default)]
+    draft: Option<String>,
+    /// Chips to show when this message is recalled. They describe files whose
+    /// bytes are already inside `content`, so they are a display record, not a
+    /// second copy of the payload.
+    #[serde(default)]
+    attachments: Vec<AttachmentBody>,
+}
+
+/// One attachment on a queued message.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttachmentBody {
+    name: String,
+    path: String,
+    /// `inline` or `upload`; anything else is a `400 bad_request`.
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    /// The inlined text of an `inline` attachment.
+    ///
+    /// It is already inside `content`, which is what the model sees; keeping it
+    /// on the chip is what lets a recall put the file back in the composer, since
+    /// the browser's copy of a local file is the only one that exists.
+    #[serde(default)]
+    content: Option<String>,
+}
+
+impl AttachmentBody {
+    fn into_queued(self) -> ApiResult<kc_core::queue::QueuedAttachment> {
+        if self.name.trim().is_empty() {
+            return Err(ApiError::bad_request(
+                "an attachment requires a non-empty `name`",
+            ));
+        }
+        if self.path.trim().is_empty() {
+            return Err(ApiError::bad_request(
+                "an attachment requires a non-empty `path`",
+            ));
+        }
+        let mode = match self.mode.as_deref().map(str::trim) {
+            None | Some("") | Some("upload") => kc_core::queue::AttachmentMode::Upload,
+            Some("inline") => kc_core::queue::AttachmentMode::Inline,
+            Some(other) => {
+                return Err(ApiError::bad_request(format!(
+                    "attachment `mode` must be `inline` or `upload` (got `{other}`)"
+                )))
+            }
+        };
+        // An uploaded file's body is on disk at `path`; accepting a copy would let
+        // a client park bytes in memory that no recall needs.
+        let content = match mode {
+            kc_core::queue::AttachmentMode::Inline => self.content,
+            kc_core::queue::AttachmentMode::Upload => {
+                if self.content.is_some() {
+                    return Err(ApiError::bad_request(
+                        "an `upload` attachment may not carry `content`: the file is at `path`",
+                    ));
+                }
+                None
+            }
+        };
+        if let Some(content) = &content {
+            if content.len() > MAX_ATTACHMENT_INLINE_BYTES {
+                return Err(ApiError::bad_request(format!(
+                    "attachment `content` is too large ({} bytes, maximum {MAX_ATTACHMENT_INLINE_BYTES})",
+                    content.len()
+                )));
+            }
+        }
+        Ok(kc_core::queue::QueuedAttachment {
+            name: self.name,
+            path: self.path,
+            mode,
+            size: self.size.unwrap_or(0),
+            content,
+        })
+    }
 }
 
 pub async fn list_sessions(
@@ -223,6 +313,9 @@ pub async fn get_session(
     let approvals = store.list_pending_approvals(Some(&session.id)).await?;
     let claims = store.list_claims(&session.id).await?;
     let running = state.runtime().is_running(&session.id);
+    // When this session was last rewound, so the UI can offer "undo is not
+    // available" honestly instead of implying the transcript is whole.
+    let last_rewind_at = store.last_rewind_at(&session.id).await?;
     // Messages the user queued while a run was in flight. Returned with the
     // session so a reload (or a second browser) shows the same pending work
     // instead of silently losing it.
@@ -250,6 +343,7 @@ pub async fn get_session(
         "running": running,
         "queued_steers": queued_steers,
         "queued_follow_ups": queued_follow_ups,
+        "last_rewind_at": last_rewind_at,
     })))
 }
 
@@ -353,14 +447,27 @@ pub async fn send_message(
     let body: MessageBody = parse_required(&body, "POST /api/sessions/:id/messages")?;
     let content = body
         .content
+        .clone()
         .ok_or_else(|| ApiError::bad_request("content is required"))?;
     validate_prompt(&content)?;
+    // A queued message keeps the chips the composer drew, so a recall puts the
+    // form back exactly as it was. `mode=send` has nowhere to put them (the
+    // transcript shows the rendered content), so they are accepted and ignored
+    // rather than rejected - a client that always sends them must not fail a
+    // plain send.
+    let attachments = body
+        .attachments
+        .into_iter()
+        .map(AttachmentBody::into_queued)
+        .collect::<ApiResult<Vec<_>>>()?;
+    let queued_input =
+        kc_runtime::QueuedInput::with_attachments(content.clone(), body.draft, attachments);
 
     match mode {
         MessageMode::Steer => {
             let steer = state
                 .runtime()
-                .steer(&id, content)
+                .steer(&id, queued_input)
                 .map_err(steer_error)?;
             Ok((
                 StatusCode::ACCEPTED,
@@ -369,6 +476,7 @@ pub async fn send_message(
                     "session_id": id,
                     "steer_id": steer.id,
                     "queued": true,
+                    "queued_message": steer.public_view(),
                 })),
             )
                 .into_response())
@@ -376,7 +484,7 @@ pub async fn send_message(
         MessageMode::FollowUp => {
             let follow_up = state
                 .runtime()
-                .enqueue_follow_up(&id, content)
+                .enqueue_follow_up(&id, queued_input)
                 .map_err(steer_error)?;
             Ok((
                 StatusCode::ACCEPTED,
@@ -385,6 +493,7 @@ pub async fn send_message(
                     "session_id": id,
                     "follow_up_id": follow_up.id,
                     "queued": true,
+                    "queued_message": follow_up.public_view(),
                 })),
             )
                 .into_response())
@@ -453,7 +562,10 @@ impl MessageMode {
         match raw.map(str::trim) {
             None | Some("") | Some("send") => Ok(MessageMode::Send),
             Some("steer") => Ok(MessageMode::Steer),
-            Some(value) if value.eq_ignore_ascii_case("follow_up") || value.eq_ignore_ascii_case("follow-up") => {
+            Some(value)
+                if value.eq_ignore_ascii_case("follow_up")
+                    || value.eq_ignore_ascii_case("follow-up") =>
+            {
                 Ok(MessageMode::FollowUp)
             }
             Some(other) => Err(ApiError::bad_request(format!(
@@ -491,6 +603,56 @@ fn steer_error(error: kc_core::Error) -> ApiError {
         kc_core::Error::BadRequest(message) => ApiError::conflict(message),
         other => ApiError::from(other),
     }
+}
+
+/// `GET /api/sessions/:id/queues` — the messages waiting for this session's run.
+///
+/// The same pair `GET /api/sessions/:id` carries, without the transcript: the
+/// composer's pending panel polls nothing (it follows the `queued_messages`
+/// event), but a client that cannot hold an event stream open, and every client
+/// that wants one cheap read on mount, can ask here.
+pub async fn list_queues(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let session = session_or_404(&state, &id).await?;
+    let snapshot = state.runtime().queued_all(&session.id);
+    Ok(Json(json!({
+        "session_id": session.id,
+        "running": state.runtime().is_running(&session.id),
+        "steers": snapshot
+            .steers
+            .iter()
+            .map(kc_runtime::QueuedSteer::public_view)
+            .collect::<Vec<_>>(),
+        "follow_ups": snapshot
+            .follow_ups
+            .iter()
+            .map(kc_runtime::QueuedFollowUp::public_view)
+            .collect::<Vec<_>>(),
+    })))
+}
+
+/// `DELETE /api/sessions/:id/queues/:queued_id` — recall a queued message.
+///
+/// The message never reaches the model and the caller gets it back whole: the
+/// draft to put in the composer and the chips to redraw. An id that is already
+/// gone (it landed, or another tab recalled it first) is the documented
+/// `404 not_found`; the browser then refreshes rather than reviving a message
+/// the run already applied.
+pub async fn recall_queued(
+    State(state): State<AppState>,
+    Path((id, queued_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let _ = session_or_404(&state, &id).await?;
+    let recalled = state
+        .runtime()
+        .recall_queued(&id, &queued_id)
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({
+        "session_id": id,
+        "recalled": recalled.public_view(),
+    })))
 }
 
 /// Ask a model for a session title, in the background.
@@ -664,7 +826,7 @@ fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-async fn session_or_404(state: &AppState, id: &str) -> ApiResult<Session> {
+pub(crate) async fn session_or_404(state: &AppState, id: &str) -> ApiResult<Session> {
     state
         .store()
         .get_session(id)

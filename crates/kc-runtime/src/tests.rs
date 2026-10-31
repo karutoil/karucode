@@ -12,7 +12,7 @@ use crate::tests_support::{
     FollowUpTool, Harness, HarnessBuilder, ImageTool, PanicTool, Script, ScriptedFactory,
     SlowCancelTool, SteerTool,
 };
-use crate::{ActiveRun, RecoveryReport, Runtime, RuntimeDeps};
+use crate::{ActiveRun, QueuedInput, QueuedKind, RecoveryReport, Runtime, RuntimeDeps};
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, ApprovalRequest};
 use kc_core::config::{ApprovalMode, ApprovalPolicy, Limits, ModelConfig, SubagentConfig};
 use kc_core::error::Error;
@@ -38,8 +38,10 @@ fn event_kind(event: &Event) -> &'static str {
         Event::SessionCreated { .. } => "session_created",
         Event::SessionRenamed { .. } => "session_renamed",
         Event::SessionModelChanged { .. } => "session_model_changed",
+        Event::SessionRewound { .. } => "session_rewound",
         Event::SessionDeleted { .. } => "session_deleted",
         Event::SteerApplied { .. } => "steer_applied",
+        Event::QueuedMessages { .. } => "queued_messages",
         Event::RunStarted { .. } => "run_started",
         Event::RunFinished { .. } => "run_finished",
         Event::RunCancelled { .. } => "run_cancelled",
@@ -307,6 +309,62 @@ async fn usage_is_read_when_it_arrives_after_the_finish_chunk() {
         })
         .expect("the usage event must survive a finish chunk that came first");
     assert_eq!(usage, (100, 4, Some(98)));
+}
+
+#[tokio::test]
+async fn every_provider_call_is_persisted_for_the_session_view() {
+    // The `usage` event is live-only, so a reload cannot answer "what has this
+    // session cost". One row per call must be left behind - for the main agent
+    // and for each subagent, tagged with the agent so the view can split them.
+    let mut h = HarnessBuilder::new(vec![
+        spawn_call("review the diff", None, false),
+        // The subagent's own call.
+        Script::Chunks(vec![
+            ProviderChunk::Text("done".into()),
+            ProviderChunk::Usage {
+                input_tokens: 12,
+                output_tokens: 2,
+                cached_tokens: Some(6),
+            },
+            ProviderChunk::Finish {
+                reason: "stop".into(),
+            },
+        ]),
+        // The parent's second call, which answers with the summary.
+        Script::Chunks(vec![
+            ProviderChunk::Text("spawning".into()),
+            ProviderChunk::Usage {
+                input_tokens: 40,
+                output_tokens: 3,
+                cached_tokens: None,
+            },
+            ProviderChunk::Finish {
+                reason: "stop".into(),
+            },
+        ]),
+    ])
+    .build()
+    .await;
+
+    let events = h.run_to_finish("go").await;
+    assert_eq!(finished_status(&events), "completed");
+
+    let rows = h.store.usage();
+    assert_eq!(rows.len(), 2, "one row per provider call: {rows:?}");
+    let main = rows
+        .iter()
+        .find(|row| row.agent_id.is_none())
+        .expect("a row for the run itself");
+    assert_eq!(main.input_tokens, 40);
+    assert_eq!(main.output_tokens, 3);
+    assert_eq!(main.cached_tokens, None, "unknown is not 0");
+    assert!(!main.run_id.is_empty());
+    let child = rows
+        .iter()
+        .find(|row| row.agent_id.is_some())
+        .expect("a row for the subagent");
+    assert_eq!(child.input_tokens, 12);
+    assert_eq!(child.cached_tokens, Some(6));
 }
 
 #[tokio::test]
@@ -3470,7 +3528,7 @@ async fn steering_with_nothing_running_is_refused() {
         .await;
     let error = h
         .runtime
-        .steer(h.session(), "anyone there?".into())
+        .steer(h.session(), "anyone there?")
         .expect_err("a steer without a run has no meaning");
     assert!(matches!(error, Error::BadRequest(_)), "{error:?}");
     assert!(
@@ -3533,7 +3591,7 @@ async fn a_steer_after_the_run_is_refused_and_leaves_no_turn() {
     // The run is over: a steer now is refused, not queued.
     let error = h
         .runtime
-        .steer(h.session(), "too late".into())
+        .steer(h.session(), "too late")
         .expect_err("a steer after the run must be refused");
     assert!(error.to_string().contains("no run in flight"), "{error}");
     assert!(
@@ -3616,7 +3674,7 @@ async fn a_follow_up_with_nothing_running_is_refused() {
         .await;
     let error = h
         .runtime
-        .enqueue_follow_up(h.session(), "after".into())
+        .enqueue_follow_up(h.session(), "after")
         .expect_err("a follow-up without a run has no meaning");
     assert!(matches!(error, Error::BadRequest(_)), "{error:?}");
     assert!(h.runtime.queued_follow_ups(h.session()).is_empty());
@@ -3657,14 +3715,243 @@ async fn an_empty_queued_message_is_rejected() {
     h.submit("job").await;
     let _ = h.wait_idle().await;
 
-    assert!(h.runtime.steer(h.session(), "   \n ".into()).is_err());
-    assert!(h
-        .runtime
-        .enqueue_follow_up(h.session(), "\t".into())
-        .is_err());
+    assert!(h.runtime.steer(h.session(), "   \n ").is_err());
+    assert!(h.runtime.enqueue_follow_up(h.session(), "\t").is_err());
     assert!(h.runtime.queued_steers(h.session()).is_empty());
     assert!(h.runtime.queued_follow_ups(h.session()).is_empty());
     h.runtime.cancel(h.session());
+}
+
+// ---------------------------------------------------------------------------
+// Recalling a queued message
+// ---------------------------------------------------------------------------
+
+fn inline_attachment() -> kc_core::queue::QueuedAttachment {
+    kc_core::queue::QueuedAttachment {
+        name: "notes.md".into(),
+        path: "notes.md".into(),
+        mode: kc_core::queue::AttachmentMode::Inline,
+        size: 812,
+        content: Some("# Note\n".into()),
+    }
+}
+
+/// What the browser sends for "summarise this file": the rendered body goes to
+/// the model, the draft and the chips are what a recall restores.
+fn with_attachment() -> QueuedInput {
+    QueuedInput::with_attachments(
+        "summarise\n\nAttached 1 file:\n\n### notes.md (inlined, 812 B)\n\n```md\n# Note\n```",
+        Some("summarise".into()),
+        vec![inline_attachment()],
+    )
+}
+
+/// Attachments survive the round trip through the queue, and the recalled message
+/// hands back the draft and the chips rather than the rendered body.
+#[tokio::test]
+async fn a_queued_steer_keeps_its_attachments_and_recalls_them() {
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text("busy".into())])])
+        .build()
+        .await;
+    h.submit("long job").await;
+    let _ = h.wait_idle().await;
+
+    let queued = h.runtime.steer(h.session(), with_attachment()).unwrap();
+    assert_eq!(queued.kind, QueuedKind::Steer);
+
+    // What a reload or a second tab sees: content for the model, draft and
+    // chips for the composer.
+    let listed = h.runtime.queued_steers(h.session());
+    assert_eq!(listed.len(), 1);
+    let view = listed[0].public_view();
+    assert_eq!(view["kind"], "steer");
+    assert_eq!(view["draft"], "summarise");
+    assert_eq!(view["attachments"][0]["name"], "notes.md");
+    assert_eq!(view["attachments"][0]["mode"], "inline");
+    assert_eq!(view["attachments"][0]["size"], 812);
+    assert!(view["content"]
+        .as_str()
+        .unwrap()
+        .contains("### notes.md (inlined, 812 B)"));
+
+    // Recalling it takes it out of the queue and gives it back whole.
+    let recalled = h.runtime.recall_queued(h.session(), &queued.id).unwrap();
+    assert_eq!(recalled.id, queued.id);
+    assert_eq!(recalled.recall_text(), "summarise");
+    assert_eq!(recalled.attachments, vec![inline_attachment()]);
+    assert!(
+        h.runtime.queued_steers(h.session()).is_empty(),
+        "a recalled message must not stay queued"
+    );
+
+    // The message never reached the conversation.
+    let users: Vec<String> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content)
+        .collect();
+    assert_eq!(users, vec!["long job".to_string()]);
+    h.runtime.cancel(h.session());
+}
+
+/// A follow-up is recalled the same way, out of its own queue.
+#[tokio::test]
+async fn a_queued_follow_up_can_be_recalled() {
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text("busy".into())])])
+        .build()
+        .await;
+    h.submit("long job").await;
+    let _ = h.wait_idle().await;
+
+    let queued = h
+        .runtime
+        .enqueue_follow_up(h.session(), with_attachment())
+        .unwrap();
+    assert_eq!(queued.kind, QueuedKind::FollowUp);
+    assert_eq!(h.runtime.queued_follow_ups(h.session()).len(), 1);
+
+    let recalled = h.runtime.recall_queued(h.session(), &queued.id).unwrap();
+    assert_eq!(recalled.recall_text(), "summarise");
+    assert_eq!(recalled.attachments.len(), 1);
+    assert!(h.runtime.queued_follow_ups(h.session()).is_empty());
+    h.runtime.cancel(h.session());
+}
+
+/// A recall that names a message which is no longer queued is a 404, not a silent
+/// success: the browser raced the run loop and must be told.
+#[tokio::test]
+async fn recalling_an_applied_message_is_not_found() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("c1", "steer_now", "{}")]),
+        Script::text("applied"),
+    ])
+    .build()
+    .await;
+    // The tool steers from inside the turn, so the run is provably in flight.
+    let tool = SteerTool::boxed(
+        "steer_now",
+        Arc::clone(&h.runtime),
+        h.session(),
+        "one more thing",
+    );
+    let mut registry = ToolRegistry::new();
+    registry.register(tool);
+    h.runtime.set_tools(Arc::new(registry));
+
+    let events = h.run_to_finish("start").await;
+    let applied = events
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::SteerApplied { steer_id, .. } => Some(steer_id.clone()),
+            _ => None,
+        })
+        .expect("the steer landed");
+
+    // The loop drained it, so it is gone - and recalling it says so.
+    let error = h
+        .runtime
+        .recall_queued(h.session(), &applied)
+        .expect_err("an applied message cannot be recalled");
+    assert!(matches!(error, Error::NotFound(_)), "{error:?}");
+    assert!(
+        error.to_string().contains("already have been applied"),
+        "{error}"
+    );
+}
+
+/// Queueing and recalling both publish the whole queue, so a second tab (or a
+/// client that missed a frame) never shows a stale pending panel.
+#[tokio::test]
+async fn every_queue_mutation_publishes_the_whole_queue() {
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text("busy".into())])])
+        .build()
+        .await;
+    h.submit("long job").await;
+    let _ = h.wait_idle().await;
+
+    let queued = h.runtime.steer(h.session(), "adjust course").unwrap();
+    let first = next_of_kind(&mut h, "queued_messages").await;
+    match first.event {
+        Event::QueuedMessages {
+            session_id,
+            steers,
+            follow_ups,
+        } => {
+            assert_eq!(session_id, h.session());
+            assert_eq!(steers.len(), 1);
+            assert_eq!(steers[0].id, queued.id);
+            assert!(follow_ups.is_empty());
+        }
+        other => panic!("expected queued_messages, got {other:?}"),
+    }
+
+    h.runtime.recall_queued(h.session(), &queued.id).unwrap();
+    let second = next_of_kind(&mut h, "queued_messages").await;
+    match second.event {
+        Event::QueuedMessages { steers, .. } => {
+            assert!(steers.is_empty(), "the recall must empty the queue")
+        }
+        other => panic!("expected queued_messages, got {other:?}"),
+    }
+
+    // A follow-up publishes too, carrying the other queue's contents untouched.
+    h.runtime
+        .enqueue_follow_up(h.session(), "then run the tests")
+        .unwrap();
+    let third = next_of_kind(&mut h, "queued_messages").await;
+    match third.event {
+        Event::QueuedMessages {
+            steers, follow_ups, ..
+        } => {
+            assert!(steers.is_empty());
+            assert_eq!(follow_ups.len(), 1);
+        }
+        other => panic!("expected queued_messages, got {other:?}"),
+    }
+    h.runtime.cancel(h.session());
+}
+
+/// A queued message may not carry an unbounded chip list: the queue is memory
+/// that lives for the length of a run.
+#[tokio::test]
+async fn a_queued_message_is_bounded_in_attachments() {
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text("busy".into())])])
+        .build()
+        .await;
+    h.submit("long job").await;
+    let _ = h.wait_idle().await;
+
+    let attachments = vec![inline_attachment(); kc_core::queue::MAX_QUEUED_ATTACHMENTS + 1];
+    let error = h
+        .runtime
+        .steer(
+            h.session(),
+            QueuedInput::with_attachments("hi", None, attachments),
+        )
+        .expect_err("too many attachments");
+    assert!(
+        error.to_string().contains("at most 16 attachments"),
+        "{error}"
+    );
+    assert!(
+        h.runtime.queued_steers(h.session()).is_empty(),
+        "a rejected request must queue nothing"
+    );
+    h.runtime.cancel(h.session());
+}
+
+/// Drain the queue frames until `kind` arrives, so an unrelated event cannot make
+/// the assertion depend on ordering.
+async fn next_of_kind(h: &mut Harness, kind: &str) -> EventEnvelope {
+    for _ in 0..64 {
+        let event = h.next_event().await;
+        if event_kind(&event.event) == kind {
+            return event;
+        }
+    }
+    panic!("no `{kind}` event after 64 frames");
 }
 
 // ---------------------------------------------------------------------------
@@ -3933,4 +4220,584 @@ async fn a_subagent_approval_notifies_once_through_the_parent_card() {
         .resolve_approval(&approval.id, ApprovalDecision::AllowOnce)
         .await
         .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// rewind
+// ---------------------------------------------------------------------------
+//
+// A rewind hides the transcript from a chosen prompt onwards and, on request,
+// puts the workspace back. These drive the real model loop with a scripted
+// provider and a real file-writing tool, so the journal rows the revert replays
+// come from the same code path production uses.
+
+/// A tool that behaves like `write_file`: journal the before-image, then write.
+///
+/// It is deliberately a stand-in rather than `kc_tools::WriteFile` because the
+/// runtime cannot depend on the tools crate (see `docs/ARCHITECTURE.md`); what
+/// matters to a rewind is only that the tool calls `record_checkpoint` first,
+/// which this does at the same point the real one does.
+struct JournalingWrite {
+    path: String,
+    content: String,
+    /// When set, the tool refuses instead of writing, to prove a refused write
+    /// journals nothing.
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl kc_core::tool::Tool for JournalingWrite {
+    fn spec(&self) -> kc_core::tool::ToolSpec {
+        kc_core::tool::ToolSpec {
+            name: "write_file".into(),
+            description: "overwrite one file".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            origin: ToolOrigin::Builtin,
+        }
+    }
+
+    fn class(&self) -> ToolClass {
+        ToolClass::Mutating
+    }
+
+    async fn invoke(
+        &self,
+        _request: kc_core::tool::ToolCallRequest,
+        ctx: kc_core::tool::ToolCtx,
+    ) -> ToolOutcome {
+        if self.fail {
+            return ToolOutcome::err("refused");
+        }
+        ctx.record_checkpoint(&self.path, "write_file").await;
+        let abs = ctx.workspace.root().join(&self.path);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(&abs, &self.content).expect("write");
+        ToolOutcome::ok(format!("wrote {} bytes", self.content.len()))
+    }
+}
+
+fn journaling_write(path: &str, content: &str) -> Arc<dyn kc_core::tool::Tool> {
+    Arc::new(JournalingWrite {
+        path: path.into(),
+        content: content.into(),
+        fail: false,
+    })
+}
+
+/// The file's bytes, or `None` when it does not exist.
+fn read_file(dir: &std::path::Path, rel: &str) -> Option<String> {
+    std::fs::read_to_string(dir.join(rel)).ok()
+}
+
+/// Visible (non-rewound) messages of the harness session, oldest first.
+async fn visible(h: &Harness) -> Vec<kc_core::store::StoredMessage> {
+    h.store
+        .list_messages(h.session(), 10_000)
+        .await
+        .expect("list messages")
+}
+
+#[tokio::test]
+async fn rewinding_hides_the_tail_and_the_next_run_sees_only_what_survives() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::text("first answer"),
+        Script::text("second answer"),
+        Script::text("third answer"),
+    ])
+    .build()
+    .await;
+
+    h.run_to_finish("first prompt").await;
+    h.run_to_finish("second prompt").await;
+    h.wait_idle().await;
+    assert_eq!(visible(&h).await.len(), 4, "two prompt/answer pairs");
+
+    // The second prompt is the one to revisit.
+    let second = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "user" && m.content == "second prompt")
+        .expect("second prompt");
+
+    let outcome = h
+        .runtime
+        .rewind(h.session(), second.id, false, true)
+        .await
+        .expect("rewind");
+    assert_eq!(outcome.point.prompt, "second prompt");
+    assert_eq!(
+        outcome.point.messages_removed, 1,
+        "only the answer after the chosen prompt is hidden"
+    );
+    assert!(
+        outcome.outcomes.is_empty(),
+        "a transcript-only rewind reverses nothing"
+    );
+
+    let after = visible(&h).await;
+    assert_eq!(
+        after.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(),
+        vec!["first prompt", "first answer", "second prompt"],
+        "the chosen prompt survives; everything after it is hidden"
+    );
+
+    // The rows are marked, not deleted: the transcript is still whole on disk.
+    assert_eq!(
+        h.session_messages().await.len(),
+        4,
+        "a rewind hides, it does not delete"
+    );
+    assert!(h.store.last_rewind_at(h.session()).await.unwrap().is_some());
+
+    // The next run is built from the rewind: the model sees the surviving three
+    // messages plus the new prompt, never the hidden answer.
+    h.run_to_finish("third prompt").await;
+    let requests = h.factory.requests();
+    let request = requests
+        .last()
+        .expect("the model was called after the rewind");
+    let contents: Vec<String> = request.messages.iter().map(|m| m.content.clone()).collect();
+    assert!(
+        !contents.iter().any(|c| c == "second answer"),
+        "the rewound answer must never reach the model again: {contents:?}"
+    );
+    assert!(contents.iter().any(|c| c == "first answer"));
+    assert!(contents.iter().any(|c| c == "third prompt"));
+}
+
+#[tokio::test]
+async fn a_rewind_refuses_while_a_run_is_in_flight() {
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![ProviderChunk::Text(
+        "working".into(),
+    )])])
+    .build()
+    .await;
+    h.submit("do something slow").await;
+    // Wait until the run is registered so `is_running` is true.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !h.runtime.is_running(h.session()) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let any = h
+        .session_messages()
+        .await
+        .first()
+        .map(|m| m.id)
+        .unwrap_or(1);
+    let err = h
+        .runtime
+        .rewind(h.session(), any, false, true)
+        .await
+        .expect_err("rewinding a live run would be undone by the running loop");
+    assert!(err.to_string().contains("run in flight"), "{err}");
+    h.runtime.cancel(h.session());
+    h.wait_idle().await;
+}
+
+#[tokio::test]
+async fn reverting_puts_back_the_file_a_run_overwrote() {
+    let mut h = HarnessBuilder::new(vec![
+        // Turn one: overwrite a file that already exists.
+        Script::call(&[("call_1", "write_file", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(journaling_write("existing.txt", "AFTER\n"))
+    .build()
+    .await;
+
+    std::fs::write(h.workspace_dir.join("existing.txt"), "BEFORE\n").expect("seed");
+
+    h.run_to_finish("overwrite the file").await;
+    h.wait_idle().await;
+    assert_eq!(
+        read_file(&h.workspace_dir, "existing.txt").as_deref(),
+        Some("AFTER\n")
+    );
+
+    let prompt = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "user")
+        .expect("prompt");
+
+    let preview = h
+        .runtime
+        .rewind_preview(h.session(), prompt.id)
+        .await
+        .expect("preview")
+        .1;
+    assert_eq!(preview.files.len(), 1, "one file is affected");
+    assert_eq!(preview.files[0].path, "existing.txt");
+    assert_eq!(
+        preview.files[0].restore.as_deref(),
+        Some("BEFORE\n"),
+        "the preview describes the state the revert restores"
+    );
+    assert!(!preview.files[0].removes_file);
+    assert!(!preview.incomplete);
+    // The preview must not have changed anything.
+    assert_eq!(
+        read_file(&h.workspace_dir, "existing.txt").as_deref(),
+        Some("AFTER\n")
+    );
+
+    let outcome = h
+        .runtime
+        .rewind(h.session(), prompt.id, true, true)
+        .await
+        .expect("rewind with revert");
+    assert_eq!(
+        outcome.outcomes,
+        vec![kc_core::checkpoint::UndoOutcome::Restored]
+    );
+    assert_eq!(
+        read_file(&h.workspace_dir, "existing.txt").as_deref(),
+        Some("BEFORE\n"),
+        "the revert must restore the bytes the tool replaced"
+    );
+    assert!(
+        h.store
+            .list_checkpoints(h.session(), 0)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an undone journal row is retired"
+    );
+}
+
+#[tokio::test]
+async fn reverting_removes_a_file_the_run_created() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "write_file", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(journaling_write("brand-new.txt", "hello\n"))
+    .build()
+    .await;
+
+    h.run_to_finish("create a file").await;
+    h.wait_idle().await;
+    assert!(h.workspace_dir.join("brand-new.txt").exists());
+
+    let prompt = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "user")
+        .expect("prompt");
+    let preview = h
+        .runtime
+        .rewind_preview(h.session(), prompt.id)
+        .await
+        .expect("preview")
+        .1;
+    assert_eq!(preview.files.len(), 1);
+    assert!(
+        preview.files[0].removes_file,
+        "a file that did not exist is removed, not restored"
+    );
+    assert!(preview.files[0].restore.is_none());
+
+    let outcome = h
+        .runtime
+        .rewind(h.session(), prompt.id, true, true)
+        .await
+        .expect("rewind");
+    assert_eq!(
+        outcome.outcomes,
+        vec![kc_core::checkpoint::UndoOutcome::Removed]
+    );
+    assert!(
+        !h.workspace_dir.join("brand-new.txt").exists(),
+        "undoing a create removes the file"
+    );
+}
+
+#[tokio::test]
+async fn a_rewind_without_revert_leaves_the_workspace_alone() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "write_file", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(journaling_write("kept.txt", "written\n"))
+    .build()
+    .await;
+    std::fs::write(h.workspace_dir.join("kept.txt"), "original\n").expect("seed");
+
+    h.run_to_finish("change the file").await;
+    h.wait_idle().await;
+    let prompt = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "user")
+        .expect("prompt");
+
+    let outcome = h
+        .runtime
+        .rewind(h.session(), prompt.id, false, true)
+        .await
+        .expect("rewind");
+    assert!(outcome.outcomes.is_empty());
+    assert_eq!(
+        read_file(&h.workspace_dir, "kept.txt").as_deref(),
+        Some("written\n"),
+        "keeping the changes is the default: the transcript is hidden, the files are not"
+    );
+    assert!(
+        !h.store
+            .list_checkpoints(h.session(), 0)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the journal survives, so a later revert can still undo the work"
+    );
+}
+
+#[tokio::test]
+async fn a_run_that_only_read_files_reports_no_files_to_revert() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "echo", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .build()
+    .await;
+
+    h.run_to_finish("look around").await;
+    h.wait_idle().await;
+    let prompt = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "user")
+        .expect("prompt");
+
+    let preview = h
+        .runtime
+        .rewind_preview(h.session(), prompt.id)
+        .await
+        .expect("preview")
+        .1;
+    assert!(
+        preview.files.is_empty(),
+        "nothing changed the workspace, so there is nothing to put back"
+    );
+    assert!(!preview.incomplete);
+}
+
+#[tokio::test]
+async fn a_rewind_point_outside_the_session_is_refused() {
+    let mut h = HarnessBuilder::new(vec![Script::text("hi")]).build().await;
+    h.run_to_finish("hello").await;
+    h.wait_idle().await;
+
+    let err = h
+        .runtime
+        .rewind("s_someone_else", 1, false, true)
+        .await
+        .expect_err("a foreign session id must not rewind this one");
+    assert!(
+        matches!(err, Error::NotFound(_)),
+        "expected NotFound, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn retrying_replaces_the_prompt_and_re_asks_the_model() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::text("first attempt"),
+        Script::text("second attempt"),
+    ])
+    .build()
+    .await;
+
+    h.run_to_finish("fix the build").await;
+    h.wait_idle().await;
+    let original = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "user")
+        .expect("prompt");
+
+    // The retry re-sends the same text; the rewind hides the old prompt so the
+    // model does not see the request twice.
+    let outcome = h
+        .runtime
+        .rewind_and_run(h.session(), original.id, false, original.content.clone())
+        .await
+        .expect("retry");
+    assert_eq!(outcome.point.prompt, "fix the build");
+    assert!(
+        outcome.run_id.is_some(),
+        "a retry starts a run, it is not a transcript edit"
+    );
+    h.collect_until_finished().await;
+    h.wait_idle().await;
+
+    let messages = h.session_messages().await;
+    let visible: Vec<&str> = messages
+        .iter()
+        .filter(|m| m.rewound_at.is_none())
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(
+        visible,
+        vec!["fix the build", "second attempt"],
+        "the retried prompt and the new answer are the whole visible transcript"
+    );
+
+    // The old prompt row still exists, hidden - a rewind never deletes.
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.content == "first attempt" && m.rewound_at.is_some()),
+        "the abandoned answer is hidden, not deleted"
+    );
+
+    // And the model was asked again, with the prompt exactly once.
+    let requests = h.factory.requests();
+    let last = requests.last().expect("a second model call");
+    let prompts = last
+        .messages
+        .iter()
+        .filter(|m| m.content == "fix the build")
+        .count();
+    assert_eq!(
+        prompts, 1,
+        "the prompt must not appear twice in one request"
+    );
+}
+
+#[tokio::test]
+async fn a_note_replaces_the_prompt_the_user_wants_to_move_on_from() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::text("first attempt"),
+        Script::text("answer to the note"),
+    ])
+    .build()
+    .await;
+
+    h.run_to_finish("add a login page").await;
+    h.wait_idle().await;
+    let original = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "user")
+        .expect("prompt");
+
+    let outcome = h
+        .runtime
+        .rewind_and_run(
+            h.session(),
+            original.id,
+            false,
+            "actually, add a signup page instead".to_string(),
+        )
+        .await
+        .expect("note");
+    assert!(outcome.run_id.is_some());
+    h.collect_until_finished().await;
+    h.wait_idle().await;
+
+    let visible: Vec<String> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|m| m.rewound_at.is_none())
+        .map(|m| m.content)
+        .collect();
+    assert_eq!(
+        visible,
+        vec![
+            "actually, add a signup page instead".to_string(),
+            "answer to the note".to_string()
+        ],
+        "the note and its answer replace the abandoned turn"
+    );
+
+    let requests = h.factory.requests();
+    let last = requests.last().expect("a second model call");
+    let contents: Vec<&str> = last.messages.iter().map(|m| m.content.as_str()).collect();
+    assert!(
+        !contents.contains(&"add a login page"),
+        "the model must not see the prompt the note replaced: {contents:?}"
+    );
+    assert!(contents.iter().any(|c| c.contains("signup page")));
+}
+
+#[tokio::test]
+async fn retrying_with_revert_undoes_the_abandoned_turn_before_re_asking() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "write_file", "{}")]),
+        Script::text("wrote it"),
+        Script::text("second attempt"),
+    ])
+    .tool(journaling_write("config.toml", "port = 8080\n"))
+    .build()
+    .await;
+    std::fs::write(h.workspace_dir.join("config.toml"), "port = 3000\n").expect("seed");
+
+    h.run_to_finish("set the port").await;
+    h.wait_idle().await;
+    assert_eq!(
+        read_file(&h.workspace_dir, "config.toml").as_deref(),
+        Some("port = 8080\n")
+    );
+
+    let original = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "user")
+        .expect("prompt");
+    let outcome = h
+        .runtime
+        .rewind_and_run(h.session(), original.id, true, original.content.clone())
+        .await
+        .expect("retry with revert");
+    assert_eq!(
+        outcome.outcomes,
+        vec![kc_core::checkpoint::UndoOutcome::Restored],
+        "the abandoned turn's write is undone even though its prompt is the rewind point"
+    );
+    assert_eq!(
+        read_file(&h.workspace_dir, "config.toml").as_deref(),
+        Some("port = 3000\n"),
+        "the file is back to what it was before the retried turn ran"
+    );
+    h.collect_until_finished().await;
+    h.wait_idle().await;
+}
+
+#[tokio::test]
+async fn a_retry_without_a_prompt_is_refused_before_anything_changes() {
+    let mut h = HarnessBuilder::new(vec![Script::text("hi")]).build().await;
+    h.run_to_finish("hello").await;
+    h.wait_idle().await;
+    let prompt = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "user")
+        .expect("prompt");
+
+    let err = h
+        .runtime
+        .rewind_and_run(h.session(), prompt.id, false, "   ".to_string())
+        .await
+        .expect_err("an empty retry prompt has nothing to ask");
+    assert!(err.to_string().contains("prompt to send"), "{err}");
+    // The transcript is untouched: validation happens before the rewind.
+    assert!(h
+        .session_messages()
+        .await
+        .iter()
+        .all(|m| m.rewound_at.is_none()));
 }

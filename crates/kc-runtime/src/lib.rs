@@ -14,12 +14,13 @@
 //! supplies, so polling `Runtime::tools()` is always the authoritative set to
 //! show to the model. [`Runtime::builtin_tool_names`] lists them.
 
-use kc_core::error::Result;
+use kc_core::error::{Error, Result};
 use kc_core::events::EventEnvelope;
 use kc_core::hooks::Hooks;
 use kc_core::ids::{AgentId, RunId, SessionId};
 use kc_core::paths::Workspace;
 use kc_core::provider::ProviderFactory;
+use kc_core::queue::{QueuedKind, QueuedMessage, MAX_QUEUED_ATTACHMENTS};
 use kc_core::settings::Settings;
 use kc_core::store::{AgentStatus, SessionSummary, Store};
 use kc_core::tool::ToolRegistry;
@@ -36,6 +37,7 @@ pub mod events;
 pub(crate) mod history;
 mod notify;
 mod restart;
+pub mod rewind;
 pub mod subagent;
 
 #[cfg(test)]
@@ -97,9 +99,12 @@ pub struct RuntimeDeps {
 /// Resolve the workspace for a run. The server implements this over its project
 /// registry; [`SingleWorkspace`] covers tests and single-directory embeddings.
 pub trait WorkspaceProvider: Send + Sync {
-    fn default_workspace(&self) -> Arc<Workspace>;
-    /// `None` means "the default workspace" (a session created before projects
-    /// existed, or one the caller did not scope).
+    /// Resolve the workspace for a run.
+    ///
+    /// `None` means "the implicit workspace" (a session created before projects
+    /// existed, or one the caller did not scope). A server started without a
+    /// default workspace returns an error here instead, so a run cannot silently
+    /// land somewhere nobody chose.
     fn workspace_for(&self, project_id: Option<&str>) -> Result<Arc<Workspace>>;
 }
 
@@ -115,10 +120,6 @@ impl SingleWorkspace {
 }
 
 impl WorkspaceProvider for SingleWorkspace {
-    fn default_workspace(&self) -> Arc<Workspace> {
-        Arc::clone(&self.workspace)
-    }
-
     fn workspace_for(&self, _project_id: Option<&str>) -> Result<Arc<Workspace>> {
         Ok(Arc::clone(&self.workspace))
     }
@@ -128,6 +129,24 @@ impl WorkspaceProvider for SingleWorkspace {
 pub struct RunHandle {
     pub run_id: String,
     pub session_id: String,
+}
+
+/// What a rewind did, or what it would do.
+///
+/// The preview is returned alongside the outcomes so a caller never has to
+/// re-derive "which files were involved" from the undo results: the two come from
+/// the same journal rows.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RewindOutcome {
+    pub point: kc_core::store::RewindPoint,
+    pub preview: kc_core::checkpoint::RewindPreview,
+    /// One entry per journal row, in the order the undo ran (newest first).
+    /// Empty when the rewind only hid the transcript.
+    pub outcomes: Vec<kc_core::checkpoint::UndoOutcome>,
+    /// The run started after the rewind, for the retry and note modes. `None`
+    /// when the caller only rewound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -206,39 +225,67 @@ pub(crate) struct RuntimeInner {
 }
 
 /// One accepted follow-up prompt, waiting for the current run to finish.
-#[derive(Debug, Clone)]
-pub struct QueuedFollowUp {
-    pub id: String,
+///
+/// Both queues hold the same shape ([`QueuedMessage`]) so the composer can
+/// render and recall them with one code path; the aliases are what the runtime
+/// and the HTTP layer name each queue's members by.
+pub type QueuedFollowUp = QueuedMessage;
+
+/// One accepted steering message, waiting for the run loop to pick it up.
+pub type QueuedSteer = QueuedMessage;
+
+/// What the caller supplies when queueing a message.
+///
+/// `content` is what the model sees (the draft with one block per attachment,
+/// rendered by the browser exactly as a plain send renders it), and `draft` plus
+/// `attachments` are what a recall puts back on screen. They are passed together
+/// because they must agree: a queued message whose content and chips disagreed
+/// would recall into a draft that no longer produces the same request.
+///
+/// `From<String>`/`From<&str>` cover the common "just text" case, so a caller
+/// with nothing attached does not have to spell the struct out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedInput {
     pub content: String,
-    pub accepted_at: i64,
+    /// The text the user typed, when it differs from `content` (attachments do
+    /// that). `None` means "the content is the draft".
+    pub draft: Option<String>,
+    pub attachments: Vec<kc_core::queue::QueuedAttachment>,
 }
 
-impl QueuedFollowUp {
-    pub fn public_view(&self) -> serde_json::Value {
-        serde_json::json!({
-            "id": self.id,
-            "content": self.content,
-            "accepted_at": self.accepted_at,
-        })
+impl QueuedInput {
+    /// Text with nothing attached.
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            draft: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Text plus the chips a recall should restore.
+    pub fn with_attachments(
+        content: impl Into<String>,
+        draft: Option<String>,
+        attachments: Vec<kc_core::queue::QueuedAttachment>,
+    ) -> Self {
+        Self {
+            content: content.into(),
+            draft,
+            attachments,
+        }
     }
 }
 
-/// One accepted steering message, waiting for the run loop to pick it up.
-#[derive(Debug, Clone)]
-pub struct QueuedSteer {
-    pub id: String,
-    pub content: String,
-    pub accepted_at: i64,
+impl From<String> for QueuedInput {
+    fn from(content: String) -> Self {
+        Self::text(content)
+    }
 }
 
-impl QueuedSteer {
-    /// Browser view of a queued steer.
-    pub fn public_view(&self) -> serde_json::Value {
-        serde_json::json!({
-            "id": self.id,
-            "content": self.content,
-            "accepted_at": self.accepted_at,
-        })
+impl From<&str> for QueuedInput {
+    fn from(content: &str) -> Self {
+        Self::text(content)
     }
 }
 
@@ -257,6 +304,37 @@ pub const MAX_QUEUED_STEERS: usize = 32;
 /// intentions that the user has not thought through. `POST .../mode=follow_up`
 /// reports the documented 409 past this.
 pub const MAX_QUEUED_FOLLOW_UPS: usize = 8;
+
+/// Both queues of one session, read together.
+#[derive(Debug, Clone, Default)]
+pub struct QueuedSnapshot {
+    pub steers: Vec<QueuedSteer>,
+    pub follow_ups: Vec<QueuedFollowUp>,
+}
+
+impl QueuedSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.steers.is_empty() && self.follow_ups.is_empty()
+    }
+}
+
+/// Remove the message with `queued_id` from one session's queue, if it is there.
+///
+/// The queue entry is dropped when it empties, so a settled session leaves no
+/// empty map key behind (the maps outlive the sessions they are keyed by).
+fn take_by_id(
+    queues: &mut HashMap<String, VecDeque<QueuedMessage>>,
+    session_id: &str,
+    queued_id: &str,
+) -> Option<QueuedMessage> {
+    let queue = queues.get_mut(session_id)?;
+    let index = queue.iter().position(|queued| queued.id == queued_id)?;
+    let removed = queue.remove(index);
+    if queue.is_empty() {
+        queues.remove(session_id);
+    }
+    removed
+}
 
 pub(crate) struct RunState {
     pub run_id: RunId,
@@ -572,6 +650,99 @@ impl Runtime {
         agent::start_run(self, session_id, prompt).await
     }
 
+    /// Hide everything after `message_id` and (optionally) undo the file changes
+    /// made since it.
+    ///
+    /// `message_id` is normalised to the user prompt that owns it, so picking an
+    /// assistant turn means "the request that produced this". With
+    /// `keep_prompt` the prompt survives (the caller wants to edit it);
+    /// otherwise it is hidden too, which is what a retry and a replacement note
+    /// need so the model does not see two user turns in a row.
+    ///
+    /// Nothing is destructive in the database sense: the tail is marked
+    /// (`rewound_at`) rather than deleted, so the transcript the model sees and
+    /// the transcript the browser renders are the same list. With `revert` the
+    /// file journal is replayed newest-first and each undone row is retired.
+    ///
+    /// Refused while a run is in flight: a running loop holds `history` in memory
+    /// and would re-persist the messages the rewind just hid.
+    pub async fn rewind(
+        self: &Arc<Self>,
+        session_id: &str,
+        message_id: i64,
+        revert: bool,
+        keep_prompt: bool,
+    ) -> Result<RewindOutcome> {
+        let (point, preview, outcomes) =
+            rewind::rewind(self, session_id, message_id, revert, keep_prompt).await?;
+        Ok(RewindOutcome {
+            point,
+            preview,
+            outcomes,
+            run_id: None,
+        })
+    }
+
+    /// Rewind, then start the run that replaces the hidden turn.
+    ///
+    /// The two are one operation on purpose. A caller that rewound and then
+    /// failed to start the run would leave a session whose transcript ends at a
+    /// prompt with no answer and no run - indistinguishable from a crash. Doing
+    /// both here means the only outcomes are "both happened" or "neither did"
+    /// (a rewind whose follow-up run is refused is reported with the preview, so
+    /// the caller can say what state the session is in).
+    ///
+    /// `next_prompt` is what the new turn says: the original prompt for a retry,
+    /// or the user's replacement note. The rewind always hides the original
+    /// prompt, because two user turns in a row reads to the model as a correction
+    /// of work that is no longer in the transcript.
+    pub async fn rewind_and_run(
+        self: &Arc<Self>,
+        session_id: &str,
+        message_id: i64,
+        revert: bool,
+        next_prompt: String,
+    ) -> Result<RewindOutcome> {
+        if next_prompt.trim().is_empty() {
+            return Err(Error::BadRequest(
+                "a retry or a note needs the prompt to send after the rewind".into(),
+            ));
+        }
+        let outcome = self.rewind(session_id, message_id, revert, false).await?;
+        // `rewind` already refused a session with a run in flight, so this cannot
+        // race an existing loop; the run row is written before this returns.
+        let handle = self.submit(session_id, next_prompt).await?;
+        Ok(RewindOutcome {
+            run_id: Some(handle.run_id),
+            ..outcome
+        })
+    }
+
+    /// What [`Runtime::rewind`] would do, without doing it.
+    pub async fn rewind_preview(
+        &self,
+        session_id: &str,
+        message_id: i64,
+    ) -> Result<(
+        kc_core::store::RewindPoint,
+        kc_core::checkpoint::RewindPreview,
+    )> {
+        let inner = self.shared();
+        let session = inner
+            .deps
+            .store
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("session {session_id} not found")))?;
+        let workspace = inner
+            .deps
+            .workspaces
+            .workspace_for(session.project_id.as_deref())?;
+        rewind::Rewinder::new(inner.deps.store.clone(), workspace)
+            .preview(session_id, message_id)
+            .await
+    }
+
     /// Cancel the run(s) for a session because the human asked.
     ///
     /// The `cancelled_by_user` flag is what keeps the resulting notification quiet:
@@ -601,32 +772,102 @@ impl Runtime {
     /// when the loop drains it, which is what keeps the transcript in the order
     /// the model actually saw it, and what makes a steer that never lands (the run
     /// finished first) simply absent rather than a dangling turn.
-    pub fn steer(&self, session_id: &str, content: String) -> Result<QueuedSteer> {
-        let trimmed = content.trim();
+    ///
+    /// Every queue mutation publishes [`Event::QueuedMessages`] with the whole
+    /// queue, so a second tab (or the same tab after a reconnect) never shows a
+    /// stale pending panel.
+    pub fn steer(&self, session_id: &str, input: impl Into<QueuedInput>) -> Result<QueuedSteer> {
+        self.queue(
+            QueuedKind::Steer,
+            session_id,
+            input.into(),
+            MAX_QUEUED_STEERS,
+        )
+    }
+
+    /// Accept a follow-up prompt for a running session.
+    ///
+    /// Queued and submitted automatically when the current run ends. Rejected when
+    /// nothing is running, because the caller should simply `submit` (that is what
+    /// a follow-up with no run *is*), and when the queue is full.
+    pub fn enqueue_follow_up(
+        &self,
+        session_id: &str,
+        input: impl Into<QueuedInput>,
+    ) -> Result<QueuedFollowUp> {
+        self.queue(
+            QueuedKind::FollowUp,
+            session_id,
+            input.into(),
+            MAX_QUEUED_FOLLOW_UPS,
+        )
+    }
+
+    fn queue(
+        &self,
+        kind: QueuedKind,
+        session_id: &str,
+        input: QueuedInput,
+        capacity: usize,
+    ) -> Result<QueuedMessage> {
+        let trimmed = input.content.trim();
+        let noun = match kind {
+            QueuedKind::Steer => "a steering message",
+            QueuedKind::FollowUp => "a follow-up message",
+        };
         if trimmed.is_empty() {
-            return Err(kc_core::Error::BadRequest(
-                "a steering message may not be empty".into(),
-            ));
+            return Err(kc_core::Error::BadRequest(format!(
+                "{noun} may not be empty"
+            )));
+        }
+        if input.attachments.len() > MAX_QUEUED_ATTACHMENTS {
+            return Err(kc_core::Error::BadRequest(format!(
+                "a queued message may carry at most {MAX_QUEUED_ATTACHMENTS} attachments (got {})",
+                input.attachments.len()
+            )));
         }
         if !self.is_running(session_id) {
             return Err(kc_core::Error::BadRequest(format!(
                 "session {session_id} has no run in flight; send a normal message instead"
             )));
         }
-        let mut queues = self.inner.steers.lock().expect("steers lock");
-        let queue = queues.entry(session_id.to_string()).or_default();
-        if queue.len() >= MAX_QUEUED_STEERS {
-            return Err(kc_core::Error::BadRequest(format!(
-                "session {session_id} already has {MAX_QUEUED_STEERS} steering messages queued"
-            )));
-        }
-        let steer = QueuedSteer {
-            id: format!("steer_{}", uuid::Uuid::new_v4().simple()),
+        let id = match kind {
+            QueuedKind::Steer => format!("steer_{}", uuid::Uuid::new_v4().simple()),
+            QueuedKind::FollowUp => format!("followup_{}", uuid::Uuid::new_v4().simple()),
+        };
+        let queued = QueuedMessage {
+            id,
+            kind,
             content: trimmed.to_string(),
+            // A draft identical to the content carries no information; leaving it
+            // out is what makes "no attachments were attached" observable on the
+            // wire instead of an empty string that has to be guessed at.
+            draft: input
+                .draft
+                .map(|draft| draft.trim().to_string())
+                .filter(|draft| *draft != trimmed),
+            attachments: input.attachments,
             accepted_at: events::now_ms(),
         };
-        queue.push_back(steer.clone());
-        Ok(steer)
+        {
+            let mut queues = match kind {
+                QueuedKind::Steer => self.inner.steers.lock().expect("steers lock"),
+                QueuedKind::FollowUp => self.inner.follow_ups.lock().expect("follow ups lock"),
+            };
+            let queue = queues.entry(session_id.to_string()).or_default();
+            if queue.len() >= capacity {
+                let what = match kind {
+                    QueuedKind::Steer => "steering messages",
+                    QueuedKind::FollowUp => "follow-ups",
+                };
+                return Err(kc_core::Error::BadRequest(format!(
+                    "session {session_id} already has {capacity} {what} queued"
+                )));
+            }
+            queue.push_back(queued.clone());
+        }
+        self.publish_queues(session_id);
+        Ok(queued)
     }
 
     /// Steering messages still waiting for a running session, oldest first.
@@ -638,48 +879,6 @@ impl Runtime {
             .unwrap_or_default()
     }
 
-    /// Drop anything still queued for a session (its run ended or it was deleted).
-    pub fn clear_steers(&self, session_id: &str) {
-        self.inner
-            .steers
-            .lock()
-            .expect("steers lock")
-            .remove(session_id);
-    }
-
-    /// Accept a follow-up prompt for a running session.
-    ///
-    /// Queued and submitted automatically when the current run ends. Rejected when
-    /// nothing is running, because the caller should simply `submit` (that is what
-    /// a follow-up with no run *is*), and when the queue is full.
-    pub fn enqueue_follow_up(&self, session_id: &str, content: String) -> Result<QueuedFollowUp> {
-        let trimmed = content.trim();
-        if trimmed.is_empty() {
-            return Err(kc_core::Error::BadRequest(
-                "a follow-up message may not be empty".into(),
-            ));
-        }
-        if !self.is_running(session_id) {
-            return Err(kc_core::Error::BadRequest(format!(
-                "session {session_id} has no run in flight; send a normal message instead"
-            )));
-        }
-        let mut queues = self.inner.follow_ups.lock().expect("follow ups lock");
-        let queue = queues.entry(session_id.to_string()).or_default();
-        if queue.len() >= MAX_QUEUED_FOLLOW_UPS {
-            return Err(kc_core::Error::BadRequest(format!(
-                "session {session_id} already has {MAX_QUEUED_FOLLOW_UPS} follow-ups queued"
-            )));
-        }
-        let follow_up = QueuedFollowUp {
-            id: format!("followup_{}", uuid::Uuid::new_v4().simple()),
-            content: trimmed.to_string(),
-            accepted_at: events::now_ms(),
-        };
-        queue.push_back(follow_up.clone());
-        Ok(follow_up)
-    }
-
     /// Follow-up prompts still waiting for a running session, oldest first.
     pub fn queued_follow_ups(&self, session_id: &str) -> Vec<QueuedFollowUp> {
         let queues = self.inner.follow_ups.lock().expect("follow ups lock");
@@ -689,26 +888,112 @@ impl Runtime {
             .unwrap_or_default()
     }
 
+    /// Both queues for a session, oldest first.
+    ///
+    /// Read under one pass of both locks so the pair a caller reports is a pair
+    /// that existed together - which is what the queued-messages event promises.
+    pub fn queued_all(&self, session_id: &str) -> QueuedSnapshot {
+        QueuedSnapshot {
+            steers: self.queued_steers(session_id),
+            follow_ups: self.queued_follow_ups(session_id),
+        }
+    }
+
+    /// Take one queued message back out, by id.
+    ///
+    /// This is what "recall" means: the message never reaches the model, and the
+    /// caller gets it back - content, draft and attachment chips - to put in the
+    /// composer. An id that is not queued (already landed, already recalled, or
+    /// belonging to another session) is [`kc_core::Error::NotFound`], so a browser
+    /// that raced the run loop is told rather than silently succeeding.
+    pub fn recall_queued(&self, session_id: &str, queued_id: &str) -> Result<QueuedMessage> {
+        let recalled = {
+            let mut steers = self.inner.steers.lock().expect("steers lock");
+            take_by_id(&mut steers, session_id, queued_id)
+        };
+        let recalled = match recalled {
+            Some(recalled) => recalled,
+            None => {
+                let mut follow_ups = self.inner.follow_ups.lock().expect("follow ups lock");
+                match take_by_id(&mut follow_ups, session_id, queued_id) {
+                    Some(recalled) => recalled,
+                    None => {
+                        return Err(kc_core::Error::NotFound(format!(
+                            "no queued message `{queued_id}` for session {session_id}; \
+                             it may already have been applied"
+                        )))
+                    }
+                }
+            }
+        };
+        self.publish_queues(session_id);
+        Ok(recalled)
+    }
+
+    /// Drop anything still queued for a session (its run ended or it was deleted).
+    pub fn clear_steers(&self, session_id: &str) {
+        let removed = self
+            .inner
+            .steers
+            .lock()
+            .expect("steers lock")
+            .remove(session_id)
+            .is_some();
+        if removed {
+            self.publish_queues(session_id);
+        }
+    }
+
     /// Take the next follow-up for a session, if any.
     ///
     /// Taken one at a time, because each one becomes a run and a run has to
     /// finish before the next may start.
     pub fn take_follow_up(&self, session_id: &str) -> Option<QueuedFollowUp> {
-        let mut queues = self.inner.follow_ups.lock().expect("follow ups lock");
-        let next = queues.get_mut(session_id).and_then(VecDeque::pop_front);
-        if queues.get(session_id).is_some_and(VecDeque::is_empty) {
-            queues.remove(session_id);
+        let next = {
+            let mut queues = self.inner.follow_ups.lock().expect("follow ups lock");
+            let next = queues.get_mut(session_id).and_then(VecDeque::pop_front);
+            if queues.get(session_id).is_some_and(VecDeque::is_empty) {
+                queues.remove(session_id);
+            }
+            next
+        };
+        if next.is_some() {
+            self.publish_queues(session_id);
         }
         next
     }
 
     /// Drop every follow-up queued for a session (it was deleted).
     pub fn clear_follow_ups(&self, session_id: &str) {
-        self.inner
+        let removed = self
+            .inner
             .follow_ups
             .lock()
             .expect("follow ups lock")
-            .remove(session_id);
+            .remove(session_id)
+            .is_some();
+        if removed {
+            self.publish_queues(session_id);
+        }
+    }
+
+    /// Tell every client what this session's queues hold now.
+    ///
+    /// Called after each mutation. The whole pair is sent rather than a delta:
+    /// the frames are small (a queue holds tens of short strings) and a client
+    /// that lost one then resynchronises on the next instead of drifting.
+    fn publish_queues(&self, session_id: &str) {
+        let snapshot = self.queued_all(session_id);
+        self.emit(
+            Some(session_id),
+            None,
+            None,
+            kc_core::events::Event::QueuedMessages {
+                session_id: session_id.to_string(),
+                steers: snapshot.steers,
+                follow_ups: snapshot.follow_ups,
+            },
+        );
     }
 
     /// Every in-flight loop: user runs (`agent_id: None`) and nested subagent
@@ -780,14 +1065,40 @@ impl RuntimeInner {
     }
 
     /// Take everything queued for a session. Called by the run loop.
+    ///
+    /// Emits [`kc_core::events::Event::QueuedMessages`] when it took anything, so
+    /// the pending panel empties the moment the loop folds the messages in rather
+    /// than lingering until the next queue mutation.
     pub(crate) fn drain_steers(&self, session_id: &str) -> Vec<QueuedSteer> {
-        let mut queues = self.steers.lock().expect("steers lock");
-        let drained: Vec<QueuedSteer> = queues
-            .get_mut(session_id)
-            .map(|queue| queue.drain(..).collect())
-            .unwrap_or_default();
-        if queues.get(session_id).is_some_and(VecDeque::is_empty) {
-            queues.remove(session_id);
+        let drained: Vec<QueuedSteer> = {
+            let mut queues = self.steers.lock().expect("steers lock");
+            let drained: Vec<QueuedSteer> = queues
+                .get_mut(session_id)
+                .map(|queue| queue.drain(..).collect())
+                .unwrap_or_default();
+            if queues.get(session_id).is_some_and(VecDeque::is_empty) {
+                queues.remove(session_id);
+            }
+            drained
+        };
+        if !drained.is_empty() {
+            let follow_ups = self
+                .follow_ups
+                .lock()
+                .expect("follow ups lock")
+                .get(session_id)
+                .map(|queue| queue.iter().cloned().collect())
+                .unwrap_or_default();
+            self.emit(
+                Some(session_id),
+                None,
+                None,
+                kc_core::events::Event::QueuedMessages {
+                    session_id: session_id.to_string(),
+                    steers: Vec::new(),
+                    follow_ups,
+                },
+            );
         }
         drained
     }

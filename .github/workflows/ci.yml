@@ -109,6 +109,11 @@ jobs:
         run: sh -n packaging/install.sh && sh -n packaging/update.sh
       - name: update.sh tests
         run: python3 tests/test_update.py
+      # install.sh's own suite: who the service account is, and where the data
+      # goes. Both are decided from the environment, so they are asserted from the
+      # real script's --dry-run output rather than from a copy of the logic.
+      - name: install.sh tests
+        run: python3 tests/test_install_defaults.py
 
   docs:
     name: docs gate

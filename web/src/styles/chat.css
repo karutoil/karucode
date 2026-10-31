@@ -2387,3 +2387,53 @@
     padding: 24px 18px;
   }
 }
+
+/* ---------- rewind ----------------------------------------------------- */
+
+/*
+ * "Recall to here" rides the message header: it is an action on a message, so it
+ * belongs beside the author and the time, not in a menu somewhere else. It is
+ * quiet until the message is hovered or the control is focused, so a transcript
+ * full of turns does not read as a page of buttons.
+ */
+.rewind-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-subtle);
+  font-family: inherit;
+  font-size: var(--fs-micro);
+  line-height: 1.6;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.msg:hover .rewind-button,
+.rewind-button:focus-visible {
+  opacity: 1;
+}
+
+.rewind-button:hover {
+  color: var(--text);
+  border-color: var(--line);
+  background: var(--surface-2, transparent);
+}
+
+.rewind-button:focus-visible {
+  outline: 2px solid var(--focus, var(--accent));
+  outline-offset: 1px;
+}
+
+/* Touch and narrow layouts have no hover, so the control has to be visible. */
+@media (hover: none) {
+  .rewind-button {
+    opacity: 1;
+    border-color: var(--line);
+  }
+}

@@ -1,7 +1,7 @@
 # karucode web
 
 The browser workspace for karucode: sessions, a streaming agent transcript, approvals,
-a workspace/git/commands/subagent inspector, and a settings sheet. Built against
+a workspace/git/session/subagent inspector, and a settings sheet. Built against
 [`docs/API.md`](../docs/API.md) and [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
 ## Stack
@@ -142,10 +142,13 @@ Agents tab).
   git data as the inspector (no terminal view — the server has no shell API).
 - Sessions: client-side session search (`/`), sessions grouped by day, running
   and failure state.
-- Inspector: Files / Changes / Commands / Agents tabs, lazy file tree, and the
-  file viewer (below), git status/diff with a branch footer, per-session
-  commands, and an Agents console (project- or session-scoped, status filters,
-  live per-agent transcripts with drill-in).
+- Inspector: Files / Changes / Session / Agents tabs, lazy file tree, and the
+  file viewer (below), git status/diff with a branch footer, a Session tab with
+  the session's counts and token totals (context fill, input/output/cached with
+  a cache hit rate, prompts vs turns vs model calls vs tool calls, runs and
+  working time, per-subagent usage, recent runs), and an Agents console
+  (project- or session-scoped, status filters, live per-agent transcripts with
+  drill-in).
 - File viewer: Markdown and HTML open on a rendered preview with a Preview/Source
   toggle (HTML runs in a fully sandboxed iframe — no scripts, no same-origin
   access, its own CSP), images and PDFs render from `GET /api/workspace/raw`, and

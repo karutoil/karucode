@@ -13,7 +13,11 @@ import type {
   Project,
   ProviderTestRequest,
   ProviderTestResult,
+  QueuedAttachment,
+  QueuedKind,
   RawEvent,
+  RewindMode,
+  RewindPreview,
   Session,
   SessionDetail,
   SessionSummary,
@@ -43,6 +47,14 @@ const RESYNC_RETRIES = 3;
 const RESYNC_BACKOFF_MS = 1_000;
 let localMessageSequence = 0;
 let sendInFlight = false;
+/** Queued ids with a recall request in flight; module-scoped so a remount cannot double-fire. */
+const recallingQueued = new Set<string>();
+let handoffToken = 0;
+
+function nextHandoffToken(): number {
+  handoffToken += 1;
+  return handoffToken;
+}
 
 function enterAuthState(): void {
   store.boot.value = 'auth';
@@ -80,6 +92,9 @@ function clearSelection(): void {
   // Nothing is open, so no event can be waiting for a snapshot of it any more.
   refreshingSessionId = null;
   refreshQueue = [];
+  store.sessionInfo.value = null;
+  store.sessionInfoFor.value = null;
+  store.sessionInfoError.value = null;
   store.writeLastSessionId(null);
 }
 
@@ -286,6 +301,18 @@ function handleRawEvent(raw: RawEvent): void {
     return;
   }
 
+  if (event.type === 'session_rewound') {
+    // The hidden tail is already on screen. Refetch rather than splice: the
+    // server owns the normalisation (an assistant turn resolves to the prompt
+    // that produced it) and the file journal's effects are not in the transcript
+    // at all.
+    if (event.session_id === store.currentSessionId.value) {
+      void openSession(event.session_id, { force: true, silent: true });
+    }
+    scheduleSessionsRefresh();
+    return;
+  }
+
   if (event.type === 'run_finished' || event.type === 'run_started' || event.type === 'run_cancelled') {
     scheduleSessionsRefresh();
   }
@@ -312,6 +339,13 @@ function applyChatEvent(event: KarucodeEvent): void {
     next.lastPromptTokens !== null
   ) {
     promptTokens.rememberPromptTokens(next.sessionId, next.lastPromptTokens);
+  }
+  // The Session tab's numbers are server-side totals, not something this state
+  // can derive: a `usage` frame is one call's tokens and the tab shows the sum
+  // of every call. Neither event arrives often enough to need a poll, and the
+  // schedule below collapses a burst into one read.
+  if (event.type === 'usage' || event.type === 'run_finished' || event.type === 'agent_finished') {
+    scheduleSessionInfoRefresh();
   }
   store.chat.value = next;
 }
@@ -569,6 +603,11 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
   if (!silent) {
     store.chatLoading.value = true;
     store.chat.value = emptyChatState(id);
+    // The previous session's numbers must not be shown under this one's title
+    // while the read is in flight.
+    store.sessionInfo.value = null;
+    store.sessionInfoFor.value = null;
+    store.sessionInfoError.value = null;
   }
 
   refreshingSessionId = id;
@@ -772,6 +811,111 @@ export async function stopRun(): Promise<void> {
     else store.pushToast(toErrorMessage(error));
   } finally {
     store.stopping.value = false;
+  }
+}
+
+/**
+ * Send a message into the run that is already working.
+ *
+ * A *steer* folds into the turn in flight and a *follow-up* starts the run after
+ * it; either way the message is queued rather than submitted, so this returns
+ * once the server has accepted it and nothing is optimistically added to the
+ * transcript. The message appears there only when the run applies it (a steer
+ * gets a `steer_applied` frame, a follow-up its own run), which is what keeps the
+ * transcript in the order the model actually saw things.
+ */
+export async function queueChatMessage(
+  mode: QueuedKind,
+  message: { content: string; draft?: string; attachments?: QueuedAttachment[] },
+): Promise<boolean> {
+  const sessionId = store.currentSessionId.value;
+  if (!sessionId || message.content.trim() === '') return false;
+  if (!store.chat.value.running) return false;
+  try {
+    const result = await api.sendQueuedMessage(sessionId, mode, message);
+    // The acceptance carries the entry, so the pending panel is correct even
+    // before the `queued_messages` frame arrives (and stays correct if it never
+    // does, because a reconnect refetches the snapshot).
+    if (store.currentSessionId.value === sessionId && result.queued_message) {
+      const current = store.chat.value;
+      const entry = result.queued_message;
+      store.chat.value = {
+        ...current,
+        queued: current.queued.some((queued) => queued.id === entry.id)
+          ? current.queued
+          : [...current.queued, entry],
+      };
+    }
+    return true;
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+    } else if (error instanceof ApiError && error.status === 409) {
+      // The run ended between the click and the request. Say so plainly: the
+      // message is still in the composer, and sending it again is a plain send.
+      store.pushToast(
+        'That run finished before the message could be queued. Send it as a normal message instead.',
+        'info',
+      );
+      // Resynchronise: the queue this browser shows is now wrong, and so is the
+      // `running` flag it decided from.
+      void openSession(sessionId, { silent: true, force: true, preserveLive: true });
+    } else {
+      store.pushToast(toErrorMessage(error));
+    }
+    return false;
+  }
+}
+
+/**
+ * Take a queued message back out of the queue and put it in the composer.
+ *
+ * The message never reached the model, so this is the undo for "sent too soon":
+ * the draft goes back in the textarea and the attachment chips come back, which
+ * is why the server hands the entry back rather than just a `deleted: true`.
+ */
+export async function recallQueuedMessage(queuedId: string): Promise<boolean> {
+  const sessionId = store.currentSessionId.value;
+  if (!sessionId || queuedId === '') return false;
+  if (recallingQueued.has(queuedId)) return false;
+  recallingQueued.add(queuedId);
+  store.recallingQueued.value = { ...store.recallingQueued.value, [queuedId]: true };
+  try {
+    const result = await api.recallQueued(sessionId, queuedId);
+    const entry = result.recalled;
+    if (store.currentSessionId.value === sessionId) {
+      const current = store.chat.value;
+      store.chat.value = {
+        ...current,
+        queued: current.queued.filter((queued) => queued.id !== queuedId),
+      };
+      // The composer consumes the hand-off and appends to whatever the user has
+      // typed since, so a recall never silently replaces a fresh draft.
+      store.composerHandoff.value = {
+        text: entry.draft || entry.content,
+        attachments: entry.attachments ?? [],
+        token: nextHandoffToken(),
+      };
+      store.composerFocusTick.value += 1;
+    }
+    return true;
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+    } else if (error instanceof ApiError && error.status === 404) {
+      // It landed while the click was in flight. The queue on screen is stale, so
+      // refresh instead of resurrecting a message the model already saw.
+      store.pushToast('That message was already applied to the run.', 'info');
+      void openSession(sessionId, { silent: true, force: true, preserveLive: true });
+    } else {
+      store.pushToast(toErrorMessage(error));
+    }
+    return false;
+  } finally {
+    recallingQueued.delete(queuedId);
+    const next = { ...store.recallingQueued.value };
+    delete next[queuedId];
+    store.recallingQueued.value = next;
   }
 }
 
@@ -1082,6 +1226,9 @@ export async function switchProject(id: string): Promise<void> {
   store.agentActivities.value = {};
   store.selectedAgentId.value = null;
   store.agentFilter.value = 'all';
+  store.sessionInfo.value = null;
+  store.sessionInfoFor.value = null;
+  store.sessionInfoError.value = null;
   store.fileViewerPath.value = null;
   clearSelection();
   await refreshSessions();
@@ -1247,6 +1394,78 @@ export async function openAgentSession(agent: AgentSummary): Promise<void> {
   }
   store.selectedAgentId.value = null;
   await openSession(agent.session_id);
+}
+
+// ---------------------------------------------------------------------------
+// Session information tab
+// ---------------------------------------------------------------------------
+
+/** One read in flight at a time; a burst of usage events must not fan out. */
+let sessionInfoInFlight: Promise<void> | null = null;
+let sessionInfoCoalesce: number | null = null;
+
+/**
+ * Load the open session's counts and token totals.
+ *
+ * Deliberately a separate request from `openSession`: the transcript is a
+ * bounded window and carries no token rows, while this endpoint carries no
+ * message bodies. Reading it on demand is what lets the Session tab stay
+ * current through a long run without refetching 50 000 messages.
+ *
+ * A read for a session the user has since left is dropped, so switching sessions
+ * mid-flight cannot leave one session's numbers under another's heading.
+ */
+export async function refreshSessionInfo(): Promise<void> {
+  const sessionId = store.currentSessionId.value;
+  if (!sessionId) {
+    store.sessionInfo.value = null;
+    store.sessionInfoFor.value = null;
+    store.sessionInfoError.value = null;
+    store.sessionInfoLoading.value = false;
+    return;
+  }
+  if (sessionInfoInFlight) return sessionInfoInFlight;
+  store.sessionInfoLoading.value = true;
+  sessionInfoInFlight = (async () => {
+    try {
+      const info = await api.getSessionInfo(sessionId);
+      if (store.currentSessionId.value !== sessionId) return;
+      store.sessionInfo.value = info;
+      store.sessionInfoFor.value = sessionId;
+      store.sessionInfoError.value = null;
+    } catch (error) {
+      if (store.currentSessionId.value !== sessionId) return;
+      if (isUnauthorized(error)) {
+        enterAuthState();
+        return;
+      }
+      store.sessionInfoError.value = toErrorMessage(error);
+    } finally {
+      store.sessionInfoLoading.value = false;
+      sessionInfoInFlight = null;
+    }
+  })();
+  return sessionInfoInFlight;
+}
+
+/**
+ * Ask for a refresh, coalesced.
+ *
+ * `usage` arrives once per model call and `run_finished` once per run, so a long
+ * run would otherwise issue a request per provider call. 400 ms is short enough
+ * that the tab looks live and long enough that a burst collapses into one read.
+ */
+export function scheduleSessionInfoRefresh(delayMs = 400): void {
+  if (typeof window === 'undefined') {
+    void refreshSessionInfo();
+    return;
+  }
+  store.sessionInfoTick.value += 1;
+  if (sessionInfoCoalesce !== null) window.clearTimeout(sessionInfoCoalesce);
+  sessionInfoCoalesce = window.setTimeout(() => {
+    sessionInfoCoalesce = null;
+    void refreshSessionInfo();
+  }, delayMs);
 }
 
 export function dismissRunError(): void {
@@ -1427,6 +1646,107 @@ export function switchSession(id: string): void {
   store.mobileSheet.value = null;
   store.paletteOpen.value = false;
   void openSession(id);
+}
+
+// ---------------------------------------------------------------------------
+// Rewind
+// ---------------------------------------------------------------------------
+
+/** Open the rewind dialog for one transcript message. */
+export function openRewind(target: store.RewindTarget): void {
+  if (store.chat.value.running) {
+    // A live run holds the conversation in memory; the server refuses the rewind
+    // too, so say why here instead of letting the dialog offer something that
+    // will come back a 409.
+    store.pushToast('Stop the run before rewinding: the agent is still writing.', 'info');
+    return;
+  }
+  if (store.currentSessionId.value === null) return;
+  store.rewindTarget.value = target;
+}
+
+export function closeRewind(): void {
+  store.rewindTarget.value = null;
+}
+
+/** What a rewind of the open target would do: the file list and the counts. */
+export async function loadRewindPreview(): Promise<RewindPreview | null> {
+  const sessionId = store.currentSessionId.value;
+  const target = store.rewindTarget.value;
+  if (!sessionId || !target) return null;
+  try {
+    const response = await api.previewRewind(sessionId, target.messageId);
+    return response.preview;
+  } catch (error) {
+    if (isUnauthorized(error)) enterAuthState();
+    else store.pushToast(toErrorMessage(error));
+    return null;
+  }
+}
+
+/**
+ * Perform the rewind the dialog described.
+ *
+ * Returns true when the server applied it. A `retry` or `note` also starts a
+ * run; the transcript is refetched either way, because hiding rows is not
+ * something the client can reproduce (the server normalises the rewind point and
+ * the journal's effects are not in the transcript).
+ */
+export async function applyRewind(options: {
+  mode: RewindMode;
+  revert: boolean;
+  note?: string;
+}): Promise<boolean> {
+  const sessionId = store.currentSessionId.value;
+  const target = store.rewindTarget.value;
+  if (!sessionId || !target) return false;
+  const note = options.note?.trim() ?? '';
+  if (options.mode === 'note' && note === '') {
+    store.pushToast('Write the note you want the agent to act on.', 'info');
+    return false;
+  }
+
+  try {
+    const response = await api.rewindSession(sessionId, {
+      message_id: target.messageId,
+      revert: options.revert,
+      mode: options.mode,
+      ...(note !== '' ? { note } : {}),
+    });
+    store.rewindTarget.value = null;
+    // The reload is what makes the hidden tail disappear; the server owns both
+    // the cut and the normalisation.
+    await openSession(sessionId, { force: true, silent: true });
+    scheduleSessionsRefresh();
+    // The files the revert could not put back are the interesting part of a
+    // successful call: saying nothing would imply a clean revert.
+    if (response.files_skipped > 0) {
+      store.pushToast(
+        `${response.files_restored} file(s) restored, ${response.files_skipped} could not be.`,
+        'info',
+      );
+    } else if (response.files_restored > 0) {
+      store.pushToast(
+        `${response.files_restored} file(s) restored.`,
+        'info',
+      );
+    } else if (options.mode !== 'none') {
+      store.pushToast(
+        options.mode === 'retry' ? 'Retrying that request.' : 'Sending your note.',
+        'info',
+      );
+    }
+    return true;
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+    } else if (error instanceof ApiError && error.status === 409) {
+      store.pushToast('A run is still active in this session; stop it first.', 'info');
+    } else {
+      store.pushToast(toErrorMessage(error));
+    }
+    return false;
+  }
 }
 
 /** Wires the global 401 handler; called once from the app root. */

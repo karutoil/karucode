@@ -103,6 +103,57 @@ struct RecordingGate {
     requests: Mutex<Vec<ApprovalRequest>>,
 }
 
+/// One journal capture the tools asked for.
+#[derive(Debug, Clone, PartialEq)]
+struct Captured {
+    path: String,
+    tool: String,
+    /// The bytes the file had when it was captured, so a test can prove the
+    /// capture happened *before* the write.
+    before: String,
+}
+
+/// A journal stand-in that records what the tools asked to have captured.
+struct RecordingJournal {
+    /// Root used to read the before-image, mirroring what the real journal does.
+    root: PathBuf,
+    captures: Mutex<Vec<Captured>>,
+    /// When false, `capture_path` reports failure so a caller that must refuse
+    /// the write can be tested.
+    succeed: bool,
+}
+
+impl RecordingJournal {
+    fn new(root: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            root,
+            captures: Mutex::new(Vec::new()),
+            succeed: true,
+        })
+    }
+
+    fn captured(&self) -> Vec<Captured> {
+        self.captures.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl kc_core::tool::JournalHandle for RecordingJournal {
+    async fn record(&self, rel: &str, tool: &str) {
+        let before = std::fs::read_to_string(self.root.join(rel)).unwrap_or_default();
+        self.captures.lock().unwrap().push(Captured {
+            path: rel.to_string(),
+            tool: tool.to_string(),
+            before,
+        });
+    }
+
+    async fn capture_path(&self, rel: &str, tool: &str) -> bool {
+        self.record(rel, tool).await;
+        self.succeed
+    }
+}
+
 #[async_trait]
 impl ApprovalGate for RecordingGate {
     async fn request(&self, request: ApprovalRequest) -> ApprovalDecision {
@@ -153,6 +204,7 @@ fn env_with(
         settings: Arc::new(TestSettings { limits, policy }),
         depth: 0,
         supports_images: false,
+        checkpoints: None,
     };
     TestEnv {
         tmp,
@@ -190,6 +242,7 @@ fn env_with_extra_roots(tag: &str, extra_roots: Vec<PathBuf>) -> TestEnv {
         }),
         depth: 0,
         supports_images: false,
+        checkpoints: None,
     };
     TestEnv {
         tmp,
@@ -784,6 +837,158 @@ async fn edit_file_replaces_exactly_once() {
         .as_str()
         .unwrap()
         .contains("+    let x = 2;"));
+}
+
+// ------------------------------------------------------- rewind journal ---
+//
+// The journal is what makes a rewind able to put the workspace back, so these
+// tests assert the *shape* of what the file tools record: the path, which tool
+// asked, and - the part that matters - that the captured bytes are the ones the
+// file had *before* the write, not after it.
+
+/// An environment whose file tools have a journal attached.
+fn env_with_journal(tag: &str) -> (TestEnv, Arc<RecordingJournal>) {
+    let mut env = env(tag);
+    let journal = RecordingJournal::new(env.tmp.path().to_path_buf());
+    env.ctx.checkpoints = Some(journal.clone());
+    (env, journal)
+}
+
+#[tokio::test]
+async fn write_file_records_the_bytes_it_overwrites() {
+    let (env, journal) = env_with_journal("journal-write-overwrite");
+    env.tmp.write("src/lib.rs", "fn before() {}\n");
+
+    let out = call(
+        &WriteFile,
+        &env.ctx,
+        json!({"path": "src/lib.rs", "content": "fn after() {}\n"}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(env.tmp.read("src/lib.rs"), "fn after() {}\n");
+
+    let captures = journal.captured();
+    assert_eq!(captures.len(), 1, "one record per file operation");
+    assert_eq!(captures[0].path, "src/lib.rs");
+    assert_eq!(captures[0].tool, "write_file");
+    assert_eq!(
+        captures[0].before, "fn before() {}\n",
+        "the journal must hold the before-image, not the bytes just written"
+    );
+}
+
+#[tokio::test]
+async fn write_file_records_a_creation_as_an_empty_before_image() {
+    let (env, journal) = env_with_journal("journal-write-create");
+
+    let out = call(
+        &WriteFile,
+        &env.ctx,
+        json!({"path": "brand/new.txt", "content": "hello\n"}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+
+    let captures = journal.captured();
+    assert_eq!(captures.len(), 1, "a create is undoable, so it is recorded");
+    assert_eq!(captures[0].path, "brand/new.txt");
+    assert_eq!(
+        captures[0].before, "",
+        "there was no file, which is what the undo restores"
+    );
+}
+
+#[tokio::test]
+async fn edit_file_records_the_pre_edit_content() {
+    let (env, journal) = env_with_journal("journal-edit");
+    env.tmp.write("a.rs", "let x = 1;\n");
+
+    let out = call(
+        &EditFile,
+        &env.ctx,
+        json!({"path": "a.rs", "old_string": "let x = 1;", "new_string": "let x = 2;"}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(env.tmp.read("a.rs"), "let x = 2;\n");
+
+    let captures = journal.captured();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].tool, "edit_file");
+    assert_eq!(
+        captures[0].before, "let x = 1;\n",
+        "an undo of the edit must restore the pre-edit bytes"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_write_records_nothing() {
+    let (mut env, journal) = env_with_journal("journal-denied");
+    env.ctx = ToolCtx {
+        approvals: ApprovalHandle::new(
+            Arc::new(RecordingGate {
+                decision: ApprovalDecision::Deny,
+                requests: Mutex::new(Vec::new()),
+            }),
+            SessionId::new(),
+            RunId::new(),
+            None,
+        ),
+        ..env.ctx.clone()
+    };
+
+    let out = call(
+        &WriteFile,
+        &env.ctx,
+        json!({"path": "blocked.txt", "content": "x"}),
+    )
+    .await;
+    assert!(!out.ok);
+    assert!(
+        journal.captured().is_empty(),
+        "a denied write changed nothing, so there is nothing to undo"
+    );
+    assert!(!env.tmp.exists("blocked.txt"));
+}
+
+#[tokio::test]
+async fn a_write_without_a_journal_still_works() {
+    // A tool invoked directly (a test harness, an embedding) has no journal; the
+    // write must not start failing because a rewind could not be recorded.
+    let env = env("journal-absent");
+    assert!(env.ctx.checkpoints.is_none());
+    let out = call(
+        &WriteFile,
+        &env.ctx,
+        json!({"path": "plain.txt", "content": "ok"}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(env.tmp.read("plain.txt"), "ok");
+}
+
+#[tokio::test]
+async fn read_only_tools_do_not_touch_the_journal() {
+    let (env, journal) = env_with_journal("journal-readonly");
+    env.tmp.write("a.txt", "body\n");
+
+    assert!(call(&ReadFile, &env.ctx, json!({"path": "a.txt"})).await.ok);
+    assert!(call(&ListDir, &env.ctx, json!({"path": "."})).await.ok);
+    assert!(
+        call(
+            &SearchFiles,
+            &env.ctx,
+            json!({"pattern": "body", "path": "."})
+        )
+        .await
+        .ok
+    );
+
+    assert!(
+        journal.captured().is_empty(),
+        "reading a file never changes it, so it is never journaled"
+    );
 }
 
 #[tokio::test]

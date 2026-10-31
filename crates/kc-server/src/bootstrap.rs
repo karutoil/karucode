@@ -48,7 +48,7 @@
 //
 // | Flag | Default | Meaning |
 // | --- | --- | --- |
-// | `--workspace <PATH>` | current dir | default workspace root; sessions without a project run here |
+// | `--workspace <PATH>` | none | optional default workspace; without it the server starts with no project and you create the first one in the web UI |
 // | `--host <ADDR>` | `127.0.0.1` | bind address; a non-loopback bind requires `KARUCODE_AUTH_TOKEN` |
 // | `--port <PORT>` | `8787` | listen port |
 // | `--data-dir <PATH>` | `~/.local/share/karucode` | SQLite database and plugin data, forced to `0700` |
@@ -100,13 +100,26 @@
 //
 // # Startup failures you will actually see
 //
-// * `workspace ... is not usable` - pass an existing directory.
+// * `workspace ... is not usable` - you named a workspace that does not exist
+//   (`--workspace`, `KARUCODE_WORKSPACE`, or `workspace =` in the config file).
+//   Fix the path, or drop it and start with no project.
 // * `refusing to bind ... without KARUCODE_AUTH_TOKEN` - remote binds need a
 //   token of at least 16 characters.
 // * `could not open the database at ...` - permissions or a corrupt/foreign
 //   file; move it aside to start fresh.
 // * `port ... in use` - another instance is running (plugin/MCP children are
 //   stopped before exiting).
+//
+// # Starting without a workspace
+//
+// `--workspace` is optional. Without it the server starts with **no project**, an
+// empty project rail, and `workspace: null` in `GET /api/health`; the first
+// project is created in the web UI (`POST /api/projects`). Until then a session
+// that names no project is refused with `400 bad_request` rather than running in
+// some arbitrary directory.
+//
+// The one thing that is still fatal is naming a workspace that does not resolve:
+// a typo in `--workspace` must not silently degrade to "start empty".
 //
 // # Gotchas
 //
@@ -179,7 +192,7 @@ Options:
       --config <PATH>      Config file (default: $KARUCODE_CONFIG or ~/.config/karucode/config.toml)
       --host <HOST>        Bind address (default: 127.0.0.1)
       --port <PORT>        Listen port (default: 8787)
-      --workspace <PATH>   Workspace root the agent may read and edit (default: current directory)
+      --workspace <PATH>   Optional default workspace (default: none; create a project in the UI)
       --data-dir <PATH>    Data directory for the SQLite database and plugins
       --no-open            Accepted for compatibility; the server never opens a browser
   -h, --help               Print this help and exit
@@ -450,6 +463,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     }
     if let Some(workspace) = cli.workspace {
         config.workspace_root = workspace;
+        config.workspace_explicit = true;
     }
     if let Some(data_dir) = cli.data_dir {
         config.data_dir = data_dir;
@@ -458,17 +472,35 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     validate_config(&config)?;
     init_tracing(&config.log_level);
 
-    let workspace = Arc::new(
-        Workspace::with_extra_roots(&config.workspace_root, config.extra_roots()).map_err(|e| {
-            anyhow!(
-                "workspace {} is not usable: {e}. Pass --workspace <path> or set KARUCODE_WORKSPACE to an existing directory.",
+    // The workspace is optional. A fresh install starts with none and the
+    // operator creates the first project in the web UI; only an explicitly
+    // requested `--workspace` that does not resolve is an error, because silently
+    // ignoring it would hide a typo.
+    let workspace = match Workspace::with_extra_roots(&config.workspace_root, config.extra_roots())
+    {
+        Ok(workspace) => {
+            let workspace = Arc::new(workspace);
+            // Canonicalise so `/api/config` and `/api/health` report the same
+            // path the file tools actually use.
+            config.workspace_root = workspace.root().to_path_buf();
+            Some(workspace)
+        }
+        Err(error) if workspace_was_requested(&config) => {
+            anyhow::bail!(
+                "workspace {} is not usable: {error}. Pass --workspace <path> or set \
+                 KARUCODE_WORKSPACE to an existing directory, or start without one and create \
+                 a project in the web UI.",
                 config.workspace_root.display()
             )
-        })?,
-    );
-    // Canonicalise so `/api/config` and `/api/health` report the same path the
-    // file tools actually use.
-    config.workspace_root = workspace.root().to_path_buf();
+        }
+        Err(_) => {
+            tracing::info!(
+                attempted = %config.workspace_root.display(),
+                "no default workspace; create a project in the web UI"
+            );
+            None
+        }
+    };
 
     ensure_private_dir(&config.data_dir)?;
 
@@ -501,11 +533,14 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     // runtime resolves runs against. The registry carries the same extra roots
     // as the default workspace, so a project created later (or a subagent, which
     // inherits its parent's workspace) can reach the temp dir too.
-    let projects = Arc::new(ProjectRegistry::with_extra_roots(
-        Arc::clone(&workspace),
-        workspace.extra_roots().to_vec(),
-    ));
-    seed_projects(&store, &projects, &workspace).await?;
+    let projects = Arc::new(match &workspace {
+        Some(workspace) => ProjectRegistry::with_extra_roots(
+            Arc::clone(workspace),
+            workspace.extra_roots().to_vec(),
+        ),
+        None => ProjectRegistry::without_default(config.extra_roots()),
+    });
+    seed_projects(&store, &projects, workspace.as_ref()).await?;
 
     let plugin_tools = {
         let host = plugins.lock().await;
@@ -542,7 +577,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         store: Arc::clone(&store),
         runtime: Arc::clone(&runtime),
         providers,
-        workspace,
         projects: Arc::clone(&projects),
         plugins: Arc::clone(&plugins),
         mcp: Arc::clone(&mcp),
@@ -655,7 +689,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     };
     tracing::info!(
         url = %url,
-        workspace = %state.workspace().root().display(),
+        workspace = %state
+            .workspace_root_display()
+            .unwrap_or_else(|| "(none yet - create a project in the UI)".into()),
         model = %model.model,
         base_url = %model.base_url,
         tools = state.tool_count(),
@@ -878,6 +914,18 @@ fn unique_project_name(existing: &[Project], base: String) -> String {
     format!("{base} ({})", crate::state::now_ms())
 }
 
+/// Did the operator actually name a workspace, or is `workspace_root` just the
+/// guess `Config::default()` made from the current directory?
+///
+/// This decides whether an unusable workspace is fatal. `--workspace`,
+/// `KARUCODE_WORKSPACE` and `workspace =` in the config file are explicit asks, so
+/// a typo there must fail loudly. The bare "current directory" default is not an
+/// ask: a service whose `WorkingDirectory=` is missing, or a first run from an odd
+/// cwd, should start empty and let the operator pick a project in the UI.
+fn workspace_was_requested(config: &Config) -> bool {
+    config.workspace_explicit
+}
+
 /// Make sure every session has a project and the registry knows every project.
 ///
 /// * no projects at all -> create one for the configured workspace;
@@ -891,9 +939,17 @@ fn unique_project_name(existing: &[Project], base: String) -> String {
 async fn seed_projects(
     store: &Arc<dyn kc_core::store::Store>,
     registry: &ProjectRegistry,
-    workspace: &Arc<Workspace>,
+    workspace: Option<&Arc<Workspace>>,
 ) -> anyhow::Result<()> {
     let mut projects = store.list_projects().await?;
+    // With no default workspace there is nothing to seed: a fresh install shows
+    // an empty project rail and the operator creates the first project.
+    let Some(workspace) = workspace else {
+        for project in &projects {
+            registry.insert(&project.id, std::path::Path::new(&project.path))?;
+        }
+        return Ok(());
+    };
     if projects.is_empty() {
         let id = ProjectId::new();
         let name = project_name_for(workspace.root());

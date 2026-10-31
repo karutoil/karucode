@@ -8,6 +8,8 @@ import type {
   PluginPanelSummary,
   Project,
   ProviderProfile,
+  QueuedAttachment,
+  SessionInfo,
   SessionSummary,
   Toast,
 } from '../api/types';
@@ -20,7 +22,7 @@ import type { AgentActivity } from './agentConsole';
  * (`plugin__<plugin>__<panel>`), so the active tab is typed as `string` and the
  * built-ins stay a closed union for the components that need one.
  */
-export type BuiltinInspectorTab = 'workspace' | 'changes' | 'commands' | 'agents';
+export type BuiltinInspectorTab = 'workspace' | 'changes' | 'session' | 'agents';
 export type InspectorTab = string;
 
 /** One plugin panel advertised by `GET /api/config`, ready to render as a tab. */
@@ -210,10 +212,51 @@ export const pluginPanelTabs = computed<PluginPanelTab[]>(() => {
 export const pluginPanelData = signal<Record<string, PluginPanelState>>({});
 export const settingsOpen = signal(false);
 export const paletteOpen = signal(false);
+/**
+ * The message a rewind dialog is open for.
+ *
+ * `messageId` is what the reader clicked, which may be an assistant turn: the
+ * server normalises it to the prompt that produced it, and the dialog shows the
+ * resolved prompt rather than the click target so what gets replaced is explicit.
+ */
+export interface RewindTarget {
+  /** The message the reader asked to rewind to. */
+  messageId: number;
+  /** The visible content of that message, for the dialog's heading. */
+  preview: string;
+  /** True when the clicked message is the agent's answer, not a prompt. */
+  isAssistant: boolean;
+}
+
+/**
+ * The message a rewind dialog is open for, if any.
+ *
+ * The dialog is a separate surface from the transcript because the choice it
+ * asks for (keep or revert the files, retry or write a note) has to be made with
+ * the preview's file list in front of the reader.
+ */
+export const rewindTarget = signal<RewindTarget | null>(null);
 /** The Theme Studio drawer (right side). Mutually exclusive with other overlays. */
 export const themeStudioOpen = signal(false);
 /** Text another surface asked the composer to take (empty-state quick prompts). */
 export const composerDraft = signal<string | null>(null);
+
+/**
+ * A message the user recalled, handed back to the composer.
+ *
+ * Separate from `composerDraft` because a recall restores the *form*, not just
+ * text: the attachment chips come back too, and the draft is appended to what the
+ * user has typed since rather than replacing it. `token` makes each hand-off
+ * unique, so recalling the same message twice in a row is still two events.
+ */
+export interface ComposerHandoff {
+  text: string;
+  attachments: QueuedAttachment[];
+  token: number;
+}
+export const composerHandoff = signal<ComposerHandoff | null>(null);
+/** Queued ids with a recall in flight, so a double click cannot fire twice. */
+export const recallingQueued = signal<Record<string, boolean>>({});
 export const fileViewerPath = signal<string | null>(null);
 /** Bumped when the UI itself writes a workspace file, so the explorer refetches. */
 export const workspaceRefreshTick = signal(0);
@@ -354,6 +397,23 @@ export const agentDetailError = signal<string | null>(null);
 export const runningAgents = computed(
   () => agentsAll.value.filter((agent) => agent.status === 'running').length,
 );
+
+/**
+ * The open session's counts and token totals, for the inspector's Session tab.
+ *
+ * Fetched from `GET /api/sessions/:id/info` rather than derived from `chat`:
+ * the transcript is a bounded window, and the token rows are persisted server
+ * side precisely because a `usage` event is live-only. `null` means "not read
+ * yet" - a different state from "a session with nothing in it", which is why the
+ * tab draws a loading line instead of a page of zeros.
+ */
+export const sessionInfo = signal<SessionInfo | null>(null);
+/** The session `sessionInfo` describes, so a stale read for another one is dropped. */
+export const sessionInfoFor = signal<string | null>(null);
+export const sessionInfoLoading = signal(false);
+export const sessionInfoError = signal<string | null>(null);
+/** Bumped by a run/usage event, so an open tab refreshes without polling. */
+export const sessionInfoTick = signal(0);
 
 export const activeSession = computed<SessionSummary | null>(
   () => sessions.value.find((session) => session.id === currentSessionId.value) ?? null,

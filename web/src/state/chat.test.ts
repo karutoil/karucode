@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ImageAttachment, SessionDetail, StoredMessage, ToolCall } from '../api/types';
-import { detailFixture, storedMessage } from '../test/fixtures';
+import { detailFixture, queuedFixture, storedMessage } from '../test/fixtures';
 import { seedChatState } from './chat';
 
 const shot: ImageAttachment = {
@@ -29,6 +29,24 @@ function assistantTurn(): StoredMessage {
 }
 
 describe('seedChatState', () => {
+  it('carries both queues off the snapshot, steers first', () => {
+    // Steers land before follow-ups (a steer joins the turn in flight, a
+    // follow-up gets its own run), so the pending list is in landing order.
+    const state = seedChatState({
+      ...detailFixture,
+      running: true,
+      queued_steers: [queuedFixture({ id: 'steer_1', kind: 'steer' })],
+      queued_follow_ups: [
+        queuedFixture({ id: 'followup_1', kind: 'follow_up', draft: 'then run the tests' }),
+      ],
+    });
+    expect(state.queued.map((entry) => entry.id)).toEqual(['steer_1', 'followup_1']);
+  });
+
+  it('has an empty queue when the snapshot carries none', () => {
+    expect(seedChatState({ ...detailFixture, running: false }).queued).toEqual([]);
+  });
+
   it('carries the stored tool images onto the card so a reload still previews them', () => {
     const toolRow: StoredMessage = {
       ...storedMessage({

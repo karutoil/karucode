@@ -8,6 +8,14 @@ export interface TabItem<T extends string> {
   icon?: JSX.Element;
   /** Optional trailing count pill, e.g. the number of changed files. */
   count?: number;
+  /**
+   * Hover text for the tab button.
+   *
+   * A tab label has room for one short word, so a number worth seeing without
+   * opening the panel (the context fill) does not fit as a pill - a bare `32`
+   * would be read as a count of something. The tooltip carries the sentence.
+   */
+  title?: string;
 }
 
 /**
@@ -104,6 +112,7 @@ export function Tabs<T extends string>({
             // Panels are mounted lazily, so only the selected tab can point at one.
             aria-controls={selected ? `${prefix}-panel-${item.id}` : undefined}
             tabIndex={selected ? 0 : -1}
+            title={item.title}
             onClick={() => onChange(item.id)}
           >
             {item.icon ? <span class="tab-icon" aria-hidden="true">{item.icon}</span> : null}

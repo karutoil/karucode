@@ -231,8 +231,8 @@ def start_container(port):
             "podman", "run", "-d",
             "--name", CONTAINER,
             "--systemd=always",
-            # The unit uses namespace sandboxing (ProtectHostname, ProtectSystem,
-            # PrivateTmp). An unprivileged container has no CAP_SYS_ADMIN, so
+            # The unit still uses namespace options (ProtectHostname, PrivateTmp,
+            # PrivateDevices). An unprivileged container has no CAP_SYS_ADMIN, so
             # systemd cannot set those up and the unit dies at status=217/USER.
             # That is a container limitation, not an installer bug, and it is why
             # a container deployment should use the Dockerfile (which does not use
@@ -257,7 +257,12 @@ def start_container(port):
 
 
 def case_fresh_install(pod, feed, port):
-    """Fetch tarball + unit from the feed and install them for real."""
+    """Fetch tarball + unit from the feed and install them for real.
+
+    This runs in a bare root shell (`podman exec` as root, no $SUDO_USER, no login
+    uid), which is the one situation with no human to resolve: the installer must
+    therefore take the system-account fallback, and say so.
+    """
     pod.cp(INSTALL_SH, "/opt/install.sh")
     result = pod.exec(
         f"VERSION=9.9.9 KARUCODE_RELEASE_BASE_URL={feed.url('/v9.9.9')} "
@@ -269,6 +274,10 @@ def case_fresh_install(pod, feed, port):
     check_in("checksum verified", result.stdout, "installer output")
     check_in("active", result.stdout, "installer output")
 
+    # No human in this shell: the fallback must be visible, not silent.
+    check_in("could not identify the human", result.stderr, "fallback warning")
+    check_in("Service account: karucode:karucode (fallback", result.stdout, "installer summary")
+
     check(pod.out("systemctl is-active karucode") == "active", "unit is not active")
     check(pod.out("systemctl is-enabled karucode") == "enabled", "unit is not enabled at boot")
     check(pod.health(port) == "200", "/api/health did not answer 200")
@@ -278,13 +287,28 @@ def case_fresh_install(pod, feed, port):
 
     dropin = pod.out("command cat /etc/systemd/system/karucode.service.d/10-install.conf")
     check_in("WorkingDirectory=/srv/kc/ws", dropin, "drop-in")
-    check_in("ReadWritePaths=/srv/kc/ws", dropin, "drop-in")
-    check_in("Environment=KARUCODE_DATA_DIR=/var/lib/karucode", dropin, "drop-in")
+    check_in("User=karucode", dropin, "drop-in")
+    check_in("Group=karucode", dropin, "drop-in")
+    # The system account's home *is* its data dir - not <home>/.local/share, which
+    # would be /var/lib/karucode/.local/share/karucode - so the unit's own
+    # StateDirectory= covers it and no KARUCODE_DATA_DIR is written.
+    check(dropin.count("StateDirectory") == 0, f"the state dir should be left to the unit:\n{dropin}")
+    check(dropin.count("KARUCODE_DATA_DIR") == 0, f"unexpected data dir in the drop-in:\n{dropin}")
+    # The shipped unit deliberately does not sandbox the filesystem, and the
+    # drop-in must not re-introduce a ReadWritePaths= allowlist.
+    check(
+        pod.out("systemctl show -p ProtectSystem --value karucode") in ("", "no"),
+        "ProtectSystem is enabled, but the unit no longer sandboxes the filesystem",
+    )
 
     check(pod.out("stat -c '%U %a' /var/lib/karucode") == "karucode 700", "state dir owner/mode wrong")
     check(pod.out("stat -c '%U' /srv/kc/ws") == "karucode", "workspace not owned by the service user")
     check(pod.out("stat -c '%a' /etc/karucode/karucode.env") == "600", "env file is not 0600")
     check(pod.out("test -f /var/lib/karucode/karucode.db && echo yes") == "yes", "no database was created")
+    check(
+        pod.out("test -e /var/lib/karucode/.local/share/karucode && echo yes") != "yes",
+        "the data dir was nested under the system account's home",
+    )
 
     # The service must not be running as root, and the hardening must be on.
     check(pod.out("systemctl show -p User --value karucode") == "karucode", "unit is not running as karucode")
@@ -293,6 +317,52 @@ def case_fresh_install(pod, feed, port):
         "NoNewPrivileges is not in effect",
     )
     return result.stdout
+
+
+def case_runs_as_the_invoking_human(pod, feed, port):
+    """A sudo run must resolve to the human, with the data under their $HOME.
+
+    This is the install the documentation describes, and the one the container
+    shell in every other case cannot reach. The environment below is what `sudo`
+    actually hands the script: `$USER` is reset to `root`, `$SUDO_USER` is the
+    human. Getting `$USER` first - the original bug - resolves to root here, and the
+    assertions below fail.
+    """
+    pod.exec(
+        "useradd --create-home --shell /bin/bash kcapp && "
+        "install -d -m 0700 -o kcapp -g kcapp /home/kcapp/.local/share/karucode && "
+        "install -d -m 0750 -o kcapp -g kcapp /home/kcapp/ws",
+        check_rc=True,
+    )
+    result = pod.exec(
+        f"VERSION=9.9.10 KARUCODE_RELEASE_BASE_URL={feed.url('/v9.9.10')} "
+        f"KARUCODE_UNIT_URL={feed.url('/packaging/karucode.service')} "
+        f"env USER=root LOGNAME=root HOME=/root SUDO_USER=kcapp "
+        f"sh /opt/install.sh --workspace /home/kcapp/ws --port {port}",
+        timeout=300,
+    )
+    check(result.returncode == 0, f"installer exited {result.returncode}:\n{result.stdout}\n{result.stderr}")
+    # The one thing that must never be silently wrong.
+    check_in("Service account: kcapp:kcapp (who ran this installer)", result.stdout, "installer summary")
+    check(result.stderr.count("could not identify the human") == 0, f"the fallback fired for a sudo run:\n{result.stderr}")
+
+    check(pod.out("systemctl show -p User --value karucode") == "kcapp", "unit is not running as the invoking human")
+    check(pod.out("systemctl show -p Group --value karucode") == "kcapp", "unit group is not the account's group")
+    check(pod.health(port) == "200", "/api/health did not answer as the invoking human")
+
+    dropin = pod.out("command cat /etc/systemd/system/karucode.service.d/10-install.conf")
+    check_in("User=kcapp", dropin, "drop-in")
+    check_in("Environment=KARUCODE_DATA_DIR=/home/kcapp/.local/share/karucode", dropin, "drop-in")
+    check_in("StateDirectory=", dropin, "drop-in should clear StateDirectory= for a home data dir")
+    check(
+        pod.out("test -f /home/kcapp/.local/share/karucode/karucode.db && echo yes") == "yes",
+        "the database was not created under the human's $HOME",
+    )
+    check(
+        pod.out("stat -c '%U' /home/kcapp/.local/share/karucode") == "kcapp",
+        "the existing data dir changed owner",
+    )
+    return "service runs as kcapp with its data under /home/kcapp"
 
 
 def case_reboot(pod, feed, port):
@@ -476,8 +546,9 @@ def case_existing_user_home(pod, feed):
     """Running as an existing account, with the data dir under $HOME.
 
     This is the migration path for someone who already ran karucode by hand: keep
-    the account and the data, let systemd own the lifecycle. It is also the case
-    that exercises ProtectHome=read-only with a nested ReadWritePaths=.
+    the account and the data, let systemd own the lifecycle - including a data
+    directory under $HOME, which works because the unit does not sandbox the
+    filesystem.
     """
     port = free_port()
     pod.exec(
@@ -497,11 +568,9 @@ def case_existing_user_home(pod, feed):
     check(result.returncode == 0, f"installer exited {result.returncode}:\n{result.stdout}\n{result.stderr}")
     check(pod.out("systemctl show -p User --value karucode") == "kcapp", "unit is not running as the requested user")
     check(pod.health(port) == "200", "/api/health did not answer as the existing user")
-    rw = pod.out("systemctl show -p ReadWritePaths --value karucode")
-    check("/home/kcapp/ws" in rw, f"workspace missing from ReadWritePaths: {rw!r}")
     check(
-        "/home/kcapp/.local/share/karucode" in rw,
-        f"custom data dir missing from ReadWritePaths: {rw!r}",
+        pod.out("systemctl show -p ProtectHome --value karucode") in ("", "no"),
+        "ProtectHome is enabled, but the unit no longer sandboxes the filesystem",
     )
     check(
         pod.out("stat -c '%U' /home/kcapp/.local/share/karucode") == "kcapp",
@@ -518,7 +587,7 @@ def case_existing_user_home(pod, feed):
 
 
 CASES = [
-    ("fresh install from a fetched release", case_fresh_install),
+    ("fresh install from a fetched release (system-account fallback)", case_fresh_install),
     ("reboot brings the service back", case_reboot),
     ("re-running the installer is safe", case_idempotent_rerun),
     ("upgrade restarts onto the new binary", case_upgrade),
@@ -527,6 +596,7 @@ CASES = [
     ("a busy port is reported clearly", case_port_conflict),
     ("--no-systemd installs only the binary", case_no_systemd),
     ("--allow-jit relaxes W^X in the drop-in", case_allow_jit),
+    ("a sudo run installs as the invoking human", case_runs_as_the_invoking_human),
     ("an existing user with data under $HOME works", case_existing_user_home),
 ]
 

@@ -154,6 +154,26 @@ If you need real isolation, run karucode as a dedicated unprivileged user inside
 container/VM with the project bind-mounted, and treat the approval policy as a
 convenience rather than a security boundary.
 
+**The packaged unit does not add a filesystem sandbox.** `packaging/karucode.service`
+runs the agent as a dedicated unprivileged user with `NoNewPrivileges=yes`, but it
+deliberately sets no `ProtectSystem=`, `ProtectHome=` or `ReadWritePaths=`: the
+agent can write anywhere that user can, so `mv`, build caches and sibling
+checkouts work instead of failing with `EROFS`. The **service account is the
+boundary** — give it its own user and it cannot reach anything that user cannot.
+
+That is a real reduction in containment compared with a read-only root, and it was
+chosen deliberately: maintaining a `ReadWritePaths=` allowlist for every toolchain
+was a permanent source of `EROFS` failures deep inside builds. If you want the wall
+back, add it in `/etc/systemd/system/karucode.service.d/20-local.conf` (which no
+tool rewrites) and run `systemctl daemon-reload && systemctl restart karucode`:
+
+```ini
+[Service]
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/srv/karucode/workspace /var/lib/karucode
+```
+
 **Plugins and MCP servers are trusted code.** They run as separate processes with
 the same OS permissions as the server. Process isolation means a crash or hang
 cannot take the harness down, and the core can time out or kill them; it does not

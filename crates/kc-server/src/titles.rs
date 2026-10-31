@@ -106,11 +106,11 @@
 //
 // Full reference: `docs/API.md` (`POST /api/sessions/:id/messages`).
 
-use kc_core::config::{ModelConfig, TitlesConfig, TITLE_PROMPT_CHARS};
+use crate::state::AppState;
 use kc_core::config::SessionModelSelection;
+use kc_core::config::{ModelConfig, TitlesConfig, TITLE_PROMPT_CHARS};
 use kc_core::message::Message;
 use kc_core::provider::{ChatRequest, ProviderChunk};
-use crate::state::AppState;
 use kc_provider::strip_tool_markup;
 
 /// Instruction that precedes the user's message.
@@ -145,10 +145,7 @@ fn title_request(model: &ModelConfig, prompt: &str, titles: &TitlesConfig) -> Ch
     let excerpt = truncate_chars(prompt.trim(), TITLE_PROMPT_CHARS);
     ChatRequest {
         model: model.model.clone(),
-        messages: vec![
-            Message::system(instruction),
-            Message::user(excerpt),
-        ],
+        messages: vec![Message::system(instruction), Message::user(excerpt)],
         // No tools: a titling turn must not be able to call anything.
         tools: Vec::new(),
         // Titles want a little variety, but this model may be a reasoning model
@@ -192,7 +189,10 @@ fn truncate_chars(text: &str, max: usize) -> String {
 /// a short line that either ends in `:` after an announcement word, or is nothing
 /// but an acknowledgement.
 fn announces_a_title(line: &str) -> bool {
-    let lower = line.trim().trim_end_matches(['*', ' ', '_']).to_ascii_lowercase();
+    let lower = line
+        .trim()
+        .trim_end_matches(['*', ' ', '_'])
+        .to_ascii_lowercase();
     if lower.is_empty() {
         return false;
     }
@@ -416,7 +416,8 @@ pub async fn maybe_auto_title(
         .ok()
         .flatten()
         .and_then(|session| session.model);
-    let Some(model) = crate::settings::resolved_title_model_for_session(&config, selection.as_ref())
+    let Some(model) =
+        crate::settings::resolved_title_model_for_session(&config, selection.as_ref())
     else {
         return;
     };
@@ -523,10 +524,15 @@ mod tests {
         let request = title_request(&ModelConfig::default(), "do the thing", &titles);
         assert_eq!(request.messages.len(), 2);
         assert!(
-            request.messages[0].content.contains("At most 40 characters"),
+            request.messages[0]
+                .content
+                .contains("At most 40 characters"),
             "the instruction must state the budget the caller will enforce"
         );
-        assert!(request.tools.is_empty(), "a titling turn must not carry tools");
+        assert!(
+            request.tools.is_empty(),
+            "a titling turn must not carry tools"
+        );
         assert!(!request.send_temperature);
         assert_eq!(request.max_tokens, Some(160));
     }
@@ -553,8 +559,14 @@ mod tests {
             clean_title("Here is the title:\nfix the flaky build", 60).unwrap(),
             "fix the flaky build"
         );
-        assert_eq!(clean_title("Sure!\nfix the build", 60).unwrap(), "fix the build");
-        assert_eq!(clean_title("# Fix flaky auth test.", 60).unwrap(), "Fix flaky auth test");
+        assert_eq!(
+            clean_title("Sure!\nfix the build", 60).unwrap(),
+            "fix the build"
+        );
+        assert_eq!(
+            clean_title("# Fix flaky auth test.", 60).unwrap(),
+            "Fix flaky auth test"
+        );
         // A real title is never mistaken for a preamble, even with a colon-free
         // question mark or an exclamation in it.
         assert_eq!(
@@ -567,16 +579,28 @@ mod tests {
 
     #[test]
     fn titles_are_stripped_of_wrappers_quotes_and_trailing_punctuation() {
-        assert_eq!(clean_title("Title: Fix the build", 60).unwrap(), "Fix the build");
-        assert_eq!(clean_title("title: fix the build.", 60).unwrap(), "fix the build");
-        assert_eq!(clean_title("\"Fix the build\"", 60).unwrap(), "Fix the build");
+        assert_eq!(
+            clean_title("Title: Fix the build", 60).unwrap(),
+            "Fix the build"
+        );
+        assert_eq!(
+            clean_title("title: fix the build.", 60).unwrap(),
+            "fix the build"
+        );
+        assert_eq!(
+            clean_title("\"Fix the build\"", 60).unwrap(),
+            "Fix the build"
+        );
         assert_eq!(
             clean_title("\u{201c}Fix the build\u{201d}", 60).unwrap(),
             "Fix the build"
         );
         assert_eq!(clean_title("  spaced\n\n  out  ", 60).unwrap(), "spaced");
         // A second line is never part of the title.
-        assert_eq!(clean_title("Real title\n\nExplanation.", 60).unwrap(), "Real title");
+        assert_eq!(
+            clean_title("Real title\n\nExplanation.", 60).unwrap(),
+            "Real title"
+        );
     }
 
     #[test]

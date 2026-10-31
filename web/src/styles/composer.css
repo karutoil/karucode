@@ -269,6 +269,189 @@
   outline-offset: 0;
 }
 
+/* ---------- queued messages (steer / follow-up) ---------- */
+
+/* Above the box, inside the dock. A queued message is only recallable while it is
+ * still queued, so the list has to be on screen while the user types the next
+ * one - and it has to look like the dock, not like a second box competing with
+ * the composer. */
+.queued-panel {
+  margin-bottom: 6px;
+  padding: 7px 10px 8px;
+  border: 1px solid var(--chip-line);
+  border-radius: 9px;
+  background: var(--chip-surface);
+  pointer-events: auto;
+}
+
+.queued-head {
+  margin: 0 0 5px;
+  color: var(--text-menu-meta);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.queued-head-hint {
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 0.8;
+}
+
+.queued-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.queued-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.queued-kind {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--accent-surface);
+  color: var(--accent-text-soft);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  cursor: default;
+}
+
+/* A follow-up runs *after* the current turn, so it reads dimmer than a steer:
+ * one is changing the work in progress, the other is waiting its turn. */
+.queued-row[data-kind='follow_up'] .queued-kind {
+  background: var(--surface-raised);
+  color: var(--text-menu-meta);
+}
+
+.queued-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.queued-text {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--chip-ink);
+  font-size: 11px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.queued-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.queued-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  padding: 1px 5px;
+  border: 1px solid var(--chip-line);
+  border-radius: 4px;
+  color: var(--text-menu-meta);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.queued-recall {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid var(--chip-line);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--row-accent-ink);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.queued-recall:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--surface-hover-strong);
+}
+
+.queued-recall:disabled {
+  color: var(--text-menu-meta);
+  cursor: default;
+}
+
+.queued-recall:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}
+
+/* ---------- steer / follow-up toggle ---------- */
+
+/* Only while a run is in flight and the box has text: it is a choice between two
+ * real behaviours ("change this turn" vs "start the next one"), so it is visible
+ * rather than a modifier key, and absent when there is nothing to choose. */
+.queue-mode {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  height: 29px;
+  padding: 2px;
+  border: 1px solid var(--chip-line);
+  border-radius: 7px;
+  background: var(--chip-surface);
+}
+
+.queue-mode-option {
+  height: 23px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-menu-meta);
+  font-size: 10px;
+  font-weight: 620;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.queue-mode-option:hover {
+  color: var(--row-accent-ink);
+}
+
+.queue-mode-option[data-active='true'] {
+  background: var(--surface-hover-strong);
+  color: var(--row-accent-ink);
+}
+
+.queue-mode-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}
+
+/* Same gold as Send: it is the primary action, just aimed at the running turn. */
+.compose-bottom .button-queue {
+  min-width: 62px;
+}
+
 /* ---------- bottom row ---------- */
 
 .compose-bottom {

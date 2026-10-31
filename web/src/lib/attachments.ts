@@ -13,6 +13,7 @@
  */
 
 import { formatBytes } from './format';
+import type { QueuedAttachment } from '../api/types';
 
 export type AttachmentMode = 'inline' | 'upload';
 
@@ -194,4 +195,44 @@ export function composeMessage(draft: string, attachments: readonly Attachment[]
   const blocks = ready.map(attachmentBlock).join('\n\n');
   const header = `Attached ${ready.length === 1 ? 'file' : 'files'}:`;
   return body === '' ? `${header}\n\n${blocks}` : `${body}\n\n${header}\n\n${blocks}`;
+}
+
+/**
+ * The chips a queued message carries, for a recall to put back.
+ *
+ * Uploads send only where the file landed; an inline file sends its text too,
+ * because the browser's copy is the only one that exists - the server never saw
+ * the file, only the block the composer rendered from it.
+ */
+export function attachForQueue(attachments: readonly Attachment[]): QueuedAttachment[] {
+  return attachments
+    .filter((attachment) => attachment.status === 'ready')
+    .map((attachment) => ({
+      // The name the user picked; `path` is where it went.
+      name: attachment.name,
+      path: attachment.path,
+      mode: attachment.mode,
+      size: attachment.size,
+      ...(attachment.mode === 'inline' && attachment.content !== undefined
+        ? { content: attachment.content }
+        : {}),
+    }));
+}
+
+/**
+ * Rebuild composer chips from a recalled message.
+ *
+ * Ready by construction: the queued entry only carries attachments that were
+ * ready when it was sent, and their content came back with them.
+ */
+export function attachmentsFromQueue(queued: readonly QueuedAttachment[]): Attachment[] {
+  return queued.map((attachment, index) => ({
+    id: `${newAttachmentId(attachment.name)}:${index}`,
+    name: attachment.name,
+    size: attachment.size,
+    mode: attachment.mode,
+    path: attachment.path,
+    status: 'ready',
+    ...(attachment.content !== undefined ? { content: attachment.content } : {}),
+  }));
 }

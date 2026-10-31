@@ -7,7 +7,7 @@
 // @kc-title: Run it as a systemd service
 // @kc-summary: Install the binary and a hardened unit, keep it enabled across reboots, and upgrade or roll back without losing the paths it needs.
 // @kc-tags: install, deploy, systemd, service, upgrade, reboot, production
-// @kc-applies-to: file:packaging/install.sh, file:packaging/update.sh, file:packaging/karucode.service, cmd:install.sh, cmd:install.sh --workspace, cmd:install.sh --dry-run, cmd:install.sh --binary, cmd:install.sh --no-systemd, cmd:install.sh --allow-jit, cmd:install.sh --port, cmd:install.sh --service-user, cmd:update.sh, cmd:update.sh --check, cmd:update.sh --dry-run, cmd:update.sh --no-pull, cmd:update.sh --ref, cmd:update.sh --build-only, cmd:update.sh --skip-build, cmd:update.sh --allow-dirty, cmd:update.sh --no-backup, cmd:update.sh --force, cmd:update.sh --stage-only, cmd:update.sh --from-stage, cmd:update.sh --no-stage, cmd:update.sh --stage-dir, cmd:update.sh --detach, cmd:update.sh --no-detach, cmd:update.sh --follow, path:/etc/systemd/system/karucode.service, path:/etc/systemd/system/karucode.service.d/10-install.conf, path:/etc/systemd/system/karucode.service.d/20-local.conf, path:/etc/karucode/karucode.env, path:/var/lib/karucode, path:/usr/local/bin/karucode, cmd:systemctl enable --now karucode, cmd:systemctl restart karucode, cmd:journalctl -u karucode
+// @kc-applies-to: file:packaging/install.sh, file:packaging/update.sh, file:packaging/karucode.service, cmd:install.sh, cmd:install.sh --workspace, cmd:install.sh --dry-run, cmd:install.sh --binary, cmd:install.sh --no-systemd, cmd:install.sh --allow-jit, cmd:install.sh --port, cmd:install.sh --service-user, cmd:install.sh --service-group, cmd:update.sh, cmd:update.sh --check, cmd:update.sh --dry-run, cmd:update.sh --no-pull, cmd:update.sh --ref, cmd:update.sh --build-only, cmd:update.sh --skip-build, cmd:update.sh --allow-dirty, cmd:update.sh --no-backup, cmd:update.sh --force, cmd:update.sh --stage-only, cmd:update.sh --from-stage, cmd:update.sh --no-stage, cmd:update.sh --stage-dir, cmd:update.sh --detach, cmd:update.sh --no-detach, cmd:update.sh --follow, env:SUDO_USER, env:LOGNAME, path:/etc/systemd/system/karucode.service, path:/etc/systemd/system/karucode.service.d/10-install.conf, path:/etc/systemd/system/karucode.service.d/20-local.conf, path:/etc/karucode/karucode.env, path:/var/lib/karucode, path:/usr/local/bin/karucode, cmd:systemctl enable --now karucode, cmd:systemctl restart karucode, cmd:journalctl -u karucode
 //
 // # Install
 //
@@ -29,9 +29,34 @@
 //
 // `--workspace` is the one directory the agent may read and edit. The installer
 // creates it, owns it by the service user, installs the unit, enables it at boot,
-// starts it, and only reports success once `/api/health` answers. It creates the
-// `karucode` system group and user if they are missing, and it writes a commented
-// template to `/etc/karucode/karucode.env` only when that file does not exist.
+// starts it, and only reports success once `/api/health` answers. It writes a
+// commented template to `/etc/karucode/karucode.env` only when that file does not
+// exist.
+//
+// **The service runs as the account that ran the installer.** There is no
+// dedicated `karucode` account to create and no `--service-user` to pass: a plain
+// `sudo sh install.sh` from your account resolves to *you*, because the agent is
+// useless if it cannot reach your toolchains, `~/.cargo`, `~/.local/bin` or your
+// projects. The installer resolves the account from `$SUDO_USER`, then `$LOGNAME`,
+// then the session login uid, and treats `$USER` as evidence only when it is not
+// `root` (under `sudo` it always is). Root is refused in every spelling —
+// `--service-user root`, `0`, `00`, `root:root` and `0:0` all exit 1. The account
+// is never created and its files are never re-owned; `--service-user` names an
+// *existing* account and refuses one that does not exist.
+//
+// The data directory follows the account: `~/.local/share/karucode` for a person,
+// the account's own home for a system account (`--service-user karucode` gives
+// `/var/lib/karucode`, not `/var/lib/karucode/.local/share/karucode`). The group
+// comes from the account's real primary gid rather than from an assumption that
+// `name == group`; `--service-group` overrides it.
+//
+// When no human can be identified at all — a bare `sudo -i` shell or a container
+// build, where `$SUDO_USER`, `$LOGNAME` and the login uid all say root — the
+// installer falls back to the `karucode` system account, creating it if missing,
+// and **says so loudly**. Both the per-step output and the final summary name the
+// resolved account (`Service account: user:group`), so `systemctl show -p User -p
+// Group karucode` can be checked against what the install reported instead of
+// assumed.
 //
 // Exit codes: `0` installed and running, `1` nothing installed (or rolled back),
 // `2` installed but the service did not come up — then it prints the four things
@@ -47,8 +72,8 @@
 //     20-local.conf                                yours, never touched
 // ```
 //
-// `WorkingDirectory=`, `ReadWritePaths=`, `User=`, the port and `ExecStart=` are
-// written to `10-install.conf`. Editing the unit in place does not stick: the next
+// `WorkingDirectory=`, `User=`, the port and `ExecStart=` are written to
+// `10-install.conf`. Editing the unit in place does not stick: the next
 // install replaces the file, and the service then fails with `status=200/CHDIR`
 // because the workspace path it needs is gone. Put local overrides in
 // `20-local.conf` and `sudo systemctl daemon-reload` afterwards — the filename must
@@ -57,9 +82,24 @@
 // ```ini
 // # /etc/systemd/system/karucode.service.d/20-local.conf
 // [Service]
-// ReadWritePaths=/srv/karucode/.cargo
+// Environment=PATH=/home/you/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 // MemoryDenyWriteExecute=no
 // ```
+//
+// # Concurrency with other toolchains
+//
+// The service gets systemd's default `PATH`, not your shell's, so `cargo`, `pnpm`,
+// `bun` and an `nvm`-managed `node` are not found by the agent's shell. Set
+// `Environment=PATH=…` in `20-local.conf`. `MemoryDenyWriteExecute=yes` in the
+// unit also stops `node`, Java and some Python C extensions; `install.sh
+// --allow-jit` turns it off, or set it to `no` yourself.
+//
+// The unit does **not** sandbox the filesystem: the agent can write anywhere the
+// service user can, so `mv`/`cp`/`rm` work across the filesystem and no build
+// fails with `EROFS`. Confinement is the dedicated unprivileged `User=` plus
+// `NoNewPrivileges=yes`. If you want a filesystem sandbox, add `ProtectSystem=`,
+// `ProtectHome=` and `ReadWritePaths=` yourself in `20-local.conf` — the shipped
+// unit leaves those out on purpose. See `packaging/README.md`.
 //
 // # Credentials
 //
@@ -210,14 +250,17 @@
 //   usr/sbin:/usr/bin`), not your shell's. `cargo` in `~/.cargo/bin`, `pnpm`, `bun`
 //   and the nvm `node` are then not found by the agent's shell. Put
 //   `Environment=PATH=…` in `20-local.conf`.
-// * `ProtectHome=read-only` makes `~/.cargo`, `~/.npm` and `~/.cache` read-only, so
-//   `cargo add` and `npm install` fail with `EPERM`. Grant those caches with
-//   `ReadWritePaths=` in `20-local.conf` — caches only, never the whole home
-//   directory.
-// * To keep an instance you already ran by hand, pass `--service-user <you>` and
-//   `--data-dir ~/.local/share/karucode`: the provider API key and every setting
-//   live in the database, so a fresh data directory is an empty instance, not an
-//   upgrade.
+// * `MemoryDenyWriteExecute=yes` stops the agent running `node`, Java or Python C
+//   extensions. Re-run the installer with `--allow-jit`, or set it to `no` in
+//   `20-local.conf`.
+// * To keep an instance you already ran by hand, pass `--data-dir
+//   ~/.local/share/karucode`: the provider API key and every setting live in the
+//   database, so a fresh data directory is an empty instance, not an upgrade. The
+//   service account is already you, so no `--service-user` is needed.
+// * `sudo sh install.sh` from a *bare root shell* (`sudo -i`, a container build)
+//   has no human to resolve. It prints a warning and falls back to the `karucode`
+//   system account with `/var/lib/karucode` as the data dir. Run it as yourself,
+//   or pass `--service-user <name>`, if you wanted the default.
 //
 // The full operator guide — reverse proxy, backups, container deployment, the
 // hardening rationale — is `packaging/README.md`.

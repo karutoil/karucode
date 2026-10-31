@@ -72,7 +72,10 @@ async fn terminals_are_created_listed_renamed_and_deleted_over_http() {
 
     // Rename, then reset to the derived default.
     let renamed = h
-        .patch(&format!("/api/terminals/{id}"), json!({"title":"build watcher"}))
+        .patch(
+            &format!("/api/terminals/{id}"),
+            json!({"title":"build watcher"}),
+        )
         .await;
     assert_eq!(renamed.status, StatusCode::OK);
     assert_eq!(renamed.json()["terminal"]["title"], "build watcher");
@@ -130,7 +133,10 @@ async fn restarting_a_terminal_replaces_the_shell_and_keeps_the_tab() {
     assert_ne!(new_pid, first_pid, "the shell is a new process");
     assert_eq!(terminal["running"], true);
 
-    wait_for("the previous shell's group to exit", || old_terminal.is_dead()).await;
+    wait_for("the previous shell's group to exit", || {
+        old_terminal.is_dead()
+    })
+    .await;
     h.delete(&format!("/api/terminals/{id}")).await;
 }
 
@@ -140,10 +146,7 @@ async fn restarting_a_terminal_replaces_the_shell_and_keeps_the_tab() {
 async fn the_terminal_budget_is_enforced() {
     let h = HarnessBuilder::new(Vec::new()).build().await;
     // The harness reads the default config, so the budget is `max_terminals`.
-    let budget = h
-        .get("/api/terminals")
-        .await
-        .json()["max_terminals"]
+    let budget = h.get("/api/terminals").await.json()["max_terminals"]
         .as_u64()
         .unwrap() as usize;
     let mut created = Vec::new();
@@ -208,9 +211,7 @@ async fn the_start_directory_is_confined_to_the_workspace() {
     let inside = h.workspace_path().join("sub");
     std::fs::create_dir_all(&inside).expect("subdir");
 
-    let ok = h
-        .post("/api/terminals", json!({"cwd":"sub"}))
-        .await;
+    let ok = h.post("/api/terminals", json!({"cwd":"sub"})).await;
     assert_eq!(ok.status, StatusCode::OK, "{}", ok.text());
     assert_eq!(
         ok.json()["terminal"]["cwd"].as_str().unwrap(),

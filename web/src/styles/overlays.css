@@ -916,3 +916,212 @@
   color: inherit;
   opacity: 0.55;
 }
+
+/* ---------- rewind dialog ---------------------------------------------- */
+
+.dialog-rewind {
+  width: min(620px, calc(100vw - 32px));
+}
+
+.rewind-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* The message being recalled to, quoted so there is no doubt which turn it is. */
+.rewind-target {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 2px solid var(--line-strong);
+  background: var(--surface-1, transparent);
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.rewind-count {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-small);
+}
+
+.rewind-modes,
+.rewind-revert {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.rewind-modes legend,
+.rewind-revert legend {
+  padding: 0 0 7px;
+  color: var(--text-subtle);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.rewind-mode {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 9px;
+  margin-bottom: 5px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 8px);
+  cursor: pointer;
+}
+
+.rewind-mode.is-checked {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.rewind-mode input {
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.rewind-mode-title {
+  color: var(--text);
+  font-size: var(--fs-small);
+  font-weight: 600;
+}
+
+.rewind-mode-hint {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  line-height: 1.55;
+}
+
+.rewind-note {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rewind-note-label {
+  color: var(--text-subtle);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.rewind-note-input {
+  width: 100%;
+  resize: vertical;
+  font-family: inherit;
+  font-size: var(--fs-small);
+  line-height: 1.6;
+}
+
+.rewind-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+
+.rewind-toggle input {
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.rewind-empty {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  line-height: 1.6;
+}
+
+.rewind-files {
+  max-height: 220px;
+  margin: 10px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 8px);
+}
+
+.rewind-file {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 9px;
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--line);
+}
+
+.rewind-file:last-child {
+  border-bottom: 0;
+}
+
+.rewind-file-action {
+  align-self: start;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  line-height: 1.7;
+}
+
+.rewind-file-action.is-restore {
+  color: var(--ok, var(--accent));
+  background: color-mix(in srgb, var(--ok, var(--accent)) 14%, transparent);
+}
+
+.rewind-file-action.is-remove {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+}
+
+.rewind-file-path {
+  color: var(--text);
+  font-size: var(--fs-small);
+  overflow-wrap: anywhere;
+}
+
+.rewind-file-meta {
+  grid-column: 2;
+  color: var(--text-subtle);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+.rewind-file-warn {
+  grid-column: 2;
+  color: var(--warn);
+  font-size: var(--fs-micro);
+  line-height: 1.55;
+}
+
+.rewind-file.is-incomplete {
+  background: color-mix(in srgb, var(--warn) 5%, transparent);
+}
+
+.rewind-warn {
+  margin: 10px 0 0;
+  padding: 8px 11px;
+  border-left: 2px solid var(--warn);
+  color: color-mix(in srgb, var(--warn) 62%, var(--text-secondary));
+  font-size: var(--fs-micro);
+  line-height: 1.6;
+}
+
+.rewind-error {
+  margin: 0;
+  padding: 8px 11px;
+  border-left: 2px solid var(--danger);
+  color: var(--danger);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+}

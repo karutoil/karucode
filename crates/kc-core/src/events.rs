@@ -24,6 +24,20 @@ pub enum Event {
     SessionDeleted {
         session_id: String,
     },
+    /// A session's transcript was rewound: every message after `message_id` is
+    /// hidden. Clients re-render the transcript rather than splicing it, because
+    /// a rewind can remove an assistant turn *and* the tool results inside it.
+    SessionRewound {
+        session_id: String,
+        /// The message the user picked (an assistant turn is normalised to the
+        /// prompt that produced it by the time this is emitted, so this is the
+        /// prompt's id).
+        message_id: i64,
+        /// How many messages the rewind hid. `0` means the rewind was a no-op -
+        /// a retry of the newest prompt - which is worth telling apart from a
+        /// deliberate "hide nothing".
+        messages_removed: usize,
+    },
     /// A steering message the user sent mid-run has been taken into the
     /// conversation. Emitted by the loop at the moment the message joins the
     /// request, so the transcript can show it where the model saw it rather than
@@ -32,6 +46,20 @@ pub enum Event {
         /// The id `POST /api/sessions/:id/messages?mode=steer` returned.
         steer_id: String,
         content: String,
+    },
+    /// One of a session's queued messages was added or removed.
+    ///
+    /// Emitted on every mutation - accepted, recalled, drained into the
+    /// conversation, taken as a follow-up, or dropped with the session - and it
+    /// carries the *whole* queue rather than a delta. A client that missed a
+    /// frame then cannot drift: the newest pair of lists is the truth, and a
+    /// second browser tab showing the same session stays in step without
+    /// polling `GET /api/sessions/:id`.
+    QueuedMessages {
+        session_id: String,
+        /// Both queues, oldest first.
+        steers: Vec<crate::queue::QueuedMessage>,
+        follow_ups: Vec<crate::queue::QueuedMessage>,
     },
     RunStarted {
         run_id: String,

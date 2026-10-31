@@ -147,10 +147,10 @@ sudo ./packaging/install.sh --binary target/release/karucode --workspace /srv/ka
 release's `SHA256SUMS` and only then unpacks it. Nothing is piped from the
 network into a shell.
 
-`--workspace` is the directory the agent may read and edit; it is created and
-owned by the service user. It is not optional in practice: it is the writable
-path the unit is hardened around (`ProtectSystem=strict` plus `ReadWritePaths=`),
-and it goes into a drop-in at
+`--workspace` is the directory the agent starts in and the one sessions default
+to working out of; it is created and owned by the service user. The agent is not
+*confined* to it — it runs as the service user and can write anywhere that account
+can — but it is where work happens by default. The path goes into a drop-in at
 `/etc/systemd/system/karucode.service.d/10-install.conf` rather than into the
 unit file, so re-running the installer for an upgrade cannot lose it. The
 service is enabled at boot and started, and the installer waits until

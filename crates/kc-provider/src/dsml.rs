@@ -129,7 +129,8 @@ impl DsmlScanner {
                 }
                 Some(start) => {
                     let search_from = self.buf.len().min(close_hint(&self.buf, start));
-                    let Some(found) = find_marker(&self.buf, search_from, Tag::ToolCalls, true) else {
+                    let Some(found) = find_marker(&self.buf, search_from, Tag::ToolCalls, true)
+                    else {
                         if self.buf.len() > MAX_BLOCK_BYTES {
                             tracing::warn!(
                                 bytes = self.buf.len(),
@@ -317,12 +318,19 @@ fn scan_marker(text: &str, at: usize) -> Scan {
 }
 
 /// Tag names the scanner knows, for spotting one that is still arriving.
-const TAG_NAMES: [&str; 6] = ["tool_calls", "toolcalls", "tool", "invoke", "parameter", "think"];
+const TAG_NAMES: [&str; 6] = [
+    "tool_calls",
+    "toolcalls",
+    "tool",
+    "invoke",
+    "parameter",
+    "think",
+];
 
 fn is_prefix_of_tag(name: &str) -> bool {
-    TAG_NAMES.iter().any(|tag| {
-        tag.len() > name.len() && tag[..name.len()].eq_ignore_ascii_case(name)
-    })
+    TAG_NAMES
+        .iter()
+        .any(|tag| tag.len() > name.len() && tag[..name.len()].eq_ignore_ascii_case(name))
 }
 
 /// A byte cursor that knows how far it got, so a marker split by the network can
@@ -463,7 +471,9 @@ fn partial_tail(text: &str) -> usize {
 enum Parsed {
     Calls(Vec<DsmlCall>),
     /// Invokes named tools that are not available to this run.
-    Unrecognised { names: Vec<String> },
+    Unrecognised {
+        names: Vec<String>,
+    },
     NotACall,
 }
 
@@ -676,7 +686,10 @@ mod tests {
         assert_eq!(text, "I will search several relevant directions first.");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "doc_knowledgebase");
-        assert_eq!(calls[0].arguments, r#"{"query":"bond detail fields display"}"#);
+        assert_eq!(
+            calls[0].arguments,
+            r#"{"query":"bond detail fields display"}"#
+        );
     }
 
     #[test]
@@ -893,8 +906,6 @@ mod tests {
     }
 }
 
-
-
 /// Text with any DSML tool-call markup removed.
 ///
 /// [`DsmlScanner`] recovers calls while a message streams. This is the batched
@@ -939,7 +950,10 @@ mod strip_tests {
 
     #[test]
     fn prose_around_a_block_is_kept() {
-        assert_eq!(strip_tool_markup(&format!("before{BLOCK}after")), "beforeafter");
+        assert_eq!(
+            strip_tool_markup(&format!("before{BLOCK}after")),
+            "beforeafter"
+        );
         assert_eq!(
             strip_tool_markup(&format!("Looking at it.{BLOCK}")),
             "Looking at it."

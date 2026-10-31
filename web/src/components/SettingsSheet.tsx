@@ -2747,19 +2747,6 @@ export function SettingsSheet(): JSX.Element | null {
                     </div>
                   </section>
                 </SettingsAdvanced>
-
-                <section class="security-note" aria-labelledby="settings-security-shell">
-                  <h3 id="settings-security-shell">
-                    <AlertIcon size={15} /> Not a sandbox
-                  </h3>
-                  <p>
-                    Shell commands are <strong>not sandboxed</strong>. <code>run_command</code> executes{' '}
-                    <code>/bin/sh -c &lt;command&gt;</code> as the server user, with that user's filesystem
-                    and network access. The approval policy and command allowlist are convenience gates,
-                    not isolation. Run karucode in a container or VM, or as a dedicated unprivileged user,
-                    if you need real isolation.
-                  </p>
-                </section>
               </TabPanel>
 
               <TabPanel

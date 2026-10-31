@@ -1,9 +1,11 @@
+use crate::checkpoint::FileCheckpoint;
 use crate::config::SessionModelSelection;
 use crate::error::Result;
 use crate::message::Message;
 use crate::message::ToolCall;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -149,6 +151,14 @@ pub struct StoredMessage {
     /// Images carried by this message (see [`crate::message::ImageAttachment`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<crate::message::ImageAttachment>,
+    /// When set, this message was hidden by a rewind at the recorded time.
+    ///
+    /// Rows are never deleted - the store is append-only and the resume and
+    /// retention passes assume monotonic ids - so a rewind marks the rows it
+    /// hides instead. [`Store::list_messages`] and friends filter them out, so a
+    /// rewound message is invisible to the model and to the browser alike.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewound_at: Option<i64>,
     pub created_at: i64,
 }
 
@@ -161,6 +171,45 @@ impl StoredMessage {
             tool_call_id: self.tool_call_id.clone(),
             name: self.name.clone(),
             images: self.images.clone(),
+        }
+    }
+}
+
+/// Where a rewind starts and what it hides, resolved from a message id.
+///
+/// The point is always a *user* message: the message whose prompt the user wants
+/// to revisit. [`newest_msg_id`] is the last message that survives, so
+/// everything strictly after it (assistant turns, tool results, steers) is
+/// hidden and the model's next request is exactly the conversation as it stood
+/// right after that prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RewindPoint {
+    pub session_id: String,
+    /// The message the user picked, after normalisation (always a `user` row).
+    pub user_message_id: i64,
+    /// The prompt that message carried, re-sent verbatim by a retry.
+    pub prompt: String,
+    /// Newest message that survives the rewind.
+    pub keep_through: i64,
+    /// Newest message that survives when the prompt itself is replaced too.
+    ///
+    /// A retry re-sends the prompt and a note replaces it, and in both cases
+    /// keeping the old prompt would show the model two user turns in a row -
+    /// "fix the build", then "fix the build differently" - which reads as a
+    /// correction of work that is no longer in the transcript. `0` when the
+    /// prompt is the first message in the session.
+    pub before_prompt: i64,
+    /// Number of messages this rewind hides.
+    pub messages_removed: usize,
+}
+
+impl RewindPoint {
+    /// The marker a rewind would use for `keep_prompt`.
+    pub fn cut(&self, keep_prompt: bool) -> i64 {
+        if keep_prompt {
+            self.keep_through
+        } else {
+            self.before_prompt
         }
     }
 }
@@ -269,6 +318,93 @@ pub struct ApprovalRecord {
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_at: Option<i64>,
+}
+
+/// One provider call's token accounting, as reported by the endpoint.
+///
+/// The runtime emits a `usage` event per model call and this is the row it
+/// leaves behind, so "what did this session cost" survives a page reload. The
+/// numbers are the provider's own: `cached_tokens` is `None` when the endpoint
+/// does not report prefix-cache hits, which is *unknown*, not a 0% hit rate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageRecord {
+    pub session_id: String,
+    pub run_id: String,
+    /// The subagent that made the call, `None` for the main agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Prompt tokens billed for this call.
+    pub input_tokens: u32,
+    /// Completion tokens produced for this call.
+    pub output_tokens: u32,
+    /// Prompt tokens the endpoint served from its prefix cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u32>,
+}
+
+/// Sum of every provider call in a scope, plus a count of the calls.
+///
+/// `cached_known_calls` is how many calls reported a cache figure at all: a
+/// ratio computed over calls that did not is a lie, so the UI needs the
+/// denominator as well as the numerator.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTotals {
+    pub calls: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    /// Calls that reported `cached_tokens` (at least one field known).
+    pub cached_known_calls: u32,
+    /// The newest call's prompt size: how full the context window is, as opposed
+    /// to what the session has cost in total.
+    pub last_input_tokens: u32,
+}
+
+impl UsageTotals {
+    /// Fraction of prompt tokens served from the prefix cache, 0..1.
+    ///
+    /// `None` when no call reported a cache figure, so a caller can render
+    /// "unknown" instead of a fabricated 0%. A reported `0` from an endpoint
+    /// that does report the field is a real 0% and stays `Some(0.0)`.
+    pub fn cache_hit_ratio(&self) -> Option<f64> {
+        if self.cached_known_calls == 0 || self.input_tokens == 0 {
+            return None;
+        }
+        Some((self.cached_tokens as f64 / self.input_tokens as f64).clamp(0.0, 1.0))
+    }
+}
+
+/// Counts describing a whole session, for the session information view.
+///
+/// Deliberately *counts and durations*, not a transcript: a session can hold
+/// tens of thousands of messages, and the view that answers "how much work was
+/// this" must not depend on shipping them to the browser.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionStats {
+    /// Every message in the session, subagent messages included.
+    pub messages_total: u64,
+    /// Messages the main agent's conversation holds (`agent_id` is NULL).
+    pub messages_main: u64,
+    /// Messages belonging to any subagent.
+    pub messages_subagent: u64,
+    /// Messages by role: `user`, `assistant`, `tool`, `system`.
+    pub messages_by_role: BTreeMap<String, u64>,
+    /// Main-agent messages by role, so "how many prompts did I send" is the
+    /// conversation's answer rather than the sum of every subagent's.
+    pub messages_main_by_role: BTreeMap<String, u64>,
+    /// Every tool call the session made, by tool name.
+    pub tool_calls: BTreeMap<String, u64>,
+    /// Total tool calls (a call is one entry in an assistant message's list).
+    pub tool_calls_total: u64,
+    /// Runs by terminal status (`completed`, `failed`, `cancelled`, ...).
+    pub runs_by_status: BTreeMap<String, u64>,
+    /// Every run that ever started, including the one in flight.
+    pub runs_total: u64,
+    /// Sum of `finished_at - started_at` over runs that finished.
+    ///
+    /// This is the number the view calls "working time": wall clock during which
+    /// a run was actually in flight, so idle gaps between runs are excluded.
+    pub working_ms: u64,
 }
 
 /// What a retention pass deleted. Every field is a row count, so a caller can
@@ -412,6 +548,57 @@ pub trait Store: Send + Sync {
     async fn mark_interrupted_runs(&self) -> Result<usize>;
     async fn list_runs(&self, session_id: &str, limit: usize) -> Result<Vec<RunRecord>>;
 
+    // ---- rewind ----------------------------------------------------------
+    //
+    // A rewind hides the messages after a chosen user turn and (optionally)
+    // undoes the file writes that ran in between. Messages are never deleted:
+    // the store is append-only, and `repair_history`, retention and the browser
+    // all read it as a monotonic log. Hiding is a column (`rewound_at`) that
+    // every read filters on, so the model and the transcript agree by
+    // construction rather than by two independent code paths.
+
+    /// Resolve `message_id` to a [`RewindPoint`], normalising an assistant turn
+    /// back to the user message that started it.
+    ///
+    /// `Err(NotFound)` when the message does not exist or belongs to another
+    /// session. A message that is already rewound is *not* an error: rewinding
+    /// the same point twice is a no-op that reports nothing left to hide, which
+    /// is what a client retrying a request expects.
+    async fn rewind_point(&self, session_id: &str, message_id: i64) -> Result<RewindPoint>;
+
+    /// Hide every message in `session_id` newer than `keep_through`, returning how
+    /// many rows were newly hidden. Idempotent: rows already hidden are not
+    /// counted again.
+    ///
+    /// `keep_through` is the id of the *last surviving* message, not the count.
+    async fn mark_messages_rewound(&self, session_id: &str, keep_through: i64) -> Result<usize>;
+
+    /// Record the before-image of one file a mutating tool is about to change.
+    async fn record_checkpoint(&self, checkpoint: &FileCheckpoint) -> Result<i64>;
+
+    /// Every journal row for messages newer than `after_id`, in the order the
+    /// tools ran (ascending id).
+    async fn list_checkpoints(
+        &self,
+        session_id: &str,
+        after_id: i64,
+    ) -> Result<Vec<FileCheckpoint>>;
+
+    /// Delete one journal row, once its undo has been applied.
+    async fn delete_checkpoint(&self, id: i64) -> Result<()>;
+
+    /// Attach a transcript position to a journal row written moments earlier.
+    ///
+    /// A tool records its before-image while its call is in flight, before the
+    /// tool result row exists, so the row is written with `message_id = 0`. The
+    /// run loop calls this once the result is persisted. That two-step write is
+    /// the price of journaling *before* the change instead of after it, and it is
+    /// worth paying: a journal written afterwards holds the new bytes.
+    async fn set_checkpoint_message_id(&self, id: i64, message_id: i64) -> Result<()>;
+
+    /// Timestamp of the newest rewind in a session, for the UI banner.
+    async fn last_rewind_at(&self, session_id: &str) -> Result<Option<i64>>;
+
     async fn upsert_agent(&self, agent: &AgentRecord) -> Result<()>;
     async fn list_agents(&self, session_id: &str) -> Result<Vec<AgentRecord>>;
     /// Every agent across every session, newest first, joined with its session's
@@ -426,7 +613,63 @@ pub trait Store: Send + Sync {
     /// first. The parent session's messages are not included.
     async fn list_agent_messages(&self, agent_id: &str, limit: usize)
         -> Result<Vec<StoredMessage>>;
+    /// How many messages each subagent of a session wrote, keyed by agent id.
+    ///
+    /// One grouped count instead of a `list_agent_messages` per agent: a session
+    /// with twenty subagents would otherwise cost twenty queries just to show a
+    /// column of numbers in the session view.
+    ///
+    /// The default is empty, so a store that does not implement it still
+    /// compiles.
+    async fn agent_message_counts(&self, session_id: &str) -> Result<BTreeMap<String, u64>> {
+        let _ = session_id;
+        Ok(BTreeMap::new())
+    }
     async fn mark_interrupted_agents(&self) -> Result<usize>;
+
+    // ---- token accounting -------------------------------------------------
+    //
+    // Every provider call reports its own token counts, and the session
+    // information view needs them after the fact: "what has this session cost,
+    // how much of it was cached, and how full is the window". The `usage` event
+    // is live-only, so without a row per call a reload answers "unknown" - which
+    // is why this is persisted rather than kept in the runtime.
+    //
+    // Both methods have a default implementation, so a store that does not care
+    // about accounting (a test double, an embedding) keeps compiling and simply
+    // reports no usage. Nothing here may fail a run: the runtime treats a
+    // failure as a warning.
+
+    /// Record one provider call's token counts.
+    async fn record_usage(&self, record: &UsageRecord) -> Result<()> {
+        let _ = record;
+        Ok(())
+    }
+
+    /// Sum of every recorded call in a session, for the main agent and for each
+    /// subagent separately. Agents absent from the map made no recorded call.
+    async fn usage_totals(
+        &self,
+        session_id: &str,
+    ) -> Result<BTreeMap<Option<String>, UsageTotals>> {
+        let _ = session_id;
+        Ok(BTreeMap::new())
+    }
+
+    /// Counts a summary view needs that a transcript page cannot give: the
+    /// session's total messages by role, its tool calls by name, its runs by
+    /// status and the wall-clock time it spent working.
+    ///
+    /// Answers about the **whole** session, not the newest `MESSAGE_LIMIT` rows
+    /// the transcript endpoint returns, so a long session's "12 000 messages" is
+    /// the real number rather than the page size.
+    ///
+    /// The default reports zeros, so a store that does not implement it still
+    /// compiles and a client simply has nothing to show.
+    async fn session_stats(&self, session_id: &str) -> Result<SessionStats> {
+        let _ = session_id;
+        Ok(SessionStats::default())
+    }
 
     async fn create_approval(&self, record: &ApprovalRecord) -> Result<()>;
     async fn resolve_approval(&self, id: &str, decision: &str) -> Result<()>;

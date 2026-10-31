@@ -29,7 +29,8 @@ pub async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
         auth_required,
         provider_configured,
         uptime_secs: state.uptime_secs(),
-        workspace: state.workspace().root().to_string_lossy().to_string(),
+        // `null` on a fresh install: no workspace exists until a project is created.
+        workspace: state.workspace_root_display(),
     });
     Ok(Json(body))
 }
@@ -42,7 +43,8 @@ struct HealthFacts {
     auth_required: bool,
     provider_configured: bool,
     uptime_secs: u64,
-    workspace: String,
+    /// `None` on a fresh install: no workspace exists until a project is made.
+    workspace: Option<String>,
 }
 
 fn health_body(facts: HealthFacts) -> Value {
@@ -86,7 +88,7 @@ mod tests {
             auth_required: false,
             provider_configured: true,
             uptime_secs: 12,
-            workspace: "/w".into(),
+            workspace: Some("/w".into()),
         }
     }
 

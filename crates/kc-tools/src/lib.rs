@@ -8,15 +8,15 @@
 // @kc-title: The built-in tools the agent can call
 // @kc-summary: What each first-party tool does, how it is gated, and the limits and gotchas that shape its output.
 // @kc-tags: tools, agent, files, search, shell, git
-// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:karucode_docs, config:[limits], config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES
+// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:karucode_docs, route:POST /api/sessions/:id/rewind, config:[limits], config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES
 //
 // | Tool | Class | Approval | What it does |
 // | --- | --- | --- | --- |
 // | `read_file` | read_only | none | UTF-8 text with numbered lines and a `path - lines A-B of N` header; `offset`/`limit` (default 400, max 2000 lines). `N` is the real line count of the whole file, even when `limits.max_file_read_bytes` cut the read short. A PNG/JPEG/GIF/WebP is attached as an image for a model that takes image input; a text-only model gets a refusal it can pass on |
 // | `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries |
 // | `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`. The result cap is global across files, and long matching lines keep their first 300 characters |
-// | `write_file` | mutating | policy | create/overwrite atomically, max 2 MiB per call |
-// | `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff |
+// | `write_file` | mutating | policy | create/overwrite atomically, max 2 MiB per call; journals the previous bytes for a rewind |
+// | `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff; journals the previous bytes |
 // | `run_command` | shell | policy | `/bin/sh -c` in the workspace, streamed output, timeout, own process group. On timeout or cancellation the whole group gets SIGTERM, then SIGKILL after a grace period, so a child that ignores SIGTERM cannot survive |
 // | `git_status` | read_only | none | branch + porcelain status for the workspace or a subdirectory |
 // | `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref |
@@ -51,6 +51,14 @@
 // * `run_command` is **not** sandboxed. It runs as the server user, in a process
 //   group that is killed on timeout or cancellation; an approved command can do
 //   anything that user can do.
+// * `write_file` and `edit_file` record the file's previous bytes in the rewind
+//   journal immediately before they write, so `POST /api/sessions/:id/rewind`
+//   with `revert` can put the file back. The journal is worth knowing about for
+//   two reasons: an edit is undoable only if the before-image fit the 4 MiB cap
+//   and was valid UTF-8 (otherwise the rewind reports that path as incomplete
+//   instead of half-restoring it), and a tool that changes files without
+//   recording cannot be undone at all - `run_command` is the big one, and the
+//   preview lists it under `opaque_tools`.
 // * `run_command` returns `ok: false` for a non-zero exit, with the exit code in
 //   the header - a failing test run is a failed tool call, not a silent success.
 // * `search_files` honours `.gitignore`. Searching ignored/build output needs a
@@ -537,6 +545,11 @@ impl Tool for WriteFile {
             return refusal;
         }
 
+        // Before-image, immediately before the write it describes. Recording
+        // after the write would journal the new bytes, and a rewind that
+        // "restores" them is a no-op that looks like a successful revert.
+        ctx.record_checkpoint(&rel, "write_file").await;
+
         if let Err(e) = file_ops::write_atomic(&abs, content.as_bytes()) {
             return ToolOutcome::err(e.to_string());
         }
@@ -630,10 +643,14 @@ impl Tool for EditFile {
             return refusal;
         }
 
+        // Before-image, immediately before the write it describes. A journal that
+        // could not be written leaves this edit unrestorable, which the rewind
+        // reports rather than papering over.
+        ctx.record_checkpoint(&plan.rel, "edit_file").await;
+
         if let Err(e) = file_ops::write_atomic(&plan.abs, plan.new_content.as_bytes()) {
             return ToolOutcome::err(e.to_string());
         }
-
         let lines = plan
             .line_numbers
             .iter()

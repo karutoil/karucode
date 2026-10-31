@@ -382,11 +382,23 @@ class InstallArguments(Case):
         args = self.install_args(result)
         self.assertEqual(args[args.index("--data-dir") + 1], str(state))
 
-    def test_service_group_difference_warns(self):
+    def test_service_group_is_forwarded_not_assumed(self):
+        # A unit whose group differs from its user must keep that group across an
+        # update: install.sh derives Group= from the account's primary gid unless it
+        # is told, which would silently change what the service runs as.
         self.set_unit(Group="svcgroup")
         result = self.run_update(*self.base_args(), "--dry-run")
-        self.assertIn("Group=svcgroup", result.stderr)
-        self.assertIn("20-local.conf", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self.install_args(result)
+        self.assertIn("--service-group", args, f"the group was not forwarded: {args}")
+        self.assertEqual(args[args.index("--service-group") + 1], "svcgroup")
+        self.assertNotIn("20-local.conf", result.stderr)
+
+    def test_a_unit_without_group_is_refused(self):
+        self.set_unit(Group="")
+        result = self.run_update(*self.base_args())
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--service-group", result.stderr)
 
 
 # --- the build --------------------------------------------------------------

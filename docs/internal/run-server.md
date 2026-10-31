@@ -49,7 +49,7 @@ of the embedded snapshot.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--workspace <PATH>` | current dir | default workspace root; sessions without a project run here |
+| `--workspace <PATH>` | none | optional default workspace; without it the server starts with no project and you create the first one in the web UI |
 | `--host <ADDR>` | `127.0.0.1` | bind address; a non-loopback bind requires `KARUCODE_AUTH_TOKEN` |
 | `--port <PORT>` | `8787` | listen port |
 | `--data-dir <PATH>` | `~/.local/share/karucode` | SQLite database and plugin data, forced to `0700` |
@@ -101,13 +101,26 @@ approvals `expired`; nothing is silently retried.
 
 ## Startup failures you will actually see
 
-* `workspace ... is not usable` - pass an existing directory.
+* `workspace ... is not usable` - you named a workspace that does not exist
+  (`--workspace`, `KARUCODE_WORKSPACE`, or `workspace =` in the config file).
+  Fix the path, or drop it and start with no project.
 * `refusing to bind ... without KARUCODE_AUTH_TOKEN` - remote binds need a
   token of at least 16 characters.
 * `could not open the database at ...` - permissions or a corrupt/foreign
   file; move it aside to start fresh.
 * `port ... in use` - another instance is running (plugin/MCP children are
   stopped before exiting).
+
+## Starting without a workspace
+
+`--workspace` is optional. Without it the server starts with **no project**, an
+empty project rail, and `workspace: null` in `GET /api/health`; the first
+project is created in the web UI (`POST /api/projects`). Until then a session
+that names no project is refused with `400 bad_request` rather than running in
+some arbitrary directory.
+
+The one thing that is still fatal is naming a workspace that does not resolve:
+a typo in `--workspace` must not silently degrade to "start empty".
 
 ## Gotchas
 

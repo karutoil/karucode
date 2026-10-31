@@ -637,7 +637,9 @@ fn content_events(fragments: &[&str]) -> String {
         body.push_str(&payload.to_string());
         body.push_str("\n\n");
     }
-    body.push_str("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n");
+    body.push_str(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+    );
     body.push_str("data: [DONE]\n\n");
     body
 }
@@ -683,12 +685,21 @@ async fn dsml_tool_calls_instead_of_content_are_recovered() {
     let chunks = collect(stream).await;
     let (text, calls) = calls_and_text(&chunks);
 
-    assert_eq!(text.trim(), "I will search several relevant directions first.");
-    assert!(!text.contains("DSML"), "markup leaked into the answer: {text}");
+    assert_eq!(
+        text.trim(),
+        "I will search several relevant directions first."
+    );
+    assert!(
+        !text.contains("DSML"),
+        "markup leaked into the answer: {text}"
+    );
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].name, "doc_knowledgebase");
     let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
-    assert_eq!(args["query"], serde_json::json!("bond detail fields display"));
+    assert_eq!(
+        args["query"],
+        serde_json::json!("bond detail fields display")
+    );
     // The provider still reports the finish reason it was given.
     assert!(chunks.contains(&ProviderChunk::Finish {
         reason: "stop".into()
@@ -770,10 +781,8 @@ async fn dsml_and_native_tool_calls_in_one_turn_do_not_merge() {
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
         "data: [DONE]\n\n"
     );
-    let server = spawn(move |_req, mut socket| async move {
-        write_sse(&mut socket, body).await
-    })
-    .await;
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, body).await }).await;
     let (stream, _cancel) = start(
         model_config(&server),
         request_with_tools(&["list_dir", "git_status"]),

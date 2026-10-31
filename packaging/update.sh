@@ -750,7 +750,8 @@ if [ -z "$DATA_DIR" ]; then
     fi
 fi
 [ -n "$DATA_DIR" ] || DATA_DIR="/var/lib/karucode"
-[ -n "$SVC_GROUP" ] || SVC_GROUP="$SVC_USER"
+# No Group= fallback to the user name: that assumption is exactly what this
+# forwarding exists to avoid, and it is not a value the running unit ever held.
 
 ALLOW_JIT=0
 [ "$(unit_prop MemoryDenyWriteExecute)" = "no" ] && ALLOW_JIT=1
@@ -770,10 +771,12 @@ ALLOW_JIT=0
 if [ "$SVC_USER" = "root" ]; then
     die "the unit runs as root; this updater refuses to keep that. Pass --service-user <name>."
 fi
-if [ "$SVC_USER" != "$SVC_GROUP" ]; then
-    warn "the unit runs as ${SVC_USER}:${SVC_GROUP}; install.sh writes User=${SVC_USER} Group=${SVC_USER}."
-    warn "Put Group=${SVC_GROUP} (or the ownership you want) in ${SERVICE}.service.d/20-local.conf."
-fi
+# The group is forwarded, not assumed. install.sh derives Group= from the account's
+# real primary gid when it is not told otherwise, which is usually right - but "the
+# group the running unit actually uses" is the only value that cannot change what
+# the service is, so it is passed explicitly.
+[ -n "$SVC_GROUP" ] \
+    || die "the unit does not set Group=; pass --service-group (install.sh would use ${SVC_USER}'s primary group)"
 
 # --- staging: prove the artifacts before touching anything live -------------
 #
@@ -1362,7 +1365,8 @@ set -- \
     --prefix "$PREFIX" \
     --workspace "$WORKSPACE" \
     --data-dir "$DATA_DIR" \
-    --service-user "$SVC_USER"
+    --service-user "$SVC_USER" \
+    --service-group "$SVC_GROUP"
 if [ -n "$STAGED_UNIT" ]; then set -- "$@" --unit-file "$STAGED_UNIT"; fi
 if [ -n "$HOST_ARG" ]; then set -- "$@" --host "$HOST_ARG"; fi
 if [ -n "$PORT_ARG" ]; then set -- "$@" --port "$PORT_ARG"; fi

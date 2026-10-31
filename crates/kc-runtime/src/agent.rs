@@ -69,6 +69,9 @@ pub(crate) struct LoopSpec {
     /// by subagents from the tool context, so a child never escapes its parent's
     /// project.
     pub workspace: Arc<Workspace>,
+    /// The rewind journal this loop's file tools record into. `None` for a
+    /// subagent whose parent had none (tests, embeddings).
+    pub journal: Option<Arc<crate::rewind::StoreJournal>>,
     /// Conversation without the system message; the system prompt is rebuilt
     /// each iteration from the current tool set and hook contributions.
     pub history: Vec<Message>,
@@ -206,6 +209,15 @@ pub(crate) async fn start_run(
     let spawned_inner = Arc::clone(&inner);
     let spawned_state = Arc::clone(&state);
     let spawned_key = key.clone();
+    // One journal per run: it names the run that produced every row, so a rewind
+    // can attribute a change to the turn it belongs to.
+    let journal = crate::rewind::StoreJournal::new(
+        inner.deps.store.clone(),
+        state.session_id.clone(),
+        state.run_id.clone(),
+        None,
+        Arc::clone(&workspace),
+    );
     // Held across the run so a queued follow-up can start the next one. Cloning
     // the caller's handle is what lets the chain continue after the HTTP request
     // that started this run has returned.
@@ -220,6 +232,7 @@ pub(crate) async fn start_run(
             history,
             model,
             workspace,
+            journal,
         ))
         .catch_unwind()
         .await;
@@ -394,6 +407,7 @@ pub(crate) async fn run_top_level(
     history: Vec<Message>,
     model: ModelConfig,
     workspace: Arc<Workspace>,
+    journal: Arc<crate::rewind::StoreJournal>,
 ) -> Result<()> {
     let settings = inner.deps.settings.clone();
     let limits = settings.limits().await;
@@ -439,6 +453,7 @@ pub(crate) async fn run_top_level(
         tools,
         cancel: state.cancel.clone(),
         workspace,
+        journal: Some(journal),
         history,
         run_state: Some(Arc::clone(&state)),
     };
@@ -1140,23 +1155,33 @@ segment, limits.max_continues is {})",
                     turn_chars = turn_chars.saturating_add(
                         message.content.len() + message.images.len() * context::IMAGE_CONTEXT_CHARS,
                     );
-                    if let Err(e) = persist(
+                    let persisted = persist(
                         &inner,
                         &spec.session_id,
                         &spec.run_id,
                         spec.agent_id.as_ref(),
                         &message,
                     )
-                    .await
-                    {
-                        let message = format!("could not persist the tool message: {e}");
-                        ctx.error("store", message.clone());
-                        return LoopOutcome::new(
-                            RunStatus::Failed,
-                            Some(message),
-                            last_text,
-                            iterations,
-                        );
+                    .await;
+                    match persisted {
+                        Ok(id) => {
+                            // Place the journal rows this call wrote on the
+                            // transcript timeline: they were recorded *before* the
+                            // write, so the row they belong to did not exist yet.
+                            if let Some(journal) = &spec.journal {
+                                journal.bind_message(id).await;
+                            }
+                        }
+                        Err(e) => {
+                            let message = format!("could not persist the tool message: {e}");
+                            ctx.error("store", message.clone());
+                            return LoopOutcome::new(
+                                RunStatus::Failed,
+                                Some(message),
+                                last_text,
+                                iterations,
+                            );
+                        }
                     }
                     history.push(message)
                 }
@@ -1411,6 +1436,10 @@ async fn run_one_tool(
                     settings: inner.deps.settings.clone(),
                     depth: spec.depth,
                     supports_images: spec.model.supports_images,
+                    checkpoints: spec
+                        .journal
+                        .clone()
+                        .map(|j| j as Arc<dyn kc_core::JournalHandle>),
                 };
                 let request = kc_core::tool::ToolCallRequest {
                     call_id: call.id.clone(),
@@ -1666,6 +1695,13 @@ async fn consume(
                             );
                         }
                         ctx.emit(Event::Usage { input_tokens, output_tokens, cached_tokens });
+                        // Recorded as well as announced: the event is live-only,
+                        // so this row is what lets the session view answer "what
+                        // has this cost" after a reload. Awaited on purpose - a
+                        // detached write could land after a session delete and
+                        // spuriously resurrect nothing, and the store call is a
+                        // single local INSERT.
+                        ctx.record_usage(input_tokens, output_tokens, cached_tokens).await;
                         // The usage block is the last thing the provider sends;
                         // do not wait out the rest of the window for it.
                         if usage_window.is_some() {

@@ -164,7 +164,12 @@ pub fn now_ms() -> i64 {
 /// re-reading the settings per tool call, is what makes every project and every
 /// subagent inherit the same allowlist.
 pub struct ProjectRegistry {
-    default_workspace: Arc<Workspace>,
+    /// The workspace a session without a project runs in.
+    ///
+    /// `None` when the server was started without one: a fresh install has no
+    /// project yet, and the operator picks the first one in the web UI. Callers
+    /// that need a workspace must then resolve a project first.
+    default_workspace: Option<Arc<Workspace>>,
     extra_roots: Vec<PathBuf>,
     projects: RwLock<HashMap<String, Arc<Workspace>>>,
 }
@@ -181,7 +186,16 @@ impl ProjectRegistry {
     /// every project it registers later.
     pub fn with_extra_roots(default_workspace: Arc<Workspace>, extra_roots: Vec<PathBuf>) -> Self {
         Self {
-            default_workspace,
+            default_workspace: Some(default_workspace),
+            extra_roots,
+            projects: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// A registry with no default workspace: a session must name a project.
+    pub fn without_default(extra_roots: Vec<PathBuf>) -> Self {
+        Self {
+            default_workspace: None,
             extra_roots,
             projects: RwLock::new(HashMap::new()),
         }
@@ -192,18 +206,16 @@ impl ProjectRegistry {
         &self.extra_roots
     }
 
-    pub fn default_workspace(&self) -> Arc<Workspace> {
-        Arc::clone(&self.default_workspace)
+    /// The implicit workspace, when the server was started with one.
+    pub fn default_workspace(&self) -> Option<Arc<Workspace>> {
+        self.default_workspace.clone()
     }
 
     /// Canonicalise `root` and register it. The path must exist and be a
     /// directory; a project whose directory disappears later keeps its row but
     /// fails to resolve, with a message naming the directory.
     pub fn insert(&self, id: &str, root: &Path) -> Result<()> {
-        let workspace = Arc::new(Workspace::with_extra_roots(
-            root,
-            self.extra_roots.clone(),
-        )?);
+        let workspace = Arc::new(Workspace::with_extra_roots(root, self.extra_roots.clone())?);
         self.projects
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -250,13 +262,14 @@ impl ProjectRegistry {
 }
 
 impl WorkspaceProvider for ProjectRegistry {
-    fn default_workspace(&self) -> Arc<Workspace> {
-        ProjectRegistry::default_workspace(self)
-    }
-
     fn workspace_for(&self, project_id: Option<&str>) -> Result<Arc<Workspace>> {
         let Some(id) = project_id else {
-            return Ok(self.default_workspace());
+            return self.default_workspace.clone().ok_or_else(|| {
+                Error::BadRequest(
+                    "no project selected: create or pick a project first (POST /api/projects)"
+                        .into(),
+                )
+            });
         };
         self.projects
             .read()
@@ -319,8 +332,8 @@ pub struct AppStateDeps {
     pub store: Arc<dyn Store>,
     pub runtime: Arc<Runtime>,
     pub providers: Arc<dyn ProviderFactory>,
-    pub workspace: Arc<Workspace>,
-    /// Project id -> workspace, already seeded by the bootstrap.
+    /// Project id -> workspace, already seeded by the bootstrap. It owns the
+    /// implicit workspace too, which is `None` on a fresh install.
     pub projects: Arc<ProjectRegistry>,
     pub plugins: Arc<Mutex<PluginHost>>,
     pub mcp: Arc<Mutex<McpManager>>,
@@ -342,7 +355,6 @@ pub struct AppStateInner {
     pub store: Arc<dyn Store>,
     pub runtime: Arc<Runtime>,
     pub providers: Arc<dyn ProviderFactory>,
-    pub workspace: Arc<Workspace>,
     pub plugins: Arc<Mutex<PluginHost>>,
     pub mcp: Arc<Mutex<McpManager>>,
     pub builtin_tools: Vec<Arc<dyn Tool>>,
@@ -376,7 +388,6 @@ impl AppState {
                 store: deps.store,
                 runtime: deps.runtime,
                 providers: deps.providers,
-                workspace: Arc::clone(&deps.workspace),
                 plugins: deps.plugins,
                 mcp: deps.mcp,
                 builtin_tools: deps.builtin_tools,
@@ -404,8 +415,22 @@ impl AppState {
         Arc::clone(&self.inner.store)
     }
 
-    pub fn workspace(&self) -> &Arc<Workspace> {
-        &self.inner.workspace
+    /// The implicit workspace, when the server was started with one.
+    ///
+    /// `None` on a fresh install: nothing is chosen until the operator creates a
+    /// project in the web UI.
+    pub fn default_workspace(&self) -> Option<Arc<Workspace>> {
+        self.inner.projects.default_workspace()
+    }
+
+    /// The implicit workspace, or the first registered project.
+    ///
+    /// Used for display and for the "which directory am I in" summary; callers
+    /// that are about to *run* something must go through
+    /// [`AppState::workspace_for_project`], which refuses when nothing is chosen.
+    pub fn workspace_root_display(&self) -> Option<String> {
+        self.default_workspace()
+            .map(|workspace| workspace.root().to_string_lossy().into_owned())
     }
 
     /// The in-memory project registry (workspace resolution per project).

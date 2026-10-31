@@ -302,10 +302,7 @@ impl Replay {
     }
 
     fn len(&self) -> usize {
-        self.chunks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len
+        self.chunks.lock().unwrap_or_else(|e| e.into_inner()).len
     }
 }
 
@@ -354,10 +351,7 @@ impl Terminal {
             });
         }
         let child = command.spawn().map_err(|e| {
-            kc_core::Error::Tool(format!(
-                "could not start `{shell}` in {}: {e}",
-                session.cwd
-            ))
+            kc_core::Error::Tool(format!("could not start `{shell}` in {}: {e}", session.cwd))
         })?;
         let pid = child.id();
 
@@ -476,13 +470,7 @@ impl Terminal {
             ws_ypixel: 0,
         };
         // `TIOCSWINSZ` also delivers SIGWINCH to the foreground group.
-        unsafe {
-            libc::ioctl(
-                master.as_raw_fd(),
-                libc::TIOCSWINSZ as libc::c_ulong,
-                &size,
-            ) == 0
-        }
+        unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as libc::c_ulong, &size) == 0 }
     }
 
     /// Terminal size the kernel currently reports, for a test and for a
@@ -533,9 +521,9 @@ impl Terminal {
 
     /// Send a control frame to every attached browser.
     fn broadcast_control(&self, value: serde_json::Value) {
-        let _ = self.output.send(Output::Data(
-            format!("{value}").into_bytes(),
-        ));
+        let _ = self
+            .output
+            .send(Output::Data(format!("{value}").into_bytes()));
     }
 
     /// Hang up and reap the shell: SIGHUP to the group, SIGKILL after
@@ -699,10 +687,7 @@ fn finish(terminal: &Terminal) {
 
 /// `openpty(3)`: a master/slave pair with `cols`x`rows` already set, so the very
 /// first prompt is the right width.
-fn open_pty(
-    cols: u16,
-    rows: u16,
-) -> kc_core::Result<(std::fs::File, std::fs::File)> {
+fn open_pty(cols: u16, rows: u16) -> kc_core::Result<(std::fs::File, std::fs::File)> {
     let mut master: libc::c_int = -1;
     let mut slave: libc::c_int = -1;
     let mut size = libc::winsize {
@@ -876,10 +861,7 @@ impl TerminalRegistry {
         for terminal in terminals {
             terminal.shutdown();
         }
-        self.live
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// Reap shells that have had no browser for `idle_secs`.
@@ -1099,7 +1081,11 @@ fn origin_matches_allowlisted(origin: &str, state: &AppState) -> bool {
 }
 
 /// Both directions of the websocket until either side goes away.
-async fn pump(mut socket: WebSocket, terminal: Arc<Terminal>, shutdown: tokio_util::sync::CancellationToken) {
+async fn pump(
+    mut socket: WebSocket,
+    terminal: Arc<Terminal>,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
     // Subscribe before snapshotting the replay so a byte written in between is
     // delivered once: it is either in the snapshot or on the channel.
     let mut output = terminal.subscribe();
@@ -1149,7 +1135,11 @@ async fn pump(mut socket: WebSocket, terminal: Arc<Terminal>, shutdown: tokio_ut
                     // reconnects and gets the replay buffer.
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
                         let frame = json!({ "type": "lagged", "missed": missed });
-                        if sender.send(Message::Text(frame.to_string().into())).await.is_err() {
+                        if sender
+                            .send(Message::Text(frame.to_string().into()))
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                         return;
@@ -1280,8 +1270,8 @@ mod tests {
     /// reader. This is the whole feature in one test.
     #[tokio::test]
     async fn a_shell_runs_and_its_output_is_replayed() {
-        let terminal = Terminal::spawn("t_test", &session(&cwd()), &settings(), 100, 30)
-            .expect("spawn shell");
+        let terminal =
+            Terminal::spawn("t_test", &session(&cwd()), &settings(), 100, 30).expect("spawn shell");
         assert!(!terminal.is_dead());
         assert!(terminal.pid() > 0);
         assert_eq!(terminal.size(), Some((100, 30)));
@@ -1327,8 +1317,8 @@ mod tests {
     /// new one instead of attaching to a closed fd.
     #[tokio::test]
     async fn a_shell_that_exits_marks_the_terminal_dead() {
-        let terminal = Terminal::spawn("t_test", &session(&cwd()), &settings(), 80, 24)
-            .expect("spawn shell");
+        let terminal =
+            Terminal::spawn("t_test", &session(&cwd()), &settings(), 80, 24).expect("spawn shell");
         assert!(terminal.write(b"exit 7\n"));
         for _ in 0..200 {
             if terminal.is_dead() {
@@ -1410,10 +1400,10 @@ mod tests {
     #[tokio::test]
     async fn the_idle_reaper_spares_attached_terminals() {
         let registry = TerminalRegistry::new();
-        let idle = Terminal::spawn("t_idle", &session(&cwd()), &settings(), 80, 24)
-            .expect("spawn idle");
-        let busy = Terminal::spawn("t_busy", &session(&cwd()), &settings(), 80, 24)
-            .expect("spawn busy");
+        let idle =
+            Terminal::spawn("t_idle", &session(&cwd()), &settings(), 80, 24).expect("spawn idle");
+        let busy =
+            Terminal::spawn("t_busy", &session(&cwd()), &settings(), 80, 24).expect("spawn busy");
         busy.mark_attached();
         // Pretend the idle one was last seen two days ago.
         idle.last_seen.store(
@@ -1430,7 +1420,10 @@ mod tests {
         let reaped = registry.reap_idle(3600);
         assert_eq!(reaped, vec!["t_idle".to_string()]);
         assert!(registry.get("t_idle").is_none());
-        assert!(registry.get("t_busy").is_some(), "an attached shell was reaped");
+        assert!(
+            registry.get("t_busy").is_some(),
+            "an attached shell was reaped"
+        );
         registry.shutdown_all();
         assert!(registry.is_empty());
     }
@@ -1441,8 +1434,8 @@ mod tests {
     async fn the_shell_environment_is_cleared_of_secrets() {
         std::env::set_var("KARUCODE_AUTH_TOKEN", "super-secret-token");
         std::env::set_var("OPENAI_API_KEY", "sk-secret");
-        let terminal = Terminal::spawn("t_test", &session(&cwd()), &settings(), 200, 50)
-            .expect("spawn shell");
+        let terminal =
+            Terminal::spawn("t_test", &session(&cwd()), &settings(), 200, 50).expect("spawn shell");
         assert!(terminal.write(b"env\n"));
         let mut seen = String::new();
         for _ in 0..200 {
@@ -1458,7 +1451,10 @@ mod tests {
         terminal.shutdown();
         std::env::remove_var("KARUCODE_AUTH_TOKEN");
         std::env::remove_var("OPENAI_API_KEY");
-        assert!(seen.contains("PATH="), "the shell never printed its env: {seen:?}");
+        assert!(
+            seen.contains("PATH="),
+            "the shell never printed its env: {seen:?}"
+        );
         assert!(
             !seen.contains("super-secret-token"),
             "KARUCODE_AUTH_TOKEN leaked into the shell environment"
@@ -1467,6 +1463,9 @@ mod tests {
             !seen.contains("sk-secret"),
             "OPENAI_API_KEY leaked into the shell environment"
         );
-        assert!(seen.contains("TERM=xterm-256color"), "TERM was not set: {seen:?}");
+        assert!(
+            seen.contains("TERM=xterm-256color"),
+            "TERM was not set: {seen:?}"
+        );
     }
 }

@@ -468,7 +468,11 @@ mod tests {
 
         // A parent of the workspace is *not* refused: a workspace under `/tmp`
         // is a normal scratch/CI layout, and there the temp root must still work.
-        let parent = std::fs::canonicalize(&dir).unwrap().parent().unwrap().to_path_buf();
+        let parent = std::fs::canonicalize(&dir)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let ws = Workspace::with_extra_roots(&dir, vec![parent.clone()]).unwrap();
         assert_eq!(ws.extra_roots(), std::slice::from_ref(&parent));
         // ... which means a sibling of the workspace is reachable now, exactly
@@ -518,9 +522,8 @@ mod tests {
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         ));
-        let ws =
-            Workspace::with_extra_roots(&dir, vec![missing.clone(), dir.clone(), dir.clone()])
-                .unwrap();
+        let ws = Workspace::with_extra_roots(&dir, vec![missing.clone(), dir.clone(), dir.clone()])
+            .unwrap();
         // The workspace root appears in the allowlist twice and is its own root,
         // so it must not be listed as an *extra* root; the missing entry is gone.
         assert!(ws.extra_roots().is_empty(), "{:?}", ws.extra_roots());

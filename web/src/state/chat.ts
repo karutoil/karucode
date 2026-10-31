@@ -4,6 +4,7 @@ import type {
   ApprovalKind,
   ImageAttachment,
   JsonValue,
+  QueuedMessage,
   RunRecord,
   RunStatus,
   SessionDetail,
@@ -143,6 +144,16 @@ export interface ChatState {
   lastPromptTokens: number | null;
   iteration: number;
   lastSeq: number;
+  /**
+   * Messages the user sent while a run was working, oldest first.
+   *
+   * Not transcript rows: a steer joins the conversation only when the runtime
+   * folds it in (and announces that with `steer_applied`), and a follow-up gets
+   * its own run. Keeping them here is what lets the composer show "two messages
+   * are waiting" and offer to take them back, including after a reload - the
+   * snapshot carries the same pair.
+   */
+  queued: QueuedMessage[];
 }
 
 export function emptyChatState(sessionId: string | null = null): ChatState {
@@ -158,7 +169,33 @@ export function emptyChatState(sessionId: string | null = null): ChatState {
     lastPromptTokens: null,
     iteration: 0,
     lastSeq: 0,
+    queued: [],
   };
+}
+
+/**
+ * Split a session snapshot's two queues into the one list the composer shows.
+ *
+ * Steers come first because they land first: a steer is folded into the running
+ * turn, while a follow-up waits for the run after it. Both keep their server-side
+ * order, so "next to land" is the order the list is in.
+ */
+export function queuedFromDetail(detail: SessionDetail): QueuedMessage[] {
+  return [...(detail.queued_steers ?? []), ...(detail.queued_follow_ups ?? [])];
+}
+
+/**
+ * Replace the pending list from one source of truth.
+ *
+ * Used by the `queued_messages` event (which carries both queues in full) and by
+ * the snapshot. Quietly drops entries with no id, because an entry the panel
+ * cannot recall is worse than no row at all.
+ */
+export function queuedLists(
+  steers: readonly QueuedMessage[],
+  followUps: readonly QueuedMessage[],
+): QueuedMessage[] {
+  return [...steers, ...followUps].filter((entry) => typeof entry.id === 'string' && entry.id !== '');
 }
 
 /** Tool-call arguments arrive as a JSON string; a parse failure is kept as text. */
@@ -477,5 +514,10 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
       sameSession && previous.runId === lastRunId ? previous.lastPromptTokens : null,
     iteration: sameSession && previous.runId === lastRunId ? previous.iteration : 0,
     lastSeq: 0,
+    // The snapshot is authoritative for the queues: the runtime keeps them in
+    // memory and reports them here, so this is what a reload (or a second tab)
+    // sees. A live queue frame that arrived during the fetch was replayed by
+    // `drainRefreshQueue` after this, so it wins only if it is newer.
+    queued: queuedFromDetail(detail),
   };
 }

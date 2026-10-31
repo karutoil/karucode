@@ -102,7 +102,7 @@ describe('App smoke render', () => {
     expect(within(workspace).queryByRole('tab', { name: /terminal/i })).toBeNull();
     expect(within(inspector).getByRole('tab', { name: 'Files' })).not.toBeNull();
     expect(within(inspector).getByRole('tab', { name: 'Changes' })).not.toBeNull();
-    expect(within(inspector).getByRole('tab', { name: /^Commands/ })).not.toBeNull();
+    expect(within(inspector).getByRole('tab', { name: /^Session/ })).not.toBeNull();
     expect(within(inspector).getByRole('tab', { name: /^Agents/ })).not.toBeNull();
     expect(screen.getByLabelText('Message karucode')).not.toBeNull();
 

@@ -67,10 +67,7 @@ pub async fn list_terminals(State(state): State<AppState>) -> ApiResult<Json<Val
     Ok(Json(terminals::list(&state).await?))
 }
 
-pub async fn create_terminal(
-    State(state): State<AppState>,
-    body: Bytes,
-) -> ApiResult<Json<Value>> {
+pub async fn create_terminal(State(state): State<AppState>, body: Bytes) -> ApiResult<Json<Value>> {
     let body: CreateBody = parse_body(&body)?;
     let settings = state.settings().snapshot().terminals;
     if !settings.enabled {
@@ -96,15 +93,11 @@ pub async fn create_terminal(
     // but the directory it *starts* in must still be one the project registry
     // knows, so `{"cwd":"/etc"}` cannot be used to place a tab outside every
     // workspace.
-    let (cwd, project_id) = resolve_start_dir(&state, body.project.as_deref(), body.cwd.as_deref())?;
+    let (cwd, project_id) =
+        resolve_start_dir(&state, body.project.as_deref(), body.cwd.as_deref())?;
 
     let id = kc_core::ids::TerminalId::new().as_str().to_string();
-    let position = existing
-        .iter()
-        .map(|row| row.position)
-        .max()
-        .unwrap_or(0)
-        + 1;
+    let position = existing.iter().map(|row| row.position).max().unwrap_or(0) + 1;
     let title = body
         .title
         .as_deref()
@@ -327,19 +320,34 @@ mod tests {
         headers.insert("host", "127.0.0.1:8787".parse().unwrap());
         // Same origin: the browser sends the host it dialled.
         headers.insert("origin", "http://127.0.0.1:8787".parse().unwrap());
-        assert!(matches!(origin_verdict(&headers), OriginVerdict::SameOrigin));
+        assert!(matches!(
+            origin_verdict(&headers),
+            OriginVerdict::SameOrigin
+        ));
         // A different host is refused outright.
         headers.insert("origin", "https://evil.example".parse().unwrap());
-        assert!(matches!(origin_verdict(&headers), OriginVerdict::Mismatch(..)));
+        assert!(matches!(
+            origin_verdict(&headers),
+            OriginVerdict::Mismatch(..)
+        ));
         // A different port is a different origin too.
         headers.insert("origin", "http://127.0.0.1:9999".parse().unwrap());
-        assert!(matches!(origin_verdict(&headers), OriginVerdict::Mismatch(..)));
+        assert!(matches!(
+            origin_verdict(&headers),
+            OriginVerdict::Mismatch(..)
+        ));
         // A non-browser client sends no `Origin`; the host guard covers it.
         headers.remove("origin");
-        assert!(matches!(origin_verdict(&headers), OriginVerdict::NotABrowser));
+        assert!(matches!(
+            origin_verdict(&headers),
+            OriginVerdict::NotABrowser
+        ));
         // A malformed `Origin` is refused, never treated as absent.
         headers.insert("origin", "not a url".parse().unwrap());
-        assert!(matches!(origin_verdict(&headers), OriginVerdict::Mismatch(..)));
+        assert!(matches!(
+            origin_verdict(&headers),
+            OriginVerdict::Mismatch(..)
+        ));
     }
 
     /// The registry starts empty: a restart is a fresh process table, and that

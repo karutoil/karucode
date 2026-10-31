@@ -20,40 +20,58 @@
 # credentials (see packaging/README.md).
 #
 # =============================================================================
-# READ THIS BEFORE YOU CHANGE THE HARDENING
+# A NOTE ON CONFINEMENT
 # =============================================================================
 #
-# karucode runs the shell commands the model asks for with `/bin/sh -c <command>`
-# as User=karucode. There is no sandbox inside the process (docs/SECURITY.md,
-# "What is NOT protected"): the approval policy is a convenience, not a boundary.
-# The unit file is therefore the operator's main containment lever, and it works
-# through two settings:
+# This unit deliberately does **not** sandbox the agent's filesystem. karucode
+# runs the shell commands the model asks for with `/bin/sh -c <command>` as
+# User=karucode, and it can write anywhere that user can - including your home
+# directory, sibling checkouts and build caches. There is no `ProtectSystem=`, no
+# `ProtectHome=` and no `ReadWritePaths=` allowlist to maintain: nothing the agent
+# does fails with `EROFS`, and `mv`/`cp`/`rm` work across the filesystem.
 #
-#   ProtectSystem=strict + ReadWritePaths=
-#       The whole filesystem is mounted read-only for this service except the
-#       paths listed in ReadWritePaths= (and the StateDirectory=, which systemd
-#       excludes automatically). So even an `rm -rf /` from the agent cannot
-#       damage the host: it can only write inside the workspace you granted.
-#       This is the single most valuable line in this file. Do not widen it to
-#       `/`, and do not add the data directory's parent, /etc, /usr or /var.
+# That is a deliberate trade. A read-only root is the strongest thing a unit file
+# can do, but it makes the agent useless for the ordinary work of moving files
+# around, and keeping the allowlist correct for every toolchain (cargo, npm, pnpm,
+# bun, rustup, plugins, screenshots) turned out to be a permanent maintenance
+# burden with a failure mode - `EROFS` deep inside a build - that looks like a bug
+# in the tool rather than in the unit.
+#
+# What still bounds the agent:
+#
+#   User=karucode
+#       A dedicated unprivileged account. Nothing it does can touch a file that
+#       account cannot write, so running it as a *dedicated user* is the lever
+#       that replaces the filesystem sandbox. Do not run this service as root.
 #
 #   NoNewPrivileges=yes
-#       Stops the agent from escalating: no setuid/setgid binaries, no file
-#       capabilities, no gaining privileges through sudo or a helper. Combined
-#       with User=karucode (unprivileged, no shell login) the agent cannot become
-#       root even if it finds a local privilege-escalation vector that needs a
-#       privileged exec.
+#       No setuid/setgid binaries, no file capabilities, no gaining privileges
+#       through sudo or a helper. The agent cannot become root even if it finds a
+#       local privilege-escalation vector that needs a privileged exec. This is
+#       kept because it costs nothing and stops the worst outcome; it does not
+#       restrict ordinary file writes.
 #
-# Neither setting stops the agent from reading files that are world-readable, or
-# from using the network. If you need more, run it in a container or VM with only
-# the project mounted (see the Dockerfile) - that is the only real isolation.
+#   The remaining Protect*=/Restrict*= lines
+#       Kernel and device surface (kernel modules, tunables, clock, hostname,
+#       SUID/SGID creation, namespaces, personality, @system-service syscalls),
+#       not your files. They do not get in the way of normal work.
 #
-# ProtectHome=read-only makes /home, /root and /run/user read-only - it does NOT
-# make them invisible. The agent can still READ ~/.ssh and ~/.aws of other users
-# if the file permissions allow it. Use ProtectHome=yes (which hides them
-# entirely) if the workspace does not live under /home. If it does, keep
-# read-only and rely on ReadWritePaths=: systemd nests a writable path inside a
-# read-only one, so the workspace stays writable while the rest of /home does not.
+# If you *do* want a filesystem sandbox, add it yourself in
+# /etc/systemd/system/karucode.service.d/20-local.conf, which no tool rewrites:
+#
+#     [Service]
+#     ProtectSystem=strict
+#     ProtectHome=read-only
+#     ReadWritePaths=/srv/karucode/workspace /var/lib/karucode
+#
+# ...then `systemctl daemon-reload && systemctl restart karucode`. Expect to widen
+# ReadWritePaths= as you add toolchains; and remember that `ProtectSystem=strict`
+# is why an unqualified `mv` or `rm` outside those paths fails with `EROFS`.
+#
+# Neither the unit nor this project can protect you from a malicious model with
+# the filesystem writable. The approval policy is a convenience, not a boundary.
+# If you need real isolation, run karucode in a container or VM with only the
+# project mounted (see the Dockerfile) - that is the only real isolation.
 
 [Unit]
 Description=karucode - self-hosted coding agent
@@ -72,9 +90,21 @@ StartLimitBurst=5
 Type=simple
 
 # --- identity ---------------------------------------------------------------
-# Dedicated unprivileged user. Create it with:
+# `install.sh` writes `User=`/`Group=` into a drop-in, set to the account that ran
+# it ($SUDO_USER, else $LOGNAME, else the session login uid), so a normal install
+# runs the agent as *you*: your files, your toolchains, your `~/.cargo` and
+# `~/.local/bin`. That is deliberate - the unit does not sandbox the filesystem
+# (see the header), so a separate account buys no protection and only cuts the
+# agent off from the tools it needs. Root is never written; the installer refuses
+# it in every spelling.
+#
+# The values below are the fallback for a hand-installed unit, and for the narrow
+# case of running the installer from a bare root shell where no human can be
+# identified at all (the installer warns loudly when it takes that path).
+# `karucode` is a system account; create it with:
 #     useradd --system --home-dir /var/lib/karucode --shell /usr/sbin/nologin karucode
-# Do NOT run this service as root: the agent executes arbitrary commands.
+# Whatever the account, do NOT run this service as root: the agent executes
+# arbitrary commands.
 User=karucode
 Group=karucode
 
@@ -122,16 +152,10 @@ RestartSec=5
 TimeoutStopSec=30
 
 # --- hardening --------------------------------------------------------------
-# The agent's shell inherits all of this. See the header for what matters most.
+# The agent's shell inherits all of this. See the header: the kernel/device
+# surface is locked down, but the filesystem is deliberately left writable so the
+# agent can do ordinary work. NoNewPrivileges= is what stops it becoming root.
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
-# Same path as WorkingDirectory= (and any other path the agent needs to write,
-# e.g. a build cache). This is the ONLY writable area outside the state
-# directory. Space-separated; prefix a path with `-` to tolerate a missing one.
-# install.sh overrides this in its drop-in, so editing this line does nothing
-# after an install: use karucode.service.d/20-local.conf instead.
-ReadWritePaths=/srv/karucode/workspace
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes

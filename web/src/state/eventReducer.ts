@@ -19,6 +19,7 @@ import type {
   NoticeItem,
   ToolItem,
 } from './chat';
+import { queuedLists } from './chat';
 
 const MAX_STREAM_CHARS = 200_000;
 
@@ -661,10 +662,32 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
         };
       });
 
+    case 'steer_applied': {
+      // The steer joined the conversation, so it is no longer pending. Drop it
+      // from the queue here rather than waiting for the matching
+      // `queued_messages`: that frame carries the whole queue, but this event is
+      // the one that proves *this* message landed, and an optimistic row must not
+      // outlive its acceptance.
+      const queued = state.queued.filter((entry) => entry.id !== event.steer_id);
+      return queued.length === state.queued.length ? seen : { ...seen, queued };
+    }
+
+    case 'queued_messages': {
+      const queued = queuedLists(event.steers ?? [], event.follow_ups ?? []);
+      return { ...seen, queued };
+    }
+
     case 'session_created':
     case 'session_renamed':
     case 'session_model_changed':
     case 'session_deleted':
+    case 'session_rewound':
+      // `session_rewound` hides rows the chat already rendered. Splicing them out
+      // client-side would have to re-derive the server's normalisation (an
+      // assistant turn resolves to its prompt) and would miss anything the
+      // rewind changed that this client never saw. The event's job is to say
+      // "refetch", which `actions.ts` does; the pure reducer keeps the state it
+      // has rather than guessing.
       return seen;
 
     default:

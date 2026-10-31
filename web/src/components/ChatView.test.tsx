@@ -402,7 +402,7 @@ describe('ChatView workspace tabs', () => {
 
     expect(screen.queryByRole('tab', { name: /terminal/i })).toBeNull();
     expect(document.getElementById('workspace-panel-terminal')).toBeNull();
-    // Command output lives in the transcript and the inspector's Commands tab.
+    // Command output lives in the transcript itself.
     expect(screen.getAllByRole('tab').map((element) => element.textContent?.trim())).toEqual([
       'Conversation',
       'Changes',

@@ -71,6 +71,15 @@
 // * **Shell commands are not sandboxed.** `run_command` runs `/bin/sh -c` as the
 //   server user with that user's filesystem and network access. Approvals are the
 //   gate, not isolation.
+// * **The packaged unit does not sandbox the filesystem either.** It runs the
+//   agent as a dedicated unprivileged user under `NoNewPrivileges=yes`, but it
+//   sets no `ProtectSystem=`/`ProtectHome=`/`ReadWritePaths=`, so the agent can
+//   write anywhere that account can - deliberately, so ordinary work (`mv`, build
+//   caches, sibling checkouts) does not fail with `EROFS`. That account is the
+//   real boundary: give the service its own user and it cannot touch files that
+//   user cannot. Add a filesystem sandbox yourself in
+//   `karucode.service.d/20-local.conf` if you want one; see
+//   `packaging/README.md`.
 // * **Plugins and MCP servers are trusted code.** They run as the server user;
 //   their declared `permissions` limit which tools the host exposes, not what the
 //   process can do. A plugin panel cannot run code in the *browser*, but the

@@ -5,7 +5,8 @@
 #
 #   curl -fsSLO https://raw.githubusercontent.com/karutoil/karucode/main/packaging/install.sh
 #   sudo sh install.sh                          # latest release, /usr/local
-#   sudo sh install.sh --workspace /srv/app     # the directory the agent may edit
+#   sudo sh install.sh                          # then add a project in the web UI
+#   sudo sh install.sh --workspace /srv/app     # ...or name the first one here
 #   sudo sh install.sh --version 0.1.0
 #   sh install.sh --prefix "$HOME/.local" --no-systemd   # binary only, no root
 #
@@ -58,11 +59,136 @@ REPO="${KARUCODE_REPO:-karutoil/karucode}"
 VERSION="${VERSION:-latest}"
 PREFIX="/usr/local"
 
-SERVICE_USER="karucode"
-SERVICE_GROUP="karucode"
+# --- who the service runs as -----------------------------------------------
+#
+# The default is **the human who ran the installer**, not a separate system
+# account and never root. That is the whole security model now that the unit does
+# not sandbox the filesystem (see packaging/README.md): the agent gets your files,
+# as you, and a dedicated account would only mean it can no longer reach your
+# toolchains, `~/.cargo`, `~/.local/bin`, your projects, or the data directory it
+# was told to use.
+#
+# Resolving "who ran this" is the part that is easy to get wrong, because `sudo`
+# hands the script several different things and only one of them is the answer.
+# The candidates are tried in this order:
+#
+#   $SUDO_USER    the account sudo switched *from* - the human. Set by sudo (and
+#                 by `su -m`/`doas`-style wrappers); the primary signal.
+#   $LOGNAME      the *login* name of the session. sudo resets $USER to `root` but
+#                 leaves $LOGNAME alone, so `sudo sh install.sh` from a login shell
+#                 still has LOGNAME=you even when $SUDO_USER is somehow absent.
+#                 Touched only as root, so an unprivileged run can set it freely.
+#   /proc/self/loginuid   the kernel's audit login uid of the session, resolved
+#                 through passwd. Survives a `sudo -s` in a root shell and is set by
+#                 sshd/login. Read only when it is a real uid and not the kernel's
+#                 4294967295 "unset" sentinel.
+#   $USER         the *effective* name. Under sudo this is `root`, which is exactly
+#                 the trap: taking it first made `sudo sh install.sh` resolve to
+#                 `root` and then fall back to the system account. It is trusted
+#                 last, and only because a non-sudo run has no other evidence.
+#
+# The first name that resolves to a passwd entry that is not root/uid 0 wins. Every
+# candidate goes through `is_human_account`, so a uid or a numeric gid can never be
+# mistaken for an account name, and 0/root in any spelling is never the service
+# account: the agent executes arbitrary commands, so root is refused outright
+# rather than "used as a fallback".
+
+# is_root_name NAME is true for every spelling of the superuser: the name `root`,
+# the uid, a uid:gid pair, and the variants systemd accepts for it.
+is_root_name() {
+    case "$1" in
+        ""|root|0|0:*|*:0|root:*) return 0 ;;
+    esac
+    # "0", "00", "0000": all digits, and none of them significant. Kept as a glob
+    # rather than arithmetic so no shell's octal parsing can turn "010" into 8 (or
+    # refuse "09") behind our back.
+    case "$1" in
+        *[!0-9]*) return 1 ;;
+        *[1-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# is_human_account NAME is true when NAME is an existing account that is not root
+# and has a real uid. A numeric name or a `name:group` pair is refused: systemd
+# accepts `User=0` and `User=root:root` in a drop-in, so an unvalidated flag could
+# smuggle root into the unit past the textual check below.
+is_human_account() {
+    case "$1" in
+        ""|*:*) return 1 ;;
+        *[!0-9]*) ;;
+        *) return 1 ;;          # all digits -> a uid, not a name
+    esac
+    _uid="$(account_uid "$1")" || return 1
+    [ -n "$_uid" ] || return 1
+    [ "$_uid" -ne 0 ] || return 1
+    return 0
+}
+
+# account_uid NAME prints the uid of an existing account, or fails. The single
+# place that decides "does this account exist", so --service-user and the
+# environment probes cannot disagree.
+account_uid() {
+    if command -v getent >/dev/null 2>&1; then
+        _line="$(getent passwd "$1" 2>/dev/null)" || return 1
+    else
+        _line="$(awk -F: -v u="$1" '$1==u{print}' /etc/passwd 2>/dev/null)"
+    fi
+    [ -n "$_line" ] || return 1
+    printf '%s\n' "$(printf '%s' "$_line" | cut -d: -f3)"
+}
+
+# login_uid prints the uid of the account that owns this session, or nothing.
+# `4294967295` is the kernel's "unset" sentinel (no PAM login record).
+login_uid() {
+    _lu="$(cat /proc/self/loginuid 2>/dev/null || true)"
+    case "$_lu" in
+        ""|*[!0-9]*|4294967295) printf '%s\n' "" ;;
+        *) printf '%s\n' "$_lu" ;;
+    esac
+}
+
+# name_for_uid UID prints the account name owning UID, or nothing.
+name_for_uid() {
+    if command -v getent >/dev/null 2>&1; then
+        getent passwd "$1" 2>/dev/null | cut -d: -f1
+    else
+        awk -F: -v u="$1" '$3==u{print $1; exit}' /etc/passwd 2>/dev/null
+    fi
+}
+
+# resolve_default_user picks the account to run the service as. Empty means "no
+# human could be identified", which the caller turns into the system-account
+# fallback and a loud warning.
+resolve_default_user() {
+    for _candidate in "${SUDO_USER:-}" "${LOGNAME:-}" "$(name_for_uid "$(login_uid)")" "${USER:-}"; do
+        if is_human_account "$_candidate"; then
+            printf '%s\n' "$_candidate"
+            return 0
+        fi
+    done
+    printf '%s\n' ""
+}
+
+DEFAULT_USER="$(resolve_default_user)"
+
+# SERVICE_USER is the account the unit names; SERVICE_GROUP follows later, once the
+# flags are parsed, because it must come from the account's *real* gid rather than
+# from an assumption that a group of the same name exists.
+SYSTEM_USER="karucode"
+SERVICE_USER="${DEFAULT_USER:-$SYSTEM_USER}"
+SERVICE_GROUP=""
+SERVICE_GROUP_EXPLICIT=0
+# Set when the account was named explicitly (--service-user) rather than derived:
+# the fallback warnings must not fire for a deliberate choice.
+SERVICE_USER_EXPLICIT=0
 SERVICE_NAME="karucode"
-WORKSPACE="/srv/karucode/workspace"
-DATA_DIR="/var/lib/karucode"
+WORKSPACE=""
+# DATA_DIR is resolved after the helper functions below: the account's own home for
+# a system account, `<their home>/.local/share/karucode` for a person. An explicit
+# --data-dir always wins.
+DATA_DIR=""
+DATA_DIR_EXPLICIT=0
 HOST_ARG=""
 PORT_ARG=""
 ENV_FILE="/etc/karucode/karucode.env"
@@ -76,7 +202,7 @@ USE_SYSTEMD=1
 ENABLE=1
 START=1
 RESTART=1
-ALLOW_JIT=0
+ALLOW_JIT=1
 DRY_RUN=0
 FORCE_SYSTEMD=0
 ARTIFACT=""
@@ -128,12 +254,18 @@ Install source:
 
 Layout:
   --prefix <DIR>         install the binary to <DIR>/bin (default: /usr/local)
-  --workspace <DIR>      directory the agent may read and edit
-                         (default: /srv/karucode/workspace)
-  --data-dir <DIR>       SQLite database and plugin data (default: /var/lib/karucode)
-  --service-user <NAME>  run the service as this user (default: karucode, created
-                         if missing). Use an existing account only if it already
-                         owns --data-dir.
+  --workspace <DIR>      create this directory and start sessions in it.
+                         Optional: without it the server starts with no project
+                         and you add the first one in the web UI
+  --data-dir <DIR>       SQLite database and plugin data. Default: the account's
+                         own home for a system account (e.g. /var/lib/karucode),
+                         else ~/.local/share/karucode
+  --service-user <NAME>  run the service as this account. Default: the account
+                         that ran this installer ($SUDO_USER, then $LOGNAME, then
+                         the session login uid). Never created, never re-owned,
+                         and never root. Pass a name only to override it.
+  --service-group <GRP>  run it in this group (default: the account's real
+                         primary group from /etc/passwd, not a guess)
   --host <ADDR>          bind address (default: whatever the unit sets, 127.0.0.1)
   --port <PORT>          listen port (default: 8787)
   --env-file <PATH>      environment file (default: /etc/karucode/karucode.env)
@@ -143,8 +275,9 @@ systemd:
   --no-enable            install the unit but do not enable it at boot
   --no-start             do not start it now
   --no-restart           leave a running instance on the old binary
-  --allow-jit            set MemoryDenyWriteExecute=no so the agent can run
-                         node/java/JIT runtimes (weaker hardening)
+  --no-jit               keep MemoryDenyWriteExecute=yes (do not disable it).
+                         On by default: without it node, Java and some Python
+                         extensions crash, so the agent cannot build a frontend
   --unit-file <PATH>     install this unit file instead of the shipped/fetched one
   --force-systemd        proceed even if systemd does not look like PID 1
                          (a chroot or an image build)
@@ -173,6 +306,141 @@ group_exists() {
     else
         grep -q "^$1:" /etc/group 2>/dev/null
     fi
+}
+
+# user_exists NAME is true when NAME is an entry in passwd. It goes through
+# account_uid so there is exactly one definition of "exists" in this script.
+user_exists() {
+    account_uid "$1" >/dev/null
+}
+
+# home_for USER prints that account's home directory, or nothing when it has none
+# we can use. Only called for accounts that already exist, so a missing entry
+# means "do not guess".
+home_for() {
+    if command -v getent >/dev/null 2>&1; then
+        _home="$(getent passwd "$1" 2>/dev/null | cut -d: -f6)"
+    else
+        _home="$(awk -F: -v u="$1" '$1==u{print $6}' /etc/passwd 2>/dev/null)"
+    fi
+    case "$_home" in
+        ""|/|/nonexistent) printf '%s\n' "" ;;
+        *) printf '%s\n' "$_home" ;;
+    esac
+}
+
+# account_group NAME prints the *name* of that account's primary group (its real
+# gid, resolved through /etc/group), or nothing when the gid has no entry.
+account_group() {
+    _gid="$(account_gid "$1")"
+    [ -n "$_gid" ] || return 1
+    if command -v getent >/dev/null 2>&1; then
+        getent group "$_gid" 2>/dev/null | cut -d: -f1
+    else
+        awk -F: -v g="$_gid" '$3==g{print $1; exit}' /etc/group 2>/dev/null
+    fi
+}
+
+# account_gid NAME prints that account's numeric primary group id.
+account_gid() {
+    if command -v getent >/dev/null 2>&1; then
+        _ent="$(getent passwd "$1" 2>/dev/null)" || return 1
+    else
+        _ent="$(awk -F: -v u="$1" '$1==u{print}' /etc/passwd 2>/dev/null)"
+    fi
+    [ -n "$_ent" ] || return 1
+    printf '%s\n' "$(printf '%s' "$_ent" | cut -d: -f4)"
+}
+
+# is_system_account NAME is true for a service account rather than a person: no
+# login shell, or a uid below the host's UID_MIN. It decides where the data
+# directory goes, because the two kinds of account have different conventions - a
+# person's app data belongs in ~/.local/share, a service account's belongs in the
+# home useradd already gave it (that is what a system account's home *is*).
+is_system_account() {
+    account_uid "$1" >/dev/null || return 1
+    _uid="$(account_uid "$1")"
+    _shell="$(account_shell "$1")"
+    case "$_shell" in
+        */nologin|*/false|"") return 0 ;;
+    esac
+    _uid_min="$(awk '$1=="UID_MIN"{print $2; exit}' /etc/login.defs 2>/dev/null || true)"
+    case "$_uid_min" in
+        ''|*[!0-9]*) _uid_min=1000 ;;
+    esac
+    [ "$_uid" -lt "$_uid_min" ]
+}
+
+# account_shell NAME prints that account's login shell.
+account_shell() {
+    if command -v getent >/dev/null 2>&1; then
+        _ent="$(getent passwd "$1" 2>/dev/null)" || return 1
+    else
+        _ent="$(awk -F: -v u="$1" '$1==u{print}' /etc/passwd 2>/dev/null)"
+    fi
+    [ -n "$_ent" ] || return 1
+    printf '%s\n' "$(printf '%s' "$_ent" | cut -d: -f7)"
+}
+
+# write_dropin prints the [Service] drop-in this run would install. Kept as one
+# function so the dry run shows the real bytes rather than a description of them.
+write_dropin() {
+    printf '# Generated by packaging/install.sh - rewritten on every run.\n'
+    printf '# Put your own overrides in 20-local.conf; install.sh never touches it.\n'
+    printf '[Service]\n'
+    # Always written, even when it matches the unit's own default: the resolved
+    # account is the one fact an operator most needs to be able to check, and
+    # `systemctl show -p User karucode` then cannot disagree with what this run
+    # reported. Group= comes from the account's real primary group (see
+    # --service-group), not from an assumption that name==group.
+    printf 'User=%s\n' "$SERVICE_USER"
+    printf 'Group=%s\n' "$SERVICE_GROUP"
+    # systemd needs *some* existing WorkingDirectory; without a workspace the data
+    # dir is the obvious neutral one. It is not a project: the operator creates the
+    # first one in the web UI.
+    if [ -n "$WORKSPACE" ]; then
+        printf 'WorkingDirectory=%s\n' "$WORKSPACE"
+    else
+        printf 'WorkingDirectory=%s\n' "$DATA_DIR"
+    fi
+    # No ReadWritePaths= here: the shipped unit no longer sandboxes the filesystem,
+    # so there is no allowlist to keep in sync. A leftover ReadWritePaths= from an
+    # older install is cleared so it cannot re-introduce a restriction that no
+    # longer has a UI.
+    printf 'ReadWritePaths=\n'
+    # The unit's StateDirectory=karucode creates and owns /var/lib/karucode as the
+    # *service* user, which only works when that user is the dedicated system
+    # account. Every other case - including the default of running as a real person
+    # - points the server at a directory that user already owns, and clears
+    # StateDirectory= so systemd does not try to chown a path it has no business
+    # touching.
+    #
+    # The test is "is this the system account", not "is the path literally
+    # /var/lib/karucode": the fallback account can be created with a different home,
+    # and a person could pass --data-dir /var/lib/karucode. systemd resolves
+    # StateDirectory= relative to /var/lib and would chown whatever it finds there
+    # to the service user, so it may only stay when the service user is the account
+    # the unit describes.
+    if [ "$DATA_DIR" = "/var/lib/karucode" ] && [ "$SERVICE_USER" = "$SYSTEM_USER" ]; then
+        : # the unit's own StateDirectory= already covers it
+    else
+        printf 'StateDirectory=\n'
+        printf 'Environment=KARUCODE_DATA_DIR=%s\n' "$DATA_DIR"
+    fi
+    if [ -n "$HOST_ARG" ]; then
+        printf 'Environment=KARUCODE_HOST=%s\n' "$HOST_ARG"
+    fi
+    if [ -n "$PORT_ARG" ]; then
+        printf 'Environment=KARUCODE_PORT=%s\n' "$PORT_ARG"
+    fi
+    if [ "$ALLOW_JIT" -eq 1 ]; then
+        # On by default: V8/JVM/Python C extensions need W^X memory, and without
+        # this every `node`, `java` or `vite build` in a session dies with a V8
+        # fatal error. `--no-jit` restores the knob.
+        printf 'MemoryDenyWriteExecute=no\n'
+    fi
+    printf 'ExecStart=\n'
+    printf 'ExecStart=%s/karucode\n' "$BIN_DIR"
 }
 
 # can_write PATH answers "could the service user write here?" from the mode bits
@@ -267,10 +535,12 @@ while [ $# -gt 0 ]; do
         --version=*)       VERSION="${1#*=}"; shift ;;
         --workspace)       need_value "$@"; WORKSPACE="$2"; shift 2 ;;
         --workspace=*)     WORKSPACE="${1#*=}"; shift ;;
-        --data-dir)        need_value "$@"; DATA_DIR="$2"; shift 2 ;;
-        --data-dir=*)      DATA_DIR="${1#*=}"; shift ;;
-        --service-user)    need_value "$@"; SERVICE_USER="$2"; SERVICE_GROUP="$2"; shift 2 ;;
-        --service-user=*)  SERVICE_USER="${1#*=}"; SERVICE_GROUP="$SERVICE_USER"; shift ;;
+        --data-dir)        need_value "$@"; DATA_DIR="$2"; DATA_DIR_EXPLICIT=1; shift 2 ;;
+        --data-dir=*)      DATA_DIR="${1#*=}"; DATA_DIR_EXPLICIT=1; shift ;;
+        --service-user)    need_value "$@"; SERVICE_USER="$2"; SERVICE_USER_EXPLICIT=1; shift 2 ;;
+        --service-user=*)  SERVICE_USER="${1#*=}"; SERVICE_USER_EXPLICIT=1; shift ;;
+        --service-group)   need_value "$@"; SERVICE_GROUP="$2"; SERVICE_GROUP_EXPLICIT=1; shift 2 ;;
+        --service-group=*) SERVICE_GROUP="${1#*=}"; SERVICE_GROUP_EXPLICIT=1; shift ;;
         --host)            need_value "$@"; HOST_ARG="$2"; shift 2 ;;
         --host=*)          HOST_ARG="${1#*=}"; shift ;;
         --port)            need_value "$@"; PORT_ARG="$2"; shift 2 ;;
@@ -288,6 +558,7 @@ while [ $# -gt 0 ]; do
         --no-start)        START=0; shift ;;
         --no-restart)      RESTART=0; shift ;;
         --allow-jit)       ALLOW_JIT=1; shift ;;
+        --no-jit)          ALLOW_JIT=0; shift ;;
         --force-systemd)   FORCE_SYSTEMD=1; shift ;;
         --dry-run)         DRY_RUN=1; shift ;;
         -h|--help)         usage; exit 0 ;;
@@ -296,11 +567,97 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$PREFIX" ] || die "--prefix may not be empty"
-[ -n "$WORKSPACE" ] || die "--workspace may not be empty"
-[ -n "$DATA_DIR" ] || die "--data-dir may not be empty"
-if [ "$SERVICE_USER" = "root" ]; then
-    die "the service must not run as root: the agent executes arbitrary commands. Pick an unprivileged user."
+
+# --- resolve the service account and its group ------------------------------
+#
+# Everything below reads SERVICE_USER as "a name that exists in passwd", so the
+# checks are ordered: reject root in any spelling, then reject an account that does
+# not exist (systemd would only fail later with status=217/USER), then derive the
+# group from the account's real gid.
+#
+# Skipped for --no-systemd: a binary-only install writes no unit and runs nothing,
+# so there is no service account to resolve and `sudo sh install.sh --no-systemd`
+# must keep working on a host with no human accounts at all (an image build).
+
+if [ "$USE_SYSTEMD" -eq 1 ]; then
+
+    if is_root_name "$SERVICE_USER"; then
+        die "the service must not run as root: the agent executes arbitrary commands.
+Pick an unprivileged account that already exists, e.g. --service-user \$(id -un)."
+    fi
+    case "$SERVICE_USER" in
+        *:*) die "--service-user takes an account name, not \"${SERVICE_USER}\" (use --service-group for the group)" ;;
+    esac
+
+    if [ "$SERVICE_USER_EXPLICIT" -eq 1 ]; then
+        # An explicit name must be an account that exists. The installer does not
+        # create accounts any more (the service runs as a person), and a typo would
+        # otherwise reach systemd as status=217/USER long after the installer had
+        # already reported success.
+        if ! account_uid "$SERVICE_USER" >/dev/null; then
+            die "no such account: ${SERVICE_USER}
+The service runs as an account that already exists; this installer never creates one
+for --service-user. Check the name with: id ${SERVICE_USER}"
+        fi
+    elif [ -z "$DEFAULT_USER" ]; then
+        # No human could be identified: a bare `sudo -i` / container shell where
+        # $SUDO_USER, $LOGNAME and loginuid all say root. Falling back is the only
+        # way to install at all - but it must not be silent, because the agent will
+        # not be able to reach the caller's home and the data dir moves to
+        # /var/lib/karucode.
+        warn "could not identify the human installing this: no usable \$SUDO_USER, no"
+        warn "usable \$LOGNAME, and the session login uid is root. This looks like a bare"
+        warn "root shell or an image build. Falling back to the dedicated system account"
+        warn "\"${SERVICE_USER}\" (created if missing); pass --service-user <name> to"
+        warn "choose the account yourself, or run the installer as the human who should"
+        warn "own the service:  sudo -u <you> env SUDO_USER=<you> sh ${0##*/}"
+    fi
+
+    # Derive the group from the account's real gid unless --service-group was given.
+    # Assuming a group named after the account is wrong on any host with user-private
+    # groups disabled, or for an account whose primary group is shared (`users`,
+    # `nogroup`, a project group): systemd then refuses to start with "Failed to
+    # determine group credentials", or the unit runs in a group nobody intended.
+    if [ "$SERVICE_GROUP_EXPLICIT" -eq 1 ]; then
+        group_exists "$SERVICE_GROUP" \
+            || die "no such group: ${SERVICE_GROUP}. Create it first, or drop --service-group to use ${SERVICE_USER}'s primary group."
+    elif account_uid "$SERVICE_USER" >/dev/null; then
+        SERVICE_GROUP="$(account_group "$SERVICE_USER")"
+        [ -n "$SERVICE_GROUP" ] || SERVICE_GROUP="$SERVICE_USER"
+    else
+        # The account does not exist yet (the system-account fallback creates it), so
+        # there is no gid to read; its same-name group is created alongside it.
+        SERVICE_GROUP="$SERVICE_USER"
+    fi
 fi
+
+# Resolve the data directory now that the flags are parsed and the helpers exist.
+# A real user's own home is the default because that is the one place the service
+# is guaranteed to be able to write without a separate account, a StateDirectory=
+# or an ACL.
+#
+# Only an account with a *usable* home gets the ~/.local/share default. The
+# fallback system account has a home of /var/lib/karucode already (useradd
+# --home-dir), and appending .local/share to that produces the nonsensical
+# /var/lib/karucode/.local/share/karucode - the historical default of /var/lib/
+# karucode is the data dir for exactly that account, and it is also the path the
+# unit's StateDirectory=karucode creates.
+if [ "$DATA_DIR_EXPLICIT" -eq 0 ]; then
+    _home="$(home_for "$SERVICE_USER")"
+    if [ -z "$_home" ]; then
+        DATA_DIR="/var/lib/karucode"
+    elif is_system_account "$SERVICE_USER"; then
+        # A service account's home is already its data directory (that is the
+        # convention useradd --system sets up, and what the shipped unit's
+        # StateDirectory=karucode describes). Appending .local/share would both
+        # invent a path nobody expects and reproduce the bug this replaced:
+        # /var/lib/karucode/.local/share/karucode.
+        DATA_DIR="$_home"
+    else
+        DATA_DIR="${_home}/.local/share/karucode"
+    fi
+fi
+[ -n "$DATA_DIR" ] || die "--data-dir may not be empty"
 if [ -n "$PORT_ARG" ]; then
     case "$PORT_ARG" in
         *[!0-9]*) die "--port must be a number, got: $PORT_ARG" ;;
@@ -526,7 +883,7 @@ if [ "$USE_SYSTEMD" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
             fi
         fi
     fi
-    if [ -d "$WORKSPACE" ] && ! can_write "$WORKSPACE"; then
+    if [ -n "$WORKSPACE" ] && [ -d "$WORKSPACE" ] && ! can_write "$WORKSPACE"; then
         warn "${WORKSPACE} exists but ${SERVICE_USER} cannot write to it."
         warn "The agent will fail on the first edit. Fix it with:"
         warn "    chown -R ${SERVICE_USER}:${SERVICE_GROUP} ${WORKSPACE}"
@@ -562,8 +919,25 @@ if [ "$USE_SYSTEMD" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 if [ "$USE_SYSTEMD" -eq 1 ]; then
-    if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
-        info "creating the ${SERVICE_USER} system group and user"
+    if user_exists "$SERVICE_USER"; then
+        # The normal path: the service runs as a real account that already exists
+        # (the person who ran the installer). Never create, never re-own.
+        if [ "$SERVICE_USER_EXPLICIT" -eq 0 ] && [ -n "$DEFAULT_USER" ]; then
+            info "running as ${SERVICE_USER}:${SERVICE_GROUP} (the account that ran this installer)"
+        elif [ "$SERVICE_USER_EXPLICIT" -eq 0 ]; then
+            info "running as ${SERVICE_USER}:${SERVICE_GROUP} (system-account fallback)"
+        else
+            info "running as the existing account ${SERVICE_USER}:${SERVICE_GROUP}"
+        fi
+        # An account with no real home would put the data dir somewhere unwritable;
+        # say so rather than fail later.
+        if [ -z "$(home_for "$SERVICE_USER")" ] && [ "$DATA_DIR_EXPLICIT" -eq 0 ]; then
+            warn "${SERVICE_USER} has no usable home directory; install with --data-dir <path>."
+        fi
+    else
+        # Only reachable for the built-in fallback: --service-user is validated to
+        # name an existing account, so nothing here can create an arbitrary account.
+        info "creating the ${SERVICE_USER} system group and user (fallback: no human identified)"
         # The unit names Group= explicitly, so create the group explicitly too.
         # Relying on useradd's implicit same-name group (USERGROUPS_ENAB) is how
         # this breaks on hosts that have it disabled: systemd then refuses to
@@ -599,7 +973,7 @@ if [ "$USE_SYSTEMD" -eq 1 ]; then
 
     # Workspace: create it when missing (that is what makes the unit startable),
     # never re-own one that already exists.
-    if [ ! -d "$WORKSPACE" ]; then
+    if [ -n "$WORKSPACE" ] && [ ! -d "$WORKSPACE" ]; then
         info "creating the workspace ${WORKSPACE}"
         run install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$WORKSPACE" \
             || die "could not create the workspace ${WORKSPACE}"
@@ -696,41 +1070,16 @@ ENVEOF
     # Site configuration lives in a drop-in, so re-running install.sh for an
     # upgrade cannot lose the paths the service needs in order to start.
     info "writing ${DROPIN_PATH}"
+    dropin_tmp="${TMPDIR_}/10-install.conf"
+    write_dropin > "$dropin_tmp"
     if [ "$DRY_RUN" -eq 1 ]; then
-        printf '    (dry-run) write the [Service] overrides (user, workspace, data dir, ExecStart) to %s\n' "$DROPIN_PATH"
+        # Print the real file, not a description of it: the resolved User=/Group=
+        # and data dir are the two facts this script can get wrong silently, and a
+        # dry run is the only chance to check them before a unit is installed.
+        printf '    (dry-run) would write %s:\n' "$DROPIN_PATH"
+        sed 's/^/    | /' "$dropin_tmp"
     else
         install -d -m 0755 "$DROPIN_DIR"
-        dropin_tmp="${TMPDIR_}/10-install.conf"
-        {
-            printf '# Generated by packaging/install.sh - rewritten on every run.\n'
-            printf '# Put your own overrides in 20-local.conf; install.sh never touches it.\n'
-            printf '[Service]\n'
-            printf 'User=%s\n' "$SERVICE_USER"
-            printf 'Group=%s\n' "$SERVICE_GROUP"
-            printf 'WorkingDirectory=%s\n' "$WORKSPACE"
-            # ReadWritePaths= is a list: reset it, then list exactly what we own.
-            printf 'ReadWritePaths=\n'
-            printf 'ReadWritePaths=%s\n' "$WORKSPACE"
-            # StateDirectory=karucode already covers the default data dir; a
-            # custom one has to be granted explicitly.
-            if [ "$DATA_DIR" != "/var/lib/karucode" ]; then
-                printf 'ReadWritePaths=%s\n' "$DATA_DIR"
-                printf 'StateDirectory=\n'
-            fi
-            printf 'Environment=KARUCODE_DATA_DIR=%s\n' "$DATA_DIR"
-            if [ -n "$HOST_ARG" ]; then
-                printf 'Environment=KARUCODE_HOST=%s\n' "$HOST_ARG"
-            fi
-            if [ -n "$PORT_ARG" ]; then
-                printf 'Environment=KARUCODE_PORT=%s\n' "$PORT_ARG"
-            fi
-            if [ "$ALLOW_JIT" -eq 1 ]; then
-                printf '# --allow-jit: node/java/some Python extensions need W^X memory.\n'
-                printf 'MemoryDenyWriteExecute=no\n'
-            fi
-            printf 'ExecStart=\n'
-            printf 'ExecStart=%s/karucode\n' "$BIN_DIR"
-        } > "$dropin_tmp"
         install -m 0644 "$dropin_tmp" "$DROPIN_PATH" \
             || die "could not write ${DROPIN_PATH}"
     fi
@@ -845,6 +1194,20 @@ fi
 
 printf '\n%s\n' "$([ "$DRY_RUN" -eq 1 ] && printf 'would install' || printf 'installed') ${INSTALLED_VERSION} to ${BIN_DIR}/karucode"
 
+# The resolved account is the single most checkable fact about an install: it is
+# what the agent will be able to read and write, and it is the thing a wrong
+# SUDO_USER gets wrong silently. Printed before the file list so it cannot be
+# missed, and worded so it matches `systemctl show -p User,Group`.
+if [ "$USE_SYSTEMD" -eq 1 ]; then
+    printf 'Service account: %s:%s' "$SERVICE_USER" "$SERVICE_GROUP"
+    if [ "$SERVICE_USER_EXPLICIT" -eq 0 ] && [ -n "$DEFAULT_USER" ]; then
+        printf ' (who ran this installer)'
+    elif [ "$SERVICE_USER_EXPLICIT" -eq 0 ]; then
+        printf ' (fallback: no human could be identified)'
+    fi
+    printf '\nData directory:  %s\n' "$DATA_DIR"
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
     printf '\nDry run: nothing was downloaded, installed or written.\n\n'
     printf 'A real run would write %s/karucode and:\n' "$BIN_DIR"
@@ -852,8 +1215,16 @@ if [ "$DRY_RUN" -eq 1 ]; then
         printf '  %s\n' "$UNIT_PATH"
         printf '  %s\n' "$DROPIN_PATH"
         printf '  %s (only if it does not exist yet)\n' "$ENV_FILE"
-        printf '  %s and %s (only if they do not exist yet)\n' "$WORKSPACE" "$DATA_DIR"
-        printf '  the %s system user and group (only if missing)\n' "$SERVICE_USER"
+        if [ -n "$WORKSPACE" ]; then
+            printf '  %s and %s (only if they do not exist yet)\n' "$WORKSPACE" "$DATA_DIR"
+        else
+            printf '  %s (only if it does not exist yet)\n' "$DATA_DIR"
+        fi
+        if user_exists "$SERVICE_USER"; then
+            printf '  the %s account is used as-is (never created, never re-owned)\n' "$SERVICE_USER"
+        else
+            printf '  the %s system user and group (only if missing)\n' "$SERVICE_USER"
+        fi
         printf '  and then: systemctl daemon-reload, enable, and start/restart %s\n' "$SERVICE_NAME"
     else
         printf '  (no systemd unit: --no-systemd or systemd was not detected)\n'
@@ -866,7 +1237,7 @@ if [ "$USE_SYSTEMD" -ne 1 ]; then
 
 Next steps (no systemd, nothing was enabled):
 
-  ${BIN_DIR}/karucode --workspace /path/to/project
+  ${BIN_DIR}/karucode        # then add a project at http://127.0.0.1:8787
 
 Set KARUCODE_DATA_DIR, KARUCODE_AUTH_TOKEN and the model variables first; see
 packaging/README.md.
@@ -933,7 +1304,7 @@ Most common causes:
   * a bad value in ${ENV_FILE}, or KARUCODE_CONFIG pointing at a missing file
   * EPERM in the journal: the unit's SystemCallFilter is blocking a tool. Add a
     narrow SystemCallFilter=~@... exception in ${DROPIN_DIR}/20-local.conf
-  * node/java crashing with SIGSEGV: re-run with --allow-jit
+  * node/java crashing with SIGSEGV: you passed --no-jit; drop it
 
 Files installed by this run:
   ${BIN_DIR}/karucode
