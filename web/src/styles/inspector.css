@@ -82,8 +82,9 @@
   display: flex;
   flex: 0 0 auto;
   gap: 0;
-  min-height: 36px;
-  padding: 0 8px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0 13px;
   border-bottom: 1px solid var(--line);
   overflow-x: auto;
   overflow-y: hidden;
