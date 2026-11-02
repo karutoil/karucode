@@ -1009,7 +1009,7 @@ segment, limits.max_continues is {})",
         // re-issued. See `crate::restart`.
         let restarts = StreamRestarts::from_config(&spec.model);
         let mut attempt: u32 = 0;
-        let (text, calls, end, finish_reason) = loop {
+        let (text, reasoning, calls, end, finish_reason) = loop {
             attempt = attempt.saturating_add(1);
             let stream = match provider
                 .stream_chat(request.clone(), spec.cancel.clone())
@@ -1035,7 +1035,7 @@ segment, limits.max_continues is {})",
             };
 
             let outcome = consume(&ctx, &spec.cancel, spec.deadline, stream).await;
-            let restart = match &outcome.2 {
+            let restart = match &outcome.3 {
                 StreamEnd::Failed { message, transient } => {
                     *transient
                         && !spec.cancel.is_cancelled()
@@ -1132,7 +1132,7 @@ segment, limits.max_continues is {})",
         }
 
         // --- persist the assistant turn ---------------------------------------
-        let assistant = Message::assistant(text, calls.clone());
+        let assistant = Message::assistant_with_reasoning(text, reasoning, calls.clone());
         if let Err(e) = persist(
             &inner,
             &spec.session_id,
@@ -1558,6 +1558,14 @@ async fn run_one_tool(
     remaining: usize,
 ) -> Result<Message> {
     let started = Instant::now();
+    // A malformed argument string is repaired *for display only* (see
+    // `repair_arguments`): the runtime never executes a guess at what the model
+    // meant, it shows the call that would parse and lets the model re-issue it.
+    let repaired: Option<serde_json::Value> = if call.arguments.trim().is_empty() {
+        None
+    } else {
+        kc_core::tool::repair_arguments(&call.arguments)
+    };
     let parsed: Option<serde_json::Value> = if call.arguments.trim().is_empty() {
         Some(serde_json::json!({}))
     } else {
@@ -1568,107 +1576,182 @@ async fn run_one_tool(
         name: call.name.clone(),
         arguments: parsed
             .clone()
+            .or_else(|| repaired.clone())
             .unwrap_or_else(|| serde_json::Value::String(call.arguments.clone())),
     });
 
     let max_bytes = spec.limits.max_tool_output_bytes.min(remaining);
-    let outcome = match (parsed, spec.tools.get(&call.name)) {
-        (None, _) => kc_core::tool::ToolOutcome::err(format!(
-            "invalid JSON arguments for tool `{}`: {}",
-            call.name, call.arguments
-        )),
-        (Some(_), None) => {
-            let available = spec.tools.names().join(", ");
-            kc_core::tool::ToolOutcome::err(format!(
-                "unknown tool `{}`; available tools: {}",
-                call.name,
-                if available.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    available
-                }
-            ))
+    let tool = spec.tools.get(&call.name);
+    // `usage` marks a failure about *how the call was written* rather than about
+    // what it did, so the working call is appended to the result. A failing test
+    // run is not a usage error and must not be dressed up as one.
+    let mut usage = false;
+    let outcome = match parsed {
+        None => {
+            usage = true;
+            let mut text = format!(
+                "invalid JSON arguments for tool `{}`: {}",
+                call.name, call.arguments
+            );
+            if let Some(repaired) = repaired {
+                text.push_str(&format!(
+                    "\nThe arguments were not valid JSON. Re-issue the call as: {}",
+                    kc_core::tool::call_snippet(&call.name, &repaired)
+                ));
+            }
+            if let Some(tool) = &tool {
+                let spec = tool.spec();
+                let summary = spec.example_arguments();
+                text.push_str(&format!(
+                    "\nRequired shape: {}",
+                    kc_core::tool::call_snippet(&spec.name, &summary)
+                ));
+            }
+            kc_core::tool::ToolOutcome::err(text)
         }
-        (Some(arguments), Some(tool)) => {
-            if let Some(denied) = gate_external_tool(inner, spec, call, &tool, &arguments).await {
-                denied
-            } else {
-                let tool_ctx = ToolCtx {
-                    workspace: Arc::clone(&spec.workspace),
-                    cancel: spec.cancel.clone(),
-                    approvals: kc_core::tool::ApprovalHandle::new(
-                        Arc::clone(&spec.gate),
-                        spec.session_id.clone(),
-                        spec.run_id.clone(),
-                        spec.agent_id.clone(),
-                    ),
-                    events: ctx.sink(),
-                    settings: inner.deps.settings.clone(),
-                    depth: spec.depth,
-                    supports_images: spec.model.supports_images,
-                    checkpoints: spec
-                        .journal
-                        .clone()
-                        .map(|j| j as Arc<dyn kc_core::JournalHandle>),
-                };
-                let request = kc_core::tool::ToolCallRequest {
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    arguments,
-                };
-                // A tool call must be bounded. The cancel token is only *offered*
-                // to the tool through `ToolCtx`; a tool that ignores it (any
-                // plugin or MCP tool, or a buggy built-in) would otherwise block
-                // this loop forever. `Runtime::cancel` only fires the token and
-                // returns, and `is_running` keeps reporting `true` for a
-                // cancelled-but-unwinding run, so every later `submit` on this
-                // session would be rejected with a 409 and the session would be
-                // bricked for the life of the process. Racing the invocation
-                // against cancellation and the run deadline turns that into an
-                // ordinary failed tool result, which keeps the transcript valid
-                // (the call still gets a result row) and lets the loop exit.
-                let invoke =
-                    std::panic::AssertUnwindSafe(tool.invoke(request, tool_ctx)).catch_unwind();
-                tokio::pin!(invoke);
-                tokio::select! {
-                    biased;
-                    _ = spec.cancel.cancelled() => {
-                        // Fire-and-forget cancellation is not enough: a tool that
-                        // *does* honour the token (every built-in, and the shell
-                        // tool's process-group kill) needs a moment to unwind and
-                        // report what it observed. Cutting it off here would drop
-                        // the future mid-flight and lose that. So give it the same
-                        // grace the subagent supervisor uses, and only synthesise a
-                        // result for a tool that ignores the token entirely.
-                        match tokio::time::timeout(TOOL_CANCEL_GRACE, &mut invoke).await {
-                            Ok(Ok(outcome)) => outcome,
-                            Ok(Err(payload)) => kc_core::tool::ToolOutcome::err(format!(
+        Some(_) => match tool {
+            None => {
+                usage = true;
+                let names = spec.tools.names();
+                let mut text = format!(
+                    "unknown tool `{}`; available tools: {}",
+                    call.name,
+                    if names.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        names.join(", ")
+                    }
+                );
+                if let Some(closest) =
+                    kc_core::tool::closest_tool_name(&call.name, names.iter().map(|s| s.as_str()))
+                {
+                    text.push_str(&format!("\nDid you mean `{closest}`?"));
+                }
+                kc_core::tool::ToolOutcome::err(text)
+            }
+            Some(ref tool) => {
+                let tool = Arc::clone(tool);
+                let arguments = parsed.expect("a parsed call has arguments");
+                let tool_spec = tool.spec();
+                // The schema the model was offered is the one it is held to:
+                // a mismatch is reported with the arguments it should have
+                // sent, before anything is approved or executed. A schema the
+                // harness cannot check (a bare `{"type":"object"}` from an MCP
+                // server, `anyOf`, `$ref`) is left to the tool.
+                if let Err(problems) = tool_spec.validate_arguments(&arguments) {
+                    usage = true;
+                    kc_core::tool::ToolOutcome::err(format!(
+                        "arguments rejected for `{}`:\n- {}\nRe-issue the call as: {}",
+                        call.name,
+                        problems.join("\n- "),
+                        tool_spec.example_call()
+                    ))
+                } else if let Some(denied) =
+                    gate_external_tool(inner, spec, call, &tool, &arguments).await
+                {
+                    denied
+                } else {
+                    let tool_ctx = ToolCtx {
+                        workspace: Arc::clone(&spec.workspace),
+                        cancel: spec.cancel.clone(),
+                        approvals: kc_core::tool::ApprovalHandle::new(
+                            Arc::clone(&spec.gate),
+                            spec.session_id.clone(),
+                            spec.run_id.clone(),
+                            spec.agent_id.clone(),
+                        ),
+                        events: ctx.sink(),
+                        settings: inner.deps.settings.clone(),
+                        depth: spec.depth,
+                        supports_images: spec.model.supports_images,
+                        checkpoints: spec
+                            .journal
+                            .clone()
+                            .map(|j| j as Arc<dyn kc_core::JournalHandle>),
+                    };
+                    let request = kc_core::tool::ToolCallRequest {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments,
+                    };
+                    // A tool call must be bounded. The cancel token is only *offered*
+                    // to the tool through `ToolCtx`; a tool that ignores it (any
+                    // plugin or MCP tool, or a buggy built-in) would otherwise block
+                    // this loop forever. `Runtime::cancel` only fires the token and
+                    // returns, and `is_running` keeps reporting `true` for a
+                    // cancelled-but-unwinding run, so every later `submit` on this
+                    // session would be rejected with a 409 and the session would be
+                    // bricked for the life of the process. Racing the invocation
+                    // against cancellation and the run deadline turns that into an
+                    // ordinary failed tool result, which keeps the transcript valid
+                    // (the call still gets a result row) and lets the loop exit.
+                    let invoke =
+                        std::panic::AssertUnwindSafe(tool.invoke(request, tool_ctx)).catch_unwind();
+                    tokio::pin!(invoke);
+                    tokio::select! {
+                        biased;
+                        _ = spec.cancel.cancelled() => {
+                            // Fire-and-forget cancellation is not enough: a tool that
+                            // *does* honour the token (every built-in, and the shell
+                            // tool's process-group kill) needs a moment to unwind and
+                            // report what it observed. Cutting it off here would drop
+                            // the future mid-flight and lose that. So give it the same
+                            // grace the subagent supervisor uses, and only synthesise a
+                            // result for a tool that ignores the token entirely.
+                            match tokio::time::timeout(TOOL_CANCEL_GRACE, &mut invoke).await {
+                                Ok(Ok(outcome)) => outcome,
+                                Ok(Err(payload)) => kc_core::tool::ToolOutcome::err(format!(
+                                    "tool `{}` panicked: {}",
+                                    call.name,
+                                    panic_message(payload.as_ref())
+                                )),
+                                Err(_) => kc_core::tool::ToolOutcome::err(format!(
+                                    "tool `{}` was cancelled before it finished",
+                                    call.name
+                                )),
+                            }
+                        }
+                        _ = tokio::time::sleep_until(spec.deadline) => {
+                            kc_core::tool::ToolOutcome::err(format!(
+                                "tool `{}` did not finish before the run deadline",
+                                call.name
+                            ))
+                        }
+                        result = &mut invoke => match result {
+                            Ok(outcome) => outcome,
+                            Err(payload) => kc_core::tool::ToolOutcome::err(format!(
                                 "tool `{}` panicked: {}",
                                 call.name,
                                 panic_message(payload.as_ref())
                             )),
-                            Err(_) => kc_core::tool::ToolOutcome::err(format!(
-                                "tool `{}` was cancelled before it finished",
-                                call.name
-                            )),
-                        }
+                        },
                     }
-                    _ = tokio::time::sleep_until(spec.deadline) => {
-                        kc_core::tool::ToolOutcome::err(format!(
-                            "tool `{}` did not finish before the run deadline",
-                            call.name
-                        ))
-                    }
-                    result = &mut invoke => match result {
-                        Ok(outcome) => outcome,
-                        Err(payload) => kc_core::tool::ToolOutcome::err(format!(
-                            "tool `{}` panicked: {}",
-                            call.name,
-                            panic_message(payload.as_ref())
-                        )),
-                    },
                 }
             }
+        },
+    };
+
+    // A failed call whose failure is about *how it was written* gets the working
+    // call appended, so the next attempt does not repeat the same parse mistake.
+    // Execution failures (a failing test, a denied approval, a timeout) are not
+    // dressed up as parsing errors: only a harness-detected usage problem, or a
+    // tool that refused the request itself (`Error::BadRequest`, which renders as
+    // "invalid request: ..."), earns the hint.
+    let outcome = if outcome.ok {
+        outcome
+    } else {
+        let refused_request = outcome.content.starts_with("invalid request: ");
+        let already_shown = outcome.content.contains("Re-issue the call as");
+        let hint = match &tool {
+            Some(tool) if (usage || refused_request) && !already_shown => {
+                tool.spec().failure_hint()
+            }
+            _ => String::new(),
+        };
+        if hint.is_empty() {
+            outcome
+        } else {
+            kc_core::tool::ToolOutcome::err(format!("{}\n{hint}", outcome.content.trim_end()))
         }
     };
 
@@ -1754,8 +1837,9 @@ async fn consume(
     cancel: &CancellationToken,
     deadline: Instant,
     mut stream: ProviderStream,
-) -> (String, Vec<ToolCall>, StreamEnd, Option<String>) {
+) -> (String, Option<String>, Vec<ToolCall>, StreamEnd, Option<String>) {
     let mut text = String::new();
+    let mut reasoning = String::new();
     let mut accumulator = kc_core::provider::ToolCallAccumulator::default();
     let mut end = StreamEnd::Complete;
     let mut finish_reason: Option<String> = None;
@@ -1982,7 +2066,8 @@ async fn consume(
         None => {}
     }
 
-    (text, accumulator.finish(), end, finish_reason)
+    let reasoning_out = if reasoning.is_empty() { None } else { Some(reasoning) };
+    (text, reasoning_out, accumulator.finish(), end, finish_reason)
 }
 
 /// What kind of repetition a stream fell into. Carries the repeated sample so the

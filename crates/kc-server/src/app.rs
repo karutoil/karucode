@@ -414,7 +414,16 @@ async fn security_headers(
     next: Next,
 ) -> Response {
     let mut response = next.run(request).await;
-    let headers = response.headers_mut();
+    apply_security_headers(response.headers_mut());
+    response
+}
+
+/// The body of [`security_headers`], as a function of the headers alone.
+///
+/// Split out so the "a handler may only narrow" rule can be tested directly: the
+/// middleware needs a whole `AppState`, which a unit test cannot cheaply build,
+/// and this rule is exactly what a regression here would break.
+fn apply_security_headers(headers: &mut axum::http::HeaderMap) {
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -430,17 +439,30 @@ async fn security_headers(
     // origin with no script. Overwriting it here would silently restore
     // `default-src 'self'` - which *allows* same-origin script - and turn a
     // workspace `.html` file back into a same-origin XSS. The rule is therefore
-    // "a handler may only narrow": the two overrides in the tree both do.
+    // "a handler may only narrow": the overrides in the tree all do.
     if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
         headers.insert(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(CONTENT_SECURITY_POLICY),
         );
     }
-    headers.insert(
-        header::HeaderName::from_static("cross-origin-resource-policy"),
-        HeaderValue::from_static("same-origin"),
-    );
+    // Same "a handler may only narrow" rule as the CSP above. Almost every
+    // response keeps the strict `same-origin`, so no workspace or API byte is
+    // loadable by a foreign page. The one deliberate widening is
+    // `GET /api/workspace/preview/*`, which must serve a document's own
+    // subresources to a *sandboxed* (opaque-origin) frame: CORP `same-origin`
+    // makes the browser refuse every one of them, so the preview rendered its
+    // HTML but none of its styles, images or scripts (measured in Chromium).
+    // Without this `contains_key` guard the assignment below silently reverted
+    // that route's header, which is exactly how the bug survived a first pass.
+    if !headers.contains_key(header::HeaderName::from_static(
+        "cross-origin-resource-policy",
+    )) {
+        headers.insert(
+            header::HeaderName::from_static("cross-origin-resource-policy"),
+            HeaderValue::from_static("same-origin"),
+        );
+    }
     // A document that carries its own `sandbox` CSP must be embeddable by *our*
     // own pages, which is the whole point of it: the file preview puts a PDF or an
     // image from `/api/workspace/raw` in an <iframe>/<img>, and `X-Frame-Options:
@@ -456,7 +478,6 @@ async fn security_headers(
     if !sandboxed {
         headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     }
-    response
 }
 
 /// Unknown `/api/...` paths answer with the JSON error shape, never the SPA.
@@ -595,5 +616,63 @@ mod tests {
             Some("ab+c")
         );
         assert_eq!(query_param(Some("session=s_1"), "token"), None);
+    }
+
+    /// A handler may narrow the CSP and CORP; the middleware must not overwrite
+    /// either. The preview route depends on both: it answers its own
+    /// `sandbox allow-scripts` policy, and it widens CORP to `cross-origin` so a
+    /// sandboxed (opaque-origin) page may load its sibling CSS and images.
+    /// Without the `contains_key` guards the middleware restored `same-origin`
+    /// and the preview rendered its HTML but none of its assets.
+    #[test]
+    fn a_handler_may_narrow_the_csp_and_corp_without_being_overwritten() {
+        // A sandboxed document that already answered its own headers.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("sandbox allow-scripts; default-src 'none'"),
+        );
+        headers.insert(
+            header::HeaderName::from_static("cross-origin-resource-policy"),
+            HeaderValue::from_static("cross-origin"),
+        );
+        apply_security_headers(&mut headers);
+
+        assert_eq!(
+            headers.get(header::CONTENT_SECURITY_POLICY).unwrap(),
+            "sandbox allow-scripts; default-src 'none'"
+        );
+        assert_eq!(
+            headers
+                .get(header::HeaderName::from_static(
+                    "cross-origin-resource-policy"
+                ))
+                .unwrap(),
+            "cross-origin"
+        );
+        // A sandboxed document is embeddable by the viewer's own iframe; adding
+        // DENY would blank that pane (verified in Chromium for the PDF preview).
+        assert!(headers.get(header::X_FRAME_OPTIONS).is_none());
+
+        // Every ordinary response still gets the strict pair.
+        let mut plain = axum::http::HeaderMap::new();
+        apply_security_headers(&mut plain);
+        assert_eq!(
+            plain.get(header::CONTENT_SECURITY_POLICY).unwrap(),
+            CONTENT_SECURITY_POLICY
+        );
+        assert_eq!(
+            plain
+                .get(header::HeaderName::from_static(
+                    "cross-origin-resource-policy"
+                ))
+                .unwrap(),
+            "same-origin"
+        );
+        assert_eq!(plain.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
+        assert_eq!(
+            plain.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff"
+        );
     }
 }

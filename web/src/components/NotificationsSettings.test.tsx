@@ -188,7 +188,7 @@ describe('saving a switch', () => {
     fireEvent.input(input, { target: { value: '30' } });
     // Nothing yet: PATCHing per keystroke would send "3", then "30".
     expect(spy).not.toHaveBeenCalled();
-    fireEvent.blur(input);
+    fireEvent.focusOut(input);
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     expect(patchAt(spy, 0)).toEqual({ min_run_secs: 30 });
   });
@@ -197,7 +197,7 @@ describe('saving a switch', () => {
     const spy = renderSection();
     const input = screen.getByRole('spinbutton');
     fireEvent.input(input, { target: { value: '999999' } });
-    fireEvent.blur(input);
+    fireEvent.focusOut(input);
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     // The server would reject it; clamping here gives the same answer without a
     // round trip that would surface as an error.
@@ -207,7 +207,7 @@ describe('saving a switch', () => {
   it('does not send a PATCH when the value did not change', async () => {
     const spy = renderSection();
     const input = screen.getByRole('spinbutton');
-    fireEvent.blur(input);
+    fireEvent.focusOut(input);
     expect(spy).not.toHaveBeenCalled();
   });
 

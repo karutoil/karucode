@@ -215,7 +215,12 @@ pub fn message_chars(message: &Message) -> usize {
         .iter()
         .map(|c| c.name.chars().count() + c.arguments.chars().count())
         .sum::<usize>();
-    message.content.chars().count() + calls + message.images.len() * IMAGE_CONTEXT_CHARS
+    let reasoning: usize = message
+        .reasoning_content
+        .as_ref()
+        .map(|r| r.chars().count())
+        .unwrap_or(0);
+    message.content.chars().count() + calls + reasoning + message.images.len() * IMAGE_CONTEXT_CHARS
 }
 
 /// The result of fitting a conversation into a character budget.

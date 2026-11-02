@@ -98,6 +98,11 @@ pub struct Message {
     /// message cannot hold them on the OpenAI-compatible wire format.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageAttachment>,
+    /// Reasoning content from models that separate thinking from output.
+    /// This is preserved across turns for cache efficiency and multi-turn quality,
+    /// following the "keep-all" pattern now standard in 2026.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl Message {
@@ -132,6 +137,21 @@ impl Message {
         }
     }
 
+    /// Create an assistant message with reasoning content.
+    pub fn assistant_with_reasoning(
+        content: impl Into<String>,
+        reasoning: Option<String>,
+        tool_calls: Vec<ToolCall>,
+    ) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: content.into(),
+            reasoning_content: reasoning,
+            tool_calls,
+            ..Default::default()
+        }
+    }
+
     pub fn tool_result(
         tool_call_id: impl Into<String>,
         name: impl Into<String>,
@@ -144,6 +164,7 @@ impl Message {
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             images: Vec::new(),
+            reasoning_content: None,
         }
     }
 }

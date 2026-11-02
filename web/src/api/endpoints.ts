@@ -514,6 +514,30 @@ export function workspaceRawUrl(path: string, project?: string | null): string {
   return `/api/workspace/raw?${query.toString()}`;
 }
 
+/**
+ * URL for one workspace HTML file rendered as a **document** (`GET
+ * /api/workspace/preview/<path>`).
+ *
+ * The path is in the URL, not a query parameter, because the page resolves its
+ * own relative references (`./style.css`, `../img/logo.png`, `./app.js`) against
+ * it. A `srcdoc` frame cannot do that, and it inherits this app's own
+ * `default-src 'self'` policy while running in an opaque origin where `'self'
+ * matches nothing - so its inline scripts, sibling stylesheets and relative
+ * images were all refused and the preview came up nearly blank.
+ *
+ * Each segment is encoded separately: a path with a space or `#` must survive
+ * the trip, but a literal `/` is a directory separator the browser has to see.
+ */
+export function workspacePreviewUrl(path: string, project?: string | null): string {
+  const encoded = path
+    .split('/')
+    .filter((segment) => segment !== '')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+  const query = project ? `?project=${encodeURIComponent(project)}` : '';
+  return `/api/workspace/preview/${encoded}${query}`;
+}
+
 /** Scope for an upload: the session owns the directory, the project the root. */
 export interface UploadAttachmentParams {
   session: string;

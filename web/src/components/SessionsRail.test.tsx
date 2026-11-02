@@ -64,7 +64,7 @@ describe('SessionList', () => {
     const input = screen.getByLabelText(/Rename session/) as HTMLInputElement;
     expect(input.value).toBe('Fix login bug');
     fireEvent.input(input, { target: { value: 'Renamed session' } });
-    fireEvent.blur(input);
+    fireEvent.focusOut(input);
     expect(props.onRename).toHaveBeenCalledWith('s_ab12', 'Renamed session');
   });
 

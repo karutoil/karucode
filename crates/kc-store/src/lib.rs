@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -318,6 +318,15 @@ const MIGRATION_10: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_messages_run_id ON messages(run_id);
 "#;
 
+/// Schema v11: preserve model reasoning across turns.
+///
+/// Some OpenAI-compatible endpoints stream analysis separately as
+/// `reasoning_content`. Keeping that text beside the assistant answer lets later
+/// requests send the complete turn back to the model. The column is nullable;
+/// rows written before v11 and messages from endpoints that do not emit
+/// reasoning read back as `None`.
+const MIGRATION_11: &str = "";
+
 /// Every `ADD COLUMN` in the schema, as `(version, table, column, declaration)`.
 ///
 /// SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (it is a syntax
@@ -341,6 +350,7 @@ const ADDED_COLUMNS: &[(i64, &str, &str, &str)] = &[
     (9, "agents", "background", "INTEGER NOT NULL DEFAULT 0"),
     (9, "agents", "note", "TEXT NOT NULL DEFAULT ''"),
     (9, "agents", "progress", "REAL"),
+    (11, "messages", "reasoning_content", "TEXT"),
 ];
 
 pub struct SqliteStore {
@@ -656,6 +666,7 @@ fn map_stored_message(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
         images,
         tool_call_id: row.get("tool_call_id")?,
         name: row.get("name")?,
+        reasoning_content: row.get("reasoning_content")?,
         rewound_at: row.get("rewound_at")?,
         created_at: row.get("created_at")?,
     })
@@ -1114,6 +1125,7 @@ impl SqliteStore {
                     8 => MIGRATION_8,
                     9 => MIGRATION_9,
                     10 => MIGRATION_10,
+                    11 => MIGRATION_11,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -1429,8 +1441,8 @@ impl Store for SqliteStore {
             let tx = conn.transaction().map_err(|e| db_err("append_message begin", e))?;
             tx.execute(
                 "INSERT INTO messages
-                    (session_id, run_id, agent_id, role, content, tool_calls, tool_call_id, name, images, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    (session_id, run_id, agent_id, role, content, tool_calls, tool_call_id, name, images, reasoning_content, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     message.session_id,
                     message.run_id,
@@ -1441,6 +1453,7 @@ impl Store for SqliteStore {
                     message.tool_call_id,
                     message.name,
                     images,
+                    message.reasoning_content,
                     now
                 ],
             )
@@ -1469,7 +1482,8 @@ impl Store for SqliteStore {
                 .prepare(
                     "SELECT * FROM (
                          SELECT id, session_id, run_id, agent_id, role, content, tool_calls,
-                                tool_call_id, name, images, rewound_at, created_at
+                                tool_call_id, name, images, reasoning_content, rewound_at,
+                                created_at
                            FROM messages
                           WHERE session_id = ?1 AND rewound_at IS NULL
                           ORDER BY id DESC LIMIT ?2
@@ -1497,7 +1511,8 @@ impl Store for SqliteStore {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, session_id, run_id, agent_id, role, content, tool_calls,
-                            tool_call_id, name, images, rewound_at, created_at
+                            tool_call_id, name, images, reasoning_content, rewound_at,
+                            created_at
                        FROM messages
                       WHERE session_id = ?1 AND id > ?2 AND rewound_at IS NULL
                       ORDER BY id ASC LIMIT ?3",
@@ -2054,7 +2069,8 @@ impl Store for SqliteStore {
                 .prepare(
                     "SELECT * FROM (
                          SELECT id, session_id, run_id, agent_id, role, content, tool_calls,
-                                tool_call_id, name, images, rewound_at, created_at
+                                tool_call_id, name, images, reasoning_content, rewound_at,
+                                created_at
                            FROM messages WHERE agent_id = ?1
                           ORDER BY id DESC LIMIT ?2
                      ) ORDER BY id ASC",
@@ -2967,6 +2983,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             images: Vec::new(),
+            reasoning_content: None,
         }
     }
 
@@ -3031,6 +3048,7 @@ mod tests {
                 8 => MIGRATION_8,
                 9 => MIGRATION_9,
                 10 => MIGRATION_10,
+                11 => MIGRATION_11,
                 other => panic!("no batch for v{other}"),
             };
             for (_, table, column, decl) in ADDED_COLUMNS
@@ -3453,6 +3471,95 @@ mod tests {
             .await
             .expect("beyond");
         assert!(beyond.is_empty());
+    }
+
+    /// Reasoning is part of the assistant turn: reloading a transcript must not
+    /// quietly strip it, including on the incremental and subagent read paths.
+    #[tokio::test]
+    async fn assistant_reasoning_roundtrips_through_every_message_read_path() {
+        let db = TempDb::new("message-reasoning");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+
+        let mut assistant = new_message("s_1", "assistant", "answer");
+        assistant.agent_id = Some("a_1".to_string());
+        assistant.reasoning_content = Some("consider the options".to_string());
+        let id = store.append_message(&assistant).await.expect("assistant");
+        store
+            .append_message(&new_message("s_1", "user", "next"))
+            .await
+            .expect("user");
+
+        let rows = store.list_messages("s_1", 10).await.expect("rows");
+        assert_eq!(
+            rows[0].reasoning_content.as_deref(),
+            Some("consider the options")
+        );
+        assert_eq!(
+            rows[0].to_message().reasoning_content.as_deref(),
+            Some("consider the options")
+        );
+        assert_eq!(rows[1].reasoning_content, None);
+
+        let after = store
+            .list_messages_after("s_1", id - 1, 10)
+            .await
+            .expect("after");
+        assert_eq!(
+            after[0].reasoning_content.as_deref(),
+            Some("consider the options")
+        );
+
+        let agent_rows = store
+            .list_agent_messages("a_1", 10)
+            .await
+            .expect("agent rows");
+        assert_eq!(
+            agent_rows[0].reasoning_content.as_deref(),
+            Some("consider the options")
+        );
+    }
+
+    /// A database created by v10 already reports v10, so adding the column to
+    /// the same schema step would be skipped forever. The v11 step must repair
+    /// the identical startup error users saw from `list_messages`.
+    #[tokio::test]
+    async fn migration_from_v10_adds_reasoning_content_without_losing_rows() {
+        let db = TempDb::new("migrate-v10-reasoning");
+        std::fs::create_dir_all(db.path.parent().expect("parent")).expect("data dir");
+        {
+            let conn = rusqlite::Connection::open(&db.path).expect("raw open");
+            write_schema_to(&conn, 10);
+            conn.pragma_update(None, "user_version", 10)
+                .expect("version");
+            conn.execute(
+                "INSERT INTO sessions (id, title, workspace, created_at, updated_at)
+                 VALUES ('s_1', 'Old', '/w', 1, 2)",
+                [],
+            )
+            .expect("session");
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, created_at)
+                 VALUES ('s_1', 'assistant', 'old answer', 1)",
+                [],
+            )
+            .expect("message");
+        }
+
+        let store = db.open().await;
+        let rows = store.list_messages("s_1", 10).await.expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, "old answer");
+        assert_eq!(rows[0].reasoning_content, None);
+
+        let mut assistant = new_message("s_1", "assistant", "new answer");
+        assistant.reasoning_content = Some("new reasoning".to_string());
+        store.append_message(&assistant).await.expect("new message");
+        let rows = store.list_messages("s_1", 10).await.expect("migrated rows");
+        assert_eq!(rows[1].reasoning_content.as_deref(), Some("new reasoning"));
     }
 
     /// Images are stored beside the text and survive a reload: a vision result

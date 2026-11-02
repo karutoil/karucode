@@ -704,7 +704,8 @@ active (already finished or never started).
   "images": [ { "media_type": "image/png",
                 "data": "iVBORw0KGgo...",
                 "bytes": 48213,
-                "name": "assets/shot.png" } ] }
+                "name": "assets/shot.png" } ],
+  "reasoning_content": "..." }
 ```
 `role` ∈ `system|user|assistant|tool`.
 
@@ -713,6 +714,11 @@ vision model (`read_file` on a PNG/JPEG/GIF/WebP). `data` is **standard base64**
 with no `data:` prefix; the UI builds `data:${media_type};base64,${data}` for the
 preview. The same list is sent live on the `tool_call_finished` event, so a chat
 shows the image without refetching the transcript.
+
+`reasoning_content` is present on an assistant row when the provider streams its
+analysis separately. The text is stored with the turn and sent back on later
+provider requests. Older rows and models without a separate reasoning stream omit
+the field.
 
 **Optional fields are omitted, not sent as `null`.** Any field shown below as
 nullable (`error`, `finished_at`, `tool_call_id`, `name`, `agent_id`, …) is left

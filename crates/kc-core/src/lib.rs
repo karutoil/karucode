@@ -45,6 +45,7 @@ pub use queue::{
 pub use settings::Settings;
 pub use store::{RewindPoint, StoredMessage};
 pub use tool::{
-    capture_file, CapturedFile, JournalHandle, Tool, ToolCallRequest, ToolClass, ToolCtx,
-    ToolOrigin, ToolOutcome, ToolRegistry, ToolSpec,
+    capture_file, closest_tool_name, repair_arguments, CapturedFile, JournalHandle, Tool,
+    ToolCallRequest, ToolClass, ToolCtx, ToolOrigin, ToolOutcome, ToolRegistry, ToolSpec,
+    FAILURE_HINT_MAX_BYTES,
 };

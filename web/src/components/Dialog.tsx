@@ -1,5 +1,6 @@
 import type { ComponentChildren } from 'preact';
 import { useId, useRef } from 'preact/hooks';
+import { createPortal } from 'preact/compat';
 import { useFocusTrap } from '../lib/dom';
 import { CloseIcon } from './icons';
 
@@ -18,6 +19,18 @@ export interface DialogProps {
 /**
  * Accessible modal shell: focus trap, Escape to close, scroll lock, focus restore
  * and a labelled dialog landmark. Panels are mounted only while open.
+ *
+ * Rendered through a portal into `document.body`, never in place. `.dialog-layer`
+ * is `position: fixed`, and a fixed element is only laid out against the viewport
+ * while no ancestor establishes a containing block for it. The transcript
+ * deliberately breaks that: `.msg` carries `content-visibility: auto` (see
+ * `styles/chat.css`) so off-screen rows skip layout and paint, and paint
+ * containment makes the row a containing block for fixed descendants. An image
+ * lightbox opened from a tool card was therefore clipped to its own message row -
+ * measured in Chromium at 691x575 inside a 1440x817 viewport - instead of covering
+ * the screen. Portalling out of the transcript fixes that for every dialog, and
+ * keeps working for any future ancestor that adds `filter`, `transform` or
+ * `contain` for its own reasons.
  */
 export function Dialog({
   open,
@@ -36,7 +49,7 @@ export function Dialog({
   useFocusTrap(ref, open, onClose);
   if (!open) return null;
 
-  return (
+  const layer = (
     <div class="dialog-layer">
       <div class="dialog-backdrop" aria-hidden="true" onClick={onClose} />
       <div
@@ -80,4 +93,9 @@ export function Dialog({
       </div>
     </div>
   );
+
+  // `document` is absent in a server render and in the `node`-environment test
+  // suites, where there is nothing to portal into and nothing to lay out either.
+  if (typeof document === 'undefined') return layer;
+  return createPortal(layer, document.body);
 }

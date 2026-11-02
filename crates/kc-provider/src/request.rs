@@ -270,6 +270,10 @@ fn message_json(message: &Message) -> Value {
     if !(has_tool_calls && message.content.is_empty()) {
         obj.insert("content".into(), Value::String(message.content.clone()));
     }
+    // Include reasoning_content if present (for models that support it)
+    if let Some(reasoning) = &message.reasoning_content {
+        obj.insert("reasoning_content".into(), Value::String(reasoning.clone()));
+    }
     if has_tool_calls {
         obj.insert(
             "tool_calls".into(),

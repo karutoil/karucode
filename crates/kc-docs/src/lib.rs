@@ -126,6 +126,7 @@ pub const REQUIRED_SLUGS: &[&str] = &[
     "security",
     "subagents",
     "themes",
+    "tool-call-errors",
     "web-ui",
 ];
 

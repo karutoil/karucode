@@ -1,3 +1,72 @@
+// @kc-doc: tool-call-errors
+// @kc-title: What a failed tool call tells the model
+// @kc-summary: A call that fails because of how it was written comes back with a working version of itself, so the next attempt is correct instead of another guess.
+// @kc-tags: tools, errors, agent, parsing, hints
+// @kc-applies-to: tool:read_file, tool:run_command, tool:karucode_docs, route:POST /api/sessions/:id/messages
+//
+// Two very different things arrive at the model as a failed tool call, and it must
+// not confuse them:
+//
+// * **a usage failure** - the call was written wrong: arguments that are not JSON,
+//   a missing or mistyped argument, a name that is not a tool;
+// * **an execution failure** - the call was right and did what it said: a test
+//   suite exited non-zero, the command timed out, a person denied the approval.
+//
+// Only the first is about syntax the model can fix, so only the first is answered
+// with the call it should have written. An execution failure never carries a "how
+// to call this" hint, because the shape was never the problem.
+//
+// # A usage failure comes back with a working call
+//
+// The failed result names the problem and then shows the call that would parse:
+//
+// ```text
+// invalid JSON arguments for tool `read_file`: ```json {"path": "a.txt",}```
+// The arguments were not valid JSON. Re-issue the call as: {"name":"read_file","arguments":{"path":"a.txt"}}
+// Required shape: {"name":"read_file","arguments":{"path":"<string>"}}
+// ```
+//
+// The example is built from the tool's own JSON Schema, never invented: every
+// `required` property is filled in, with the value the schema itself offers (an
+// `enum` member or a `default`) and a type-correct placeholder otherwise. A tool
+// that declares no properties gets no hint, because there is nothing to teach.
+// The block is capped at `FAILURE_HINT_MAX_BYTES` (600) and the prose summary is
+// dropped before the copyable JSON ever is.
+//
+// Mechanical JSON mistakes are repaired **for display only**: a code fence or a
+// sentence around the object, trailing commas, single quotes, a double-encoded
+// string. The repaired call is shown to the model, which re-issues it; the
+// harness never executes a guess at what the model meant.
+//
+// | The model wrote | What it gets back |
+// | --- | --- |
+// | `{not json` | the parse error, the required shape |
+// | ```` ```json {"path": "a.txt",}``` ```` | the repaired call, ready to copy |
+// | `{"path": 7}` where `path` is a string | `` `path` must be string (JSON string), got integer `` |
+// | `{}` with `path`/`content` required | `missing required argument `path``, `... `content`` |
+// | `read_files` | `Did you mean `read_file`?` |
+//
+// # The schema is enforced, shallowly
+//
+// The arguments are checked against the schema the model was actually offered,
+// before anything is approved or run: `required` presence, `enum` membership, a
+// declared `type` (or a list, as in `["string","null"]`) and
+// `additionalProperties: false`. Richer keywords (`anyOf`, `$ref`, `format`,
+// nested `required`) are left to the tool, because a wrong "invalid" verdict from
+// the harness would block a call the tool would have accepted. A server that
+// publishes a bare `{"type":"object"}` gets no second-guessing at all.
+//
+// # What a refusal from the tool itself still gets
+//
+// A tool that rejects the request after parsing it - `pattern may not be empty`,
+// an unknown enum value the schema did not declare - reports it as a bad request,
+// and that result *also* carries the working call. That covers the built-in tools
+// and any plugin or MCP server that reports an invalid-parameter error.
+//
+// An approval denial or a policy refusal is an execution outcome, not a parse
+// failure: it says who refused and what to change in the policy, and shows no
+// argument example.
+
 use crate::approval::{ApprovalDecision, ApprovalKind, ApprovalRequest};
 use crate::config::Limits;
 use crate::error::Result;
@@ -57,6 +126,555 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
     #[serde(default)]
     pub origin: ToolOrigin,
+}
+
+/// Longest a [`ToolSpec::failure_hint`] may be.
+///
+/// The hint is appended to a failed tool result, which is itself bounded by
+/// `limits.max_tool_output_bytes` (and by the turn's remaining budget, whose
+/// floor is a couple of kilobytes). A schema the size of `spawn_agents`' must
+/// not push the real error out of a tight budget, so the hint is capped here and
+/// the *summary* is what gets dropped first - never the JSON example.
+pub const FAILURE_HINT_MAX_BYTES: usize = 600;
+
+/// Build the smallest argument object a JSON Schema says the tool accepts.
+///
+/// Only required properties are filled in, in the order the schema declares
+/// them; a tool with no required property gets its first declared one, so the
+/// example is a concrete call rather than `{}`. Values come from the schema
+/// itself (`enum`, `default`, `examples`, `minimum`) and are otherwise a
+/// type-correct placeholder (`"<string>"`, `1`, `true`). The result is a shape
+/// the model can copy, not a guess at the user's task.
+fn example_object(schema: &serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return serde_json::Value::Object(out);
+    };
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    for key in props.keys() {
+        if required.contains(&key.as_str()) {
+            out.insert(key.clone(), example_value(&props[key]));
+        }
+    }
+    if out.is_empty() {
+        if let Some((key, value)) = props.iter().next() {
+            out.insert(key.clone(), example_value(value));
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+fn example_value(schema: &serde_json::Value) -> serde_json::Value {
+    // An explicit value the schema offers always beats a placeholder: a model
+    // copying `{"action":"list"}` is right, while copying `"<string>"` is not.
+    for key in ["enum", "default", "examples"] {
+        let value = schema.get(key);
+        if key == "enum" || key == "examples" {
+            if let Some(first) = value.and_then(|v| v.as_array()).and_then(|a| a.first()) {
+                return first.clone();
+            }
+        } else if let Some(default) = value {
+            return default.clone();
+        }
+    }
+    match schema.get("type").and_then(|t| t.as_str()) {
+        Some("integer") | Some("number") => schema
+            .get("minimum")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!(1)),
+        Some("boolean") => serde_json::json!(true),
+        Some("array") => {
+            let item = schema
+                .get("items")
+                .map(example_value)
+                .unwrap_or_else(|| serde_json::json!("<string>"));
+            serde_json::json!([item])
+        }
+        Some("object") => example_object(schema),
+        Some("null") => serde_json::Value::Null,
+        _ => serde_json::json!("<string>"),
+    }
+}
+
+/// How many properties the one-line argument summary may name.
+const HINT_PROPERTY_LIMIT: usize = 6;
+
+/// One tool call rendered the way a model should write it: `name` first, no
+/// map-order surprises.
+///
+/// `serde_json::json!` on a `Map` sorts keys, which turns the example into
+/// `{"arguments":…,"name":…}` - still valid, but not the shape the wire format
+/// uses, and a model copying it is copying a coincidence.
+pub fn call_snippet(name: &str, arguments: &serde_json::Value) -> String {
+    format!(
+        "{{\"name\":{},\"arguments\":{}}}",
+        serde_json::Value::String(name.to_string()),
+        arguments
+    )
+}
+
+impl ToolSpec {
+    /// A complete argument object the schema accepts, with every required key.
+    pub fn example_arguments(&self) -> serde_json::Value {
+        example_object(&self.parameters)
+    }
+
+    /// One JSON call an agent can copy verbatim.
+    pub fn example_call(&self) -> String {
+        call_snippet(&self.name, &self.example_arguments())
+    }
+
+    /// `required: path (string); optional: offset (integer), limit (integer)`.
+    ///
+    /// Property *names and JSON types* are what a model gets wrong, so those come
+    /// first; the description is not repeated here (it is already in the tool
+    /// schema the provider sent, and would triple the size of this line).
+    fn arguments_summary(&self) -> Option<String> {
+        let props = self.parameters.get("properties")?.as_object()?;
+        if props.is_empty() {
+            return None;
+        }
+        let required: Vec<&str> = self
+            .parameters
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        let ty = |key: &str| {
+            props
+                .get(key)
+                .and_then(|p| p.get("type"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("any")
+                .to_string()
+        };
+        let mut parts = Vec::new();
+        if !required.is_empty() {
+            parts.push(format!(
+                "required: {}",
+                required
+                    .iter()
+                    .map(|key| format!("{key} ({})", ty(key)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let optional: Vec<String> = props
+            .keys()
+            .filter(|key| !required.contains(&key.as_str()))
+            .take(HINT_PROPERTY_LIMIT)
+            .map(|key| format!("{key} ({})", ty(key)))
+            .collect();
+        if !optional.is_empty() {
+            parts.push(format!(
+                "optional: {}{}",
+                optional.join(", "),
+                if props.len() > required.len() + optional.len() {
+                    ", ..."
+                } else {
+                    ""
+                }
+            ));
+        }
+        Some(parts.join("; "))
+    }
+
+    /// The block appended to a failed call so the next attempt has the right
+    /// shape: what the arguments are and a copyable call that satisfies them.
+    ///
+    /// Empty when the schema carries no properties (a tool that takes nothing
+    /// has nothing to teach, and the failure is not a parsing failure).
+    pub fn failure_hint(&self) -> String {
+        let summary = self.arguments_summary();
+        let example = self.example_call();
+        if summary.is_none()
+            && self
+                .example_arguments()
+                .as_object()
+                .is_some_and(|o| o.is_empty())
+        {
+            return String::new();
+        }
+        let mut hint = format!("[how to call `{}`: {example}", self.name);
+        if let Some(summary) = summary {
+            // The example is the copyable part; drop the summary before ever
+            // cutting the JSON, and only cut the JSON as a last resort.
+            if hint.len() + summary.len() + 2 <= FAILURE_HINT_MAX_BYTES {
+                hint.push_str(" — ");
+                hint.push_str(&summary);
+            }
+        }
+        hint.push(']');
+        if hint.len() > FAILURE_HINT_MAX_BYTES {
+            let mut end = FAILURE_HINT_MAX_BYTES.saturating_sub(4);
+            while end > 0 && !hint.is_char_boundary(end) {
+                end -= 1;
+            }
+            hint.truncate(end);
+            hint.push_str("...]");
+        }
+        hint
+    }
+
+    /// Check an already-parsed argument object against the schema the model was
+    /// given, returning every problem it can prove.
+    ///
+    /// Deliberately shallow: `required` presence, `enum` membership, a declared
+    /// `type` (or a list of them, as some schemas write `["string","null"]`) and
+    /// `additionalProperties: false`. Anything richer (`anyOf`, `$ref`, `format`,
+    /// nested `required`) is left to the tool, because a wrong "invalid" answer
+    /// from the harness would block a call the tool would have accepted.
+    pub fn validate_arguments(
+        &self,
+        args: &serde_json::Value,
+    ) -> std::result::Result<(), Vec<String>> {
+        let mut problems = Vec::new();
+        if self.parameters.get("type").and_then(|t| t.as_str()) != Some("object")
+            && self.parameters.get("properties").is_none()
+        {
+            return Ok(());
+        }
+        let Some(object) = args.as_object() else {
+            return Err(vec![format!(
+                "`{}` takes a JSON object, got {}",
+                self.name,
+                json_type(args)
+            )]);
+        };
+        let props = self
+            .parameters
+            .get("properties")
+            .and_then(|p| p.as_object());
+        for key in self
+            .parameters
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default()
+        {
+            if !object.contains_key(key) {
+                problems.push(format!("missing required argument `{key}`"));
+            }
+        }
+        if let Some(props) = props {
+            for (key, value) in object {
+                let Some(schema) = props.get(key) else {
+                    if self.parameters.get("additionalProperties")
+                        == Some(&serde_json::json!(false))
+                    {
+                        problems.push(format!("unknown argument `{key}`"));
+                    }
+                    continue;
+                };
+                if value.is_null() {
+                    continue;
+                }
+                if let Some(allowed) = schema.get("enum").and_then(|e| e.as_array()) {
+                    if !allowed.contains(value) {
+                        problems.push(format!(
+                            "`{key}` must be one of {}, got {}",
+                            allowed
+                                .iter()
+                                .map(|v| v.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            value
+                        ));
+                        continue;
+                    }
+                }
+                if let Some(declared) = schema.get("type") {
+                    let types: Vec<&str> = match declared {
+                        serde_json::Value::String(s) => vec![s.as_str()],
+                        serde_json::Value::Array(a) => {
+                            a.iter().filter_map(|t| t.as_str()).collect()
+                        }
+                        _ => Vec::new(),
+                    };
+                    if !types.is_empty() && !types.iter().any(|t| matches_json_type(value, t)) {
+                        problems.push(format!(
+                            "`{key}` must be {} (JSON {}), got {}",
+                            types.join(" or "),
+                            types.join("|"),
+                            json_type(value)
+                        ));
+                    }
+                }
+            }
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems)
+        }
+    }
+}
+
+fn json_type(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(n) => {
+            if n.is_f64() && n.as_i64().is_none() {
+                "number"
+            } else {
+                "integer"
+            }
+        }
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn matches_json_type(value: &serde_json::Value, declared: &str) -> bool {
+    let actual = json_type(value);
+    match declared {
+        // Every JSON integer is a valid number; the reverse is not true.
+        "number" => actual == "number" || actual == "integer",
+        other => actual == other,
+    }
+}
+
+/// Try to turn a malformed argument string into the call the model meant.
+///
+/// A model writes tool arguments as text long before a parser sees them, so the
+/// failures are almost always mechanical: a code fence or a sentence around the
+/// object, a trailing comma, single quotes, an unquoted key. Repairing them here
+/// means the failure output can show *the same call with the syntax fixed*
+/// instead of an abstract schema, and a repair is only reported when it parses.
+///
+/// `None` when nothing parses. The result is never executed: it is shown to the
+/// model, which re-issues the call itself.
+pub fn repair_arguments(raw: &str) -> Option<serde_json::Value> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        // One level of unwrapping covers the model that JSON-encoded its
+        // argument object a second time (`"{\"path\":\"a.txt\"}"`): the string is
+        // valid JSON, so the plain parse would hand back a string and the call
+        // would be rejected further down for the wrong reason.
+        if let serde_json::Value::String(inner) = &value {
+            if let Ok(serde_json::Value::Object(obj)) =
+                serde_json::from_str::<serde_json::Value>(inner)
+            {
+                return Some(serde_json::Value::Object(obj));
+            }
+        }
+        return Some(value);
+    }
+    let candidate = extract_json_span(raw);
+    // Apply the mechanical fixes cumulatively, then try each stage: a model that
+    // wrote valid JSON inside a fence needs only the first, one that also used
+    // single quotes needs the second.
+    let mut stages = vec![candidate.clone()];
+    let stripped = strip_trailing_commas(&candidate);
+    if stripped != candidate {
+        stages.push(stripped);
+    }
+    for stage in stages.clone() {
+        let quoted = requote_single_strings(&stage);
+        if quoted != stage {
+            stages.push(requote_single_strings(&strip_trailing_commas(&quoted)));
+        }
+    }
+    for stage in stages {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&stage) {
+            return Some(value);
+        }
+        // `{"arguments": "{\"path\":\"a\"}"}`: a double-encoded object.
+        if let Ok(serde_json::Value::String(inner)) =
+            serde_json::from_str::<serde_json::Value>(&stage)
+        {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&inner) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// The first balanced `{...}` or `[...]` in `raw`, quotes respected.
+fn extract_json_span(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let Some(start) = trimmed.find(['{', '[']) else {
+        return trimmed.to_string();
+    };
+    let open = trimmed.as_bytes()[start];
+    let close = if open == b'{' { b'}' } else { b']' };
+    let bytes = trimmed.as_bytes();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, byte) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match *byte {
+            b'"' => in_string = true,
+            b if b == open => depth += 1,
+            b if b == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return trimmed[start..=i].to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    trimmed[start..].to_string()
+}
+
+/// Drop `,]` and `,}` (and their whitespace-separated forms), which are the
+/// single most common hand-written JSON mistake.
+fn strip_trailing_commas(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if in_string {
+            out.push(byte as char);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match byte {
+            b'"' => {
+                in_string = true;
+                out.push('"');
+            }
+            b',' => {
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && (bytes[j] == b'}' || bytes[j] == b']') {
+                    // Skip the comma and the whitespace it carried.
+                    i = j;
+                    continue;
+                }
+                out.push(',');
+            }
+            other => out.push(other as char),
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Rewrite `'value'` / `'key':` as JSON double-quoted strings.
+///
+/// Only for text that is not already valid JSON, so a legitimate apostrophe
+/// inside a double-quoted string is never touched: strings that start with `"`
+/// are copied verbatim.
+fn requote_single_strings(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            out.push(c);
+            let mut escaped = false;
+            for c in chars.by_ref() {
+                out.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if c == '\'' {
+            out.push('"');
+            let mut escaped = false;
+            for c in chars.by_ref() {
+                if escaped {
+                    out.push('\\');
+                    out.push(c);
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '\'' {
+                    out.push('"');
+                    break;
+                } else if c == '"' {
+                    out.push_str("\\\"");
+                } else {
+                    out.push(c);
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The tool name in `names` closest to `wanted`, when it is close enough to be
+/// the name the model meant rather than a different tool entirely.
+///
+/// Plain Levenshtein distance, bounded to a small budget: the point is to catch
+/// `read_files` / `Read_File` / `searchfiles`, not to fuzzy-match unrelated
+/// tools. `None` when nothing is within a third of the wanted name's length.
+pub fn closest_tool_name<'a, I>(wanted: &str, names: I) -> Option<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let lower = wanted.to_ascii_lowercase();
+    let budget = (lower.chars().count() / 3).max(1);
+    names
+        .into_iter()
+        .map(|name| {
+            let distance = levenshtein(&lower, &name.to_ascii_lowercase());
+            (distance, name)
+        })
+        .filter(|(distance, _)| *distance <= budget)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, name)| name.to_string())
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0usize; b.len() + 1];
+    for (i, ac) in a.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, bc) in b.iter().enumerate() {
+            let cost = usize::from(ac != bc);
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
 }
 
 #[derive(Debug, Clone)]
@@ -525,5 +1143,250 @@ mod tests {
         assert_eq!(reg.names(), vec!["a".to_string(), "b".to_string()]);
         reg.register(mk("a"));
         assert_eq!(reg.len(), 2);
+    }
+
+    fn read_file_spec() -> ToolSpec {
+        ToolSpec {
+            name: "read_file".into(),
+            description: "Read a file.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["path"]
+            }),
+            origin: ToolOrigin::Builtin,
+        }
+    }
+
+    #[test]
+    fn the_example_call_fills_every_required_argument() {
+        let spec = read_file_spec();
+        let example = spec.example_arguments();
+        assert_eq!(example["path"], "<string>");
+        assert!(
+            example.get("offset").is_none(),
+            "optional arguments must not be invented: {example}"
+        );
+        let call = spec.example_call();
+        assert!(call.contains("\"name\":\"read_file\""), "{call}");
+        assert!(call.contains("\"path\""), "{call}");
+    }
+
+    #[test]
+    fn the_example_prefers_values_the_schema_itself_offers() {
+        let spec = ToolSpec {
+            name: "karucode_docs".into(),
+            description: String::new(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "search", "read"]},
+                    "limit": {"type": "integer", "default": 5},
+                    "path": {"type": "string", "default": "."}
+                },
+                "required": ["action"]
+            }),
+            origin: ToolOrigin::Builtin,
+        };
+        assert_eq!(spec.example_arguments()["action"], "list");
+        let with_default = ToolSpec {
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string", "default": "."}},
+            }),
+            ..spec
+        };
+        // No required list: the first declared property is still made concrete.
+        assert_eq!(with_default.example_arguments()["path"], ".");
+    }
+
+    #[test]
+    fn a_tool_with_no_arguments_gets_no_hint() {
+        let spec = ToolSpec {
+            name: "git_status".into(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            origin: ToolOrigin::Builtin,
+        };
+        assert_eq!(spec.failure_hint(), "");
+    }
+
+    #[test]
+    fn the_failure_hint_is_bounded_and_keeps_the_call_intact() {
+        let mut props = serde_json::Map::new();
+        for i in 0..40 {
+            props.insert(
+                format!("argument_number_{i}"),
+                serde_json::json!({"type": "string", "description": "x".repeat(200)}),
+            );
+        }
+        let spec = ToolSpec {
+            name: "big".into(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "object", "properties": props}),
+            origin: ToolOrigin::Builtin,
+        };
+        let hint = spec.failure_hint();
+        assert!(hint.len() <= FAILURE_HINT_MAX_BYTES, "{}", hint.len());
+        assert!(hint.contains("\"name\":\"big\""), "{hint}");
+        assert!(hint.contains("argument_number_0"), "{hint}");
+        assert!(hint.ends_with("\"]") || hint.contains("...]"), "{hint}");
+    }
+
+    #[test]
+    fn arguments_are_checked_against_the_schema_they_were_offered() {
+        let spec = read_file_spec();
+        assert!(spec
+            .validate_arguments(&serde_json::json!({"path": "a.txt"}))
+            .is_ok());
+
+        let problems = spec
+            .validate_arguments(&serde_json::json!({"offset": 3}))
+            .unwrap_err();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("missing required argument `path`"));
+
+        let problems = spec
+            .validate_arguments(&serde_json::json!({"path": "a", "offset": "3"}))
+            .unwrap_err();
+        assert!(
+            problems[0].contains("`offset` must be integer"),
+            "{problems:?}"
+        );
+
+        // A top-level non-object is a problem of its own.
+        let problems = spec
+            .validate_arguments(&serde_json::json!("a.txt"))
+            .unwrap_err();
+        assert!(problems[0].contains("takes a JSON object, got string"));
+    }
+
+    #[test]
+    fn validation_respects_enum_nullable_and_additional_properties() {
+        let spec = ToolSpec {
+            name: "t".into(),
+            description: String::new(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "read"]},
+                    "base": {"type": ["string", "null"]},
+                    "limit": {"type": "number"}
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+            origin: ToolOrigin::Builtin,
+        };
+        assert!(spec
+            .validate_arguments(&serde_json::json!({"action": "read", "base": null}))
+            .is_ok());
+        // A whole integer is a valid `number`.
+        assert!(spec
+            .validate_arguments(&serde_json::json!({"action": "list", "limit": 2}))
+            .is_ok());
+
+        let problems = spec
+            .validate_arguments(&serde_json::json!({"action": "dance", "typo": 1}))
+            .unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.contains("must be one of")),
+            "{problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("unknown argument `typo`")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_schema_without_types_is_not_second_guessed() {
+        // An MCP server may publish a bare `{"type":"object"}`; refusing every
+        // argument it did not describe would break a call the server accepts.
+        let spec = ToolSpec {
+            name: "mcp__fs__read".into(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "object"}),
+            origin: ToolOrigin::Mcp {
+                server: "fs".into(),
+            },
+        };
+        assert!(spec
+            .validate_arguments(&serde_json::json!({"anything": [1, 2]}))
+            .is_ok());
+        assert_eq!(spec.failure_hint(), "");
+    }
+
+    #[test]
+    fn malformed_arguments_are_repaired_into_the_call_that_was_meant() {
+        let cases = [
+            // Fenced, with prose around it.
+            (
+                "```json\n{\"path\": \"a.txt\"}\n```",
+                "{\"path\":\"a.txt\"}",
+            ),
+            // A sentence first.
+            (
+                "Call this: {\"path\": \"a.txt\"} please",
+                "{\"path\":\"a.txt\"}",
+            ),
+            // Trailing comma.
+            ("{\"path\": \"a.txt\",}", "{\"path\":\"a.txt\"}"),
+            // Single quotes.
+            ("{'path': 'a.txt'}", "{\"path\":\"a.txt\"}"),
+            // Both at once.
+            ("{'path': 'a.txt', }", "{\"path\":\"a.txt\"}"),
+        ];
+        for (raw, expected) in cases {
+            let repaired =
+                repair_arguments(raw).unwrap_or_else(|| panic!("could not repair {raw:?}"));
+            assert_eq!(repaired.to_string(), expected, "input was {raw:?}");
+        }
+    }
+
+    #[test]
+    fn repair_reports_nothing_when_nothing_parses() {
+        assert!(repair_arguments("{not json at all").is_none());
+        assert!(repair_arguments("").is_none());
+        assert!(repair_arguments("no braces here").is_none());
+    }
+
+    #[test]
+    fn repair_unwraps_a_double_encoded_object() {
+        let repaired = repair_arguments("\"{\\\"path\\\":\\\"a.txt\\\"}\"").unwrap();
+        assert_eq!(repaired["path"], "a.txt");
+    }
+
+    #[test]
+    fn repair_does_not_mangle_an_apostrophe_inside_a_json_string() {
+        let repaired =
+            repair_arguments("{\"old_string\": \"it's fine\", \"new_string\": \"ok\"}").unwrap();
+        assert_eq!(repaired["old_string"], "it's fine");
+    }
+
+    #[test]
+    fn a_typo_in_a_tool_name_is_suggested_by_closeness() {
+        let names = ["read_file", "write_file", "run_command", "search_files"];
+        assert_eq!(
+            closest_tool_name("read_files", names).as_deref(),
+            Some("read_file")
+        );
+        assert_eq!(
+            closest_tool_name("Read_File", names).as_deref(),
+            Some("read_file")
+        );
+        assert_eq!(
+            closest_tool_name("searchfiles", names).as_deref(),
+            Some("search_files")
+        );
+        // An unrelated name must not be "corrected" into a different tool.
+        assert_eq!(closest_tool_name("spawn_agent", names), None);
+        assert_eq!(closest_tool_name("", names), None);
     }
 }

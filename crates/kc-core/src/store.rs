@@ -163,6 +163,9 @@ pub struct StoredMessage {
     /// Images carried by this message (see [`crate::message::ImageAttachment`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<crate::message::ImageAttachment>,
+    /// Reasoning content from models that separate thinking from output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// When set, this message was hidden by a rewind at the recorded time.
     ///
     /// Rows are never deleted - the store is append-only and the resume and
@@ -183,6 +186,7 @@ impl StoredMessage {
             tool_call_id: self.tool_call_id.clone(),
             name: self.name.clone(),
             images: self.images.clone(),
+            reasoning_content: self.reasoning_content.clone(),
         }
     }
 }
@@ -238,6 +242,7 @@ pub struct NewMessage {
     pub name: Option<String>,
     /// Images attached to this message (see [`crate::message::ImageAttachment`]).
     pub images: Vec<crate::message::ImageAttachment>,
+    pub reasoning_content: Option<String>,
 }
 
 impl NewMessage {
@@ -252,6 +257,7 @@ impl NewMessage {
             tool_call_id: m.tool_call_id.clone(),
             name: m.name.clone(),
             images: m.images.clone(),
+            reasoning_content: m.reasoning_content.clone(),
         }
     }
 }

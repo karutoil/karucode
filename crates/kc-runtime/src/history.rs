@@ -76,6 +76,7 @@ pub(crate) async fn repair_history(
             tool_call_id: Some(missing.call.id),
             name: Some(missing.call.name),
             images: Vec::new(),
+            reasoning_content: None,
         };
         store.append_message(&record).await?;
     }
@@ -197,6 +198,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             images: Vec::new(),
+            reasoning_content: None,
             rewound_at: None,
             created_at: id,
         }

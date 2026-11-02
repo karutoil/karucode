@@ -1,6 +1,7 @@
 import type { JSX } from 'preact';
 import { useMemo } from 'preact/hooks';
-import { workspaceRawUrl } from '../api/endpoints';
+import { getAuthToken } from '../api/client';
+import { workspacePreviewUrl, workspaceRawUrl } from '../api/endpoints';
 import { copyText } from '../lib/clipboard';
 import { isExternalReference, resolveRelativePath, type FileRender } from '../lib/fileKind';
 import { renderMarkdown } from '../lib/markdown';
@@ -12,7 +13,7 @@ export interface FilePreviewProps {
   content: string;
   render: FileRender;
   project?: string | null;
-  /** The editor holds unsaved changes, so images/PDFs on disk are stale. */
+  /** The editor holds unsaved changes, so images/PDFs/HTML on disk are stale. */
   dirty?: boolean;
   /** Open a workspace path that a rendered link pointed at. */
   onOpenFile?: (path: string) => void;
@@ -22,11 +23,12 @@ export interface FilePreviewProps {
  * The rendered half of the file viewer.
  *
  * Everything that can render gets a preview here: Markdown through the same
- * renderer (and sanitiser) the chat uses, HTML inside a fully sandboxed iframe,
- * images and PDFs from the raw-bytes endpoint. Nothing from the workspace is ever
- * inserted into the app's own DOM as markup, and nothing can run: `renderMarkdown`
- * disables raw HTML, and the iframe has no `allow-scripts`, so a workspace HTML
- * file cannot reach the app's origin, storage or API.
+ * renderer (and sanitiser) the chat uses, HTML as a real page in a sandboxed
+ * iframe loaded from its own workspace URL, images and PDFs from the raw-bytes
+ * endpoint. Nothing from the workspace is ever inserted into the app's own DOM as
+ * markup. The HTML frame runs the page's own scripts - that is the point of
+ * previewing a page - but it is an opaque origin served under a policy that
+ * blocks network access, so it cannot reach the app's origin, storage or API.
  */
 export function FilePreview({
   path,
@@ -39,10 +41,6 @@ export function FilePreview({
   const markdownHtml = useMemo(
     () => (render === 'markdown' ? renderMarkdownForFile(content, path, project) : ''),
     [render, content, path, project],
-  );
-  const htmlSource = useMemo(
-    () => (render === 'html' ? htmlDocument(content) : ''),
-    [render, content],
   );
 
   if (render === 'markdown') {
@@ -100,23 +98,57 @@ export function FilePreview({
   }
 
   if (render === 'html') {
+    // A real URL in an iframe, not `srcdoc`. Two reasons, both measured in
+    // Chromium: a `srcdoc` frame inherits *this app's* CSP (`default-src 'self'`,
+    // no `unsafe-inline` for scripts) and then runs in an opaque origin where
+    // `'self'` matches nothing, so its inline scripts, sibling stylesheets and
+    // relative images were all refused and the preview came up nearly blank; and
+    // a `srcdoc` document has no path, so `./style.css` has nothing to resolve
+    // against. Serving the file from `/api/workspace/preview/<path>` gives it
+    // both: its own policy (script yes, network no, opaque origin) and a base URL
+    // in its own directory.
+    //
+    // `sandbox="allow-scripts"` matches the server's policy and never adds
+    // `allow-same-origin`: without that pair the frame would share the app's
+    // origin and could read its storage and call `/api`.
+    const url = workspacePreviewUrl(path, project);
+    // An iframe is a browser navigation: it cannot send the `Authorization`
+    // header, and the page's own relative `./style.css` requests cannot carry a
+    // query token either. That is fine on the default loopback, token-less
+    // deployment, and it is honest to say so rather than render a blank frame
+    // that looks like the page is broken.
+    const needsToken = getAuthToken() !== null;
     return (
       <div
         class="file-preview-scroll file-preview-media"
         role="region"
         aria-label={`Rendered HTML of ${path}`}
       >
-        <iframe
-          class="file-preview-html"
-          // No `allow-scripts`, `allow-same-origin` or `allow-forms`: the document
-          // is inert, so a workspace file cannot script the app or submit anything.
-          sandbox=""
-          referrerPolicy="no-referrer"
-          srcDoc={htmlSource}
-          title={`Rendered ${path}`}
-          data-testid="file-preview-html"
-        />
-        <p class="file-preview-note">Scripts, forms and network requests are disabled here.</p>
+        {needsToken ? (
+          <p class="file-notice" data-testid="file-preview-html-needs-token">
+            This deployment requires a token, and a rendered page cannot present one. Open{' '}
+            <code>{path}</code> from the <strong>Source</strong> tab, or view it inline in the
+            workspace.
+          </p>
+        ) : (
+          <iframe
+            class="file-preview-html"
+            sandbox="allow-scripts"
+            referrerPolicy="no-referrer"
+            src={url}
+            title={`Rendered ${path}`}
+            data-testid="file-preview-html"
+            // A fresh key per file so reopening a different page never reuses the
+            // previous document (an iframe keeps its content when only `src`
+            // changes through a same-document hash).
+            key={url}
+          />
+        )}
+        <p class="file-preview-note">
+          {dirty
+            ? 'The preview shows the saved page; save to see your edits rendered.'
+            : 'Rendered as an isolated page: scripts run, but it cannot reach karucode, its storage or the network.'}
+        </p>
       </div>
     );
   }
@@ -177,6 +209,11 @@ export function renderMarkdownForFile(
 /**
  * Wrap workspace HTML in a complete document so it renders the way its author
  * meant it to, with a neutral base style and no way to reach the network.
+ *
+ * Superseded by `GET /api/workspace/preview/<path>` for the viewer's own HTML
+ * preview: a `srcdoc` document has no base URL (so relative assets cannot
+ * resolve) and inherits this app's CSP, which leaves it nearly blank. Kept for
+ * callers that genuinely have HTML source with no file behind it.
  */
 export function htmlDocument(source: string): string {
   return [

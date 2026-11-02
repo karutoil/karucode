@@ -56,7 +56,10 @@ describe('FileViewer', () => {
   it('renders markdown as a preview with a source toggle and no raw HTML', async () => {
     installFetch({ content: '# Title\n\n<script>alert(1)</script>\n\nhello', size: 41, language: 'markdown' });
     store.fileViewerPath.value = 'docs/guide.md';
-    const { container } = render(<FileViewer />);
+    render(<FileViewer />);
+    // The viewer is a Dialog, and a Dialog renders through a portal into
+    // `document.body` so no ancestor can clip it (see Dialog.tsx).
+    const container = document.body;
 
     await waitFor(() => expect(screen.getByTestId('file-preview-markdown')).toBeTruthy());
     expect(screen.getByRole('heading', { name: 'Title' })).toBeTruthy();
@@ -71,24 +74,34 @@ describe('FileViewer', () => {
     expect(container.querySelector('.file-code')?.textContent).toContain('# Title');
   });
 
-  it('renders html in a sandboxed iframe and never inlines it', async () => {
+  it('renders html as a real sandboxed page from its own URL, never inlined', async () => {
     installFetch({ content: '<h1>hi</h1><script>alert(1)</script>', size: 39, language: 'html', path: 'site/index.html' });
     store.fileViewerPath.value = 'site/index.html';
-    const { container } = render(<FileViewer />);
+    render(<FileViewer />);
+    // The viewer is a Dialog, and a Dialog renders through a portal into
+    // `document.body` so no ancestor can clip it (see Dialog.tsx).
+    const container = document.body;
 
     const frame = await screen.findByTestId('file-preview-html');
-    // `sandbox=""` is the whole safety story: no scripts, no same-origin access.
-    expect(frame.getAttribute('sandbox')).toBe('');
-    expect(frame.getAttribute('srcdoc')).toContain('<h1>hi</h1>');
-    expect(frame.getAttribute('srcdoc')).toContain('Content-Security-Policy');
-    // The markup is inside the frame's attribute, not the app's DOM.
+    // The page is fetched as a document from its own workspace path, so its
+    // relative assets resolve and it gets the server's preview policy. A
+    // `srcdoc` frame could do neither, and inherited the app's CSP on top.
+    expect(frame.getAttribute('src')).toBe('/api/workspace/preview/site/index.html');
+    expect(frame.getAttribute('srcdoc')).toBeNull();
+    // `allow-scripts` makes the page work; `allow-same-origin` would give it the
+    // app's origin, where it could read the stored bearer token and call `/api`.
+    expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
+    // Nothing from the file is ever in the app's own DOM.
     expect(container.querySelector('h1')).toBeNull();
   });
 
   it('shows images from the raw endpoint rather than as binary', async () => {
     installFetch({ content: '', size: 1024, binary: true, path: 'assets/logo.png' });
     store.fileViewerPath.value = 'assets/logo.png';
-    const { container } = render(<FileViewer />);
+    render(<FileViewer />);
+    // The viewer is a Dialog, and a Dialog renders through a portal into
+    // `document.body` so no ancestor can clip it (see Dialog.tsx).
+    const container = document.body;
 
     const image = await screen.findByTestId('file-preview-image');
     expect(image.getAttribute('src')).toBe('/api/workspace/raw?path=assets%2Flogo.png');
@@ -106,7 +119,10 @@ describe('FileViewer', () => {
   it('falls back to a refusal for a binary file with no preview', async () => {
     installFetch({ content: '', size: 512, binary: true, path: 'data/blob.bin' });
     store.fileViewerPath.value = 'data/blob.bin';
-    const { container } = render(<FileViewer />);
+    render(<FileViewer />);
+    // The viewer is a Dialog, and a Dialog renders through a portal into
+    // `document.body` so no ancestor can clip it (see Dialog.tsx).
+    const container = document.body;
     await waitFor(() => expect(container.querySelector('.file-notice')?.textContent).toContain('binary file'));
     const edit = screen.getByRole('button', { name: /edit/i }) as HTMLButtonElement;
     expect(edit.disabled).toBe(true);
@@ -123,7 +139,10 @@ describe('FileViewer', () => {
       path: 'docs/spec.pdf',
     });
     store.fileViewerPath.value = 'docs/spec.pdf';
-    const { container } = render(<FileViewer />);
+    render(<FileViewer />);
+    // The viewer is a Dialog, and a Dialog renders through a portal into
+    // `document.body` so no ancestor can clip it (see Dialog.tsx).
+    const container = document.body;
 
     const frame = await screen.findByTestId('file-preview-pdf');
     expect(frame.getAttribute('src')).toBe('/api/workspace/raw?path=docs%2Fspec.pdf');
@@ -138,7 +157,10 @@ describe('FileViewer', () => {
   it('edits and saves with the loaded size as the staleness check', async () => {
     const fetchMock = installFetch({ content: 'old', size: 3, language: 'markdown' });
     store.fileViewerPath.value = 'docs/guide.md';
-    const { container } = render(<FileViewer />);
+    render(<FileViewer />);
+    // The viewer is a Dialog, and a Dialog renders through a portal into
+    // `document.body` so no ancestor can clip it (see Dialog.tsx).
+    const container = document.body;
 
     await waitFor(() => expect(screen.getByTestId('file-preview-markdown')).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: /edit/i }));
@@ -187,7 +209,10 @@ describe('FileViewer', () => {
       },
     );
     store.fileViewerPath.value = 'docs/guide.md';
-    const { container } = render(<FileViewer />);
+    render(<FileViewer />);
+    // The viewer is a Dialog, and a Dialog renders through a portal into
+    // `document.body` so no ancestor can clip it (see Dialog.tsx).
+    const container = document.body;
 
     await waitFor(() => expect(screen.getByTestId('file-preview-markdown')).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: /edit/i }));
@@ -210,7 +235,10 @@ describe('FileViewer', () => {
   it('asks before discarding unsaved edits when the dialog is closed', async () => {
     installFetch({ content: 'old', size: 3, language: 'markdown' });
     store.fileViewerPath.value = 'docs/guide.md';
-    const { container } = render(<FileViewer />);
+    render(<FileViewer />);
+    // The viewer is a Dialog, and a Dialog renders through a portal into
+    // `document.body` so no ancestor can clip it (see Dialog.tsx).
+    const container = document.body;
 
     await waitFor(() => expect(screen.getByTestId('file-preview-markdown')).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: /edit/i }));
@@ -245,7 +273,10 @@ describe('FileViewer', () => {
     // file has no preview renderer, so the strip should not offer one.
     installFetch({ content: 'fn main() {}\n', size: 14, language: 'rust', path: 'src/main.rs' });
     store.fileViewerPath.value = 'src/main.rs';
-    const { container } = render(<FileViewer />);
+    render(<FileViewer />);
+    // The viewer is a Dialog, and a Dialog renders through a portal into
+    // `document.body` so no ancestor can clip it (see Dialog.tsx).
+    const container = document.body;
 
     await waitFor(() => expect(container.querySelector('.file-code')).not.toBeNull());
     expect(screen.queryByRole('tab', { name: /preview/i })).toBeNull();
@@ -264,7 +295,10 @@ describe('FileViewer', () => {
     // now shares it instead of reimplementing a worse copy.
     installFetch({ content: '# Title\n\nbody', size: 15, language: 'markdown' });
     store.fileViewerPath.value = 'docs/guide.md';
-    const { container } = render(<FileViewer />);
+    render(<FileViewer />);
+    // The viewer is a Dialog, and a Dialog renders through a portal into
+    // `document.body` so no ancestor can clip it (see Dialog.tsx).
+    const container = document.body;
 
     await waitFor(() => expect(screen.getByTestId('file-preview-markdown')).toBeTruthy());
     const preview = screen.getByRole('tab', { name: /preview/i });

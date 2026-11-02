@@ -248,6 +248,192 @@ pub const MAX_RAW_BYTES: u64 = 32 * 1024 * 1024;
 /// disposition - is what neutralises an HTML file.
 pub const RAW_CONTENT_SECURITY_POLICY: &str = "sandbox; default-src 'none'";
 
+/// Ceiling for one file in a preview tree: the entry document or any asset it
+/// loads. Bounded so one request cannot exhaust memory.
+pub const MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Policy for [`preview`]: a workspace HTML file rendered *as a page*.
+///
+/// [`RAW_CONTENT_SECURITY_POLICY`] cannot be used here. `default-src 'none'`
+/// and a bare `sandbox` (no `allow-scripts`) leave an HTML file almost entirely
+/// inert, which is right for "the bytes of a file" and useless for "look at my
+/// page": no inline script, no sibling stylesheet, no relative image.
+///
+/// This policy keeps the security property that matters - the document is an
+/// **opaque origin** - while letting the page be a page:
+///
+/// * `sandbox allow-scripts` (never `allow-same-origin`) is what makes the
+///   origin opaque. Verified in Chromium: the frame's `parent`, `localStorage`
+///   and `document.cookie` reads all throw `SecurityError`, `window.open`
+///   returns `null`, and `top.location` cannot be navigated.
+/// * `script-src`/`style-src`/`img-src`/`font-src`/`media-src` allow `*`, so a
+///   page's own `./app.js`, `./style.css` and remote CDN assets load. It is
+///   safe to be this open *because* the origin is opaque: a hostile script can
+///   only reach what it was served with.
+/// * `connect-src 'none'` blocks `fetch`/XHR/WebSocket. That is the one channel
+///   that could lift data out of the rendered document, so it stays off even
+///   though nothing sensitive is reachable.
+/// * `frame-src`/`child-src`/`object-src 'none'` stop the preview nesting more
+///   documents or plugins, `form-action 'none'` stops it submitting anywhere,
+///   and `base-uri 'self'` stops a `<base>` from re-pointing its own relative
+///   URLs at another origin.
+/// * `frame-ancestors 'self'` is narrower than the app-wide `'none'` so the file
+///   viewer's own iframe may embed this response, and nothing else can. The
+///   `sandbox` directive also makes [`crate::app::security_headers`] withhold
+///   `X-Frame-Options: DENY`, which would otherwise block that frame.
+pub const PREVIEW_CONTENT_SECURITY_POLICY: &str = "sandbox allow-scripts; default-src 'none'; \
+     img-src * data: blob:; media-src * data: blob:; font-src * data:; \
+     style-src * 'unsafe-inline'; script-src * 'unsafe-inline' 'unsafe-eval' blob:; \
+     connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; \
+     object-src 'none'; form-action 'none'; base-uri 'self'; frame-ancestors 'self'";
+
+/// `GET /api/workspace/preview/<path>[?project=<id>]`
+///
+/// One workspace file served from its own workspace path, so a previewed page is
+/// a real document that can load its own siblings.
+///
+/// The path is in the URL rather than a query parameter on purpose: a document
+/// loaded from `/api/workspace/preview/docs/index.html` resolves `./style.css`
+/// and `../img/logo.png` against its own directory, which is exactly what a page
+/// authored in the workspace expects. A query parameter cannot do that - and
+/// neither can `srcdoc`, which additionally inherits the app's own
+/// `default-src 'self'` policy and then runs in an opaque origin where `'self'
+/// matches nothing, so *every* subresource and inline script is refused.
+///
+/// This serves the whole preview *tree*, not just the entry document: the same
+/// route answers the page's `style.css`, its `pic.png` and its `app.js`, because
+/// those requests carry the same `/api/workspace/preview/...` prefix. That is
+/// what makes a preview of a real page look like the page.
+///
+/// The security shape differs by what is being served, and it is deliberately
+/// narrow in both cases:
+///
+/// * a document (`text/html`) gets [`PREVIEW_CONTENT_SECURITY_POLICY`], which is
+///   an opaque origin with script but no network;
+/// * every other asset keeps [`RAW_CONTENT_SECURITY_POLICY`], which is an opaque
+///   origin with no script and no network - correct for bytes that are only ever
+///   meant to be drawn.
+///
+/// Both are opaque origins, so neither can reach the app: no `/api` call, no
+/// `localStorage`, no cookie, no framing of the app.
+pub async fn preview(
+    State(state): State<AppState>,
+    axum::extract::Path(rest): axum::extract::Path<String>,
+    Query(query): Query<QueryMap>,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+
+    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let (bytes, content_type) =
+        tokio::task::spawn_blocking(move || preview_blocking(&workspace, &rest, MAX_PREVIEW_BYTES))
+            .await
+            .map_err(|e| ApiError::internal(format!("workspace task failed: {e}")))??;
+
+    let is_document = content_type.starts_with("text/html");
+    let mut response = axum::body::Bytes::from(bytes).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_str(&content_type)
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("application/octet-stream")),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        axum::http::HeaderValue::from_static("inline"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(if is_document {
+            PREVIEW_CONTENT_SECURITY_POLICY
+        } else {
+            RAW_CONTENT_SECURITY_POLICY
+        }),
+    );
+    // The app-wide `Cross-Origin-Resource-Policy: same-origin` (see
+    // `app::security_headers`) would defeat this route entirely. A previewed page
+    // and everything it loads run in an **opaque origin**, so every one of its
+    // subresource requests is cross-origin by definition, and CORP
+    // `same-origin` makes the browser refuse them: measured in Chromium, the
+    // sibling stylesheet never applied, the relative `<img>` never decoded and a
+    // sibling `.js` never ran, while the document itself loaded fine.
+    //
+    // This is the one place the header is widened, and it is deliberately narrow:
+    //
+    // * it applies to this route only - every other response keeps
+    //   `same-origin`, so no other workspace or API byte becomes loadable;
+    // * CORP never grants *read* access. It decides whether a subresource may be
+    //   embedded, and this server sends no `Access-Control-Allow-Origin`, so a
+    //   foreign page can at most make a browser *render* a workspace file - what
+    //   any static file server allows - never read it;
+    // * what it renders is inert: a document here is served an opaque origin with
+    //   `connect-src 'none'`, so even a hostile `.html` cannot phone home.
+    headers.insert(
+        header::HeaderName::from_static("cross-origin-resource-policy"),
+        axum::http::HeaderValue::from_static("cross-origin"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
+}
+
+/// Read one file behind a preview URL, with the MIME type its name implies.
+///
+/// A directory answers with its `index.html` when it has one, so
+/// `/api/workspace/preview/branding/` renders the same page a static server
+/// would. A document must be valid UTF-8; anything else is served as bytes for
+/// an `<img>`/`<link>` to consume.
+fn preview_blocking(
+    workspace: &Workspace,
+    rest: &str,
+    limit: u64,
+) -> Result<(Vec<u8>, String), ApiError> {
+    let path = if rest.trim_matches('/').is_empty() {
+        ".".to_string()
+    } else {
+        rest.trim_matches('/').to_string()
+    };
+    let mut abs = workspace.resolve_existing(&path)?;
+    if abs.is_dir() {
+        let index = abs.join("index.html");
+        if !index.is_file() {
+            return Err(ApiError::bad_request(format!(
+                "`{path}` is a directory with no index.html to render"
+            )));
+        }
+        abs = index;
+    }
+    let meta = std::fs::metadata(&abs).map_err(|e| ApiError::from(Error::io(&abs, e)))?;
+    if meta.len() > limit {
+        return Err(ApiError::payload_too_large(
+            limit as usize,
+            Some("this file is too large to render as a preview"),
+        ));
+    }
+    let bytes = std::fs::read(&abs).map_err(|e| ApiError::from(Error::io(&abs, e)))?;
+    if bytes.len() as u64 > limit {
+        return Err(ApiError::payload_too_large(
+            limit as usize,
+            Some("this file is too large to render as a preview"),
+        ));
+    }
+    let content_type = mime_guess::from_path(&abs)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string();
+    if content_type.starts_with("text/html") && std::str::from_utf8(&bytes).is_err() {
+        return Err(ApiError::bad_request(format!(
+            "`{path}` is not valid UTF-8, so it cannot be rendered as a page"
+        )));
+    }
+    Ok((bytes, content_type))
+}
+
 /// `GET /api/workspace/raw?path=<file>[&project=<id>]`
 ///
 /// The bytes of one workspace file, with the MIME type guessed from its name.
@@ -982,6 +1168,76 @@ mod tests {
         let err = file_blocking(&ws, "../../etc/passwd", 1024).unwrap_err();
         assert!(matches!(err, Error::PathEscape { .. }));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn preview_serves_a_page_and_its_own_siblings() {
+        let (dir, ws) = workspace();
+        std::fs::create_dir_all(dir.join("site")).unwrap();
+        std::fs::write(
+            dir.join("site/index.html"),
+            "<link rel=stylesheet href=sibling.css><h1>hi</h1>",
+        )
+        .unwrap();
+        std::fs::write(dir.join("site/sibling.css"), "body { background: red; }").unwrap();
+        std::fs::write(dir.join("site/pic.png"), [0u8, 1, 2, 3]).unwrap();
+
+        let (bytes, content_type) = preview_blocking(&ws, "site/index.html", 4096).unwrap();
+        assert_eq!(content_type, "text/html");
+        assert!(String::from_utf8(bytes).unwrap().contains("<h1>hi</h1>"));
+
+        // The page's own references arrive through the same prefix, so the
+        // browser resolves `sibling.css` and `pic.png` against it.
+        let (_, css_type) = preview_blocking(&ws, "site/sibling.css", 4096).unwrap();
+        assert_eq!(css_type, "text/css");
+        let (_, png_type) = preview_blocking(&ws, "site/pic.png", 4096).unwrap();
+        assert_eq!(png_type, "image/png");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn preview_renders_a_directory_through_its_index() {
+        let (dir, ws) = workspace();
+        std::fs::create_dir_all(dir.join("site")).unwrap();
+        std::fs::write(dir.join("site/index.html"), "<h1>index</h1>").unwrap();
+        let (bytes, content_type) = preview_blocking(&ws, "site/", 4096).unwrap();
+        assert_eq!(content_type, "text/html");
+        assert!(String::from_utf8(bytes).unwrap().contains("index"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn preview_refuses_what_it_cannot_render() {
+        let (dir, ws) = workspace();
+        // A directory with no index.html is not a page.
+        assert!(preview_blocking(&ws, "src", 4096).is_err());
+        // A file over the cap is refused rather than truncated into a broken page.
+        std::fs::write(dir.join("big.html"), "<p>x</p>".repeat(200)).unwrap();
+        assert!(preview_blocking(&ws, "big.html", 64).is_err());
+        // Non-UTF-8 HTML cannot be decoded into a document.
+        std::fs::write(dir.join("bad.html"), [0xffu8, 0xfe, 0x00]).unwrap();
+        assert!(preview_blocking(&ws, "bad.html", 4096).is_err());
+        // Traversal is refused exactly like every other workspace read.
+        assert!(preview_blocking(&ws, "../../etc/passwd", 4096).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_preview_policy_is_an_opaque_origin_with_script_but_no_network() {
+        // The whole safety story for rendering a workspace page. `allow-scripts`
+        // makes the page work; `allow-same-origin` must never appear beside it,
+        // or the page would share the app's origin and could read its storage
+        // and call `/api`.
+        assert!(PREVIEW_CONTENT_SECURITY_POLICY.contains("sandbox allow-scripts"));
+        assert!(!PREVIEW_CONTENT_SECURITY_POLICY.contains("allow-same-origin"));
+        assert!(PREVIEW_CONTENT_SECURITY_POLICY.contains("connect-src 'none'"));
+        assert!(PREVIEW_CONTENT_SECURITY_POLICY.contains("form-action 'none'"));
+        assert!(PREVIEW_CONTENT_SECURITY_POLICY.contains("object-src 'none'"));
+        // The file viewer's own iframe must be allowed to embed it.
+        assert!(PREVIEW_CONTENT_SECURITY_POLICY.contains("frame-ancestors 'self'"));
+        // Assets keep the stricter no-script policy.
+        assert!(RAW_CONTENT_SECURITY_POLICY.contains("sandbox"));
+        assert!(!RAW_CONTENT_SECURITY_POLICY.contains("allow-scripts"));
     }
 
     #[test]

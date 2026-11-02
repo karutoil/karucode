@@ -33,6 +33,7 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`subagents`](subagents.md) | How spawn_agent, spawn_agents and the control tools work - blocking and background, sequential and parallel - and the limits they run under. | `crates/kc-runtime/src/subagent.rs:20` |
 | [`terminals`](terminals.md) | A real shell in the browser that survives a reload, another browser and a cleared cache - and the honest limit of what survives a restart. | `crates/kc-server/src/terminals.rs:1` |
 | [`themes`](themes.md) | Built-in palettes, live colour and density editing, fonts and custom CSS, the transcript view options (cards or rows, grouped calls, folded turns), saved in the browser and shareable as a theme JSON file. | `web/src/theme/engine.ts:1` |
+| [`tool-call-errors`](tool-call-errors.md) | A call that fails because of how it was written comes back with a working version of itself, so the next attempt is correct instead of another guess. | `crates/kc-core/src/tool.rs:1` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-19 topic(s).
+20 topic(s).

@@ -22,7 +22,7 @@
 // @kc-title: Call the HTTP API
 // @kc-summary: Authenticate, send the CSRF header, and find the endpoint for sessions, config, approvals, files, git, plugins, MCP and the event stream.
 // @kc-tags: api, http, rest, sse, curl, endpoints
-// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:POST /api/workspace/upload, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, config:plugin_panels, route:GET /api/events, event:notification, event:queued_messages, event:session_rewound, config:[notifications], header:X-Karucode-Client, env:KARUCODE_AUTH_TOKEN, doc:docs/API.md
+// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, config:plugin_panels, route:GET /api/events, event:notification, event:queued_messages, event:session_rewound, config:[notifications], header:X-Karucode-Client, env:KARUCODE_AUTH_TOKEN, doc:docs/API.md
 //
 // The API is same-origin only; there is no CORS surface. Two rules matter:
 //
@@ -109,6 +109,11 @@
 // `messages_truncated: true` means older messages exist in the database and a
 // larger `?messages=` (or a client-side "load older") will fetch them; nothing
 // is deleted. A non-numeric `messages` is `400 bad_request`.
+//
+// An assistant row may also carry `reasoning_content` when the endpoint streams
+// analysis separately from the answer. That text is stored with the turn and
+// sent back in later provider requests; it is omitted for older rows and for
+// models that do not produce a separate reasoning stream.
 //
 // # Per-session model selection
 //
@@ -273,6 +278,54 @@
 // Note that `binary` from the read endpoint is a NUL-byte sniff, and a PDF or an
 // SVG is ASCII - so it is `false` for both. Decide how to display a file from its
 // extension, not from that flag.
+//
+// # Previewing an HTML file as a page
+//
+// `GET /api/workspace/preview/<path>[?project=<id>]` serves a workspace file
+// from its own workspace path, so the web viewer can show an HTML page the way
+// its author meant it: the page's `./style.css`, `../img/logo.png` and
+// `./app.js` resolve against the directory the page lives in, and its inline
+// scripts run.
+//
+// ```bash
+// curl -s -D- -o /dev/null "localhost:8787/api/workspace/preview/docs/index.html"
+// # content-type: text/html; charset=utf-8
+// # content-security-policy: sandbox allow-scripts; default-src 'none'; …
+// ```
+//
+// The path is in the URL rather than a query parameter for exactly that reason:
+// a document has to have a base URL inside the workspace. (`srcdoc` cannot work
+// for the same preview - it inherits the app's own `default-src 'self'` policy
+// and then runs in an opaque origin where `'self'` matches nothing, so its
+// inline scripts, sibling stylesheets and relative images are all refused.)
+//
+// The route serves the whole preview *tree*: the same prefix answers the page's
+// assets, so a reviewed page looks like the page.
+//
+// What makes it safe, and what to preserve if you change it:
+//
+// * the document answers `Content-Security-Policy: sandbox allow-scripts; …`,
+//   which is an **opaque origin**. It cannot read the app's DOM,
+//   `localStorage` or cookies, cannot `fetch`/XHR/WebSocket (`connect-src
+//   'none'`), cannot open a popup, cannot navigate the top frame and cannot
+//   submit a form. Never add `allow-same-origin` to that policy or to the
+//   viewer's `<iframe sandbox>`: that pair hands the page the app's origin,
+//   where it could read the stored bearer token and call `/api`;
+// * assets keep the stricter `sandbox; default-src 'none'` used by
+//   `/api/workspace/raw`;
+// * the response widens `Cross-Origin-Resource-Policy` to `cross-origin` so the
+//   opaque-origin page may load its own siblings - the app-wide `same-origin`
+//   would block every one of them. It is widened on this route only, and CORP
+//   never grants *read* access: with no `Access-Control-Allow-Origin`, a foreign
+//   page can at most render a workspace file, never read it;
+// * a directory answers its `index.html` (`400` when there is none), a
+//   non-UTF-8 document is `400`, and anything over 16 MiB is `413
+//   payload_too_large`.
+//
+// A deployment that sets `KARUCODE_AUTH_TOKEN` cannot use this preview: an
+// `<iframe>` is a browser navigation and cannot send `Authorization`, and the
+// page's own relative requests cannot carry a query token either. The viewer
+// says so instead of showing a blank frame; the *Source* tab still works.
 //
 // # Plugin panels
 //

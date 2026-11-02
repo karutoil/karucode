@@ -296,7 +296,11 @@ function installFetch(
 function renderSheet(config: Config) {
   store.config.value = config;
   store.settingsOpen.value = true;
-  return render(<SettingsSheet />);
+  const result = render(<SettingsSheet />);
+  // The sheet is a Dialog, and a Dialog renders through a portal into
+  // `document.body` so no ancestor can clip it (see Dialog.tsx). Query the
+  // document, not the render container, for anything inside the sheet.
+  return { ...result, container: document.body };
 }
 
 /** Open one of the sheet's tabs. */

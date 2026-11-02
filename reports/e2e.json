@@ -31,6 +31,10 @@
     "a stream that dies mid-answer is restarted, not fatal",
     "only the restart's answer is persisted",
     "subagent runs and reports",
+    "a fan-out runs both children",
+    "a background spawn detaches and is collected by a wait",
+    "controlling a finished agent is a 404",
+    "an unknown agent action is a 400 naming the verbs",
     "plugin tool requires approval",
     "plugin tool is callable",
     "MCP tool requires approval",
@@ -49,7 +53,7 @@
   ],
   "failed": [],
   "skipped": [],
-  "events": 349,
-  "server_log": "/tmp/kc-e2e-_2jkp9t3/server.log",
-  "mock_requests": 41
+  "events": 464,
+  "server_log": "/tmp/kc-e2e-kka4w6ap/server.log",
+  "mock_requests": 50
 }

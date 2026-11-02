@@ -7,7 +7,7 @@
 
 - **Slug:** `web-ui`
 - **Tags:** ui, web, frontend, panels, shortcuts, preact
-- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:POST /api/workspace/upload`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `config:providers.models.context_window`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `fn:registerPluginPanelRenderer`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`
+- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `config:providers.models.context_window`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `fn:registerPluginPanelRenderer`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`
 - **Source:** `web/src/app.tsx:1`
 
 ---
@@ -103,7 +103,16 @@
 * **File viewer** (modal): Markdown and HTML open on a rendered preview (with a
   *Preview*/*Source* toggle), images and PDFs render from
   `GET /api/workspace/raw`, and every complete text file can be edited and
-  saved. The preview follows your edits, so *Preview* is a live preview of the
+  saved. An HTML file is previewed as a **real page**, loaded from
+  `GET /api/workspace/preview/<path>` in an `<iframe sandbox="allow-scripts">`
+  (never `srcdoc`): that gives it a base URL inside the workspace, so its own
+  `./style.css`, `../img/logo.png` and `./app.js` load, and the server's
+  `sandbox allow-scripts; …` policy keeps it an opaque origin with
+  `connect-src 'none'`, so it still cannot reach the app, its storage or the
+  network. The preview shows the *saved* page - an unsaved draft says so and
+  needs a save - and on a `KARUCODE_AUTH_TOKEN` deployment, where an `<iframe>`
+  cannot present a bearer header, it explains that instead of showing a blank
+  frame. Markdown follows your edits live, so *Preview* is a live preview of the
   draft. Every preview kind fills the dialog: no `max-width` measure on the
   scrolling surface, because a `ch` cap there shrinks the pane itself and
   leaves a blank strip beside the prose. `Ctrl/Cmd+S` saves; a save whose
@@ -112,6 +121,16 @@
   closing with unsaved changes asks first. Binary and server-truncated files
   cannot be edited (a truncated save would discard everything past the read
   limit) and the *Edit* button's tooltip says which case applies.
+* **Dialogs and the image lightbox**: clicking a tool card's image thumbnail
+  opens a lightbox with the full image. Every dialog (`Dialog.tsx`) renders
+  through a portal into `document.body` rather than in place: `.dialog-layer`
+  is `position: fixed`, and a transcript row carries `content-visibility:
+  auto`, which makes the row a containing block for fixed descendants - so an
+  in-place lightbox was laid out *inside its message row*, measuring 691x575 in
+  a 1440x817 viewport instead of covering the screen. Portalling fixes that for
+  every modal and survives any future `filter`/`transform`/`contain` ancestor.
+  The focus trap, Escape-to-close, scroll lock and focus restore are unchanged,
+  and dialogs stay mounted only while open.
 * **Theme studio** (right drawer, `Ctrl/Cmd+Shift+T`): built-in themes,
   per-token colours, density and custom CSS, persisted in the browser. The
   `themes` topic covers the storage key and the shareable export format.

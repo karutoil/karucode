@@ -373,6 +373,7 @@ impl Store for FakeStore {
             tool_call_id: message.tool_call_id.clone(),
             name: message.name.clone(),
             images: message.images.clone(),
+            reasoning_content: message.reasoning_content.clone(),
             rewound_at: None,
             created_at: now_ms(),
         };
@@ -1591,6 +1592,100 @@ impl Tool for ExternalTool {
     }
 }
 
+/// A tool whose schema declares required arguments, so the runtime's
+/// schema check and its "how to call this" hint can be exercised.
+///
+/// Three modes, because they must be told apart: a call that runs and fails
+/// (an execution failure, no hint), a call that refuses the request itself
+/// (`Error::BadRequest`, hint), and a call that runs cleanly.
+pub(crate) struct RequiredArgsTool {
+    pub name: String,
+    pub required: Vec<String>,
+    mode: RequiredMode,
+    invocations: Arc<AtomicUsize>,
+    /// Declare `required` as `properties` without making any of them required.
+    optional: bool,
+}
+
+enum RequiredMode {
+    Ok,
+    Fail,
+    Refuse,
+}
+
+impl RequiredArgsTool {
+    pub(crate) fn boxed(name: &str, required: &[&str]) -> Arc<Self> {
+        Self::build(name, required, RequiredMode::Ok)
+    }
+
+    pub(crate) fn failing(name: &str, required: &[&str]) -> Arc<Self> {
+        Self::build(name, required, RequiredMode::Fail)
+    }
+
+    pub(crate) fn refusing(name: &str, required: &[&str]) -> Arc<Self> {
+        Self::build(name, required, RequiredMode::Refuse)
+    }
+
+    /// Refuses the request itself while declaring every argument *optional*, so
+    /// schema validation lets the call through and the tool's own
+    /// `Error::BadRequest` is what the loop sees.
+    pub(crate) fn refusing_optional(name: &str, properties: &[&str]) -> Arc<Self> {
+        let mut tool = Self::build(name, properties, RequiredMode::Refuse);
+        Arc::get_mut(&mut tool)
+            .expect("a fresh tool handle")
+            .optional = true;
+        tool
+    }
+
+    fn build(name: &str, required: &[&str], mode: RequiredMode) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            required: required.iter().map(|s| s.to_string()).collect(),
+            mode,
+            invocations: Arc::new(AtomicUsize::new(0)),
+            optional: false,
+        })
+    }
+
+    /// How many times the tool actually ran, so a test can assert that a call
+    /// the schema rejected never reached it.
+    pub(crate) fn invocations(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.invocations)
+    }
+}
+
+#[async_trait]
+impl Tool for RequiredArgsTool {
+    fn spec(&self) -> ToolSpec {
+        let mut properties = serde_json::Map::new();
+        for key in &self.required {
+            properties.insert(key.clone(), serde_json::json!({"type": "string"}));
+        }
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Needs the declared arguments.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": properties,
+                "required": if self.optional { serde_json::json!([]) } else { serde_json::json!(self.required) },
+            }),
+            origin: ToolOrigin::Builtin,
+        }
+    }
+
+    async fn invoke(&self, request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        match self.mode {
+            RequiredMode::Ok => ToolOutcome::ok(format!("invoked:{}", request.name)),
+            RequiredMode::Fail => ToolOutcome::err("boom"),
+            RequiredMode::Refuse => ToolOutcome::err(Error::BadRequest(
+                "pattern may not be empty".to_string(),
+            )
+            .to_string()),
+        }
+    }
+}
+
 /// A tool that blocks until the run's cancellation token fires.
 ///
 /// Used to prove that a timed-out or cancelled subagent gets the chance to
@@ -2032,5 +2127,6 @@ pub(crate) fn new_message(session: &str, role: &str, content: &str) -> NewMessag
         tool_call_id: None,
         name: None,
         images: Vec::new(),
+        reasoning_content: None,
     }
 }

@@ -9,8 +9,8 @@ use crate::approvals::{ApprovalRegistry, RuntimeApprovalGate};
 use crate::subagent::SPAWN_AGENT_TOOL;
 use crate::tests_support::{
     test_inner_with_settings, ApprovalTool, BigOutputTool, EchoTool, ExternalTool, FakeSettings,
-    FollowUpTool, GateTool, Harness, HarnessBuilder, ImageTool, PanicTool, Script, ScriptedFactory,
-    SlowCancelTool, SteerTool,
+    FollowUpTool, GateTool, Harness, HarnessBuilder, ImageTool, PanicTool, RequiredArgsTool,
+    Script, ScriptedFactory, SlowCancelTool, SteerTool,
 };
 use crate::{ActiveRun, QueuedInput, QueuedKind, RecoveryReport, Runtime, RuntimeDeps};
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, ApprovalRequest};
@@ -809,6 +809,198 @@ async fn invalid_json_arguments_are_a_tool_error() {
     let messages = h.session_messages().await;
     let tool_message = messages.iter().find(|m| m.role == "tool").unwrap();
     assert!(tool_message.content.contains("invalid JSON arguments"));
+}
+
+/// The model sees a *working* call, not just a complaint, when its arguments
+/// fail to parse - and the repair is shown to it, never executed.
+#[tokio::test]
+async fn a_malformed_call_gets_the_working_version_back() {
+    // A fenced object with a trailing comma: the two mistakes that actually
+    // happen. It must parse after repair, and the tool must not have run.
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "echo", "```json\n{\"path\": \"a.txt\",}\n```")]),
+        Script::text("ok"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("bad args").await;
+    assert_eq!(finished_status(&events), "completed");
+    let finished = tool_finished(&events);
+    assert!(!finished[0].1, "a repaired call is still not run for the model");
+
+    let messages = h.session_messages().await;
+    let tool_message = messages.iter().find(|m| m.role == "tool").unwrap();
+    assert!(
+        tool_message.content.contains("invalid JSON arguments"),
+        "{}",
+        tool_message.content
+    );
+    assert!(
+        tool_message
+            .content
+            .contains("Re-issue the call as: {\"name\":\"echo\",\"arguments\":{\"path\":\"a.txt\"}}"),
+        "the repaired, runnable call must be in the result: {}",
+        tool_message.content
+    );
+    // No second `echoed:` result: a guess is shown, never executed.
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.role == "tool" && m.content.starts_with("echoed:")),
+        "a repaired argument string must not be executed"
+    );
+}
+
+#[tokio::test]
+async fn an_unparseable_call_still_shows_the_required_shape() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "write", "totally not json")]),
+        Script::text("ok"),
+    ])
+    .tool(RequiredArgsTool::boxed("write", &["path", "content"]))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("bad args").await;
+    let finished = tool_finished(&events);
+    assert!(!finished[0].1);
+    assert!(
+        finished[0].2.contains("Required shape:")
+            && finished[0].2.contains("\"path\""),
+        "{}",
+        finished[0].2
+    );
+}
+
+#[tokio::test]
+async fn arguments_that_violate_the_schema_are_refused_before_the_tool_runs() {
+    let tool = RequiredArgsTool::boxed("write", &["path"]);
+    let invoked = tool.invocations();
+    let mut h = HarnessBuilder::new(vec![
+        // `path` is present but has the wrong JSON type.
+        Script::call(&[("call_1", "write", "{\"path\": 7}")]),
+        Script::text("ok"),
+    ])
+    .tool(tool)
+    .build()
+    .await;
+
+    let events = h.run_to_finish("bad args").await;
+    assert_eq!(finished_status(&events), "completed");
+    let finished = tool_finished(&events);
+    assert!(!finished[0].1);
+    assert!(
+        finished[0].2.contains("arguments rejected for `write`")
+            && finished[0].2.contains("`path` must be string"),
+        "{}",
+        finished[0].2
+    );
+    assert!(
+        finished[0].2.contains("Re-issue the call as:"),
+        "{}",
+        finished[0].2
+    );
+    assert_eq!(
+        invoked.load(Ordering::SeqCst),
+        0,
+        "a call the schema rejects must not reach the tool"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_required_argument_is_named_with_the_example() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "write", "{}")]),
+        Script::text("ok"),
+    ])
+    .tool(RequiredArgsTool::boxed("write", &["path", "content"]))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("bad args").await;
+    let finished = tool_finished(&events);
+    assert!(!finished[0].1);
+    assert!(
+        finished[0]
+            .2
+            .contains("missing required argument `path`")
+            && finished[0].2.contains("missing required argument `content`"),
+        "{}",
+        finished[0].2
+    );
+}
+
+/// A tool that refuses the request itself still gets a hint, while a tool that
+/// simply succeeded at failing (a non-zero exit code) must not be dressed up
+/// as a parse error.
+#[tokio::test]
+async fn execution_failures_do_not_claim_the_arguments_were_wrong() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "flaky", "{\"path\":\"a.txt\"}")]),
+        Script::text("ok"),
+    ])
+    .tool(RequiredArgsTool::failing("flaky", &["path"]))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("run it").await;
+    let finished = tool_finished(&events);
+    assert!(!finished[0].1);
+    assert!(finished[0].2.contains("boom"), "{}", finished[0].2);
+    assert!(
+        !finished[0].2.contains("how to call"),
+        "an execution failure must not carry a usage hint: {}",
+        finished[0].2
+    );
+}
+
+#[tokio::test]
+async fn a_tool_that_refuses_the_request_itself_gets_the_working_call() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "picky", "{}")]),
+        Script::text("ok"),
+    ])
+    .tool(RequiredArgsTool::refusing_optional("picky", &["pattern"]))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("go").await;
+    let finished = tool_finished(&events);
+    assert!(!finished[0].1);
+    assert!(
+        finished[0].2.contains("invalid request: pattern may not be empty"),
+        "{}",
+        finished[0].2
+    );
+    assert!(
+        finished[0]
+            .2
+            .contains("[how to call `picky`: {\"name\":\"picky\",\"arguments\":{\"pattern\":\"<string>\"}}"),
+        "{}",
+        finished[0].2
+    );
+}
+
+#[tokio::test]
+async fn a_typo_in_a_tool_name_is_corrected_in_the_error() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "echoo", "{}")]),
+        Script::text("ok"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("typo").await;
+    let finished = tool_finished(&events);
+    assert!(!finished[0].1);
+    assert!(
+        finished[0].2.contains("Did you mean `echo`?"),
+        "{}",
+        finished[0].2
+    );
 }
 
 #[tokio::test]

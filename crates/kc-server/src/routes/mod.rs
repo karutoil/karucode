@@ -108,6 +108,10 @@ pub fn api_router() -> Router<AppState> {
         .route("/workspace/tree", get(workspace::tree))
         .route("/workspace/file", get(workspace::file))
         .route("/workspace/raw", get(workspace::raw))
+        // A wildcard, not a query parameter: a rendered page resolves its own
+        // `./style.css` and `../logo.png` against this URL's path, so the path
+        // has to be the workspace path. See `workspace::preview`.
+        .route("/workspace/preview/*rest", get(workspace::preview))
         .route("/git/status", get(git::status))
         .route("/git/diff", get(git::diff))
         .route(

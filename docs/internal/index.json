@@ -1,5 +1,5 @@
 {
-  "count": 19,
+  "count": 20,
   "generated_by": "cargo run -p kc-docs -- --write",
   "topics": [
     {
@@ -262,6 +262,7 @@
         "route:GET /api/workspace/file",
         "route:PUT /api/workspace/file",
         "route:GET /api/workspace/raw",
+        "route:GET /api/workspace/preview/*rest",
         "route:POST /api/workspace/upload",
         "route:GET /api/git/status",
         "route:GET /api/git/diff",
@@ -744,6 +745,26 @@
     },
     {
       "applies_to": [
+        "tool:read_file",
+        "tool:run_command",
+        "tool:karucode_docs",
+        "route:POST /api/sessions/:id/messages"
+      ],
+      "path": "tool-call-errors.md",
+      "slug": "tool-call-errors",
+      "source": "crates/kc-core/src/tool.rs:1",
+      "summary": "A call that fails because of how it was written comes back with a working version of itself, so the next attempt is correct instead of another guess.",
+      "tags": [
+        "tools",
+        "errors",
+        "agent",
+        "parsing",
+        "hints"
+      ],
+      "title": "What a failed tool call tells the model"
+    },
+    {
+      "applies_to": [
         "ui:ProjectRail",
         "ui:project-switcher",
         "ui:mobile-sheet",
@@ -770,7 +791,9 @@
         "route:GET /api/workspace/tree",
         "route:PUT /api/workspace/file",
         "route:GET /api/workspace/raw",
+        "route:GET /api/workspace/preview/*rest",
         "route:POST /api/workspace/upload",
+        "file:web/src/components/Dialog.tsx",
         "route:GET /api/sessions/:id/rewind",
         "route:POST /api/sessions/:id/rewind",
         "event:session_rewound",
