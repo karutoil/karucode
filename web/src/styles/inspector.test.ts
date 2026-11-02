@@ -63,8 +63,8 @@ describe('inspector tab strip stylesheet', () => {
     // The strip is sized by its tab, not by the scrollbar: on a platform whose
     // bar takes space the strip grows by the bar (44 -> 53px) instead of
     // clipping the tabs, so the panel below moves by a bar's height at most.
-    expect(strip['min-height']).toBe('36px');
-    expect(tab['height']).toBe('36px');
+    expect(strip['min-height']).toBe('44px');
+    expect(tab['height']).toBe('44px');
   });
 });
 

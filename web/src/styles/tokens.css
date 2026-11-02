@@ -18,43 +18,43 @@
   color-scheme: dark;
 
   /* ---- surfaces -------------------------------------------------------- */
-  --theme-bg: #08090b; /* app canvas */
-  --theme-rail: #0b0d10; /* project rail */
-  --theme-sidebar: #0e1116; /* session sidebar */
-  --theme-inspector: #11151a; /* right inspector */
-  --theme-surface: #171c23; /* cards, panels, inputs */
-  --theme-raised: #1d232c; /* elevated surface */
-  --theme-hover: #252c37; /* hover surface */
+  --theme-bg: #111213; /* app canvas */
+  --theme-rail: #141516; /* project rail */
+  --theme-sidebar: #18191a; /* session sidebar */
+  --theme-inspector: #171819; /* right inspector */
+  --theme-surface: #1c1d1f; /* cards, panels, inputs */
+  --theme-raised: #222326; /* elevated surface */
+  --theme-hover: #27292b; /* hover surface */
 
   /* ---- lines ----------------------------------------------------------- */
-  --theme-line: #252c37;
-  --theme-line-soft: #1f252d;
-  --theme-line-strong: #333c48;
+  --theme-line: #2a2c2f;
+  --theme-line-soft: #242628;
+  --theme-line-strong: #343638;
 
   /* ---- text ------------------------------------------------------------ */
-  --theme-text: #e9ebf0;
-  --theme-text-secondary: #b7bdc8;
-  --theme-muted: #9aa3b2;
-  --theme-faint: #6d7683;
+  --theme-text: #eae9e5;
+  --theme-text-secondary: #b4b3ae;
+  --theme-muted: #8b8d8c;
+  --theme-faint: #676b6b;
 
   /* ---- accents & status ------------------------------------------------ */
-  --theme-accent: #eaa06d;
-  --theme-accent-hi: #f5bd93;
-  --theme-accent-bg: #2a2119;
-  --theme-accent-line: #6b4a33;
-  --theme-accent-text: #eaa06d; /* accent as ink */
+  --theme-accent: #dfb680;
+  --theme-accent-hi: #f1c691;
+  --theme-accent-bg: #32291e;
+  --theme-accent-line: #58452e;
+  --theme-accent-text: #dfb680; /* accent as ink */
   --theme-on-accent: #1c0f06; /* ink on an accent fill */
-  --theme-success: #7fd6b4;
-  --theme-success-bg: #12271f;
-  --theme-warn: #f0c26b;
-  --theme-danger: #f2938b;
+  --theme-success: #88baa0;
+  --theme-success-bg: #1b3029;
+  --theme-warn: #f1c691;
+  --theme-danger: #e49e91;
   --theme-danger-bg: #2c1b1a;
-  --theme-info: #8fb3f7;
+  --theme-info: #92b3d8;
 
   /* ---- code ------------------------------------------------------------ */
-  --theme-syntax-keyword: #eaa06d;
-  --theme-syntax-string: #8fdcb7;
-  --theme-syntax-comment: #7c8494;
+  --theme-syntax-keyword: #dfb680;
+  --theme-syntax-string: #88baa0;
+  --theme-syntax-comment: #8b8d8c;
   --theme-shadow: rgba(0, 0, 0, 0.48);
 
   /* ---- fidelity roles --------------------------------------------------
@@ -65,17 +65,17 @@
 --surface-input: #1b212a;
   --line-input: #333c48;
   --focus-input: #8a6242;
-  --input-ink: #e9ebf0;
+  --input-ink: #eae9e5;
   --input-placeholder: #6d7683;
   --surface-plus-hover: #252c37;
   --surface-hover-strong: #222933;
   --line-hair: #252c37;
-  --gold-send: #eaa06d;
+  --gold-send: #dfb680;
   --gold-send-hover: #f5bd93;
   --on-gold: #1c0f06;
   --foot-ink: #6d7683;
   --foot-strong: #9aa3b2;
-  --ring-fill: #eaa06d;
+  --ring-fill: #dfb680;
   --ring-track: #2c333d;
   --chip-surface: #1d232c;
   --chip-line: #2c333d;
@@ -86,7 +86,7 @@
   --text-menu-item: #b7bdc8;
   --text-menu-meta: #9aa3b2;
   --row-accent-bg: #2a2119;
-  --row-accent-ink: #eaa06d;
+  --row-accent-ink: #dfb680;
   --surface-inset: #1f2630;
   --line-inset: #252c37;
   --line-card: #2b333e;
@@ -97,10 +97,10 @@
   --text-subtle: #6d7683;
   --text-kicker: #8b92a1;
   --text-kicker-panel: #9aa3b2;
-  --tab-active-text: #e9ebf0;
+  --tab-active-text: #eae9e5;
   --tab-hover: #b7bdc8;
   --row-selected-bg: #2a2119;
-  --row-selected-text: #eaa06d;
+  --row-selected-text: #dfb680;
   --surface-preview: #1b212a;
   --line-preview: #2c333d;
   --icon-folder: #c79a6b;
@@ -113,10 +113,10 @@
   --btn-accent-bg: #2a2119;
   --btn-accent-bg-hover: #3a2b1d;
   --btn-accent-line: #6b4a33;
-  --btn-accent-text: #eaa06d;
+  --btn-accent-text: #dfb680;
   --toggle-track: #2c333d;
   --toggle-knob: #6d7683;
-  --toggle-on-track: #eaa06d;
+  --toggle-on-track: #dfb680;
   --toggle-on-knob: #f5bd93;
   --surface-card: #13181f;
   --line-card-strong: #2b333e;
@@ -147,15 +147,15 @@
   --surface-diff-add: #0f2a20;
   --surface-diff-del: #2e1a1a;
   --surface-diff-ctx: #0d1014;
-  --text-review: #eaa06d;
+  --text-review: #dfb680;
   --surface-review: #2a2119;
   --surface-review-hi: #3a2b1d;
-  --text-empty-title: #e9ebf0;
+  --text-empty-title: #eae9e5;
   --text-empty-copy: #9aa3b2;
-  --text-empty-symbol: #eaa06d;
+  --text-empty-symbol: #dfb680;
   --surface-toast: #252c37;
   --line-toast: #3a4350;
-  --text-toast: #e9ebf0;
+  --text-toast: #eae9e5;
   --rail-glyph-text: #8b92a1;
   --rail-add-line: #2c333d;
   --rail-add-line-hover: #6b4a33;
@@ -279,13 +279,14 @@
   --transition-fast: 120ms ease-out;
 
   /* ---- frame metrics --------------------------------------------------- */
-  --rail-w: 54px;
-  --sidebar-w: 288px;
-  --inspector-w: 340px;
-  --header-h: 52px;
-  --tabs-h: 40px;
-  --content-max: 820px;
-
+  /* Mock reference (karucode-v3-themes.html line 19):
+   * --railw:64px; --sidew:258px; --rightw:342px; */
+  --rail-w: 64px;
+  --sidebar-w: 258px;
+  --inspector-w: 342px;
+  --header-h: 66px; /* .main-head{height:66px;min-height:66px} */
+  --tabs-h: 44px; /* .workspace-tabs{height:44px;min-height:44px} */
+  --content-max: 820px; /* .thread-inner{max-width:820px} */
   /* ---- mock surface aliases -------------------------------------------- *
    * The mock's three-pane language names its fills directly: `--panel-2` is the
    * chrome column, `--surface-2`/`--surface-3` are the two raised card fills, and

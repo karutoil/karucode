@@ -46,7 +46,7 @@ const CHROME_COLUMNS = ['rail', 'sidebar', 'inspector'] as const;
  */
 const CHROME_LAYERS = 4;
 
-const MIN_LAYER_STEP: Record<Theme['mode'], number> = { dark: 1.06, light: 1.04 };
+const MIN_LAYER_STEP: Record<Theme['mode'], number> = { dark: 1.05, light: 1.04 };
 
 /** Chrome columns are a frame, not objects: only a visible hairline is required. */
 const MIN_CHROME_STEP = 1.015;

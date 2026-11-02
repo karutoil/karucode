@@ -42,7 +42,7 @@ describe('tool calls: one visual language', () => {
   it('shares one themed card shell and one error treatment', () => {
     const shell = sharedDeclarations('.tool-card', '.command-card');
     expect(shell['border']).toBe('1px solid var(--line-card-strong)');
-    expect(shell['border-radius']).toBe('var(--radius)');
+    expect(shell['border-radius']).toBe('10px');
     expect(shell['background']).toBe('var(--surface-card)');
     expect(css).toMatch(/\.tool-card\[data-status='error'\],[\s\S]*?\.command-card\[data-status='error'\]/);
   });

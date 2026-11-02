@@ -54,11 +54,11 @@ describe('initTheme', () => {
     expect(root().dataset.theme).toBe('ember');
     expect(root().dataset.mode).toBe('dark');
     expect(root().dataset.density).toBe('comfortable');
-    expect(token('--theme-bg')).toBe('#08090b');
-    expect(token('--theme-accent')).toBe('#eaa06d');
+    expect(token('--theme-bg')).toBe('#111213');
+    expect(token('--theme-accent')).toBe('#dfb680');
     expect(root().style.colorScheme).toBe('dark');
     expect(document.querySelector('meta[name="theme-color"]')?.getAttribute('content')).toBe(
-      '#08090b',
+      '#111213',
     );
   });
 

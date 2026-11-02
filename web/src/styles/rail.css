@@ -8,8 +8,8 @@
 
 .project-rail {
   --project-rail-width: var(--rail-w);
-  --project-rail-item: 32px;
-  --project-rail-glyph: 27px;
+  --project-rail-item: 42px; /* Mock reference: .project-btn{width:42px;height:42px} */
+  --project-rail-glyph: 35px; /* Mock reference: .project-glyph{width:35px;height:35px} */
   display: flex;
   flex: 0 0 var(--project-rail-width);
   flex-direction: column;
@@ -35,7 +35,7 @@
   display: grid;
   place-items: center;
   width: 100%;
-  height: auto;
+  height: 70px; /* Mock reference: .brand{height:70px} */
   margin-bottom: 9px;
   flex: 0 0 auto;
 }
@@ -47,9 +47,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 29px;
-  height: 29px;
-  border-radius: 9px;
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
   background: linear-gradient(
     150deg,
     color-mix(in srgb, var(--accent-fill) 55%, var(--text)),
@@ -126,7 +126,7 @@
   height: var(--project-rail-item);
   padding: 0;
   border: 0;
-  border-radius: 9px;
+  border-radius: 13px;
   background: transparent;
   color: var(--rail-glyph-text);
   cursor: pointer;
@@ -141,7 +141,7 @@
   width: var(--project-rail-glyph);
   height: var(--project-rail-glyph);
   border: 1px solid var(--rail-glyph-line);
-  border-radius: 8px;
+  border-radius: 11px;
   background: var(--surface-3);
   color: var(--rail-glyph-text);
   font-family: var(--font-ui);

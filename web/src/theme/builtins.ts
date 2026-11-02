@@ -13,30 +13,30 @@ import type { Theme, ThemeColors, ThemeMode } from './types';
 
 /** Ember, the default dark palette (see `styles/tokens.css`).
  *
- * These are the mock's own values: a near-black cool canvas (`#08090b`), a
- * four-step chrome ladder, and a coral accent. The accent is warm against a cool
- * shell on purpose — it is the only saturated colour in the frame, so it reads as
- * "the thing you press" without any weight of its own.
+ * These are the mock's exact values from karucode-v3-themes.html: a warm charcoal
+ * canvas, a four-step chrome ladder, and a sand-gold accent. The palette is kept
+ * byte-for-byte identical to the mock's :root variables so applying Ember before
+ * React renders cannot shift the UI.
  */
 const DARK_DEFAULTS: ThemeColors = {
-  bg: '#08090b',
-  rail: '#0b0d10',
-  sidebar: '#0e1116',
-  inspector: '#11151a',
-  surface: '#171c23',
-  raised: '#1d232c',
-  hover: '#252c37',
-  border: '#333c48',
-  text: '#e9ebf0',
-  muted: '#9aa3b2',
-  accent: '#eaa06d',
-  success: '#7fd6b4',
-  danger: '#f2938b',
-  info: '#8fb3f7',
-  warn: '#f0c26b',
-  syntaxKeyword: '#eaa06d',
-  syntaxString: '#8fdcb7',
-  syntaxComment: '#7c8494',
+  bg: '#111213',
+  rail: '#141516',
+  sidebar: '#18191a',
+  inspector: '#171819',
+  surface: '#1c1d1f',
+  raised: '#222326',
+  hover: '#27292b',
+  border: '#343638',
+  text: '#eae9e5',
+  muted: '#8b8d8c',
+  accent: '#dfb680',
+  success: '#88baa0',
+  danger: '#e49e91',
+  info: '#92b3d8',
+  warn: '#f1c691',
+  syntaxKeyword: '#dfb680',
+  syntaxString: '#88baa0',
+  syntaxComment: '#8b8d8c',
 };
 
 /** Daybreak, the default light palette (the mock's warm-paper mode). */

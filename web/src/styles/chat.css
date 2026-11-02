@@ -67,15 +67,15 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: 0 0 6px;
-  padding: 8px 0 14px;
+  margin: 4px auto 30px;
+  padding: 0;
   color: var(--faint);
   font-family: var(--font-mono);
   font-size: 10px;
-  font-weight: 400;
-  letter-spacing: 0;
-  text-align: left;
-  text-transform: none;
+  font-weight: 650;
+  letter-spacing: 1.18px;
+  text-align: center;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 
@@ -88,9 +88,9 @@
 }
 
 /* Cards that arrive without an assistant turn (a tool call restored from
- * history) still line up under the assistant body: 24px avatar + 11px gap. */
+ * history) still line up under the assistant body: 29px avatar + 14px gap. */
 .transcript > :is(.tool-card, .command-card, .approval-card, .diff-preview, .notice, .run-error) {
-  margin-left: 35px;
+  margin-left: 43px;
 }
 
 /* ---------- message rows ---------- */
@@ -104,30 +104,30 @@
  * fallback is what stops a jump when a skipped row is measured again. */
 .msg {
   display: flex;
-  gap: 11px;
+  gap: 14px;
   min-width: 0;
-  margin: 0;
-  padding: 12px 0;
+  margin: 0 0 33px;
+  padding: 0;
   content-visibility: auto;
   contain-intrinsic-size: auto 160px;
   animation: msg-fade-up 0.26s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 }
 
-/* The mock's `.av`: a 24px rounded square. The user's is a quiet hairline tile;
+/* The mock's `.av`: a 29px rounded square. The user's is a quiet hairline tile;
  * the agent's is the one place the accent appears as a fill, so a scroll down
  * the page reads as a conversation between two people rather than a log. */
 .msg-avatar {
   display: grid;
   place-items: center;
-  flex: 0 0 24px;
-  width: 24px;
-  height: 24px;
+  flex: 0 0 29px;
+  width: 29px;
+  height: 29px;
   margin-top: 1px;
   border: 1px solid var(--line-strong);
-  border-radius: 7px;
+  border-radius: 10px;
   background: var(--surface-3);
   color: var(--text-secondary);
-  font-size: 9.5px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: -0.2px;
   user-select: none;
@@ -163,9 +163,9 @@
 .msg-top {
   display: flex;
   align-items: center;
-  gap: 7px;
-  min-height: 18px;
-  margin: 0 0 4px;
+  gap: 9px;
+  height: 22px;
+  margin: 0 0 9px;
 }
 
 .msg-author {
@@ -183,21 +183,21 @@
 .msg-body {
   min-width: 0;
   color: var(--text-body);
-  font-size: var(--fs-message);
-  line-height: var(--lh-message);
+  font-size: 12.5px;
+  line-height: 1.72;
 }
 
 /* The mock's `.body-card`: the user's question in a raised, inset-lit card. */
 .user-question {
   margin-top: 3px;
-  padding: 10px 12px;
+  padding: 16px 18px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--surface);
   box-shadow: inset 0 1px 0 var(--line-soft);
   color: var(--text-secondary);
   font-size: 12.8px;
-  line-height: 1.62;
+  line-height: 1.72;
 }
 
 .user-text {
@@ -295,17 +295,24 @@
 .tag {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   height: 17px;
-  padding: 0 5px;
+  padding: 3px 7px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 5px;
   background: var(--surface-2);
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   line-height: 15px;
   white-space: nowrap;
+}
+
+.tag .circle {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 .tag-dot {
@@ -882,7 +889,7 @@
 .command-card {
   margin: 18px 0 15px;
   border: 1px solid var(--line-card-strong);
-  border-radius: var(--radius);
+  border-radius: 10px;
   background: var(--surface-card);
   overflow: hidden;
 }
@@ -897,7 +904,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 44px;
+  height: 44px;
   padding: 0 15px;
   border-bottom: 1px solid var(--line-divider);
 }
@@ -909,7 +916,7 @@
   width: 26px;
   height: 26px;
   border: 1px solid var(--line-symbol);
-  border-radius: var(--radius-sm);
+  border-radius: 7px;
   background: var(--surface-symbol);
   color: var(--text-symbol);
 }
@@ -1780,7 +1787,7 @@
 .diff-preview {
   margin: 18px 0 13px;
   border: 1px solid var(--line-diff);
-  border-radius: var(--radius);
+  border-radius: 10px;
   background: var(--surface-diff);
   overflow: hidden;
 }
@@ -1789,7 +1796,7 @@
   display: flex;
   align-items: center;
   gap: 9px;
-  min-height: 43px;
+  height: 43px;
   padding: 0 14px;
   border-bottom: 1px solid var(--line-diff-head);
 }
@@ -1800,7 +1807,7 @@
   flex: 0 0 26px;
   width: 26px;
   height: 26px;
-  border-radius: var(--radius-sm);
+  border-radius: 7px;
   background: var(--surface-raised);
   color: var(--accent);
 }
@@ -2333,7 +2340,7 @@
   }
 
   .transcript > :is(.tool-card, .command-card, .approval-card, .diff-preview, .notice, .run-error) {
-    margin-left: 35px;
+    margin-left: 43px;
   }
 
   .tool-head,
@@ -2465,7 +2472,7 @@
   /* The date marker is 30px of air below a 15px label; the groups are obvious
    * from the timestamps on phones. */
   .date-marker {
-    margin: 0 0 6px;
+    margin: 4px auto 30px;
     padding: 6px 0 10px;
   }
 

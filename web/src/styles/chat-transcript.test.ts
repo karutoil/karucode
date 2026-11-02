@@ -13,8 +13,8 @@ function rule(selector: string): string {
 
 describe('transcript mock layout contract', () => {
   it('keeps the compact avatar and conversation row rhythm at every density', () => {
-    expect(rule('.msg')).toContain('gap: 11px;');
-    expect(rule('.msg')).toContain('padding: 12px 0;');
+    expect(rule('.msg')).toContain('gap: 14px;');
+    expect(rule('.msg')).toContain('margin: 0 0 33px;');
     expect(css).not.toMatch(/\.msg\s*\{[^}]*margin-bottom:\s*(?:22|41)px/s);
     expect(css).toContain(".date-marker::before,");
     expect(css).toContain(".date-marker::after {");
@@ -27,7 +27,7 @@ describe('transcript mock layout contract', () => {
     expect(cards).toContain('background: var(--surface-card);');
     expect(rule(".tool-card[data-status='error'],\n.command-card[data-status='error']")).toContain('var(--danger)');
     const headers = rule('.tool-head,\n.command-summary');
-    expect(headers).toContain('min-height: 44px;');
+    expect(headers).toContain('height: 44px;');
     expect(headers).toContain('padding: 0 15px;');
     expect(rule('.cmd-output')).toContain('color: var(--text-output);');
     expect(rule('.cmd-output[hidden]')).toContain('display: none;');
@@ -42,6 +42,6 @@ describe('transcript mock layout contract', () => {
     expect(css).toContain('.tool-group');
     expect(css).toContain('.process-fold');
     expect(css).toMatch(/@media \(max-width: 640px\)[\s\S]*?\.msg\s*\{[^}]*gap: 0;/);
-    expect(css).toMatch(/@media \(max-width: 640px\)[\s\S]*?\.date-marker\s*\{[^}]*margin: 0 0 6px;/);
+    expect(css).toMatch(/@media \(max-width: 640px\)[\s\S]*?\.date-marker\s*\{[^}]*margin: 4px auto 30px;/);
   });
 });

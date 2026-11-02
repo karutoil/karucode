@@ -153,7 +153,7 @@ describe('colour editing', () => {
 
     fireEvent.input(input, { target: { value: '#12' } });
     expect(input.getAttribute('aria-invalid')).toBe('true');
-    expect(document.documentElement.style.getPropertyValue('--theme-bg')).toBe('#08090b');
+    expect(document.documentElement.style.getPropertyValue('--theme-bg')).toBe('#111213');
     expect(draftEdited.value).toBe(false);
 
     fireEvent.focusOut(input);
