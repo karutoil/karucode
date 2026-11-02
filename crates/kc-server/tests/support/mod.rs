@@ -11,7 +11,9 @@ use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use futures_util::StreamExt;
-use kc_core::config::{Config, McpServerConfig, ModelConfig, PluginConfig, TerminalConfig};
+use kc_core::config::{
+    Config, McpServerConfig, ModelConfig, PluginConfig, TerminalConfig, TitlesConfig,
+};
 use kc_core::hooks::NoHooks;
 use kc_core::paths::Workspace;
 use kc_core::provider::{ChatRequest, Provider, ProviderChunk, ProviderFactory, ProviderStream};
@@ -251,6 +253,11 @@ pub struct HarnessBuilder {
     project_roots: Vec<PathBuf>,
     /// `[terminals]`. `None` uses the defaults (on, `/bin/sh`-ish, 16 slots).
     terminals: Option<TerminalConfig>,
+    /// `allow_temp_dir = false`: the workspace is the only allowed root, so a
+    /// `..` escape is refused the way it is in a normal install outside `/tmp`.
+    strict_root: bool,
+    /// `[titles]`. `None` keeps the shipped default, which is AI titles **on**.
+    titles: Option<TitlesConfig>,
 }
 
 impl HarnessBuilder {
@@ -268,6 +275,8 @@ impl HarnessBuilder {
             allowed_hosts: None,
             project_roots: Vec::new(),
             terminals: None,
+            strict_root: false,
+            titles: None,
         }
     }
 
@@ -283,6 +292,43 @@ impl HarnessBuilder {
     /// creation into an allowlisted operation.
     pub fn project_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.project_roots = roots;
+        self
+    }
+
+    /// Confine the file tools to the project root only, by turning
+    /// `allow_temp_dir` off.
+    ///
+    /// The default is *on*, and deliberately so - the temp directory is a second
+    /// allowed root (see `Config::extra_roots` and the `security` doc topic). That
+    /// makes `/tmp` a legal destination, which is why a test that wants to prove a
+    /// `..` escape is refused has to ask for project-only confinement first: the
+    /// harness workspace lives under `std::env::temp_dir()`, so with the default
+    /// `../../etc/passwd` genuinely resolves to `<tmp>/etc/passwd` and is *allowed*.
+    /// Without this, an escape assertion passes or fails depending on what happens
+    /// to be in `/tmp`, which is not a test.
+    pub fn strict_workspace(mut self) -> Self {
+        self.strict_root = true;
+        self
+    }
+
+    /// Override `[titles]`. The shipped default is AI titles **on** (see the
+    /// `session-titles` doc topic), and the harness models are scripted, so a
+    /// titling turn is answered by the next script exactly like a run turn.
+    /// A test that asserts the *deterministic* title has to turn the model title
+    /// off with [`.no_ai_titles`](Self::no_ai_titles), or it is racing the titler.
+    pub fn titles(mut self, config: TitlesConfig) -> Self {
+        self.titles = Some(config);
+        self
+    }
+
+    /// Turn the background AI title off, leaving the deterministic title the
+    /// server derives from the first message. Use this in any test that asserts
+    /// a title without first arranging a titling response.
+    pub fn no_ai_titles(mut self) -> Self {
+        self.titles = Some(TitlesConfig {
+            enabled: false,
+            ..TitlesConfig::default()
+        });
         self
     }
 
@@ -361,11 +407,10 @@ impl HarnessBuilder {
             // list the entries the host was actually given — the bootstrap wires
             // it that way too.
             plugins: self.plugin_configs.clone(),
-            terminals: self
-                .terminals
-                .clone()
-                .unwrap_or_else(TerminalConfig::default),
+            terminals: self.terminals.clone().unwrap_or_default(),
             project_roots: self.project_roots.clone(),
+            allow_temp_dir: !self.strict_root,
+            titles: self.titles.clone().unwrap_or_default(),
             model: ModelConfig {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 model: "test-model".into(),

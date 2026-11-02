@@ -29,7 +29,10 @@ data_dir = "/home/me/.local/share/karucode"
 # confinement. Env: KARUCODE_ALLOW_TEMP_DIR.
 # allow_temp_dir = true
 # Delete messages older than this many days (the newest 100 per session are
-# always kept). 0 keeps everything. Env: KARUCODE_RETENTION_DAYS.
+# always kept). 0 keeps everything and is the default. When set, a retention
+# pass runs once an hour and then hands the freed pages back to the filesystem;
+# the setting is re-read every hour, so changing it takes effect on the next
+# pass. Env: KARUCODE_RETENTION_DAYS.
 # retention_days = 0
 log_level = "info"
 
@@ -247,3 +250,28 @@ say_body = true
 # url = "http://127.0.0.1:3001/mcp"
 # [mcp_servers.headers]
 # Authorization = "Bearer ..."
+
+# --- terminals -------------------------------------------------------------
+# The terminal tab: a real PTY per sub-tab, running as the server user. This is
+# a shell for the *operator*, not a model tool, so it does not ask for approval;
+# `approvals.mode` does not gate it. Turn it off on a shared host.
+# `KARUCODE_TERMINALS=0`, `_SHELL`, `_SCROLLBACK_BYTES`, `_MAX`, and
+# `KARUCODE_TERMINAL_IDLE_SECS` override these.
+[terminals]
+enabled = true
+# shell = "/bin/sh"          # default: $SHELL, else /bin/sh
+scrollback_bytes = 262144    # replay ring per terminal, 256 KiB (4 KiB .. 4 MiB)
+max_terminals = 16           # per install (1 .. 64); further creates are refused
+idle_timeout_secs = 43200    # an idle shell is reaped after 12 hours
+
+# --- session titles --------------------------------------------------------
+# AI-written session titles, on by default. One cheap extra request after the
+# first user message; it never blocks the run and never overwrites a name you
+# set yourself. Leave `provider`/`model` empty to use the session's own model.
+# `KARUCODE_TITLES`, `_PROVIDER`, `_MODEL` override these.
+[titles]
+enabled = true
+# provider = "gateway"       # a [[providers]] id; default = the session's own
+# model = "claude-haiku"     # default = the session's model
+max_chars = 60               # hard cap on a generated title (8 .. 120)
+timeout_secs = 20            # give up and keep the derived title

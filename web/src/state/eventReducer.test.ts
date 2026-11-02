@@ -2,7 +2,14 @@ import { describe, expect, it } from 'vitest';
 import type { KarucodeEvent, SessionSummary } from '../api/types';
 import { emptyChatState, seedChatState, type ChatState, type MessageItem } from './chat';
 import { applyEventToChat, applyEventToSessions } from './eventReducer';
-import { detailFixture, NOW, queuedFixture, summaryFixture, secondSummaryFixture } from '../test/fixtures';
+import {
+  detailFixture,
+  NOW,
+  queuedFixture,
+  secondSummaryFixture,
+  summaryFixture,
+  withoutDraft,
+} from '../test/fixtures';
 
 function state(): ChatState {
   return emptyChatState('s_ab12');
@@ -616,6 +623,32 @@ describe('seedChatState', () => {
 });
 
 describe('queued messages', () => {
+  it('normalises a frame that omits the draft, so every row can render one', () => {
+    // `queued_messages` serialises the raw `QueuedMessage`, where `draft` is
+    // `skip_serializing_if = "Option::is_none"` - absent whenever it equals
+    // `content`, which is the normal no-attachment case. Only
+    // `GET .../queues` goes through `public_view()`. The reducer fills the gap in
+    // at the boundary so no component has to know.
+    const queued = applyEventToChat(state(), {
+      ...event(3, 'queued_messages'),
+      session_id: 's_ab12',
+      steers: [withoutDraft(queuedFixture({ id: 'steer_1', content: 'also check the fixtures' }))],
+      follow_ups: [],
+    } as unknown as KarucodeEvent);
+
+    expect(queued.queued).toHaveLength(1);
+    expect(queued.queued[0]?.draft).toBe('also check the fixtures');
+    // An explicitly empty draft is a draft (an attachments-only message), not a
+    // missing field: it must not be replaced by the rendered content.
+    const withEmpty = applyEventToChat(state(), {
+      ...event(4, 'queued_messages'),
+      session_id: 's_ab12',
+      steers: [queuedFixture({ id: 'steer_1', draft: '', content: '<file>body</file>' })],
+      follow_ups: [],
+    } as unknown as KarucodeEvent);
+    expect(withEmpty.queued[0]?.draft).toBe('');
+  });
+
   it('replaces the pending list from the whole-queue frame', () => {
     const queued = applyEventToChat(state(), {
       ...event(3, 'queued_messages'),

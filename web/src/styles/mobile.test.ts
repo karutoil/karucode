@@ -101,9 +101,13 @@ describe('phone shell: the frame leaves the conversation alone', () => {
     // spent on chrome before the first message.
     expect(body).toMatch(/--header-h: 52px/);
     expect(body).toMatch(/--tabs-h: 38px/);
-    // The project -> sessions -> activity line is a second row the title alone
-    // already answers.
-    expect(body).toMatch(/\.breadcrumb \{\s*\n\s*display: none/);
+  });
+
+  it('keeps the session title while dropping secondary breadcrumb chrome', () => {
+    const body = tier(layoutCss, 640);
+    expect(body).toMatch(/\.breadcrumb > strong,[\s\S]*?display: none/);
+    expect(body).toMatch(/\.breadcrumb \{\s*\n\s*flex: 1 1 auto/);
+    expect(body).not.toMatch(/\.breadcrumb \{\s*\n\s*display: none/);
   });
 });
 
@@ -190,7 +194,7 @@ describe('phone transcript: a card does not fill the screen', () => {
     // finished calls filled a 956px screen. The preview is one line of context
     // here; the full output is one tap away in "Show output".
     expect(body).toMatch(/\.tool-body \{[^}]*max-height: 74px/);
-    expect(body).toMatch(/\.tool-head \{[^}]*min-height: 38px/);
+    expect(body).toMatch(/\.tool-head,\s*\.command-summary \{[^}]*min-height: 38px/);
     expect(body).toMatch(/\.tool-foot \{[^}]*min-height: 28px/);
   });
 
@@ -203,5 +207,33 @@ describe('phone transcript: a card does not fill the screen', () => {
     // A regression here is a horizontal scrollbar on the whole page, which on a
     // phone makes the header slide sideways under the thumb.
     expect(chatCss).not.toMatch(/body \{[^}]*overflow-x: scroll/);
+  });
+});
+
+describe('transcript row cost: off-screen rows skip layout and paint', () => {
+  const row = declarations(chatCss, '.msg');
+
+  it('opts the message row into content-visibility', () => {
+    // A session can hold thousands of rows and a run streams a token at a time;
+    // without this the browser lays out and paints the whole conversation on
+    // every one of them. `auto` (not `hidden`) keeps the row focusable, findable
+    // by find-in-page, and reachable by `scrollIntoView`.
+    expect(row['content-visibility']).toBe('auto');
+  });
+
+  it('reserves a plausible height for a row it has not measured yet', () => {
+    // `auto 160px` remembers each row's last measured height and falls back to
+    // 160px the first time. Without the fallback the scrollbar jumps as rows are
+    // skipped and re-measured; `contain-intrinsic-size: none` would collapse
+    // every off-screen row to zero and make the scrollbar meaningless.
+    expect(row['contain-intrinsic-size']).toBe('auto 160px');
+  });
+
+  it('leaves the date marker and the cards outside the containment', () => {
+    // Only message rows are contained. Applying it to the tool cards too would
+    // break `position: sticky` headers inside them and the diff cards' height
+    // measurement, which `content-visibility: auto` freezes while off-screen.
+    expect(chatCss).not.toMatch(/\.tool-card \{[^}]*content-visibility/);
+    expect(chatCss).not.toMatch(/\.date-marker \{[^}]*content-visibility/);
   });
 });

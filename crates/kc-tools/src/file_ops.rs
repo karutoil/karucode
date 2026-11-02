@@ -19,9 +19,22 @@ pub const MAX_READ_LINES: usize = 2000;
 pub const MAX_FILE_WRITE_BYTES: usize = 2 * 1024 * 1024;
 /// Cap for `edit_file` (the whole file is loaded to compute the diff).
 pub const MAX_EDIT_BYTES: u64 = 8 * 1024 * 1024;
+/// How many line numbers an ambiguity refusal lists before "…".
+const MAX_REPORTED_LINES: usize = 10;
 pub const MAX_LIST_ENTRIES: usize = 500;
-/// How many leading bytes are inspected for a NUL byte (binary sniff).
+/// How many leading bytes are inspected for a NUL byte when *planning an edit*.
+///
+/// `read_file` no longer uses a fixed prefix: it sniffs the whole window it is
+/// about to return (a NUL at offset 20 000 used to slip past an 8 KiB check and
+/// reach the model). An edit needs the whole file in memory anyway, so this is
+/// only an early-out for an obviously binary target.
 pub const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+/// Upper bound on the line count `read_file` will compute for a byte-capped read.
+///
+/// The count exists so the header can say "of N" for a file larger than
+/// `limits.max_file_read_bytes`. Beyond this the number stops being useful and the
+/// scan is wasted IO, so counting stops and the total is reported as a lower bound.
+pub const MAX_COUNTED_LINES: usize = 5_000_000;
 /// How many leading bytes are used to recognise an image by its magic number.
 ///
 /// The extension is deliberately *not* trusted: `logo.png` that is really a
@@ -69,19 +82,27 @@ pub fn read_file(
     }
     let size = meta.len();
 
+    // One open, one pass. The prefix is read first (that is what gets returned);
+    // when the byte cap cut it short, the *same* handle keeps reading to count the
+    // file's lines. The old path opened the file a second time and re-read it from
+    // byte 0, so the prefix was read twice and a big file cost two full scans.
     let want = (max_bytes as u64).saturating_add(1).min(size);
     let mut buf = Vec::new();
     let mut file = std::fs::File::open(&abs).map_err(|e| Error::io(&abs, e))?;
-    let mut limited = std::io::Read::by_ref(&mut file).take(want);
-    limited
-        .read_to_end(&mut buf)
-        .map_err(|e| Error::io(&abs, e))?;
+    {
+        let mut limited = std::io::Read::by_ref(&mut file).take(want);
+        limited
+            .read_to_end(&mut buf)
+            .map_err(|e| Error::io(&abs, e))?;
+    }
     let byte_limited = buf.len() > max_bytes;
     if byte_limited {
         buf.truncate(max_bytes);
     }
 
-    if let Some(pos) = buf.iter().take(BINARY_SNIFF_BYTES).position(|b| *b == 0) {
+    // Sniff the window that is actually returned, not a fixed 8 KiB prefix: a NUL
+    // at offset 20 000 used to pass the check and reach the model as U+0000.
+    if let Some(pos) = buf.iter().position(|b| *b == 0) {
         return Err(Error::BadRequest(format!(
             "`{rel}` looks like a binary file (NUL byte at offset {pos}); read_file only returns UTF-8 text. \
              Use run_command with `file`/`xxd` if you need to inspect it."
@@ -94,14 +115,14 @@ pub fn read_file(
     // limited, count the whole file so the header, `lines_total` and the
     // "next N lines" hint describe the real file instead of the prefix.
     let available = lines.len();
-    let total = if byte_limited {
-        match count_lines_streaming(&abs) {
-            Ok(n) => n as usize,
+    let (total, total_capped) = if byte_limited {
+        match continue_counting(&mut file, &buf) {
             // The count is a nicety; never fail a readable file over it.
-            Err(_) => available,
+            Ok(counted) => counted,
+            Err(_) => (available, false),
         }
     } else {
-        available
+        (available, false)
     };
 
     let offset = offset.unwrap_or(1).max(1) as usize;
@@ -128,8 +149,15 @@ pub fn read_file(
         (start + 1, shown_end)
     };
     let mut out = String::new();
+    // A capped count is a lower bound, so it is written `N+` and explained rather
+    // than presented as the file's real length.
+    let total_label = if total_capped {
+        format!("{total}+")
+    } else {
+        total.to_string()
+    };
     out.push_str(&format!(
-        "{rel} — lines {first}-{last} of {total} ({size} bytes)"
+        "{rel} — lines {first}-{last} of {total_label} ({size} bytes)"
     ));
 
     // Explain the (rare) byte cap before the content so it survives output
@@ -139,6 +167,12 @@ pub fn read_file(
             "\n[note: only the first {max_bytes} of {size} bytes were read (limits.max_file_read_bytes); \
              raise the limit to see the rest]"
         ));
+        if total_capped {
+            out.push_str(&format!(
+                "\n[note: the line count stopped at {MAX_COUNTED_LINES} lines, so `{total}+` is a \
+                 lower bound]"
+            ));
+        }
     }
 
     if total == 0 {
@@ -173,6 +207,7 @@ pub fn read_file(
         meta: serde_json::json!({
             "path": rel,
             "lines_total": total,
+            "lines_total_is_lower_bound": total_capped,
             "lines_from": first,
             "lines_to": last,
             "bytes": size,
@@ -183,16 +218,25 @@ pub fn read_file(
     })
 }
 
-/// Count the lines in a file with a streaming pass, so a file far larger than
-/// `max_file_read_bytes` can still be described accurately without loading it.
+/// Keep reading `file` from where the byte-capped prefix left off and return the
+/// whole file's line count, plus whether the count stopped at the cap.
+///
+/// `prefix` is what [`read_file`] already read, so the scan starts there instead of
+/// at byte 0 (the previous implementation re-opened the file and re-read it from
+/// the beginning, so the prefix was read twice).
+///
+/// The count is bounded by [`MAX_COUNTED_LINES`]: a pathological file (say a 2 GiB
+/// log of short lines) would otherwise cost a full extra scan to produce a number
+/// nobody needs. When the bound is hit the caller reports the count as "N+" rather
+/// than lying about the total.
 ///
 /// Matches `str::lines` semantics: a trailing newline does not start a new line,
 /// and an empty file has zero lines.
-fn count_lines_streaming(abs: &Path) -> std::io::Result<u64> {
-    let mut file = std::fs::File::open(abs)?;
+fn continue_counting(file: &mut std::fs::File, prefix: &[u8]) -> std::io::Result<(usize, bool)> {
+    let mut newlines = prefix.iter().filter(|b| **b == b'\n').count();
+    let mut last_byte = prefix.last().copied();
     let mut buf = vec![0u8; 64 * 1024];
-    let mut newlines = 0u64;
-    let mut last_byte = None;
+    let mut capped = false;
     loop {
         let n = match file.read(&mut buf) {
             Ok(0) => break,
@@ -200,14 +244,18 @@ fn count_lines_streaming(abs: &Path) -> std::io::Result<u64> {
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        newlines += buf[..n].iter().filter(|b| **b == b'\n').count() as u64;
+        newlines += buf[..n].iter().filter(|b| **b == b'\n').count();
         last_byte = Some(buf[n - 1]);
+        if newlines > MAX_COUNTED_LINES {
+            capped = true;
+            break;
+        }
     }
     // A file that does not end in a newline has one more (partial) line.
-    if last_byte.is_some() && last_byte != Some(b'\n') {
+    if !capped && last_byte.is_some() && last_byte != Some(b'\n') {
         newlines += 1;
     }
-    Ok(newlines)
+    Ok((newlines, capped))
 }
 
 /// What a file turned out to be, as far as the vision APIs are concerned.
@@ -392,9 +440,22 @@ pub fn list_dir(ws: &Workspace, path: &str, depth: u32, max_entries: usize) -> R
         rel: String,
         size: u64,
     }
-    let mut items: Vec<Item> = Vec::new();
+    // The walk stops one entry past the cap. Collecting the whole tree and
+    // truncating afterwards meant a directory of 1 000 files walked 1,000
+    // `readdir` entries and stat'ed every one of them to show 500 (verified:
+    // 100,200 entries walked for a 500-entry cap, 249 ms, +10 MB RSS). `readdir`
+    // order is arbitrary, so the *set* that fits in the cap is not the
+    // alphabetically-first one; the entries that are shown stay sorted, and the
+    // truncation note says the list was cut.
+    let mut items: Vec<Item> = Vec::with_capacity(max_entries.min(1024) + 1);
     let mut skipped_errors = 0usize;
+    let mut capped = false;
     for entry in walker {
+        // `max_entries + 1` so the caller still learns that there *was* more.
+        if items.len() > max_entries {
+            capped = true;
+            break;
+        }
         let entry = match entry {
             Ok(e) => e,
             Err(_) => {
@@ -414,15 +475,28 @@ pub fn list_dir(ws: &Workspace, path: &str, depth: u32, max_entries: usize) -> R
         };
         items.push(Item { is_dir, rel, size });
     }
+    if items.len() > max_entries {
+        capped = true;
+    }
 
     items.sort_by(|a, b| (!a.is_dir, &a.rel).cmp(&(!b.is_dir, &b.rel)));
-    let total = items.len();
-    let truncated = total > max_entries;
+    // `entries` is how many entries the walk collected: the loop breaks at the top of
+    // the iteration that finds more than the cap, so it stops at `max_entries + 1`
+    // - enough to know there was more, without walking the rest of the tree.
+    let entries = items.len();
+    let truncated = capped || entries > max_entries;
     items.truncate(max_entries);
+    // With `capped` the directory's true size is unknown, so the total is a lower
+    // bound rather than a number the walk never established.
+    let total_label = if capped {
+        format!("{}+", max_entries)
+    } else {
+        entries.to_string()
+    };
 
     let mut out = format!(
-        "Listing {rel} (depth {depth}, {total} entr{}, {} shown)",
-        if total == 1 { "y" } else { "ies" },
+        "Listing {rel} (depth {depth}, {total_label} entr{}, {} shown)",
+        if items.len() == 1 { "y" } else { "ies" },
         items.len()
     );
     if items.is_empty() {
@@ -437,7 +511,7 @@ pub fn list_dir(ws: &Workspace, path: &str, depth: u32, max_entries: usize) -> R
     }
     if truncated {
         out.push_str(&format!(
-            "\n[truncated: showing the first {max_entries} of {total} entries; \
+            "\n[truncated: showing the first {max_entries} of {total_label} entries; \
              raise the path or depth narrowing instead of increasing the cap]"
         ));
     }
@@ -453,7 +527,10 @@ pub fn list_dir(ws: &Workspace, path: &str, depth: u32, max_entries: usize) -> R
         meta: serde_json::json!({
             "path": rel,
             "depth": depth,
-            "entries": total,
+            // With `capped` this is how many entries were walked, not how many
+            // the directory has; `entries_capped` says which.
+            "entries": entries,
+            "entries_capped": capped,
             "shown": items.len(),
             "errors": skipped_errors,
         }),
@@ -533,6 +610,7 @@ fn next_seq() -> u64 {
 }
 
 /// A validated edit, ready to be approved and written.
+#[derive(Debug)]
 pub struct EditPlan {
     pub abs: PathBuf,
     pub rel: String,
@@ -595,16 +673,18 @@ pub fn plan_edit(
             preview(old, 200)
         )));
     }
-    let line_numbers: Vec<usize> = indices
-        .iter()
-        .map(|i| content[..*i].bytes().filter(|b| *b == b'\n').count() + 1)
-        .collect();
+    // The ambiguity refusal needs only the match *count* and the first few line
+    // numbers, so it runs before the line numbers for every match are computed.
+    // This used to be the other way round: `content[..i].bytes().filter(..).count()`
+    // per match is O(occurrences × bytes), which measured 5.8 s on a 633 KB file
+    // and 79.6 s at the 1 MiB mark - paid *before* the cheap refusal that then
+    // threw the work away.
     if indices.len() > 1 && !replace_all {
-        let listed: Vec<String> = line_numbers
-            .iter()
-            .take(10)
-            .map(|n| n.to_string())
-            .collect();
+        let shown = indices.len().min(MAX_REPORTED_LINES);
+        // Only scan up to the last match whose line number is reported: the
+        // matches are ordered, so the newlines before it are all that is needed.
+        let line_numbers = line_numbers_within(&content, &indices[..shown], indices[shown - 1]);
+        let listed: Vec<String> = line_numbers.iter().map(|n| n.to_string()).collect();
         return Err(Error::Tool(format!(
             "old_string matches {} places in `{rel}` (lines {}). Add surrounding context to make it unique, \
              or pass replace_all: true.",
@@ -612,6 +692,8 @@ pub fn plan_edit(
             listed.join(", ")
         )));
     }
+
+    let line_numbers = line_numbers_within(&content, &indices, content.len());
 
     let mut new_content = String::with_capacity(content.len());
     let mut last = 0usize;
@@ -634,6 +716,27 @@ pub fn plan_edit(
         line_numbers,
         diff,
     })
+}
+
+/// 1-based line numbers of `indices` (ascending byte offsets into `content`),
+/// computed in **one** forward pass.
+///
+/// The newline offsets are collected once and then binary-searched per match, so
+/// the cost is O(bytes + matches × log(lines)) instead of the O(bytes × matches)
+/// of rescanning `content[..i]` per match. `limit` bounds the scan: nothing at or
+/// after it can affect a returned number, so the ambiguity path only pays for the
+/// matches it is about to report.
+fn line_numbers_within(content: &str, indices: &[usize], limit: usize) -> Vec<usize> {
+    let limit = limit.min(content.len());
+    let newlines: Vec<usize> = content.as_bytes()[..limit]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| (*b == b'\n').then_some(i))
+        .collect();
+    indices
+        .iter()
+        .map(|i| newlines.partition_point(|offset| *offset < *i) + 1)
+        .collect()
 }
 
 /// First `max_chars` characters of `s`, with an ellipsis when shortened.
@@ -909,11 +1012,133 @@ mod tests {
         assert!(rendered.text.contains("max_file_read_bytes"));
     }
 
-    /// The streaming counter must agree with `str::lines` on the awkward shapes.
+    /// Line numbers must be right across many matches, not just the first: the old
+    /// per-match rescan of `content[..i]` was also what made the ambiguity path
+    /// quadratic, so a wrong answer here is easy to miss.
+    #[test]
+    fn edit_line_numbers_are_right_for_every_match() {
+        // Matches on lines 1, 3, 4 and 7, with matches sharing a line too.
+        let body = "needle\nfiller\nneedle\nneedle needle\nfiller\nfiller\nneedle\n";
+        let tmp = TempWs::new("edit-lines");
+        tmp.write("a.txt", body);
+        let ws = tmp.ws();
+
+        let plan = plan_edit(&ws, "a.txt", "needle", "pin", true).unwrap();
+        assert_eq!(plan.occurrences, 5);
+        assert_eq!(
+            plan.line_numbers,
+            vec![1, 3, 4, 4, 7],
+            "every match keeps its own 1-based line number"
+        );
+        assert_eq!(
+            plan.new_content,
+            "pin\nfiller\npin\npin pin\nfiller\nfiller\npin\n"
+        );
+
+        // The single-match path answers the same.
+        let plan = plan_edit(&ws, "a.txt", "filler", "stuff", true).unwrap();
+        assert_eq!(plan.line_numbers, vec![2, 5, 6]);
+    }
+
+    /// CRLF content must keep its line endings, and a BOM must survive an edit: the
+    /// whole file is rewritten from the decoded string, so anything the decoder
+    /// normalises would be lost.
+    #[test]
+    fn edits_preserve_crlf_and_a_byte_order_mark() {
+        let tmp = TempWs::new("edit-crlf-bom");
+        tmp.write("crlf.txt", "alpha\r\nbeta\r\ngamma\r\n");
+        tmp.write_bytes("bom.txt", "\u{feff}first\nsecond\n".as_bytes());
+        let ws = tmp.ws();
+
+        let plan = plan_edit(&ws, "crlf.txt", "beta", "BETA", false).unwrap();
+        assert_eq!(plan.line_numbers, vec![2]);
+        assert_eq!(
+            plan.new_content, "alpha\r\nBETA\r\ngamma\r\n",
+            "CRLF line endings must be preserved byte-for-byte"
+        );
+        write_atomic(&plan.abs, plan.new_content.as_bytes()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path.join("crlf.txt")).unwrap(),
+            "alpha\r\nBETA\r\ngamma\r\n"
+        );
+
+        let plan = plan_edit(&ws, "bom.txt", "second", "SECOND", false).unwrap();
+        assert_eq!(plan.line_numbers, vec![2]);
+        assert!(
+            plan.new_content.starts_with('\u{feff}'),
+            "the byte order mark must survive: {:?}",
+            plan.new_content
+        );
+        write_atomic(&plan.abs, plan.new_content.as_bytes()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path.join("bom.txt")).unwrap(),
+            "\u{feff}first\nSECOND\n"
+        );
+    }
+
+    /// FIX 2 timing guard: the ambiguity refusal used to compute a line number for
+    /// *every* match before refusing - O(occurrences x bytes), measured at 5.8 s for
+    /// a 633 KB file and 79.6 s at 1 MiB. The refusal now needs only the match count
+    /// and the first few line numbers, and line numbers themselves come from one
+    /// forward pass.
+    ///
+    /// The budget is deliberately enormous (a correct implementation finishes in
+    /// milliseconds; the old one takes minutes here) so this cannot flake on a loaded
+    /// machine while still failing loudly if the quadratic scan comes back.
+    #[test]
+    fn a_huge_number_of_matches_is_refused_promptly() {
+        let tmp = TempWs::new("edit-many-matches");
+        // 640 KB, 40 000 lines, each with one match.
+        let lines = 40_000usize;
+        let body: String = (0..lines).map(|_| "needle in this row\n").collect();
+        assert!(body.len() > 600_000, "the fixture must be large");
+        tmp.write("many.txt", &body);
+        let ws = tmp.ws();
+
+        let started = std::time::Instant::now();
+        let err = plan_edit(&ws, "many.txt", "needle", "pin", false).unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "the ambiguous refusal must not compute every match's line number first; \
+         took {elapsed:?} for {lines} matches"
+        );
+        let message = err.to_string();
+        assert!(message.contains("matches 40000 places"), "{message}");
+        // The refusal still names line numbers, and only the ones it shows.
+        assert!(
+            message.contains("lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)"),
+            "{message}"
+        );
+    }
+
+    /// The same guard for the `replace_all` path, which does have to touch every
+    /// match but must still be linear in the file size.
+    #[test]
+    fn a_large_replace_all_is_linear() {
+        let tmp = TempWs::new("edit-replace-all-linear");
+        let lines = 40_000usize;
+        let body: String = (0..lines).map(|_| "needle in this row\n").collect();
+        tmp.write("many.txt", &body);
+        let ws = tmp.ws();
+
+        let started = std::time::Instant::now();
+        let plan = plan_edit(&ws, "many.txt", "needle", "pin", true).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(plan.occurrences, lines);
+        assert_eq!(plan.line_numbers.first(), Some(&1));
+        assert_eq!(plan.line_numbers.last(), Some(&lines));
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "replace_all must stay linear in the file size; took {elapsed:?}"
+        );
+    }
+
+    /// The counter must agree with `str::lines` on the awkward shapes, whether the
+    /// prefix is empty (the whole file is streamed) or a non-empty cut.
     #[test]
     fn the_streaming_line_count_matches_str_lines() {
         let tmp = TempWs::new("count-lines");
-        let ws = tmp.ws();
         for (name, body) in [
             ("empty.txt", ""),
             ("one.txt", "a"),
@@ -923,12 +1148,28 @@ mod tests {
             ("blank.txt", "\n\n\n"),
         ] {
             tmp.write(name, body);
-            let abs = ws.resolve_existing(name).unwrap();
-            assert_eq!(
-                count_lines_streaming(&abs).unwrap(),
-                body.lines().count() as u64,
-                "{name} ({body:?})"
-            );
+            let mut file = std::fs::File::open(tmp.path.join(name)).unwrap();
+            // No prefix: everything comes from the streaming loop.
+            let (counted, capped) = continue_counting(&mut file, b"").unwrap();
+            assert_eq!(counted, body.lines().count(), "{name} ({body:?})");
+            assert!(!capped, "{name}");
+
+            // A prefix that stops mid-file must give the same answer, because the
+            // count starts from the newlines already in it.
+            let bytes = body.as_bytes();
+            for cut in 0..=bytes.len() {
+                // `continue_counting` reads from the handle's current offset, which
+                // `read_file` has left at the end of the prefix.
+                let mut file = std::fs::File::open(tmp.path.join(name)).unwrap();
+                use std::io::Seek;
+                file.seek(std::io::SeekFrom::Start(cut as u64)).unwrap();
+                let (counted, _) = continue_counting(&mut file, &bytes[..cut]).unwrap();
+                assert_eq!(
+                    counted,
+                    body.lines().count(),
+                    "{name} ({body:?}) with a {cut}-byte prefix"
+                );
+            }
         }
     }
 

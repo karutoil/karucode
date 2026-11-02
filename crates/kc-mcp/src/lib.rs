@@ -119,6 +119,7 @@ use kc_core::config::McpServerConfig;
 use kc_core::tool::{Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOrigin, ToolOutcome, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -126,6 +127,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
 mod http;
+mod procgroup;
 mod rpc;
 mod stdio;
 mod transport;
@@ -366,8 +368,22 @@ impl McpManager {
     }
 
     /// Tools of every connected server.
+    ///
+    /// # Name collisions
+    ///
+    /// `mcp__<server>__<tool>` only guarantees no clash with a first-party tool.
+    /// Two servers can still produce the same string — a server `a` exposing a
+    /// tool `b__c` and a server `a__b` exposing a tool `c` both yield
+    /// `mcp__a__b__c` — and the tool registry is a `HashMap`, so an insert would
+    /// silently drop one server's tool with no diagnostic anywhere.
+    ///
+    /// The first server in configuration order keeps the name; a later claimant
+    /// is refused, logged, and reported in that server's [`McpServerStatus::error`]
+    /// (see [`McpManager::collisions`]). Refusing rather than suffixing keeps a
+    /// tool name's meaning stable for callers and for the approval record.
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
         let mut out: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
         for slot in &self.servers {
             if !slot.state.is_connected() {
                 continue;
@@ -379,6 +395,21 @@ impl McpManager {
                 continue;
             }
             for def in slot.state.tool_defs() {
+                let name = namespaced_name(&slot.config.name, &def.name);
+                if let Some(owner) = seen.get(&name) {
+                    warn!(
+                        server = %slot.config.name,
+                        tool = %def.name,
+                        name = %name,
+                        claimed_by = %owner,
+                        "not exposing MCP tool: `{name}` is already provided by server \
+                         `{owner}`; two servers produced the same namespaced tool name (the \
+                         `mcp__` prefix only prevents collisions with first-party tools). \
+                         Rename the server or the tool"
+                    );
+                    continue;
+                }
+                seen.insert(name, slot.config.name.clone());
                 out.push(Arc::new(McpTool {
                     server: slot.config.name.clone(),
                     name: namespaced_name(&slot.config.name, &def.name),
@@ -393,8 +424,38 @@ impl McpManager {
         out
     }
 
+    /// Namespaced tool names claimed by more than one server, keyed by the
+    /// colliding **name**: `name -> (owner server, later claimant servers)`.
+    ///
+    /// The tool name is refused in [`tools`](Self::tools); this is how that
+    /// refusal reaches a human, through [`statuses`](Self::statuses).
+    pub fn collisions(&self) -> BTreeMap<String, (String, Vec<String>)> {
+        let mut claims: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+        for slot in &self.servers {
+            if !slot.state.is_connected() {
+                continue;
+            }
+            for def in slot.state.tool_defs() {
+                let name = namespaced_name(&slot.config.name, &def.name);
+                match claims.get_mut(&name) {
+                    Some((_, claimants)) => {
+                        if !claimants.contains(&slot.config.name) {
+                            claimants.push(slot.config.name.clone());
+                        }
+                    }
+                    None => {
+                        claims.insert(name, (slot.config.name.clone(), Vec::new()));
+                    }
+                }
+            }
+        }
+        claims.retain(|_, (_, claimants)| !claimants.is_empty());
+        claims
+    }
+
     /// Status of every configured server (connected | failed | disconnected).
     pub fn statuses(&self) -> Vec<McpServerStatus> {
+        let collisions = self.collisions();
         self.servers
             .iter()
             .map(|slot| {
@@ -426,6 +487,25 @@ impl McpManager {
                 } else {
                     Vec::new()
                 };
+                // A refused tool name is a diagnostic the operator must see, so
+                // it goes in `error` (the only free-text field the API exposes)
+                // without changing the status: the server itself is fine.
+                if let Some((name, (owner, _))) = collisions
+                    .iter()
+                    .find(|(_, (_, claimants))| claimants.contains(&slot.config.name))
+                {
+                    let note = format!(
+                        "not exposing `{name}`: the name is already provided by server \
+                         `{owner}`. Two servers produced the same namespaced tool name \
+                         (`mcp__` only prevents collisions with first-party tools), so this one \
+                         was refused rather than silently replacing the other. Rename the server \
+                         or the tool"
+                    );
+                    error = Some(match error.take() {
+                        Some(existing) => format!("{existing}; {note}"),
+                        None => note,
+                    });
+                }
                 McpServerStatus {
                     name: slot.config.name.clone(),
                     transport: slot.config.transport.clone(),

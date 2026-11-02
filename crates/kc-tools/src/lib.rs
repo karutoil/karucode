@@ -8,22 +8,29 @@
 // @kc-title: The built-in tools the agent can call
 // @kc-summary: What each first-party tool does, how it is gated, and the limits and gotchas that shape its output.
 // @kc-tags: tools, agent, files, search, shell, git
-// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:karucode_docs, route:POST /api/sessions/:id/rewind, config:[limits], config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES
+// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:karucode_docs, tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, route:POST /api/sessions/:id/rewind, config:[limits], config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES
 //
 // | Tool | Class | Approval | What it does |
 // | --- | --- | --- | --- |
 // | `read_file` | read_only | none | UTF-8 text with numbered lines and a `path - lines A-B of N` header; `offset`/`limit` (default 400, max 2000 lines). `N` is the real line count of the whole file, even when `limits.max_file_read_bytes` cut the read short. A PNG/JPEG/GIF/WebP is attached as an image for a model that takes image input; a text-only model gets a refusal it can pass on |
-// | `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries |
-// | `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`. The result cap is global across files, and long matching lines keep their first 300 characters |
+// | `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries; the walk stops at the cap and a truncated listing reports the total as a lower bound (`500+`) |
+// | `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`. The result cap is global across files, and long matching lines keep their first 300 characters in both engines |
 // | `write_file` | mutating | policy | create/overwrite atomically, max 2 MiB per call; journals the previous bytes for a rewind |
 // | `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff; journals the previous bytes |
 // | `run_command` | shell | policy | `/bin/sh -c` in the workspace, streamed output, timeout, own process group. On timeout or cancellation the whole group gets SIGTERM, then SIGKILL after a grace period, so a child that ignores SIGTERM cannot survive |
-// | `git_status` | read_only | none | branch + porcelain status for the workspace or a subdirectory |
-// | `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref |
+// | `git_status` | read_only | none | branch + porcelain status for the workspace or a subdirectory, **confined to the workspace** |
+// | `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref, **confined to the workspace** (paths are workspace-relative) |
 // | `karucode_docs` | read_only | none | search and read karucode's own documentation (this system) |
 //
-// `spawn_agent` is registered by the runtime (`crates/kc-runtime/src/subagent.rs`),
-// not here. Plugin tools are namespaced `plugin__<plugin>__<tool>` and MCP tools
+// The delegate family - `spawn_agent`, `spawn_agents`, `send_message`,
+// `wait_for_agents`, `list_subagents`, `agent_history`, `pause_agents`,
+// `resume_agents`, `kill_agents` and `report_status` - is registered by the
+// runtime (`crates/kc-runtime/src/subagent.rs`), not here: every one of them needs
+// the runtime's live agent registry, which a stateless tool cannot reach. They are
+// class `delegate`, and `spawn_agent`/`spawn_agents` take a `background` flag that
+// detaches the child so the caller can keep working. The `subagents` topic is
+// their reference; this page lists them so the table above is the whole built-in
+// surface. Plugin tools are namespaced `plugin__<plugin>__<tool>` and MCP tools
 // `mcp__<server>__<tool>`, so a collision with a first-party name is impossible.
 //
 // # Examples the model is expected to use
@@ -64,13 +71,23 @@
 // * `search_files` honours `.gitignore`. Searching ignored/build output needs a
 //   pattern under an explicitly named path, not a glob trick.
 // * `search_files` caps results globally, not per file, and both engines agree on
-//   the cap. A match on a very long line keeps its first 300 characters rather
-//   than being replaced by a placeholder.
+//   the cap. A match on a very long line keeps its first 300 **characters** rather
+//   than being replaced by a placeholder; the cap is counted in characters, not
+//   bytes, so a line of multi-byte text is cut in the same place by both engines
+//   (ripgrep's own `--max-columns` counts bytes, so it is set wide enough that our
+//   character cap is the one that decides). A path containing `:` is reported
+//   correctly: ripgrep is asked for `--null` records.
+// * `run_command` reports a **success** when the command exits 0 and leaves a
+//   child running in the background (`build & exit 0`) instead of waiting for that
+//   child to close the output pipes. The result says the output may be incomplete
+//   and `background_output` is set in the metadata.
 // * `read_file` reports the file's real line count in its header even when the
 //   byte cap truncated the content; when the byte cap (not the line window) ended
 //   the read, there is no "continue with offset" hint, because those lines cannot
 //   be reached without raising `limits.max_file_read_bytes`.
-// * Binary files are refused by `read_file` instead of being rendered as noise.
+// * Binary files are refused by `read_file` instead of being rendered as noise:
+//   the check covers the whole window that would be returned, so a NUL deep in a
+//   large file cannot reach the model as U+0000.
 //
 // # Scratch space: the temp directory
 //
@@ -184,6 +201,24 @@ fn spec(name: &str, description: &str, parameters: serde_json::Value) -> ToolSpe
         description: description.into(),
         parameters,
         origin: kc_core::tool::ToolOrigin::Builtin,
+    }
+}
+
+/// Run blocking file work off the runtime's worker threads.
+///
+/// Reading a file, walking a directory or computing an edit plan is CPU- and
+/// IO-bound; on a runtime worker it stalls every other task on that thread for
+/// its whole duration (an 8 MiB `edit_file` is seconds). `spawn_blocking` is the
+/// same tool `search::search_fallback` already uses for its walker, and the join
+/// error is surfaced rather than swallowed so a panic is not reported as success.
+async fn blocking<T, F>(what: &str, work: F) -> std::result::Result<kc_core::Result<T>, ToolOutcome>
+where
+    F: FnOnce() -> kc_core::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => Ok(result),
+        Err(e) => Err(ToolOutcome::err(format!("{what} task failed: {e}"))),
     }
 }
 
@@ -337,21 +372,24 @@ impl Tool for ReadFile {
             Ok(file_ops::ImageProbe::NotAnImage) | Err(_) => {}
         }
 
-        match file_ops::read_file(
-            &ctx.workspace,
-            path,
-            offset,
-            limit,
-            limits.max_file_read_bytes,
-        ) {
-            Ok(rendered) => {
-                let (text, cut) = truncate_output(&rendered.text, limits.max_tool_output_bytes);
-                ToolOutcome::ok(text)
-                    .truncated(cut || rendered.truncated)
-                    .with_meta(rendered.meta)
-            }
-            Err(e) => ToolOutcome::err(e.to_string()),
-        }
+        // The file is read and (when the byte cap cut it) scanned to count lines:
+        // blocking work that must not run on a runtime worker.
+        let rendered = match blocking("read_file", {
+            let ws = ctx.workspace.clone();
+            let path = path.to_string();
+            let max_bytes = limits.max_file_read_bytes;
+            move || file_ops::read_file(&ws, &path, offset, limit, max_bytes)
+        })
+        .await
+        {
+            Err(refusal) => return refusal,
+            Ok(Err(e)) => return ToolOutcome::err(e.to_string()),
+            Ok(Ok(rendered)) => rendered,
+        };
+        let (text, cut) = truncate_output(&rendered.text, limits.max_tool_output_bytes);
+        ToolOutcome::ok(text)
+            .truncated(cut || rendered.truncated)
+            .with_meta(rendered.meta)
     }
 }
 
@@ -364,7 +402,8 @@ impl Tool for ListDir {
             "list_dir",
             "List a directory inside the workspace. Respects .gitignore rules, skips .git and \
              node_modules, lists directories first (with a trailing '/') and files with their size. \
-             Capped at 500 entries.",
+             Capped at 500 entries; the walk stops at the cap, so a truncated listing says the \
+             total is a lower bound (`500+`).",
             json!({
                 "type": "object",
                 "properties": {
@@ -379,15 +418,23 @@ impl Tool for ListDir {
         let path = request.opt_str("path").unwrap_or(".");
         let depth = request.opt_u64("depth").unwrap_or(1) as u32;
         let limits = ctx.limits().await;
-        match file_ops::list_dir(&ctx.workspace, path, depth, file_ops::MAX_LIST_ENTRIES) {
-            Ok(rendered) => {
-                let (text, cut) = truncate_output(&rendered.text, limits.max_tool_output_bytes);
-                ToolOutcome::ok(text)
-                    .truncated(cut || rendered.truncated)
-                    .with_meta(rendered.meta)
-            }
-            Err(e) => ToolOutcome::err(e.to_string()),
-        }
+        // The walk stats every entry it visits; on a runtime worker that stalls
+        // every other task on the thread for as long as the directory takes.
+        let rendered = match blocking("list_dir", {
+            let ws = ctx.workspace.clone();
+            let path = path.to_string();
+            move || file_ops::list_dir(&ws, &path, depth, file_ops::MAX_LIST_ENTRIES)
+        })
+        .await
+        {
+            Err(refusal) => return refusal,
+            Ok(Err(e)) => return ToolOutcome::err(e.to_string()),
+            Ok(Ok(rendered)) => rendered,
+        };
+        let (text, cut) = truncate_output(&rendered.text, limits.max_tool_output_bytes);
+        ToolOutcome::ok(text)
+            .truncated(cut || rendered.truncated)
+            .with_meta(rendered.meta)
     }
 }
 
@@ -550,8 +597,18 @@ impl Tool for WriteFile {
         // "restores" them is a no-op that looks like a successful revert.
         ctx.record_checkpoint(&rel, "write_file").await;
 
-        if let Err(e) = file_ops::write_atomic(&abs, content.as_bytes()) {
-            return ToolOutcome::err(e.to_string());
+        // The write is a create + `sync_all` + rename on a worker thread: fsync can
+        // block for a long time on a busy disk.
+        let written = blocking("write_file", {
+            let abs = abs.clone();
+            let content = content.to_string();
+            move || file_ops::write_atomic(&abs, content.as_bytes())
+        })
+        .await;
+        match written {
+            Err(refusal) => return refusal,
+            Ok(Err(e)) => return ToolOutcome::err(e.to_string()),
+            Ok(Ok(())) => {}
         }
 
         ToolOutcome::ok(format!(
@@ -604,9 +661,23 @@ impl Tool for EditFile {
         };
         let replace_all = request.opt_bool("replace_all").unwrap_or(false);
 
-        let plan = match file_ops::plan_edit(&ctx.workspace, path, old, new, replace_all) {
-            Ok(p) => p,
-            Err(e) => return ToolOutcome::err(e.to_string()),
+        // Edit planning reads the whole file, finds every match and builds the
+        // diff: CPU- and IO-bound work that must not run on a runtime worker -
+        // `MAX_EDIT_BYTES` is 8 MiB, so a large file would otherwise stall every
+        // other task on this thread for the duration. Approval still happens
+        // after this plan and before the write, so its semantics are unchanged.
+        let plan = match blocking("edit_file planning", {
+            let ws = ctx.workspace.clone();
+            let path = path.to_string();
+            let old = old.to_string();
+            let new = new.to_string();
+            move || file_ops::plan_edit(&ws, &path, &old, &new, replace_all)
+        })
+        .await
+        {
+            Err(refusal) => return refusal,
+            Ok(Err(e)) => return ToolOutcome::err(e.to_string()),
+            Ok(Ok(plan)) => plan,
         };
 
         let policy = ctx.settings.approval_policy().await;
@@ -648,8 +719,17 @@ impl Tool for EditFile {
         // reports rather than papering over.
         ctx.record_checkpoint(&plan.rel, "edit_file").await;
 
-        if let Err(e) = file_ops::write_atomic(&plan.abs, plan.new_content.as_bytes()) {
-            return ToolOutcome::err(e.to_string());
+        // Write the planned bytes off the runtime worker, same as write_file.
+        let written = blocking("edit_file", {
+            let abs = plan.abs.clone();
+            let new_content = plan.new_content.clone();
+            move || file_ops::write_atomic(&abs, new_content.as_bytes())
+        })
+        .await;
+        match written {
+            Err(refusal) => return refusal,
+            Ok(Err(e)) => return ToolOutcome::err(e.to_string()),
+            Ok(Ok(())) => {}
         }
         let lines = plan
             .line_numbers
@@ -681,7 +761,10 @@ impl Tool for RunCommand {
              This is NOT a sandbox: the command runs as the server user with that user's full \
              filesystem and network access, so treat it as trusted unless the approval policy says \
              otherwise. Requires approval per policy; refused in read_only mode. Output is kept \
-             head+tail within the configured limit; timeouts kill the whole process group.",
+             head+tail within the configured limit, and stdout and stderr are budgeted separately so \
+             a long stdout cannot push stderr out. Timeouts kill the whole process group. A command \
+             that exits 0 while a background child still holds the output pipes is reported as a \
+             success whose output may be incomplete, not as a timeout.",
             json!({
                 "type": "object",
                 "properties": {
@@ -778,6 +861,37 @@ impl Tool for RunCommand {
         if outcome.cancelled {
             text.push_str("\n[cancelled: the process group was terminated]");
         }
+        if outcome.background_output {
+            // The leader exited 0 but a child it started in the background still
+            // held the output pipes. Waiting for EOF would have turned this
+            // success into a timeout; stopping early would silently lose output.
+            // Say both things instead of implying the capture is complete.
+            text.push_str(&format!(
+                "\n[note: a process started in the background is still running and still holds \
+                 the output pipes, so the stdout/stderr below may be incomplete - this is not a \
+                 timeout, the command itself exited {}]",
+                outcome
+                    .exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "without a status".to_string())
+            ));
+        }
+        // Each stream gets its own budget so neither can evict the other: keeping
+        // them in one buffer meant a long stdout pushed a short stderr off the end
+        // of the result entirely (31 KB of stdout + 50 stderr lines lost every
+        // stderr line). The two headers are cheap and always kept, so a truncated
+        // stream still says how much it produced.
+        let header = std::mem::take(&mut text);
+        let (stdout_text, stdout_cut) = truncate_output(
+            &outcome.stdout.text,
+            stdout_budget(limits.max_tool_output_bytes),
+        );
+        let (stderr_text, stderr_cut) = truncate_output(
+            &outcome.stderr.text,
+            stderr_budget(limits.max_tool_output_bytes),
+        );
+        let cut = stdout_cut || stderr_cut;
+        let mut text = header;
         text.push_str(&format!(
             "\n\n--- stdout ({} bytes{}) ---\n{}",
             outcome.stdout.total_bytes,
@@ -786,10 +900,10 @@ impl Tool for RunCommand {
             } else {
                 ""
             },
-            if outcome.stdout.text.is_empty() {
+            if stdout_text.is_empty() {
                 "(empty)"
             } else {
-                outcome.stdout.text.trim_end_matches('\n')
+                stdout_text.trim_end_matches('\n')
             }
         ));
         if !outcome.stderr.text.is_empty() {
@@ -801,11 +915,10 @@ impl Tool for RunCommand {
                 } else {
                     ""
                 },
-                outcome.stderr.text.trim_end_matches('\n')
+                stderr_text.trim_end_matches('\n')
             ));
         }
 
-        let (text, cut) = truncate_output(&text, limits.max_tool_output_bytes);
         ToolOutcome {
             ok: outcome.ok(),
             content: text,
@@ -817,6 +930,7 @@ impl Tool for RunCommand {
                 "duration_ms": outcome.duration.as_millis() as u64,
                 "timed_out": outcome.timed_out,
                 "cancelled": outcome.cancelled,
+                "background_output": outcome.background_output,
                 "stdout_bytes": outcome.stdout.total_bytes,
                 "stderr_bytes": outcome.stderr.total_bytes,
                 "timeout_secs": timeout_secs,
@@ -824,6 +938,22 @@ impl Tool for RunCommand {
             images: Vec::new(),
         }
     }
+}
+
+/// Share of the tool-output budget `run_command` gives stdout.
+///
+/// stderr is never allowed to be crowded out: a build that prints 30 KB of
+/// progress to stdout and one `error: ...` line to stderr is the case this
+/// carving exists for, so stderr always keeps a quarter of the budget (and all of
+/// it when that is enough).
+fn stdout_budget(total: usize) -> usize {
+    // The headers above the two bodies are trivially small; reserving nothing for
+    // them keeps this predictable.
+    (total / 4) * 3
+}
+
+fn stderr_budget(total: usize) -> usize {
+    total - stdout_budget(total)
 }
 
 pub struct GitStatus;
@@ -835,7 +965,9 @@ impl Tool for GitStatus {
             "git_status",
             "Show git branch and working-tree status (`git status --porcelain=v1 -b`) for the \
              workspace or a subdirectory. Read-only, no approval. Reports is_repo: false when the \
-             path is not in a git repository.",
+             path is not in a git repository. Confined to the workspace: when the workspace is a \
+             subdirectory of a bigger repository, only changes inside it are listed (paths are \
+             workspace-relative) and the enclosing repository's paths are not revealed.",
             json!({
                 "type": "object",
                 "properties": {"path": {"type": "string", "description": "Workspace-relative path (default '.')"}}
@@ -853,6 +985,7 @@ impl Tool for GitStatus {
                     "is_repo": report.is_repo,
                     "branch": report.branch,
                     "entries": report.entries,
+                    "confined": report.confined,
                 }))
             }
             Err(e) => ToolOutcome::err(e.to_string()),
@@ -867,8 +1000,11 @@ impl Tool for GitDiff {
     fn spec(&self) -> ToolSpec {
         spec(
             "git_diff",
-            "Show the staged or unstaged diff (`git diff [--staged] [base] -- <path>`) for the \
-             workspace or a path. Read-only, no approval. Output is bounded by the tool-output limit.",
+            "Show the staged or unstaged diff (`git diff [--staged] [base] --relative -- <path>`) \
+             for the workspace or a path. Read-only, no approval. Confined to the workspace: when \
+             the workspace is a subdirectory of a bigger repository, the patch is relative to the \
+             workspace root and changes outside it are not shown. Output is bounded by the \
+             tool-output limit.",
             json!({
                 "type": "object",
                 "properties": {

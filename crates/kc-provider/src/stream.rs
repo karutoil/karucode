@@ -38,11 +38,18 @@ type ByteStream = BoxStream<'static, reqwest::Result<Bytes>>;
 /// `tool_names` is what makes DSML recovery safe: a block of DeepSeek markup in
 /// the text channel is only executed when every invoke names a tool this run
 /// could actually call (see [`crate::dsml`]).
+///
+/// `timeout` is the per-read gap and `attempt` the wall-clock budget for the
+/// whole body (see [`crate::attempt_timeout`]): the first catches a silent
+/// endpoint, the second a stream that keeps trickling - or sends nothing but
+/// keepalive comments - forever.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_from_response(
     bytes: ByteStream,
     cancel: CancellationToken,
     url: String,
     timeout: Duration,
+    attempt: Duration,
     secrets: Vec<String>,
     tool_names: Vec<String>,
 ) -> ProviderStream {
@@ -51,6 +58,8 @@ pub(crate) fn stream_from_response(
         cancel,
         url,
         timeout,
+        attempt,
+        deadline: tokio::time::Instant::now() + attempt,
         secrets,
         parser: SseParser::new(),
         decoder: Utf8Decoder::default(),
@@ -58,6 +67,7 @@ pub(crate) fn stream_from_response(
         dsml: DsmlTools::new(tool_names).map(DsmlScanner::new),
         dsml_calls: 0,
         saw_event: false,
+        saw_done: false,
         saw_finish: false,
         input_done: false,
         failed: false,
@@ -74,6 +84,10 @@ struct StreamState {
     cancel: CancellationToken,
     url: String,
     timeout: Duration,
+    /// Wall-clock budget for this attempt (see [`crate::attempt_timeout`]).
+    attempt: Duration,
+    /// When that budget runs out.
+    deadline: tokio::time::Instant,
     secrets: Vec<String>,
     parser: SseParser,
     decoder: Utf8Decoder,
@@ -84,6 +98,10 @@ struct StreamState {
     dsml_calls: usize,
     /// At least one JSON payload was understood.
     saw_event: bool,
+    /// A `data: [DONE]` terminator arrived. Distinct from `saw_event` because a
+    /// completion delivered only as `[DONE]` is a finished (empty) answer, not a
+    /// stream that died before sending anything.
+    saw_done: bool,
     /// A `finish_reason` was delivered, so no synthetic Finish is needed.
     saw_finish: bool,
     /// Input is exhausted: `[DONE]`, EOF, or a terminal error.
@@ -112,7 +130,7 @@ impl StreamState {
                 if self.failed {
                     return None;
                 }
-                if !self.saw_event {
+                if !self.saw_event && !self.saw_done {
                     return Some(Ok(ProviderChunk::Error {
                         message: format!(
                             "provider at {} closed the stream without sending any data",
@@ -122,7 +140,24 @@ impl StreamState {
                     }));
                 }
                 if !self.saw_finish {
-                    // The stream ended without an explicit finish_reason. Report
+                    if !self.saw_event {
+                        // A completion delivered only as `data: [DONE]`: the
+                        // endpoint said it finished and had nothing to say.
+                        // That is a legitimate (if odd) answer - a model that
+                        // stopped on an empty string - so the turn ends with
+                        // empty text. Reporting it as "sent no data" made the
+                        // runtime restart the whole generation, which billed
+                        // four completions for one empty turn.
+                        tracing::debug!(
+                            url = %self.url,
+                            "provider stream carried only [DONE]: ending the turn with empty text"
+                        );
+                        self.saw_finish = true;
+                        return Some(Ok(ProviderChunk::Finish {
+                            reason: "stop".into(),
+                        }));
+                    }
+                    // The stream carried a payload but no `finish_reason`. Report
                     // that honestly as `eof` rather than claiming a clean stop:
                     // the provider does not know whether the answer was
                     // complete, and the runtime treats `eof` as an incomplete
@@ -165,8 +200,35 @@ impl StreamState {
                     }
                     Some(Ok(bytes)) => self.feed(&bytes),
                 },
+                // The whole-attempt budget. A per-read timeout cannot fire
+                // against a body that trickles, or against a stream that sends
+                // nothing but SSE keepalive comments, so without this an
+                // endpoint can hold the attempt open for as long as it likes.
+                // Reported as a timeout (retryable: the endpoint did not
+                // answer, which says nothing bad about the request), and
+                // queued behind whatever has already been delivered so no text
+                // is lost with it.
+                _ = tokio::time::sleep_until(self.deadline) => {
+                    self.timed_out();
+                    continue;
+                }
             }
         }
+    }
+
+    /// The attempt ran out of wall clock. Anything the answer produced so far is
+    /// kept; the failure is reported after it.
+    fn timed_out(&mut self) {
+        self.flush_text();
+        self.queue.push_back(Err(Error::Timeout(format!(
+            "provider at {} did not finish the response within {}s \
+             (read gap {}s); the attempt was abandoned",
+            self.url,
+            self.attempt.as_secs(),
+            self.timeout.as_secs()
+        ))));
+        self.failed = true;
+        self.input_done = true;
     }
 
     fn feed(&mut self, bytes: &[u8]) {
@@ -193,6 +255,7 @@ impl StreamState {
             return;
         }
         if data == "[DONE]" {
+            self.saw_done = true;
             self.input_done = true;
             self.flush_text();
             return;
@@ -538,6 +601,8 @@ mod tests {
             cancel: CancellationToken::new(),
             url: "http://test/v1/chat/completions".into(),
             timeout: Duration::from_secs(5),
+            attempt: Duration::from_secs(30),
+            deadline: tokio::time::Instant::now() + Duration::from_secs(30),
             secrets: Vec::new(),
             parser: SseParser::new(),
             decoder: Utf8Decoder::default(),
@@ -545,6 +610,7 @@ mod tests {
             dsml: DsmlTools::new(tool_names).map(DsmlScanner::new),
             dsml_calls: 0,
             saw_event: false,
+            saw_done: false,
             saw_finish: false,
             input_done: false,
             failed: false,
@@ -558,6 +624,164 @@ mod tests {
             out.push(item);
         }
         out
+    }
+
+    /// A stream that never ends must be stopped by the attempt deadline, not left
+    /// hanging: this is the drip-fed body and the keepalive-only stream in one.
+    #[tokio::test]
+    async fn an_endless_stream_is_cut_off_by_the_attempt_deadline() {
+        // A body that keeps arriving but never terminates an event: `read_timeout`
+        // never fires, because every single read succeeds.
+        let endless = stream::unfold(0usize, |n| async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            Some((Ok::<Bytes, reqwest::Error>(Bytes::from_static(b"d")), n + 1))
+        })
+        .boxed();
+        let state = StreamState {
+            bytes: endless,
+            cancel: CancellationToken::new(),
+            url: "http://test/v1/chat/completions".into(),
+            timeout: Duration::from_secs(30),
+            attempt: Duration::from_millis(300),
+            deadline: tokio::time::Instant::now() + Duration::from_millis(300),
+            secrets: Vec::new(),
+            parser: SseParser::new(),
+            decoder: Utf8Decoder::default(),
+            queue: VecDeque::new(),
+            dsml: None,
+            dsml_calls: 0,
+            saw_event: false,
+            saw_done: false,
+            saw_finish: false,
+            input_done: false,
+            failed: false,
+            finished: false,
+        };
+
+        let started = std::time::Instant::now();
+        let items = tokio::time::timeout(Duration::from_secs(5), drain(state))
+            .await
+            .expect("the attempt deadline must end the stream, not hang");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the stream ran {:?}",
+            started.elapsed()
+        );
+        assert_eq!(items.len(), 1, "{items:?}");
+        match items[0].as_ref().unwrap_err() {
+            Error::Timeout(message) => {
+                assert!(message.contains("did not finish the response"), "{message}");
+            }
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+    }
+
+    /// A body that only ever sends keepalive comments produces no events at all,
+    /// so nothing but the attempt deadline can end it.
+    #[tokio::test]
+    async fn a_keepalive_only_stream_is_cut_off_by_the_attempt_deadline() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let bytes = stream::unfold(rx, |mut rx| async move {
+            let item = rx.recv().await?;
+            Some((Ok::<Bytes, reqwest::Error>(item), rx))
+        })
+        .boxed();
+        // Feed keepalives from a task that is dropped with the test.
+        let pinger = tokio::spawn(async move {
+            loop {
+                if tx.send(Bytes::from_static(b": keepalive\n\n")).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let state = StreamState {
+            bytes,
+            cancel: CancellationToken::new(),
+            url: "http://test/v1/chat/completions".into(),
+            timeout: Duration::from_secs(30),
+            attempt: Duration::from_millis(300),
+            deadline: tokio::time::Instant::now() + Duration::from_millis(300),
+            secrets: Vec::new(),
+            parser: SseParser::new(),
+            decoder: Utf8Decoder::default(),
+            queue: VecDeque::new(),
+            dsml: None,
+            dsml_calls: 0,
+            saw_event: false,
+            saw_done: false,
+            saw_finish: false,
+            input_done: false,
+            failed: false,
+            finished: false,
+        };
+
+        let items = tokio::time::timeout(Duration::from_secs(5), drain(state))
+            .await
+            .expect("the attempt deadline must end a keepalive-only stream");
+        pinger.abort();
+        assert_eq!(items.len(), 1, "{items:?}");
+        match items[0].as_ref().unwrap_err() {
+            Error::Timeout(message) => {
+                assert!(message.contains("did not finish the response"), "{message}");
+            }
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+    }
+
+    /// The deadline is a *whole-attempt* budget, so a stream that finishes inside
+    /// it is untouched - keepalives and all.
+    #[tokio::test]
+    async fn a_stream_that_finishes_inside_the_budget_is_untouched() {
+        let mut state = state_with_chunks(vec![
+            ": keepalive\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        ]);
+        state.attempt = Duration::from_millis(500);
+        state.deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        let items = drain(state).await;
+        assert_eq!(
+            items.into_iter().map(|i| i.unwrap()).collect::<Vec<_>>(),
+            vec![
+                ProviderChunk::Text("x".into()),
+                ProviderChunk::Finish {
+                    reason: "stop".into()
+                },
+            ]
+        );
+    }
+
+    /// A completion the endpoint delivers only as `data: [DONE]` is a finished,
+    /// empty answer - not a stream that died before sending anything. Reporting
+    /// it as "sent no data" made the runtime restart the generation, billing
+    /// four completions for one empty turn.
+    #[tokio::test]
+    async fn a_done_only_completion_finishes_with_empty_text() {
+        let items = drain(state_with_chunks(vec!["data: [DONE]\n\n"])).await;
+        assert_eq!(
+            items
+                .into_iter()
+                .map(|i| i.expect("no error"))
+                .collect::<Vec<_>>(),
+            vec![ProviderChunk::Finish {
+                reason: "stop".into()
+            }],
+            "a [DONE]-only completion must end the turn, not raise a retryable error"
+        );
+    }
+
+    /// A body that really did send nothing is still an error worth retrying: the
+    /// `[DONE]` exception above must not swallow it.
+    #[tokio::test]
+    async fn a_stream_with_no_data_and_no_done_still_requests_a_retry() {
+        let items = drain(state_with_chunks(vec![""])).await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        match items[0].as_ref().unwrap() {
+            ProviderChunk::Error { message, retryable } => {
+                assert!(*retryable, "{message}");
+                assert!(message.contains("without sending any data"), "{message}");
+            }
+            other => panic!("unexpected chunk: {other:?}"),
+        }
     }
 
     /// The provider reports prompt-cache hits in three different shapes, and a

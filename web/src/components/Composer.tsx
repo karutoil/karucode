@@ -31,7 +31,16 @@ import {
 import { formatBytes } from '../lib/format';
 import { FileMentionMenu, mentionOptionId } from './FileMentionMenu';
 import { ModelControls } from './ModelSwitcher';
-import { AlertIcon, ArrowRightIcon, CloseIcon, FileIcon, LockIcon, PlusIcon, StopIcon } from './icons';
+import {
+  AlertIcon,
+  ArrowUpIcon,
+  CloseIcon,
+  FileIcon,
+  LockIcon,
+  PaperclipIcon,
+  PlusIcon,
+  StopIcon,
+} from './icons';
 import {
   contextTone,
   contextUsage,
@@ -167,7 +176,7 @@ function QueuedPanel({
             </span>
             <span class="queued-body">
               <span class="queued-text" title={entry.content}>
-                {entry.draft || entry.content}
+                {entry.draft ?? entry.content}
               </span>
               {entry.attachments && entry.attachments.length > 0 ? (
                 <span class="queued-attachments">
@@ -189,7 +198,7 @@ function QueuedPanel({
               class="queued-recall"
               disabled={recalling[entry.id] === true}
               onClick={() => onRecall(entry.id)}
-              aria-label={`Recall ${QUEUE_LABEL[entry.kind].toLowerCase()}: ${entry.draft || entry.content}`}
+              aria-label={`Recall ${QUEUE_LABEL[entry.kind].toLowerCase()}: ${entry.draft ?? entry.content}`}
               title="Take this back, with its attachments, and put it in the composer"
             >
               {recalling[entry.id] ? 'Recalling…' : 'Recall'}
@@ -751,97 +760,84 @@ export function Composer({
           />
         ) : null}
 
-        <div class="compose-top">
-          <button
-            type="button"
-            class="compose-plus"
-            onClick={() => fileInput.current?.click()}
+        <div class="compose-field">
+          <label class="sr-only" for="composer-input">
+            Message karucode
+          </label>
+          <textarea
+            id="composer-input"
+            ref={textarea}
+            class="composer-input"
+            rows={1}
+            value={draft}
+            placeholder={placeholder}
             disabled={!canType}
-            aria-label="Attach files"
-            title={attachTitle}
-          >
-            <PlusIcon size={18} />
-          </button>
-
-          <div class="compose-field">
-            <label class="sr-only" for="composer-input">
-              Message karucode
-            </label>
-            <textarea
-              id="composer-input"
-              ref={textarea}
-              class="composer-input"
-              rows={1}
-              value={draft}
-              placeholder={placeholder}
-              disabled={!canType}
-              role="combobox"
-              aria-expanded={menuOpen}
-              aria-controls={menuOpen ? MENTION_MENU_ID : undefined}
-              aria-autocomplete="list"
-              aria-activedescendant={
-                menuOpen && ranked[activeIndex] ? mentionOptionId(MENTION_MENU_ID, activeIndex) : undefined
+            role="combobox"
+            aria-expanded={menuOpen}
+            aria-controls={menuOpen ? MENTION_MENU_ID : undefined}
+            aria-autocomplete="list"
+            aria-activedescendant={
+              menuOpen && ranked[activeIndex] ? mentionOptionId(MENTION_MENU_ID, activeIndex) : undefined
+            }
+            aria-describedby="composer-status"
+            onInput={(event) => {
+              const element = event.currentTarget;
+              setDraft(element.value);
+              syncCaret(element);
+              setDismissed(false);
+            }}
+            onClick={(event) => syncCaret(event.currentTarget)}
+            onKeyUp={(event) => {
+              if (event.key.startsWith('Arrow') || event.key === 'Home' || event.key === 'End') {
+                syncCaret(event.currentTarget);
               }
-              aria-describedby="composer-status"
-              onInput={(event) => {
-                const element = event.currentTarget;
-                setDraft(element.value);
-                syncCaret(element);
-                setDismissed(false);
-              }}
-              onClick={(event) => syncCaret(event.currentTarget)}
-              onKeyUp={(event) => {
-                if (event.key.startsWith('Arrow') || event.key === 'Home' || event.key === 'End') {
-                  syncCaret(event.currentTarget);
-                }
-              }}
-              onPaste={(event) => {
-                const files = event.clipboardData?.files;
-                if (canType && files && files.length > 0) {
-                  void addFiles(Array.from(files));
-                }
-              }}
-              onKeyDown={(event) => {
-                if (menuOpen && mention) {
-                  if (event.key === 'ArrowDown' && ranked.length > 0) {
-                    event.preventDefault();
-                    setActiveOption((current) => (current + 1) % ranked.length);
-                    return;
-                  }
-                  if (event.key === 'ArrowUp' && ranked.length > 0) {
-                    event.preventDefault();
-                    setActiveOption((current) => (current - 1 + ranked.length) % ranked.length);
-                    return;
-                  }
-                  if (
-                    (event.key === 'Enter' || event.key === 'Tab') &&
-                    !event.metaKey &&
-                    !event.ctrlKey &&
-                    ranked.length > 0
-                  ) {
-                    event.preventDefault();
-                    const chosen = ranked[activeIndex];
-                    if (chosen) chooseMention(chosen);
-                    return;
-                  }
-                  if (event.key === 'Escape') {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    setDismissed(true);
-                    return;
-                  }
-                }
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            }}
+            onPaste={(event) => {
+              const files = event.clipboardData?.files;
+              if (canType && files && files.length > 0) {
+                void addFiles(Array.from(files));
+              }
+            }}
+            onKeyDown={(event) => {
+              if (menuOpen && mention) {
+                if (event.key === 'ArrowDown' && ranked.length > 0) {
                   event.preventDefault();
-                  void submit();
-                } else if (event.key === 'Escape' && running) {
+                  setActiveOption((current) => (current + 1) % ranked.length);
+                  return;
+                }
+                if (event.key === 'ArrowUp' && ranked.length > 0) {
+                  event.preventDefault();
+                  setActiveOption((current) => (current - 1 + ranked.length) % ranked.length);
+                  return;
+                }
+                if (
+                  (event.key === 'Enter' || event.key === 'Tab') &&
+                  !event.metaKey &&
+                  !event.ctrlKey &&
+                  ranked.length > 0
+                ) {
+                  event.preventDefault();
+                  const chosen = ranked[activeIndex];
+                  if (chosen) chooseMention(chosen);
+                  return;
+                }
+                if (event.key === 'Escape') {
                   event.preventDefault();
                   event.stopPropagation();
-                  if (!stopping) onStop();
+                  setDismissed(true);
+                  return;
                 }
-              }}
-            />
-          </div>
+              }
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                void submit();
+              } else if (event.key === 'Escape' && running) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!stopping) onStop();
+              }
+            }}
+          />
         </div>
 
         {attachments.length > 0 ? (
@@ -875,7 +871,19 @@ export function Composer({
         ) : null}
 
         <div class="compose-bottom">
-          <ModelControls />
+          <div class="composer-controls compose-bar-left">
+            <button
+              type="button"
+              class="compose-plus"
+              onClick={() => fileInput.current?.click()}
+              disabled={!canType}
+              aria-label="Attach files"
+              title={attachTitle}
+            >
+              <PaperclipIcon size={15} />
+            </button>
+            <ModelControls />
+          </div>
           <div class="composer-spacer" />
 
           {context ? <ContextPill usage={context} /> : null}
@@ -898,7 +906,7 @@ export function Composer({
               {hasContent ? <QueueModeToggle mode={queueMode} onChange={setQueueMode} /> : null}
               <button
                 type="submit"
-                class="button button-primary button-send button-queue"
+                class="button button-primary button-queue"
                 disabled={!canQueue}
                 aria-label={
                   queueMode === 'steer'
@@ -907,7 +915,7 @@ export function Composer({
                 }
                 title={QUEUE_TITLE[queueMode]}
               >
-                <ArrowRightIcon size={15} />
+                <ArrowUpIcon size={13} />
                 {queueMode === 'steer' ? 'Steer' : 'Queue'}
               </button>
               <button
@@ -916,9 +924,9 @@ export function Composer({
                 onClick={onStop}
                 disabled={stopping}
                 aria-label="Stop run (Escape)"
+                title={stopping ? 'Stopping…' : 'Stop (Escape)'}
               >
                 <StopIcon size={13} />
-                {stopping ? 'Stopping…' : 'Stop'}
               </button>
             </>
           ) : (
@@ -927,9 +935,9 @@ export function Composer({
               class="button button-primary button-send"
               disabled={!canSend}
               aria-label="Send message (Command or Control + Enter)"
+              title="Send (Command or Control + Enter)"
             >
-              <ArrowRightIcon size={15} />
-              Send
+              <ArrowUpIcon size={14} />
             </button>
           )}
         </div>

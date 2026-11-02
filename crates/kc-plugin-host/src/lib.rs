@@ -40,6 +40,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
+mod procgroup;
 mod rpc;
 mod tool;
 
@@ -130,6 +131,10 @@ pub(crate) struct PluginSlot {
     /// Set when discovery itself rejected the entry (bad command, duplicate name,
     /// unparsable manifest). The slot is reported as `failed` and never spawned.
     pub(crate) setup_error: Option<String>,
+    /// Things the operator should know that do **not** stop the plugin, e.g. a
+    /// `plugin.toml` that tried to grant itself an approval exemption. Reported
+    /// in the diagnostics; never a reason to refuse to start.
+    pub(crate) warnings: Vec<String>,
     /// The files this slot's process was built from, as of the last discovery,
     /// so a re-read of the sources can tell "same plugin" from "rebuilt plugin"
     /// (see [`Fingerprint`]).
@@ -147,6 +152,8 @@ pub(crate) struct DiscoveredEntry {
     pub(crate) config: PluginConfig,
     pub(crate) source: String,
     pub(crate) setup_error: Option<String>,
+    /// Non-fatal findings for the operator (see [`PluginSlot::warnings`]).
+    pub(crate) warnings: Vec<String>,
     pub(crate) fingerprint: Fingerprint,
     /// The manifest this entry was read from, when it came from disk.
     pub(crate) manifest: Option<PathBuf>,
@@ -307,7 +314,9 @@ impl PluginHost {
         let timeouts = Arc::new(TimeoutRefs::default());
         let plugins = discover_entries(configs, data_dir)
             .into_iter()
-            .map(|entry| entry.into_slot(Arc::clone(&timeouts), None))
+            // Nothing is listening yet: `listen_notifications` is called after
+            // `discover`.
+            .map(|entry| entry.into_slot(Arc::clone(&timeouts), None, None))
             .collect();
         Self {
             plugins,
@@ -373,15 +382,32 @@ impl PluginHost {
 
     /// Snapshot of every plugin slot, ready or not.
     pub fn diagnostics(&self) -> Vec<PluginDiagnostics> {
-        self.plugins.iter().map(slot_diagnostics).collect()
+        let collisions = colliding_tools(&self.plugins);
+        self.plugins
+            .iter()
+            .map(|slot| {
+                let note = collisions
+                    .iter()
+                    .find(|(_, (_, claimants))| claimants.contains(&slot.config.name))
+                    .map(|(name, (owner, _))| collision_note(name, owner));
+                slot_diagnostics(slot, note.as_deref())
+            })
+            .collect()
     }
 
     /// Diagnostics for one plugin.
     pub fn diagnostics_for(&self, name: &str) -> Option<PluginDiagnostics> {
+        let collisions = colliding_tools(&self.plugins);
         self.plugins
             .iter()
             .find(|s| s.config.name == name)
-            .map(slot_diagnostics)
+            .map(|slot| {
+                let note = collisions
+                    .iter()
+                    .find(|(_, (_, claimants))| claimants.contains(&slot.config.name))
+                    .map(|(name, (owner, _))| collision_note(name, owner));
+                slot_diagnostics(slot, note.as_deref())
+            })
     }
 
     /// Tools of all currently ready plugins, in discovery order.
@@ -390,8 +416,24 @@ impl PluginHost {
     /// not grant is *not* exposed; the reason is logged at warn level. The class
     /// it is exposed with is always `external` (see [`tool::effective_class`]),
     /// so the declaration can only restrict exposure, never widen it.
+    ///
+    /// # Name collisions
+    ///
+    /// `plugin__<plugin>__<tool>` only guarantees no clash with a *first-party*
+    /// tool. Two plugins can still produce the same string — a plugin `a` with a
+    /// tool `b__c` and a plugin `a__b` with a tool `c` both yield
+    /// `plugin__a__b__c` — and the registry is a `HashMap`, so a plain insert
+    /// would silently drop one of them and leave that plugin unreachable with no
+    /// diagnostic anywhere.
+    ///
+    /// The first one in discovery order keeps the name; every later claimant is
+    /// refused with a warning naming both plugins and the colliding name. Refusing
+    /// rather than suffixing keeps the mapping from tool name to plugin stable for
+    /// callers and for the approval record, and the refusal is loud: logged, and
+    /// repeated in that plugin's diagnostics by [`colliding_tools`].
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
         let mut out: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
         for slot in &self.plugins {
             let Some(shared) = &slot.shared else { continue };
             if shared.status() != PluginStatus::Ready {
@@ -433,6 +475,21 @@ impl PluginHost {
                         continue;
                     }
                 }
+                let name = tool::namespaced_name(&slot.config.name, &def.name);
+                if let Some(owner) = seen.get(&name) {
+                    warn!(
+                        plugin = %slot.config.name,
+                        tool = %def.name,
+                        name = %name,
+                        claimed_by = %owner,
+                        "not exposing plugin tool: `{name}` is already provided by plugin \
+                         `{owner}`; two plugins produced the same namespaced tool name (the \
+                         `plugin__` prefix only prevents collisions with first-party tools). \
+                         Rename the plugin or the tool"
+                    );
+                    continue;
+                }
+                seen.insert(name, slot.config.name.clone());
                 out.push(Arc::new(tool::PluginTool::new(
                     Arc::clone(shared),
                     def,
@@ -481,7 +538,7 @@ impl PluginHost {
         } else {
             shared.disable().await;
         }
-        Ok(slot_diagnostics(&self.plugins[idx]))
+        Ok(slot_diagnostics(&self.plugins[idx], None))
     }
 
     /// Fan a hook out to every ready plugin that advertises it and collect the
@@ -639,7 +696,8 @@ impl PluginHost {
                 .position(|slot| slot.config.name == name)
                 .map(|idx| self.plugins.remove(idx));
             let Some(old) = existing else {
-                let slot = entry.into_slot(Arc::clone(&self.timeouts), None);
+                let slot =
+                    entry.into_slot(Arc::clone(&self.timeouts), None, self.notify_tx.as_ref());
                 if let Some(shared) = started_slot(&slot) {
                     starts.push(shared);
                 }
@@ -661,7 +719,11 @@ impl PluginHost {
             if let Some(shared) = old.shared {
                 stops.push(shared);
             }
-            let slot = entry.into_slot(Arc::clone(&self.timeouts), Some(&old.config));
+            let slot = entry.into_slot(
+                Arc::clone(&self.timeouts),
+                Some(&old.config),
+                self.notify_tx.as_ref(),
+            );
             if let Some(shared) = started_slot(&slot) {
                 starts.push(shared);
             }
@@ -719,7 +781,11 @@ impl PluginHost {
         if let Some(shared) = old.shared.clone() {
             shared.stop().await;
         }
-        let slot = entry.into_slot(Arc::clone(&self.timeouts), Some(&old.config));
+        let slot = entry.into_slot(
+            Arc::clone(&self.timeouts),
+            Some(&old.config),
+            self.notify_tx.as_ref(),
+        );
         let shared = slot.shared.clone();
         let enabled = slot.config.enabled;
         self.plugins.insert(idx, slot);
@@ -730,7 +796,7 @@ impl PluginHost {
                 }
             }
         }
-        Ok(slot_diagnostics(&self.plugins[idx]))
+        Ok(slot_diagnostics(&self.plugins[idx], None))
     }
 
     /// A cheap number that changes when anything a reload depends on changes:
@@ -770,11 +836,17 @@ impl DiscoveredEntry {
     /// Build the slot for this entry. `previous` is the config of the slot being
     /// replaced, if any: its `enabled` flag is a runtime toggle and therefore
     /// wins over whatever the config file says now.
-    fn into_slot(self, timeouts: Arc<TimeoutRefs>, previous: Option<&PluginConfig>) -> PluginSlot {
+    fn into_slot(
+        self,
+        timeouts: Arc<TimeoutRefs>,
+        previous: Option<&PluginConfig>,
+        notify_tx: Option<&mpsc::UnboundedSender<PluginNotice>>,
+    ) -> PluginSlot {
         let DiscoveredEntry {
             mut config,
             source,
             setup_error,
+            warnings,
             fingerprint,
             manifest,
         } = self;
@@ -787,7 +859,14 @@ impl DiscoveredEntry {
             PluginStatus::Disabled
         };
         let shared = if setup_error.is_none() {
-            Some(PluginShared::new(config.clone(), timeouts, status))
+            let shared = PluginShared::new(config.clone(), timeouts, status);
+            // A rebuilt slot is a brand-new `PluginShared`. Without this, a
+            // plugin that is loaded or reloaded after `listen_notifications` was
+            // called would be built with no listener and its `notify` frames
+            // would be dropped — notifications would stop for every plugin that
+            // was installed, upgraded or edited while the server was running.
+            shared.set_notify_sender(notify_tx.cloned());
+            Some(shared)
         } else {
             if let Some(err) = &setup_error {
                 warn!(plugin = %config.name, "plugin unavailable: {err}");
@@ -799,6 +878,7 @@ impl DiscoveredEntry {
             shared,
             source,
             setup_error,
+            warnings,
             fingerprint,
             manifest,
         }
@@ -871,12 +951,21 @@ fn discover_entries(configs: &[PluginConfig], data_dir: &Path) -> Vec<Discovered
                             cfg.name = dir_name;
                         }
                         let error = error.map(|e| format!("{}: {e}", manifest_path.display()));
+                        // Approval exemptions are the operator's decision: a
+                        // `plugin.toml` found on disk may not grant itself
+                        // `trust` or `read_only_tools` (see
+                        // `strip_disk_trust_settings`). Anything else in
+                        // `settings` still reaches the plugin.
+                        let source = manifest_path.display().to_string();
+                        let trusted = strip_disk_trust_settings(&mut cfg, &source);
+                        let warnings: Vec<String> = trusted.into_iter().collect();
                         let fingerprint = Fingerprint::of(&cfg, Some(&manifest_path));
-                        push_entry(
+                        push_entry_with_warnings(
                             &mut out,
                             cfg,
-                            manifest_path.display().to_string(),
+                            source,
                             error,
+                            warnings,
                             fingerprint,
                             Some(manifest_path),
                         );
@@ -925,6 +1014,27 @@ fn push_entry(
     fingerprint: Fingerprint,
     manifest: Option<PathBuf>,
 ) {
+    push_entry_with_warnings(
+        out,
+        config,
+        source,
+        setup_error,
+        Vec::new(),
+        fingerprint,
+        manifest,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_entry_with_warnings(
+    out: &mut Vec<DiscoveredEntry>,
+    config: PluginConfig,
+    source: String,
+    setup_error: Option<String>,
+    warnings: Vec<String>,
+    fingerprint: Fingerprint,
+    manifest: Option<PathBuf>,
+) {
     let mut config = config;
     if config.name.trim().is_empty() {
         // Cannot happen for disk entries (directory name is the fallback) but a
@@ -965,12 +1075,55 @@ fn push_entry(
         config,
         source,
         setup_error,
+        warnings,
         fingerprint,
         manifest,
     });
 }
 
-fn slot_diagnostics(slot: &PluginSlot) -> PluginDiagnostics {
+/// Namespaced tool names claimed by more than one plugin, keyed by the
+/// colliding **name**: `name -> (owner plugin, later claimant plugins)`.
+///
+/// `tools` refuses the later claimants (see its "Name collisions" section); this
+/// map is how the refusal reaches a human, because a `warn!` in a log nobody
+/// tails is not a diagnostic. Built from the same data `tools` reads, so the two
+/// cannot disagree.
+fn colliding_tools(plugins: &[PluginSlot]) -> BTreeMap<String, (String, Vec<String>)> {
+    let mut claims: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+    for slot in plugins {
+        let Some(shared) = &slot.shared else { continue };
+        if shared.status() != PluginStatus::Ready {
+            continue;
+        }
+        for def in shared.tool_defs() {
+            let name = tool::namespaced_name(&slot.config.name, &def.name);
+            match claims.get_mut(&name) {
+                Some((_, claimants)) => {
+                    if !claimants.contains(&slot.config.name) {
+                        claimants.push(slot.config.name.clone());
+                    }
+                }
+                None => {
+                    claims.insert(name, (slot.config.name.clone(), Vec::new()));
+                }
+            }
+        }
+    }
+    claims.retain(|_, (_, claimants)| !claimants.is_empty());
+    claims
+}
+
+/// The sentence shown in diagnostics for a plugin that lost a name collision.
+fn collision_note(name: &str, owner: &str) -> String {
+    format!(
+        "not exposing `{name}`: the name is already provided by plugin `{owner}`. Two plugins \
+         produced the same namespaced tool name (`plugin__` only prevents collisions with \
+         first-party tools), so this one was refused rather than silently replacing the other. \
+         Rename the plugin or the tool"
+    )
+}
+
+fn slot_diagnostics(slot: &PluginSlot, collisions: Option<&str>) -> PluginDiagnostics {
     let mut diagnostics = match &slot.setup_error {
         Some(err) => PluginDiagnostics {
             name: slot.config.name.clone(),
@@ -1005,13 +1158,30 @@ fn slot_diagnostics(slot: &PluginSlot) -> PluginDiagnostics {
                 ignored.join(", ")
             );
             warn!(plugin = %slot.config.name, "{warning}");
-            diagnostics.error = Some(match diagnostics.error.take() {
-                Some(existing) => format!("{existing}; {warning}"),
-                None => warning,
-            });
+            append_note(&mut diagnostics, warning);
         }
     }
+    // Findings from discovery that did not stop the plugin (a manifest that
+    // tried to grant itself an approval exemption, for instance).
+    for warning in &slot.warnings {
+        append_note(&mut diagnostics, warning.clone());
+    }
+    if let Some(note) = collisions {
+        append_note(&mut diagnostics, note.to_string());
+    }
     diagnostics
+}
+
+/// Append a note to a diagnostics' error slot, keeping whatever was there.
+///
+/// `PluginDiagnostics.error` is the only free-text field the API exposes, so
+/// warnings that must be visible to the operator go there alongside a failure
+/// reason rather than being logged only.
+fn append_note(diagnostics: &mut PluginDiagnostics, warning: String) {
+    diagnostics.error = Some(match diagnostics.error.take() {
+        Some(existing) => format!("{existing}; {warning}"),
+        None => warning,
+    });
 }
 
 /// The permissions the host actually honours.
@@ -1086,6 +1256,50 @@ fn class_label(class: ToolClass) -> &'static str {
         ToolClass::Delegate => "delegate",
         ToolClass::External => "external",
     }
+}
+
+/// `settings` keys that weaken the approval policy: they can exempt a tool from
+/// the prompt (`read_only_tools`, by mapping it to [`ToolClass::ReadOnly`]) or
+/// hand the plugin's own manifest the last word on what it may do (`trust`).
+///
+/// They are honoured from the **operator's** `[[plugins]]` entry only — see
+/// [`strip_disk_trust_settings`].
+pub(crate) const SECURITY_SETTINGS: [&str; 2] = [TRUST_SETTING, tool::READ_ONLY_TOOLS_SETTING];
+
+/// Drop approval-relevant `settings` a plugin's **own** `plugin.toml` tried to
+/// set, and describe what was dropped.
+///
+/// A `plugin.toml` lives inside the plugin's own directory: it is written by
+/// whoever ships or installs that plugin, not by the operator. Honouring
+/// `settings.trust = true` from it would let the plugin's manifest become the
+/// authority on its own permissions, and honouring
+/// `settings.read_only_tools = ["tool"]` would expose that tool as `read_only`
+/// — which `Tool::requires_approval` maps to "no prompt needed", so the runtime
+/// would silently skip the approval it was configured to ask for. Both are
+/// operator decisions, so both are read from the `[[plugins]]` entry in
+/// `config.toml` only; a disk manifest that asks for them is ignored and
+/// reported (log + diagnostics), never obeyed.
+///
+/// Everything else in `settings` is left alone: a plugin's ordinary
+/// configuration is none of the host's business.
+fn strip_disk_trust_settings(config: &mut PluginConfig, source: &str) -> Option<String> {
+    let mut dropped: Vec<String> = Vec::new();
+    for key in SECURITY_SETTINGS {
+        if let Some(value) = config.settings.remove(key) {
+            dropped.push(format!("`settings.{key}` = {value}"));
+        }
+    }
+    if dropped.is_empty() {
+        return None;
+    }
+    let warning = format!(
+        "ignored {} declared by the plugin manifest at {source}: `trust` and `read_only_tools` are \
+         approval exemptions, so they are honoured only from the operator's [[plugins]] entry in \
+         config.toml. Move the key there if you really mean it",
+        dropped.join(" and ")
+    );
+    warn!("{warning}");
+    Some(warning)
 }
 
 /// Shape of `<data_dir>/plugins/<name>/plugin.toml`.

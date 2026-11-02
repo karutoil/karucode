@@ -1,6 +1,7 @@
 import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
-import type { AgentRecord, AgentStatus, AgentSummary } from '../api/types';
+import type { AgentAction, AgentRecord, AgentStatus, AgentSummary } from '../api/types';
+import { isAgentLive } from '../api/types';
 import { formatDuration, jsonSummary, relativeTime, truncate } from '../lib/format';
 import * as actions from '../state/actions';
 import {
@@ -34,6 +35,7 @@ interface FilterChip {
 const FILTERS: FilterChip[] = [
   { id: 'all', label: 'All' },
   { id: 'running', label: 'Running' },
+  { id: 'paused', label: 'Paused' },
   { id: 'completed', label: 'Done' },
   { id: 'failed', label: 'Failed' },
   { id: 'cancelled', label: 'Cancelled' },
@@ -42,14 +44,17 @@ const FILTERS: FilterChip[] = [
 
 const STATUS_LABEL: Record<AgentStatus, string> = {
   running: 'running',
+  paused: 'paused',
   completed: 'done',
   failed: 'failed',
   cancelled: 'cancelled',
   interrupted: 'interrupted',
 };
 
-function agentGlyph(role: string, name: string): JSX.Element {
-  const needle = `${role} ${name}`.toLowerCase();
+function agentGlyph(role: string | null | undefined, name: string | null | undefined): JSX.Element {
+  // `role`/`name` come straight off an agent row and the reducer's placeholders
+  // leave them empty; a missing one must not throw the whole tab away.
+  const needle = `${role ?? ''} ${name ?? ''}`.toLowerCase();
   if (needle.includes('review') || needle.includes('audit')) return <EyeIcon size={15} />;
   if (needle.includes('test') || needle.includes('verif') || needle.includes('shell')) {
     return <TerminalIcon size={15} />;
@@ -60,13 +65,16 @@ function agentGlyph(role: string, name: string): JSX.Element {
   return <AgentsIcon size={15} />;
 }
 
-/** Running agents first, then newest first: the live ones are what the user came for. */
+/**
+ * Live agents first (a paused one is still live), then newest first: the ones
+ * that can still change are what the user opened this tab for.
+ */
 function sortAgents(agents: AgentRow[]): AgentRow[] {
   return [...agents].sort((a, b) => {
-    const aRunning = a.status === 'running' ? 1 : 0;
-    const bRunning = b.status === 'running' ? 1 : 0;
-    if (aRunning !== bRunning) return bRunning - aRunning;
-    return b.created_at - a.created_at;
+    const aLive = isAgentLive(a.status) ? 1 : 0;
+    const bLive = isAgentLive(b.status) ? 1 : 0;
+    if (aLive !== bLive) return bLive - aLive;
+    return (b.created_at ?? 0) - (a.created_at ?? 0);
   });
 }
 
@@ -74,17 +82,30 @@ function statusCounts(agents: AgentRow[]): Record<store.AgentFilter, number> {
   const counts: Record<store.AgentFilter, number> = {
     all: agents.length,
     running: 0,
+    paused: 0,
     completed: 0,
     failed: 0,
     cancelled: 0,
     interrupted: 0,
   };
-  for (const agent of agents) counts[agent.status] += 1;
+  for (const agent of agents) {
+    // A status this build does not know about (a newer server) counts toward the
+    // total only: `counts[status] += 1` on a missing key would write NaN.
+    const status: AgentStatus = agent.status;
+    if (status in counts) counts[status] += 1;
+  }
   return counts;
 }
 
-/** What this agent is doing right now, derived from its own live feed. */
+/**
+ * What this agent is doing right now, derived from its own live feed.
+ *
+ * A paused agent answers "paused" even though its feed still has a tool marked
+ * running: that tool finished or was never resumed, and saying `running a
+ * command` about a parked agent is the one thing this label must not do.
+ */
 function liveLabel(agent: AgentRow, activity: AgentActivity): string {
+  if (agent.status === 'paused') return 'paused';
   if (agent.status !== 'running') return STATUS_LABEL[agent.status];
   const tail = [...activity.items].reverse();
   const active = tail.find(
@@ -100,12 +121,36 @@ function liveLabel(agent: AgentRow, activity: AgentActivity): string {
   if (approval) return 'waiting for approval';
   const streaming = tail.find((item) => item.kind === 'message' && item.streaming);
   if (streaming) return 'writing';
-  return agent.iterations > 0 ? 'thinking' : 'starting';
+  // The server omits `note` entirely when the agent has never reported one, so
+  // this is `undefined` in practice — never assume it is a string.
+  const note = agent.note?.trim() ?? '';
+  if (note !== '') return note;
+  return (agent.iterations ?? 0) > 0 ? 'thinking' : 'starting';
+}
+
+/**
+ * A progress bar for the agent's own claim, when it made one.
+ *
+ * Returning `null` when the claim is missing or not a finite number is what
+ * keeps `<ProgressBar value={undefined}>` from rendering `width: 'NaN%'`: the
+ * server omits `progress` rather than sending `null`, which slips past a bare
+ * `!== null` check.
+ */
+function ProgressBar({ value }: { value: number | null | undefined }): JSX.Element | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
+  return (
+    <span class="agent-progress" title={`${pct}% complete, according to the agent`}>
+      <span class="agent-progress-fill" style={{ width: `${pct}%` }} />
+    </span>
+  );
 }
 
 function elapsed(agent: AgentRow, now: number): string {
   const end = agent.finished_at ?? now;
-  return formatDuration(Math.max(0, end - agent.created_at));
+  // A missing timestamp would make this `NaN` and render "NaNm" in the footer.
+  const started = Number.isFinite(agent.created_at) ? agent.created_at : now;
+  return formatDuration(Math.max(0, end - started));
 }
 
 function argsPreview(item: Extract<AgentActivityItem, { kind: 'tool' }>): string {
@@ -225,6 +270,45 @@ function AgentsEmpty({ filtered }: { filtered: boolean }): JSX.Element {
   );
 }
 
+/**
+ * Pause / resume / stop for one live agent.
+ *
+ * Rendered only while the loop exists: a settled agent's buttons would be dead
+ * controls, and the 404 that followed would look like a failure. `onClick` stops
+ * propagation because the whole card is a button that opens the drill-in.
+ */
+function AgentControls({ agent }: { agent: AgentRow }): JSX.Element | null {
+  const pending = store.agentControlPending.value[agent.id];
+  if (!isAgentLive(agent.status)) return null;
+  const paused = agent.status === 'paused';
+  const run = (action: AgentAction) => (event: MouseEvent) => {
+    event.stopPropagation();
+    void actions.controlAgent(agent.id, action);
+  };
+  return (
+    <div class="agent-controls" onClick={(event) => event.stopPropagation()}>
+      <button
+        type="button"
+        class="button button-small"
+        aria-label={paused ? `Resume ${agent.name}` : `Pause ${agent.name}`}
+        disabled={pending !== undefined}
+        onClick={run(paused ? 'resume' : 'pause')}
+      >
+        {pending === 'pause' || pending === 'resume' ? '…' : paused ? 'Resume' : 'Pause'}
+      </button>
+      <button
+        type="button"
+        class="button button-small button-danger"
+        aria-label={`Stop ${agent.name}`}
+        disabled={pending !== undefined}
+        onClick={run('cancel')}
+      >
+        {pending === 'cancel' ? 'Stopping…' : 'Stop'}
+      </button>
+    </div>
+  );
+}
+
 function AgentCard({
   agent,
   activity,
@@ -275,10 +359,21 @@ function AgentCard({
 
       {agent.task ? <p class="agent-task">{truncate(agent.task, 180)}</p> : null}
 
+      {agent.note ? (
+        <p class="agent-note" title={agent.note}>
+          {agent.note}
+        </p>
+      ) : null}
+
+      {agent.progress !== null && agent.progress !== undefined ? (
+        <ProgressBar value={agent.progress} />
+      ) : null}
+
       <div class="agent-card-foot">
         <span>
-          {agent.iterations} {agent.iterations === 1 ? 'iteration' : 'iterations'}
+          {agent.iterations ?? 0} {(agent.iterations ?? 0) === 1 ? 'iteration' : 'iterations'}
         </span>
+        {agent.background ? <span class="agent-badge">background</span> : null}
         <span>
           {agent.finished_at ? relativeTime(agent.finished_at, now) : elapsed(agent, now)}
         </span>
@@ -286,6 +381,8 @@ function AgentCard({
           <ArrowRightIcon size={12} />
         </span>
       </div>
+
+      <AgentControls agent={agent} />
     </article>
   );
 }
@@ -332,14 +429,26 @@ function AgentDetail({
           <p class="agent-role">{agent.role || 'agent'}</p>
         </div>
         <span class="agent-live" data-status={agent.status}>
-          {agent.status === 'running' ? liveLabel(agent, activity) : STATUS_LABEL[agent.status]}
+          {isAgentLive(agent.status) ? liveLabel(agent, activity) : STATUS_LABEL[agent.status]}
         </span>
       </header>
+
+      <AgentControls agent={agent} />
 
       {agent.session_title ? (
         <p class="agent-detail-session" title={agent.session_title}>
           {agent.session_title}
         </p>
+      ) : null}
+
+      {agent.note ? (
+        <div class="agent-note agent-detail-note">
+          <span class="inspector-kicker">Says</span>
+          <p>{agent.note}</p>
+          {agent.progress !== null && agent.progress !== undefined ? (
+            <ProgressBar value={agent.progress} />
+          ) : null}
+        </div>
       ) : null}
 
       {agent.task ? (
@@ -357,12 +466,12 @@ function AgentDetail({
         <div>
           <dt>Iterations</dt>
           <dd>
-            {agent.iterations} · {elapsed(agent, now)}
+            {agent.iterations ?? 0} · {elapsed(agent, now)}
           </dd>
         </div>
         <div>
           <dt>Started</dt>
-          <dd>{relativeTime(agent.created_at, now)}</dd>
+          <dd>{relativeTime(agent.created_at ?? now, now)}</dd>
         </div>
         <div>
           <dt>{agent.parent_agent_id ? 'Parent agent' : 'Parent run'}</dt>
@@ -372,7 +481,7 @@ function AgentDetail({
         </div>
       </dl>
 
-      {agent.owned_paths.length > 0 ? (
+      {agent.owned_paths && agent.owned_paths.length > 0 ? (
         <div class="agent-paths">
           <span class="inspector-kicker">Owned paths</span>
           <ul>
@@ -471,7 +580,8 @@ export function AgentsTab(): JSX.Element {
         <span class="inspector-kicker">
           Agents
           <span class="inspector-kicker-note">
-            {counts.running} running · {counts.all} total
+            {counts.running} running
+            {counts.paused > 0 ? ` · ${counts.paused} paused` : ''} · {counts.all} total
           </span>
         </span>
         <button

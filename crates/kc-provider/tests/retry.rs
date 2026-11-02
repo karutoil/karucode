@@ -185,7 +185,10 @@ async fn retries_rate_limits() {
 }
 
 // The stream layer's own `retryable: false` must be honoured: an in-stream
-// `invalid_request_error` is a rejected request, not a dead channel.
+// `invalid_request_error` is a rejected request, not a dead channel. It must
+// reach the consumer *as a chunk*, still marked non-retryable: raising it as an
+// `Err(Error::Provider(..))` made the runtime treat it as transport-shaped and
+// restart the whole stream (4 billed regenerations of one rejected request).
 #[tokio::test]
 async fn honours_a_non_retryable_stream_error() {
     let body = "data: {\"error\":{\"message\":\"unsupported parameter: foo\",\
@@ -200,12 +203,21 @@ async fn honours_a_non_retryable_stream_error() {
         .await
         .unwrap();
 
-    let err = stream
+    let item = stream
         .next()
         .await
-        .expect("a terminal error item")
-        .expect_err("a non-retryable stream error must surface");
-    assert!(err.to_string().contains("unsupported parameter"), "{err}");
+        .expect("a terminal item")
+        .expect("a rejected request is delivered as a chunk, not as a transport error");
+    match item {
+        ProviderChunk::Error { message, retryable } => {
+            assert!(message.contains("unsupported parameter"), "{message}");
+            assert!(
+                !retryable,
+                "the verdict must survive to the runtime, which restarts on `retryable`"
+            );
+        }
+        other => panic!("expected an Error chunk, got {other:?}"),
+    }
     assert_eq!(
         hit_count(&server),
         1,
@@ -476,4 +488,175 @@ async fn factory_built_provider_retries() {
 
     assert_eq!(texts(stream).await, "ok");
     assert_eq!(hit_count(&server), 2, "factory-built providers must retry");
+}
+
+// --- permanent failures are not retried --------------------------------------
+//
+// Three shapes reached the retry layer with no status to classify and were
+// therefore treated as transient: a 200 carrying an error body, a 200 with no
+// body at all, and a completion delivered only as `data: [DONE]`. Each attempt
+// is a billed generation, so a quota error was retried 51 times and a [DONE]
+// completion four times.
+
+/// A gateway that reports a *rejection* with a 200 and an `error` body. The
+/// reason is in the body and nowhere else, so it has to be surfaced - and the
+/// identical request must not be sent again.
+#[tokio::test]
+async fn a_200_with_a_json_error_body_is_not_retried_and_names_the_reason() {
+    let failure = response(
+        "200 OK",
+        "application/json",
+        "{\"error\":{\"message\":\"You exceeded your current quota, \
+         please check your plan and billing details. (insufficient_quota)\",\
+         \"type\":\"insufficient_quota\"}}",
+    );
+    let server = flaky_server(usize::MAX, failure).await;
+
+    let mut stream = retrying(&server, 5)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let err = stream
+        .next()
+        .await
+        .expect("a terminal error item")
+        .expect_err("a 200 carrying a rejection must fail the attempt");
+    let text = err.to_string();
+    assert!(
+        text.contains("insufficient_quota"),
+        "the upstream reason must reach the user: {text}"
+    );
+    assert!(text.contains("200"), "{text}");
+    assert!(
+        !text.contains("gave up after"),
+        "a permanent failure must not report a retry budget: {text}"
+    );
+    assert_eq!(
+        hit_count(&server),
+        1,
+        "a permanent rejection must be sent exactly once, not 51 times"
+    );
+    assert!(stream.next().await.is_none());
+}
+
+/// A 200 with no body is the endpoint answering "nothing", which it will answer
+/// again. It used to be retried for the full attempt budget.
+#[tokio::test]
+async fn an_empty_body_is_not_retried() {
+    let server = spawn(move |_req, mut socket| async move {
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let _ = socket.shutdown().await;
+    })
+    .await;
+
+    let mut stream = retrying(&server, 5)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let err = stream
+        .next()
+        .await
+        .expect("a terminal error item")
+        .expect_err("an empty body must fail the attempt");
+    assert!(err.to_string().contains("empty response body"), "{err}");
+    assert!(
+        !err.to_string().contains("gave up after"),
+        "an empty body is a permanent answer, not a retry budget: {err}"
+    );
+    assert_eq!(hit_count(&server), 1, "an empty body must be sent once");
+    assert!(stream.next().await.is_none());
+}
+
+/// A successful completion delivered only as `[DONE]` is a finished (empty)
+/// answer. It used to be read as "the stream died before sending anything" and
+/// regenerated four times for one turn.
+#[tokio::test]
+async fn a_done_only_completion_finishes_without_restarting() {
+    let server = spawn(move |_req, mut socket| async move {
+        write_sse(&mut socket, "data: [DONE]\n\n").await;
+    })
+    .await;
+
+    let mut stream = retrying(&server, 5)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let mut seen = Vec::new();
+    while let Some(item) = stream.next().await {
+        seen.push(item.expect("a [DONE]-only completion is not an error"));
+    }
+    assert_eq!(
+        seen,
+        vec![ProviderChunk::Finish {
+            reason: "stop".into()
+        }],
+        "the turn must finish with empty text, not restart"
+    );
+    assert_eq!(
+        hit_count(&server),
+        1,
+        "[DONE] is a finished answer, not a reason to re-bill a generation"
+    );
+}
+
+/// A `retryable: false` in-stream error must reach the runtime as a chunk with
+/// the verdict intact. Raising it as a transport error made the runtime restart
+/// the stream four times on a permanently rejected request.
+#[tokio::test]
+async fn a_non_retryable_stream_error_keeps_its_verdict() {
+    let body = "data: {\"error\":{\"message\":\"model does not support tools\",\
+                \"type\":\"invalid_request_error\"}}\n\n";
+    let server = spawn(move |_req, mut socket| async move {
+        write_sse(&mut socket, body).await;
+    })
+    .await;
+
+    let mut stream = retrying(&server, 5)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    match stream.next().await.expect("a terminal item") {
+        Ok(ProviderChunk::Error { message, retryable }) => {
+            assert!(
+                message.contains("model does not support tools"),
+                "{message}"
+            );
+            assert!(
+                !retryable,
+                "a rejected request must not be marked retryable"
+            );
+        }
+        other => panic!("the runtime decides restarts from this chunk, got {other:?}"),
+    }
+    assert_eq!(hit_count(&server), 1, "one request, one billed generation");
+    assert!(stream.next().await.is_none());
+}
+
+/// The transient half of the same shape must still retry: a 200 + HTML splash
+/// from a dying proxy is exactly what the retry layer exists for.
+#[tokio::test]
+async fn a_splash_page_still_retries_and_recovers() {
+    let failure = response(
+        "200 OK",
+        "text/html",
+        "<html><body>502 Bad Gateway</body></html>",
+    );
+    let server = flaky_server(2, failure).await;
+
+    let stream = retrying(&server, 5)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(texts(stream).await, "ok", "the retry must recover the turn");
+    assert_eq!(hit_count(&server), 3, "two splashes then the winner");
 }

@@ -7,7 +7,7 @@
 
 - **Slug:** `terminals`
 - **Tags:** terminal, shell, pty, websocket, ui, tabs
-- **Applies to:** `route:GET /api/terminals`, `route:POST /api/terminals`, `route:PATCH /api/terminals/:id`, `route:DELETE /api/terminals/:id`, `route:POST /api/terminals/:id/restart`, `route:GET /api/terminals/:id/socket`, `config:[terminals]`, `config:terminals.enabled`, `config:terminals.shell`, `config:terminals.scrollback_bytes`, `config:terminals.max_terminals`, `config:terminals.idle_timeout_secs`, `env:KARUCODE_TERMINALS`, `env:KARUCODE_TERMINALS_SHELL`, `env:KARUCODE_TERMINALS_SCROLLBACK_BYTES`, `env:KARUCODE_TERMINALS_MAX`, `env:KARUCODE_TERMINAL_IDLE_SECS`, `ui:TerminalTab`, `file:web/src/components/TerminalTab.tsx`, `file:crates/kc-server/src/terminals.rs`
+- **Applies to:** `route:GET /api/terminals`, `route:POST /api/terminals`, `route:PATCH /api/terminals/:id`, `route:DELETE /api/terminals/:id`, `route:POST /api/terminals/:id/restart`, `route:GET /api/terminals/:id/socket`, `config:[terminals]`, `config:terminals.enabled`, `config:terminals.shell`, `config:terminals.scrollback_bytes`, `config:terminals.max_terminals`, `config:terminals.idle_timeout_secs`, `env:KARUCODE_TERMINALS`, `env:KARUCODE_TERMINALS_SHELL`, `env:KARUCODE_TERMINALS_SCROLLBACK_BYTES`, `env:KARUCODE_TERMINALS_MAX`, `env:KARUCODE_TERMINAL_IDLE_SECS`, `env:KARUCODE_ALLOWED_HOSTS`, `ui:TerminalTab`, `file:web/src/components/TerminalTab.tsx`, `file:crates/kc-server/src/terminals.rs`
 - **Source:** `crates/kc-server/src/terminals.rs:1`
 
 ---
@@ -79,6 +79,18 @@ Because a browser cannot set a header on a websocket handshake, this route
 also accepts `?token=<auth token>` exactly like `GET /api/events`. The
 `Origin` header must still match `Host` (a cross-origin page cannot open it),
 and the origin check is enforced even when no token is configured.
+
+"Match" is exact - scheme, host and **port**. The one exception is a reverse
+proxy, and there it is not a loopback shortcut: the `Origin`'s authority must
+appear as an explicit `KARUCODE_ALLOWED_HOSTS` entry. So
+`Origin: http://localhost:9999` against `Host: 127.0.0.1:8787` is refused
+(they are different origins, whatever the port is doing), while a proxy
+fronting `https://karucode.example.com` still works because that name is
+listed. There is no dev-server exemption to lose: `web/vite.config.ts` proxies
+`/api` without `ws: true`, so `npm run dev` never reaches this socket - open
+the built app at `http://127.0.0.1:8787` instead. A missing `Origin` is a
+non-browser client and is accepted (the `Host` guard and the bearer token are
+the gate for those), never a web page.
 
 ## The shell
 

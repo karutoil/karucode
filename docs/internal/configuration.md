@@ -7,7 +7,7 @@
 
 - **Slug:** `configuration`
 - **Tags:** config, settings, configuration, toml, env
-- **Applies to:** `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_AUTO_CONTINUE`, `env:KARUCODE_MAX_CONTINUES`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:[notifications]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `config:notifications.enabled`, `config:notifications.min_run_secs`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`
+- **Applies to:** `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_AUTO_CONTINUE`, `env:KARUCODE_MAX_CONTINUES`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_MAX_CONTINUES`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_concurrent`, `config:subagents.max_iterations`, `config:subagents.max_continues`, `config:subagents.max_depth`, `config:subagents.timeout_secs`, `config:[notifications]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `config:notifications.enabled`, `config:notifications.min_run_secs`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`
 - **Source:** `crates/kc-server/src/settings.rs:14`
 
 ---
@@ -32,6 +32,11 @@ Command-line flags (`--host`, `--port`, `--workspace`, `--data-dir`,
 Set `KARUCODE_LOCK_SETTINGS=1` to remove layer 1 entirely: the UI becomes
 read-only for settings and `PATCH /api/config` answers `403`. This is how you
 run karucode where the operator, not the browser, owns the model and keys.
+
+Every boolean in this file and in the environment takes the same spellings:
+`1/0`, `true/false`, `yes/no`, `on/off`, case-insensitive. Anything else is
+ignored with the previous value kept, so `KARUCODE_LOCK_SETTINGS=1` and
+`KARUCODE_LOCK_SETTINGS=true` are the same switch.
 
 ## Which settings apply without a restart
 
@@ -73,6 +78,18 @@ security change is logged at `info` with the field *names* only.
 
 With no admin token configured the gate is off and any API client can change
 those fields; the server logs a warning at startup when that is the case.
+
+Both credentials are validated: `auth_token` and `admin_token` must each be at
+least 16 characters, and neither may be a documented placeholder
+(`change-me…`, `changeme…`, `secret…`, `password…`, `test…`). A placeholder is
+published text - the 27-character `change-me-to-16-plus-chars` that used to
+ship in `.env.example` passed a length check and was a guessable working
+bearer token - so it is refused by name. Generate a real one:
+
+```bash
+export KARUCODE_AUTH_TOKEN="$(openssl rand -hex 24)"
+export KARUCODE_ADMIN_TOKEN="$(openssl rand -hex 24)"
+```
 
 ## Project roots
 
@@ -159,16 +176,30 @@ than restart. Subagents follow the same rule with their own numbers:
 
 ```toml
 [subagents]
+max_concurrent = 3      # subagent loops running at once
+max_background = 8      # live detached agents per session
+allow_background = true # permitted to spawn with `background = true`
+wait_timeout_secs = 600 # default bound on `wait_for_agents`
 max_iterations = 200    # model turns per subagent segment
 max_continues = 60      # about 12,200 turns before it must report back
 timeout_secs = 14400    # 4h wall clock for one delegated task
 ```
 
+`max_concurrent` bounds real parallelism, not call sites: a `spawn_agents`
+fan-out or a `background: true` spawn runs beside its caller, so several loops
+can be live at once. `max_background` is a separate ceiling on *detached*
+agents in one session, because each one keeps a provider stream open after the
+turn that started it has ended. A spawn past either limit is refused by name,
+never quietly queued. `wait_timeout_secs` bounds `wait_for_agents`: a wait that
+runs out reports which agents are still working instead of hanging.
+
 `max_continues = 0` restores the one-shot budget (the subagent stops at
 `max_iterations`), and `limits.auto_continue = false` switches continuation off
 for runs and subagents alike. Environment:
+`KARUCODE_SUBAGENT_CONCURRENCY`, `KARUCODE_SUBAGENT_MAX_BACKGROUND`,
+`KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`,
 `KARUCODE_SUBAGENT_MAX_ITERATIONS`, `KARUCODE_SUBAGENT_MAX_CONTINUES`,
-`KARUCODE_SUBAGENT_TIMEOUT_SECS`.
+`KARUCODE_SUBAGENT_TIMEOUT_SECS`, `KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`.
 
 `limits.context_max_chars` decides how much conversation is sent to the model.
 Leave it at `0` (the default) and the budget is **derived from the resolved

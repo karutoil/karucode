@@ -7,7 +7,7 @@
 
 - **Slug:** `builtin-tools`
 - **Tags:** tools, agent, files, search, shell, git
-- **Applies to:** `tool:read_file`, `tool:list_dir`, `tool:search_files`, `tool:write_file`, `tool:edit_file`, `tool:run_command`, `tool:git_status`, `tool:git_diff`, `tool:karucode_docs`, `route:POST /api/sessions/:id/rewind`, `config:[limits]`, `config:allow_temp_dir`, `env:KARUCODE_ALLOW_TEMP_DIR`, `config:[model]`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`
+- **Applies to:** `tool:read_file`, `tool:list_dir`, `tool:search_files`, `tool:write_file`, `tool:edit_file`, `tool:run_command`, `tool:git_status`, `tool:git_diff`, `tool:karucode_docs`, `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `route:POST /api/sessions/:id/rewind`, `config:[limits]`, `config:allow_temp_dir`, `env:KARUCODE_ALLOW_TEMP_DIR`, `config:[model]`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`
 - **Source:** `crates/kc-tools/src/lib.rs:7`
 
 ---
@@ -15,17 +15,24 @@
 | Tool | Class | Approval | What it does |
 | --- | --- | --- | --- |
 | `read_file` | read_only | none | UTF-8 text with numbered lines and a `path - lines A-B of N` header; `offset`/`limit` (default 400, max 2000 lines). `N` is the real line count of the whole file, even when `limits.max_file_read_bytes` cut the read short. A PNG/JPEG/GIF/WebP is attached as an image for a model that takes image input; a text-only model gets a refusal it can pass on |
-| `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries |
-| `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`. The result cap is global across files, and long matching lines keep their first 300 characters |
+| `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries; the walk stops at the cap and a truncated listing reports the total as a lower bound (`500+`) |
+| `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`. The result cap is global across files, and long matching lines keep their first 300 characters in both engines |
 | `write_file` | mutating | policy | create/overwrite atomically, max 2 MiB per call; journals the previous bytes for a rewind |
 | `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff; journals the previous bytes |
 | `run_command` | shell | policy | `/bin/sh -c` in the workspace, streamed output, timeout, own process group. On timeout or cancellation the whole group gets SIGTERM, then SIGKILL after a grace period, so a child that ignores SIGTERM cannot survive |
-| `git_status` | read_only | none | branch + porcelain status for the workspace or a subdirectory |
-| `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref |
+| `git_status` | read_only | none | branch + porcelain status for the workspace or a subdirectory, **confined to the workspace** |
+| `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref, **confined to the workspace** (paths are workspace-relative) |
 | `karucode_docs` | read_only | none | search and read karucode's own documentation (this system) |
 
-`spawn_agent` is registered by the runtime (`crates/kc-runtime/src/subagent.rs`),
-not here. Plugin tools are namespaced `plugin__<plugin>__<tool>` and MCP tools
+The delegate family - `spawn_agent`, `spawn_agents`, `send_message`,
+`wait_for_agents`, `list_subagents`, `agent_history`, `pause_agents`,
+`resume_agents`, `kill_agents` and `report_status` - is registered by the
+runtime (`crates/kc-runtime/src/subagent.rs`), not here: every one of them needs
+the runtime's live agent registry, which a stateless tool cannot reach. They are
+class `delegate`, and `spawn_agent`/`spawn_agents` take a `background` flag that
+detaches the child so the caller can keep working. The `subagents` topic is
+their reference; this page lists them so the table above is the whole built-in
+surface. Plugin tools are namespaced `plugin__<plugin>__<tool>` and MCP tools
 `mcp__<server>__<tool>`, so a collision with a first-party name is impossible.
 
 ## Examples the model is expected to use
@@ -66,13 +73,23 @@ of a long stream within `max_command_output_bytes`.
 * `search_files` honours `.gitignore`. Searching ignored/build output needs a
   pattern under an explicitly named path, not a glob trick.
 * `search_files` caps results globally, not per file, and both engines agree on
-  the cap. A match on a very long line keeps its first 300 characters rather
-  than being replaced by a placeholder.
+  the cap. A match on a very long line keeps its first 300 **characters** rather
+  than being replaced by a placeholder; the cap is counted in characters, not
+  bytes, so a line of multi-byte text is cut in the same place by both engines
+  (ripgrep's own `--max-columns` counts bytes, so it is set wide enough that our
+  character cap is the one that decides). A path containing `:` is reported
+  correctly: ripgrep is asked for `--null` records.
+* `run_command` reports a **success** when the command exits 0 and leaves a
+  child running in the background (`build & exit 0`) instead of waiting for that
+  child to close the output pipes. The result says the output may be incomplete
+  and `background_output` is set in the metadata.
 * `read_file` reports the file's real line count in its header even when the
   byte cap truncated the content; when the byte cap (not the line window) ended
   the read, there is no "continue with offset" hint, because those lines cannot
   be reached without raising `limits.max_file_read_bytes`.
-* Binary files are refused by `read_file` instead of being rendered as noise.
+* Binary files are refused by `read_file` instead of being rendered as noise:
+  the check covers the whole window that would be returned, so a NUL deep in a
+  large file cannot reach the model as U+0000.
 
 ## Scratch space: the temp directory
 

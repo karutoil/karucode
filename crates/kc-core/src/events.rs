@@ -153,6 +153,11 @@ pub enum Event {
         task: String,
         model: String,
         parent_run_id: String,
+        /// True when the spawn detached, so the roster can show it without
+        /// waiting for a refresh from the store (which is where the row's own
+        /// copy lives). Defaulted so a frame from an older build still parses.
+        #[serde(default)]
+        background: bool,
     },
     AgentProgress {
         agent_id: String,
@@ -165,6 +170,42 @@ pub enum Event {
         summary: String,
         #[serde(default)]
         error: Option<String>,
+    },
+    /// A live subagent was paused or resumed by a human or by its parent.
+    ///
+    /// Separate from `agent_progress` because it changes whether the agent can
+    /// spend anything at all, and the roster has to say so: a paused agent still
+    /// holds a subagent slot, so a list that showed it as `running` would make the
+    /// next spawn look like it had free capacity it does not have.
+    AgentPaused {
+        agent_id: String,
+        /// `true` when the pause landed, `false` when it was lifted.
+        paused: bool,
+        /// Who asked, for the roster: `user` or the parent agent id.
+        by: String,
+    },
+    /// A message was delivered to (or queued for) another agent.
+    ///
+    /// The payload is the *delivery*, not the message text: the text is already
+    /// in the recipient's transcript, and a mailbox frame is meant for the roster
+    /// ("sarah has 2 unread"), not for a second copy of the conversation.
+    AgentMessage {
+        from_agent_id: Option<String>,
+        /// The recipient: an agent id, or `run:<id>` for a message to the
+        /// top-level run of a session (which is what a child means by "parent"
+        /// when it was spawned by the main agent).
+        to: String,
+        /// `delivered` when the recipient's loop took it at the top of its next
+        /// iteration, `queued` when it is parked or still working.
+        state: String,
+    },
+    /// A live subagent's own status report: what it says it is doing and how far
+    /// along it claims to be. Advisory, and independent of the iteration counter.
+    AgentNote {
+        agent_id: String,
+        note: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        progress: Option<f32>,
     },
     Notice {
         level: String,

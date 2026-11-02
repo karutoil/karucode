@@ -26,16 +26,17 @@ use kc_core::config::SessionModelSelection;
 use kc_core::error::{Error, Result};
 use kc_core::message::{ImageAttachment, ToolCall};
 use kc_core::store::*;
+use parking_lot::Mutex;
 use rusqlite::{params, OptionalExtension, Row};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 10;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -144,6 +145,12 @@ CREATE INDEX IF NOT EXISTS idx_claims_session_id ON claims(session_id);
 /// session belongs to one (nullable for sessions created before v2, which the
 /// server attaches at startup). The `workspace` column on sessions stays: it is
 /// the path the session actually ran in, even if the project is later renamed.
+///
+/// The `ALTER TABLE sessions ADD COLUMN project_id` is not in the batch: SQLite
+/// has no `ADD COLUMN IF NOT EXISTS`, so it goes through
+/// [`add_column_if_missing`] like every other added column, and the batch here
+/// runs *after* it so `idx_sessions_project_id` has a column to index. See
+/// [`SqliteStore::migrate`] for why that matters.
 const MIGRATION_2: &str = r#"
 CREATE TABLE IF NOT EXISTS projects (
     id         TEXT PRIMARY KEY,
@@ -153,17 +160,17 @@ CREATE TABLE IF NOT EXISTS projects (
     updated_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
-
-ALTER TABLE sessions ADD COLUMN project_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_sessions_project_id ON sessions(project_id);
 "#;
 
 /// Schema v3: per-session model selection. NULL follows the install-wide
 /// default; otherwise a JSON [`SessionModelSelection`] (`{provider, model,
 /// reasoning_effort?}`) pins this session to a profile + model.
-const MIGRATION_3: &str = r#"
-ALTER TABLE sessions ADD COLUMN model TEXT;
-"#;
+///
+/// The column itself is in [`ADDED_COLUMNS`], so this batch is empty - SQLite
+/// has no `ADD COLUMN IF NOT EXISTS` and the step has to be replayable. See
+/// [`SqliteStore::migrate`].
+const MIGRATION_3: &str = "";
 
 /// Schema v4: multi-instance safety and the indexes the hot queries need.
 ///
@@ -180,9 +187,6 @@ ALTER TABLE sessions ADD COLUMN model TEXT;
 /// `sessions(updated_at)` for the `ORDER BY s.updated_at DESC` in
 /// `list_sessions`.
 const MIGRATION_4: &str = r#"
-ALTER TABLE runs ADD COLUMN instance_id TEXT NOT NULL DEFAULT '';
-ALTER TABLE agents ADD COLUMN instance_id TEXT NOT NULL DEFAULT '';
-
 CREATE INDEX IF NOT EXISTS idx_messages_agent_id ON messages(agent_id, id);
 CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals(run_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_session_status ON approvals(session_id, status);
@@ -196,9 +200,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);
 /// `kc-provider` re-emits it as a follow-up `user` message with an `image_url`
 /// content part. `'[]'` for rows written before v5 keeps every existing
 /// transcript readable.
-const MIGRATION_5: &str = r#"
-ALTER TABLE messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]';
-"#;
+const MIGRATION_5: &str = "";
 
 /// Schema v6: the browser terminal.
 ///
@@ -243,8 +245,6 @@ CREATE INDEX IF NOT EXISTS idx_terminals_position ON terminals(position, created
 /// retention and the rewind itself, since a deleted journal row must not leave
 /// its payload behind.
 const MIGRATION_7: &str = r#"
-ALTER TABLE messages ADD COLUMN rewound_at INTEGER;
-
 CREATE TABLE IF NOT EXISTS checkpoint_blobs (
     id   INTEGER PRIMARY KEY AUTOINCREMENT,
     sha  TEXT NOT NULL,
@@ -295,6 +295,53 @@ CREATE TABLE IF NOT EXISTS usage_calls (
 );
 CREATE INDEX IF NOT EXISTS idx_usage_calls_session ON usage_calls(session_id, id);
 "#;
+
+/// Schema v9: reporting on a live subagent.
+///
+/// A background agent is a job the parent can watch, message and stop, so the
+/// row carries what a human would ask about it: whether it was detached, what it
+/// last said it was doing, and how far along it claims to be. `note` and
+/// `progress` are written by `report_status`, which is advisory - they describe
+/// the agent's own claim, not a measurement - and `background = 0` keeps every
+/// existing row meaning "a spawn that blocked its caller", which is exactly what
+/// it was.
+const MIGRATION_9: &str = "";
+
+/// Schema v10: the index the retention pass needs.
+///
+/// Pruning runs and agents asks "does any message still reference this row?",
+/// which without an index on `messages(run_id)` is a correlated full scan of
+/// `messages` per candidate row - 1.2 s for 149 runs over 33k messages, all of
+/// it inside the transaction that holds the single writer. With the index the
+/// subquery becomes a covering-index lookup per row.
+const MIGRATION_10: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_messages_run_id ON messages(run_id);
+"#;
+
+/// Every `ADD COLUMN` in the schema, as `(version, table, column, declaration)`.
+///
+/// SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (it is a syntax
+/// error), so a replayed migration batch that contains one aborts with
+/// "duplicate column name". That is not a corner case: `sqlite3 db .dump` does
+/// not carry `user_version`, so the ordinary backup idiom - dump, then restore
+/// into a fresh file - produces a database whose *schema is current* and whose
+/// version reads 0. Migrations then replay from v1 and used to die on the first
+/// `ADD COLUMN`, leaving a file that could never be opened again.
+///
+/// So every step's columns live here and go through
+/// [`add_column_if_missing`], which reads `PRAGMA table_info` first. `table` and
+/// `column` are compile-time literals, never caller input.
+const ADDED_COLUMNS: &[(i64, &str, &str, &str)] = &[
+    (2, "sessions", "project_id", "TEXT"),
+    (3, "sessions", "model", "TEXT"),
+    (4, "runs", "instance_id", "TEXT NOT NULL DEFAULT ''"),
+    (4, "agents", "instance_id", "TEXT NOT NULL DEFAULT ''"),
+    (5, "messages", "images", "TEXT NOT NULL DEFAULT '[]'"),
+    (7, "messages", "rewound_at", "INTEGER"),
+    (9, "agents", "background", "INTEGER NOT NULL DEFAULT 0"),
+    (9, "agents", "note", "TEXT NOT NULL DEFAULT ''"),
+    (9, "agents", "progress", "REAL"),
+];
 
 pub struct SqliteStore {
     /// The single writer connection. Every mutation takes this mutex.
@@ -360,6 +407,64 @@ fn file_size(path: &Path) -> Result<u64> {
 fn db_err(context: &str, e: rusqlite::Error) -> Error {
     Error::Store(format!("{context}: {e}"))
 }
+
+/// `ALTER TABLE <table> ADD COLUMN <column> <decl>`, but only when the column
+/// is not there yet. Returns whether the table was changed.
+///
+/// This is the substitute for the `ADD COLUMN IF NOT EXISTS` SQLite does not
+/// have, and it is what makes [`SqliteStore::migrate`] replayable: a restored
+/// `.dump` has the current schema with `user_version = 0`, so every step runs
+/// again over tables that already carry every column.
+///
+/// `PRAGMA table_info` cannot be parameterised, so the table name is
+/// interpolated. The only strings that reach it are the literals in
+/// [`ADDED_COLUMNS`] and [`SCHEMA_TABLES`], which a test checks against SQLite's
+/// own table list - never user input.
+fn add_column_if_missing(
+    conn: &rusqlite::Connection,
+    table: &'static str,
+    column: &'static str,
+    decl: &'static str,
+) -> Result<bool> {
+    let existing: Vec<String> = {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|e| db_err("table_info prepare", e))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>("name"))
+            .map_err(|e| db_err("table_info query", e))?;
+        // The statement is dropped before the ALTER so nothing is holding a
+        // schema snapshot open while the table is rewritten.
+        rows.collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(|e| db_err("table_info rows", e))?
+    };
+    if existing.iter().any(|name| name == column) {
+        return Ok(false);
+    }
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
+        .map_err(|e| db_err(&format!("add {table}.{column}"), e))?;
+    Ok(true)
+}
+
+/// Every table the schema creates, in the order [`SqliteStore::migrate`]'s
+/// batches run. Only used by the test that keeps [`add_column_if_missing`]'s
+/// interpolated table names honest (a typo would otherwise look fine, and
+/// silently skip a column on a fresh database).
+#[cfg(test)]
+const SCHEMA_TABLES: &[&str] = &[
+    "sessions",
+    "messages",
+    "runs",
+    "agents",
+    "approvals",
+    "settings",
+    "claims",
+    "projects",
+    "terminals",
+    "checkpoint_blobs",
+    "checkpoints",
+    "usage_calls",
+];
 
 fn limit_i64(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
@@ -432,6 +537,28 @@ fn json_opt<T: serde::de::DeserializeOwned>(raw: Option<String>, column: &str) -
         },
         _ => None,
     }
+}
+
+/// Delete every `checkpoint_blobs` row no `checkpoints` row points at, and
+/// return how many went.
+///
+/// The journal is content-addressed, so one blob can back many checkpoint rows
+/// in many sessions, and the only link runs `checkpoints.content_id ->
+/// checkpoint_blobs.id`. `NOT EXISTS` therefore is the correct shape: asking
+/// "does anything still need these bytes" is safe, deleting by `session_id`
+/// would take a payload another session is still using.
+///
+/// Only meaningful *after* the caller has deleted the journal rows it no longer
+/// wants, which is why it is called from both `delete_session` and the
+/// retention pass rather than offered as a standalone store method.
+fn sweep_orphaned_blobs(conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM checkpoint_blobs
+          WHERE NOT EXISTS (
+                SELECT 1 FROM checkpoints c WHERE c.content_id = checkpoint_blobs.id
+          )",
+        [],
+    )
 }
 
 fn map_session(row: &Row<'_>) -> rusqlite::Result<Session> {
@@ -566,6 +693,9 @@ fn map_agent(row: &Row<'_>) -> rusqlite::Result<AgentRecord> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         finished_at: row.get("finished_at")?,
+        background: row.get::<_, i64>("background").unwrap_or(0) != 0,
+        note: row.get::<_, String>("note").unwrap_or_default(),
+        progress: row.get("progress").ok(),
     })
 }
 
@@ -842,6 +972,15 @@ impl SqliteStore {
     }
 
     /// Run a blocking closure with exclusive access to the writer connection.
+    ///
+    /// The mutex deliberately does not poison ([`parking_lot::Mutex`]): `f` is
+    /// caller-supplied code that can panic, and with `std::sync::Mutex` a single
+    /// panic would poison the writer and make every later call fail with
+    /// "database mutex poisoned" for the lifetime of the process - a store that
+    /// never recovers, unlike the runtime, which catches panics per tool. The
+    /// connection is left in whatever state rusqlite guarantees (any open
+    /// transaction is rolled back when its guard unwinds), so the next caller
+    /// gets a usable connection.
     pub(crate) async fn with<T, F>(&self, f: F) -> Result<T>
     where
         T: Send + 'static,
@@ -849,9 +988,7 @@ impl SqliteStore {
     {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let mut guard = conn
-                .lock()
-                .map_err(|_| Error::Store("database mutex poisoned".into()))?;
+            let mut guard = conn.lock();
             f(&mut guard)
         })
         .await
@@ -875,9 +1012,7 @@ impl SqliteStore {
         let readers = self.readers.clone();
         let index = self.next_reader.fetch_add(1, Ordering::Relaxed) % readers.len();
         tokio::task::spawn_blocking(move || {
-            let guard = readers[index]
-                .lock()
-                .map_err(|_| Error::Store("read connection mutex poisoned".into()))?;
+            let guard = readers[index].lock();
             f(&guard)
         })
         .await
@@ -932,11 +1067,24 @@ impl SqliteStore {
         Err(corruption_error(&path, &result))
     }
 
-    /// Forward-only, idempotent migrations driven by `PRAGMA user_version`.
+    /// Forward-only, replayable migrations driven by `PRAGMA user_version`.
     ///
-    /// Each step runs in its own transaction: the DDL and the version bump are
-    /// committed together, so a crash mid-migration leaves the previous version
-    /// intact. `IF NOT EXISTS` everywhere means a re-run is harmless.
+    /// Each step runs in its own transaction: the DDL, the step's `ADD COLUMN`s
+    /// and the version bump are committed together, so a crash mid-migration
+    /// leaves the previous version intact and the step runs again next boot.
+    ///
+    /// Every statement is idempotent, which is a requirement rather than a
+    /// nicety. `sqlite3 db .dump` does not carry `user_version`, so the ordinary
+    /// backup idiom (dump, restore into a fresh file) yields a database with the
+    /// *current schema* and version 0. Migrations then replay from v1 and must
+    /// be able to run over tables that already have everything: `CREATE TABLE IF
+    /// NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` in the batches, and
+    /// [`add_column_if_missing`] for the columns, because SQLite has no
+    /// `ADD COLUMN IF NOT EXISTS`. Without that, a restore was permanently
+    /// unbootable with "duplicate column name".
+    ///
+    /// A database written by a *newer* build is still refused rather than
+    /// touched.
     async fn migrate(&self) -> Result<()> {
         self.with(|conn| {
             let current: i64 = conn
@@ -955,35 +1103,32 @@ impl SqliteStore {
                 let tx = conn
                     .transaction()
                     .map_err(|e| db_err("begin migration", e))?;
-                match version {
-                    1 => tx
-                        .execute_batch(MIGRATION_1)
-                        .map_err(|e| db_err("migration v1", e))?,
-                    2 => tx
-                        .execute_batch(MIGRATION_2)
-                        .map_err(|e| db_err("migration v2", e))?,
-                    3 => tx
-                        .execute_batch(MIGRATION_3)
-                        .map_err(|e| db_err("migration v3", e))?,
-                    4 => tx
-                        .execute_batch(MIGRATION_4)
-                        .map_err(|e| db_err("migration v4", e))?,
-                    5 => tx
-                        .execute_batch(MIGRATION_5)
-                        .map_err(|e| db_err("migration v5", e))?,
-                    6 => tx
-                        .execute_batch(MIGRATION_6)
-                        .map_err(|e| db_err("migration v6", e))?,
-                    7 => tx
-                        .execute_batch(MIGRATION_7)
-                        .map_err(|e| db_err("migration v7", e))?,
-                    8 => tx
-                        .execute_batch(MIGRATION_8)
-                        .map_err(|e| db_err("migration v8", e))?,
+                let batch = match version {
+                    1 => MIGRATION_1,
+                    2 => MIGRATION_2,
+                    3 => MIGRATION_3,
+                    4 => MIGRATION_4,
+                    5 => MIGRATION_5,
+                    6 => MIGRATION_6,
+                    7 => MIGRATION_7,
+                    8 => MIGRATION_8,
+                    9 => MIGRATION_9,
+                    10 => MIGRATION_10,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
+                };
+                // Columns first: a step's batch may index one of them (v2's
+                // `idx_sessions_project_id`), and both are idempotent, so the
+                // order only matters for the index that depends on the column.
+                for (_, table, column, decl) in ADDED_COLUMNS
+                    .iter()
+                    .filter(|(introduced, ..)| *introduced == version)
+                {
+                    add_column_if_missing(&tx, table, column, decl)?;
                 }
+                tx.execute_batch(batch)
+                    .map_err(|e| db_err(&format!("migration v{version}"), e))?;
                 tx.pragma_update(None, "user_version", version)
                     .map_err(|e| db_err("set user_version", e))?;
                 tx.commit().map_err(|e| db_err("commit migration", e))?;
@@ -1104,9 +1249,21 @@ impl Store for SqliteStore {
     async fn delete_session(&self, id: &str) -> Result<()> {
         let id = id.to_string();
         self.with(move |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("delete_session begin", e))?;
             // Messages/runs/agents/approvals/claims go with it (ON DELETE CASCADE).
-            conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])
+            tx.execute("DELETE FROM sessions WHERE id = ?1", params![id])
                 .map_err(|e| db_err("delete_session", e))?;
+            // `checkpoint_blobs` is not cascaded: it is content-addressed, shared
+            // by every checkpoint holding the same bytes, and its only link
+            // points the other way (`checkpoints.content_id`). Without this sweep
+            // deleting a session left every before-image of every file the
+            // session touched on disk - 12.7 MB of private file contents for a
+            // session the user believed they had deleted.
+            sweep_orphaned_blobs(&tx).map_err(|e| db_err("delete_session blobs", e))?;
+            tx.commit()
+                .map_err(|e| db_err("delete_session commit", e))?;
             Ok(())
         })
         .await
@@ -1761,8 +1918,9 @@ impl Store for SqliteStore {
                 "INSERT INTO agents
                     (id, session_id, parent_run_id, parent_agent_id, name, role, task, status,
                      model, iterations, summary, error, owned_paths, created_at, updated_at,
-                     finished_at, instance_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                     finished_at, instance_id, background, note, progress)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                        ?18, ?19, ?20)
                  ON CONFLICT(id) DO UPDATE SET
                      session_id      = excluded.session_id,
                      parent_run_id   = excluded.parent_run_id,
@@ -1778,7 +1936,10 @@ impl Store for SqliteStore {
                      owned_paths     = excluded.owned_paths,
                      updated_at      = excluded.updated_at,
                      finished_at     = excluded.finished_at,
-                     instance_id     = excluded.instance_id",
+                     instance_id     = excluded.instance_id,
+                     background      = excluded.background,
+                     note            = excluded.note,
+                     progress        = excluded.progress",
                 params![
                     agent.id,
                     agent.session_id,
@@ -1796,7 +1957,10 @@ impl Store for SqliteStore {
                     created_at,
                     updated_at,
                     agent.finished_at,
-                    instance_id
+                    instance_id,
+                    i64::from(agent.background),
+                    agent.note,
+                    agent.progress.map(f64::from)
                 ],
             )
             .map_err(|e| db_err("upsert_agent", e))?;
@@ -1812,7 +1976,7 @@ impl Store for SqliteStore {
                 .prepare(
                     "SELECT id, session_id, parent_run_id, parent_agent_id, name, role, task,
                             status, model, iterations, summary, error, owned_paths, created_at,
-                            updated_at, finished_at
+                            updated_at, finished_at, background, note, progress
                        FROM agents WHERE session_id = ?1
                       ORDER BY created_at ASC, id ASC",
                 )
@@ -1834,6 +1998,7 @@ impl Store for SqliteStore {
                     "SELECT a.id, a.session_id, a.parent_run_id, a.parent_agent_id, a.name,
                             a.role, a.task, a.status, a.model, a.iterations, a.summary, a.error,
                             a.owned_paths, a.created_at, a.updated_at, a.finished_at,
+                            a.background, a.note, a.progress,
                             s.title AS session_title, s.workspace AS workspace,
                             s.project_id AS project_id
                        FROM agents a JOIN sessions s ON s.id = a.session_id
@@ -1858,6 +2023,7 @@ impl Store for SqliteStore {
                     "SELECT a.id, a.session_id, a.parent_run_id, a.parent_agent_id, a.name,
                             a.role, a.task, a.status, a.model, a.iterations, a.summary, a.error,
                             a.owned_paths, a.created_at, a.updated_at, a.finished_at,
+                            a.background, a.note, a.progress,
                             s.title AS session_title, s.workspace AS workspace,
                             s.project_id AS project_id
                        FROM agents a JOIN sessions s ON s.id = a.session_id
@@ -2611,6 +2777,20 @@ impl Store for SqliteStore {
                     params![cutoff],
                 )
                 .map_err(|e| db_err("prune agents", e))?;
+            // `claims` only has a session FK, so an agent's path claims outlived
+            // the agent row and every later subagent touching those paths was
+            // warned about a dead agent - which trains the model and the operator
+            // to ignore the one overlap signal `owned_paths` provides. The
+            // subagent release path cannot be relied on here either: a claim
+            // whose `release_claims` never ran (a crash, a killed task) is
+            // exactly the kind that needs sweeping.
+            let claims = tx
+                .execute(
+                    "DELETE FROM claims
+                      WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = claims.agent_id)",
+                    [],
+                )
+                .map_err(|e| db_err("prune claims", e))?;
             // After the runs: an approval whose run was just pruned is orphaned.
             let approvals = tx
                 .execute(
@@ -2625,18 +2805,21 @@ impl Store for SqliteStore {
             // other old row, so the journal rows that point at it must go too.
             // Sweeping here (rather than only when a rewind is undone) is what
             // keeps `checkpoints` from outliving the transcript it describes.
+            //
+            // `message_id > 0` is load-bearing: the runtime writes a journal row
+            // the moment a mutating tool starts and binds it to the assistant
+            // message *afterwards*, so `message_id = 0` means "in flight, the
+            // before-image of the write happening right now". `EXISTS(... id =
+            // 0)` is false for it, so without the guard this pass deleted the
+            // one row a concurrent undo needed.
             tx.execute(
                 "DELETE FROM checkpoints
-                  WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = checkpoints.message_id)",
+                  WHERE message_id > 0
+                    AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = checkpoints.message_id)",
                 [],
             )
             .map_err(|e| db_err("prune checkpoints", e))?;
-            tx.execute(
-                "DELETE FROM checkpoint_blobs
-                  WHERE NOT EXISTS (SELECT 1 FROM checkpoints c WHERE c.content_id = checkpoint_blobs.id)",
-                [],
-            )
-            .map_err(|e| db_err("prune checkpoint blobs", e))?;
+            sweep_orphaned_blobs(&tx).map_err(|e| db_err("prune checkpoint blobs", e))?;
             tx.commit().map_err(|e| db_err("prune commit", e))?;
 
             let report = PruneReport {
@@ -2654,6 +2837,9 @@ impl Store for SqliteStore {
                     approvals = report.approvals,
                     "pruned old rows"
                 );
+            }
+            if claims > 0 {
+                tracing::debug!(claims, "released path claims left behind by pruned agents");
             }
             Ok(report)
         })
@@ -2802,6 +2988,9 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             finished_at: None,
+            background: false,
+            note: String::new(),
+            progress: None,
         }
     }
 
@@ -2822,6 +3011,38 @@ mod tests {
         }
     }
 
+    /// Write schema versions `1..=version` into a database the way a real
+    /// previous build would have: that step's `ADD COLUMN`s plus the batch.
+    ///
+    /// The columns are not in the batches any more (see [`ADDED_COLUMNS`]), so a
+    /// fixture that only ran the batches would build a database no shipped
+    /// version ever wrote. The order matches [`SqliteStore::migrate`]: columns
+    /// first, because a batch may index one of them.
+    fn write_schema_to(conn: &rusqlite::Connection, version: i64) {
+        for step in 1..=version {
+            let batch = match step {
+                1 => MIGRATION_1,
+                2 => MIGRATION_2,
+                3 => MIGRATION_3,
+                4 => MIGRATION_4,
+                5 => MIGRATION_5,
+                6 => MIGRATION_6,
+                7 => MIGRATION_7,
+                8 => MIGRATION_8,
+                9 => MIGRATION_9,
+                10 => MIGRATION_10,
+                other => panic!("no batch for v{other}"),
+            };
+            for (_, table, column, decl) in ADDED_COLUMNS
+                .iter()
+                .filter(|(introduced, ..)| *introduced == step)
+            {
+                add_column_if_missing(conn, table, column, decl).expect("schema column");
+            }
+            conn.execute_batch(batch).expect("schema batch");
+        }
+    }
+
     async fn count(store: &SqliteStore, sql: &str) -> i64 {
         let sql = sql.to_string();
         store
@@ -2831,6 +3052,17 @@ mod tests {
             })
             .await
             .expect("count")
+    }
+
+    /// `PRAGMA user_version` of an open store.
+    async fn version_of(store: &SqliteStore) -> i64 {
+        store
+            .with(|conn| {
+                conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+                    .map_err(|e| db_err("user_version", e))
+            })
+            .await
+            .expect("user_version")
     }
 
     #[tokio::test]
@@ -2976,8 +3208,7 @@ mod tests {
         {
             // A database written by the previous build: v1 + v2, no model column.
             let conn = rusqlite::Connection::open(&db.path).expect("raw open");
-            conn.execute_batch(MIGRATION_1).expect("v1");
-            conn.execute_batch(MIGRATION_2).expect("v2");
+            write_schema_to(&conn, 2);
             conn.pragma_update(None, "user_version", 2)
                 .expect("version");
             conn.execute(
@@ -2998,6 +3229,14 @@ mod tests {
         assert!(
             session.model.is_none(),
             "an upgraded session follows the install-wide default"
+        );
+        // v2's own index must survive the replayable form of the step: the
+        // column moved out of the batch, and the index that depends on it did
+        // not.
+        let sessions = index_names(&store, "sessions").await;
+        assert!(
+            sessions.iter().any(|n| n == "idx_sessions_project_id"),
+            "v2 indexed sessions(project_id): {sessions:?}"
         );
 
         // The new column is writable after the migration.
@@ -3263,10 +3502,7 @@ mod tests {
         std::fs::create_dir_all(db.path.parent().expect("parent")).expect("data dir");
         {
             let conn = rusqlite::Connection::open(&db.path).expect("raw open");
-            conn.execute_batch(MIGRATION_1).expect("v1");
-            conn.execute_batch(MIGRATION_2).expect("v2");
-            conn.execute_batch(MIGRATION_3).expect("v3");
-            conn.execute_batch(MIGRATION_4).expect("v4");
+            write_schema_to(&conn, 4);
             conn.pragma_update(None, "user_version", 4)
                 .expect("version");
             conn.execute(
@@ -4438,6 +4674,104 @@ mod tests {
         assert_eq!(runs[0].id, "r_live", "a running run is never pruned");
     }
 
+    /// `claims` has only a `session_id` foreign key, so a pruned agent's path
+    /// claims used to outlive it (measured: 0 agents, 1 claim) and every later
+    /// subagent touching those paths was warned about an agent that no longer
+    /// existed. The runtime's `release_claims` cannot be relied on: a claim left
+    /// behind by a crash is exactly the kind that needs sweeping.
+    #[tokio::test]
+    async fn pruning_an_agent_releases_its_path_claims() {
+        let db = TempDb::new("prune-claims");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .upsert_agent(&agent("a_old", "s_1", "completed"))
+            .await
+            .expect("agent");
+        store
+            .upsert_agent(&agent("a_live", "s_1", "running"))
+            .await
+            .expect("live agent");
+        store
+            .claim_paths("s_1", "a_old", &["src/lib.rs".to_string()], "write")
+            .await
+            .expect("claim");
+        store
+            .claim_paths("s_1", "a_live", &["src/other.rs".to_string()], "write")
+            .await
+            .expect("live claim");
+        store
+            .with(|conn| {
+                conn.execute("UPDATE agents SET created_at = 1", [])
+                    .map_err(|e| db_err("age agents", e))?;
+                Ok(())
+            })
+            .await
+            .expect("age agents");
+        // The agent has no transcript, so this pass prunes it.
+        let report = store.prune_messages_older_than(30).await.expect("prune");
+        assert_eq!(report.agents, 1, "the finished, transcript-less agent goes");
+
+        let claims = store.list_claims("s_1").await.expect("claims");
+        assert!(
+            claims.iter().all(|c| c.agent_id != "a_old"),
+            "a dead agent's claims must not outlive it: {claims:?}"
+        );
+        assert!(
+            claims.iter().any(|c| c.agent_id == "a_live"),
+            "a live agent's claims are not retention's business: {claims:?}"
+        );
+    }
+
+    /// The retention pass's orphan check is a `NOT EXISTS` over
+    /// `messages(run_id)`. Without an index that is a correlated full scan per
+    /// candidate row - 1.2 s for 149 runs over 33k messages, inside the
+    /// transaction that holds the single writer. The plan must be a search, not
+    /// a scan of `messages`.
+    #[tokio::test]
+    async fn the_retention_orphan_check_uses_the_run_id_index() {
+        let db = TempDb::new("plan-run-id");
+        let store = db.open().await;
+        let indexes = index_names(&store, "messages").await;
+        assert!(
+            indexes.iter().any(|n| n == "idx_messages_run_id"),
+            "the prune needs messages(run_id): {indexes:?}"
+        );
+
+        let plan: Vec<String> = store
+            .with(|conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "EXPLAIN QUERY PLAN
+                         SELECT 1 FROM runs
+                          WHERE status <> 'running'
+                            AND NOT EXISTS (
+                                  SELECT 1 FROM messages m WHERE m.run_id = runs.id
+                            )",
+                    )
+                    .map_err(|e| db_err("plan prepare", e))?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(3))
+                    .map_err(|e| db_err("plan rows", e))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(|e| db_err("plan collect", e))
+            })
+            .await
+            .expect("plan");
+        let joined = plan.join("\n");
+        assert!(
+            joined.contains("idx_messages_run_id"),
+            "the subquery must be answered by the index, not a scan:\n{joined}"
+        );
+        assert!(
+            !joined.contains("SCAN m\n") && !joined.ends_with("SCAN m"),
+            "the subquery must not scan messages:\n{joined}"
+        );
+    }
+
     #[tokio::test]
     async fn db_size_bytes_returns_a_plausible_value() {
         let db = TempDb::new("db-size");
@@ -4504,6 +4838,47 @@ mod tests {
             "vacuum preserves the rows"
         );
         assert!(store.integrity_check().await.expect("check").ok);
+    }
+
+    /// A panic inside a store closure must not brick the store.
+    ///
+    /// `with` runs caller-supplied code while holding the writer mutex. With
+    /// `std::sync::Mutex` one panic poisoned it and every later call failed with
+    /// "database mutex poisoned" for the rest of the process's life - a
+    /// permanently dead server from one bad row, with no recovery path.
+    #[tokio::test]
+    async fn a_panicking_closure_does_not_poison_the_writer() {
+        let db = TempDb::new("panic-no-poison");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+
+        // The join error of a panicking closure is what a caller sees; the point
+        // of the test is what happens *afterwards*.
+        let panicked = store
+            .with(|_conn| -> Result<()> { panic!("a tool panicked mid-query") })
+            .await;
+        assert!(panicked.is_err(), "the panic surfaces as an error");
+
+        // The writer is still usable: no "poisoned" error, and the connection is
+        // not stuck inside a transaction the panic left open.
+        store
+            .append_message(&new_message("s_1", "user", "after the panic"))
+            .await
+            .expect("the store recovers from a panicking closure");
+        assert_eq!(
+            store
+                .list_messages("s_1", 10)
+                .await
+                .expect("messages")
+                .len(),
+            1
+        );
+
+        // Reads through the pool are unaffected too.
+        assert_eq!(store.list_sessions().await.expect("sessions").len(), 1);
     }
 
     #[tokio::test]
@@ -4724,9 +5099,7 @@ mod tests {
         {
             // A database written by the previous build: v1..v3, no instance_id.
             let conn = rusqlite::Connection::open(&db.path).expect("raw open");
-            conn.execute_batch(MIGRATION_1).expect("v1");
-            conn.execute_batch(MIGRATION_2).expect("v2");
-            conn.execute_batch(MIGRATION_3).expect("v3");
+            write_schema_to(&conn, 3);
             conn.pragma_update(None, "user_version", 3)
                 .expect("version");
             conn.execute(
@@ -5124,6 +5497,72 @@ mod tests {
         );
     }
 
+    /// Deleting a session must take its file before-images with it.
+    ///
+    /// `checkpoint_blobs` has no foreign key in either direction - the only link
+    /// runs `checkpoints.content_id -> checkpoint_blobs.id` - so the session
+    /// cascade used to leave every payload on disk: measured 72 blobs / 12.7 MB
+    /// for one deleted session, the opposite of what deleting a private session
+    /// promises.
+    #[tokio::test]
+    async fn deleting_a_session_releases_its_checkpoint_blobs() {
+        let db = TempDb::new("delete-session-blobs");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "doomed", "/w", None)
+            .await
+            .expect("session");
+        store
+            .create_session("s_kept", "kept", "/w", None)
+            .await
+            .expect("session");
+        store
+            .record_checkpoint(&checkpoint("s_1", "a.rs", "private bytes", 1))
+            .await
+            .expect("a");
+        store
+            .record_checkpoint(&checkpoint("s_1", "b.rs", "other private bytes", 2))
+            .await
+            .expect("b");
+        // A payload both sessions share must survive the delete.
+        store
+            .record_checkpoint(&checkpoint("s_1", "shared.rs", "shared bytes", 3))
+            .await
+            .expect("shared in s_1");
+        store
+            .record_checkpoint(&checkpoint("s_kept", "shared.rs", "shared bytes", 4))
+            .await
+            .expect("shared in s_kept");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoint_blobs").await,
+            3
+        );
+
+        store.delete_session("s_1").await.expect("delete");
+
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoints").await,
+            1,
+            "the cascade removed s_1's journal rows"
+        );
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoint_blobs").await,
+            1,
+            "only the payload another session still references survives"
+        );
+        assert_eq!(
+            store
+                .list_checkpoints("s_kept", 0)
+                .await
+                .expect("list")
+                .first()
+                .expect("kept row")
+                .content,
+            "shared bytes",
+            "the surviving blob is still readable"
+        );
+    }
+
     #[tokio::test]
     async fn an_uncapturable_checkpoint_keeps_its_place_but_no_bytes() {
         let db = TempDb::new("checkpoint-uncapturable");
@@ -5212,6 +5651,67 @@ mod tests {
             count(&store, "SELECT COUNT(*) FROM checkpoint_blobs").await,
             1,
             "and its payload goes with it"
+        );
+    }
+
+    /// A journal row with `message_id = 0` is a write that is happening *right
+    /// now*: the runtime records the before-image the moment the tool starts and
+    /// binds it to the assistant message afterwards. The old predicate
+    /// (`NOT EXISTS (... m.id = checkpoints.message_id)`) was false for such a
+    /// row and deleted the before-image a concurrent undo needed.
+    #[tokio::test]
+    async fn retention_keeps_an_in_flight_checkpoint_that_is_not_bound_yet() {
+        let db = TempDb::new("checkpoint-in-flight");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        let keep = store.retention_keep_messages();
+        for i in 0..(keep + 10) {
+            store
+                .append_message(&new_message("s_1", "user", &format!("m{i}")))
+                .await
+                .expect("append");
+        }
+        let in_flight = store
+            .record_checkpoint(&checkpoint("s_1", "working.rs", "before", 0))
+            .await
+            .expect("in-flight checkpoint");
+        age_messages(&store, "s_1", 30).await;
+
+        store.prune_messages_older_than(30).await.expect("prune");
+
+        let rows = store.list_checkpoints("s_1", 0).await.expect("list");
+        assert_eq!(
+            rows.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![in_flight],
+            "the unbound row is the write in progress, not an orphan"
+        );
+        assert_eq!(
+            store.list_checkpoints("s_1", 0).await.expect("list")[0].content,
+            "before",
+            "its payload survives with it"
+        );
+
+        // Once the runtime binds it to a kept message it is a normal journal row
+        // again, and a later prune keeps it for the same reason.
+        let survivor = *store
+            .list_messages("s_1", 10_000)
+            .await
+            .expect("messages")
+            .last()
+            .map(|m| &m.id)
+            .expect("a survivor");
+        store
+            .set_checkpoint_message_id(in_flight, survivor)
+            .await
+            .expect("bind");
+        store.prune_messages_older_than(30).await.expect("prune");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoints").await,
+            1,
+            "a bound row whose message survives is kept"
         );
     }
 
@@ -5499,31 +5999,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_v7_database_migrates_to_v8_without_losing_anything() {
-        let db = TempDb::new("migrate-v8");
+    async fn a_v7_database_migrates_forward_through_v8_and_v9_without_losing_anything() {
+        let db = TempDb::new("migrate-v7-forward");
         std::fs::create_dir_all(&db.dir).expect("dir");
         {
-            // Build a real v7 database by opening one and taking it back a
-            // version: the point is that the v8 step runs over populated tables.
-            let store = db.open().await;
-            store
-                .create_session("s_1", "Kept", "/w", None)
-                .await
-                .expect("session");
-            store
-                .append_message(&new_message("s_1", "user", "hello"))
-                .await
-                .expect("message");
-            store
-                .with(|conn| {
-                    conn.execute_batch("DROP TABLE usage_calls;")
-                        .map_err(|e| db_err("drop usage", e))?;
-                    conn.pragma_update(None, "user_version", 7)
-                        .map_err(|e| db_err("version", e))?;
-                    Ok(())
-                })
-                .await
-                .expect("downgrade to v7");
+            // Build a real v7 database. It has to be written step by step, not by
+            // opening a current store and taking it back: `user_version = 7` on a
+            // table that already has v9's columns is the *restore* shape, which is
+            // a different test.
+            let conn = rusqlite::Connection::open(&db.path).expect("raw open");
+            write_schema_to(&conn, 7);
+            conn.pragma_update(None, "user_version", 7)
+                .expect("version");
+            conn.execute(
+                "INSERT INTO sessions (id, title, workspace, created_at, updated_at)
+                 VALUES ('s_1', 'Kept', '/w', 1, 2)",
+                [],
+            )
+            .expect("insert session");
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, created_at)
+                 VALUES ('s_1', 'user', 'hello', 1)",
+                [],
+            )
+            .expect("insert message");
+            conn.execute(
+                "INSERT INTO agents (id, session_id, parent_run_id, name, role, task, status,
+                                     created_at, updated_at)
+                 VALUES ('a_1', 's_1', 'r_1', 'n', 'r', 't', 'completed', 1, 1)",
+                [],
+            )
+            .expect("insert agent");
         }
 
         let store = db.open().await;
@@ -5537,12 +6043,249 @@ mod tests {
                 .len(),
             1
         );
-        // And the new table is usable straight away.
+        // v9's columns arrived with their defaults, so an agent written by v7
+        // reads back as "a blocking spawn that never reported".
+        let agent = store
+            .list_agents("s_1")
+            .await
+            .expect("agents")
+            .into_iter()
+            .next()
+            .expect("the v7 agent");
+        assert!(!agent.background);
+        assert_eq!(agent.note, "");
+        assert_eq!(agent.progress, None);
+        // And v8's table is usable straight away.
         store
             .record_usage(&usage("s_1", "r_1", None, 7, 1, None))
             .await
             .expect("usage");
         assert_eq!(store.usage_totals("s_1").await.expect("totals").len(), 1);
+        assert_eq!(version_of(&store).await, SCHEMA_VERSION);
+    }
+
+    /// The `.dump`-restore regression: `sqlite3 db .dump` does not carry
+    /// `user_version`, so restoring a dump into a fresh file yields the *current*
+    /// schema with version 0. Migrations replay from v1 over tables that already
+    /// have every column, and used to die with "duplicate column name" -- a
+    /// restored database that could never be opened again.
+    #[tokio::test]
+    async fn a_restored_dump_with_a_stale_version_opens_and_keeps_its_rows() {
+        let db = TempDb::new("restore-dump");
+        std::fs::create_dir_all(&db.dir).expect("dir");
+        {
+            // Exactly what a restore produces: a full current schema, rows in
+            // every table, and `user_version = 0`.
+            let conn = rusqlite::Connection::open(&db.path).expect("raw open");
+            write_schema_to(&conn, SCHEMA_VERSION);
+            conn.pragma_update(None, "user_version", 0)
+                .expect("version");
+            conn.execute(
+                "INSERT INTO sessions (id, title, workspace, project_id, model, created_at,
+                                       updated_at)
+                 VALUES ('s_1', 'Restored', '/w', NULL, NULL, 1, 2)",
+                [],
+            )
+            .expect("insert session");
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, images, created_at)
+                 VALUES ('s_1', 'user', 'hello', '[]', 1)",
+                [],
+            )
+            .expect("insert message");
+            conn.execute(
+                "INSERT INTO runs (id, session_id, status, started_at, instance_id)
+                 VALUES ('r_1', 's_1', 'completed', 1, '')",
+                [],
+            )
+            .expect("insert run");
+            conn.execute(
+                "INSERT INTO agents (id, session_id, parent_run_id, name, role, task, status,
+                                     created_at, updated_at, instance_id, background, note,
+                                     progress)
+                 VALUES ('a_1', 's_1', 'r_1', 'n', 'r', 't', 'completed', 1, 1, '', 1,
+                         'waiting on the build', 0.5)",
+                [],
+            )
+            .expect("insert agent");
+        }
+
+        // The whole point: this used to be a hard error.
+        let store = db.open().await;
+        assert_eq!(
+            version_of(&store).await,
+            SCHEMA_VERSION,
+            "the replay must stamp the version rather than fail"
+        );
+
+        // And nothing was lost or reset by the replay.
+        let session = store.get_session("s_1").await.unwrap().expect("session");
+        assert_eq!(session.title, "Restored");
+        assert_eq!(
+            store
+                .list_messages("s_1", 10)
+                .await
+                .expect("messages")
+                .len(),
+            1
+        );
+        let agent = store
+            .list_agents("s_1")
+            .await
+            .expect("agents")
+            .into_iter()
+            .next()
+            .expect("agent");
+        assert!(agent.background, "a replayed ADD COLUMN keeps the data");
+        assert_eq!(agent.note, "waiting on the build");
+        assert_eq!(agent.progress, Some(0.5));
+
+        // A second open is a no-op, not another replay. (The first store must be
+        // dropped: the data directory is single-instance by design.)
+        drop(store);
+        let reopened = SqliteStore::open(&db.path).await.expect("reopen");
+        assert_eq!(version_of(&reopened).await, SCHEMA_VERSION);
+        assert_eq!(
+            reopened
+                .list_messages("s_1", 10)
+                .await
+                .expect("messages")
+                .len(),
+            1
+        );
+    }
+
+    /// `add_column_if_missing` interpolates table names into DDL, which SQLite
+    /// cannot parameterise. Every name it can see is a literal in
+    /// [`ADDED_COLUMNS`]; this keeps a typo from becoming a column that is
+    /// silently skipped on a fresh database.
+    #[tokio::test]
+    async fn every_added_column_names_a_real_table_and_column() {
+        let db = TempDb::new("added-columns");
+        let store = db.open().await;
+        let tables: Vec<String> = store
+            .with(|conn| {
+                let mut stmt = conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+                    .map_err(|e| db_err("master prepare", e))?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|e| db_err("master rows", e))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(|e| db_err("master collect", e))
+            })
+            .await
+            .expect("tables");
+        for table in SCHEMA_TABLES {
+            assert!(
+                tables.iter().any(|t| t == table),
+                "SCHEMA_TABLES names {table}, which no migration creates: {tables:?}"
+            );
+        }
+        for (version, table, column, _) in ADDED_COLUMNS {
+            assert!(version <= &SCHEMA_VERSION, "v{version} is in the future");
+            let columns: Vec<String> = store
+                .with(move |conn| {
+                    let mut stmt = conn
+                        .prepare(&format!("PRAGMA table_info({table})"))
+                        .map_err(|e| db_err("table_info prepare", e))?;
+                    let rows = stmt
+                        .query_map([], |row| row.get::<_, String>(1))
+                        .map_err(|e| db_err("table_info rows", e))?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()
+                        .map_err(|e| db_err("table_info collect", e))
+                })
+                .await
+                .expect("table_info");
+            assert!(
+                columns.iter().any(|c| c == column),
+                "ADDED_COLUMNS claims {table}.{column} (v{version}), but a migrated \
+                 database does not have it: {columns:?}"
+            );
+        }
+    }
+
+    /// The restore shape end to end: a `.dump`-restored database opens *and* a
+    /// retention pass over it behaves - the aged rows go, the newest survive, and
+    /// the journal's payloads are released with the transcript they described.
+    ///
+    /// This is the pair the fix has to deliver together: the restore replays
+    /// every migration over an already-current schema, and the pass that then
+    /// runs on the timer must work on the result.
+    #[tokio::test]
+    async fn a_restored_dump_opens_and_a_retention_pass_behaves_on_it() {
+        let db = TempDb::new("restore-then-prune");
+        std::fs::create_dir_all(&db.dir).expect("dir");
+        let keep = RETENTION_KEEP_MESSAGES;
+        {
+            let conn = rusqlite::Connection::open(&db.path).expect("raw open");
+            write_schema_to(&conn, SCHEMA_VERSION);
+            conn.pragma_update(None, "user_version", 0)
+                .expect("version");
+            conn.execute(
+                "INSERT INTO sessions (id, title, workspace, created_at, updated_at)
+                 VALUES ('s_1', 'Restored', '/w', 1, 2)",
+                [],
+            )
+            .expect("session");
+            // Older messages than the keep-window, all far outside a 30-day
+            // window, plus a checkpoint whose payload must go with its message.
+            for i in 0..(keep + 5) {
+                conn.execute(
+                    "INSERT INTO messages (session_id, role, content, created_at)
+                     VALUES ('s_1', 'user', ?1, 1)",
+                    params![format!("m{i}")],
+                )
+                .expect("message");
+            }
+            conn.execute(
+                "INSERT INTO checkpoint_blobs (sha, data) VALUES ('deadbeef', ?1)",
+                params![b"before-image".to_vec()],
+            )
+            .expect("blob");
+            conn.execute(
+                "INSERT INTO checkpoints
+                    (session_id, run_id, call_id, tool, path, existed, content_id,
+                     capture_failed, message_id, created_at)
+                 VALUES ('s_1', 'r_1', 'c1', 'edit_file', 'old.rs', 1, 1, 0, 1, 1)",
+                [],
+            )
+            .expect("checkpoint");
+        }
+
+        let store = db.open().await;
+        assert_eq!(version_of(&store).await, SCHEMA_VERSION);
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM messages").await,
+            (keep + 5) as i64
+        );
+
+        let report = store.prune_messages_older_than(30).await.expect("prune");
+        assert_eq!(report.messages, 5, "only the rows past the keep-window go");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM messages").await,
+            keep as i64,
+            "the newest messages of the session survive"
+        );
+        // The checkpoint pointed at message 1, which was pruned, so the journal
+        // row and its payload are gone too.
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoints").await,
+            0,
+            "the journal must not outlive the transcript it described"
+        );
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM checkpoint_blobs").await,
+            0,
+            "and its payload is released with it"
+        );
+        // The pass is repeatable on a restored database.
+        assert!(store
+            .prune_messages_older_than(30)
+            .await
+            .expect("second prune")
+            .is_empty());
+        store.incremental_vacuum().await.expect("vacuum");
     }
 }
 

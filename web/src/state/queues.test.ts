@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { emptyChatState } from './chat';
 import * as actions from './actions';
 import * as store from './store';
-import { detailFixture, jsonResponse, errorResponse, queuedFixture, resetAppState } from '../test/fixtures';
+import {
+  detailFixture,
+  jsonResponse,
+  errorResponse,
+  queuedFixture,
+  resetAppState,
+  withoutDraft,
+} from '../test/fixtures';
 
 /**
  * What these cover, and why at this level.
@@ -188,17 +195,42 @@ describe('recallQueuedMessage', () => {
     expect(store.recallingQueued.value).toEqual({});
   });
 
-  it('falls back to the content when the server sent no draft', async () => {
+  it('falls back to the content when the server omitted the draft', async () => {
     runningSession();
     stubFetch(() =>
       jsonResponse({
         session_id: 's_ab12',
-        recalled: { ...queuedFixture({ id: 'steer_1', draft: '' }), content: 'plain text' },
+        // The wire shape: Rust skips `draft` entirely when it equals `content`
+        // (`skip_serializing_if = "Option::is_none"`). An absent field is the
+        // real case, not an empty string.
+        recalled: { ...withoutDraft(queuedFixture({ id: 'steer_1' })), content: 'plain text' },
       }),
     );
 
     await actions.recallQueuedMessage('steer_1');
     await vi.waitFor(() => expect(store.composerHandoff.value?.text).toBe('plain text'));
+  });
+
+  it('keeps a draft that is deliberately empty', async () => {
+    // A message made only of attachments has an empty draft and a `content`
+    // holding their rendered blocks. Restoring the content would put the
+    // attachment bodies in the box *and* re-attach the chips, which is exactly the
+    // double-send the recall contract exists to avoid. So an empty string is a
+    // draft, not a missing one - which is why this is `??`, not `||`.
+    runningSession();
+    stubFetch(() =>
+      jsonResponse({
+        session_id: 's_ab12',
+        recalled: {
+          ...queuedFixture({ id: 'steer_1', draft: '' }),
+          content: '<file name="a.txt">body</file>',
+        },
+      }),
+    );
+
+    await actions.recallQueuedMessage('steer_1');
+    await vi.waitFor(() => expect(store.composerHandoff.value).not.toBeNull());
+    expect(store.composerHandoff.value?.text).toBe('');
   });
 
   it('says the message was already applied on a 404, and drops the stale row', async () => {

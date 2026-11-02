@@ -24,6 +24,9 @@ Prompt hints (in the user message):
   [tool:bad]             call a tool that does not exist
   [tool:crash]           call run_command "sleep 5" (cancellation/timeout)
   [tool:agent]           spawn a subagent through the delegate tool
+  [tool:agents]          fan out two subagents in one call
+  [tool:background]      spawn a detached subagent
+  [tool:wait]            wait for the background subagents to finish
   [tool:plugin]          call the example-hello plugin tool
   [tool:notify]          call a plugin tool that raises a `notify` frame
   [tool:mcp]             call an MCP tool from the mock MCP server
@@ -169,6 +172,51 @@ def decide(messages):
                 )
             ],
         )
+    if "[tool:agents]" in last_user:
+        # A fan-out: two children started together, then one batch of results.
+        return (
+            "tools",
+            [
+                call(
+                    "call_fan_1",
+                    "spawn_agents",
+                    {
+                        "tasks": [
+                            {
+                                "task": "[text] Fan-out child one reporting.",
+                                "name": "e2e-fan-one",
+                                "role": "tester",
+                            },
+                            {
+                                "task": "[text] Fan-out child two reporting.",
+                                "name": "e2e-fan-two",
+                                "role": "tester",
+                            },
+                        ]
+                    },
+                )
+            ],
+        )
+    if "[tool:background]" in last_user:
+        # A detached spawn followed by a wait, in the same turn sequence: this is
+        # the pair of calls the background path exists for.
+        return (
+            "tools",
+            [
+                call(
+                    "call_bg_1",
+                    "spawn_agent",
+                    {
+                        "task": "[text] Background child reporting.",
+                        "name": "e2e-background",
+                        "role": "tester",
+                        "background": True,
+                    },
+                )
+            ],
+        )
+    if "[tool:wait]" in last_user:
+        return ("tools", [call("call_wait_1", "wait_for_agents", {"timeout_secs": 20})])
     if "[tool:plugin]" in last_user:
         return (
             "tools",

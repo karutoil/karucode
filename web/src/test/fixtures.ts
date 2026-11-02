@@ -1,4 +1,5 @@
 import type {
+  AgentSummary,
   ApprovalRecord,
   Config,
   QueuedMessage,
@@ -25,6 +26,20 @@ export function queuedFixture(overrides: Partial<QueuedMessage> = {}): QueuedMes
     accepted_at: NOW - 1_000,
     ...overrides,
   };
+}
+
+/**
+ * The same entry as it arrives on the wire when the draft is redundant.
+ *
+ * Rust declares `draft` as `Option<String>` with
+ * `skip_serializing_if = "Option::is_none"` (`kc-core/src/queue.rs`), and the
+ * `queued_messages` SSE frame serialises the raw struct, so a normal message with
+ * no attachments carries **no** `draft` key at all. A fixture that always sets it
+ * is what let the required-`draft` lie survive.
+ */
+export function withoutDraft(entry: QueuedMessage): Omit<QueuedMessage, 'draft'> {
+  const { draft: _draft, ...rest } = entry;
+  return rest;
 }
 
 export const configFixture: Config = {
@@ -81,6 +96,9 @@ export const configFixture: Config = {
     allow_recursive: false,
     max_depth: 1,
     timeout_secs: 900,
+    allow_background: true,
+    max_background: 8,
+    wait_timeout_secs: 600,
   },
   plugins: [],
   mcp_servers: [],
@@ -219,12 +237,64 @@ export const detailFixture: SessionDetail = {
       created_at: NOW - 85_000,
       updated_at: NOW - 84_000,
       finished_at: NOW - 84_000,
+      background: false,
+      note: '',
+      progress: null,
     },
   ],
   approvals: [approvalFixture],
   claims: [],
   running: false,
 };
+
+/**
+ * One agent row exactly as `GET /api/agents` writes it on the wire.
+ *
+ * Not every `AgentRecord` field is always present: the Rust struct marks
+ * `note` (`skip_serializing_if = "String::is_empty"`), `progress`,
+ * `parent_agent_id`, `error` and `finished_at` (`skip_serializing_if =
+ * Option::is_none`) as omittable, and a live server omitted `note` and
+ * `progress` on all 77 rows of a run. A fixture that fills them with `''`/
+ * `null` therefore tests a payload the server never sends — which is how a
+ * blank-screen crash shipped with a green suite.
+ *
+ * Use this (plus `omitFields`) for anything that claims to model a server
+ * response; keep the richer hand-written fixtures for component-level tests.
+ */
+export function wireAgentSummary(
+  id: string,
+  overrides: Record<string, unknown> = {},
+): AgentSummary {
+  return {
+    id,
+    session_id: 's_ab12',
+    parent_run_id: 'r_1',
+    name: id,
+    role: 'reviewer',
+    task: `review ${id}`,
+    status: 'completed',
+    model: 'gpt-4o-mini',
+    iterations: 3,
+    summary: '',
+    owned_paths: [],
+    created_at: NOW - 60_000,
+    updated_at: NOW - 60_000,
+    background: false,
+    session_title: 'Fix login bug',
+    workspace: '/home/me/project',
+    project_id: null,
+    // Deliberately absent here: note, progress, parent_agent_id, error,
+    // finished_at — serde skips each of them when it is empty/None.
+    ...overrides,
+  } as unknown as AgentSummary;
+}
+
+/** Remove keys entirely, the way serde does when it skips a field. */
+export function omitFields<T extends object>(row: T, ...keys: string[]): T {
+  const copy = { ...row } as Record<string, unknown>;
+  for (const key of keys) delete copy[key];
+  return copy as T;
+}
 
 export function resetAppState(): void {
   actions.resetRuntimeForTests();

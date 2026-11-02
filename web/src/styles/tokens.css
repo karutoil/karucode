@@ -18,41 +18,43 @@
   color-scheme: dark;
 
   /* ---- surfaces -------------------------------------------------------- */
-  --theme-bg: #111213; /* app canvas */
-  --theme-rail: #191a1c; /* project rail */
-  --theme-sidebar: #202223; /* session sidebar */
-  --theme-inspector: #27282a; /* right inspector */
-  --theme-surface: #2c2d31; /* cards, panels, inputs */
-  --theme-raised: #313337; /* elevated surface */
-  --theme-hover: #36393b; /* hover surface */
+  --theme-bg: #08090b; /* app canvas */
+  --theme-rail: #0b0d10; /* project rail */
+  --theme-sidebar: #0e1116; /* session sidebar */
+  --theme-inspector: #11151a; /* right inspector */
+  --theme-surface: #171c23; /* cards, panels, inputs */
+  --theme-raised: #1d232c; /* elevated surface */
+  --theme-hover: #252c37; /* hover surface */
 
   /* ---- lines ----------------------------------------------------------- */
-  --theme-line: #35373a;
-  --theme-line-soft: #313236;
-  --theme-line-strong: #3a3d3f;
+  --theme-line: #252c37;
+  --theme-line-soft: #1f252d;
+  --theme-line-strong: #333c48;
 
   /* ---- text ------------------------------------------------------------ */
-  --theme-text: #eae9e5;
-  --theme-text-secondary: #cfcfcc;
-  --theme-muted: #a6a8a7;
-  --theme-faint: #7c7e7e;
+  --theme-text: #e9ebf0;
+  --theme-text-secondary: #b7bdc8;
+  --theme-muted: #9aa3b2;
+  --theme-faint: #6d7683;
 
   /* ---- accents & status ------------------------------------------------ */
-  --theme-accent: #dfb680;
-  --theme-accent-hi: #e1c196;
-  --theme-accent-bg: #544128;
-  --theme-accent-line: #84735c;
-  --theme-success: #88baa0;
-  --theme-success-bg: #34483d;
-  --theme-warn: #d9a441;
-  --theme-danger: #e49e91;
-  --theme-danger-bg: #542e27;
-  --theme-info: #92b3d8;
+  --theme-accent: #eaa06d;
+  --theme-accent-hi: #f5bd93;
+  --theme-accent-bg: #2a2119;
+  --theme-accent-line: #6b4a33;
+  --theme-accent-text: #eaa06d; /* accent as ink */
+  --theme-on-accent: #1c0f06; /* ink on an accent fill */
+  --theme-success: #7fd6b4;
+  --theme-success-bg: #12271f;
+  --theme-warn: #f0c26b;
+  --theme-danger: #f2938b;
+  --theme-danger-bg: #2c1b1a;
+  --theme-info: #8fb3f7;
 
   /* ---- code ------------------------------------------------------------ */
-  --theme-syntax-keyword: #dfb680;
-  --theme-syntax-string: #a5cbb4;
-  --theme-syntax-comment: #878e88;
+  --theme-syntax-keyword: #eaa06d;
+  --theme-syntax-string: #8fdcb7;
+  --theme-syntax-comment: #7c8494;
   --theme-shadow: rgba(0, 0, 0, 0.48);
 
   /* ---- fidelity roles --------------------------------------------------
@@ -60,124 +62,124 @@
      menu, diff row, rail glyph, …). Values are the mock's own literals for
      Ember; `src/theme/roles.ts` recomputes them for every other theme and
      for light mode, so components never hardcode a shade. */
---surface-input: #1e2021;
-  --line-input: #3c3d3d;
-  --focus-input: #866c50;
-  --input-ink: #e4e5df;
-  --input-placeholder: #898d89;
-  --surface-plus-hover: #2e3031;
-  --surface-hover-strong: #303233;
-  --line-hair: #3c3e3d;
-  --gold-send: #b88b53;
-  --gold-send-hover: #e3b47c;
-  --on-gold: #181714;
-  --foot-ink: #6f7670;
-  --foot-strong: #989e96;
-  --ring-fill: #c69e6e;
-  --ring-track: #494b4b;
-  --chip-surface: #242627;
-  --chip-line: #3a3b3a;
-  --chip-ink: #acb5b0;
-  --surface-menu: #252628;
-  --line-menu: #434547;
-  --text-menu-title: #848a87;
-  --text-menu-item: #c9c9c5;
-  --text-menu-meta: #8b908c;
-  --row-accent-bg: #33302b;
-  --row-accent-ink: #e9d7be;
-  --surface-inset: #202223;
-  --line-inset: #303334;
-  --line-card: #363838;
-  --line-divider: #2b2e30;
-  --line-keycap: #393b3c;
-  --line-overlay: #4a4c4c;
-  --text-caption: #a2a69f;
-  --text-subtle: #777d76;
-  --text-kicker: #808781;
-  --text-kicker-panel: #9c9d97;
-  --tab-active-text: #e9cfab;
-  --tab-hover: #dedbd5;
-  --row-selected-bg: #343027;
-  --row-selected-text: #f1d8b4;
-  --surface-preview: #1e2020;
-  --line-preview: #343633;
-  --icon-folder: #c5a57b;
+--surface-input: #1b212a;
+  --line-input: #333c48;
+  --focus-input: #8a6242;
+  --input-ink: #e9ebf0;
+  --input-placeholder: #6d7683;
+  --surface-plus-hover: #252c37;
+  --surface-hover-strong: #222933;
+  --line-hair: #252c37;
+  --gold-send: #eaa06d;
+  --gold-send-hover: #f5bd93;
+  --on-gold: #1c0f06;
+  --foot-ink: #6d7683;
+  --foot-strong: #9aa3b2;
+  --ring-fill: #eaa06d;
+  --ring-track: #2c333d;
+  --chip-surface: #1d232c;
+  --chip-line: #2c333d;
+  --chip-ink: #b7bdc8;
+  --surface-menu: #20262f;
+  --line-menu: #333b46;
+  --text-menu-title: #8b92a1;
+  --text-menu-item: #b7bdc8;
+  --text-menu-meta: #9aa3b2;
+  --row-accent-bg: #2a2119;
+  --row-accent-ink: #eaa06d;
+  --surface-inset: #1f2630;
+  --line-inset: #252c37;
+  --line-card: #2b333e;
+  --line-divider: #222831;
+  --line-keycap: #2c333d;
+  --line-overlay: #333b46;
+  --text-caption: #b7bdc8;
+  --text-subtle: #6d7683;
+  --text-kicker: #8b92a1;
+  --text-kicker-panel: #9aa3b2;
+  --tab-active-text: #e9ebf0;
+  --tab-hover: #b7bdc8;
+  --row-selected-bg: #2a2119;
+  --row-selected-text: #eaa06d;
+  --surface-preview: #1b212a;
+  --line-preview: #2c333d;
+  --icon-folder: #c79a6b;
   --icon-rust: #d8a178;
-  --icon-file: #a8a38b;
-  --icon-md: #9badbf;
-  --icon-path: #ad9d81;
-  --icon-quiet: #8a8e8b;
-  --icon-pill-down: #777c77;
-  --btn-accent-bg: #2a2722;
-  --btn-accent-bg-hover: #403222;
-  --btn-accent-line: #4b3c2c;
-  --btn-accent-text: #d7bb94;
-  --toggle-track: #454847;
-  --toggle-knob: #aeb2ae;
-  --toggle-on-track: #917451;
-  --toggle-on-knob: #f8e2c6;
-  --surface-card: #1b1d1e;
-  --line-card-strong: #313436;
-  --surface-command: #202222;
-  --line-command: #363838;
-  --surface-command-hover: #282929;
-  --surface-command-output: #181a1b;
-  --text-command: #bdc4bb;
-  --text-command-output: #8eac97;
-  --surface-symbol: #272b2b;
-  --line-symbol: #3a3e3c;
-  --text-symbol: #9eb6a6;
-  --text-output: #8e9b95;
-  --text-output-num: #6e7672;
-  --text-expand: #babdb7;
-  --text-body: #bfc1bc;
-  --text-date: #686e6b;
-  --text-user: #dadbd6;
-  --surface-user: #212224;
-  --surface-avatar: #2d302d;
-  --line-avatar: #444945;
-  --text-avatar: #d7dcd7;
-  --surface-avatar-agent: #302a24;
-  --line-avatar-agent: #5a4630;
-  --surface-diff: #1a1c1d;
-  --line-diff: #353737;
-  --line-diff-head: #2d3030;
-  --surface-diff-add: #1d3027;
-  --surface-diff-del: #362626;
-  --surface-diff-ctx: #1b1d1f;
-  --text-review: #e3c39d;
-  --surface-review: #362c20;
-  --surface-review-hi: #4c3925;
-  --text-empty-title: #eae8e4;
-  --text-empty-copy: #909590;
-  --text-empty-symbol: #e5b67d;
-  --surface-toast: #292b2a;
-  --line-toast: #54544c;
-  --text-toast: #dfdfd7;
-  --rail-glyph-text: #9c9e9f;
-  --rail-add-line: #3e4141;
-  --rail-add-line-hover: #6e655b;
-  --rail-avatar-bg: #31352f;
-  --rail-avatar-line: #475144;
-  --rail-avatar-text: #cfdfcd;
-  --accent-faint: #484038;
-  --accent-surface: #27241f;
-  --accent-text-soft: #f0d5ac;
-  --accent-hint: #ab987a;
-  --field-focus-line: #655038;
-  --item-active-to: #252321;
-  --meta-text: #858983;
+  --icon-file: #8b92a1;
+  --icon-md: #8fb3f7;
+  --icon-path: #a08a72;
+  --icon-quiet: #6d7683;
+  --icon-pill-down: #6d7683;
+  --btn-accent-bg: #2a2119;
+  --btn-accent-bg-hover: #3a2b1d;
+  --btn-accent-line: #6b4a33;
+  --btn-accent-text: #eaa06d;
+  --toggle-track: #2c333d;
+  --toggle-knob: #6d7683;
+  --toggle-on-track: #eaa06d;
+  --toggle-on-knob: #f5bd93;
+  --surface-card: #13181f;
+  --line-card-strong: #2b333e;
+  --surface-command: #13181f;
+  --line-command: #2b333e;
+  --surface-command-hover: #171c23;
+  --surface-command-output: #0a0d11;
+  --text-command: #b7bdc8;
+  --text-command-output: #8fdcb7;
+  --surface-symbol: #212831;
+  --line-symbol: #232a33;
+  --text-symbol: #b7bdc8;
+  --text-output: #9aa3b2;
+  --text-output-num: #6d7683;
+  --text-expand: #9aa3b2;
+  --text-body: #b7bdc8;
+  --text-date: #6d7683;
+  --text-user: #b7bdc8;
+  --surface-user: #101318;
+  --surface-avatar: #252c37;
+  --line-avatar: #2c333d;
+  --text-avatar: #b7bdc8;
+  --surface-avatar-agent: #2a2119;
+  --line-avatar-agent: #6b4a33;
+  --surface-diff: #0a0d11;
+  --line-diff: #232a33;
+  --line-diff-head: #222831;
+  --surface-diff-add: #0f2a20;
+  --surface-diff-del: #2e1a1a;
+  --surface-diff-ctx: #0d1014;
+  --text-review: #eaa06d;
+  --surface-review: #2a2119;
+  --surface-review-hi: #3a2b1d;
+  --text-empty-title: #e9ebf0;
+  --text-empty-copy: #9aa3b2;
+  --text-empty-symbol: #eaa06d;
+  --surface-toast: #252c37;
+  --line-toast: #3a4350;
+  --text-toast: #e9ebf0;
+  --rail-glyph-text: #8b92a1;
+  --rail-add-line: #2c333d;
+  --rail-add-line-hover: #6b4a33;
+  --rail-avatar-bg: #252c37;
+  --rail-avatar-line: #2c333d;
+  --rail-avatar-text: #b7bdc8;
+  --accent-faint: #6b4a33;
+  --accent-surface: #2a2119;
+  --accent-text-soft: #f5bd93;
+  --accent-hint: #c08c62;
+  --field-focus-line: #8a6242;
+  --item-active-to: #2a2119;
+  --meta-text: #8b92a1;
   --rail-glyph-line: rgb(255 255 255 / 8%); /* light: rgb(0 0 0 / 10%) */
   --inset-hairline: rgb(255 255 255 / 3%); /* light: rgb(255 255 255 / 60%) */
-  --scrim: rgb(0 0 0 / 47%);
+  --scrim: rgb(3 4 6 / 60%);
   --scrim-soft: rgb(0 0 0 / 13%);
   --shadow-composer: 0 12px 34px rgb(0 0 0 / 10%);
   /* A floating dock needs a lift the old attached band did not: a tight
    * contact shadow plus a wide, soft one, so the box reads as *above* the
    * transcript rather than painted onto it. */
-  --shadow-dock: 0 18px 44px rgb(0 0 0 / 38%), 0 2px 8px rgb(0 0 0 / 26%);
-  --shadow-menu: 0 20px 60px rgb(0 0 0 / 60%); /* light: 0 20px 60px rgb(15 23 42 / 14%) */
-  --shadow-overlay: 0 30px 90px rgb(0 0 0 / 69%); /* light: 0 30px 90px rgb(15 23 42 / 18%) */
+  --shadow-dock: inset 0 1px 0 rgb(255 255 255 / 3%), 0 16px 40px -18px rgb(0 0 0 / 85%);
+  --shadow-menu: 0 24px 60px -20px rgb(0 0 0 / 85%); /* light: 0 20px 60px rgb(15 23 42 / 14%) */
+  --shadow-overlay: 0 30px 90px -24px rgb(0 0 0 / 85%); /* light: 0 30px 90px rgb(15 23 42 / 18%) */
 
   /* ===================================================================== */
   /* Public aliases — use these in component CSS.                          */
@@ -208,6 +210,11 @@
   --accent-hi: var(--theme-accent-hi);
   --accent-bg: var(--theme-accent-bg);
   --accent-line: var(--theme-accent-line);
+  /* The accent as a *fill* and the ink that is legible on it. `--accent` itself
+   * is tuned to be readable as text on the canvas, which in light mode makes it
+   * too dark to carry light text; these two are the button pair. */
+  --accent-fill: var(--theme-accent-text);
+  --on-accent: var(--theme-on-accent);
   --success: var(--theme-success);
   --success-bg: var(--theme-success-bg);
   --warn: var(--theme-warn);
@@ -272,12 +279,34 @@
   --transition-fast: 120ms ease-out;
 
   /* ---- frame metrics --------------------------------------------------- */
-  --rail-w: 64px;
-  --sidebar-w: 258px;
-  --inspector-w: 342px;
-  --header-h: 66px;
-  --tabs-h: 44px;
+  --rail-w: 54px;
+  --sidebar-w: 288px;
+  --inspector-w: 340px;
+  --header-h: 52px;
+  --tabs-h: 40px;
   --content-max: 820px;
+
+  /* ---- mock surface aliases -------------------------------------------- *
+   * The mock's three-pane language names its fills directly: `--panel-2` is the
+   * chrome column, `--surface-2`/`--surface-3` are the two raised card fills, and
+   * `--text-2` is the "second voice" the meta lines use. They are aliases over
+   * the theme tokens, not new colours, so a theme still owns everything. */
+  --panel-2: var(--rail);
+  --surface-2: var(--raised);
+  --surface-3: var(--hover);
+  --text-2: var(--text-secondary);
+
+  /* The mock's canvas glow: two very faint radial tints (warm top-left, cool
+   * top-right) laid over `--bg`. Derived from the accent/info roles so every
+   * theme gets its own version instead of Ember's orange. */
+  --bg-glow:
+    radial-gradient(900px 460px at 8% -12%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 62%),
+    radial-gradient(700px 420px at 100% 0%, color-mix(in srgb, var(--info) 7%, transparent), transparent 60%);
+  --stage-glow: radial-gradient(
+    720px 320px at 50% -100px,
+    color-mix(in srgb, var(--accent) 10%, transparent),
+    transparent 72%
+  );
 }
 
 /* Density is a theme setting (`data-density` on <html>). Components that own

@@ -850,6 +850,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "kc-core",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
@@ -864,6 +865,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "kc-core",
+ "libc",
  "serde",
  "serde_json",
  "tokio",
@@ -954,6 +956,7 @@ dependencies = [
  "async-trait",
  "kc-core",
  "libc",
+ "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",

@@ -125,7 +125,7 @@ pub async fn preview(
         "session_id": id,
         "point": point,
         "preview": preview,
-        "running": state.runtime().is_running(&id),
+        "running": state.runtime().has_active_run(&id),
     })))
 }
 

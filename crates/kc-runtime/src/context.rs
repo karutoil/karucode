@@ -176,6 +176,12 @@ const TURNS_OF_HEADROOM: usize = 50;
 
 /// How many of the newest messages a run window keeps even when the exchange
 /// boundary says otherwise. The exchange rule below is the real protection.
+///
+/// This protects those messages from being **dropped**, not from being
+/// **shortened**: a window whose protected tail alone is larger than the budget
+/// is truncated body-by-body instead (see [`shrink_bodies`]) rather than sent
+/// as it is. Treating this as "never compact a short history" is what let an
+/// eight-message window carry 60k characters into a 32k budget.
 const PROTECTED_TAIL: usize = 32;
 
 /// Characters a single turn's tool results may add to the conversation.
@@ -306,17 +312,14 @@ pub fn fit_detailed(
     let mut units = group_droppable(&prepared, start, end.max(start), &sticky);
     if units.is_empty() {
         // No user boundary to drop behind (a subagent talks to one task the
-        // whole run). Fall back to keeping the newest tail so an over-budget
-        // window is never sent as-is.
+        // whole run). Fall back to keeping the newest tail, so an over-budget
+        // window is never sent as-is even when nothing can be dropped whole.
         let end = clamp_end_to_exchange(
             &prepared,
             start,
             prepared.len().saturating_sub(PROTECTED_TAIL).max(start),
         );
         units = group_droppable(&prepared, start, end, &sticky);
-        if units.is_empty() {
-            return FitOutcome::unchanged(prepared);
-        }
     }
 
     let target = target_chars(&prepared, max_chars);
@@ -336,7 +339,19 @@ pub fn fit_detailed(
             next += 1;
         }
         if dropped_messages == 0 {
-            return FitOutcome::unchanged(prepared);
+            // Nothing may be dropped: the request is the pinned prefix and the
+            // protected tail, and all of it is over budget. Elide the largest
+            // bodies rather than send a request several times the budget.
+            let mut window = prepared.clone();
+            return match shrink_window(&mut window, &dropped, start, max_chars) {
+                Some((messages, notice)) => FitOutcome {
+                    messages,
+                    prepared,
+                    dropped,
+                    notice: Some(notice),
+                },
+                None => FitOutcome::unchanged(prepared),
+            };
         }
         let notice = compact_notice(&prepared, &dropped, dropped_messages, max_chars);
         if survivors + notice.chars().count() <= max_chars || next >= units.len() {
@@ -352,7 +367,15 @@ pub fn fit_detailed(
         next += 1;
     };
 
-    let messages = rebuild(prepared.clone(), start, &dropped, notice.clone());
+    // Every droppable unit is gone and the tail alone still does not fit with
+    // the digest: elide the surviving bodies, then rebuild.
+    let mut window = prepared.clone();
+    let notice_chars = notice.chars().count();
+    let shortened = shrink_bodies(&mut window, &dropped, max_chars - notice_chars);
+    let messages = rebuild(window, start, &dropped, notice.clone());
+    if shortened > 0 {
+        warn_elided(&messages, max_chars);
+    }
     FitOutcome {
         messages,
         prepared,
@@ -373,22 +396,39 @@ pub fn fit_detailed(
 /// [`COMPACT_TARGET_PERCENT`] of the budget. The second-order effect of that last
 /// rule is the important one: the front of the window stays byte-identical for
 /// many turns, so the provider's prompt cache keeps hitting.
+///
+/// When there is nothing left to drop - a history of at most [`PROTECTED_TAIL`]
+/// messages, or one whose every droppable unit is pinned - the window is
+/// **shrunk** instead of being returned over budget: the largest bodies keep a
+/// head and a tail around a marker, and the pinned task is bounded last. A
+/// short-but-huge history is exactly the case this function exists for, so
+/// "few messages" must never mean "send 8x the budget".
 pub fn compact_run_window(history: &mut Vec<Message>, max_chars: usize) {
     let total: usize = history.iter().map(message_chars).sum();
-    if total <= max_chars || history.len() <= PROTECTED_TAIL {
+    if total <= max_chars {
         return;
     }
 
     let start = pinned_prefix(history);
     let sticky = sticky_flags(history, max_chars);
     let current = current_exchange_start(history);
-    let end = clamp_end_to_exchange(
-        history,
-        start,
-        (history.len() - PROTECTED_TAIL).min(current).max(start),
-    );
+    // A window shorter than the protected tail has no droppable prefix at all;
+    // saturating here is what makes the short case fall through to elision
+    // instead of panicking on a subtraction.
+    let tail_start = history.len().saturating_sub(PROTECTED_TAIL);
+    let end = clamp_end_to_exchange(history, start, tail_start.min(current).max(start));
     let units = group_droppable(history, start, end, &sticky);
     if units.is_empty() {
+        // Nothing may be dropped whole: the window is the pinned prefix plus the
+        // protected tail, and all of it is over budget. Elide the largest bodies
+        // rather than hold (and re-clone into every request) several times the
+        // budget for the rest of the run.
+        let dropped = vec![false; history.len()];
+        let mut window = history.clone();
+        if let Some((messages, _notice)) = shrink_window(&mut window, &dropped, start, max_chars) {
+            warn_elided(&messages, max_chars);
+            *history = messages;
+        }
         return;
     }
 
@@ -411,6 +451,12 @@ pub fn compact_run_window(history: &mut Vec<Message>, max_chars: usize) {
             next += 1;
         }
         if dropped_messages == 0 {
+            // Nothing turned out to be droppable: elide the bodies instead.
+            let mut window = history.clone();
+            if let Some((messages, _)) = shrink_window(&mut window, &dropped, start, max_chars) {
+                warn_elided(&messages, max_chars);
+                *history = messages;
+            }
             return;
         }
         let notice = compact_notice(history, &dropped, dropped_messages, max_chars);
@@ -427,8 +473,199 @@ pub fn compact_run_window(history: &mut Vec<Message>, max_chars: usize) {
         next += 1;
     };
 
-    let out = rebuild(std::mem::take(history), start, &dropped, notice);
+    // Every droppable unit is gone and the tail alone is still too big: elide
+    // the surviving bodies, so what is held (and sent) respects the budget.
+    let mut window = std::mem::take(history);
+    let notice_chars = notice.chars().count();
+    if shrink_bodies(&mut window, &dropped, max_chars - notice_chars) > 0 {
+        let rebuilt = rebuild(window.clone(), start, &dropped, notice.clone());
+        warn_elided(&rebuilt, max_chars);
+        *history = rebuilt;
+        return;
+    }
+    let out = rebuild(window, start, &dropped, notice);
     *history = out;
+}
+
+// ---------------------------------------------------------------------------
+// last-resort elision
+// ---------------------------------------------------------------------------
+
+/// Marker left where part of a message body was elided by [`shrink_bodies`].
+///
+/// Distinct from the tool-output `[truncated: ...]` marker on purpose: that one
+/// means "the tool produced more than the cap", this one means "the request did
+/// not fit and the middle of this body was cut". Both are visible to the model.
+pub const ELIDED_MARKER: &str =
+    "\n\n[... middle elided: the request was over the context budget ...]\n\n";
+
+/// Enough of a body to stay usable: the head names what it is, the tail keeps a
+/// closing brace, a summary line or the end of a stack trace.
+const ELIDE_MIN_KEEP: usize = 240;
+
+/// The digest that stands in for elided bodies.
+///
+/// A digest on purpose (it starts with [`DIGEST_PREFIX`], so a later compaction
+/// pins it and carries our own note forward instead of nesting a second one):
+/// the model is told that what it is missing was cut for space, which is the
+/// truth, rather than being handed a transcript that silently lost its middle.
+fn elision_notice() -> String {
+    format!(
+        "{TRIM_PREFIX}the conversation was shortened to fit the context budget: the middle of \
+         the largest messages and tool results was cut, keeping the start and the end of each. \
+         The task and the newest turn are intact. Read a file again if you need an omitted part]"
+    )
+}
+
+/// The whole elision pass for a window that cannot be compacted any further.
+///
+/// Keeps every message that may not be dropped and shortens the bodies of what
+/// remains, largest first, until the rebuilt window fits `max_chars`. The pinned
+/// first user message is bounded **last** and only as far as it must be: the
+/// task is the one thing a long run must not forget, so its text is the last
+/// thing to give up room.
+///
+/// Returns `None` when even elision cannot bring the window under budget (the
+/// system prompt alone is that big), so the caller can leave the input alone
+/// instead of writing half a page of markers over it.
+fn shrink_window(
+    window: &mut [Message],
+    dropped: &[bool],
+    pin: usize,
+    max_chars: usize,
+) -> Option<(Vec<Message>, String)> {
+    let notice = elision_notice();
+    shrink_bodies(
+        window,
+        dropped,
+        max_chars.saturating_sub(notice.chars().count()),
+    );
+    // Rebuild with the notice, then check what actually came out: `rebuild`
+    // inserts the digest even when nothing was dropped, so the check has to be
+    // on the list that will be sent, not on an estimate.
+    let messages = rebuild(window.to_vec(), pin, dropped, notice.clone());
+    let total: usize = messages.iter().map(message_chars).sum();
+    if total <= max_chars {
+        Some((messages, notice))
+    } else {
+        // Nothing is droppable and elision cannot reach the budget either (a
+        // system prompt or attached images larger than the budget). Sending it
+        // is the only option left, but never silently.
+        tracing::warn!(
+            budget = max_chars,
+            sent = total,
+            "context window cannot be brought under budget: nothing may be dropped and eliding \
+             the remaining bodies was not enough. Raise `context_window` for this model or lower \
+             `max_tool_output_bytes`."
+        );
+        None
+    }
+}
+
+/// Shorten the bodies of the surviving messages until they fit `budget`.
+///
+/// Whole messages are never removed here - that is compaction's job - which is
+/// what keeps a `tool_call` attached to its `tool_result` and the task attached
+/// to the run. Each body keeps a head and a tail around [`ELIDED_MARKER`], so a
+/// tool result still shows what it started with and how it ended.
+///
+/// Returns how many characters were elided (0 when the window already fitted).
+fn shrink_bodies(window: &mut [Message], dropped: &[bool], budget: usize) -> usize {
+    let mut total: usize = window
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !dropped[*i])
+        .map(|(_, m)| message_chars(m))
+        .sum();
+    if total <= budget {
+        return 0;
+    }
+    let before = total;
+
+    // Pinned prefix = system prompt, earlier digests, the first user turn. It is
+    // shortened last, and the system prompt is never shortened at all: it is the
+    // harness's own instructions, not conversation.
+    let pin = pinned_prefix(window);
+
+    // Largest first: one 60k tool result costs one elision, while shaving every
+    // message in turn costs a marker in all of them.
+    let mut order: Vec<usize> = (0..window.len())
+        .filter(|i| !dropped[*i])
+        .filter(|&i| window[i].role != Role::System && !is_digest(&window[i]))
+        .collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(message_chars(&window[i])));
+
+    for &i in &order {
+        if total <= budget {
+            break;
+        }
+        let is_task = i < pin && window[i].role == Role::User;
+        // The task keeps more than a tool result does: it is the instruction,
+        // not the output.
+        let keep = if is_task {
+            (budget / 8).max(ELIDE_MIN_KEEP)
+        } else {
+            ELIDE_MIN_KEEP
+        };
+        if let Some(saved) = elide_body(&mut window[i], keep) {
+            total = total.saturating_sub(saved);
+        }
+    }
+
+    // Still over: the task itself has to give. It keeps a head and a tail too,
+    // so the model still knows what it was asked, minus the middle.
+    if total > budget {
+        for &i in &order {
+            if total <= budget {
+                break;
+            }
+            if i < pin && window[i].role == Role::User {
+                if let Some(saved) = elide_body(&mut window[i], ELIDE_MIN_KEEP / 2) {
+                    total = total.saturating_sub(saved);
+                }
+            }
+        }
+    }
+
+    before.saturating_sub(total)
+}
+
+/// Replace the middle of one message body with [`ELIDED_MARKER`], keeping
+/// `keep` characters at each end (UTF-8 safe). Returns the characters saved, or
+/// `None` when the body is already short enough to leave alone.
+fn elide_body(message: &mut Message, keep: usize) -> Option<usize> {
+    let chars: Vec<char> = message.content.chars().collect();
+    let marker_chars = ELIDED_MARKER.chars().count();
+    if chars.len() <= keep * 2 + marker_chars {
+        return None;
+    }
+    let head: String = chars[..keep].iter().collect();
+    let tail: String = chars[chars.len() - keep..].iter().collect();
+    let body = format!("{head}{ELIDED_MARKER}{tail}");
+    let saved = chars.len().saturating_sub(body.chars().count());
+    if saved == 0 {
+        return None;
+    }
+    message.content = body;
+    Some(saved)
+}
+
+/// Say so, once per compaction, that the request had to be elided.
+///
+/// A warning rather than a silent success: this is the path where the budget
+/// could not be met by dropping history, so an install seeing it wants either a
+/// bigger `context_window` or a smaller `max_tool_output_bytes`.
+fn warn_elided(messages: &[Message], max_chars: usize) {
+    let total: usize = messages.iter().map(message_chars).sum();
+    tracing::warn!(
+        budget = max_chars,
+        sent = total,
+        elided = messages
+            .iter()
+            .filter(|m| m.content.contains(ELIDED_MARKER))
+            .count(),
+        "context window could not be compacted under budget; message bodies were elided"
+    );
 }
 
 /// Budget the window is compacted *down to* on a compaction.
@@ -1028,6 +1265,21 @@ mod run_window_tests {
     use super::*;
     use kc_core::message::ToolCall;
 
+    fn tool_msg(id: &str, body: &str) -> Message {
+        Message::tool_result(id, "echo", body)
+    }
+
+    fn call_msg(id: &str) -> Message {
+        Message::assistant(
+            "",
+            vec![ToolCall {
+                id: id.into(),
+                name: "echo".into(),
+                arguments: "{}".into(),
+            }],
+        )
+    }
+
     fn exchange(i: usize, body: usize) -> Vec<Message> {
         vec![
             Message::user(format!("step {i}: inspect the parser")),
@@ -1244,6 +1496,156 @@ mod run_window_tests {
                 .any(|m| m.tool_calls.iter().any(|c| c.id == straddled)),
             "the exchange at the boundary lost its call but kept its result"
         );
+    }
+
+    /// A short history is not an exemption from the budget.
+    ///
+    /// `compact_run_window` used to return early for `len <= PROTECTED_TAIL`,
+    /// which is every window of a run whose tool results are large but few: the
+    /// shipped defaults (8 messages, one 60k-char tool result) sent 60,061 chars
+    /// against a 32,000 budget, eight times over, and re-cloned it into every
+    /// request. Few messages must still mean "fits the budget".
+    #[test]
+    fn a_short_run_window_still_respects_the_budget() {
+        let mut history = vec![
+            Message::system("sys"),
+            Message::user("TASK: summarise this log"),
+            Message::assistant("on it", vec![]),
+        ];
+        // Eight messages total: well under PROTECTED_TAIL, over any budget.
+        history.push(call_msg("c1"));
+        history.push(tool_msg("c1", &"L".repeat(40_000)));
+        history.push(Message::assistant("reading further", vec![]));
+        history.push(call_msg("c2"));
+        history.push(tool_msg("c2", &"M".repeat(20_000)));
+        assert!(
+            history.len() <= PROTECTED_TAIL,
+            "fixture: {} messages must stay inside the protected tail",
+            history.len()
+        );
+        let before: usize = history.iter().map(message_chars).sum();
+        assert!(before > 60_000, "fixture should be far over budget");
+
+        compact_run_window(&mut history, 32_000);
+
+        let after: usize = history.iter().map(message_chars).sum();
+        assert!(
+            after <= 32_000,
+            "a {}-message window sent {after} chars against a 32_000 budget",
+            history.len()
+        );
+        // The newest messages are still there - elision shortens bodies, it never
+        // drops the protected tail.
+        let results = history.iter().filter(|m| m.role == Role::Tool).count();
+        assert_eq!(results, 2, "the newest tool results must survive");
+        // Nothing was orphaned: every surviving result keeps the call that
+        // declared it, so the provider still accepts the request.
+        let mut seen = std::collections::HashSet::new();
+        for m in &history {
+            for c in &m.tool_calls {
+                seen.insert(c.id.clone());
+            }
+            if m.role == Role::Tool {
+                let id = m.tool_call_id.clone().unwrap();
+                assert!(seen.contains(&id), "orphaned tool result {id}");
+            }
+        }
+        // The task is still there and still recognisable, and the elision is
+        // stated rather than silent.
+        assert!(
+            history
+                .iter()
+                .any(|m| m.content.starts_with("TASK: summarise")),
+            "the task must survive"
+        );
+        assert!(
+            history.iter().any(is_digest),
+            "the window must say it was shortened: {:?}",
+            history.first().map(|m| m.content.clone())
+        );
+        assert!(
+            history.iter().any(|m| m.content.contains(ELIDED_MARKER)),
+            "an elided body must carry the marker"
+        );
+    }
+
+    /// Every run window must stay bounded even while a single turn is in flight.
+    /// The 60-parallel-call fixture is over budget in *both* directions: more
+    /// results than [`PROTECTED_TAIL`] messages and more characters than the
+    /// budget. Keeping every result is not a licence to send them whole.
+    #[test]
+    fn a_single_oversized_turn_is_elided_rather_than_sent_over_budget() {
+        let budget = 40_000;
+        let mut history = vec![Message::user("TASK")];
+        history.push(Message::assistant(
+            "",
+            (0..60)
+                .map(|i| ToolCall {
+                    id: format!("c{i}"),
+                    name: "read_file".into(),
+                    arguments: format!("{{\"path\":\"f{i}.rs\"}}"),
+                })
+                .collect(),
+        ));
+        for i in 0..60 {
+            history.push(Message::tool_result(
+                format!("c{i}"),
+                "read_file",
+                "z".repeat(2_000),
+            ));
+        }
+        let before: usize = history.iter().map(message_chars).sum();
+        assert!(before > budget * 2, "fixture: {before} chars");
+
+        compact_run_window(&mut history, budget);
+
+        let kept = history.iter().filter(|m| m.role == Role::Tool).count();
+        assert_eq!(kept, 60, "the turn in flight lost {}/60 results", 60 - kept);
+        let after: usize = history.iter().map(message_chars).sum();
+        assert!(
+            after <= budget,
+            "an in-flight turn sent {after} chars against a {budget} budget"
+        );
+    }
+
+    /// The same escape in `fit`: a subagent talks to one task for the whole run,
+    /// so there is no user boundary to drop behind. It used to hand back the
+    /// over-budget window untouched.
+    #[test]
+    fn fit_still_bounds_a_conversation_with_no_droppable_exchange() {
+        let task = "TASK: review one file";
+        let msgs = vec![
+            Message::system("sys"),
+            Message::user(task),
+            Message::assistant("reading", vec![]),
+            call_msg("c1"),
+            tool_msg("c1", &"q".repeat(30_000)),
+            Message::assistant("done", vec![]),
+        ];
+        let before: usize = msgs.iter().map(message_chars).sum();
+        assert!(before > 10_000, "fixture: {before} chars");
+
+        let out = fit(msgs, 10_000, 100_000);
+
+        let total: usize = out.iter().map(message_chars).sum();
+        assert!(
+            total <= 10_000,
+            "a request with nothing droppable was sent at {total} chars against a 10_000 budget"
+        );
+        assert!(
+            out.iter().any(|m| m.content == task),
+            "the task survives elision"
+        );
+        let mut seen = std::collections::HashSet::new();
+        for m in &out {
+            for c in &m.tool_calls {
+                seen.insert(c.id.clone());
+            }
+            if m.role == Role::Tool {
+                let id = m.tool_call_id.clone().unwrap();
+                assert!(seen.contains(&id), "orphaned tool result {id}");
+            }
+        }
     }
 
     fn render(history: &[Message]) -> String {

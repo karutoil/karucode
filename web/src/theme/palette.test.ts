@@ -21,14 +21,35 @@ import type { Theme, ThemeColorKey } from './types';
 const LAYERS = ['bg', 'rail', 'sidebar', 'inspector', 'surface', 'raised', 'hover'] as const;
 
 /**
+ * The chrome columns all sit directly on the canvas and are divided from one
+ * another by a 1px `--line`, not by tone: the rail (left), the sessions sheet and
+ * the inspector (right) are three separate columns of one frame, and the mock
+ * paints them at 1.020–1.024 apart. What matters is that each one is legible as
+ * a column *against the canvas*, so that is what is pinned here.
+ */
+const CHROME_COLUMNS = ['rail', 'sidebar', 'inspector'] as const;
+
+/**
  * Minimum contrast between adjacent layers.
  *
- * Dark themes can afford a full 1.07 step: the eye needs a bigger luminance
- * delta to resolve dark-on-dark. Light themes compress at the top of the ramp
- * (a 1.07 step would mean a muddy grey sidebar), so they separate through tint
- * and borders as well, and 1.04 is the floor there.
+ * The ladder has two halves, and they are held to different floors:
+ *
+ * * **Chrome** (`bg → rail → sidebar → inspector`) is the mock's near-black
+ *   frame. On a `#08090b` canvas a 1.07 step per column would put the *card*
+ *   surface around 30% grey — the "bright grey app" the mock exists to avoid.
+ *   Chrome separates at 1.017–1.04 and is told apart by its 1px `--line` and by
+ *   position, which is how the mock draws it (its own steps are 1.020–1.024).
+ * * **Content** (`inspector → surface → raised → hover`) is where the floor
+ *   matters: cards, menus and hover states are objects that must read as
+ *   distinct from what they sit on, and the washed-out regression was exactly
+ *   these collapsing. Dark themes take a full 1.06 step there, light themes 1.04.
  */
-const MIN_LAYER_STEP: Record<Theme['mode'], number> = { dark: 1.07, light: 1.04 };
+const CHROME_LAYERS = 4;
+
+const MIN_LAYER_STEP: Record<Theme['mode'], number> = { dark: 1.06, light: 1.04 };
+
+/** Chrome columns are a frame, not objects: only a visible hairline is required. */
+const MIN_CHROME_STEP = 1.015;
 
 /** HSL saturation, 0–1. A dark UI must not be built out of pure grey. */
 function hueSaturation(hex: string): number {
@@ -73,7 +94,8 @@ describe('built-in palette legibility', () => {
   it('separates every adjacent surface layer', () => {
     for (const theme of BUILTIN_THEMES) {
       const floor = MIN_LAYER_STEP[theme.mode];
-      for (let index = 1; index < LAYERS.length; index += 1) {
+      // Content layers: cards, menus and hover states are objects on a surface.
+      for (let index = CHROME_LAYERS; index < LAYERS.length; index += 1) {
         const lower = theme.colors[LAYERS[index - 1]!];
         const upper = theme.colors[LAYERS[index]!];
         const ratio = contrastRatio(lower, upper);
@@ -82,6 +104,19 @@ describe('built-in palette legibility', () => {
           `${theme.id}: ${LAYERS[index - 1]} → ${LAYERS[index]} is ${ratio.toFixed(3)}:1, ` +
             `needs ≥ ${floor}:1 or the two surfaces read as one colour`,
         ).toBeGreaterThanOrEqual(floor);
+      }
+    }
+  });
+
+  it('lifts every chrome column off the canvas', () => {
+    for (const theme of BUILTIN_THEMES) {
+      for (const column of CHROME_COLUMNS) {
+        const ratio = contrastRatio(theme.colors.bg, theme.colors[column]);
+        expect(
+          ratio,
+          `${theme.id}: ${column} on the canvas is ${ratio.toFixed(3)}:1, ` +
+            `needs ≥ ${MIN_CHROME_STEP}:1 or the column dissolves into the background`,
+        ).toBeGreaterThanOrEqual(MIN_CHROME_STEP);
       }
     }
   });

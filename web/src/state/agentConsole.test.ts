@@ -82,6 +82,9 @@ function agent(id: string, created: number): AgentSummary {
     created_at: created,
     updated_at: created,
     finished_at: null,
+    background: false,
+    note: '',
+    progress: null,
     session_title: 'Session',
     workspace: '/work',
     project_id: 'p_1',
@@ -257,6 +260,85 @@ describe('agent registry', () => {
       sessions,
     );
     expect(agents[0]).toMatchObject({ id: 'a_lost', status: 'failed', session_id: 's_ab12' });
+  });
+
+  it('keeps a pause that arrives before the list lands', () => {
+    // On a cold tab the SSE stream is already open while `GET /api/agents` is
+    // still in flight, so `agent_paused` can arrive first. The reducer used to
+    // bail out on an unknown row, which lost the frame: the row was created by the
+    // list read that followed, and it rendered `running` - a paused agent that
+    // says it is spending. `agent_finished` already synthesised a row here; the
+    // pause has to do the same.
+    const agents = applyAgentRegistry(
+      [],
+      agentEvent(1, 'agent_paused', 'a_early', { paused: true }),
+      sessions,
+    );
+
+    expect(agents).toHaveLength(1);
+    expect(agents[0]).toMatchObject({
+      id: 'a_early',
+      status: 'paused',
+      session_id: 's_ab12',
+      session_title: 'Review the harness',
+      // A placeholder is not a finished agent, and it holds no invented facts.
+      finished_at: null,
+      iterations: 0,
+    });
+
+    // A resume for the same early agent flips it back rather than being dropped.
+    const resumed = applyAgentRegistry(
+      agents,
+      agentEvent(2, 'agent_paused', 'a_early', { paused: false }),
+      sessions,
+    );
+    expect(resumed[0]?.status).toBe('running');
+
+    // The list read that lands afterwards is the authority on the rest of the row.
+    const merged = mergeAgentList(resumed, [
+      { ...agent('a_early', NOW), status: 'running', name: 'reviewer', task: 'review it' },
+    ]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ id: 'a_early', name: 'reviewer', task: 'review it' });
+  });
+
+  it('keeps an early progress frame and an early note', () => {
+    // Same rule for the other two frames: each one carries a fact (the iteration
+    // count, what the agent says about itself) that a later list read cannot
+    // recover, because the list only has the status.
+    const withProgress = applyAgentRegistry(
+      [],
+      agentEvent(1, 'agent_progress', 'a_progress', { iterations: 4 }),
+      sessions,
+    );
+    expect(withProgress[0]).toMatchObject({ id: 'a_progress', iterations: 4, status: 'running' });
+
+    const withNote = applyAgentRegistry(
+      [],
+      agentEvent(1, 'agent_note', 'a_note', { note: 'reading the diff', progress: 0.5 }),
+      sessions,
+    );
+    expect(withNote[0]).toMatchObject({
+      id: 'a_note',
+      note: 'reading the diff',
+      progress: 0.5,
+      status: 'running',
+    });
+  });
+
+  it('still ignores an early frame from a session outside the open project', () => {
+    // The other-project guard must survive the new placeholder path: the list is
+    // scoped to the project, and a global SSE stream must not leak rows into it.
+    const agents = applyAgentRegistry(
+      [],
+      event(1, 'agent_paused', {
+        session_id: 's_other_project',
+        agent_id: 'a_other',
+        paused: true,
+      }),
+      sessions,
+    );
+    expect(agents).toEqual([]);
   });
 
   it('ignores a spawn from a session outside the open project', () => {

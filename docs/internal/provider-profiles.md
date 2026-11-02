@@ -129,6 +129,35 @@ Setting `KARUCODE_MODEL`, `KARUCODE_BASE_URL` or `KARUCODE_API_KEY` (or the
 it, so an env-driven deployment never silently keeps using a file profile.
 Keys are write-only: `GET /api/config` reports `api_key_set`, never the key.
 
+## Timeouts: two deadlines from one setting
+
+`request_timeout_secs` (default 300, per profile or `[model]`) answers two
+different questions, and both are enforced:
+
+| deadline | what it bounds | what it catches |
+|---|---|---|
+| **per-read gap**, `request_timeout_secs` | the silence *between* two reads | an endpoint that stops talking: a dead backend, a stalled proxy |
+| **whole attempt**, twice `request_timeout_secs` | the request from send to last byte | an endpoint that never stops talking: a body that trickles a byte at a time, a stream that sends nothing but keepalive comments |
+
+Both are needed. A per-read timeout cannot see a drip-fed body, because every
+individual read returns in time; measured, a 5 s setting let a drip-fed body
+run for 42 s and kept a keepalive-only stream alive indefinitely. The whole
+attempt is a multiple of the gap rather than a separate key so there is one
+number to understand and one number to tune; the ceiling is generous on
+purpose (twice the gap, so ten minutes at the 300 s default) because a slow
+reasoning model must still fit inside it.
+
+Exceeding either deadline is a **retryable** timeout: the endpoint did not
+answer, which says nothing bad about the request, so the retry layer is free
+to try another channel. Configuration for it lives with the profile:
+
+```toml
+[[providers]]
+request_timeout_secs = 300   # read gap; the whole attempt gets twice this
+```
+
+The retry layer has its own separate wall clock, covered below.
+
 ## Retries, and why a broken answer no longer fails the run
 
 A gateway dying mid-request is routine: a dying backend answers 502, a
@@ -153,7 +182,8 @@ both global (`[model]`, not per profile):
 ### What is retried, and what is not
 
 The attempt count is not the whole story: a request the endpoint has already
-judged is not fixed by re-sending it. Classification is by HTTP status:
+judged is not fixed by re-sending it. Classification is by HTTP status, plus
+three cases that carry no usable status:
 
 | status | retried | why |
 |---|---|---|
@@ -162,6 +192,17 @@ judged is not fixed by re-sending it. Classification is by HTTP status:
 | 400, 413, 422 | **no** | a malformed or oversized request stays malformed |
 | 401, 403, 404 | **no** | a revoked key or a missing model id is permanent here |
 | other 4xx | **no** | the endpoint refused the request |
+| 200 + `application/json` | **no** | a buffered completion or an error object (`insufficient_quota`); the body's reason is surfaced |
+| 200 + empty body | **no** | the endpoint answered "nothing", and will answer it again |
+| 200 + HTML/plain splash | yes | a broken proxy; the next attempt lands on a healthy channel |
+| in-stream `retryable: false` | **no** | the endpoint judged the request mid-answer (`invalid_request_error`, a context overflow) |
+| `data: [DONE]` only | n/a | a finished (empty) answer, not a failure: the turn ends with empty text |
+
+The last three matter because each retry is a billed generation. A 200 with an
+error body used to be a generic provider error - no status to classify, so
+transient - and was re-sent up to 51 times; a completion delivered only as
+`[DONE]` was read as "the stream died before sending anything" and regenerated
+four times for one empty turn. Both now end the turn with the real reason.
 
 Transport failures (a timeout, a connection reset, a body that dies
 mid-decode) are always retried. A context overflow is never retried: the
@@ -177,17 +218,16 @@ gateway and want the old behaviour, that flag is the change to ask for.
 ### The wall-clock budget
 
 The attempt count alone cannot bound a run: 50 retries against a 30 s backoff
-ceiling is ~20 minutes of a hung turn. A hard wall-clock budget of **300 s**
+ceiling is ~20 minutes of a hung turn. `retry_max_total_secs` (default 300)
 per stream stops the chain even when attempts remain, and the real error is
-surfaced instead. It is currently a constant
-(`kc_provider::retry::DEFAULT_MAX_TOTAL_RETRY`); a `retry_max_total_secs`
-config field is the intended follow-up.
+surfaced instead.
 
 ```toml
 [model]
 retry_max_retries = 50          # attempts = retries + 1; 0 disables
 retry_base_delay_ms = 500       # first delay; doubles per attempt (jittered)
 retry_max_delay_ms = 30000      # backoff ceiling for both layers
+retry_max_total_secs = 300      # wall clock for the whole retry chain
 retry_max_stream_restarts = 3   # restarts of a stream that died mid-answer
 ```
 

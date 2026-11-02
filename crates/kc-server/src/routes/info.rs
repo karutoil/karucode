@@ -93,7 +93,7 @@ pub async fn session_info(
     let usage = store.usage_totals(&session.id).await?;
     let agents = store.list_agents(&session.id).await?;
     let runs = store.list_runs(&session.id, RUN_LIMIT).await?;
-    let running = state.runtime().is_running(&session.id);
+    let running = state.runtime().has_active_run(&session.id);
 
     // Per-agent message counts: `list_agent_messages` is the right answer
     // (it is what the Agents view shows), but it is one query per agent. The

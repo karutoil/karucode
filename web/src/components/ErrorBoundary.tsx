@@ -6,6 +6,15 @@ export interface ErrorBoundaryProps {
   children: ComponentChildren;
   /** What broke, for the card's heading: "the workspace", "this conversation". */
   scope?: string;
+  /**
+   * Marks the outermost boundary, the one with nothing of the app left outside it.
+   *
+   * The difference matters because the card's advice does: a nested boundary took
+   * one panel down and the rest of the workspace really is still running, while
+   * the root boundary caught a crash and there is nothing on screen to go back to.
+   * `App` sets this on its shell boundary; every panel boundary leaves it off.
+   */
+  root?: boolean;
 }
 
 interface ErrorBoundaryState {
@@ -71,15 +80,19 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     if (!error) return <>{this.props.children}</>;
 
     const scope = this.props.scope ?? 'this view';
+    // What the reader can still do depends on which boundary caught. A nested one
+    // took a single panel down: everything else on the page is alive and usable,
+    // and reloading would throw away the session state they are working in. The
+    // root one has nothing left outside it, so reload is the only way forward.
+    const hint = this.props.root
+      ? 'Nothing else is available: this was the outermost boundary. Reload to get back to a clean state, or copy the diagnostics into a bug report.'
+      : 'The rest of the workspace is still running. Reload to get back to a clean state, or copy the diagnostics into a bug report.';
     return (
       <div class="crash-card" role="alert">
         <p class="crash-kicker">Something broke</p>
         <h2 class="crash-title">{scope} could not be rendered.</h2>
         <p class="crash-message">{error.message || error.name}</p>
-        <p class="crash-hint">
-          The rest of the workspace is still running. Reload to get back to a clean state, or copy
-          the diagnostics into a bug report.
-        </p>
+        <p class="crash-hint">{hint}</p>
         <div class="crash-actions">
           <button type="button" class="button button-primary button-small" onClick={this.reload}>
             Reload

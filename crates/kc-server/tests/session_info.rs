@@ -175,9 +175,8 @@ async fn session_info_separates_subagent_work_from_the_main_agent() {
     assert!(agent["iterations"].as_u64().unwrap_or(0) >= 1);
 
     // The session split keeps the two apart.
-    assert_eq!(
+    assert!(
         body["messages"]["subagent"].as_u64().unwrap_or(0) > 0,
-        true,
         "{}",
         body["messages"]
     );

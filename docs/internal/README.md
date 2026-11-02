@@ -30,7 +30,7 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`run-server`](run-server.md) | Build the UI and the binary, start it against a workspace, and know what each CLI flag and startup failure means. | `crates/kc-server/src/bootstrap.rs:8` |
 | [`security`](security.md) | What karucode protects by default, what it explicitly does not, and the recipe for safe remote access. | `crates/kc-server/src/app.rs:16` |
 | [`session-titles`](session-titles.md) | Sessions are titled from their first message; with `[titles]` on (the default) a model writes a short, plain-language title instead, using the session's own model or a cheaper one you pick. | `crates/kc-server/src/titles.rs:1` |
-| [`subagents`](subagents.md) | How spawn_agent works, the limits it runs under, and when delegation helps instead of hurting. | `crates/kc-runtime/src/subagent.rs:20` |
+| [`subagents`](subagents.md) | How spawn_agent, spawn_agents and the control tools work - blocking and background, sequential and parallel - and the limits they run under. | `crates/kc-runtime/src/subagent.rs:20` |
 | [`terminals`](terminals.md) | A real shell in the browser that survives a reload, another browser and a cleared cache - and the honest limit of what survives a restart. | `crates/kc-server/src/terminals.rs:1` |
 | [`themes`](themes.md) | Built-in palettes, live colour and density editing, fonts and custom CSS, the transcript view options (cards or rows, grouped calls, folded turns), saved in the browser and shareable as a theme JSON file. | `web/src/theme/engine.ts:1` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |

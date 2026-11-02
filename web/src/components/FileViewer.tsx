@@ -11,6 +11,7 @@ import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { Dialog } from './Dialog';
 import { FilePreview } from './FilePreview';
+import { Tabs, type TabItem } from './Tabs';
 import { CheckIcon, CopyIcon, EditIcon, EyeIcon, FileCodeIcon, RefreshIcon } from './icons';
 
 type LoadState = 'loading' | 'ready' | 'error';
@@ -175,30 +176,30 @@ export function FileViewer(): JSX.Element | null {
     }
   };
 
-  // Only a text render has a source view to switch to; an image or PDF is its own
-  // preview, and `file.binary` is false for a PDF (its bytes are ASCII).
-  const showTabs = capability !== null && hasSourceView(capability.render);
+  // The tab strip exists only when there is a choice to make. A code file has no
+  // preview renderer, so offering "Preview" there was a dead tab: clicking it left
+  // `.file-code` as the pane and rendered nothing (`hasSourceView('code')` is
+  // true, but `hasRichPreview('code')` is not). `previewable` is the right
+  // question - the same one the body below asks before drawing a preview.
+  const showTabs = previewable && capability !== null && hasSourceView(capability.render);
+  const viewTabs = useMemo<TabItem<ViewMode>[]>(() => {
+    const items: TabItem<ViewMode>[] = [];
+    if (previewable) items.push({ id: 'preview', label: 'Preview', icon: <EyeIcon size={13} /> });
+    items.push({ id: 'source', label: 'Source', icon: <FileCodeIcon size={13} /> });
+    return items;
+  }, [previewable]);
+  // Editing forces the source view, and a file with no preview has nothing else
+  // to show: never leave `mode` pointing at a panel that is not in the strip.
+  const activeMode: ViewMode = editing || !previewable ? 'source' : mode;
   const tabs = showTabs ? (
-    <div class="file-view-tabs" role="tablist" aria-label="File view">
-      <button
-        type="button"
-        role="tab"
-        aria-selected={mode === 'preview'}
-        class={`file-view-tab${mode === 'preview' ? ' is-active' : ''}`}
-        onClick={() => setMode('preview')}
-      >
-        <EyeIcon size={13} /> Preview
-      </button>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={mode === 'source'}
-        class={`file-view-tab${mode === 'source' ? ' is-active' : ''}`}
-        onClick={() => setMode('source')}
-      >
-        <FileCodeIcon size={13} /> Source
-      </button>
-    </div>
+    <Tabs
+      items={viewTabs}
+      active={activeMode}
+      onChange={setMode}
+      label="File view"
+      idPrefix="file-view"
+      variant="fileview"
+    />
   ) : null;
 
   return (
@@ -373,7 +374,7 @@ export function FileViewer(): JSX.Element | null {
               project={projectId}
               onOpenFile={actions.openFileViewer}
             />
-          ) : editing && mode === 'source' ? (
+          ) : editing && activeMode === 'source' ? (
             <>
               {file.truncated ? (
                 <p class="file-notice">
@@ -393,15 +394,27 @@ export function FileViewer(): JSX.Element | null {
                 onInput={(event) => setDraft(event.currentTarget.value)}
               />
             </>
-          ) : mode === 'preview' && previewable ? (
-            <FilePreview
-              path={path}
-              content={previewContent}
-              render={capability?.render ?? 'code'}
-              project={projectId}
-              dirty={dirty}
-              onOpenFile={actions.openFileViewer}
-            />
+          ) : activeMode === 'preview' && previewable ? (
+            // `Tabs` points `aria-controls` at `file-view-panel-preview`, so the
+            // pane has to be the element with that id and the tabpanel role -
+            // otherwise the reference dangles and a screen reader announces a tab
+            // that controls nothing.
+            <div
+              id="file-view-panel-preview"
+              class="file-view-pane"
+              role="tabpanel"
+              aria-labelledby="file-view-tab-preview"
+              tabIndex={0}
+            >
+              <FilePreview
+                path={path}
+                content={previewContent}
+                render={capability?.render ?? 'code'}
+                project={projectId}
+                dirty={dirty}
+                onOpenFile={actions.openFileViewer}
+              />
+            </div>
           ) : (
             <>
               {file.truncated ? (
@@ -410,15 +423,23 @@ export function FileViewer(): JSX.Element | null {
                   is shown.
                 </p>
               ) : null}
-              <div class="file-code-scroll" tabIndex={0} role="region" aria-label={`Contents of ${path}`}>
-                <div class="file-gutter" aria-hidden="true">
-                  {Array.from({ length: lineCount }, (_, index) => (
-                    <span key={index}>{index + 1}</span>
-                  ))}
+              <div
+                id={showTabs ? 'file-view-panel-source' : undefined}
+                class="file-view-pane"
+                role={showTabs ? 'tabpanel' : undefined}
+                aria-labelledby={showTabs ? 'file-view-tab-source' : undefined}
+                tabIndex={showTabs ? 0 : undefined}
+              >
+                <div class="file-code-scroll" tabIndex={0} role="region" aria-label={`Contents of ${path}`}>
+                  <div class="file-gutter" aria-hidden="true">
+                    {Array.from({ length: lineCount }, (_, index) => (
+                      <span key={index}>{index + 1}</span>
+                    ))}
+                  </div>
+                  <pre class="file-code">
+                    <code class="hljs" dangerouslySetInnerHTML={{ __html: highlighted }} />
+                  </pre>
                 </div>
-                <pre class="file-code">
-                  <code class="hljs" dangerouslySetInnerHTML={{ __html: highlighted }} />
-                </pre>
               </div>
             </>
           )

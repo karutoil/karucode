@@ -482,7 +482,7 @@ describe('ChatView workspace tabs', () => {
     expect(container.querySelectorAll('.quick-prompt')).toHaveLength(3);
   });
 
-  it('renders the project → sessions → activity breadcrumb and the session title', () => {
+  it('renders the project / session breadcrumb and the activity chip', () => {
     store.projects.value = [
       {
         id: 'p_karucode',
@@ -496,8 +496,11 @@ describe('ChatView workspace tabs', () => {
     store.currentProjectId.value = 'p_karucode';
     renderChat();
 
+    // One line, as in the mock: the project names the workspace, the session
+    // title names the conversation, and the activity word rides beside it as a
+    // capsule. The `sessions` segment the old two-row header carried is gone -
+    // it repeated what the session-list toggle in the same bar already means.
     expect(screen.getByText('KaruCode')).not.toBeNull();
-    expect(screen.getByText('sessions')).not.toBeNull();
     expect(screen.getByText('ready')).not.toBeNull();
     expect(screen.getByRole('heading', { level: 1, name: 'Fix login bug' })).not.toBeNull();
   });

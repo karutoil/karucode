@@ -189,6 +189,23 @@ describe('TerminalTab', () => {
     expect(terminalState.activeTerminal.value?.id).toBe('t_two');
   });
 
+  it('releases the closed terminal\'s emulator so the map cannot grow forever', async () => {
+    // The xterm instance is module state keyed by id and outlives the unmount,
+    // so nothing frees it on its own: a session that opens and closes all 16
+    // terminals used to hold 16 emulators, canvases and listener sets. The strip
+    // calls the disposer the lazily-loaded surface registered.
+    stubServer([terminal(), terminal({ id: 't_two', title: 'watcher', position: 2 })]);
+    const disposed: string[] = [];
+    terminalState.setTerminalEmulatorDisposer((id) => disposed.push(id));
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(2));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close karucode-1' }));
+    await waitFor(() => expect(disposed).toEqual(['t_one']));
+    // The other terminal's emulator is untouched.
+    expect(disposed).not.toContain('t_two');
+  });
+
   it('renames a terminal from the tab strip, and a blank name restores the default', async () => {
     stubServer([terminal()]);
     render(<TerminalTab />);

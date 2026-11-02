@@ -744,7 +744,7 @@ export function ThemeStudio(): JSX.Element | null {
                 </label>
                 <p class="theme-advanced-help" id={`${titleId}-css-help`}>
                   Applied live after the application stylesheet. Use{' '}
-                  <code>:root {'{ --theme-accent: #dfb680; }'}</code> to adjust tokens, or target any
+                  <code>:root {'{ --theme-accent: #eaa06d; }'}</code> to adjust tokens, or target any
                   class.
                 </p>
                 <textarea

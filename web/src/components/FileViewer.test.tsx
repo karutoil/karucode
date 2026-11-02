@@ -237,4 +237,61 @@ describe('FileViewer', () => {
     expect(edit.disabled).toBe(true);
     expect(edit.getAttribute('title')).toContain('limits.max_file_read_bytes');
   });
+
+  it('offers no dead Preview tab for a plain code file, and keeps Source keyboard-operable', async () => {
+    // `hasSourceView('code')` is true, which is why every `.rs`/`.ts`/`.toml` file
+    // used to show a Preview tab that rendered nothing: clicking it left
+    // `.file-code` as the pane with no preview element and no way to tell. A code
+    // file has no preview renderer, so the strip should not offer one.
+    installFetch({ content: 'fn main() {}\n', size: 14, language: 'rust', path: 'src/main.rs' });
+    store.fileViewerPath.value = 'src/main.rs';
+    const { container } = render(<FileViewer />);
+
+    await waitFor(() => expect(container.querySelector('.file-code')).not.toBeNull());
+    expect(screen.queryByRole('tab', { name: /preview/i })).toBeNull();
+    // With nothing to switch between there is no tablist at all: the pane is the
+    // file, and a one-item tablist is noise in the accessibility tree.
+    expect(screen.queryByRole('tablist', { name: /file view/i })).toBeNull();
+    expect(screen.queryByRole('tab', { name: /source/i })).toBeNull();
+    // The status bar still says what is on screen.
+    expect(container.querySelector('.file-statusbar')?.textContent).toContain('2 lines');
+  });
+
+  it('makes the file-view tabs keyboard-operable, with one tab-in-tablist', async () => {
+    // The strip used to be two plain buttons with `role="tab"`: no `tabIndex={-1}`
+    // on the inactive one, no arrow-key model, no ids for `aria-controls`. `Tabs`
+    // implements all of it for the inspector and the workspace tabs, so the viewer
+    // now shares it instead of reimplementing a worse copy.
+    installFetch({ content: '# Title\n\nbody', size: 15, language: 'markdown' });
+    store.fileViewerPath.value = 'docs/guide.md';
+    const { container } = render(<FileViewer />);
+
+    await waitFor(() => expect(screen.getByTestId('file-preview-markdown')).toBeTruthy());
+    const preview = screen.getByRole('tab', { name: /preview/i });
+    const source = screen.getByRole('tab', { name: /source/i });
+
+    // Only the selected tab is in the tab order.
+    expect(preview.getAttribute('tabindex')).toBe('0');
+    expect(source.getAttribute('tabindex')).toBe('-1');
+    // The selected tab names the panel and the panel names the tab back.
+    expect(preview.getAttribute('aria-controls')).toBe('file-view-panel-preview');
+    expect(preview.id).toBe('file-view-tab-preview');
+    // The referenced panel exists, is a tabpanel, and points back at the tab: a
+    // tab whose `aria-controls` names nothing is announced as controlling nothing.
+    const previewPanel = document.getElementById('file-view-panel-preview');
+    expect(previewPanel).not.toBeNull();
+    expect(previewPanel?.getAttribute('role')).toBe('tabpanel');
+    expect(previewPanel?.getAttribute('aria-labelledby')).toBe('file-view-tab-preview');
+
+    // ArrowRight moves selection (and focus) to Source without a pointer.
+    fireEvent.keyDown(preview, { key: 'ArrowRight' });
+    await waitFor(() => expect(container.querySelector('.file-code')).not.toBeNull());
+    expect(screen.getByRole('tab', { name: /source/i }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: /source/i }).getAttribute('tabindex')).toBe('0');
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: /source/i }));
+
+    // Home goes back to the first tab, which wraps the other way round.
+    fireEvent.keyDown(screen.getByRole('tab', { name: /source/i }), { key: 'Home' });
+    await waitFor(() => expect(screen.getByTestId('file-preview-markdown')).toBeTruthy());
+  });
 });

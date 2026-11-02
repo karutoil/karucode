@@ -91,6 +91,16 @@ field names that changed — never the values.
 
 Writes are atomic (temp file + rename) and carry a size cap.
 
+These are *checks, not handles* (`kc_core::paths` says so at the top of the
+module). Resolution returns a path and the caller then opens or writes it by name,
+so a component swapped for a symlink between the check and the syscall defeats
+rule 4. Closing that window needs `openat2(RESOLVE_BENEATH)` or passed handles
+(`cap-std`), not a second `stat`. It is not treated as a vulnerability of its own
+for the same reason `/tmp` is inside the fence: the agent can already run
+`run_command` as this user, so anything that can win the race can read the file
+directly. What these rules do prevent is a *model* walking out of its project with
+a plain `../` or a committed symlink.
+
 **A workspace has more than one root.** Besides the project directory, every
 workspace allows the system temporary directory (`TMPDIR` when set and absolute,
 otherwise `/tmp`) — `allow_temp_dir`, on by default, off with

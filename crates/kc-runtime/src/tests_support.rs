@@ -985,8 +985,19 @@ impl Script {
     }
 }
 
+/// A script queue belonging to one agent.
+///
+/// `needle` is matched against the conversation's user turns. A spawned child's
+/// first user turn *is* its task, which is unique by construction, so the task
+/// text is what identifies "this child's script". Without this, a fan-out has two
+/// loops popping from one queue: the second child gets the first child's answer
+/// and the batch is unpredictable by design, which is exactly what a concurrency
+/// test must not be.
+type KeyedScripts = Arc<Mutex<Vec<(String, std::collections::VecDeque<Script>)>>>;
+
 struct ScriptedProvider {
     scripts: Arc<Mutex<std::collections::VecDeque<Script>>>,
+    keyed: KeyedScripts,
     requests: Arc<Mutex<Vec<ChatRequest>>>,
 }
 
@@ -1001,8 +1012,36 @@ impl Provider for ScriptedProvider {
         request: ChatRequest,
         _cancel: CancellationToken,
     ) -> Result<ProviderStream> {
-        self.requests.lock().expect("requests lock").push(request);
-        let script = self.scripts.lock().expect("script lock").pop_front();
+        self.requests
+            .lock()
+            .expect("requests lock")
+            .push(request.clone());
+        let script = {
+            // A keyed queue wins when its needle appears in this request's own
+            // conversation; the shared queue is the parent's (and everyone
+            // else's) fallback, so existing tests are unaffected.
+            let text: String = request
+                .messages
+                .iter()
+                .filter(|message| message.role == kc_core::message::Role::User)
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\u{1}");
+            let mut keyed = self.keyed.lock().expect("keyed lock");
+            let mut found = None;
+            for (needle, queue) in keyed.iter_mut() {
+                if text.contains(needle.as_str()) {
+                    if let Some(script) = queue.pop_front() {
+                        found = Some(script);
+                        break;
+                    }
+                }
+            }
+            match found {
+                Some(script) => Some(script),
+                None => self.scripts.lock().expect("script lock").pop_front(),
+            }
+        };
         match script {
             None => Err(Error::Provider(
                 "scripted provider has no script left for this call".into(),
@@ -1029,6 +1068,7 @@ impl Provider for ScriptedProvider {
 
 pub(crate) struct ScriptedFactory {
     scripts: Arc<Mutex<std::collections::VecDeque<Script>>>,
+    keyed: KeyedScripts,
     requests: Arc<Mutex<Vec<ChatRequest>>>,
     builds: Arc<AtomicUsize>,
 }
@@ -1037,9 +1077,19 @@ impl ScriptedFactory {
     pub(crate) fn new(scripts: Vec<Script>) -> Self {
         Self {
             scripts: Arc::new(Mutex::new(scripts.into())),
+            keyed: Arc::new(Mutex::new(Vec::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
             builds: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Give one conversation its own script queue, keyed by a needle that appears
+    /// in its user turns (a subagent's task text).
+    pub(crate) fn key(&self, needle: &str, scripts: Vec<Script>) {
+        self.keyed
+            .lock()
+            .expect("keyed lock")
+            .push((needle.to_string(), scripts.into()));
     }
 
     pub(crate) fn requests(&self) -> Vec<ChatRequest> {
@@ -1057,6 +1107,7 @@ impl ProviderFactory for ScriptedFactory {
         self.builds.fetch_add(1, Ordering::Relaxed);
         Ok(Arc::new(ScriptedProvider {
             scripts: Arc::clone(&self.scripts),
+            keyed: Arc::clone(&self.keyed),
             requests: Arc::clone(&self.requests),
         }))
     }
@@ -1246,11 +1297,16 @@ impl Tool for SteerTool {
 
 /// Queues a follow-up from *inside* a tool call, for the same reason as
 /// [`SteerTool`].
+///
+/// `messages` holds every prompt to queue, in order. One entry is the ordinary
+/// "and then…" case; several is what catches a drain that starts the next run
+/// before the previous one has deregistered (the queue used to be wiped after the
+/// second entry was refused).
 pub(crate) struct FollowUpTool {
     pub name: String,
     pub runtime: Arc<crate::Runtime>,
     pub session: String,
-    pub message: String,
+    pub messages: Vec<String>,
 }
 
 impl FollowUpTool {
@@ -1260,11 +1316,20 @@ impl FollowUpTool {
         session: &str,
         message: &str,
     ) -> Arc<dyn Tool> {
+        Self::boxed_many(name, runtime, session, vec![message.to_string()])
+    }
+
+    pub(crate) fn boxed_many(
+        name: &str,
+        runtime: Arc<crate::Runtime>,
+        session: &str,
+        messages: Vec<String>,
+    ) -> Arc<dyn Tool> {
         Arc::new(Self {
             name: name.to_string(),
             runtime,
             session: session.to_string(),
-            message: message.to_string(),
+            messages,
         })
     }
 }
@@ -1281,13 +1346,17 @@ impl Tool for FollowUpTool {
     }
 
     async fn invoke(&self, _request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
-        match self
-            .runtime
-            .enqueue_follow_up(&self.session, self.message.clone())
-        {
-            Ok(follow_up) => ToolOutcome::ok(format!("queued:{}", follow_up.id)),
-            Err(error) => ToolOutcome::err(format!("follow-up refused: {error}")),
+        let mut ids = Vec::new();
+        for message in &self.messages {
+            match self
+                .runtime
+                .enqueue_follow_up(&self.session, message.clone())
+            {
+                Ok(follow_up) => ids.push(follow_up.id),
+                Err(error) => return ToolOutcome::err(format!("follow-up refused: {error}")),
+            }
         }
+        ToolOutcome::ok(format!("queued:{}", ids.join(",")))
     }
 }
 
@@ -1584,6 +1653,105 @@ impl Tool for SlowCancelTool {
     }
 }
 
+/// A tool that parks its caller until a test releases it.
+///
+/// A background subagent has to be observable *while it works*, and a test has no
+/// other way to hold one still: the loop only stops between iterations, so
+/// something inside an iteration has to be the thing that waits. `arrived` counts
+/// the calls that got here and `release` lets them all go.
+#[derive(Clone)]
+pub(crate) struct GateTool {
+    pub name: String,
+    arrived: Arc<AtomicUsize>,
+    /// Latched, not just signalled: a test that releases *before* the agent
+    /// reaches the gate must still let it through, or the whole run parks on a
+    /// wake-up that already happened.
+    released: Arc<AtomicBool>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl GateTool {
+    pub(crate) fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            arrived: Arc::new(AtomicUsize::new(0)),
+            released: Arc::new(AtomicBool::new(false)),
+            release: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    /// The tool plus a handle on its gate, so a test can register it and still
+    /// release the invocation it is waiting on.
+    pub(crate) fn pair(name: &str) -> (Self, GateHandle) {
+        let tool = Self::new(name);
+        let handle = GateHandle {
+            arrived: Arc::clone(&tool.arrived),
+            released: Arc::clone(&tool.released),
+            release: Arc::clone(&tool.release),
+        };
+        (tool, handle)
+    }
+
+    pub(crate) fn boxed(name: &str) -> Arc<dyn Tool> {
+        Arc::new(Self::new(name))
+    }
+}
+
+/// The far end of a [`GateTool`]: what a test holds while the agent holds a call.
+#[derive(Clone)]
+pub(crate) struct GateHandle {
+    arrived: Arc<AtomicUsize>,
+    released: Arc<AtomicBool>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl GateHandle {
+    /// How many calls have reached the gate.
+    pub(crate) fn arrived(&self) -> usize {
+        self.arrived.load(Ordering::SeqCst)
+    }
+
+    /// Let every parked call return, and every later one through.
+    pub(crate) fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl Tool for GateTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Blocks until the test releases it.".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            origin: ToolOrigin::Builtin,
+        }
+    }
+
+    async fn invoke(&self, _request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        self.arrived.fetch_add(1, Ordering::SeqCst);
+        loop {
+            if self.released.load(Ordering::SeqCst) {
+                return ToolOutcome::ok("released");
+            }
+            // Register before re-checking, so a release between the check and the
+            // await cannot be missed.
+            let notified = self.release.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.released.load(Ordering::SeqCst) {
+                return ToolOutcome::ok("released");
+            }
+            tokio::select! {
+                biased;
+                _ = ctx.cancel.cancelled() => return ToolOutcome::err("cancelled while parked"),
+                _ = notified => {}
+            }
+        }
+    }
+}
+
 /// Panics on every invocation (exercises the tool panic guard).
 pub(crate) struct PanicTool {
     pub name: String,
@@ -1737,6 +1905,33 @@ impl Harness {
         }
     }
 
+    /// Collect the frames still arriving until every loop (parent and child) is
+    /// gone.
+    ///
+    /// `collect_until_finished` stops at the parent's `run_finished`, which a
+    /// background child legitimately outlives. A test about *that child* needs the
+    /// frames it emits afterwards, and they are already in flight by the time the
+    /// parent settles.
+    pub(crate) async fn collect_until_quiet(&mut self) -> Vec<EventEnvelope> {
+        let mut collected = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !self.runtime.active_runs().is_empty() {
+            match tokio::time::timeout(Duration::from_millis(50), self.events.recv()).await {
+                Ok(Ok(event)) => collected.push(event),
+                Ok(Err(e)) => panic!("event stream closed: {e}"),
+                Err(_) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+        // Drain whatever is already queued, without waiting for more.
+        while let Ok(event) = self.events.try_recv() {
+            collected.push(event);
+        }
+        collected
+    }
+
     /// Wait (bounded) until no run is registered any more.
     pub(crate) async fn wait_idle(&self) -> Vec<ActiveRun> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1808,6 +2003,7 @@ pub(crate) fn test_inner_with_settings(settings: FakeSettings) -> Arc<RuntimeInn
         runs: Mutex::new(HashMap::new()),
         approvals: ApprovalRegistry::new(),
         subagents: Arc::new(SubagentLimiter::new(Default::default())),
+        hub: Arc::new(crate::hub::AgentHub::new()),
         seq: AtomicU64::new(0),
         events_emitted: AtomicU64::new(0),
         session_allow: Mutex::new(std::collections::HashSet::new()),

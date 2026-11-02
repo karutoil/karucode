@@ -46,6 +46,30 @@ export const activeTerminalId = signal<string | null>(readActiveTerminalId());
 /** Live connection state per terminal id, for the status dot in the strip. */
 export const terminalStatus = signal<Record<string, TerminalSocketStatus>>({});
 
+/**
+ * How the closed terminal's emulator is released.
+ *
+ * xterm lives in a lazily-loaded chunk (`components/TerminalSurface`), so this
+ * module cannot import it without dragging ~200 kB of emulator into the main
+ * bundle for every user who never opens the terminal tab. The surface registers
+ * its own `disposeTerminal` here on load instead, and closing a tab calls it.
+ * Until the chunk has loaded there is no emulator to release.
+ */
+type TerminalDisposer = (id: string) => void;
+let emulatorDisposer: TerminalDisposer | null = null;
+
+export function setTerminalEmulatorDisposer(disposer: TerminalDisposer | null): void {
+  emulatorDisposer = disposer;
+}
+
+function releaseEmulator(id: string): void {
+  try {
+    emulatorDisposer?.(id);
+  } catch {
+    // Releasing an emulator must never fail a close.
+  }
+}
+
 export const activeTerminal = computed<Terminal | null>(() => {
   const list = terminals.value;
   const id = activeTerminalId.value;
@@ -147,7 +171,7 @@ export async function newTerminal(options: { cols?: number; rows?: number } = {}
   }
 }
 
-/** Close a terminal: the shell is killed and the tab disappears. */
+/** Close a terminal: the shell is killed, the tab disappears and its emulator is released. */
 export async function closeTerminal(id: string): Promise<void> {
   const previous = terminals.value;
   const index = previous.findIndex((terminal) => terminal.id === id);
@@ -157,10 +181,17 @@ export async function closeTerminal(id: string): Promise<void> {
     const next = terminals.value[Math.min(index, terminals.value.length - 1)];
     selectTerminal(next?.id ?? null);
   }
+  // The emulator is module-level state keyed by id (`components/TerminalSurface`)
+  // and outlives the unmount, so the tab has to release it explicitly or every
+  // terminal ever viewed keeps an emulator, canvas and listeners for the life of
+  // the page.
+  releaseEmulator(id);
   try {
     await deleteTerminal(id);
   } catch (error) {
     terminals.value = previous;
+    // The tab is coming back, so the emulator must survive too: recreate it on
+    // the next mount rather than restoring a disposed one.
     store.pushToast(toErrorMessage(error), 'error');
   }
 }

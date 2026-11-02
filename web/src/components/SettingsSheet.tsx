@@ -72,6 +72,9 @@ interface FormState {
   allowRecursive: boolean;
   subagentMaxDepth: string;
   subagentTimeout: string;
+  allowBackground: boolean;
+  subagentMaxBackground: string;
+  subagentWaitTimeout: string;
 }
 
 const LIMIT_FIELDS: { key: NumericLimitKey; label: string }[] = [
@@ -134,6 +137,9 @@ function formFromConfig(config: Config): FormState {
     allowRecursive: config.subagents.allow_recursive,
     subagentMaxDepth: String(config.subagents.max_depth),
     subagentTimeout: String(config.subagents.timeout_secs),
+    allowBackground: config.subagents.allow_background,
+    subagentMaxBackground: String(config.subagents.max_background),
+    subagentWaitTimeout: String(config.subagents.wait_timeout_secs),
   };
 }
 
@@ -208,6 +214,12 @@ function validate(form: FormState): Record<string, string> {
   if (!integerAtLeast(form.subagentTimeout, 1, 604_800)) {
     errors.subagentTimeout = 'Timeout must be 1–604800 seconds.';
   }
+  if (!integerAtLeast(form.subagentMaxBackground, 1, 16)) {
+    errors.subagentMaxBackground = 'Live background agents must be 1–16.';
+  }
+  if (!integerAtLeast(form.subagentWaitTimeout, 1, 3_600)) {
+    errors.subagentWaitTimeout = 'Wait timeout must be 1–3600 seconds.';
+  }
 
   return errors;
 }
@@ -246,6 +258,9 @@ function buildPatch(form: FormState): ConfigPatch {
       allow_recursive: form.allowRecursive,
       max_depth: Number(form.subagentMaxDepth),
       timeout_secs: Number(form.subagentTimeout),
+      allow_background: form.allowBackground,
+      max_background: Number(form.subagentMaxBackground),
+      wait_timeout_secs: Number(form.subagentWaitTimeout),
     },
   };
 }
@@ -1895,6 +1910,8 @@ const FIELD_LOCATIONS: Record<string, FieldLocation> = {
   subagentContinues: { tab: 'agent', advanced: 'agent', anchor: 'subagent-continues' },
   subagentMaxDepth: { tab: 'agent', advanced: 'agent', anchor: 'subagent-max-depth' },
   subagentTimeout: { tab: 'agent', advanced: 'agent', anchor: 'subagent-timeout' },
+  subagentMaxBackground: { tab: 'agent', advanced: 'agent', anchor: 'subagent-max-background' },
+  subagentWaitTimeout: { tab: 'agent', advanced: 'agent', anchor: 'subagent-wait-timeout' },
   ...Object.fromEntries(
     LIMIT_FIELDS.map((field) => [
       `limits.${field.key}`,
@@ -2690,6 +2707,67 @@ export function SettingsSheet(): JSX.Element | null {
                           aria-describedby={errors.subagentTimeout ? 'subagent-timeout-error' : undefined}
                         />
                       </Field>
+                      <Field
+                        id="subagent-max-background"
+                        label="Live background agents"
+                        hint="How many detached subagents one session may keep running at once."
+                        error={errors.subagentMaxBackground}
+                      >
+                        <input
+                          id="subagent-max-background"
+                          class="input mono"
+                          type="number"
+                          min="1"
+                          max="16"
+                          step="1"
+                          value={form.subagentMaxBackground}
+                          disabled={disabled}
+                          onInput={(event) =>
+                            update({ subagentMaxBackground: event.currentTarget.value })
+                          }
+                          aria-invalid={errors.subagentMaxBackground ? 'true' : undefined}
+                          aria-describedby={
+                            errors.subagentMaxBackground
+                              ? 'subagent-max-background-error'
+                              : 'subagent-max-background-hint'
+                          }
+                        />
+                      </Field>
+                      <Field
+                        id="subagent-wait-timeout"
+                        label="Wait timeout (s)"
+                        hint="The default bound on wait_for_agents; a wait that runs out reports who is still working."
+                        error={errors.subagentWaitTimeout}
+                      >
+                        <input
+                          id="subagent-wait-timeout"
+                          class="input mono"
+                          type="number"
+                          min="1"
+                          max="3600"
+                          step="1"
+                          value={form.subagentWaitTimeout}
+                          disabled={disabled}
+                          onInput={(event) =>
+                            update({ subagentWaitTimeout: event.currentTarget.value })
+                          }
+                          aria-invalid={errors.subagentWaitTimeout ? 'true' : undefined}
+                          aria-describedby={
+                            errors.subagentWaitTimeout
+                              ? 'subagent-wait-timeout-error'
+                              : 'subagent-wait-timeout-hint'
+                          }
+                        />
+                      </Field>
+                      <div class="field field-toggle field-wide">
+                        <Toggle
+                          label="Allow background subagents"
+                          description="A spawn can return immediately and keep working; the parent collects it with wait_for_agents."
+                          checked={form.allowBackground}
+                          disabled={disabled}
+                          onChange={(checked) => update({ allowBackground: checked })}
+                        />
+                      </div>
                       <div class="field field-toggle field-wide">
                         <Toggle
                           label="Allow recursive subagents"

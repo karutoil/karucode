@@ -606,6 +606,24 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         );
     }
 
+    // Retention: drop transcript rows outside `retention_days` and hand the
+    // freed pages back. Off by default (`0` = keep everything), so the task is
+    // only started when the operator opted in at startup; it re-reads the
+    // setting every tick, so changing the window (or turning it off) from the
+    // settings sheet takes effect on the next pass. Turning it *on* for a server
+    // started with `0` needs a restart, which is the price of not running a
+    // timer for an install that never enabled the feature. The task stops itself
+    // on shutdown.
+    if crate::retention::should_prune(config.retention_days) {
+        crate::retention::spawn(state.clone(), crate::retention::PRUNE_INTERVAL);
+        tracing::info!(
+            days = config.retention_days,
+            interval_secs = crate::retention::PRUNE_INTERVAL.as_secs(),
+            "retention enabled: messages older than this window are pruned, keeping the \
+             newest messages of every session"
+        );
+    }
+
     // Log the allowlist when it actually gates requests, so an operator who
     // reaches the server through a proxy sees the 403 reason in the log.
     if state.enforce_host_allowlist() {

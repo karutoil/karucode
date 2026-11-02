@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import type { AgentSummary, StoredMessage } from '../api/types';
 import { AgentsTab } from './AgentsTab';
+import { Inspector } from './Inspector';
 import { emptyChatState, type AgentView } from '../state/chat';
 import * as store from '../state/store';
 import { jsonResponse, resetAppState } from '../test/fixtures';
@@ -26,6 +27,9 @@ function agent(id: string, overrides: Partial<AgentSummary> = {}): AgentSummary 
     created_at: NOW,
     updated_at: NOW,
     finished_at: NOW + 1_000,
+    background: false,
+    note: '',
+    progress: null,
     session_title: 'Review the harness',
     workspace: '/work/karucode',
     project_id: 'p_1',
@@ -103,6 +107,28 @@ describe('AgentsTab', () => {
     expect(screen.getByRole('button', { name: /Cancelled/ }).hasAttribute('disabled')).toBe(true);
 
     await waitFor(() => expect(fetch).toHaveBeenCalled());
+  });
+
+  it('counts a paused agent as live in the inspector badge', () => {
+    // The badge is `store.runningAgents`, rendered on the inspector's Agents tab
+    // (`Inspector.tsx:89`). It counted `status === 'running'` only, while the
+    // server's own tally is running|paused ("a paused agent still holds a subagent
+    // slot", `routes/agents.rs:80-89`) and every row in the tab already sorts and
+    // labels a paused agent as live. A project whose agents were all paused
+    // therefore showed no badge at all while still holding their slots.
+    store.agentsAll.value = [
+      agent('a_run', { status: 'running', finished_at: null }),
+      agent('a_paused', { status: 'paused', finished_at: null }),
+      agent('a_done', { status: 'completed' }),
+      agent('a_failed', { status: 'failed' }),
+    ];
+
+    expect(store.runningAgents.value).toBe(2);
+
+    // The tab pill shows that number, so the two surfaces cannot drift.
+    render(<Inspector />);
+    const tab = screen.getByRole('tab', { name: /Agents/ });
+    expect(tab.querySelector('.tab-count')?.textContent).toBe('2');
   });
 
   it('filters the list to one status', () => {

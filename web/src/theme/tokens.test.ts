@@ -57,13 +57,13 @@ describe('built-in themes', () => {
     expect(DEFAULT_THEME.id).toBe('ember');
     // `styles/tokens.css` paints the first frame before the engine runs, so the
     // canvas and text it hardcodes must match the built-in exactly.
-    expect(DEFAULT_THEME.colors.bg).toBe('#111213');
-    expect(DEFAULT_THEME.colors.text).toBe('#eae9e5');
-    expect(DEFAULT_THEME.colors.accent).toBe('#dfb680');
-    expect(DEFAULT_THEME.colors.syntaxString).toBe('#a5cbb4');
+    expect(DEFAULT_THEME.colors.bg).toBe('#08090b');
+    expect(DEFAULT_THEME.colors.text).toBe('#e9ebf0');
+    expect(DEFAULT_THEME.colors.accent).toBe('#eaa06d');
+    expect(DEFAULT_THEME.colors.syntaxString).toBe('#8fdcb7');
     // Surfaces are asserted against the stylesheet itself below, so the two
     // cannot drift apart.
-    expect(DEFAULT_THEME.colors.surface).toBe('#2c2d31');
+    expect(DEFAULT_THEME.colors.surface).toBe('#171c23');
   });
 
   it('keeps every Ember surface in sync with the first-paint stylesheet', () => {
@@ -109,9 +109,9 @@ describe('completeColors', () => {
   it('falls back to the mode defaults for missing surfaces', () => {
     const dark = completeColors({}, 'dark');
     const light = completeColors({}, 'light');
-    expect(dark.bg).toBe('#111213');
-    expect(light.bg).toBe('#f7f8fb');
-    expect(light.text).toBe('#1b283a');
+    expect(dark.bg).toBe('#08090b');
+    expect(light.bg).toBe('#f4f2ee');
+    expect(light.text).toBe('#1c1a17');
   });
 });
 

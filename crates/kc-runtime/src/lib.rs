@@ -35,6 +35,7 @@ pub mod approvals;
 pub mod context;
 pub mod events;
 pub(crate) mod history;
+pub(crate) mod hub;
 mod notify;
 mod restart;
 pub mod rewind;
@@ -131,6 +132,30 @@ pub struct RunHandle {
     pub session_id: String,
 }
 
+/// What a human asked the runtime to do to one live agent.
+///
+/// A distinct type rather than a `&str` so the HTTP route, the runtime and any
+/// future caller cannot disagree about the spelling, and so an unknown verb is a
+/// parse error instead of a silent no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentAction {
+    Pause,
+    Resume,
+    Cancel,
+}
+
+impl AgentAction {
+    /// Parse the path segment of `POST /api/agents/:id/<action>`.
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value.trim().to_ascii_lowercase().as_str() {
+            "pause" => AgentAction::Pause,
+            "resume" => AgentAction::Resume,
+            "cancel" | "kill" | "stop" => AgentAction::Cancel,
+            _ => return None,
+        })
+    }
+}
+
 /// What a rewind did, or what it would do.
 ///
 /// The preview is returned alongside the outcomes so a caller never has to
@@ -191,6 +216,9 @@ pub(crate) struct RuntimeInner {
     pub runs: Mutex<HashMap<String, Arc<RunState>>>,
     pub approvals: approvals::ApprovalRegistry,
     pub subagents: Arc<subagent::SubagentLimiter>,
+    /// The live half of subagents: pause gates, mailboxes and a registry of the
+    /// agents whose loops exist right now. See [`hub`].
+    pub hub: Arc<hub::AgentHub>,
     pub seq: AtomicU64,
     pub events_emitted: AtomicU64,
     /// `allow_session` approvals, keyed by session + kind + target.
@@ -396,6 +424,7 @@ impl Runtime {
             runs: Mutex::new(HashMap::new()),
             approvals: approvals::ApprovalRegistry::new(),
             subagents: Arc::new(subagent::SubagentLimiter::new(Default::default())),
+            hub: Arc::new(hub::AgentHub::new()),
             seq: AtomicU64::new(0),
             events_emitted: AtomicU64::new(0),
             session_allow: Mutex::new(HashSet::new()),
@@ -409,8 +438,13 @@ impl Runtime {
     }
 
     /// Names of the tools the runtime itself contributes to the registry view.
+    ///
+    /// The delegate family lives here rather than in `kc-tools` because every one
+    /// of them needs the runtime's live agent registry, and the list is what
+    /// `set_tools` re-installs on top of whatever the server supplies, so a
+    /// reload cannot silently drop the ability to delegate.
     pub fn builtin_tool_names() -> &'static [&'static str] {
-        &[subagent::SPAWN_AGENT_TOOL]
+        subagent::DELEGATE_TOOLS
     }
 
     pub(crate) fn shared(&self) -> &Arc<RuntimeInner> {
@@ -444,7 +478,7 @@ impl Runtime {
                 registry.register(tool);
             }
         }
-        registry.register(subagent::spawn_tool(inner));
+        subagent::install_delegate_tools(inner, &mut registry);
         registry
     }
 
@@ -826,7 +860,10 @@ impl Runtime {
                 input.attachments.len()
             )));
         }
-        if !self.is_running(session_id) {
+        // A steer or a follow-up wants a *user run* to fold into or follow: a
+        // detached subagent still working in the session is not something a new
+        // prompt can steer, and queueing behind it would look like a lost message.
+        if !self.has_active_run(session_id) {
             return Err(kc_core::Error::BadRequest(format!(
                 "session {session_id} has no run in flight; send a normal message instead"
             )));
@@ -963,6 +1000,41 @@ impl Runtime {
         next
     }
 
+    /// Put a taken follow-up back at the front of the queue.
+    ///
+    /// The counterpart of [`Runtime::take_follow_up`] for the one case where a
+    /// taken entry must not be spent: the run it was taken for could not start.
+    /// The client was told `202` with this id, so dropping it would silently lose
+    /// a message it can no longer recall - putting it back keeps both promises
+    /// (the id stays findable, and the next free run picks it up).
+    pub fn requeue_follow_up(&self, session_id: &str, follow_up: QueuedFollowUp) {
+        if follow_up.kind != QueuedKind::FollowUp {
+            // Not a follow-up: leave the other queue alone rather than putting
+            // a steering message where a run is expected.
+            return;
+        }
+        {
+            let mut queues = self.inner.follow_ups.lock().expect("follow ups lock");
+            let queue = queues.entry(session_id.to_string()).or_default();
+            // Front, not back: it was the oldest entry, and the user's order is
+            // what a queue promises.
+            queue.push_front(follow_up);
+        }
+        self.publish_queues(session_id);
+    }
+
+    /// Is a **user run** registered for this session, cancelled or not?
+    ///
+    /// Exactly the predicate `start_run` refuses on, which is what makes it
+    /// usable as the "would a new run be accepted right now" test: unlike
+    /// [`Runtime::has_active_run`] it does not ignore a run that is unwinding, so
+    /// a follow-up chain that waits on this one cannot spin against a refusal.
+    pub(crate) fn top_level_run_registered(&self, session_id: &str) -> bool {
+        let runs = self.inner.runs.lock().expect("runs lock");
+        runs.values()
+            .any(|s| s.top_level && s.session_id.0 == session_id)
+    }
+
     /// Drop every follow-up queued for a session (it was deleted).
     pub fn clear_follow_ups(&self, session_id: &str) {
         let removed = self
@@ -1017,9 +1089,25 @@ impl Runtime {
         out
     }
 
-    /// True while a run for this session is registered and has not been
-    /// cancelled. Cancelled-but-unwinding runs still block a new `submit`, which
-    /// is why `submit` does its own check on the run map.
+    /// True while a **user run** for this session is in flight.
+    ///
+    /// This is the question the composer and `POST .../messages` ask: "would a
+    /// new prompt be refused right now?". A detached subagent is deliberately not
+    /// counted - it outlives the turn that started it, and a session that looked
+    /// busy for as long as a background agent ran would silently refuse every
+    /// prompt the user typed in the meantime. Use [`Runtime::is_running`] for
+    /// "is anything at all still writing in here" (rewind, deletion).
+    pub fn has_active_run(&self, session_id: &str) -> bool {
+        let runs = self.inner.runs.lock().expect("runs lock");
+        runs.values()
+            .any(|s| s.top_level && s.session_id.0 == session_id && !s.cancel.is_cancelled())
+    }
+
+    /// True while *any* loop for this session is registered and has not been
+    /// cancelled: a user run, or a subagent it started (including a detached one).
+    ///
+    /// Cancelled-but-unwinding runs still block a new `submit`, which is why
+    /// `submit` does its own check on the run map.
     pub fn is_running(&self, session_id: &str) -> bool {
         let runs = self.inner.runs.lock().expect("runs lock");
         runs.values()
@@ -1034,6 +1122,102 @@ impl Runtime {
         decision: kc_core::approval::ApprovalDecision,
     ) -> Result<()> {
         approvals::resolve(Arc::clone(&self.inner), approval_id, decision).await
+    }
+
+    /// Pause, resume or cancel one live agent on a human's behalf.
+    ///
+    /// This is the runtime half of `POST /api/agents/:id/{pause,resume,cancel}`.
+    /// A human is not an agent, so ownership does not apply: the person operating
+    /// the install may stop anything running in it. The `by` value is recorded on
+    /// the event so the roster can say who did it.
+    ///
+    /// The status returned is what the agent *is*, not what was asked for: a
+    /// pause on an agent that is already unwinding reports `cancelled` rather
+    /// than a pause that will never land. An unknown or settled id is
+    /// [`Error::NotFound`], so a browser that raced the finish is told instead of
+    /// silently succeeding.
+    pub async fn control_agent(&self, agent_id: &str, action: AgentAction) -> Result<AgentStatus> {
+        let live = self.inner.hub.get(agent_id).ok_or_else(|| {
+            Error::NotFound(format!(
+                "agent {agent_id} is not running; it may have finished already"
+            ))
+        })?;
+        let session_id = live.session_id.clone();
+        let status = match action {
+            AgentAction::Pause => match self.inner.hub.pause(agent_id, "user") {
+                Ok(status) => status,
+                Err(e) => return Err(Error::BadRequest(e.message())),
+            },
+            AgentAction::Resume => match self.inner.hub.resume(agent_id, "user") {
+                Ok(status) => status,
+                Err(e) => return Err(Error::BadRequest(e.message())),
+            },
+            AgentAction::Cancel => {
+                // The loop writes its own final status a moment from now, so the
+                // honest answer here is what was asked for: cancelled. Reporting
+                // the pre-cancel status would be a lie, and reporting nothing
+                // would make a stop button look broken.
+                self.inner
+                    .hub
+                    .kill(&session_id, &[agent_id.to_string()], "user");
+                AgentStatus::Cancelled
+            }
+        };
+        self.inner.emit(
+            Some(&session_id),
+            None,
+            Some(agent_id),
+            kc_core::events::Event::AgentPaused {
+                agent_id: agent_id.to_string(),
+                paused: matches!(action, AgentAction::Pause),
+                by: "user".to_string(),
+            },
+        );
+        // Persist the visible half so a reload agrees with the live roster. A
+        // store failure must not fail the control action: the flag is already set.
+        if !matches!(action, AgentAction::Cancel) {
+            if let Ok(Some(summary)) = self.inner.deps.store.get_agent(agent_id).await {
+                let mut record = summary.agent;
+                record.status = status.as_str().to_string();
+                record.updated_at = events::now_ms();
+                if let Err(e) = self.inner.deps.store.upsert_agent(&record).await {
+                    tracing::warn!(agent = %agent_id, error = %e, "could not persist an agent status");
+                }
+            }
+        }
+        Ok(status)
+    }
+
+    /// Live agents in one session, for a caller that wants the roster without a
+    /// round trip to the store (the store has the history; this has the truth
+    /// about what is running right now).
+    pub fn live_agent_ids(&self, session_id: &str) -> Vec<String> {
+        self.inner
+            .hub
+            .list(session_id)
+            .iter()
+            .map(|agent| agent.id.0.clone())
+            .collect()
+    }
+
+    /// How many agents are live in a session right now.
+    pub fn live_agent_count(&self, session_id: &str) -> usize {
+        self.inner.hub.live_count(session_id)
+    }
+
+    /// The highest number of subagent loops that have run at the same time since
+    /// this runtime started.
+    ///
+    /// A high-water mark, not a current count: it is what makes "did these
+    /// actually overlap" observable from a test, a metrics line or a report,
+    /// without having to sample a moving number.
+    pub fn subagents_peak(&self) -> usize {
+        self.inner.subagents.peak()
+    }
+
+    /// Subagent loops running right now.
+    pub fn subagents_active(&self) -> usize {
+        self.inner.subagents.active()
     }
 
     /// Cancel every run and wait briefly for the loops to unwind.
@@ -1166,6 +1350,9 @@ mod recovery_tests {
             created_at: 0,
             updated_at: 0,
             finished_at: None,
+            background: false,
+            note: String::new(),
+            progress: None,
         }
     }
 

@@ -3,11 +3,11 @@
 
 # Delegate work to subagents
 
-> How spawn_agent works, the limits it runs under, and when delegation helps instead of hurting.
+> How spawn_agent, spawn_agents and the control tools work - blocking and background, sequential and parallel - and the limits they run under.
 
 - **Slug:** `subagents`
-- **Tags:** subagents, delegation, agents, parallel, spawn_agent, long-running
-- **Applies to:** `tool:spawn_agent`, `config:[subagents]`, `config:subagents.max_iterations`, `config:subagents.max_continues`, `config:subagents.timeout_secs`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_MAX_CONTINUES`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `route:GET /api/sessions/:id`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `ui:AgentsTab`
+- **Tags:** subagents, delegation, agents, parallel, background, spawn_agent, spawn_agents, send_message, long-running
+- **Applies to:** `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `config:[subagents]`, `config:subagents.max_concurrent`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_iterations`, `config:subagents.max_continues`, `config:subagents.timeout_secs`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_MAX_CONTINUES`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `route:GET /api/sessions/:id`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_progress`, `event:agent_paused`, `event:agent_message`, `event:agent_note`, `event:agent_finished`, `ui:AgentsTab`
 - **Source:** `crates/kc-runtime/src/subagent.rs:20`
 
 ---
@@ -15,18 +15,75 @@
 The model can call `spawn_agent` with a self-contained task and a list of
 `owned_paths`. A subagent is a **nested, bounded agent loop**: it gets a fresh
 history (system prompt marked as subagent, the task as the user turn), its own
-run id and agent id, and the same tool set minus `spawn_agent` unless recursion
-is explicitly allowed.
+run id and agent id, and the same tool set minus the delegate tools unless
+recursion is explicitly allowed.
 
 You do not configure a subagent per task: you write the task, and the agent
 decides. To steer it, ask for delegation explicitly - "use a subagent to map
 the call sites while you fix the parser".
 
+## Sequential and parallel
+
+| Call | Blocks? | Pattern |
+| --- | --- | --- |
+| `spawn_agent` | yes | one job, then use its answer |
+| `spawn_agent` + `background: true` | no | start it, keep working, collect later |
+| `spawn_agents` | yes | a fan-out that runs together and returns one batch |
+| `spawn_agents` + `background: true` | no | start a fan-out and keep working |
+
+The blocking forms are the cheap ones: the parent spends one tool call and gets
+the answer as the result. The background forms cost a second call
+(`wait_for_agents`) but let the parent do something useful meanwhile. A
+fan-out is the case that was previously impossible - three `spawn_agent` calls
+inside one turn execute in order, so they never actually overlapped on
+anything but provider latency.
+
+```json
+{"name": "spawn_agents", "arguments": {"tasks": [
+  {"task": "map the call sites of parse()", "name": "mapper", "role": "mapper"},
+  {"task": "review the diff for panics", "name": "reviewer", "role": "reviewer"}
+]}}
+```
+
+## Talking to a live agent
+
+| Tool | What it does |
+| --- | --- |
+| `send_message` | deliver text to one or more agents (or a parent) as their next user turn |
+| `wait_for_agents` | block until named (or all) background agents settle, bounded by a timeout |
+| `list_subagents` | the live roster: status, iterations, unread mail, last reported note |
+| `agent_history` | one agent's transcript - the audit trail behind its summary |
+| `pause_agents` / `resume_agents` | park an agent between iterations, and let it go |
+| `kill_agents` | stop an agent and everything below it |
+| `report_status` | a subagent says what it is doing, for its parent and the roster |
+
+A message is delivered where a user turn belongs - at the top of the
+recipient's next iteration, before the request is built. It never interrupts
+the turn in flight, for the same reason a user steer does not: aborting a model
+mid-plan throws away work and can persist a tool call with no result. So
+`send_message` returns `queued`, not "they have read it".
+
+Pausing works the same way: the agent finishes its current turn, then parks.
+That is the only point where stopping is free. A paused agent still holds its
+subagent slot, and `kill_agents` still works on it - a paused agent is never
+unkillable.
+
+**Ownership.** An agent may pause, resume, kill and inspect the agents it
+spawned and everything *they* spawned. Messaging is open to everyone, including
+upwards to the parent: a child reporting a blocker is the case this exists for.
+Welcome but worth knowing: a child can therefore inject a turn into its
+parent's conversation. That is by design, and it is why the injected turn is
+labelled with who sent it.
+
 ## Limits
 
 ```toml
 [subagents]
-max_concurrent = 3       # KARUCODE_SUBAGENT_CONCURRENCY
+max_concurrent = 3       # loops running at once;  KARUCODE_SUBAGENT_CONCURRENCY
+max_background = 8       # live background agents per session
+allow_background = true  # KARUCODE_SUBAGENT_ALLOW_BACKGROUND
+max_background = 8       # KARUCODE_SUBAGENT_MAX_BACKGROUND
+wait_timeout_secs = 600  # default bound on wait_for_agents
 max_iterations = 200     # turns per segment; KARUCODE_SUBAGENT_MAX_ITERATIONS
 max_continues = 60       # segment refreshes;   KARUCODE_SUBAGENT_MAX_CONTINUES
 allow_recursive = false  # KARUCODE_ALLOW_RECURSIVE_SUBAGENTS
@@ -36,7 +93,9 @@ timeout_secs = 14400     # 4h wall clock;      KARUCODE_SUBAGENT_TIMEOUT_SECS
 
 Concurrency is enforced by a semaphore, iterations and wall clock per subagent,
 and a hard backstop on top of the in-loop deadline. Cancelling the parent cancels
-children through a child token.
+children through a child token. A spawn past `max_concurrent` or
+`max_background` is **refused**, never queued: a model that says "go" and then
+sees nothing happen is worse than one that was told "no".
 
 ## A subagent runs as long as the task needs
 
@@ -67,24 +126,27 @@ progress and the final result per agent.
 
 Open the **Agents** tab in the inspector. It lists agents for the whole project
 (not only the open session), so a review fan-out is visible while you work
-somewhere else. The status chips - Running, Done, Failed, Cancelled, Interrupted
-- carry counts and filter the list; switching to **This session** narrows it to
-the working session.
+somewhere else. The status chips - Running, Paused, Done, Failed, Cancelled,
+Interrupted - carry counts and filter the list; switching to **This session**
+narrows it to the working session. A running agent has pause and stop buttons.
 
 Click an agent to open its drill-in view: the task it was given, its model and
-parent, and its live transcript - assistant text, thinking, each tool call with
-status and output, commands with exit codes, and approvals it is waiting on. The
-transcript keeps streaming while the agent runs and is backfilled from SQLite
-when you open an agent that finished before the page loaded.
+parent, its last reported note, and its live transcript - assistant text,
+thinking, each tool call with status and output, commands with exit codes, and
+approvals it is waiting on. The transcript keeps streaming while the agent runs
+and is backfilled from SQLite when you open an agent that finished before the
+page loaded.
 
-The same data is available over HTTP: `GET /api/agents?project=<id>` and
-`GET /api/agents/:id`. Both are documented in `docs/API.md`.
+The same data is available over HTTP: `GET /api/agents?project=<id>`,
+`GET /api/agents/:id`, and `POST /api/agents/:id/pause`, `/resume`, `/cancel`.
+All are documented in `docs/API.md`.
 
 ## Failure handling
 
 A subagent failure is a failed tool result for the parent - it never fails the
 parent run. A timeout, a provider error and a cancelled task all come back with
-an explanatory message.
+an explanatory message. A *background* agent has no such result to carry the
+failure, so it notifies and leaves it in its row and its summary.
 
 ## Gotchas
 
@@ -95,13 +157,20 @@ an explanatory message.
   question into an expensive fan-out.
 * Subagent runs cost tokens and time. Delegating a one-file read is slower than
   reading the file.
-* Tool calls inside a turn execute in order, so "parallel" subagents mostly
-  overlap on provider latency, not local work.
+* Tool calls inside a turn execute in order, so a blocking fan-out still issues
+  its children one after another; `spawn_agents` is what makes them overlap.
+* `max_background` caps *live background* agents per session. A blocking spawn is
+  bounded by `max_concurrent` instead, because it holds its parent's turn.
+* A background agent outlives the turn that started it but not the run: when
+  the run ends its children are cancelled, and a restart marks them
+  `interrupted`.
 * A subagent runs on its session's pinned model, not the install-wide default:
   pinning a session to a small model makes its subagents cheap too.
 * A subagent that keeps working without progress burns tokens until
   `timeout_secs`. Keep it pointed at one task; split unrelated work into
   separate subagents instead of widening one.
+* `report_status` is a claim, not a measurement. Nothing verifies a progress
+  number, so treat it as a hint about what to look at.
 
 Full reference: `docs/internal/subagents.md` (this page) and the
 `subagents` topic; `GET /api/sessions/:id` returns the session's `agents`

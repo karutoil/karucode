@@ -99,6 +99,10 @@ pub fn api_router() -> Router<AppState> {
         .route("/projects/:id/favicon", get(projects::project_favicon))
         .route("/agents", get(agents::list_agents))
         .route("/agents/:id", get(agents::get_agent))
+        // One route for the three control verbs: they take the same path shape,
+        // the same body (none) and return the same shape, so three routes would be
+        // three copies of the same handler with a different constant in each.
+        .route("/agents/:id/:action", post(agents::control_agent))
         .route("/approvals", get(approvals::list_approvals))
         .route("/approvals/:id", post(approvals::resolve_approval))
         .route("/workspace/tree", get(workspace::tree))

@@ -2,7 +2,7 @@
 // @kc-title: Use the terminal tab
 // @kc-summary: A real shell in the browser that survives a reload, another browser and a cleared cache - and the honest limit of what survives a restart.
 // @kc-tags: terminal, shell, pty, websocket, ui, tabs
-// @kc-applies-to: route:GET /api/terminals, route:POST /api/terminals, route:PATCH /api/terminals/:id, route:DELETE /api/terminals/:id, route:POST /api/terminals/:id/restart, route:GET /api/terminals/:id/socket, config:[terminals], config:terminals.enabled, config:terminals.shell, config:terminals.scrollback_bytes, config:terminals.max_terminals, config:terminals.idle_timeout_secs, env:KARUCODE_TERMINALS, env:KARUCODE_TERMINALS_SHELL, env:KARUCODE_TERMINALS_SCROLLBACK_BYTES, env:KARUCODE_TERMINALS_MAX, env:KARUCODE_TERMINAL_IDLE_SECS, ui:TerminalTab, file:web/src/components/TerminalTab.tsx, file:crates/kc-server/src/terminals.rs
+// @kc-applies-to: route:GET /api/terminals, route:POST /api/terminals, route:PATCH /api/terminals/:id, route:DELETE /api/terminals/:id, route:POST /api/terminals/:id/restart, route:GET /api/terminals/:id/socket, config:[terminals], config:terminals.enabled, config:terminals.shell, config:terminals.scrollback_bytes, config:terminals.max_terminals, config:terminals.idle_timeout_secs, env:KARUCODE_TERMINALS, env:KARUCODE_TERMINALS_SHELL, env:KARUCODE_TERMINALS_SCROLLBACK_BYTES, env:KARUCODE_TERMINALS_MAX, env:KARUCODE_TERMINAL_IDLE_SECS, env:KARUCODE_ALLOWED_HOSTS, ui:TerminalTab, file:web/src/components/TerminalTab.tsx, file:crates/kc-server/src/terminals.rs
 //
 // The **Terminal** tab in the chat area runs a real shell in a real PTY as the
 // server user, in the current project's directory. It is a shell for *you*, the
@@ -72,6 +72,18 @@
 // `Origin` header must still match `Host` (a cross-origin page cannot open it),
 // and the origin check is enforced even when no token is configured.
 //
+// "Match" is exact - scheme, host and **port**. The one exception is a reverse
+// proxy, and there it is not a loopback shortcut: the `Origin`'s authority must
+// appear as an explicit `KARUCODE_ALLOWED_HOSTS` entry. So
+// `Origin: http://localhost:9999` against `Host: 127.0.0.1:8787` is refused
+// (they are different origins, whatever the port is doing), while a proxy
+// fronting `https://karucode.example.com` still works because that name is
+// listed. There is no dev-server exemption to lose: `web/vite.config.ts` proxies
+// `/api` without `ws: true`, so `npm run dev` never reaches this socket - open
+// the built app at `http://127.0.0.1:8787` instead. A missing `Origin` is a
+// non-browser client and is accepted (the `Host` guard and the bearer token are
+// the gate for those), never a web page.
+//
 // # The shell
 //
 // `terminals.shell`, or `$SHELL`, or `/bin/sh` - in that order. The value is
@@ -122,6 +134,7 @@
 // Full reference: `docs/API.md` (terminals), `config.example.toml`.
 
 use crate::error::{ApiError, ApiResult};
+use crate::host::HostAllowlist;
 use crate::state::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
@@ -690,19 +703,22 @@ fn finish(terminal: &Terminal) {
 fn open_pty(cols: u16, rows: u16) -> kc_core::Result<(std::fs::File, std::fs::File)> {
     let mut master: libc::c_int = -1;
     let mut slave: libc::c_int = -1;
-    let mut size = libc::winsize {
+    let size = libc::winsize {
         ws_row: rows,
         ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // `openpty` writes the two fds through the pointers; it only ever reads the
+    // termios/winsize arguments, so they do not need to be `mut` (clippy's
+    // `unnecessary_mut_passed` would flag `&mut`).
     let rc = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null(),
-            &mut size,
+            &size,
         )
     };
     if rc != 0 {
@@ -1020,6 +1036,28 @@ pub async fn socket(
 /// (loopback, no token) - which means a non-browser client on the machine, not a
 /// web page.
 fn check_origin(headers: &HeaderMap, state: &AppState) -> ApiResult<()> {
+    decide_origin(headers, state.host_allowlist()).map_err(ApiError::forbidden)
+}
+
+/// The whole `Origin` decision, split out from [`check_origin`] so a test can
+/// exercise the fallback (the production path needs an `AppState`; this needs
+/// only an allowlist).
+///
+/// `SameOrigin` and `NotABrowser` pass. A `Mismatch` is accepted only behind a
+/// reverse proxy, and then only when **both** halves are trusted: the `Host` the
+/// request arrived with is one the allowlist accepts, and the `Origin`'s
+/// authority matches an *explicit* `KARUCODE_ALLOWED_HOSTS` rule
+/// ([`HostAllowlist::allows_explicit_authority`]).
+///
+/// That second half must not use [`HostAllowlist::check`]: it treats any
+/// loopback name on any port as allowed, so `Origin: http://localhost:9999`
+/// against `Host: 127.0.0.1:8787` would pass, and any page on any local port
+/// (`npm run dev`, a docs server, an attacker's own localhost listener) could
+/// open a shell. There is no dev-server exemption to protect - `web/vite.config.ts`
+/// proxies `/api` without `ws: true`, so `npm run dev` cannot reach this socket
+/// by design. An operator who really fronts karucode with a proxy names it in
+/// `KARUCODE_ALLOWED_HOSTS`, which is exactly the explicit rule required here.
+fn decide_origin(headers: &HeaderMap, allowlist: &HostAllowlist) -> Result<(), String> {
     match origin_verdict(headers) {
         OriginVerdict::SameOrigin => Ok(()),
         OriginVerdict::NotABrowser => Ok(()),
@@ -1027,14 +1065,15 @@ fn check_origin(headers: &HeaderMap, state: &AppState) -> ApiResult<()> {
             // Behind a reverse proxy the `Host` a browser sends is the public name
             // while the server may already trust that name; `origin_matches_host`
             // covers the ordinary case, and the host allowlist covers the rest.
-            if state.host_allowlist().check(&host).is_ok()
-                && origin_matches_allowlisted(&origin, state)
+            if allowlist.check(&host).is_ok()
+                && origin_is_explicitly_allowlisted(&origin, allowlist)
             {
                 return Ok(());
             }
-            Err(ApiError::forbidden(
-                "cross-origin websocket rejected: the Origin header does not match the Host header",
-            ))
+            Err(
+                "cross-origin websocket rejected: the Origin header does not match the Host header"
+                    .to_string(),
+            )
         }
     }
 }
@@ -1071,13 +1110,20 @@ pub fn origin_verdict(headers: &HeaderMap) -> OriginVerdict {
     }
 }
 
-/// True when the origin's host is one the `Host` allowlist already accepts.
-fn origin_matches_allowlisted(origin: &str, state: &AppState) -> bool {
+/// True when the origin's authority matches an explicit allowlist rule.
+///
+/// Not [`HostAllowlist::check`]: that accepts every loopback name on every port
+/// (see [`decide_origin`]), which would turn any page on a local port into a
+/// shell. A malformed origin matches nothing.
+fn origin_is_explicitly_allowlisted(origin: &str, allowlist: &HostAllowlist) -> bool {
     let Some(rest) = origin.split_once("://").map(|(_, rest)| rest) else {
         return false;
     };
     let authority = rest.split('/').next().unwrap_or(rest);
-    state.host_allowlist().check(authority).is_ok()
+    match crate::host::parse_authority(authority) {
+        Some(authority) => allowlist.allows_explicit_authority(&authority),
+        None => false,
+    }
 }
 
 /// Both directions of the websocket until either side goes away.
@@ -1099,15 +1145,11 @@ async fn pump(
         "pid": terminal.pid(),
         "running": !terminal.is_dead(),
     });
-    if socket
-        .send(Message::Text(ready.to_string().into()))
-        .await
-        .is_err()
-    {
+    if socket.send(Message::Text(ready.to_string())).await.is_err() {
         terminal.mark_detached();
         return;
     }
-    if !replay.is_empty() && socket.send(Message::Binary(replay.into())).await.is_err() {
+    if !replay.is_empty() && socket.send(Message::Binary(replay)).await.is_err() {
         terminal.mark_detached();
         return;
     }
@@ -1121,13 +1163,13 @@ async fn pump(
             loop {
                 match output.recv().await {
                     Ok(Output::Data(bytes)) => {
-                        if sender.send(Message::Binary(bytes.into())).await.is_err() {
+                        if sender.send(Message::Binary(bytes)).await.is_err() {
                             return;
                         }
                     }
                     Ok(Output::Exit(code)) => {
                         let frame = json!({ "type": "exit", "code": code });
-                        let _ = sender.send(Message::Text(frame.to_string().into())).await;
+                        let _ = sender.send(Message::Text(frame.to_string())).await;
                         return;
                     }
                     // A lagging browser: it missed frames, so tell it to resync
@@ -1135,11 +1177,7 @@ async fn pump(
                     // reconnects and gets the replay buffer.
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
                         let frame = json!({ "type": "lagged", "missed": missed });
-                        if sender
-                            .send(Message::Text(frame.to_string().into()))
-                            .await
-                            .is_err()
-                        {
+                        if sender.send(Message::Text(frame.to_string())).await.is_err() {
                             return;
                         }
                         return;
@@ -1264,6 +1302,117 @@ mod tests {
 
     fn cwd() -> String {
         std::env::temp_dir().to_string_lossy().into_owned()
+    }
+
+    fn handshake(origin: &str, host: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_str(origin).expect("origin header"),
+        );
+        headers.insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_str(host).expect("host header"),
+        );
+        headers
+    }
+
+    fn allowlist(extra: Option<&str>) -> HostAllowlist {
+        HostAllowlist::new("127.0.0.1", extra)
+    }
+
+    /// The reported bug: `Origin: http://localhost:9999` (and any other loopback
+    /// name on another port) was accepted against `Host: 127.0.0.1:PORT`,
+    /// because the fallback asked the `Host` allowlist - which treats every
+    /// loopback name on every port as trusted. That is a shell for any page on
+    /// any local port.
+    #[test]
+    fn a_cross_port_loopback_origin_is_rejected() {
+        let allow = allowlist(None);
+        for origin in [
+            "http://localhost:9999",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:9999",
+            "http://[::1]:8080",
+            "http://localhost:8787",
+        ] {
+            let result = decide_origin(&handshake(origin, "127.0.0.1:8787"), &allow);
+            assert!(
+                result.is_err(),
+                "{origin} must not be allowed to open a shell on 127.0.0.1:8787"
+            );
+        }
+    }
+
+    /// The ordinary case still works: the app's own page dials its own host.
+    #[test]
+    fn the_same_origin_is_accepted() {
+        let allow = allowlist(None);
+        for (origin, host) in [
+            ("http://127.0.0.1:8787", "127.0.0.1:8787"),
+            ("http://localhost:8787", "localhost:8787"),
+            ("http://[::1]:8787", "[::1]:8787"),
+        ] {
+            assert!(
+                decide_origin(&handshake(origin, host), &allow).is_ok(),
+                "{origin} == {host} must be accepted"
+            );
+        }
+    }
+
+    /// A reverse proxy is the one supported cross-origin case, and it works for
+    /// the documented reason: the public name is an *explicit* allowlist entry.
+    #[test]
+    fn an_explicitly_allowlisted_origin_behind_a_proxy_is_accepted() {
+        let allow = allowlist(Some("karucode.example.com, karucode.example.com:443"));
+        assert!(
+            decide_origin(
+                &handshake("https://karucode.example.com", "karucode.example.com"),
+                &allow
+            )
+            .is_ok(),
+            "the allowlisted proxy host must still open the terminal"
+        );
+        // A Host/Origin pair the operator never named is still refused.
+        assert!(decide_origin(
+            &handshake("https://evil.example", "karucode.example.com"),
+            &allow
+        )
+        .is_err());
+        // An allowlisted *Host* with a loopback *Origin* is exactly the exfiltration
+        // shape the fallback used to allow: the port differs, so it is a stranger.
+        assert!(decide_origin(
+            &handshake("http://localhost:9999", "karucode.example.com"),
+            &allow
+        )
+        .is_err());
+    }
+
+    /// No `Origin` is a non-browser client; it is accepted (the `Host` guard and
+    /// the bearer token are the gate for those clients).
+    #[test]
+    fn a_missing_origin_is_accepted_as_a_non_browser_client() {
+        let allow = allowlist(None);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static("127.0.0.1:8787"),
+        );
+        assert!(decide_origin(&headers, &allow).is_ok());
+    }
+
+    /// A cross-origin page behind an allowlisted proxy still cannot use the
+    /// websocket, and the error names the actual rule.
+    #[test]
+    fn the_rejection_message_names_the_origin_rule() {
+        let allow = allowlist(None);
+        let error = decide_origin(
+            &handshake("http://localhost:9999", "127.0.0.1:8787"),
+            &allow,
+        )
+        .expect_err("a cross-port loopback origin must be rejected");
+        assert!(error.contains("Origin"), "{error}");
+        assert!(error.contains("Host"), "{error}");
     }
 
     /// A real shell runs in a real PTY and its output comes back through the

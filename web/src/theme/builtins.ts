@@ -11,48 +11,54 @@
 import { mix } from './color';
 import type { Theme, ThemeColors, ThemeMode } from './types';
 
-/** Ember, the default dark palette (see `styles/tokens.css`). */
+/** Ember, the default dark palette (see `styles/tokens.css`).
+ *
+ * These are the mock's own values: a near-black cool canvas (`#08090b`), a
+ * four-step chrome ladder, and a coral accent. The accent is warm against a cool
+ * shell on purpose — it is the only saturated colour in the frame, so it reads as
+ * "the thing you press" without any weight of its own.
+ */
 const DARK_DEFAULTS: ThemeColors = {
-  bg: '#111213',
-  rail: '#191a1c',
-  sidebar: '#202223',
-  inspector: '#27282a',
-  surface: '#2c2d31',
-  raised: '#313337',
-  hover: '#36393b',
-  border: '#3a3d3f',
-  text: '#eae9e5',
-  muted: '#a6a8a7',
-  accent: '#dfb680',
-  success: '#88baa0',
-  danger: '#e49e91',
-  info: '#92b3d8',
-  warn: '#d9a441',
-  syntaxKeyword: '#dfb680',
-  syntaxString: '#a5cbb4',
-  syntaxComment: '#878e88',
+  bg: '#08090b',
+  rail: '#0b0d10',
+  sidebar: '#0e1116',
+  inspector: '#11151a',
+  surface: '#171c23',
+  raised: '#1d232c',
+  hover: '#252c37',
+  border: '#333c48',
+  text: '#e9ebf0',
+  muted: '#9aa3b2',
+  accent: '#eaa06d',
+  success: '#7fd6b4',
+  danger: '#f2938b',
+  info: '#8fb3f7',
+  warn: '#f0c26b',
+  syntaxKeyword: '#eaa06d',
+  syntaxString: '#8fdcb7',
+  syntaxComment: '#7c8494',
 };
 
-/** Daybreak, the default light palette. */
+/** Daybreak, the default light palette (the mock's warm-paper mode). */
 const LIGHT_DEFAULTS: ThemeColors = {
-  bg: '#f7f8fb',
-  rail: '#e9edf5',
-  sidebar: '#e3e6f2',
-  inspector: '#dce0ef',
+  bg: '#f4f2ee',
+  rail: '#faf9f6',
+  sidebar: '#f7f4ef',
+  inspector: '#faf9f6',
   surface: '#ffffff',
-  raised: '#e8edf6',
-  hover: '#dfe6f1',
-  border: '#cdd5e2',
-  text: '#1b283a',
-  muted: '#5a6575',
-  accent: '#536ee6',
-  success: '#227e55',
-  danger: '#b94251',
-  info: '#286cb5',
-  warn: '#9a6413',
-  syntaxKeyword: '#536ee6',
-  syntaxString: '#227e55',
-  syntaxComment: '#59616f',
+  raised: '#f7f5f1',
+  hover: '#eeebe5',
+  border: '#ded9d0',
+  text: '#1c1a17',
+  muted: '#6f6a61',
+  accent: '#bb5f2c',
+  success: '#1c8465',
+  danger: '#bb4a42',
+  info: '#3968c9',
+  warn: '#96700f',
+  syntaxKeyword: '#bb5f2c',
+  syntaxString: '#1c8465',
+  syntaxComment: '#6f6a61',
 };
 
 export interface BuiltinSpec {

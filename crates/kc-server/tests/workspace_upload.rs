@@ -547,7 +547,16 @@ async fn upload_follows_the_session_project_when_no_project_is_given() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_symlinked_attachment_root_cannot_be_used_to_escape_the_workspace() {
-    let h = HarnessBuilder::new(Vec::new()).build().await;
+    // Project-only confinement: the sibling `outside` directory below lives under
+    // the system temp dir, which is a second allowed root by default (see the
+    // `workspace_temp_dir_is_a_root_by_default` test in api.rs). Without
+    // `strict_workspace` this asserts nothing, because the link target is inside a
+    // legal root. The symlink must still be refused when the workspace is the only
+    // root - that is the rule this test exists for.
+    let h = HarnessBuilder::new(Vec::new())
+        .strict_workspace()
+        .build()
+        .await;
     let session = create_session(&h).await;
 
     let outside = h.workspace_path().parent().unwrap().join("outside");

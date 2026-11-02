@@ -218,10 +218,14 @@ pub fn retryable_with(err: &Error, aggregator: bool) -> bool {
         // A prompt that does not fit the window is not fixed by re-sending it;
         // the runtime has to compact first.
         Error::Provider(message) if errors::is_context_overflow(message) => false,
+        // The provider tagged this as "another attempt cannot help" (a 200
+        // carrying a buffered error body or nothing at all, a rejected request).
+        // The status table cannot see those, because the status is 200.
+        Error::Provider(message) if errors::is_permanent(message) => false,
         Error::Provider(message) => match errors::http_status_of(message) {
             Some(status) => status_retryable(status, aggregator),
-            // No status: a transport/decode failure, an empty body, a splash
-            // page, a stream that died mid-frame. Always worth another attempt.
+            // No status: a transport/decode failure, a splash page, a stream
+            // that died mid-frame. Always worth another attempt.
             None => true,
         },
         // Timeouts, and every other error class that reaches this layer, are
@@ -376,7 +380,19 @@ impl RetryState {
                     // chunk is forwarded unchanged below.)
                     if !stream_retryable {
                         self.done = true;
-                        return Some(Err(self.exhausted(Error::Provider(message))));
+                        // Forwarded as a chunk rather than raised as an `Err`:
+                        // `Error::Provider` is transport-shaped to the runtime,
+                        // which would restart the whole stream
+                        // `retry_max_stream_restarts` times on a failure the
+                        // provider has already judged permanent. The chunk
+                        // carries the verdict (`retryable: false`) through to
+                        // the runtime, which then fails the turn with the real
+                        // reason - and without re-billing a generation per
+                        // restart.
+                        return Some(Ok(ProviderChunk::Error {
+                            message,
+                            retryable: false,
+                        }));
                     }
                     if let Some(item) = self.on_failure(Error::Provider(message)).await {
                         return Some(item);
@@ -453,9 +469,13 @@ impl RetryState {
 
     /// Name the attempt count on the terminal error so the user can tell a
     /// single failed call from a retry budget that was exhausted.
+    ///
+    /// An error the provider already classified as permanent is returned as it
+    /// is: it is surfaced after one attempt, so there is no count to report, and
+    /// a suffix would only bury the reason the operator has to act on.
     fn exhausted(&self, err: Error) -> Error {
         let attempts = self.attempt.max(1);
-        if attempts <= 1 {
+        if attempts <= 1 || errors::is_permanent(&err.to_string()) {
             return err;
         }
         let suffix = format!(" (gave up after {attempts} attempts)");

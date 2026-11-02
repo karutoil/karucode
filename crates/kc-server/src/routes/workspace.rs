@@ -229,6 +229,25 @@ fn file_blocking(workspace: &Workspace, path: &str, limit: usize) -> Result<Valu
 /// cannot exhaust memory.
 pub const MAX_RAW_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Route-local CSP for a workspace file's bytes, whose `Content-Type` is guessed
+/// from the file name and therefore attacker-chosen.
+///
+/// `sandbox` is the directive that makes this safe: without `allow-scripts` the
+/// browser puts the document in an **opaque origin** and refuses to run script in
+/// it. An `evil.html` sitting in the workspace is then inert - it cannot read the
+/// app's `localStorage` (the bearer token the auth screen saved), cannot call
+/// `/api` (it has no origin to be same-origin with), cannot register a service
+/// worker and cannot frame the app. `default-src 'none'` additionally stops it
+/// loading or fetching anything, so even `<img src="http://…">` inside it cannot
+/// phone home.
+///
+/// The response keeps its guessed `Content-Type` and stays `inline` rather than
+/// `attachment`, because that is what makes the previews work: an `<img src>`
+/// needs the image bytes and a PDF `<iframe>` needs the document inline. Turning
+/// every response into a download would break both, so the sandbox - not the
+/// disposition - is what neutralises an HTML file.
+pub const RAW_CONTENT_SECURITY_POLICY: &str = "sandbox; default-src 'none'";
+
 /// `GET /api/workspace/raw?path=<file>[&project=<id>]`
 ///
 /// The bytes of one workspace file, with the MIME type guessed from its name.
@@ -236,9 +255,13 @@ pub const MAX_RAW_BYTES: u64 = 32 * 1024 * 1024;
 /// endpoint answers JSON, which a browser cannot render. It is read-only and
 /// confined exactly like `/api/workspace/file`.
 ///
-/// Responses carry `Content-Disposition: inline` (never `attachment`), and the
-/// CSP keeps the browser from treating a same-origin asset as a script, so an
-/// uploaded HTML file served here cannot run code in the app's origin.
+/// Responses carry `Content-Disposition: inline` (never `attachment`) so images
+/// and PDFs embed, plus a route-local [`RAW_CONTENT_SECURITY_POLICY`] whose
+/// `sandbox` directive makes the document an opaque origin with script disabled.
+/// That is what stops an uploaded HTML file from running in the app's origin
+/// (which would otherwise let it `PATCH /api/config` or open a terminal); the
+/// app-wide CSP alone could not, because its `default-src 'self'` allows
+/// same-origin scripts and this response *is* the app's origin.
 pub async fn raw(
     State(state): State<AppState>,
     Query(query): Query<QueryMap>,
@@ -278,6 +301,15 @@ pub async fn raw(
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         axum::http::HeaderValue::from_static("nosniff"),
+    );
+    // Route-local, so it replaces the app-wide CSP for this response: `sandbox`
+    // makes the document an opaque origin with no script, which is what stops a
+    // workspace `.html` file from executing in the app's origin. The bytes stay
+    // `inline` with their guessed type so `<img src>` and the PDF `<iframe>` keep
+    // working. See [`RAW_CONTENT_SECURITY_POLICY`].
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(RAW_CONTENT_SECURITY_POLICY),
     );
     headers.insert(
         header::CACHE_CONTROL,

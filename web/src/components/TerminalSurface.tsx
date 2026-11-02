@@ -16,8 +16,42 @@ import { RefreshIcon } from './icons';
  * for the newly selected terminal. The `instances` map keeps the *xterm* object
  * alive across that remount so scrollback and the cursor survive the switch;
  * the socket is per-surface and detaches on unmount.
+ *
+ * The emulator is disposed by `disposeTerminal` when the tab is closed. Nothing
+ * else releases it: the map is module state, so an entry that is never disposed
+ * keeps its emulator, FitAddon, canvas and listeners alive for the life of the
+ * page - up to `terminals.max_terminals` (16) of them.
  */
 const instances = new Map<string, { term: XTerm; fit: FitAddon }>();
+
+/**
+ * Release a terminal's emulator. Called when the terminal is closed, so closing
+ * a tab (or letting the server prune one) frees the canvas and the listeners
+ * instead of leaking them until reload.
+ *
+ * Safe to call for an id that was never opened.
+ */
+export function disposeTerminal(id: string): void {
+  const instance = instances.get(id);
+  if (!instance) return;
+  instances.delete(id);
+  try {
+    instance.fit.dispose();
+  } catch {
+    // A partially-constructed addon has nothing to release.
+  }
+  try {
+    instance.term.dispose();
+  } catch {
+    // `dispose()` throws if xterm was never `open()`ed in some versions; the
+    // map entry is already gone, which is what matters for the leak.
+  }
+}
+
+/** Test seam: how many emulators are currently held. */
+export function terminalInstanceCount(): number {
+  return instances.size;
+}
 
 function getInstance(id: string): { term: XTerm; fit: FitAddon } {
   const existing = instances.get(id);
@@ -89,13 +123,32 @@ export function TerminalSurface({ terminal }: { terminal: Terminal }): JSX.Eleme
 
   const { term, fit } = useMemo(() => getInstance(terminal.id), [terminal.id]);
 
-  // Mount the xterm instance into this surface's host. `open()` is idempotent
-  // per element, and re-opening into a new element is how the instance moves
-  // between tabs without losing its buffer.
+  // Let the tab strip release this emulator when the terminal is closed. The
+  // disposer is registered from inside the lazily-loaded chunk so `state/terminals`
+  // never has to import xterm.
+  useEffect(() => {
+    terminalsState.setTerminalEmulatorDisposer(disposeTerminal);
+    return () => terminalsState.setTerminalEmulatorDisposer(null);
+  }, []);
+
+  // Mount the xterm instance into this surface's host.
+  //
+  // A tab switch remounts this component (the parent keys it by terminal id),
+  // so this effect runs again with a *fresh* host element for an emulator that
+  // may already have been opened. `Terminal.open()` is NOT a move: in xterm
+  // 5.5.0 it early-returns as soon as `this.element` exists, so a second
+  // `open(newHost)` leaves the element in the discarded host and the new pane
+  // renders blank and untypable. Re-parent the element instead - that is what
+  // actually moves the emulator - and only call `open()` on the first mount.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    term.open(host);
+    const element = term.element;
+    if (element) {
+      if (element.parentElement !== host) host.appendChild(element);
+    } else {
+      term.open(host);
+    }
     const measure = (): void => {
       try {
         fit.fit();
@@ -111,6 +164,14 @@ export function TerminalSurface({ terminal }: { terminal: Terminal }): JSX.Eleme
     const observer =
       typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
     observer?.observe(host);
+    // Focus follows the move: the surface the user just selected is the one
+    // that should take keystrokes, and a re-parent loses the focused node's
+    // place in the document.
+    try {
+      term.focus();
+    } catch {
+      // A hidden host cannot take focus; the observer retries the fit.
+    }
     return () => {
       window.cancelAnimationFrame(frame);
       observer?.disconnect();

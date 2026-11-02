@@ -8,6 +8,7 @@ import type {
   StoredMessage,
 } from '../api/types';
 import {
+  normalizeAgentRecord,
   parseArgs,
   parseStoredCommandReport,
   stringArg,
@@ -74,6 +75,9 @@ export function isAgentLifecycleEvent(event: KarucodeEvent): boolean {
   return (
     event.type === 'agent_spawned' ||
     event.type === 'agent_progress' ||
+    event.type === 'agent_paused' ||
+    event.type === 'agent_message' ||
+    event.type === 'agent_note' ||
     event.type === 'agent_finished'
   );
 }
@@ -405,6 +409,51 @@ function sessionContext(session: SessionSummary | undefined): {
 }
 
 /**
+ * A first row for an agent the server has not described yet.
+ *
+ * The SSE stream is global, so an `agent_progress`, `agent_paused` or
+ * `agent_note` frame can reach the page **before** `GET /api/agents` answers on a
+ * cold tab. Dropping those frames (`if (!current) return agents`) lost the fact
+ * that the agent existed at all: the row then never appeared until a refresh, and
+ * an early pause left it rendering `running` once the list arrived. `agent_finished`
+ * already synthesised a row in exactly this situation; this is the same rule for
+ * the three events that used to bail out.
+ *
+ * Only the id, the session and the event's own facts are filled in - everything
+ * the frame does not carry is left at a neutral default, which the next
+ * `GET /api/agents` (or the agent's `agent_spawned`) replaces.
+ */
+function placeholderAgent(
+  id: string,
+  event: { ts_ms: number; session_id?: string | null },
+  session: SessionSummary | undefined,
+  fields: Partial<AgentSummary> & Pick<AgentSummary, 'status'>,
+): AgentSummary {
+  return {
+    id,
+    session_id: event.session_id ?? '',
+    parent_run_id: null,
+    parent_agent_id: null,
+    name: 'subagent',
+    role: 'subagent',
+    task: '',
+    model: '',
+    iterations: 0,
+    summary: '',
+    error: null,
+    owned_paths: [],
+    created_at: event.ts_ms,
+    updated_at: event.ts_ms,
+    finished_at: null,
+    background: false,
+    note: '',
+    progress: null,
+    ...sessionContext(session),
+    ...fields,
+  };
+}
+
+/**
  * Keep the workspace-wide agent list in step with live lifecycle events.
  *
  * Works for agents in sessions the user is not looking at: the SSE stream is
@@ -428,9 +477,13 @@ export function applyAgentRegistry(
   if (index === -1 && !session) return agents;
 
   const replace = (next: AgentSummary): AgentSummary[] => {
-    if (index === -1) return [next, ...agents];
+    // A row built here may be the first copy of an agent the server has not
+    // described yet, and a `current` row may predate normalisation; fill in the
+    // fields serde omits so the list never carries a bare `undefined`.
+    const row = normalizeAgentRecord(next);
+    if (index === -1) return [row, ...agents];
     const list = [...agents];
-    list[index] = next;
+    list[index] = row;
     return list;
   };
 
@@ -453,6 +506,9 @@ export function applyAgentRegistry(
         created_at: event.ts_ms,
         updated_at: event.ts_ms,
         finished_at: null,
+        background: event.background ?? false,
+        note: '',
+        progress: null,
         ...sessionContext(session),
       };
       return replace({
@@ -462,16 +518,61 @@ export function applyAgentRegistry(
         task: event.task,
         model: event.model,
         status: 'running',
+        // The row's own `background` copy comes from the store, but the live
+        // frame is what a client sees first: without it the badge would only
+        // appear after a refresh.
+        background: event.background ?? base.background,
         updated_at: event.ts_ms,
         ...sessionContext(session),
       });
     }
 
     case 'agent_progress': {
-      if (!current) return agents;
+      // A frame that beats `GET /api/agents` on a cold tab still proves the agent
+      // exists, and carries the iteration count it has reached.
+      const base =
+        current ??
+        placeholderAgent(id, event, session, {
+          status: 'running',
+          iterations: event.iterations,
+        });
       return replace({
-        ...current,
+        ...base,
         iterations: event.iterations,
+        updated_at: event.ts_ms,
+      });
+    }
+
+    // A pause changes whether the agent can spend anything, and a note is what it
+    // says about itself. Both are updates to the row the roster renders, so both
+    // have to land in this reducer - not only in the agent's own activity feed.
+    case 'agent_paused': {
+      // Dropping this for an unknown row is what made a paused agent render
+      // `running`: the frame arrived first, and the list read after it is the
+      // last writer. The row is created paused instead, and the later list (which
+      // carries the same status) confirms it.
+      const base =
+        current ??
+        placeholderAgent(id, event, session, { status: event.paused ? 'paused' : 'running' });
+      return replace({
+        ...base,
+        status: event.paused ? 'paused' : 'running',
+        updated_at: event.ts_ms,
+      });
+    }
+
+    case 'agent_note': {
+      const base =
+        current ??
+        placeholderAgent(id, event, session, {
+          status: 'running',
+          note: event.note,
+          progress: event.progress ?? null,
+        });
+      return replace({
+        ...base,
+        note: event.note,
+        progress: event.progress ?? base.progress,
         updated_at: event.ts_ms,
       });
     }
@@ -495,6 +596,9 @@ export function applyAgentRegistry(
           created_at: event.ts_ms,
           updated_at: event.ts_ms,
           finished_at: event.ts_ms,
+          background: false,
+          note: '',
+          progress: null,
           ...sessionContext(session),
         });
       }
@@ -525,8 +629,8 @@ export function mergeAgentList(
 ): AgentSummary[] {
   if (incoming.length === 0) return current;
   const byId = new Map<string, AgentSummary>();
-  for (const agent of current) byId.set(agent.id, agent);
-  for (const agent of incoming) byId.set(agent.id, agent);
+  for (const agent of current) byId.set(agent.id, normalizeAgentRecord(agent));
+  for (const agent of incoming) byId.set(agent.id, normalizeAgentRecord(agent));
   return [...byId.values()].sort((a, b) => b.created_at - a.created_at);
 }
 

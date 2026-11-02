@@ -91,7 +91,23 @@ pub fn system_prompt_with_roots(
         .join("\n");
 
     let role = if budget.subagent {
-        "You are a focused subagent inside karucode. Complete the single task you were given, then report back concisely. Do not expand scope, do not spawn more agents."
+        // What a subagent may do about *other* agents depends on its tool set,
+        // which the loop already put in the tool list below. The wording has to
+        // match: telling a child "do not spawn more agents" while handing it
+        // `spawn_agent` is a prompt that contradicts its own tools, and it makes
+        // a delegating agent refuse work it was told to do.
+        let can_delegate = tools.iter().any(|t| t.name == "spawn_agent");
+        if can_delegate {
+            "You are a subagent inside karucode. Do the task you were given, then report back \
+             concisely. You may delegate a self-contained part of it with `spawn_agent` and \
+             collect the result with `wait_for_agents`, and you may message another agent or your \
+             parent with `send_message` when you are blocked, need a decision, or have something \
+             they are waiting on."
+        } else {
+            "You are a focused subagent inside karucode. Complete the single task you were given, \
+             then report back concisely. Do not expand scope, do not spawn more agents. If you are \
+             blocked on something only your parent can answer, say so in your report."
+        }
     } else {
         "You are karucode, a coding agent running in a self-hosted harness. You work directly in the user's workspace until the task is actually done."
     };
@@ -236,10 +252,25 @@ mod tests {
     }
 
     #[test]
-    fn subagent_prompt_forbids_recursion() {
+    fn subagent_prompt_forbids_recursion_only_when_it_cannot_delegate() {
         let budget = Budget::for_subagent(&Limits::default(), &SubagentConfig::default());
         let p = system_prompt("/w", &[], "auto", &budget, &[]);
         assert!(p.contains("Do not expand scope"));
+        assert!(p.contains("If you are blocked"));
+
+        // With `spawn_agent` registered the wording has to change: a child that is
+        // handed the tool and told not to use it will refuse work it was asked to
+        // do. The message about being messaged has to appear in both cases,
+        // because `send_message` is always available to a subagent.
+        let spawn = ToolSpec {
+            name: "spawn_agent".into(),
+            description: "Spawn a subagent.".into(),
+            parameters: serde_json::json!({}),
+            origin: ToolOrigin::Builtin,
+        };
+        let allowing = system_prompt("/w", &[spawn], "auto", &budget, &[]);
+        assert!(allowing.contains("You may delegate"), "{allowing}");
+        assert!(!allowing.contains("do not spawn more agents"), "{allowing}");
     }
 
     #[test]

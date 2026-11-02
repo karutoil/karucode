@@ -118,6 +118,29 @@ export type ChatItem =
 
 export type AgentView = AgentRecord;
 
+/**
+ * Fill in the `AgentRecord` fields the server is allowed to omit.
+ *
+ * `owned_paths` (`serde(default)`), `note` (`skip_serializing_if =
+ * String::is_empty`) and `progress` (`skip_serializing_if = Option::is_none`)
+ * all disappear from the JSON when they are empty/unset — on a live server, all
+ * 77 rows of `GET /api/agents` carried neither `note` nor `progress`, running
+ * ones included. Components read them as present, so every record is normalised
+ * once, here, as it enters the state: a missing string becomes `''` and a
+ * missing claim becomes `null`.
+ *
+ * The generic keeps the caller's more specific type (`AgentSummary` stays an
+ * `AgentSummary`), so this is a drop-in for `{ ...agent, owned_paths: … }`.
+ */
+export function normalizeAgentRecord<T extends AgentRecord>(agent: T): T {
+  return {
+    ...agent,
+    owned_paths: agent.owned_paths ?? [],
+    note: agent.note ?? '',
+    progress: agent.progress ?? null,
+  };
+}
+
 export interface RunError {
   runId: string | null;
   message: string;
@@ -190,12 +213,36 @@ export function queuedFromDetail(detail: SessionDetail): QueuedMessage[] {
  * Used by the `queued_messages` event (which carries both queues in full) and by
  * the snapshot. Quietly drops entries with no id, because an entry the panel
  * cannot recall is worse than no row at all.
+ *
+ * This is also where a queued message is **normalised**. Rust omits `draft`
+ * (`skip_serializing_if = "Option::is_none"`) whenever it equals `content`, and
+ * the `queued_messages` SSE frame serialises the raw struct rather than
+ * `public_view()`, so the field really can be missing. Filling it in here - the
+ * one place both sources pass through - means every component downstream reads a
+ * string and none of them has to remember `entry.draft || entry.content`.
+ *
+ * FOLLOW-UP FOR THE SERVER OWNER: the `queued_messages` event should carry
+ * `public_view()` too. That is a crates/ change (the event variant holds
+ * `Vec<QueuedMessage>`), so it is out of scope for the web client; until then this
+ * boundary is what keeps the optional field honest.
  */
 export function queuedLists(
   steers: readonly QueuedMessage[],
   followUps: readonly QueuedMessage[],
 ): QueuedMessage[] {
-  return [...steers, ...followUps].filter((entry) => typeof entry.id === 'string' && entry.id !== '');
+  return [...steers, ...followUps]
+    .filter((entry) => typeof entry.id === 'string' && entry.id !== '')
+    .map(normalizeQueuedMessage);
+}
+
+/**
+ * Fill in the fields the wire is allowed to omit on one queued message.
+ *
+ * `draft` is the one that matters (see `queuedLists`); the generic keeps the
+ * caller's type, so this is a drop-in wherever a queued message enters state.
+ */
+export function normalizeQueuedMessage<T extends QueuedMessage>(entry: T): T {
+  return entry.draft === undefined ? { ...entry, draft: entry.content } : entry;
 }
 
 /** Tool-call arguments arrive as a JSON string; a parse failure is kept as text. */
@@ -443,9 +490,13 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
         payload: approval.payload,
         session_id: approval.session_id,
         run_id: approval.run_id,
-        agent_id: approval.agent_id,
+        // `ApprovalRecord.decision` and `agent_id` are `skip_serializing_if` on the
+        // server, so they arrive absent rather than null; `ApprovalView` keeps a
+        // strict shape (`null`) so every consumer's `??`/truthiness test is
+        // comparing one kind of "nothing".
+        agent_id: approval.agent_id ?? null,
         status: approval.status,
-        decision: approval.decision,
+        decision: approval.decision ?? null,
         created_at: approval.created_at,
       },
     });
@@ -502,7 +553,7 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
   return {
     sessionId: detail.session.id,
     items: ordered,
-    agents: [...detail.agents].sort((a, b) => a.created_at - b.created_at),
+    agents: detail.agents.map(normalizeAgentRecord).sort((a, b) => a.created_at - b.created_at),
     running,
     runId: lastRunId,
     runStatus: lastRun?.status ?? null,

@@ -1,8 +1,12 @@
 //! Content search: ripgrep when available, a pure-Rust walker otherwise.
 //!
-//! Both engines honour `.gitignore`, produce the same `path:line: text` shape
-//! and stop at the same result budget, so the caller (and the model) cannot
-//! tell them apart except for the engine label in the header.
+//! Both engines honour `.gitignore`, produce the same `path:line: text` shape,
+//! keep the same first [`MAX_MATCH_COLUMNS`] **characters** of a long matching
+//! line and stop at the same result budget, so the caller (and the model) cannot
+//! tell them apart except for the engine label in the header. ripgrep is asked for
+//! `--null` records (`path\0line:text`) so a filename containing `:` is parsed
+//! unambiguously, and its byte-based `--max-columns` is set wide enough that the
+//! character cap is what actually cuts the text.
 
 use crate::file_ops::BINARY_SNIFF_BYTES;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -129,8 +133,18 @@ pub async fn search_with_rg(
         // file argument. Without it rg emits bare `line:text`, which the parser
         // cannot attribute to a file, so every match was silently dropped.
         .arg("--with-filename")
+        // Ask for `path\0line:text` instead of `path:line:text`. A filename may
+        // contain `:` - with the colon-separated form a match in `a:b.txt` was
+        // parsed as path `a`, line `b.txt` and dropped, while the built-in walker
+        // found it, so the two engines disagreed.
+        .arg("--null")
         .arg("--max-columns")
-        .arg(MAX_MATCH_COLUMNS.to_string())
+        // Bytes, because that is the unit `--max-columns` counts. It is set wide
+        // enough (4 bytes per character) that the *character* cap in
+        // `normalise_match_text` decides where the text ends, so both engines cut
+        // at the same character and the documented limit is in characters.
+        // `--max-columns` still bounds the bytes ripgrep writes for one line.
+        .arg((MAX_MATCH_COLUMNS * 4).to_string())
         // Without this, `--max-columns` replaces the whole line with the literal
         // text `[Omitted long matching line]`, so a match on a minified bundle
         // arrives with no content at all.
@@ -251,7 +265,7 @@ pub async fn search_with_rg(
     }))
 }
 
-/// Read ripgrep's stdout line by line, stopping as soon as `max_results`
+/// Read ripgrep's stdout record by record, stopping as soon as `max_results`
 /// matches have been collected.
 ///
 /// Takes ownership of the pipe so it is dropped (closed) on return: ripgrep then
@@ -284,7 +298,7 @@ async fn read_matches<R: tokio::io::AsyncRead + Unpin>(
         let mut rest = &chunk[..n];
         while let Some(nl) = rest.iter().position(|b| *b == b'\n') {
             record.extend_from_slice(&rest[..nl]);
-            if let Some(m) = parse_rg_line(ws, base, &String::from_utf8_lossy(&record)) {
+            if let Some(m) = parse_rg_record(ws, base, &record) {
                 matches.push(m);
                 if matches.len() >= max_results {
                     return (matches, true);
@@ -300,7 +314,7 @@ async fn read_matches<R: tokio::io::AsyncRead + Unpin>(
         }
     }
     if !record.is_empty() {
-        if let Some(m) = parse_rg_line(ws, base, &String::from_utf8_lossy(&record)) {
+        if let Some(m) = parse_rg_record(ws, base, &record) {
             matches.push(m);
         }
     }
@@ -317,45 +331,61 @@ async fn read_pipe<R: tokio::io::AsyncRead + Unpin>(pipe: &mut Option<R>) -> Vec
     buf
 }
 
-/// Parse one `path:line:text` record.
+/// Parse one `--null` record: `path\0line:text`.
 ///
-/// ripgrep normally emits the filename prefix (`-H` is passed for exactly this
-/// reason), but a bare `line:text` record is still accepted and attributed to
-/// `base`: dropping it would turn a real match into a silent "no matches".
-fn parse_rg_line(ws: &Workspace, base: &Path, line: &str) -> Option<SearchMatch> {
-    let mut parts = line.splitn(3, ':');
-    let first = parts.next()?;
-    let second = parts.next();
-    let third = parts.next();
-
-    // `path:line:text` when the second field is a line number, else `line:text`
-    // relative to `base`.
-    let (raw_path, raw_line, text) = match (second, third) {
-        (Some(second), Some(third)) => match second.parse::<u64>() {
-            Ok(n) => (Some(first), n, third),
-            Err(_) => (None, first.parse::<u64>().ok()?, second),
-        },
-        // `line:text` with an empty text field.
-        (Some(second), None) => (None, first.parse::<u64>().ok()?, second),
-        (None, _) => return None,
+/// The filename is delimited by a **NUL**, not by `:` - that is what `--null`
+/// buys. Splitting the record on `:` instead (the previous parser) lost every
+/// match in a path containing a colon (`a:b.txt` produced `path = "a"`,
+/// `line = "b.txt"`), and disagreed with the built-in walker, which had no such
+/// problem. A record without a NUL is still accepted as a bare `line:text` and
+/// attributed to `base`: dropping it would turn a real match into a silent "no
+/// matches", and old ripgrep builds are the only way to reach it.
+fn parse_rg_record(ws: &Workspace, base: &Path, record: &[u8]) -> Option<SearchMatch> {
+    let (path_bytes, rest) = match record.iter().position(|b| *b == 0) {
+        Some(nul) => (&record[..nul], &record[nul + 1..]),
+        None => (&record[..0], record),
     };
+    let rest = String::from_utf8_lossy(rest);
+    // `line:text`; the line number cannot contain a colon, and the text may.
+    let (raw_line, text) = match rest.split_once(':') {
+        Some((line, text)) => (line, text),
+        None => return None,
+    };
+    let line: u64 = raw_line.parse().ok()?;
 
-    let abs: PathBuf = match raw_path {
-        Some(raw_path) => {
-            let path = Path::new(raw_path);
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                base.join(path)
-            }
+    let abs: PathBuf = if path_bytes.is_empty() {
+        base.to_path_buf()
+    } else {
+        let raw_path = String::from_utf8_lossy(path_bytes).into_owned();
+        let path = Path::new(&raw_path);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            base.join(path)
         }
-        None => base.to_path_buf(),
     };
     Some(SearchMatch {
         path: ws.relative(&abs),
-        line: raw_line,
-        text: text.to_string(),
+        line,
+        text: normalise_match_text(text),
     })
+}
+
+/// Cap a match's text at [`MAX_MATCH_COLUMNS`] **characters**, adding an ellipsis.
+///
+/// ripgrep's `--max-columns` counts *bytes*, so a line of multi-byte characters is
+/// cut earlier than the built-in walker cuts the same line (200 CJK characters:
+/// rg stops after 300 bytes / ~100 characters, the walker after 300 characters).
+/// Applying the character cap here makes the two engines return the same text for
+/// the same line instead of merely both being bounded, and lets the documented
+/// contract be about characters - which is what a model reading the result counts
+/// (verified: 200 CJK chars -> rg 637 bytes / 237 chars, builtin 606 bytes / 206
+/// chars before this change).
+fn normalise_match_text(text: &str) -> String {
+    // ripgrep appends this marker when `--max-columns` cut the line; our own
+    // truncation replaces it, so both engines show the same `…`.
+    let text = text.trim_end_matches(" [... omitted end of long line]");
+    truncate_columns(text, MAX_MATCH_COLUMNS)
 }
 
 /// Built-in search: used when `rg` is unavailable, and by tests directly.
@@ -599,20 +629,108 @@ mod tests {
         // A bare record is relative to the search base, which for a single-file
         // search is the file itself.
         let file_base = ws.resolve_existing("one.txt").unwrap();
-        let m = parse_rg_line(&ws, &file_base, "1:alpha").expect("bare record must parse");
+        let m = parse_rg_record(&ws, &file_base, b"1:alpha").expect("bare record must parse");
         assert_eq!(m.path, "one.txt");
         assert_eq!(m.line, 1);
         assert_eq!(m.text, "alpha");
 
-        // The normal `path:line:text` shape still works against a directory base.
+        // The normal `path\0line:text` shape works against a directory base.
         let dir_base = ws.resolve_existing(".").unwrap();
-        let m = parse_rg_line(&ws, &dir_base, "one.txt:3:alpha").expect("prefixed record");
+        let m = parse_rg_record(&ws, &dir_base, b"one.txt\x003:alpha").expect("prefixed record");
         assert_eq!(m.path, "one.txt");
         assert_eq!(m.line, 3);
         assert_eq!(m.text, "alpha");
 
         // Garbage is still rejected rather than invented.
-        assert!(parse_rg_line(&ws, &dir_base, "not a match").is_none());
+        assert!(parse_rg_record(&ws, &dir_base, b"not a match").is_none());
+    }
+
+    /// ripgrep is run with `--null`: prove the whole path round-trips, not just the
+    /// parser, by searching a directory that contains such a file.
+    #[tokio::test]
+    async fn ripgrep_finds_a_match_in_a_path_containing_a_colon() {
+        let tmp = TempWs::new("rg-colon-path");
+        tmp.write("a:b.txt", "needle one\n");
+        tmp.write("plain.txt", "needle two\n");
+        let ws = tmp.ws();
+        let q = query("needle", ".", 10);
+        let cancel = CancellationToken::new();
+
+        let builtin = search_fallback(&ws, &q).await.unwrap();
+        let mut builtin_paths: Vec<&str> =
+            builtin.matches.iter().map(|m| m.path.as_str()).collect();
+        builtin_paths.sort_unstable();
+        assert_eq!(builtin_paths, vec!["a:b.txt", "plain.txt"]);
+
+        if !rg_available() {
+            return;
+        }
+        let rg = search_with_rg("rg", &ws, &q, &cancel)
+            .await
+            .unwrap()
+            .expect("rg is installed");
+        assert_eq!(rg.engine, SearchEngine::Ripgrep);
+        let mut rg_paths: Vec<&str> = rg.matches.iter().map(|m| m.path.as_str()).collect();
+        rg_paths.sort_unstable();
+        assert_eq!(
+            rg_paths, builtin_paths,
+            "the engines must agree, including on a path with a `:` in it"
+        );
+        let colon = rg
+            .matches
+            .iter()
+            .find(|m| m.path == "a:b.txt")
+            .expect("rg must report the colon path");
+        assert_eq!(colon.line, 1);
+        assert_eq!(colon.text, "needle one");
+    }
+
+    /// The multi-byte half of the same parity claim: `--max-columns` counts bytes,
+    /// the walker counts characters, so a CJK line was cut in a different place by
+    /// each engine. Both now cut at [`MAX_MATCH_COLUMNS`] characters.
+    #[tokio::test]
+    async fn both_engines_cut_a_wide_character_line_at_the_same_place() {
+        let tmp = TempWs::new("cjk-columns");
+        // 12 ASCII + 400 three-byte characters: 1 212 bytes, 412 characters, so
+        // both engines have to cut (the line is longer than the cap in either
+        // unit, which is what makes the comparison meaningful).
+        let line = format!("NEEDLE{}{}", "x".repeat(6), "中".repeat(400));
+        assert_eq!(line.chars().count(), 412);
+        tmp.write("wide.txt", &line);
+        let ws = tmp.ws();
+        let q = query("NEEDLE", ".", 10);
+        let cancel = CancellationToken::new();
+
+        let builtin = search_fallback(&ws, &q).await.unwrap();
+        assert_eq!(builtin.matches.len(), 1);
+        let builtin_text = &builtin.matches[0].text;
+        assert_eq!(
+            builtin_text.chars().count(),
+            MAX_MATCH_COLUMNS + 1,
+            "the walker keeps {MAX_MATCH_COLUMNS} characters plus the ellipsis"
+        );
+
+        if !rg_available() {
+            return;
+        }
+        let rg = search_with_rg("rg", &ws, &q, &cancel)
+            .await
+            .unwrap()
+            .expect("rg is installed");
+        assert_eq!(rg.matches.len(), 1);
+        let rg_text = &rg.matches[0].text;
+        assert_eq!(
+            rg_text,
+            builtin_text,
+            "both engines must return the same text for the same line \
+             (rg kept {} chars, walker kept {} chars)",
+            rg_text.chars().count(),
+            builtin_text.chars().count()
+        );
+        assert!(
+            !rg_text.contains("omitted end of long line"),
+            "ripgrep's own marker must be replaced by the shared ellipsis: {rg_text:?}"
+        );
     }
 
     /// Bug 2: `--max-count` is per file, so the cap used to be multiplied by the

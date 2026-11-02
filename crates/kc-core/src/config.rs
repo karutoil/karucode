@@ -730,6 +730,12 @@ fn derived_context_chars(model: &ModelConfig) -> Option<usize> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubagentConfig {
+    /// Subagent loops allowed to run at the same time, across the whole install.
+    ///
+    /// A blocking `spawn_agent` waits for its own child, but a `spawn_agents`
+    /// fan-out or a `background` agent runs beside the caller, so this is the
+    /// ceiling on real parallelism - and on how many provider streams one model
+    /// can open at once.
     #[serde(default = "d_sub_concurrency")]
     pub max_concurrent: usize,
     /// Model round-trips allowed in one *segment* of a subagent.
@@ -755,6 +761,30 @@ pub struct SubagentConfig {
     /// Wall-clock limit for one subagent task, across every segment.
     #[serde(default = "d_sub_timeout")]
     pub timeout_secs: u64,
+    /// Allow `spawn_agent`/`spawn_agents` to detach with `background = true`.
+    ///
+    /// A background agent keeps working after the tool call that started it has
+    /// returned, so its parent can do something else and collect the result with
+    /// `wait_for_agents`, message it with `send_message`, or stop it. With this
+    /// off, every spawn blocks its caller exactly as it did before and asking for
+    /// `background` is refused with an explanation.
+    #[serde(default = "d_true")]
+    pub allow_background: bool,
+    /// Ceiling on *live* background agents, per session.
+    ///
+    /// Each one holds a subagent slot, a provider stream and a transcript, so
+    /// this is a memory and cost bound rather than a taste one: past it, a spawn
+    /// is refused instead of queued. `max_concurrent` still applies on top, so
+    /// the useful setting is at least as large as the fan-out you actually want.
+    #[serde(default = "d_sub_max_background")]
+    pub max_background: usize,
+    /// How long `wait_for_agents` blocks by default, in seconds.
+    ///
+    /// A wait with no bounded default would park the parent against its own
+    /// wall clock with nothing to show for it, so the tool always waits with a
+    /// timeout and reports which agents are still running.
+    #[serde(default = "d_sub_wait_timeout")]
+    pub wait_timeout_secs: u64,
 }
 
 fn d_sub_concurrency() -> usize {
@@ -772,6 +802,12 @@ fn d_sub_depth() -> u8 {
 fn d_sub_timeout() -> u64 {
     14_400
 }
+fn d_sub_max_background() -> usize {
+    8
+}
+fn d_sub_wait_timeout() -> u64 {
+    600
+}
 
 impl Default for SubagentConfig {
     fn default() -> Self {
@@ -782,6 +818,9 @@ impl Default for SubagentConfig {
             allow_recursive: false,
             max_depth: d_sub_depth(),
             timeout_secs: d_sub_timeout(),
+            allow_background: true,
+            max_background: d_sub_max_background(),
+            wait_timeout_secs: d_sub_wait_timeout(),
         }
     }
 }
@@ -1424,6 +1463,47 @@ fn env_bool(name: &str) -> Option<bool> {
     }
 }
 
+/// Minimum length for both the bearer token and the admin token.
+///
+/// Sixteen characters is the floor published in `docs/SECURITY.md`,
+/// `.env.example` and the startup error, and it is what makes a human-typed
+/// token the wrong choice: `openssl rand -hex 24` is 48 characters.
+pub const MIN_TOKEN_LEN: usize = 16;
+
+/// Prefixes a documented placeholder starts with. `change-me-to-16-plus-chars`
+/// is 27 characters, so a length check alone accepts it - and it is the first
+/// thing anyone guesses off a public bind.
+const PLACEHOLDER_PREFIXES: [&str; 5] = ["change-me", "changeme", "secret", "password", "test"];
+
+/// Reject a token that is too short or is a documented placeholder.
+///
+/// The message is actionable on purpose: the fix is one command, and an operator
+/// who is told "use at least 16 characters" on a 27-character placeholder would
+/// rightly think the check was broken.
+fn validate_token(label: &str, env: &str, token: &str) -> Result<()> {
+    // Length is measured on the trimmed value so whitespace copied out of a
+    // `.env` file cannot count as entropy.
+    let trimmed = token.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if trimmed.len() < MIN_TOKEN_LEN {
+        return Err(Error::Config(format!(
+            "{label} must be at least {MIN_TOKEN_LEN} characters (got {}); generate one with \
+             `openssl rand -hex 24` and set {env}",
+            trimmed.len()
+        )));
+    }
+    if let Some(placeholder) = PLACEHOLDER_PREFIXES
+        .iter()
+        .find(|prefix| lowered.starts_with(*prefix))
+    {
+        return Err(Error::Config(format!(
+            "{label} looks like the documented placeholder (`{placeholder}...`); it is public \
+             and has no secret value. Generate a real one with `openssl rand -hex 24` and set {env}"
+        )));
+    }
+    Ok(())
+}
+
 impl Config {
     /// Load configuration from file + environment. Network bind errors are not
     /// validated here; the server does that when it binds.
@@ -1540,7 +1620,7 @@ impl Config {
         if let Some(v) = env_str("KARUCODE_AUTH_TOKEN") {
             cfg.auth_token = Some(v);
         }
-        if let Some(v) = env_parse("KARUCODE_LOCK_SETTINGS") {
+        if let Some(v) = env_bool("KARUCODE_LOCK_SETTINGS") {
             cfg.lock_settings = v;
         }
         if let Some(v) = env_str("KARUCODE_LOG").or_else(|| env_str("RUST_LOG")) {
@@ -1683,10 +1763,16 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_RETRY_MAX_DELAY_MS") {
             cfg.model.retry_max_delay_ms = v;
         }
+        if let Some(v) = env_parse("KARUCODE_RETRY_MAX_TOTAL_SECS") {
+            // The wall-clock ceiling for one stream's retry chain. It was documented
+            // in `.env.example` and `config.example.toml` long before this line
+            // existed, so a locked deployment that set it silently kept the default.
+            cfg.model.retry_max_total_secs = v;
+        }
         if let Some(v) = env_parse("KARUCODE_RETRY_MAX_STREAM_RESTARTS") {
             cfg.model.retry_max_stream_restarts = v;
         }
-        if let Some(v) = env_parse("KARUCODE_MODEL_SUPPORTS_IMAGES") {
+        if let Some(v) = env_bool("KARUCODE_MODEL_SUPPORTS_IMAGES") {
             cfg.model.supports_images = v;
         }
 
@@ -1748,8 +1834,17 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_SUBAGENT_TIMEOUT_SECS") {
             cfg.subagents.timeout_secs = v;
         }
-        if let Some(v) = env_parse("KARUCODE_ALLOW_RECURSIVE_SUBAGENTS") {
+        if let Some(v) = env_bool("KARUCODE_ALLOW_RECURSIVE_SUBAGENTS") {
             cfg.subagents.allow_recursive = v;
+        }
+        if let Some(v) = env_bool("KARUCODE_SUBAGENT_ALLOW_BACKGROUND") {
+            cfg.subagents.allow_background = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_SUBAGENT_MAX_BACKGROUND") {
+            cfg.subagents.max_background = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS") {
+            cfg.subagents.wait_timeout_secs = v;
         }
 
         // Validate.
@@ -1760,15 +1855,11 @@ impl Config {
         if cfg.model.base_url.trim().is_empty() {
             return Err(Error::Config("model.base_url may not be empty".into()));
         }
-        if cfg
-            .auth_token
-            .as_deref()
-            .map(|t| t.len() < 16)
-            .unwrap_or(false)
-        {
-            return Err(Error::Config(
-                "auth token must be at least 16 characters".into(),
-            ));
+        if let Some(token) = &cfg.auth_token {
+            validate_token("auth token", "KARUCODE_AUTH_TOKEN", token)?;
+        }
+        if let Some(token) = &cfg.admin_token {
+            validate_token("admin token", "KARUCODE_ADMIN_TOKEN", token)?;
         }
         if cfg.host != "127.0.0.1"
             && cfg.host != "localhost"
@@ -1782,6 +1873,15 @@ impl Config {
         }
         if cfg.subagents.max_concurrent == 0 {
             cfg.subagents.max_concurrent = 1;
+        }
+        // `max_background = 0` would make `background = true` a guaranteed
+        // refusal rather than a limit, so it means "one at a time" - the switch
+        // that turns background work off entirely is `allow_background`.
+        if cfg.subagents.max_background == 0 {
+            cfg.subagents.max_background = 1;
+        }
+        if cfg.subagents.wait_timeout_secs == 0 {
+            cfg.subagents.wait_timeout_secs = 1;
         }
         // A watcher interval is a promise about latency, so keep it inside the
         // range the docs describe instead of accepting `0` (a busy loop over the
@@ -2523,17 +2623,24 @@ retry_max_stream_restarts = 0
         std::env::set_var("KARUCODE_RETRY_BASE_DELAY_MS", "25");
         std::env::set_var("KARUCODE_RETRY_MAX_DELAY_MS", "250");
         std::env::set_var("KARUCODE_RETRY_MAX_STREAM_RESTARTS", "1");
+        std::env::set_var("KARUCODE_RETRY_MAX_TOTAL_SECS", "120");
         let cfg = Config::from_parts(ConfigFile::default(), None);
         std::env::remove_var("KARUCODE_RETRY_MAX_RETRIES");
         std::env::remove_var("KARUCODE_RETRY_BASE_DELAY_MS");
         std::env::remove_var("KARUCODE_RETRY_MAX_DELAY_MS");
         std::env::remove_var("KARUCODE_RETRY_MAX_STREAM_RESTARTS");
+        std::env::remove_var("KARUCODE_RETRY_MAX_TOTAL_SECS");
 
         let cfg = cfg.expect("config loads");
         assert_eq!(cfg.model.retry_max_retries, 3);
         assert_eq!(cfg.model.retry_base_delay_ms, 25);
         assert_eq!(cfg.model.retry_max_delay_ms, 250);
         assert_eq!(cfg.model.retry_max_stream_restarts, 1);
+        assert_eq!(
+            cfg.model.retry_max_total_secs, 120,
+            "every documented KARUCODE_RETRY_* variable must actually be read: \
+             this one was advertised for months while nothing parsed it"
+        );
         assert_eq!(
             cfg.effective_model().retry_max_retries,
             3,
@@ -2818,10 +2925,218 @@ retry_max_stream_restarts = 0
         assert_eq!(cfg.notifications, NotificationsConfig::default());
     }
 
+    /// The reported bug: `.env.example` shipped
+    /// `KARUCODE_AUTH_TOKEN=change-me-to-16-plus-chars`, which is 27 characters
+    /// and therefore passes a bare length check - a working, guessable bearer
+    /// token. `admin_token` had no length check at all.
+    #[test]
+    fn a_placeholder_token_is_rejected_for_both_credentials() {
+        for placeholder in [
+            "change-me-to-16-plus-chars",
+            "CHANGE-ME-to-16-plus-chars",
+            "changeme1234567890",
+            "secret-token-1234567890",
+            "Password1234567890",
+            "test-token-1234567890",
+            "TEST-TOKEN-1234567890",
+        ] {
+            let err = validate_token("auth token", "KARUCODE_AUTH_TOKEN", placeholder)
+                .expect_err(&format!("{placeholder} must be rejected as a placeholder"));
+            let message = err.to_string();
+            assert!(message.contains("placeholder"), "{message}");
+            assert!(message.contains("openssl rand -hex 24"), "{message}");
+            assert!(message.contains("KARUCODE_AUTH_TOKEN"), "{message}");
+        }
+        // ...and the same rule applies to the admin credential, where a long
+        // placeholder is what would otherwise slip past a length-only check.
+        let err = validate_token(
+            "admin token",
+            "KARUCODE_ADMIN_TOKEN",
+            "change-me-to-16-plus-chars",
+        )
+        .expect_err("a 27-character admin placeholder must be rejected");
+        assert!(err.to_string().contains("placeholder"), "{err}");
+    }
+
+    #[test]
+    fn a_real_token_of_the_documented_length_is_accepted() {
+        // 48 characters, exactly what `openssl rand -hex 24` produces.
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(token.len(), 48);
+        assert!(validate_token("auth token", "KARUCODE_AUTH_TOKEN", token).is_ok());
+        assert!(validate_token("admin token", "KARUCODE_ADMIN_TOKEN", token).is_ok());
+        // Exactly at the floor is accepted; one character under is not.
+        let floor = "a".repeat(MIN_TOKEN_LEN);
+        assert_eq!(floor.len(), 16);
+        assert!(validate_token("auth token", "KARUCODE_AUTH_TOKEN", &floor).is_ok());
+        let under = "a".repeat(MIN_TOKEN_LEN - 1);
+        let err = validate_token("auth token", "KARUCODE_AUTH_TOKEN", &under).unwrap_err();
+        assert!(err.to_string().contains("at least 16 characters"), "{err}");
+    }
+
+    /// The admin token had no length rule at all, so `change-me-too` (13 chars)
+    /// or `x` gated nothing: a one-character secret is a formality.
+    #[test]
+    fn a_short_admin_token_is_rejected_at_load() {
+        let file = ConfigFile {
+            admin_token: Some("short".into()),
+            ..ConfigFile::default()
+        };
+        let err = Config::from_parts(file, None).expect_err("a 5-character admin token must fail");
+        let message = err.to_string();
+        assert!(message.contains("admin token"), "{message}");
+        assert!(message.contains("at least 16"), "{message}");
+
+        let file = ConfigFile {
+            admin_token: Some("0123456789abcdef".into()),
+            ..ConfigFile::default()
+        };
+        let cfg = Config::from_parts(file, None).expect("16 characters is enough");
+        assert_eq!(cfg.admin_token.as_deref(), Some("0123456789abcdef"));
+    }
+
+    /// The auth token keeps its documented floor, and now also refuses the
+    /// placeholder that `.env.example` used to suggest.
+    #[test]
+    fn a_short_or_placeholder_auth_token_is_rejected_at_load() {
+        for (token, expected) in [
+            ("short", "at least 16"),
+            ("change-me-to-16-plus-chars", "placeholder"),
+        ] {
+            let file = ConfigFile {
+                auth_token: Some(token.into()),
+                ..ConfigFile::default()
+            };
+            let err = Config::from_parts(file, None).unwrap_err().to_string();
+            assert!(
+                err.contains(expected),
+                "{token:?} should fail with {expected:?}, got {err}"
+            );
+        }
+    }
+
     #[test]
     fn the_minimum_run_secs_bound_is_documented() {
         // The settings layer validates against this; the constant exists here so a
         // TOML reader and the API agree on the ceiling.
         assert_eq!(MAX_MIN_RUN_SECS, 3_600);
+    }
+
+    /// The reported bug: `KARUCODE_LOCK_SETTINGS=1` was read with
+    /// `parse::<bool>()`, which rejects `1`, so the flag was silently inert and
+    /// `PATCH /api/config` kept answering 200 on a deployment that believed
+    /// settings were locked. `KARUCODE_MODEL_SUPPORTS_IMAGES`,
+    /// `KARUCODE_ALLOW_RECURSIVE_SUBAGENTS` and
+    /// `KARUCODE_SUBAGENT_ALLOW_BACKGROUND` had the same defect. Every documented
+    /// spelling (`1/0`, `true/false`, `yes/no`, `on/off`) must set the field.
+    #[test]
+    fn the_boolean_env_flags_accept_the_documented_spellings() {
+        // These variables are read by `from_parts`, which is process-global state.
+        // The guard restores the previous value even if an assertion fails, so a
+        // failed run cannot leak a flag into another test in this binary.
+        let _guard = EnvVars::set([
+            "KARUCODE_LOCK_SETTINGS",
+            "KARUCODE_MODEL_SUPPORTS_IMAGES",
+            "KARUCODE_ALLOW_RECURSIVE_SUBAGENTS",
+            "KARUCODE_SUBAGENT_ALLOW_BACKGROUND",
+        ]);
+
+        let cfg = Config::from_parts(ConfigFile::default(), None).expect("config loads");
+        // Defaults first, so "it parsed" cannot pass by accident.
+        assert!(!cfg.lock_settings);
+        assert!(!cfg.model.supports_images);
+        assert!(!cfg.subagents.allow_recursive);
+        assert!(cfg.subagents.allow_background);
+
+        for (spelling, expected) in [
+            ("1", true),
+            ("0", false),
+            ("true", true),
+            ("false", false),
+            ("on", true),
+            ("off", false),
+            ("yes", true),
+            ("no", false),
+        ] {
+            for name in _guard.names() {
+                std::env::set_var(name, spelling);
+            }
+            let cfg = Config::from_parts(ConfigFile::default(), None).expect("config loads");
+            assert_eq!(
+                cfg.lock_settings, expected,
+                "KARUCODE_LOCK_SETTINGS={spelling}"
+            );
+            assert_eq!(
+                cfg.model.supports_images, expected,
+                "KARUCODE_MODEL_SUPPORTS_IMAGES={spelling}"
+            );
+            assert_eq!(
+                cfg.subagents.allow_recursive, expected,
+                "KARUCODE_ALLOW_RECURSIVE_SUBAGENTS={spelling}"
+            );
+            assert_eq!(
+                cfg.subagents.allow_background, expected,
+                "KARUCODE_SUBAGENT_ALLOW_BACKGROUND={spelling}"
+            );
+        }
+    }
+
+    /// `KARUCODE_LOCK_SETTINGS=1` is the spelling the docs use for pinning a
+    /// deployment; an unparseable value must not silently look like `false`.
+    #[test]
+    fn a_locked_deployment_is_locked_from_the_environment() {
+        let _guard = EnvVars::set(["KARUCODE_LOCK_SETTINGS"]);
+        std::env::set_var("KARUCODE_LOCK_SETTINGS", "1");
+        let cfg = Config::from_parts(ConfigFile::default(), None).expect("config loads");
+        assert!(
+            cfg.lock_settings,
+            "KARUCODE_LOCK_SETTINGS=1 must lock settings"
+        );
+    }
+
+    /// Set environment variables for the duration of a test and put the previous
+    /// values back afterwards, including on a panic.
+    ///
+    /// The guard also holds [`ENV_LOCK`] for its lifetime, so two tests that
+    /// mutate the same variables cannot interleave (one reading `1` while the
+    /// other has just written `0`). Nothing else in this file sets these
+    /// variables, so the lock has no other participants to coordinate with.
+    struct EnvVars {
+        previous: Vec<(&'static str, Option<String>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    /// Serialises the tests that mutate process environment variables.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl EnvVars {
+        fn set<const N: usize>(names: [&'static str; N]) -> Self {
+            // A poisoned lock only means another holder panicked; the
+            // environment was still restored by its `Drop`, so carry on.
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = names
+                .into_iter()
+                .map(|name| (name, std::env::var(name).ok()))
+                .collect();
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+
+        fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+            self.previous.iter().map(|(name, _)| *name)
+        }
+    }
+
+    impl Drop for EnvVars {
+        fn drop(&mut self) {
+            for (name, value) in &self.previous {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
     }
 }

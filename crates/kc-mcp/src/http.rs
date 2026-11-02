@@ -239,6 +239,15 @@ fn too_large(name: &str, max: usize, what: &str) -> McpError {
 }
 
 /// Read an SSE response until the JSON-RPC response for `id` arrives.
+///
+/// The body is buffered as **bytes** and decoded only once a complete line is
+/// available. Decoding each TCP chunk on its own — which is what
+/// `String::from_utf8_lossy(&chunk)` did — corrupts any character whose UTF-8
+/// encoding straddles a chunk boundary: the leading bytes of one write and the
+/// continuation bytes of the next both decode to `U+FFFD`, the `data:` payload
+/// becomes invalid JSON, `dispatch_event` drops it, and the call fails with
+/// "no JSON-RPC response for request N in the SSE stream". A `write()` boundary
+/// is not a protocol boundary, so nothing may rely on it.
 async fn read_sse(response: reqwest::Response, id: u64, name: &str) -> Result<Value, McpError> {
     if let Some(len) = response.content_length() {
         if len > MAX_SSE_BYTES as u64 {
@@ -246,7 +255,8 @@ async fn read_sse(response: reqwest::Response, id: u64, name: &str) -> Result<Va
         }
     }
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    // Raw bytes, not a `String`: a line is decoded only when it is complete.
+    let mut buffer: Vec<u8> = Vec::new();
     let mut data_lines: Vec<String> = Vec::new();
     let mut total: usize = 0;
     while let Some(chunk) = stream.next().await {
@@ -259,18 +269,20 @@ async fn read_sse(response: reqwest::Response, id: u64, name: &str) -> Result<Va
         if total > MAX_SSE_BYTES {
             return Err(too_large(name, MAX_SSE_BYTES, "an SSE stream"));
         }
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(pos) = buffer.find('\n') {
-            let line: String = buffer.drain(..=pos).collect();
-            let line = line.trim_end_matches(['\n', '\r']);
-            if line.is_empty() {
-                if let Some(result) = dispatch_event(&mut data_lines, id) {
-                    return result;
-                }
-            } else if let Some(rest) = line.strip_prefix("data:") {
-                data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+        buffer.extend_from_slice(&chunk);
+        while let Some(pos) = buffer.iter().position(|b| *b == b'\n') {
+            // The slice up to and including the newline is a complete line, so
+            // it must be valid UTF-8 on its own. An invalid one is a broken
+            // producer, not a chunking artefact: say so instead of guessing.
+            let line: Vec<u8> = buffer.drain(..=pos).collect();
+            let line = std::str::from_utf8(&line).map_err(|_| {
+                McpError::Protocol(format!(
+                    "MCP server `{name}` sent an SSE line that is not valid UTF-8"
+                ))
+            })?;
+            if let Some(result) = handle_sse_line(line, &mut data_lines, id) {
+                return result;
             }
-            // `event:`, `id:`, `retry:` and `:comment` lines are not needed here.
         }
     }
     // A stream that ends without a trailing blank line still carries one event.
@@ -280,6 +292,26 @@ async fn read_sse(response: reqwest::Response, id: u64, name: &str) -> Result<Va
     Err(McpError::Protocol(format!(
         "no JSON-RPC response for request {id} in the SSE stream of MCP server `{name}`"
     )))
+}
+
+/// Feed one complete SSE line to the event accumulator.
+///
+/// Returns `Some` only when a blank line completed an event that carried the
+/// response for `id`. `event:`, `id:`, `retry:` and `:comment` lines are not
+/// needed here.
+fn handle_sse_line(
+    line: &str,
+    data_lines: &mut Vec<String>,
+    id: u64,
+) -> Option<Result<Value, McpError>> {
+    let line = line.trim_end_matches(['\n', '\r']);
+    if line.is_empty() {
+        return dispatch_event(data_lines, id);
+    }
+    if let Some(rest) = line.strip_prefix("data:") {
+        data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+    }
+    None
 }
 
 fn dispatch_event(data_lines: &mut Vec<String>, id: u64) -> Option<Result<Value, McpError>> {
@@ -358,6 +390,33 @@ mod tests {
         let t = HttpTransport::new("demo".into(), "not-a-url".into(), BTreeMap::new()).unwrap();
         let err = t.open().await.unwrap_err();
         assert!(err.describe().contains("invalid url"), "{}", err.describe());
+    }
+
+    #[test]
+    fn sse_lines_accumulate_into_one_event() {
+        let mut data = Vec::new();
+        assert!(handle_sse_line("event: message\n", &mut data, 3).is_none());
+        assert!(handle_sse_line("data: {\"a\":\n", &mut data, 3).is_none());
+        assert!(handle_sse_line("data: 1}\n", &mut data, 3).is_none());
+        assert_eq!(data, vec!["{\"a\":".to_string(), "1}".to_string()]);
+        assert!(handle_sse_line("\n", &mut data, 3).is_none());
+        assert!(data.is_empty(), "the event was consumed on the blank line");
+
+        // A blank line that completes the wanted response returns it.
+        let mut data = Vec::new();
+        handle_sse_line(
+            "data: {\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{\"ok\":true}}\n",
+            &mut data,
+            9,
+        );
+        let got = handle_sse_line("\r\n", &mut data, 9).unwrap().unwrap();
+        assert_eq!(got, json!({"ok": true}));
+
+        // An unrelated event is dropped and the accumulator reset.
+        let mut data = Vec::new();
+        handle_sse_line("data: not json\n", &mut data, 9);
+        assert!(handle_sse_line("\n", &mut data, 9).is_none());
+        assert!(data.is_empty());
     }
 
     #[test]

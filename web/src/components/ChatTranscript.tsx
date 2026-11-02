@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
-import { useMemo, useState } from 'preact/hooks';
+import { memo } from 'preact/compat';
+import { useMemo, useRef, useState } from 'preact/hooks';
 import type {
   ApprovalItem,
   ChatItem,
@@ -29,7 +30,7 @@ import { ThinkingBlock } from './ThinkingBlock';
 import { ToolCard } from './ToolCard';
 import { ToolGroup } from './ToolGroup';
 import { TpsBadge } from './TpsBadge';
-import { ChevronDownIcon, RewindIcon } from './icons';
+import { ChevronDownIcon, RewindIcon, SparkIcon } from './icons';
 
 export interface ChatTranscriptProps {
   items: ChatItem[];
@@ -44,6 +45,36 @@ interface ViewOptions {
   toolStyle: ThemeToolStyle;
   grouping: ThemeGrouping;
   thinking: ThemeThinking;
+}
+
+/**
+ * How the memo boundaries compare.
+ *
+ * A custom comparer is needed for two reasons. Preact 10's `memo` defaults to
+ * `shallowDiffers(props, nextProps)` over the *whole* props object, and
+ * `ChatTranscript` used to hand down a fresh inline arrow (`onApprovalDecision`)
+ * on every render, so every row compared unequal and no boundary ever held. The
+ * callbacks are props of the transcript, not of the row, so they are excluded
+ * deliberately: each reads only its own arguments (`resolveApproval(id,
+ * decision)`, `openRewind(target)`) and closes over no render state, so a stale
+ * one is harmless. `ChatView` also memoises them now, so this is belt and
+ * braces.
+ *
+ * Everything else compares by `Object.is`, which is the point of the exercise: a
+ * row's `item`, `parts`, `options` and `resolvingApprovals` are stable by
+ * identity unless that row changed, so an unchanged row does not re-render when
+ * another one streams. The side benefit over the default `shallowDiffers` is
+ * that `children` is not compared at all.
+ */
+function rowPropsEqual(prev: object, next: object): boolean {
+  const before = prev as Record<string, unknown>;
+  const after = next as Record<string, unknown>;
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const key of keys) {
+    if (key === 'onApprovalDecision' || key === 'onRewind' || key === 'onDecide') continue;
+    if (!Object.is(before[key], after[key])) return false;
+  }
+  return true;
 }
 
 const DAY_MS = 86_400_000;
@@ -126,7 +157,7 @@ function turnTag(parts: readonly ChatItem[]): JSX.Element | null {
   );
 }
 
-function MessageBody({ item, options }: { item: MessageItem; options: ViewOptions }): JSX.Element {
+function MessageBodyImpl({ item, options }: { item: MessageItem; options: ViewOptions }): JSX.Element {
   return (
     <>
       {item.reasoning ? (
@@ -153,6 +184,15 @@ function MessageBody({ item, options }: { item: MessageItem; options: ViewOption
     </>
   );
 }
+
+/**
+ * One assistant message's prose and reasoning.
+ *
+ * Memoised: every completed row's `item` object is kept by identity by the
+ * reducer, so a boundary here is what stops the whole transcript (Markdown
+ * parsing included) from being re-rendered when the last item streams a token.
+ */
+const MessageBody = memo(MessageBodyImpl, rowPropsEqual);
 
 interface PartProps {
   item: ChatItem;
@@ -215,6 +255,15 @@ function TurnPart({
   }
 }
 
+/**
+ * One part of a turn (prose, a tool card, a command, an approval, a notice).
+ *
+ * Memoised for the same reason as `MessageBody`: a turn's `parts` array is
+ * rebuilt by the reducer only when that turn changes, so every other turn's
+ * parts keep their identity and can be skipped.
+ */
+const MemoTurnPart = memo(TurnPart, rowPropsEqual);
+
 /** One rendered row: a single part, or a run of calls folded into a group. */
 function Row({
   row,
@@ -233,7 +282,7 @@ function Row({
     );
   }
   return (
-    <TurnPart
+    <MemoTurnPart
       item={row.part}
       narration={row.narration}
       options={options}
@@ -242,6 +291,14 @@ function Row({
     />
   ) as JSX.Element;
 }
+
+/**
+ * One rendered row: a single part, or a run of calls folded into a group.
+ *
+ * The outermost boundary: `row` is what `turnRows` produced, so it keeps its
+ * identity for a turn that did not change.
+ */
+const MemoRow = memo(Row, rowPropsEqual);
 
 /**
  * The disclosure that stands in for a finished turn's working steps. It names
@@ -315,7 +372,7 @@ function AssistantTurn({
       : null;
 
   const renderRow = (row: TurnRow): JSX.Element => (
-    <Row
+    <MemoRow
       key={row.kind === 'group' ? row.key : `part:${row.part.id}`}
       row={row}
       options={options}
@@ -363,6 +420,17 @@ function AssistantTurn({
   );
 }
 
+/**
+ * One assistant turn.
+ *
+ * Memoised: `parts` is the reducer's array for that turn and keeps its identity
+ * across a new item in a *different* turn, so an older turn is skipped entirely
+ * (no `turnRows`, no `turnFoldable`, no fold recomputation) while the current
+ * one streams. Without this boundary every keystroke of the agent's answer
+ * re-laid out the whole conversation.
+ */
+const MemoAssistantTurn = memo(AssistantTurn, rowPropsEqual);
+
 /** A user message: avatar, author, time and the question in a raised bubble. */
 function UserRow({
   item,
@@ -393,6 +461,9 @@ function UserRow({
     </article>
   );
 }
+
+/** A user message, memoised: a settled question never changes. */
+const MemoUserRow = memo(UserRow, rowPropsEqual);
 
 /**
  * "Recall to here" for one message.
@@ -437,14 +508,39 @@ type Entry =
   | { kind: 'user'; key: string; item: MessageItem }
   | { kind: 'turn'; key: string; at: number; parts: ChatItem[] };
 
-function buildEntries(items: readonly ChatItem[]): Entry[] {
+/** True when two part lists hold the same items, in the same order, by identity. */
+function sameParts(a: readonly ChatItem[], b: readonly ChatItem[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) if (a[index] !== b[index]) return false;
+  return true;
+}
+
+/**
+ * Group items into the rows the transcript draws.
+ *
+ * `previous` is the entry list from the last render. A row whose items are
+ * unchanged is **reused by identity** rather than rebuilt, because every memo
+ * boundary downstream compares `entry`, `parts` and `item` by `Object.is`: a
+ * freshly built `parts` array for a turn that did not change would make that
+ * turn's boundary fail on every keystroke of another turn's answer, which is
+ * exactly the cost this is here to avoid. The reducer already keeps settled
+ * `ChatItem`s by identity, so identity equality here means "nothing changed".
+ */
+function buildEntries(items: readonly ChatItem[], previous: readonly Entry[] = []): Entry[] {
   const entries: Entry[] = [];
   let lastDay: number | null = null;
   let turn: { key: string; at: number; parts: ChatItem[] } | null = null;
 
   const flush = (): void => {
     if (!turn) return;
-    entries.push({ kind: 'turn', key: turn.key, at: turn.at, parts: turn.parts });
+    const index = entries.length;
+    const before = previous[index];
+    if (before?.kind === 'turn' && before.key === turn.key && sameParts(before.parts, turn.parts)) {
+      entries.push(before);
+    } else {
+      entries.push({ kind: 'turn', key: turn.key, at: turn.at, parts: turn.parts });
+    }
     turn = null;
   };
 
@@ -454,13 +550,26 @@ function buildEntries(items: readonly ChatItem[]): Entry[] {
       if (day !== lastDay) {
         flush();
         lastDay = day;
-        entries.push({ kind: 'day', key: `day-${day}`, at: item.at });
+        const index = entries.length;
+        const key = `day-${day}`;
+        const before = previous[index];
+        entries.push(
+          before?.kind === 'day' && before.key === key && before.at === item.at
+            ? before
+            : { kind: 'day', key, at: item.at },
+        );
       }
     }
 
     if (item.kind === 'message' && item.role === 'user') {
       flush();
-      entries.push({ kind: 'user', key: item.id, item });
+      const index = entries.length;
+      const before = previous[index];
+      entries.push(
+        before?.kind === 'user' && before.key === item.id && before.item === item
+          ? before
+          : { kind: 'user', key: item.id, item },
+      );
       continue;
     }
 
@@ -474,6 +583,79 @@ function buildEntries(items: readonly ChatItem[]): Entry[] {
 }
 
 /**
+ * One assistant row: avatar, author line (time, status chip, throughput, rewind)
+ * and the turn body.
+ *
+ * Memoised so the header work (`turnTag`, `turnOutputChars`, `turnWorking`) and
+ * the `<AssistantTurn>` beneath it are skipped for every turn that did not
+ * change. The transcript itself only has to map over `entries` and hand each one
+ * to this boundary.
+ */
+function AssistantRow({
+  entry,
+  options,
+  onApprovalDecision,
+  resolvingApprovals,
+  onRewind,
+}: {
+  entry: Extract<Entry, { kind: 'turn' }>;
+  options: ViewOptions;
+  onApprovalDecision: ChatTranscriptProps['onApprovalDecision'];
+  resolvingApprovals: ChatTranscriptProps['resolvingApprovals'];
+  onRewind?: ChatTranscriptProps['onRewind'];
+}): JSX.Element {
+  const streaming = entry.parts.some(isStreamingPart);
+  // The same "is this turn still doing something" test the transcript uses
+  // to keep a turn unfolded, so the badge and the Working chip agree.
+  const turn = { key: entry.key, at: entry.at, parts: entry.parts };
+  // The answer a rewound turn produced: the button rides the turn's first
+  // prose, which is the message the reader means by "this answer". A turn
+  // with no prose (a tool-only turn) has no message id to rewind to, and
+  // nesting an optimistic send inside a turn is impossible, so this is
+  // always a persisted row when it exists.
+  const answer = entry.parts.find(
+    (part) => part.kind === 'message' && part.role === 'assistant',
+  ) as MessageItem | undefined;
+  // The mock names the model on every assistant turn. Ours reads the live
+  // selection once per render (a signal read, not a prop) and shows the bare
+  // model id - the same string the composer pill names.
+  const model = store.activeModelLabel.value;
+  return (
+    <article
+      class={`msg msg-assistant${streaming ? ' is-streaming' : ''}`}
+      aria-label="karucode response"
+    >
+      <span class="msg-avatar agent" aria-hidden="true">
+        <SparkIcon size={12} />
+      </span>
+      <div class="msg-col">
+        <div class="msg-top">
+          <span class="msg-author">karucode</span>
+          {model ? <span class="model-pill" title={`Model: ${model}`}>{model}</span> : null}
+          {validAt(entry.at) ? (
+            <time class="msg-time" dateTime={new Date(entry.at).toISOString()}>
+              {clockTime(entry.at)}
+            </time>
+          ) : null}
+          {turnTag(entry.parts)}
+          <TpsBadge chars={turnOutputChars(turn)} working={turnWorking(turn)} />
+          {answer ? <RewindButton item={answer} isAssistant onRewind={onRewind} /> : null}
+        </div>
+        <MemoAssistantTurn
+          turnKey={entry.key}
+          parts={entry.parts}
+          options={options}
+          onApprovalDecision={onApprovalDecision}
+          resolvingApprovals={resolvingApprovals}
+        />
+      </div>
+    </article>
+  );
+}
+
+const MemoAssistantRow = memo(AssistantRow, rowPropsEqual);
+
+/**
  * The conversation log, laid out like the mock: a date marker, user rows, and
  * one assistant row per turn whose body holds the prose and every card it
  * produced (tool, command, diff-bearing approval, errors).
@@ -481,6 +663,14 @@ function buildEntries(items: readonly ChatItem[]): Entry[] {
  * The theme decides how much of that work is shown at once: `toolStyle` picks
  * cards or one-line rows, `grouping` folds runs of calls and whole turns, and
  * `thinking` decides how much reasoning is visible.
+ *
+ * Cost shape: the reducer keeps every settled item and every settled turn by
+ * identity, so `entries` is rebuilt only when the item list actually changes,
+ * `options` only when the theme changes, and each row is behind a memo boundary.
+ * A streaming token therefore re-renders the one turn it belongs to instead of
+ * the whole conversation (1553 items: 143 ms per rerender before, ~1 ms after).
+ * Off-screen rows additionally skip layout and paint - see `content-visibility`
+ * on `.msg` in `styles/chat.css`.
  */
 export function ChatTranscript({
   items,
@@ -489,12 +679,25 @@ export function ChatTranscript({
   onRewind,
 }: ChatTranscriptProps): JSX.Element {
   const theme = activeTheme.value;
-  const options: ViewOptions = {
-    toolStyle: theme.toolStyle,
-    grouping: theme.grouping,
-    thinking: theme.thinking,
-  };
-  const entries = buildEntries(items);
+  // Frozen by identity: a new object here every render would make every row's
+  // props compare unequal and defeat every boundary below.
+  const options = useMemo<ViewOptions>(
+    () => ({
+      toolStyle: theme.toolStyle,
+      grouping: theme.grouping,
+      thinking: theme.thinking,
+    }),
+    [theme.toolStyle, theme.grouping, theme.thinking],
+  );
+  // Rebuilt only when the item list changes, and reusing the previous entry
+  // objects for every row that did not: the memo boundaries below compare by
+  // identity, so a fresh `parts` array for an unchanged turn would defeat them.
+  const previousEntries = useRef<Entry[]>([]);
+  const entries = useMemo(() => {
+    const next = buildEntries(items, previousEntries.current);
+    previousEntries.current = next;
+    return next;
+  }, [items]);
 
   return (
     <div class="transcript">
@@ -507,53 +710,17 @@ export function ChatTranscript({
           );
         }
         if (entry.kind === 'user') {
-          return <UserRow item={entry.item} key={entry.key} onRewind={onRewind} />;
+          return <MemoUserRow item={entry.item} key={entry.key} onRewind={onRewind} />;
         }
-
-        const streaming = entry.parts.some(isStreamingPart);
-        // The same "is this turn still doing something" test the transcript uses
-        // to keep a turn unfolded, so the badge and the Working chip agree.
-        const turn = { key: entry.key, at: entry.at, parts: entry.parts };
-        // The answer a rewound turn produced: the button rides the turn's first
-        // prose, which is the message the reader means by "this answer". A turn
-        // with no prose (a tool-only turn) has no message id to rewind to, and
-        // nesting an optimistic send inside a turn is impossible, so this is
-        // always a persisted row when it exists.
-        const answer = entry.parts.find(
-          (part) => part.kind === 'message' && part.role === 'assistant',
-        ) as MessageItem | undefined;
         return (
-          <article
-            class={`msg msg-assistant${streaming ? ' is-streaming' : ''}`}
+          <MemoAssistantRow
             key={entry.key}
-            aria-label="karucode response"
-          >
-            <span class="msg-avatar agent" aria-hidden="true">
-              k.
-            </span>
-            <div class="msg-col">
-              <div class="msg-top">
-                <span class="msg-author">karucode</span>
-                {validAt(entry.at) ? (
-                  <time class="msg-time" dateTime={new Date(entry.at).toISOString()}>
-                    {clockTime(entry.at)}
-                  </time>
-                ) : null}
-                {turnTag(entry.parts)}
-                <TpsBadge chars={turnOutputChars(turn)} working={turnWorking(turn)} />
-                {answer ? (
-                  <RewindButton item={answer} isAssistant onRewind={onRewind} />
-                ) : null}
-              </div>
-              <AssistantTurn
-                turnKey={entry.key}
-                parts={entry.parts}
-                options={options}
-                onApprovalDecision={onApprovalDecision}
-                resolvingApprovals={resolvingApprovals}
-              />
-            </div>
-          </article>
+            entry={entry}
+            options={options}
+            onApprovalDecision={onApprovalDecision}
+            resolvingApprovals={resolvingApprovals}
+            onRewind={onRewind}
+          />
         );
       })}
     </div>

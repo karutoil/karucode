@@ -20,11 +20,11 @@ export interface TabItem<T extends string> {
 
 /**
  * `default` is the compact inspector strip; `workspace` is the header tab bar
- * (Conversation / Changes); `settings` is the settings sheet's section strip.
- * All three share the same tablist semantics and differ only in the classes the
- * stylesheets key off.
+ * (Conversation / Changes); `settings` is the settings sheet's section strip;
+ * `fileview` is the file viewer's Preview/Source control. All four share the
+ * same tablist semantics and differ only in the classes the stylesheets key off.
  */
-export type TabVariant = 'default' | 'workspace' | 'settings';
+export type TabVariant = 'default' | 'workspace' | 'settings' | 'fileview';
 
 export interface TabsProps<T extends string> {
   items: readonly TabItem<T>[];
@@ -56,8 +56,21 @@ export function Tabs<T extends string>({
   const prefix = idPrefix ?? generated;
   const workspace = variant === 'workspace';
   const settings = variant === 'settings';
-  const listClass = settings ? 'settings-tabs' : workspace ? 'workspace-tabs' : 'tabs';
-  const tabClass = settings ? 'settings-tab' : workspace ? 'workspace-tab' : 'tab';
+  const fileview = variant === 'fileview';
+  const listClass = fileview
+    ? 'file-view-tabs'
+    : settings
+      ? 'settings-tabs'
+      : workspace
+        ? 'workspace-tabs'
+        : 'tabs';
+  const tabClass = fileview
+    ? 'file-view-tab'
+    : settings
+      ? 'settings-tab'
+      : workspace
+        ? 'workspace-tab'
+        : 'tab';
   const listRef = useRef<HTMLDivElement>(null);
 
   // Measured by hand rather than with `scrollIntoView`, which would also scroll

@@ -68,7 +68,19 @@ so `read_only` still denies it.
 * Subagents inherit the parent policy; their prompts carry the parent's
   approval mode and the agent id in the audit trail.
 * `auto` is audited but does not ask; do not run it against a workspace whose
-  contents you have not looked at.
+  contents you have not looked at. "Audited" here means the ordinary
+  `tool_call_started`/`tool_call_finished` events are emitted: an allowed-
+  without-asking call does not store an approval row or an `approval_resolved`
+  event, because there was no question.
+* `approvals.mode` governs **the agent**, not you. It classifies the model's
+  tool calls. Actions you take from the API are yours and are not consulted
+  against it - `POST /api/terminals` opens a shell, `/api/workspace/upload`
+  writes an attachment, `/api/projects` and `/api/plugins/reload` mutate - so
+  `read_only` does not lock the machine against the person operating it. The
+  one exception is the editor's file save (`PUT /api/workspace/file`), which
+  does refuse in `read_only` because it is the closest API equivalent to a
+  `write_file` the model would have needed approval for. To take the shell away
+  entirely set `KARUCODE_TERMINALS=0`.
 * Changing the mode via `PATCH /api/config` applies to the next decision, not
   retroactively to an approval already pending.
 

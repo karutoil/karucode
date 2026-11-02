@@ -1,5 +1,6 @@
 import { ApiError, apiRequest, apiRequestBlob, withQuery } from './client';
 import type {
+  AgentAction,
   AgentDetail,
   AgentStatus,
   AgentSummary,
@@ -404,6 +405,24 @@ export function getAgent(
   return apiRequest<AgentDetail>(
     withQuery(`/api/agents/${encodeURIComponent(id)}`, { messages: params.messages }),
     options,
+  );
+}
+
+/**
+ * Pause, resume or cancel one live subagent.
+ *
+ * Only meaningful while the agent's loop exists: an id that already finished
+ * answers 404, which the caller shows as "it finished" rather than an error the
+ * user has to act on.
+ */
+export function controlAgent(
+  id: string,
+  action: AgentAction,
+  options: CallOptions = {},
+): Promise<{ agent_id: string; action: AgentAction; status: AgentStatus }> {
+  return apiRequest(
+    `/api/agents/${encodeURIComponent(id)}/${action}`,
+    { method: 'POST', ...options },
   );
 }
 

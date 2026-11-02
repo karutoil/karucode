@@ -744,6 +744,50 @@ def main():
             f"{len(detail['agents'])} agent(s)",
         )[-1])
 
+        rid = run_prompt("[tool:agents] fan out", timeout=90)
+        time.sleep(0.3)
+        detail = client.ok("GET", f"/api/sessions/{sid}")
+        names = [a["name"] for a in detail["agents"]]
+        check("a fan-out runs both children", lambda: (
+            _assert("e2e-fan-one" in names, names),
+            _assert("e2e-fan-two" in names, names),
+            _assert(
+                all(a["status"] == "completed" for a in detail["agents"]
+                    if a["name"].startswith("e2e-fan")),
+                [(a["name"], a["status"]) for a in detail["agents"]],
+            ),
+            f"{len(names)} agent(s)",
+        )[-1])
+
+        rid = run_prompt("[tool:background] detach", timeout=90)
+        time.sleep(0.3)
+        run_prompt("[tool:wait] collect", timeout=90)
+        time.sleep(0.3)
+        detail = client.ok("GET", f"/api/sessions/{sid}")
+        bg = next((a for a in detail["agents"] if a["name"] == "e2e-background"), None)
+        check("a background spawn detaches and is collected by a wait", lambda: (
+            _assert(bg is not None, [a["name"] for a in detail["agents"]]),
+            _assert(bg.get("background") is True, bg),
+            _assert(bg["status"] == "completed", bg["status"]),
+            "background agent completed",
+        )[-1])
+
+        # The control routes only apply to a live agent, so a settled one is a
+        # 404 that says so - which is the contract a browser can rely on.
+        status, body = client.raw("POST", f"/api/agents/{bg['id']}/pause")
+        check("controlling a finished agent is a 404", lambda: (
+            _assert(status == 404, (status, body)),
+            _assert(body.get("error", {}).get("code") == "not_found", body),
+            "404 not_found",
+        )[-1])
+
+        status, body = client.raw("POST", f"/api/agents/{bg['id']}/explode")
+        check("an unknown agent action is a 400 naming the verbs", lambda: (
+            _assert(status == 400, (status, body)),
+            _assert("pause" in json.dumps(body), body),
+            "400 bad_request",
+        )[-1])
+
         print("\n== plugins / MCP tools ==", flush=True)
         if plugin_bin is None:
             print("  SKIP  plugin checks (no example-hello binary)", flush=True)

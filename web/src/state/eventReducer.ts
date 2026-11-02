@@ -19,7 +19,7 @@ import type {
   NoticeItem,
   ToolItem,
 } from './chat';
-import { queuedLists } from './chat';
+import { normalizeAgentRecord, queuedLists } from './chat';
 
 const MAX_STREAM_CHARS = 200_000;
 
@@ -147,6 +147,9 @@ function agentFromEvent(
     created_at: event.ts_ms,
     updated_at: event.ts_ms,
     finished_at: null,
+    background: event.background ?? false,
+    note: '',
+    progress: null,
   };
 }
 
@@ -632,6 +635,29 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
           : null,
       );
 
+    case 'agent_paused':
+      return upsertAgent(seen, event.agent_id, (current) =>
+        current
+          ? {
+              ...current,
+              status: event.paused ? 'paused' : 'running',
+              updated_at: at,
+            }
+          : null,
+      );
+
+    case 'agent_note':
+      return upsertAgent(seen, event.agent_id, (current) =>
+        current
+          ? {
+              ...current,
+              note: event.note,
+              progress: event.progress ?? current.progress,
+              updated_at: at,
+            }
+          : null,
+      );
+
     case 'agent_finished':
       return upsertAgent(seen, event.agent_id, (current) => {
         const base: AgentView = current ?? {
@@ -651,6 +677,9 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
           created_at: at,
           updated_at: at,
           finished_at: null,
+          background: false,
+          note: '',
+          progress: null,
         };
         return {
           ...base,
@@ -790,8 +819,16 @@ export function markUserRun(items: ChatItem[], runId: string): ChatItem[] {
   return changed ? next : items;
 }
 
-export function sessionAgentFromRecord(agent: AgentRecord): AgentView {
-  return { ...agent, owned_paths: agent.owned_paths ?? [] };
+/**
+ * Normalise one agent record off the wire into the view the UI reads.
+ *
+ * Everything downstream treats `owned_paths`, `note` and `progress` as present,
+ * but the server omits each of them when it is empty/`None`, so they are filled
+ * in here — once, at the boundary — rather than defended against in every
+ * component. See `normalizeAgentRecord` for the wire contract.
+ */
+export function sessionAgentFromRecord<T extends AgentRecord>(agent: T): T {
+  return normalizeAgentRecord(agent);
 }
 
 /** Small helper used by tests and by seeded/live error banners. */

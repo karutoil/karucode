@@ -280,6 +280,22 @@
 // exempt itself by declaring `read_only`. To let a specific tool skip the prompt,
 // list it in the plugin's `settings.read_only_tools = ["tool", …]`.
 //
+// Those two keys, `trust` and `read_only_tools`, are **operator-only**: they are
+// honoured from the `[[plugins]]` entry in `config.toml` and ignored when a
+// `plugin.toml` in the plugin's own directory sets them. A plugin ships that file,
+// so letting it decide its own approval exemptions would defeat the policy; the
+// host logs the ignore and repeats it in the plugin's `error` field rather than
+// obeying it silently. Every other `settings` key still reaches the plugin.
+//
+// # Tool names
+//
+// A tool is exposed as `plugin__<plugin>__<tool>`. The prefix prevents collisions
+// with first-party tools, but **not** between two plugins: a plugin `a` with a
+// tool `b__c` and a plugin `a__b` with a tool `c` both produce
+// `plugin__a__b__c`. The first in discovery order keeps the name; any later
+// claimant's tool is not exposed, and the reason is logged and reported in that
+// plugin's `error` field. A collision never silently replaces another plugin.
+//
 // The plugin process gets a **cleared environment** plus an allowlist (`PATH`,
 // `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `TERM`, `TMPDIR`, `PWD`, `TZ`), the
 // `KARUCODE_PLUGIN_*` variables and your `env` table (which wins). Credentials

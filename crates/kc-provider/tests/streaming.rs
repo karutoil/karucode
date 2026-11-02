@@ -604,6 +604,86 @@ async fn connect_error_redacts_the_api_key() {
     assert!(!text.contains("sk-connect-secret"), "{text}");
 }
 
+// --- the whole-attempt deadline ----------------------------------------------
+//
+// `request_timeout_secs` bounds the gap *between* reads, so a body that keeps
+// trickling - or a stream that sends only SSE keepalive comments - can hold an
+// attempt open indefinitely: measured at 42 s (drip-fed body) and 16 s+
+// (keepalive only) against a 5 s setting. The whole attempt now has its own
+// deadline, derived from the same setting.
+
+/// A body that keeps arriving but never terminates an event, driven through the
+/// real HTTP client: `read_timeout` never fires, because every single read
+/// succeeds, so only the whole-attempt deadline can end this.
+#[tokio::test]
+async fn a_drip_fed_body_is_stopped_by_the_attempt_deadline() {
+    let server = spawn(move |_req, mut socket| async move {
+        socket.write_all(SSE_HEAD.as_bytes()).await.unwrap();
+        socket.flush().await.ok();
+        // One byte every 200ms, forever: nothing here ever times out per read.
+        loop {
+            if socket.write_all(b"d").await.is_err() || socket.flush().await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await;
+
+    // `request_timeout_secs` is floored at MIN_TIMEOUT_SECS (5s), so the attempt
+    // budget here is twice that - short enough to test, long enough that a slow
+    // machine cannot trip it early.
+    let mut config = model_config(&server);
+    config.request_timeout_secs = 5;
+    let provider = OpenAiProvider::new(config).unwrap();
+    let stream = provider
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    let started = Instant::now();
+    let mut timed_out = None;
+    let drain = async {
+        let mut stream = stream;
+        while let Some(item) = stream.next().await {
+            if let Err(err) = item {
+                timed_out = Some(err);
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(40), drain)
+        .await
+        .expect("the attempt deadline must end the stream, not hang");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the drip-fed body ran {elapsed:?}; the attempt deadline did not fire"
+    );
+    let error = timed_out.expect("a drip-fed body must end in an error");
+    assert!(matches!(error, kc_core::Error::Timeout(_)), "{error:?}");
+    let text = error.to_string();
+    assert!(text.contains("did not finish the response"), "{text}");
+    // A timeout says nothing bad about the request, so the retry layer may try
+    // another channel.
+    assert!(kc_provider::retry::retryable(&error), "{text}");
+}
+
+/// A normal answer inside the budget is unaffected by the deadline.
+#[tokio::test]
+async fn a_prompt_completion_is_not_disturbed_by_the_attempt_deadline() {
+    let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"quick\"},\"finish_reason\":\"stop\"}]}\n\n\
+                data: [DONE]\n\n";
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, body).await }).await;
+    let (stream, _cancel) = start(model_config(&server), chat_request()).await;
+    let chunks = collect(stream).await;
+    assert_eq!(texts(&chunks), "quick");
+    assert!(chunks.contains(&ProviderChunk::Finish {
+        reason: "stop".into()
+    }));
+}
+
 // --- DeepSeek DSML recovery -------------------------------------------------
 //
 // DeepSeek-V4 sometimes writes its native tool-call markup into `content`

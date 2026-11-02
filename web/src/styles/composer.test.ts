@@ -97,13 +97,13 @@ describe('composer dock: layout', () => {
 describe('composer dock: the box stays compact', () => {
   it('starts on one line and grows with the draft', () => {
     const input = declarations(composerCss, '.composer-input');
-    // 47px was two-and-a-bit empty lines at rest; the box auto-grows from here
-    // and Composer.tsx still caps it at 150px.
-    expect(input['min-height']).toBe('26px');
+    expect(input['min-height']).toBe('35px');
     // The cap is a custom property so the phone tier can shrink it without a
-    // second magic number in the component; the default is still the mock's 150px.
-    expect(input['--compose-input-max']).toBe('150px');
+    // second magic number in the component; the default is the mock's 170px.
+    expect(input['--compose-input-max']).toBe('170px');
     expect(input['max-height']).toBe('var(--compose-input-max)');
+    expect(input['padding']).toBe('12px 13px 3px');
+    expect(input['font-size']).toBe('13px');
   });
 
   it('does not force the bottom row onto a second line', () => {
@@ -113,10 +113,13 @@ describe('composer dock: the box stays compact', () => {
     expect(composerCss).not.toMatch(/\.composer-spacer \{[^}]*flex: 1 0 100%/);
   });
 
-  it('is tighter than the attached band it replaced', () => {
-    expect(declarations(composerCss, '.compose-top')['padding']).toBe('9px 11px 0 12px');
-    expect(declarations(composerCss, '.compose-bottom')['padding']).toBe('0 9px 7px 11px');
-    expect(declarations(composerCss, '.compose-bottom')['min-height']).toBe('34px');
+  it('matches the mock bar, attach and send geometry', () => {
+    expect(declarations(composerCss, '.compose-bottom')['padding']).toBe('4px 7px 7px 8px');
+    expect(declarations(composerCss, '.compose-bottom')['min-height']).toBe('39px');
+    expect(declarations(composerCss, '.compose-plus')['width']).toBe('24px');
+    expect(declarations(composerCss, '.button-send')['width']).toBe('28px');
+    expect(declarations(composerCss, '.button-send')['height']).toBe('28px');
+    expect(declarations(composerCss, '.composer')['--radius-composer']).toBe('15px');
   });
 
   it('keeps one row on a phone', () => {
@@ -215,7 +218,7 @@ describe('context window pill', () => {
 
   it('paints from tokens so every theme repaints it', () => {
     expect(fill['background']).toContain('var(--accent)');
-    expect(pill['color']).toContain('var(--text-body)');
+    expect(pill['color']).toContain('var(--faint)');
     expect(composerCss).not.toMatch(/\.context-pill[^{]*(?<!var\()[^)]*\{[^}]*#[0-9a-f]{3,8}\b/i);
   });
 

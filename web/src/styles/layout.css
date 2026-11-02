@@ -37,7 +37,7 @@
   min-width: 0;
   height: 100%;
   overflow: hidden;
-  background: var(--sidebar);
+  background: var(--panel-2);
   border-right: 1px solid var(--line);
   z-index: 5;
   transition:
@@ -67,21 +67,23 @@
     visibility 0s linear 160ms;
 }
 
+/* The mock's `.ws` row: a 27px glyph tile, the name over the path, a chevron.
+ * It is the workspace switcher, so it reads as a control rather than a heading. */
 .side-head {
   flex: 0 0 auto;
-  padding: 25px 16px 18px;
+  padding: 11px 12px 9px;
 }
 
 :root[data-density='compact'] .side-head {
-  padding: 17px 16px 12px;
+  padding: 8px 12px 6px;
 }
 
 .project-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 5px;
-  margin-top: 12px;
+  gap: 9px;
+  margin-top: 0;
 }
 
 .side-head-actions {
@@ -94,24 +96,38 @@
 .project-title {
   display: flex;
   flex: 1 1 auto;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
   min-width: 0;
   margin: 0;
   color: var(--text);
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: -0.7px;
-  line-height: 1.2;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+/* The mock's `.ws-logo`: a 27px hairline tile holding the project's initial in
+ * the accent - the workspace's own mark, beside its name and path. */
+.project-title-glyph {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 27px;
+  height: 27px;
+  margin-right: 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1;
+  text-transform: lowercase;
 }
 
 .project-title-dot {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  margin: 0 11px 3px 1px;
-  background: var(--accent);
-  border-radius: 1px;
-  transform: rotate(45deg);
+  display: none;
 }
 
 .project-title-text {
@@ -120,13 +136,14 @@
   white-space: nowrap;
 }
 
+/* The mock's `.ws-path`: 10px mono, faint, under the name. */
 .path-hint {
-  margin: 7px 0 0 18px;
+  margin: 1px 0 0;
   overflow: hidden;
-  color: var(--text-kicker);
+  color: var(--faint);
   font-family: var(--font-mono);
-  font-size: var(--fs-micro);
-  line-height: 1.1;
+  font-size: 10px;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -150,72 +167,97 @@
   color: var(--text);
 }
 
+/* The mock's `.new-btn`: a hairline capsule that only takes the accent on hover.
+ * It is the primary action, so it stays full width and keeps the `+` in accent -
+ * but it does not shout, because starting a session is cheap and reversible. */
 .new-session {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 9px;
+  gap: 8px;
   flex: 0 0 auto;
-  height: 38px;
-  margin: 1px 13px 21px;
-  border: 1px solid var(--accent-faint);
-  border-radius: var(--radius);
-  background: var(--accent-surface);
-  color: var(--accent-text-soft);
+  height: 31px;
+  margin: 2px 12px 8px;
+  padding: 0 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 500;
   transition:
     background-color var(--transition),
-    border-color var(--transition);
+    border-color var(--transition),
+    color var(--transition);
 }
 
 .new-session:hover {
-  border-color: var(--accent-hair-hover);
-  background: var(--btn-accent-bg-hover);
+  border-color: var(--accent-line);
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 .new-session .new-left {
   display: flex;
   align-items: center;
-  gap: 9px;
-  margin-left: 10px;
+  gap: 8px;
+  margin-left: 0;
+}
+
+.new-session .new-left svg {
+  width: 14px;
+  height: 14px;
+  color: var(--accent);
 }
 
 .new-session .shortcut {
-  margin-right: 10px;
+  margin-right: 0;
   margin-left: auto;
-  color: var(--accent-hint);
-  font-size: var(--fs-micro);
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--faint);
+  font-size: 9.5px;
   font-weight: 500;
 }
 
 :root[data-density='compact'] .new-session {
-  height: 34px;
-  margin-bottom: 13px;
+  height: 28px;
+  margin-bottom: 6px;
 }
 
 :root[data-density='spacious'] .new-session {
-  height: 44px;
+  height: 36px;
 }
 
+/* The mock's `.search`: a filled inset with no border until focused. */
 .side-search {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 7px;
   flex: 0 0 auto;
-  height: 33px;
-  margin: 0 13px 18px;
-  padding: 0 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface-input);
-  color: var(--text-subtle);
+  height: 30px;
+  margin: 0 12px 6px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--faint);
   cursor: text;
-  transition: border-color var(--transition-fast);
+  transition:
+    border-color var(--transition-fast),
+    background-color var(--transition-fast);
 }
 
 .side-search:focus-within {
-  border-color: var(--field-focus-line);
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+}
+
+.side-search svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--faint);
 }
 
 .side-search input {
@@ -225,13 +267,66 @@
   outline: none;
   background: none;
   color: var(--text);
-  font-size: 11.5px;
+  font-size: 12px;
   cursor: text;
 }
 
 .side-search input::placeholder {
-  color: var(--text-subtle);
+  color: var(--faint);
   opacity: 1;
+}
+
+/* The mock's `.chips` row: one-tap filters, each with its count. */
+.session-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  flex: 0 0 auto;
+  padding: 0 12px 8px;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    color var(--transition-fast),
+    border-color var(--transition-fast),
+    background-color var(--transition-fast);
+}
+
+.filter-chip:hover {
+  border-color: var(--line-strong);
+  color: var(--text-secondary);
+}
+
+.filter-chip.is-on {
+  border-color: var(--accent-line);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.filter-chip-count {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  opacity: 0.85;
+}
+
+/* The mock paints a needs-you count in rose: it is a queue, not a setting. */
+.filter-chip.is-alert .filter-chip-count {
+  color: var(--danger);
+}
+
+.filter-chip.is-on .filter-chip-count {
+  color: inherit;
 }
 
 /* Chromium's native search control duplicates our own keycap. */
@@ -244,7 +339,7 @@
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 0 9px 12px;
+  padding: 0 6px 8px;
 }
 
 .session-list-wrap,
@@ -254,22 +349,30 @@
   gap: 2px;
 }
 
+/* The mock's `.group-label`: 9px uppercase, the count in mono on the right. */
 .session-group + .session-group {
-  margin-top: 20px;
+  margin-top: 2px;
 }
 
 .session-group-label {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin: 0 10px 7px;
-  padding-top: 7px;
-  color: var(--text-subtle);
-  font-size: var(--fs-micro);
+  margin: 0;
+  padding: 9px 7px 4px;
+  color: var(--faint);
+  font-size: 9px;
   font-weight: 700;
   line-height: 1.5;
-  letter-spacing: 0.105em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
+}
+
+.session-group-label span {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  letter-spacing: 0;
+  opacity: 0.8;
 }
 
 :root[data-density='compact'] .session-group + .session-group {
@@ -279,64 +382,86 @@
 .session-list {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 1px;
   margin: 0;
   list-style: none;
 }
 
-:root[data-density='compact'] .session-list {
-  gap: 1px;
-}
-
 :root[data-density='spacious'] .session-list {
-  gap: 6px;
+  gap: 4px;
 }
 
+/* The mock's `.session`: a flat row with a 2px status rail let in at the left
+ * edge, a hairline-tight rhythm, and no card chrome until it is hovered. Three
+ * pieces of information stack into ~38px: the title with its tool glyphs, then
+ * the age/tokens and the diff fingerprint. */
 .session-row {
   position: relative;
   display: flex;
   align-items: stretch;
-  border: 1px solid transparent;
-  border-radius: var(--radius);
-  transition:
-    background-color var(--transition-fast),
-    border-color var(--transition-fast);
+  border: 0;
+  border-radius: 7px;
+  transition: background-color var(--transition-fast);
 }
 
 .session-row:hover,
 .session-row:focus-within {
-  background: var(--surface-raised);
+  background: var(--surface);
 }
 
-/* Current session: the mock's quiet warm card (#3c3630 hairline, a gradient
-   that ends on #252321, and a 2px gold bar let in from the left edge). */
+/* The rail: transparent until this row is the current one (accent), running
+ * (accent, pulsing), or waiting on you / failed (rose). */
+.session-row::before {
+  content: '';
+  position: absolute;
+  top: 7px;
+  bottom: 7px;
+  left: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background-color var(--transition);
+}
+
+/* Current session: the mock's `.session.active` - a raised fill plus the rail. */
 .session-row.is-active {
-  border-color: color-mix(in srgb, var(--accent-faint) 78%, var(--bg));
-  background: linear-gradient(
-    100deg,
-    color-mix(in srgb, var(--accent-bg) 70%, var(--bg)) 0%,
-    var(--item-active-to) 83%
-  );
-  box-shadow: inset 2px 0 var(--accent);
+  background: var(--surface-2);
+}
+
+.session-row.is-active::before {
+  background: var(--accent);
+}
+
+.session-row.is-active.running::before {
+  animation: pulse 2.2s ease-in-out infinite;
+}
+
+.session-row.needs::before {
+  background: var(--danger);
+}
+
+.session-row.failed::before {
+  background: var(--danger);
+  opacity: 0.55;
 }
 
 .session-open {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 1px;
   flex: 1 1 auto;
   min-width: 0;
-  padding: 11px 34px 12px 12px;
-  border-radius: var(--radius);
+  padding: 5px 8px 6px 10px;
+  border-radius: 7px;
   text-align: left;
 }
 
 :root[data-density='compact'] .session-open {
-  padding: 7px 30px 7px 10px;
+  padding: 4px 8px 4px 10px;
 }
 
 :root[data-density='spacious'] .session-open {
-  padding: 15px 34px 15px 13px;
+  padding: 8px 8px 8px 10px;
 }
 
 .session-head {
@@ -350,10 +475,9 @@
   overflow: hidden;
   flex: 1 1 auto;
   min-width: 0;
-  padding-right: 13px;
-  color: color-mix(in srgb, var(--text) 88%, var(--muted));
+  color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 400;
   line-height: 1.5;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -383,16 +507,20 @@
 
 .session-row.is-active .session-title {
   color: var(--text);
+  font-weight: 500;
 }
 
+/* The mock's `.s-bottom`: a 12px line under the title, mono micro-type. */
 .session-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
   overflow: hidden;
-  color: var(--meta-text);
-  font-size: var(--fs-micro);
-  line-height: 1.5;
+  height: 12px;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1;
   white-space: nowrap;
 }
 
@@ -401,13 +529,92 @@
   width: 3px;
   height: 3px;
   border-radius: 50%;
-  background: var(--faint);
+  background: currentColor;
+  opacity: 0.7;
+}
+
+.session-meta .status-dot {
+  width: 5px;
+  height: 5px;
+}
+
+/* The mock's `.s-turns`: the turn count, right-aligned and dimmed. */
+.session-turns {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--faint);
+  opacity: 0.7;
+}
+
+/* The mock's `.s-micro`: an 18x3 two-tone ratio bar (added vs removed). */
+.session-ratio {
+  display: flex;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 3px;
+  margin-left: auto;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--surface-3);
+}
+
+.session-ratio i {
+  display: block;
+  height: 100%;
+}
+
+.session-ratio .ratio-add {
+  background: var(--success);
+}
+
+.session-ratio .ratio-del {
+  background: var(--danger);
+}
+
+/* The mock's `.s-stat`: mono `+n −n` after the ratio bar. */
+.session-diff {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  opacity: 0.9;
+}
+
+.session-diff .diff-add {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.session-diff .diff-del {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* The mock's `.s-glyphs`: up to three tool symbols at 10px, quiet by default. */
+.session-glyphs {
+  display: flex;
+  gap: 3px;
+  flex: 0 0 auto;
+  margin-top: -1px;
+  opacity: 0.75;
+}
+
+.session-glyphs svg {
+  width: 10px;
+  height: 10px;
+  color: var(--faint);
+}
+
+.session-row.is-active .session-glyphs svg {
+  color: var(--muted);
 }
 
 .session-menu-wrap {
   position: absolute;
-  top: 9px;
-  right: 7px;
+  top: 3px;
+  right: 4px;
 }
 
 .session-menu-trigger {
@@ -547,9 +754,12 @@
 }
 
 .side-footer {
+  display: flex;
   flex: 0 0 auto;
+  flex-direction: column;
+  gap: 9px;
   margin-top: auto;
-  padding: 14px 13px 13px;
+  padding: 10px 12px 11px;
   border-top: 1px solid var(--line);
 }
 
@@ -557,17 +767,17 @@
   display: flex;
   align-items: center;
   gap: 9px;
-  margin: 0 3px 12px;
-  color: var(--ink-secondary);
-  font-size: 11px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.3;
 }
 
 .online-row .right {
   margin-left: auto;
   overflow: hidden;
-  color: var(--text-date);
+  color: var(--faint);
   font-family: var(--font-mono);
-  font-size: var(--fs-micro);
+  font-size: 9.5px;
   line-height: 1.1;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -604,18 +814,59 @@
   gap: 8px;
 }
 
+/* The mock's sidebar foot: a context meter over the account/settings row. */
+.side-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.side-meter-top {
+  display: flex;
+  justify-content: space-between;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.side-meter-bar {
+  display: flex;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--surface-3);
+}
+
+.side-meter-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width var(--transition);
+}
+
+.side-meter-bar i[data-tone='warn'] {
+  background: var(--warn);
+}
+
+.side-meter-bar i[data-tone='hot'] {
+  background: var(--danger);
+}
+
 .settings-btn {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px;
-  border-radius: calc(var(--radius) - 4px);
-  color: var(--foot-strong);
-  font-size: 11px;
+  padding: 5px 6px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.3;
 }
 
 .settings-btn:hover {
-  background: var(--surface-menu);
+  background: var(--surface-2);
   color: var(--text);
 }
 
@@ -680,27 +931,40 @@
 
 /* ---------- main column ---------- */
 
+/* The mock's canvas: `--bg` with a faint two-tone glow laid over it, so the
+ * centre pane reads as a lit stage rather than a flat rectangle. */
 .chat-main {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
   min-width: 0;
   height: 100dvh;
-  background: var(--bg);
+  background-color: var(--bg);
+  background-image: var(--stage-glow);
 }
+
+/* ---------- topbar (the mock's `.topbar`) ---------- */
 
 .main-head {
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 10px;
   flex: 0 0 auto;
   height: var(--header-h);
   min-height: var(--header-h);
-  padding: 0 26px;
+  padding: 0 14px;
+  background: var(--bg);
   border-bottom: 1px solid var(--line-soft);
+  z-index: 12;
+  position: relative;
 }
 
+/* One line, as in the mock: project name (quiet) / session title (loud). The
+ * activity word rides beside it as the mock's `Live` pill. */
 .head-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -708,10 +972,11 @@
 .breadcrumb {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 7px;
+  min-width: 0;
   overflow: hidden;
-  color: color-mix(in srgb, var(--muted) 88%, var(--bg));
-  font-size: 11px;
+  color: var(--muted);
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -723,29 +988,74 @@
   flex: 0 1 auto;
   min-width: 3ch;
   overflow: hidden;
-  color: var(--ink-secondary);
-  font-weight: 570;
+  color: var(--muted);
+  font-weight: 400;
   text-overflow: ellipsis;
 }
 
 .crumb-sep {
-  color: color-mix(in srgb, var(--faint) 70%, transparent);
+  color: var(--faint);
 }
 
+/* The mock's `.live` chip: a jade capsule with a pulsing dot, beside the title. */
 .head-activity {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   overflow: hidden;
+  margin-left: 4px;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--success) 22%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
   text-overflow: ellipsis;
+  text-transform: uppercase;
 }
 
+.head-activity::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
+/* Only a live run earns the pill: idle, done and failed turns fall back to the
+ * plain muted word so the chip keeps its meaning. */
+.head-activity.status-idle,
+.head-activity.status-stopped,
+.head-activity.status-error,
+.head-activity.status-failed {
+  border-color: var(--line);
+  background: transparent;
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.head-activity.status-idle::before,
+.head-activity.status-stopped::before,
+.head-activity.status-error::before,
+.head-activity.status-failed::before {
+  display: none;
+}
+
+/* The session title is the loudest thing in the bar, exactly as in the mock. */
 .main-title {
-  max-width: 100%;
-  margin: 3px 0 0;
+  max-width: 330px;
+  min-width: 0;
+  margin: 0;
   overflow: hidden;
   color: var(--text);
-  font-size: 14px;
-  font-weight: 660;
+  font-size: 12px;
+  font-weight: 500;
   line-height: 1.5;
-  letter-spacing: -0.33px;
+  letter-spacing: -0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -753,20 +1063,24 @@
 .header-buttons {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 6px;
   flex: 0 0 auto;
+  margin-left: auto;
 }
 
+/* The mock's `.ghost-chip`: a hairline capsule, mono micro-type, no fill. */
 .head-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  height: 31px;
-  padding: 0 10px;
-  border: 1px solid var(--head-line);
+  gap: 6px;
+  height: 26px;
+  max-width: 190px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
   border-radius: var(--radius);
-  color: var(--ink-secondary);
+  color: var(--muted);
+  font-family: var(--font-mono);
   font-size: 11px;
   white-space: nowrap;
   transition:
@@ -776,31 +1090,48 @@
 }
 
 .head-btn:hover:not(:disabled) {
-  background: var(--surface-hover);
+  background: var(--surface);
+  border-color: var(--line-strong);
   color: var(--text);
 }
 
+.head-btn svg {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+}
+
+/* The mock's `.icon-btn`: a square, fill-less button for the palette and the
+   inspector toggle. */
 .head-btn.head-icon {
-  width: 31px;
+  width: 26px;
   padding: 0;
+  border-color: transparent;
+  font-family: var(--font-ui);
+}
+
+.head-btn.head-icon:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: transparent;
 }
 
 /* The mock hands the Share slot to an accent button; ours copies the
    conversation, which is the equivalent real action. */
 .head-btn.accent-head {
-  border-color: var(--btn-accent-line);
-  background: var(--btn-accent-bg);
-  color: var(--btn-accent-text);
+  border-color: var(--accent-line);
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-family: var(--font-ui);
 }
 
 .head-btn.accent-head:hover:not(:disabled) {
-  border-color: var(--btn-accent-line);
-  background: var(--btn-accent-bg-hover);
-  color: var(--btn-accent-text);
+  border-color: var(--accent-line);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
 }
 
 .head-btn.accent-head:disabled {
-  border-color: var(--head-line);
+  border-color: var(--line);
   background: transparent;
   color: var(--faint);
   opacity: 1;
@@ -817,21 +1148,21 @@
   color: var(--accent);
 }
 
-/* The mock's theme button label uses the brighter `--text2`, not the header's
+/* The mock's theme button label uses the brighter `--text-2`, not the header's
    grey, so the active theme name reads as a value rather than a control. */
 .theme-header-btn {
   color: var(--text-secondary);
 }
 
 .theme-header-btn:hover:not(:disabled) {
-  border-color: var(--btn-accent-line);
+  border-color: var(--accent-line);
 }
 
 .header-divider {
   width: 1px;
-  height: 20px;
-  margin: 0 4px;
-  background: var(--line-strong);
+  height: 18px;
+  margin: 0 3px;
+  background: var(--line);
 }
 
 /* ---------- workspace tabs ---------- */
@@ -842,16 +1173,16 @@
   flex: 0 0 auto;
   height: var(--tabs-h);
   min-height: var(--tabs-h);
-  padding: 0 26px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--line);
-  gap: 26px;
+  gap: 14px;
 }
 
 .workspace-tabs {
   display: flex;
   align-items: stretch;
   flex: 0 1 auto;
-  gap: 26px;
+  gap: 2px;
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
@@ -861,21 +1192,23 @@
   display: none;
 }
 
+/* The mock's `.c-tab`: a text tab with a 2px accent rule under the active one. */
 .workspace-tab {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 1px;
-  color: var(--text-kicker);
-  font-size: 11px;
-  font-weight: 550;
+  gap: 6px;
+  height: 100%;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
   white-space: nowrap;
   transition: color var(--transition-fast);
 }
 
 .workspace-tab:hover {
-  color: var(--tab-hover);
+  color: var(--text-secondary);
 }
 
 .workspace-tab.is-active {
@@ -885,11 +1218,11 @@
 .workspace-tab.is-active::after {
   content: '';
   position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
   height: 2px;
-  border-radius: 3px 3px 0 0;
+  border-radius: 2px 2px 0 0;
   background: var(--accent);
 }
 
@@ -897,34 +1230,42 @@
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
+  color: var(--faint);
 }
 
+.workspace-tab.is-active .tab-icon {
+  color: var(--accent);
+}
+
+/* The mock's `.count`: a mono micro-pill, accent-tinted on the active tab. */
 .workspace-tab .tab-count {
   display: inline-flex;
   align-items: center;
-  height: 18px;
-  padding: 0 5px;
-  border: 1px solid var(--line-keycap);
-  border-radius: calc(var(--radius) - 5px);
-  background: color-mix(in srgb, var(--surface-hover) 70%, var(--line-strong));
-  color: var(--ink-secondary);
+  height: auto;
+  padding: 1px 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--muted);
   font-family: var(--font-mono);
-  font-size: var(--fs-micro);
-  line-height: 16px;
+  font-size: 9.5px;
+  line-height: 1.4;
   letter-spacing: 0;
 }
 
-.tab-fill {
-  flex: 1 1 auto;
+.workspace-tab.is-active .tab-count {
+  background: var(--accent-bg);
+  color: var(--accent);
 }
 
+/* The mock's `.c-tabs-meta`: what the model is doing, right-aligned in mono. */
 .tab-note {
   display: flex;
   align-items: center;
   align-self: center;
   gap: 6px;
-  margin: 0;
-  color: var(--text-subtle);
+  margin: 0 0 0 auto;
+  color: var(--faint);
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
   line-height: 1.3;
@@ -933,7 +1274,14 @@
 
 /* Idle/ready marker is the mock's circle-check, not a status dot. */
 .tab-note svg {
-  color: color-mix(in srgb, var(--success) 57%, var(--foot-ink));
+  width: 12px;
+  height: 12px;
+  color: var(--accent);
+}
+
+.tab-note .status-dot {
+  width: 6px;
+  height: 6px;
 }
 
 /* ---------- centre pane ---------- */
@@ -1342,10 +1690,9 @@
   }
 }
 
-/* The phone tier: the header gives up its second line and the tab strip gives up
- * its padding, because a 66 + 44 + 57px frame on a 956px screen left the
- * conversation 82% of the viewport and one tool card filled a third of what was
- * left. */
+/* A 52 + 38px frame keeps the conversation in view on the phone. The breadcrumb
+ * is now one line, so the title remains the header's primary label on every
+ * viewport. */
 @media (max-width: 640px) {
   :root {
     --header-h: 52px;
@@ -1370,10 +1717,16 @@
     width: 30px;
   }
 
-  /* The breadcrumb's project → sessions → activity line is a second row of
-   * chrome the title alone already answers on a phone. */
-  .breadcrumb {
+  /* The project and activity are secondary on a phone; the session title stays
+   * visible, rather than hiding the whole breadcrumb that now owns the title. */
+  .breadcrumb > strong,
+  .breadcrumb > .head-activity,
+  .breadcrumb > .crumb-sep {
     display: none;
+  }
+
+  .breadcrumb {
+    flex: 1 1 auto;
   }
 
   .main-title {

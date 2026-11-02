@@ -3,7 +3,7 @@
 
 use kc_core::paths::Workspace;
 use kc_core::{Error, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 struct GitRun {
     code: Option<i32>,
@@ -17,6 +17,9 @@ pub struct StatusReport {
     pub is_repo: bool,
     pub branch: Option<String>,
     pub entries: usize,
+    /// True when the workspace is a *subdirectory* of the repository, so the
+    /// report is confined to it and the enclosing repository is bigger.
+    pub confined: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -245,43 +248,177 @@ pub fn diff_args(staged: bool, base: Option<&str>, pathspec: Option<&str>) -> Ve
     args
 }
 
-fn dir_for(ws: &Workspace, path: Option<&str>) -> Result<PathBuf> {
-    let abs = ws.resolve_existing(path.unwrap_or("."))?;
-    if abs.is_dir() {
-        Ok(abs)
-    } else {
-        Ok(abs
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| ws.root().to_path_buf()))
+/// How a read-only git command is confined to the workspace.
+///
+/// # The policy: confine to the workspace, never report the enclosing repository
+///
+/// git discovers a repository by walking *up* from its working directory, so a
+/// workspace that is a subdirectory of a larger repository (a checkout under a
+/// home-directory repo, a package inside a monorepo, `~/dotfiles/editors`) used
+/// to report that whole repository: `git_status` listed sibling paths outside the
+/// workspace and `git_diff` printed their contents. Both tools are read-only and
+/// auto-approved in every mode, so the disclosure happened with no approval
+/// prompt, and it contradicted the file tools, which refuse the same paths.
+///
+/// Two policies fix that; this module takes the second.
+///
+/// (a) *Refuse* when `git rev-parse --show-toplevel` is not the workspace root.
+///     Simple, but it breaks an ordinary layout - a project checked out inside a
+///     bigger repository is not an attack - and it removes `git_status` outright
+///     for it while `run_command` still has the whole filesystem.
+/// (b) *Confine*: run git from the workspace root with an explicit pathspec.
+///     Keeps the tool useful and makes it agree with the file tools.
+///
+/// Confinement is built from three pieces, because no single git flag covers both
+/// tools:
+///
+/// * an explicit pathspec (`.` for the whole workspace, or the workspace-relative
+///   `path` argument) after `--`, which is what actually stops git at the
+///   workspace boundary;
+/// * `GIT_LITERAL_PATHSPECS=1` ([`literal_pathspec_env`]), so a workspace file
+///   named `a[1].txt` or `*.rs` cannot turn the pathspec into a glob that matches
+///   something else;
+/// * path re-basing. `git diff` accepts `--relative`, which rewrites the `a/…`
+///   `b/…` headers against the working directory (the workspace root). `git
+///   status` has **no** `--relative` - porcelain paths are always relative to the
+///   repository root - so its paths are re-based by stripping the
+///   `git rev-parse --show-prefix` of the workspace root.
+struct Scope {
+    /// The resolved `path` argument, relative to the workspace root, for messages.
+    target_rel: String,
+    /// The pathspec handed to git: workspace-relative, `.` for the whole workspace.
+    pathspec: String,
+    /// `git rev-parse --show-prefix` for the workspace root: empty at the top of
+    /// the repository, `inner/` when the workspace is a subdirectory of it.
+    prefix: String,
+    /// `git rev-parse --show-toplevel`, only used to explain the confinement.
+    toplevel: String,
+}
+
+impl Scope {
+    /// Whether the workspace is a strict subdirectory of its repository, i.e.
+    /// whether anything had to be confined away.
+    fn confined(&self) -> bool {
+        !self.prefix.is_empty()
+    }
+
+    /// Re-base a repository-relative path on the workspace root.
+    ///
+    /// `None` means the path is outside the workspace. The pathspec makes that
+    /// impossible for the paths git reports, with one exception: the *source* side
+    /// of a rename that moved a file into the workspace from elsewhere in the
+    /// enclosing repository.
+    fn rebase(&self, repo_path: &str) -> Option<String> {
+        if self.prefix.is_empty() {
+            return Some(repo_path.to_string());
+        }
+        let rel = repo_path.strip_prefix(self.prefix.as_str())?;
+        if rel.is_empty() {
+            Some(".".to_string())
+        } else {
+            Some(rel.to_string())
+        }
     }
 }
 
-/// `git status --porcelain=v1 -b`, summarised with the branch name.
-pub async fn status(ws: &Workspace, path: Option<&str>) -> Result<StatusReport> {
-    let dir = dir_for(ws, path)?;
-    let args: Vec<String> = ["status", "--porcelain=v1", "-b"]
+/// Environment that stops git from reading a pathspec as a glob.
+///
+/// Deliberately *not* part of [`safe_env`], which `kc-server` shares: this is the
+/// tools' confinement policy, and keeping it here means the HTTP routes keep the
+/// argv they had.
+fn literal_pathspec_env() -> [(String, String); 1] {
+    [("GIT_LITERAL_PATHSPECS".to_string(), "1".to_string())]
+}
+
+/// Where the workspace sits inside its repository.
+///
+/// `Ok(None)` is "not a git repository" - the caller reports `is_repo: false`
+/// exactly as before, so the answer for a non-repository workspace is unchanged.
+async fn repo_scope(ws: &Workspace, path: Option<&str>) -> Result<Option<Scope>> {
+    let target = ws.resolve_existing(path.unwrap_or("."))?;
+    // A file argument selects the file; a directory (or the default `.`) selects
+    // the subtree, so the pathspec is the argument itself either way.
+    let target_rel = ws.relative(&target);
+    let root = ws.root().to_path_buf();
+    let args: Vec<String> = ["rev-parse", "--show-toplevel", "--show-prefix"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let run = git(&dir, &args).await?;
-
+    let run = git(&root, &args).await?;
     if is_not_a_repo(&run) {
-        let rel = ws.relative(&dir);
+        return Ok(None);
+    }
+    if run.code != Some(0) {
+        // A bare repository, for instance: `status`/`diff` cannot work in a work
+        // tree that does not exist, and this is the process that finds out.
+        return Err(Error::Tool(format!(
+            "`git rev-parse` failed in `{}` (exit {}): {}",
+            ws.relative(&root),
+            run.code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into()),
+            if run.stderr.is_empty() {
+                "no output".to_string()
+            } else {
+                run.stderr
+            }
+        )));
+    }
+    let mut lines = run.stdout.lines();
+    let toplevel = lines.next().unwrap_or_default().to_string();
+    let prefix = lines.next().unwrap_or_default().to_string();
+    Ok(Some(Scope {
+        target_rel: target_rel.clone(),
+        pathspec: target_rel,
+        prefix,
+        toplevel,
+    }))
+}
+
+/// `git status --porcelain=v1 -b`, summarised with the branch name and confined
+/// to the workspace (see [`Scope`]).
+pub async fn status(ws: &Workspace, path: Option<&str>) -> Result<StatusReport> {
+    let Some(scope) = repo_scope(ws, path).await? else {
         return Ok(StatusReport {
             is_repo: false,
             branch: None,
             entries: 0,
+            confined: false,
             text: format!(
-                "is_repo: false — `{rel}` is not inside a git repository (or git is not initialised). \
-                 No branch or changes are available."
+                "is_repo: false — `{}` is not inside a git repository (or git is not initialised). \
+                 No branch or changes are available.",
+                ws.relative(&ws.resolve_existing(path.unwrap_or("."))?)
+            ),
+        });
+    };
+    // `-z` for machine parsing: paths arrive unquoted and NUL-terminated, so a
+    // name containing `"`, `\` or a newline cannot be mis-parsed, and the
+    // workspace prefix can be stripped from the raw name.
+    let mut args: Vec<String> = ["status", "--porcelain=v1", "-b", "-z"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    args.push("--".to_string());
+    args.push(scope.pathspec.clone());
+    let run = git_with_env(ws.root(), &args, &literal_pathspec_env()).await?;
+
+    if is_not_a_repo(&run) {
+        return Ok(StatusReport {
+            is_repo: false,
+            branch: None,
+            entries: 0,
+            confined: false,
+            text: format!(
+                "is_repo: false — `{}` is not inside a git repository (or git is not initialised). \
+                 No branch or changes are available.",
+                scope.target_rel
             ),
         });
     }
     if run.code != Some(0) {
         return Err(Error::Tool(format!(
             "`git status` failed in `{}` (exit {}): {}",
-            ws.relative(&dir),
+            scope.target_rel,
             run.code
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "signal".into()),
@@ -293,22 +430,23 @@ pub async fn status(ws: &Workspace, path: Option<&str>) -> Result<StatusReport> 
         )));
     }
 
-    let mut branch: Option<String> = None;
-    let mut entries: Vec<String> = Vec::new();
-    for line in run.stdout.lines() {
-        if let Some(rest) = line.strip_prefix("## ") {
-            branch = Some(parse_branch(rest));
-            continue;
-        }
-        if !line.trim().is_empty() {
-            entries.push(line.to_string());
-        }
-    }
+    let (branch, entries) = parse_status_records(&run.stdout, &scope);
 
     let mut text = format!(
         "is_repo: true\nbranch: {}",
         branch.as_deref().unwrap_or("(unknown)")
     );
+    if scope.confined() {
+        // Say it explicitly. The workspace root is an ancestor of nothing here:
+        // the enclosing repository is the workspace's *parent*, and a model that
+        // is told only "working tree clean" would wrongly conclude that the
+        // repository has no other files.
+        text.push_str(&format!(
+            "\n[confined to this workspace, which is a subdirectory of the git repository at {}: \
+             changes outside it are not listed and their paths are not revealed]",
+            scope.toplevel
+        ));
+    }
     if entries.is_empty() {
         text.push_str("\nworking tree clean");
     } else {
@@ -324,7 +462,49 @@ pub async fn status(ws: &Workspace, path: Option<&str>) -> Result<StatusReport> 
         is_repo: true,
         branch,
         entries: entries.len(),
+        confined: scope.confined(),
     })
+}
+
+/// Parse `git status --porcelain=v1 -b -z` into the branch and one display line
+/// per change, with every path re-based on the workspace root.
+///
+/// Each record is `<XY> <path>`; a rename or copy (`R`/`C`) is followed by the
+/// original path as its own record. The rendered line keeps the shape the
+/// non-`-z` output had (`R  old -> new`), so callers and the model see the same
+/// thing, only workspace-relative.
+fn parse_status_records(stdout: &str, scope: &Scope) -> (Option<String>, Vec<String>) {
+    let mut branch: Option<String> = None;
+    let mut entries: Vec<String> = Vec::new();
+    let mut records = stdout.split('\0').filter(|record| !record.is_empty());
+    while let Some(record) = records.next() {
+        if let Some(rest) = record.strip_prefix("## ") {
+            branch = Some(parse_branch(rest));
+            continue;
+        }
+        let Some(code) = record.get(..2) else {
+            continue;
+        };
+        let path = record.get(3..).unwrap_or_default();
+        let rename = code.contains('R') || code.contains('C');
+        // Consume the origin record even when the new path is outside the
+        // workspace, so it cannot be mistaken for the next entry.
+        let origin = if rename { records.next() } else { None };
+        let Some(path) = scope.rebase(path) else {
+            continue;
+        };
+        match origin {
+            // A rename whose source is outside the workspace cannot be described
+            // without naming an outside path, so it is reported as the addition
+            // the confined diff sees as well.
+            Some(origin) => match scope.rebase(origin) {
+                Some(origin) => entries.push(format!("{code} {origin} -> {path}")),
+                None => entries.push(format!("{code} {path}")),
+            },
+            None => entries.push(format!("{code} {path}")),
+        }
+    }
+    (branch, entries)
 }
 
 fn is_not_a_repo(run: &GitRun) -> bool {
@@ -343,7 +523,8 @@ fn parse_branch(header: &str) -> String {
     name.trim().to_string()
 }
 
-/// `git diff [--staged] [base] -- <path>`.
+/// `git diff [--staged] [base] --relative -- <path>`, confined to the workspace
+/// (see [`Scope`]).
 pub async fn diff(
     ws: &Workspace,
     path: Option<&str>,
@@ -366,34 +547,38 @@ pub async fn diff(
         None => None,
     };
 
-    // Resolve the working directory and optional pathspec together so a file
-    // argument works without shell quoting.
-    let (dir, pathspec) = match path {
-        Some(p) => {
-            let abs = ws.resolve_existing(p)?;
-            if abs.is_dir() {
-                (abs, None)
-            } else {
-                let dir = ws.root().to_path_buf();
-                let rel = ws.relative(&abs);
-                (dir, Some(rel))
-            }
-        }
-        None => (ws.root().to_path_buf(), None),
+    let Some(scope) = repo_scope(ws, path).await? else {
+        let rel = ws.relative(&ws.resolve_existing(path.unwrap_or("."))?);
+        return Ok(DiffReport {
+            text: format!(
+                "is_repo: false — `{rel}` is not inside a git repository (or git is not initialised)."
+            ),
+            empty: true,
+        });
     };
+    // Running from the workspace root (never from the `path` argument's own
+    // directory) is what keeps `--relative` honest: the patch headers are
+    // re-based on the workspace root, and the pathspec - not the working
+    // directory - decides what is inside.
+    let dir = ws.root().to_path_buf();
+    // `--relative` for the diff: unlike `status`, `diff` accepts it, and it
+    // rewrites the `a/…`/`b/…` headers against the workspace root so a patch never
+    // names a path above it.
+    let mut args = diff_args(staged, base, Some(&scope.pathspec));
+    args.insert(1, "--relative".to_string());
 
     // `git diff` runs `filter.<driver>.clean`/`.process` to build the
     // working-tree side of the patch, so the repository's own filter drivers
     // have to be neutralised before the diff runs.
-    let filter_overrides = filter_env(&dir).await?;
-    let args = diff_args(staged, base, pathspec.as_deref());
+    let mut overrides = filter_env(&dir).await?;
+    overrides.extend(literal_pathspec_env());
 
-    let run = git_with_env(&dir, &args, &filter_overrides).await?;
+    let run = git_with_env(&dir, &args, &overrides).await?;
     if is_not_a_repo(&run) {
-        let rel = ws.relative(&dir);
         return Ok(DiffReport {
             text: format!(
-                "is_repo: false — `{rel}` is not inside a git repository (or git is not initialised)."
+                "is_repo: false — `{}` is not inside a git repository (or git is not initialised).",
+                scope.target_rel
             ),
             empty: true,
         });
@@ -404,7 +589,7 @@ pub async fn diff(
             return Err(Error::Tool(format!(
                 "`git {}` failed in `{}` (exit {}): {}",
                 args.join(" "),
-                ws.relative(&dir),
+                scope.target_rel,
                 other
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "signal".into()),
@@ -418,7 +603,10 @@ pub async fn diff(
     }
 
     if run.stdout.trim().is_empty() {
-        let scope = match (staged, base, pathspec.as_deref()) {
+        // `path: null` means "the whole workspace"; `.` reads better in a message
+        // than the pathspec does, and it says what was searched.
+        let where_ = (scope.target_rel != ".").then_some(scope.target_rel.as_str());
+        let text = match (staged, base, where_) {
             (true, _, Some(p)) => format!("No staged changes for `{p}`"),
             (true, _, None) => "No staged changes".to_string(),
             (false, Some(b), Some(p)) => format!("No changes for `{p}` against `{b}`"),
@@ -428,22 +616,31 @@ pub async fn diff(
                 "No unstaged changes (working tree matches the index)".to_string()
             }
         };
-        return Ok(DiffReport {
-            text: scope,
-            empty: true,
-        });
+        return Ok(DiffReport { text, empty: true });
     }
 
-    Ok(DiffReport {
-        text: run.stdout,
-        empty: false,
-    })
+    let mut text = run.stdout;
+    if scope.confined() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if scope.confined() {
+        // The patch is already re-based; the note stops a reader concluding that
+        // this is the repository's whole diff.
+        text.push_str(&format!(
+            "[confined to this workspace, a subdirectory of the git repository at {}; the diff is \
+             relative to the workspace root and changes outside it are not shown]\n",
+            scope.toplevel
+        ));
+    }
+
+    Ok(DiffReport { text, empty: false })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -621,6 +818,50 @@ mod tests {
         assert!(!conv_marker.exists(), "`git diff` ran a textconv driver");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Porcelain `-z` records are re-based on the workspace root, and a rename is
+    /// rendered in the same `R  old -> new` shape the line-based output had.
+    #[test]
+    fn status_records_are_rebased_and_renames_are_rendered() {
+        let at_root = Scope {
+            target_rel: ".".into(),
+            pathspec: ".".into(),
+            prefix: String::new(),
+            toplevel: "/repo".into(),
+        };
+        let (branch, entries) =
+            parse_status_records("## main\0 M a.txt\0R  b.txt\0a.txt\0?? dir/\0", &at_root);
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert_eq!(
+            entries,
+            vec![" M a.txt", "R  a.txt -> b.txt", "?? dir/"],
+            "at the top of the repository the paths are already workspace-relative"
+        );
+        assert!(!at_root.confined());
+
+        // The workspace is `inner/` inside the repository: everything is stripped.
+        let nested = Scope {
+            target_rel: ".".into(),
+            pathspec: ".".into(),
+            prefix: "inner/".into(),
+            toplevel: "/repo".into(),
+        };
+        let (_, entries) = parse_status_records(
+            "## main\0 M inner/a.txt\0R  inner/b.txt\0inner/a.txt\0",
+            &nested,
+        );
+        assert_eq!(entries, vec![" M a.txt", "R  a.txt -> b.txt"]);
+        assert!(nested.confined());
+
+        // A rename whose source is outside the workspace cannot be described without
+        // naming an outside path, so only the visible side is reported - and the
+        // origin record is consumed, not mistaken for the next entry.
+        let (_, entries) = parse_status_records(
+            "## main\0R  inner/moved.txt\0../outside.txt\0 M inner/b.txt\0",
+            &nested,
+        );
+        assert_eq!(entries, vec!["R  moved.txt", " M b.txt"]);
     }
 
     #[test]

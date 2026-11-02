@@ -28,11 +28,11 @@
   width: 100%;
   max-width: var(--content-max);
   margin: 0 auto;
-  border: 1px solid var(--line-input);
-  /* `--radius-input` is pinned to the mock's 12px and is deliberately immune to
-   * Theme Studio rounding: the mock's rounding override list never reshapes the
-   * composer. */
-  border-radius: var(--radius-input);
+  border: 1px solid var(--line-strong);
+  /* The mock's 15px, held locally: Theme Studio's rounding override list never
+   * reshapes the composer, and this file owns the value. */
+  --radius-composer: 15px;
+  border-radius: var(--radius-composer);
   /* Translucent so the transcript stays readable underneath. The fill keeps
    * `--surface-input`'s own contrast in light and dark themes; `--dock-opacity`
    * is the knob the scrolled state turns down (see below). */
@@ -90,45 +90,11 @@
     visibility 0s linear var(--transition);
 }
 
-/* ---------- input row ---------- */
+/* ---------- input ---------- */
 
-.compose-top {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 9px 11px 0 12px;
-}
-
-.compose-plus {
-  display: grid;
-  flex: 0 0 auto;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  margin-top: 0;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--icon-quiet);
-  cursor: pointer;
-  transition:
-    background-color var(--transition-fast),
-    color var(--transition-fast);
-}
-
-/* The mock says `color:white`; `--text` is its warm near-white and stays legible
- * in light mode, where a literal white would vanish. */
-.compose-plus:hover:not(:disabled) {
-  background: var(--surface-plus-hover);
-  color: var(--text);
-}
-
-.compose-plus:disabled {
-  color: var(--faint);
-  cursor: not-allowed;
-}
-
+/* The mock's `.composer textarea`: full-bleed inside the box, 13px/1.55, and
+ * 12px 13px 3px of padding — the box's own top inset comes from here, there is
+ * no separate header row. The attach control lives in the bar below. */
 .compose-field {
   flex: 1 1 auto;
   min-width: 0;
@@ -137,23 +103,20 @@
 .composer-input {
   display: block;
   width: 100%;
-  /* One line at rest — the dock should not reserve a paragraph's worth of empty
-   * space — and it grows with the draft (Composer.tsx measures scrollHeight). */
-  min-height: 26px;
-  /* The mock caps the textarea at 150px. `--compose-input-max` is what the
-   * component actually reads, so the phone tier can shrink it without a magic
-   * number in two places. */
-  --compose-input-max: 150px;
+  /* Grows with the draft (Composer.tsx measures scrollHeight); the cap is a
+   * custom property so the phone tier can lower it without a second constant. */
+  --compose-input-max: 170px;
+  min-height: 35px;
   max-height: var(--compose-input-max);
-  padding: 1px 0 0;
+  padding: 12px 13px 3px;
   overflow-y: auto;
   border: 0;
   background: transparent;
-  color: var(--input-ink);
+  color: var(--text);
   font-family: var(--font-ui);
   /* Fixed, like the mock — density no longer stretches the input's type. */
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.55;
   resize: none;
 }
 
@@ -447,38 +410,63 @@
   outline-offset: 0;
 }
 
-/* Same gold as Send: it is the primary action, just aimed at the running turn. */
-.compose-bottom .button-queue {
-  min-width: 62px;
-}
-
 /* ---------- bottom row ---------- */
 
+/* The mock's `.composer-bar`: one 39px row holding the attach control and both
+ * pills on the left, context meter, key hint and the round Send on the right. */
 .compose-bottom {
   display: flex;
   align-items: center;
-  gap: 6px;
-  min-height: 34px;
-  padding: 0 9px 7px 11px;
+  gap: 4px;
+  min-height: 39px;
+  padding: 4px 7px 7px 8px;
 }
 
-/* The mock separates the model and reasoning pills with a 1x16 hairline. Both
- * pills live inside <ModelControls/>, so the divider is drawn as the first flex
- * child of the reasoning pill instead of reaching into that component. */
-.compose-bottom .reasoning-selector-button::before {
-  content: '';
-  align-self: center;
-  width: 1px;
-  height: 16px;
-  margin-right: 1px;
-  background: var(--line-hair);
+/* `.cbar-left`: a tight cluster that clips before the right-hand controls. */
+.compose-bar-left {
+  gap: 3px;
+  overflow: hidden;
+}
+
+/* The mock's 24px attach button, hoisted out of the old header row. */
+.compose-plus {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.compose-plus:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.compose-plus:disabled {
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+/* The mock has no pill divider in this bar; the 3px gap separates the pills. */
+.compose-bottom .reasoning-selector-button::before,
+.compose-bottom .reasoning-selector::before {
+  display: none;
 }
 
 .composer-controls {
   display: flex;
   flex: 0 1 auto;
   align-items: center;
-  gap: 6px;
+  gap: 3px;
   min-width: 0;
   padding: 0;
 }
@@ -487,27 +475,27 @@
  * bottom row reads as one line of quiet controls next to the Send button.
  * `.open` is identical to `:hover` in the mock — no accent outline. */
 .compose-bottom .model-switcher-button {
-  gap: 7px;
+  gap: 5px;
   max-width: 230px;
-  height: 26px;
-  padding: 0 8px;
-  border-color: transparent;
+  height: 23px;
+  padding: 0 7px;
+  border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-body);
+  color: var(--muted);
   font-size: 10.5px;
-  font-weight: 550;
+  font-weight: 500;
 }
 
 .compose-bottom .model-switcher-button:hover,
 .compose-bottom .model-switcher-button[aria-expanded='true'] {
-  border-color: transparent;
-  background: var(--surface-hover-strong);
-  color: var(--row-accent-ink);
+  border-color: var(--line);
+  background: var(--surface-2);
+  color: var(--text-2);
 }
 
 .compose-bottom .model-switcher-button .down {
-  color: var(--icon-pill-down);
+  color: var(--faint);
 }
 
 .compose-bottom .model-switcher-text {
@@ -517,13 +505,19 @@
   min-width: 0;
 }
 
+/* The mock's `.pill-btn` glyphs are 11px. */
+.compose-bottom .model-switcher-text > svg {
+  width: 11px;
+  height: 11px;
+}
+
 .compose-bottom .model-switcher-model {
   max-width: 145px;
   overflow: hidden;
   color: inherit;
   font-family: var(--font-ui);
   font-size: 10.5px;
-  font-weight: 550;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -558,47 +552,71 @@
   flex: 1;
 }
 
-/* The mock's `.send`: no border, the darker gold, the arrow glyph. */
+/* The mock's `.send`: a 28×28 round square holding only the up-arrow. The
+ * label is sr-only — the accessible name still says "Send message". */
 .button-send {
-  gap: 7px;
-  min-width: 62px;
-  height: 29px;
+  flex: 0 0 auto;
+  gap: 0;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
   padding: 0;
   border: 0;
-  border-radius: 7px;
-  background: var(--gold-send);
-  color: var(--on-gold);
-  font-size: 11px;
-  font-weight: 730;
-  letter-spacing: 0;
+  border-radius: 8px;
+  /* The deep accent fill, not `--accent` itself: in light mode the raw accent is
+   * an ink (4.4:1 on white) and would fail as a button with light text on it. */
+  background: var(--accent-fill);
+  color: var(--on-accent);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 25%);
+  font-size: 0;
+  transition:
+    background-color var(--transition-fast),
+    transform var(--transition-fast),
+    box-shadow var(--transition-fast);
 }
 
 .button-send:hover:not(:disabled) {
   border-color: transparent;
-  background: var(--gold-send-hover);
+  background: color-mix(in srgb, var(--accent-fill) 84%, var(--text));
+  transform: translateY(-1px);
 }
 
-/* Disabled keeps the gold and only drops opacity — an empty composer is the
- * default first paint, so repainting it grey was the most visible delta. */
+/* The mock's `.send.off`: an empty box paints flat `surface-3` with a faint
+ * glyph rather than a dimmed accent. */
 .button-send:disabled {
   border-color: transparent;
-  background: var(--gold-send);
-  color: var(--on-gold);
-  opacity: 0.4;
+  background: var(--surface-3);
+  color: var(--faint);
+  box-shadow: none;
+  opacity: 1;
+  transform: none;
 }
 
 .button-send svg {
-  stroke-width: 2.25;
+  stroke-width: 2.2;
 }
 
+/* Stop keeps the same 28px square, in the mock's rose "stop" dressing. */
 .compose-bottom .button-stop {
-  gap: 7px;
-  min-width: 62px;
-  height: 29px;
-  padding: 0 11px;
-  border-radius: 7px;
+  flex: 0 0 auto;
+  gap: 0;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+
+.compose-bottom .button-queue {
+  min-width: 0;
+  width: auto;
+  height: 28px;
+  padding: 0 9px;
   font-size: 11px;
-  font-weight: 730;
+  font-weight: 700;
 }
 
 /* Our character counter sits in the mock's context pill slot. */
@@ -622,29 +640,30 @@
 
 /* ---------- context window pill ---------- */
 
-/* Sits between the spacer and Send: how full the context window is, as a
- * percentage over a hairline meter. Both halves are the provider's own numbers
- * (see `contextUsage`), so the pill is absent rather than approximate until the
- * session's first model call reports usage. */
+/* Sits between the spacer and Send, like the mock's `.ctx` control: how full the
+ * context window is, as a percentage over a hairline meter. Both halves are the
+ * provider's own numbers (see `contextUsage`), so the pill is absent rather than
+ * approximate until the session's first model call reports usage. */
 .context-pill {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   height: 26px;
-  padding: 0 8px;
-  border-radius: 6px;
-  color: var(--text-body);
+  padding: 0 3px;
+  border-radius: 5px;
+  color: var(--faint);
   font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 550;
+  font-size: 9.5px;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   cursor: default;
 }
 
 .context-pill:hover {
-  background: var(--surface-hover-strong);
+  background: var(--surface-2);
+  color: var(--text-2);
 }
 
 /* A 3px track, 34px long: a gauge, not a bar chart. The fill width is set inline
@@ -770,18 +789,21 @@
 
 /* ---------- footnote: status + hints, approvals ---------- */
 
+/* The mock's `.composer-foot`: mono 9.5px, faint, 6px above and 4px of side
+ * inset. `code`/`kbd` inside it use the muted ink. */
 .compose-foot {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 4px 12px;
+  gap: 6px 10px;
   width: 100%;
   max-width: var(--content-max);
   margin: 6px auto 0;
-  padding: 0 2px;
-  color: var(--foot-ink);
-  font-size: 10px;
+  padding: 6px 4px 0;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
   line-height: 1.5;
   /* Floating chrome: clickable, but the row itself must not swallow a wheel or
    * drag over the transcript behind it. */
@@ -806,8 +828,8 @@
   gap: 5px;
   min-height: 15px;
   min-width: 0;
-  color: var(--foot-ink);
-  font-size: 10px;
+  color: var(--faint);
+  font-size: 9.5px;
   text-align: left;
 }
 
@@ -832,13 +854,14 @@
 /* Plain text, no keycaps: the mock's foot reads `<strong>Ctrl Enter</strong> to
  * send · <strong>@</strong> mention files`. */
 .composer-hint {
-  color: var(--foot-ink);
-  font-size: 10px;
+  color: var(--faint);
+  font-size: 9.5px;
   white-space: normal;
 }
 
+/* The mock: `.composer-foot code { color: var(--muted) }`. */
 .composer-hint strong {
-  color: var(--foot-strong);
+  color: var(--muted);
   font-weight: 540;
 }
 
@@ -850,8 +873,8 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: var(--foot-ink);
-  font-size: 10px;
+  color: var(--faint);
+  font-size: 9.5px;
   white-space: nowrap;
 }
 
@@ -1199,12 +1222,11 @@
     max-width: 78px;
   }
 
-  /* `flex-shrink: 0` on the buttons: they must not be squeezed below their label,
-   * and `min-width` keeps "Send"/"Stop" legible rather than wrapping inside. */
+  /* `flex-shrink: 0` on the buttons: the 28px send square must never be squeezed. */
   .compose-bottom .button-send,
   .compose-bottom .button-stop {
     flex: 0 0 auto;
-    min-width: 54px;
+    min-width: 28px;
   }
 
   .context-pill {

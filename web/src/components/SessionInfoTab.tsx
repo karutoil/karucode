@@ -412,7 +412,11 @@ function RecentRuns({ info }: { info: SessionInfo }): JSX.Element | null {
       <ul class="si-run-list">
         {runs.map((run) => {
           const duration =
-            run.finished_at !== null ? formatDuration(run.finished_at - run.started_at) : null;
+            // `!= null`, not `!== null`: `finished_at` is `skip_serializing_if =
+            // "Option::is_none"` in Rust, so a run still in flight sends no key at
+            // all. `undefined !== null` was true, and the row then rendered
+            // `NaNms` from `undefined - started_at`.
+            run.finished_at != null ? formatDuration(run.finished_at - run.started_at) : null;
           return (
             <li key={run.id} class="si-run" data-status={run.status}>
               <span class="si-run-status">{run.status.replace('_', ' ')}</span>

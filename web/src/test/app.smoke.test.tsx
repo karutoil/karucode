@@ -129,6 +129,57 @@ describe('App smoke render', () => {
     expect(screen.getByLabelText('Access token')).not.toBeNull();
   });
 });
+describe('App crash containment', () => {
+  beforeEach(() => {
+    resetAppState();
+  });
+
+  afterEach(() => {
+    resetAppState();
+    vi.unstubAllGlobals();
+    vi.doUnmock('../components/Inspector');
+    vi.resetModules();
+  });
+
+  it('keeps the rails, the transcript and the composer when the inspector throws', async () => {
+    // A panel crash used to take the whole document down: there were two
+    // boundaries in the app (the conversation and a boot fallback), so anything
+    // that threw inside the inspector, the rails or an overlay unmounted the
+    // entire tree and left a blank page. This is the assertion that the shell
+    // survives one panel dying - it is not a rendering test of the inspector.
+    vi.resetModules();
+    vi.doMock('../components/Inspector', () => ({
+      Inspector: () => {
+        throw new Error('plugin panel payload was not JSON');
+      },
+    }));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { App: MockedApp } = await import('../app');
+    installFetch();
+
+    render(<MockedApp />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Fix login bug').length).toBeGreaterThan(0);
+    });
+    // The transcript comes from the session detail read, which lands after the
+    // list; wait for it so the assertions below are about containment rather than
+    // about a request that had not finished.
+    await waitFor(() => {
+      expect(screen.getByText('The login handler is unfinished.')).not.toBeNull();
+    });
+
+    // The crash card names the panel...
+    expect(screen.getByText('The inspector could not be rendered.')).not.toBeNull();
+    expect(screen.getByText('plugin panel payload was not JSON')).not.toBeNull();
+    // ...and everything else is still on screen and still usable.
+    expect(screen.getByLabelText('Message karucode')).not.toBeNull();
+    expect(screen.getByRole('main', { name: 'Workspace' })).not.toBeNull();
+    expect(screen.getByLabelText('Find a session')).not.toBeNull();
+    errorSpy.mockRestore();
+  });
+});
+
 /** Preact flushes effects in an animation frame, which jsdom defers; let it run. */
 async function flushEffects(): Promise<void> {
   await act(async () => {

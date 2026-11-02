@@ -170,13 +170,25 @@ describe('Composer', () => {
       expect(foot.parentElement).toBe(form.parentElement);
     });
 
-    it('draws the mock arrow glyph on Send', () => {
+    it('draws the mock up-arrow glyph in the round Send button', () => {
       const { textarea } = renderComposer();
       fireEvent.input(textarea, { target: { value: 'hello' } });
       const send = screen.getByRole('button', { name: /Send message/ });
+      // Mock: `#i-arrow-up` — a bare up-arrow; the label is the accessible name,
+      // not visible text.
       const path = send.querySelector('svg path');
-      expect(path?.getAttribute('d')).toBe('M5 12h14m-6-6 6 6-6 6');
-      expect(send.querySelector('svg')?.getAttribute('width')).toBe('15');
+      expect(path?.getAttribute('d')).toBe('M12 19V5M6 11l6-6 6 6');
+      expect(send.querySelector('svg')?.getAttribute('width')).toBe('14');
+      expect(send.textContent).toBe('');
+    });
+
+    it('keeps the attach control in the bottom bar, like the mock', () => {
+      const { container } = renderComposer();
+      const bar = container.querySelector('.compose-bottom') as HTMLElement;
+      const attach = screen.getByRole('button', { name: 'Attach files' });
+      expect(bar.contains(attach)).toBe(true);
+      // The mock's textarea is the first thing in the box; there is no header row.
+      expect(container.querySelector('.compose-top')).toBeNull();
     });
 
     it('reads the approval policy into the right-hand footnote zone', () => {

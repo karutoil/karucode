@@ -30,19 +30,32 @@ jobs:
 
   # A tracked file that imports an untracked one produces a tree that does not
   # compile from a clean clone. That happened once; this job makes it loud.
+  #
+  # `git status` cannot see it: a fresh `actions/checkout` has no untracked
+  # files, so the old version of this job could never fail. The failure mode is
+  # only visible from a *working* tree, which is what a contributor has and CI
+  # does not. So the gate builds the tree twice instead: once as checked out
+  # (catches a repo that is red for whatever reason) and once after deleting
+  # every file git does not know about (catches a tracked file that needs an
+  # untracked one). The second build is the one the old job was reaching for.
   tracked:
     name: no untracked sources
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: fail on untracked files
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build exactly what git tracks
         run: |
-          untracked=$(git status --porcelain --untracked-files=all | grep '^??' || true)
-          if [ -n "$untracked" ]; then
-            echo "::error::untracked files present; a clean clone would not build:"
-            echo "$untracked"
-            exit 1
-          fi
+          # Remove anything not in the index (generated bundles, stray files) so
+          # the next build sees only committed sources. Keep the two directories
+          # that are pure cache/machine output; deleting them would only make the
+          # job slower, not stricter (`target` is a build cache, `node_modules`
+          # is restored from package-lock.json which *is* tracked).
+          git clean -xdfq -e target -e web/node_modules
+          # A tracked file that only compiled because of something untracked now
+          # fails here, by name.
+          cargo check --locked --workspace --all-targets
 
   clippy:
     name: clippy
@@ -185,7 +198,12 @@ jobs:
   release:
     name: release artifacts
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [fmt, clippy, test, docs, web]
+    # Every gate that can fail a normal run must also gate a release. The e2e
+    # job is deliberately excluded: it boots the binary as a real server, which
+    # makes it the slowest job by far, and it is already required on the commit
+    # the tag points at. Everything that can silently ship a broken or
+    # unaudited artifact is listed here.
+    needs: [fmt, tracked, clippy, test, test-release, readme, packaging, docs, web, audit, msrv]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -198,8 +216,19 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - uses: Swatinem/rust-cache@v2
+      # The artifact is named from the tag, but the binary reports
+      # CARGO_PKG_VERSION. They must agree or `karucode --version` contradicts
+      # the tarball it came in and update.sh's "already up to date" logic lies.
+      - name: tag matches the workspace version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match [workspace.package] version ${manifest}; bump Cargo.toml or retag"
+            exit 1
+          fi
       - run: cd web && npm ci && npm run build
-      - run: cargo build --release -p kc-server -p example-hello
+      - run: cargo build --release --locked -p kc-server -p example-hello
       - name: package
         run: |
           set -eu

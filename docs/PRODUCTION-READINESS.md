@@ -23,15 +23,25 @@ findings cannot be audited.
 | Check | Then | Now |
 | --- | --- | --- |
 | `cargo check --workspace --all-targets` | pass | pass |
-| `cargo test --workspace` | 580 passed, 0 failed | **721 passed, 0 failed** |
+| `cargo test --workspace` | 580 passed, 0 failed | **1171 passed, 0 failed** |
+| `cargo test --release -p kc-runtime -p kc-tools` | — | **309 passed, 0 failed** |
 | `cargo clippy --workspace --all-targets -- -D warnings` | pass | pass |
 | `cargo fmt --all -- --check` | **FAIL** — 33 diffs across 10 files | pass |
-| `npx vitest run` (web) | 423 passed, 33 files | **446 passed, 36 files** |
+| `cargo deny check` | not run | **pass** — advisories, bans, licenses, sources |
+| `npx vitest run` (web) | 423 passed, 33 files | **1055 passed, 72 files** |
 | `npx tsc --noEmit` (web) | pass | pass |
-| `kc-docs --check` | pass — 15 topics, 17 files | pass — 15 topics, 17 files |
+| `kc-docs --check` | pass — 15 topics, 17 files | pass — 19 topics, 21 files |
+| `python3 -m pytest tests/` (packaging) | not run | **122 passed, 1 skipped** |
+| `scripts/verify_web_fixes.py` (real Chromium) | — | **18/18 checks** |
+| `scripts/verify_agents_tab.py` (real Chromium) | — | **21/21 checks** |
 | `scripts/e2e_smoke.py` | 36 checks | **38 passed, 0 failed** |
 | CI configuration | **none exists** | `.github/workflows/ci.yml` |
 | `LICENSE` | **absent** | MIT |
+
+> The "Then"/"Now" columns above were resynchronised against a measured run of
+> this tree (the previous numbers described a tree that no longer existed). Keep
+> them that way: a hard-coded count that nobody re-runs is a lie with a date on
+> it, which is why the CI gates are the authority and this table is a snapshot.
 
 The engineering quality is genuinely high — the test suite is real, the docs gate is
 real, and the architecture is sound. The gaps are concentrated in three places:

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ImageAttachment, SessionDetail, StoredMessage, ToolCall } from '../api/types';
-import { detailFixture, queuedFixture, storedMessage } from '../test/fixtures';
+import { detailFixture, omitFields, queuedFixture, storedMessage, wireAgentSummary } from '../test/fixtures';
 import { seedChatState } from './chat';
 
 const shot: ImageAttachment = {
@@ -77,5 +77,25 @@ describe('seedChatState', () => {
 
     const tool = state.items.find((item) => item.kind === 'tool');
     expect(tool?.kind === 'tool' ? tool.images : undefined).toEqual([]);
+  });
+
+  it('fills in the agent fields serde omits from a session snapshot', () => {
+    // `note`, `progress` and `owned_paths` are all `skip_serializing_if`/`default`
+    // on the server, so a snapshot can carry none of them. Components read them
+    // as present; the seed is where that is made true.
+    const wireAgent = omitFields(
+      wireAgentSummary('a_wire', { status: 'running' }),
+      'note',
+      'progress',
+      'owned_paths',
+    );
+    expect('note' in wireAgent).toBe(false);
+
+    const state = seedChatState({ ...detailFixture, agents: [wireAgent] });
+
+    const [agent] = state.agents;
+    expect(agent?.note).toBe('');
+    expect(agent?.progress).toBeNull();
+    expect(agent?.owned_paths).toEqual([]);
   });
 });

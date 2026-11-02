@@ -163,6 +163,21 @@ impl HostAllowlist {
         self.rules.iter().any(|rule| rule.matches(authority))
     }
 
+    /// Whether the request's `host[:port]` matches an **explicit**
+    /// `KARUCODE_ALLOWED_HOSTS` entry, with no implicit loopback shortcut.
+    ///
+    /// [`Self::allows`] treats `127.0.0.1`, `localhost` and `::1` as allowed on
+    /// *any* port, which is right for the `Host` header (the browser dials the
+    /// port this server actually bound). It is wrong for the terminal
+    /// websocket's `Origin` fallback: there the question is "is this a host the
+    /// operator named as trusted", and answering "any loopback name on any
+    /// port" would let `http://localhost:9999` open a shell on
+    /// `http://127.0.0.1:8787`. So this method consults the configured rules
+    /// only. A reverse proxy still works: its public name is an explicit entry.
+    pub fn allows_explicit_authority(&self, authority: &Authority) -> bool {
+        self.rules.iter().any(|rule| rule.matches(authority))
+    }
+
     /// Full check for a raw header value: `Ok(())` when accepted, otherwise the
     /// 403 message naming the allowed hosts.
     pub fn check(&self, raw: &str) -> Result<(), String> {

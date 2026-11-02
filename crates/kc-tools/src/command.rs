@@ -18,6 +18,19 @@ use tokio::sync::mpsc;
 /// Grace period between SIGTERM and SIGKILL when a command must be stopped.
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
+/// How long the output pipes may stay open after the leader has exited.
+///
+/// A command may deliberately leave a child running (`sh -c 'build & echo
+/// started; exit 0'`), and that child inherits the stdout/stderr pipes. The
+/// leader is finished, so its exit status is the command's result; waiting for
+/// EOF instead means a *successful* command is reported as a timeout as soon as
+/// the background child outlives the timeout. The pipe is therefore given this
+/// short grace to drain whatever the leader wrote, and anything still open after
+/// it is reported as possibly-truncated output rather than blocking the call.
+/// While the leader is *alive* the wait stays unbounded: a foreground command
+/// that writes slowly must still stream to the end.
+const DRAIN_GRACE: Duration = Duration::from_millis(250);
+
 /// Environment variables a command inherits from the server.
 ///
 /// The child gets a **cleared** environment plus this allowlist, never the
@@ -108,6 +121,10 @@ pub struct CommandOutcome {
     pub exit_code: Option<i32>,
     pub timed_out: bool,
     pub cancelled: bool,
+    /// True when the leader exited but something it started still held the
+    /// output pipes open past [`DRAIN_GRACE`], so the captured output may be
+    /// incomplete even though the command itself succeeded.
+    pub background_output: bool,
     pub duration: Duration,
     pub stdout: FinishedStream,
     pub stderr: FinishedStream,
@@ -342,8 +359,25 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
     tokio::pin!(deadline);
     let mut exit_status: Option<std::process::ExitStatus> = None;
     let mut streams_open = true;
+    let mut background_output = false;
+    // Armed when the leader exits; while it is unarmed the pipe wait is unbounded.
+    let mut drain_grace: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
+        // Leaving the loop means "stop reading". Two things can end it: both
+        // pipes reached EOF *and* the leader was reaped (nothing more can
+        // arrive), or the leader exited and its pipes stayed open past the grace
+        // period (a background child still holds them). The second case is not a
+        // timeout: the leader's exit status is already known and is what the
+        // caller asked for. While the leader is alive the wait is unbounded, so a
+        // command that closes both pipes and keeps working still finishes.
         if !streams_open && exit_status.is_some() {
+            break;
+        }
+        // The leader is gone and its drain grace is over (or it never armed one
+        // because the pipes had already closed): stop reading. Note the reverse of
+        // this rule is what used to be wrong - requiring EOF *and* an exit status
+        // meant a backgrounded child kept the call open until the timeout.
+        if exit_status.is_some() && drain_grace.is_none() {
             break;
         }
         tokio::select! {
@@ -354,6 +388,13 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
             }
             _ = &mut deadline => {
                 timed_out = true;
+                break;
+            }
+            _ = async { drain_grace.as_mut().unwrap().as_mut().await }, if drain_grace.is_some() => {
+                // The leader is done and its pipes are still open: something it
+                // started in the background is holding them. Keep what was
+                // captured and report success with a note.
+                background_output = streams_open;
                 break;
             }
             chunk = rx.recv(), if streams_open => match chunk {
@@ -381,6 +422,12 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
                         // running: only disarm once the group is empty, so a
                         // dropped future still kills the survivors.
                         group.disarm_if_empty();
+                        // Start the bounded wait for the pipe drain (see
+                        // `DRAIN_GRACE`); `streams_open` false already broke out.
+                        if streams_open {
+                            drain_grace =
+                                Some(Box::pin(tokio::time::sleep(DRAIN_GRACE)));
+                        }
                     }
                     Err(e) => {
                         return Err(Error::Tool(format!(
@@ -400,7 +447,10 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
         exit_status
     };
     // The leader is reaped; keep the guard armed until the group is empty so a
-    // surviving grandchild cannot keep the pipes open past this call.
+    // surviving grandchild cannot keep the pipes open past this call. On the
+    // drain-grace path (leader exited, a background child still holds a pipe) this
+    // is also what reaps that child: `group` is dropped at the end of `run`, never
+    // disarmed while a member lives.
     group.disarm_if_empty();
     for pump in pumps {
         pump.abort();
@@ -412,6 +462,7 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
         exit_code,
         timed_out,
         cancelled,
+        background_output,
         duration,
         stdout: stdout_acc.finish(),
         stderr: stderr_acc.finish(),

@@ -55,6 +55,31 @@ describe('ErrorBoundary', () => {
     expect(screen.getByRole('alert')).not.toBeNull();
   });
 
+  it('promises the rest of the workspace is running only when that is true', () => {
+    // A nested boundary took one panel down: the rail, the transcript and the
+    // composer are still mounted and usable, so the copy is accurate and reloading
+    // would throw away a live session for nothing.
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const nested = render(
+      <ErrorBoundary scope="The inspector">
+        <Exploding />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByText(/The rest of the workspace is still running/)).not.toBeNull();
+    nested.unmount();
+
+    // The root boundary has nothing left outside it. Saying "the rest of the
+    // workspace is still running" there was a lie: the page is one crash card.
+    render(
+      <ErrorBoundary scope="The workspace" root>
+        <Exploding />
+      </ErrorBoundary>,
+    );
+    expect(screen.queryByText(/The rest of the workspace is still running/)).toBeNull();
+    expect(screen.getByText(/this was the outermost boundary/)).not.toBeNull();
+  });
+
   it('copies a diagnostics block that names the error and the page', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const writeText = vi.fn(async (_text: string) => undefined);

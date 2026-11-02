@@ -248,6 +248,42 @@ describe('SessionInfoTab', () => {
     expect(screen.queryByText('0.0% of tokens')).toBeNull();
   });
 
+  it('shows no duration for a run that is still in flight', async () => {
+    // `RunRecord.finished_at` is `skip_serializing_if = "Option::is_none"` in Rust
+    // (`kc-core/src/store.rs`), so a live run sends **no key at all** rather than
+    // `null`. The guard used to be `run.finished_at !== null`, which is true for
+    // `undefined`, so the row computed `undefined - started_at` -> `NaN` and only
+    // escaped a "NaNms" by luck: `formatDuration` rejects non-finite input as a
+    // second line of defence. Both the guard (`!= null`) and the type
+    // (`finished_at?: number | null`) now say what the wire actually sends, and
+    // this pins that the row renders the start time and no invented duration.
+    const live = fullInfo();
+    live.runs.recent = [
+      {
+        id: 'r_live',
+        session_id: 's_ab12',
+        status: 'running',
+        model: 'gpt-4o-mini',
+        prompt: 'still going',
+        // No `error` and no `finished_at`: exactly what the server sends.
+        started_at: 1_000,
+      },
+    ];
+    stubInfo(live);
+    seedSession(live);
+    const { container } = render(<SessionInfoTab />);
+    await screen.findByText('Recent runs');
+
+    expect(screen.getByText('still going')).not.toBeNull();
+    // No duration, and nothing that looks like one.
+    expect(container.textContent).not.toContain('NaN');
+    expect(container.textContent).not.toContain('<1ms');
+    // The row still says *when* it started, which is all a live run can report.
+    const meta = container.querySelector('.si-run-meta')?.textContent ?? '';
+    expect(meta).not.toBe('');
+    expect(meta).not.toContain('·');
+  });
+
   it('says "not reported" instead of inventing a 0% cache hit', async () => {
     stubInfo(
       fullInfo({

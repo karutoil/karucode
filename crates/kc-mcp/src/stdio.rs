@@ -232,6 +232,10 @@ impl Transport for StdioTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Own session => own process group, so teardown reaches every helper the
+        // server starts (an `npx`-launched `node`, a wrapper script, a tool call's
+        // children). `kill_on_drop` only signals the leader.
+        crate::procgroup::detach_into_own_group(&mut command);
         debug!(server = %self.inner.name, command = ?self.command, "starting MCP stdio server");
         let mut child: Child = command.spawn().map_err(|e| {
             McpError::Transport(format!(
@@ -241,7 +245,12 @@ impl Transport for StdioTransport {
                 self.command.join(" ")
             ))
         })?;
-        let pid = child.id();
+        let pid = child.id().ok_or_else(|| {
+            McpError::Transport(format!(
+                "spawned MCP server `{}` has no pid; cannot manage its process group",
+                self.inner.name
+            ))
+        })?;
         let stdin = child.stdin.take().ok_or_else(|| {
             McpError::Transport(format!(
                 "could not capture stdin of MCP server `{}`",
@@ -262,7 +271,7 @@ impl Transport for StdioTransport {
             let mut st = self.inner.lock();
             st.out = Some(out_tx);
             st.kill = Some(kill_tx);
-            st.pid = pid;
+            st.pid = Some(pid);
             st.error = None;
         }
         self.inner.alive.store(true, Ordering::SeqCst);
@@ -292,12 +301,21 @@ impl Transport for StdioTransport {
         if let Some(stderr) = stderr {
             let inner = Arc::clone(&self.inner);
             tokio::spawn(async move {
-                let result = pump_lines(stderr, MAX_LOG_LINE, |line| {
+                // A log line past the cap is truncated, not fatal: closing this
+                // read end used to make the server's next stderr write fail with
+                // `EPIPE` and take the whole process down.
+                let result = pump_lines(stderr, MAX_LOG_LINE, OverLong::Truncate, |line| {
                     debug!(server = %inner.name, "stderr: {line}");
                 })
                 .await;
-                if let Err(e) = result {
-                    debug!(server = %inner.name, "stopped draining stderr: {e}");
+                match result {
+                    Ok(report) if !report.is_empty() => debug!(
+                        server = %inner.name,
+                        "{}",
+                        report.describe(MAX_LOG_LINE, "the server's stderr")
+                    ),
+                    Ok(_) => {}
+                    Err(e) => debug!(server = %inner.name, "stopped draining stderr: {e}"),
                 }
             });
         }
@@ -306,8 +324,13 @@ impl Transport for StdioTransport {
         {
             let inner = Arc::clone(&self.inner);
             tokio::spawn(async move {
-                let result =
-                    pump_lines(stdout, MAX_PROTOCOL_LINE, |line| inner.handle_line(line)).await;
+                // `OverLong::Fail`: an over-long JSON-RPC line cannot be parsed,
+                // so that server's in-flight requests are failed rather than left
+                // waiting. stderr is truncated instead - see above.
+                let result = pump_lines(stdout, MAX_PROTOCOL_LINE, OverLong::Fail, |line| {
+                    inner.handle_line(line)
+                })
+                .await;
                 if let Err(e) = result {
                     let message = if e.kind() == std::io::ErrorKind::InvalidData {
                         format!(
@@ -329,14 +352,18 @@ impl Transport for StdioTransport {
         {
             let inner = Arc::clone(&self.inner);
             tokio::spawn(async move {
-                tokio::select! {
-                    status = child.wait() => inner.on_exit(status),
-                    _ = kill_rx => {
-                        let _ = child.start_kill();
-                        let status = child.wait().await;
-                        inner.on_exit(status);
+                // Backstop: the group must not outlive this task either.
+                let _group = crate::procgroup::guard(pid);
+                let status = tokio::select! {
+                    status = child.wait() => {
+                        // The leader exited on its own; helpers it started are
+                        // still in the group and would keep the pipes open.
+                        crate::procgroup::kill_group_after_exit(pid);
+                        status
                     }
-                }
+                    _ = kill_rx => crate::procgroup::terminate_group(&mut child, pid).await,
+                };
+                inner.on_exit(status);
             });
         }
         Ok(())
@@ -419,8 +446,57 @@ const MAX_PROTOCOL_LINE: usize = 8 * 1024 * 1024;
 /// Largest stderr line kept for logging.
 const MAX_LOG_LINE: usize = 64 * 1024;
 
+/// What to do with a line that exceeds the reader's cap.
+///
+/// See the identical reasoning in `kc_plugin_host::rpc`: the two streams are not
+/// symmetric.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverLong {
+    /// A **log** stream (stderr): truncate the line, report it once, keep
+    /// draining. Fatal truncation here was a bug — the closed read end made the
+    /// server's next stderr write fail with `EPIPE`, which killed the process,
+    /// and every later call failed with "process stopped or broke the protocol".
+    Truncate,
+    /// A **protocol** stream (stdout): the line cannot be JSON, so the server
+    /// broke the framing contract. Failing is the honest answer.
+    Fail,
+}
+
+/// What [`pump_lines`] saw beyond an ordinary end of stream.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PumpReport {
+    /// Lines that exceeded the cap: truncated to it and handed to `on_line`
+    /// anyway, with the remainder discarded.
+    over_long_lines: u64,
+}
+
+impl PumpReport {
+    fn is_empty(&self) -> bool {
+        self.over_long_lines == 0
+    }
+
+    fn describe(&self, max_line: usize, what: &str) -> String {
+        format!(
+            "{what} sent {} line(s) longer than the {max_line} byte limit; each was truncated to \
+             that limit and the remainder discarded, and reading continued",
+            self.over_long_lines
+        )
+    }
+}
+
 /// Chunked, length-capped line reader (see the plugin host for the rationale).
-async fn pump_lines<R, F>(mut reader: R, max_line: usize, mut on_line: F) -> std::io::Result<()>
+///
+/// Bytes past `max_line` are dropped as they arrive instead of being buffered, so
+/// an endless line cannot exhaust memory. What happens *then* depends on
+/// [`OverLong`]: a log line is truncated and the drain continues; a protocol line
+/// is a framing violation. The only `Err` a log stream can produce is a genuine
+/// read failure from the OS.
+async fn pump_lines<R, F>(
+    mut reader: R,
+    max_line: usize,
+    over_long: OverLong,
+    mut on_line: F,
+) -> std::io::Result<PumpReport>
 where
     R: AsyncReadExt + Unpin,
     F: FnMut(&str),
@@ -430,12 +506,27 @@ where
     // Offset up to which `pending` has already been searched for a newline, so a
     // long line is scanned once instead of once per read (quadratic).
     let mut searched: usize = 0;
+    let mut report = PumpReport::default();
+    // The current line already hit the cap: drop everything up to its newline.
+    let mut discarding = false;
     loop {
         let read = reader.read(&mut chunk).await?;
         if read == 0 {
             break;
         }
-        pending.extend_from_slice(&chunk[..read]);
+        if discarding {
+            match chunk[..read].iter().position(|b| *b == b'\n') {
+                Some(pos) => {
+                    discarding = false;
+                    pending.clear();
+                    searched = 0;
+                    pending.extend_from_slice(&chunk[pos + 1..read]);
+                }
+                None => continue,
+            }
+        } else {
+            pending.extend_from_slice(&chunk[..read]);
+        }
         while let Some(rel) = pending[searched..].iter().position(|b| *b == b'\n') {
             let end = searched + rel + 1;
             let line: Vec<u8> = pending.drain(..end).collect();
@@ -445,16 +536,41 @@ where
         }
         searched = pending.len();
         if pending.len() > max_line {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("line exceeds {max_line} bytes; the server is not speaking the protocol"),
-            ));
+            if over_long == OverLong::Fail {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "line exceeds {max_line} bytes; the server is not speaking the protocol"
+                    ),
+                ));
+            }
+            let cut = floor_char_boundary(&pending, max_line);
+            let head = String::from_utf8_lossy(&pending[..cut]).into_owned();
+            on_line(head.trim_end_matches(['\n', '\r']));
+            pending.clear();
+            searched = 0;
+            discarding = true;
+            report.over_long_lines += 1;
         }
     }
-    if !pending.is_empty() {
+    if !discarding && !pending.is_empty() {
         on_line(String::from_utf8_lossy(&pending).trim_end_matches(['\n', '\r']));
     }
-    Ok(())
+    Ok(report)
+}
+
+/// Largest index `<= max` that is a UTF-8 character boundary in `bytes`.
+fn floor_char_boundary(bytes: &[u8], max: usize) -> usize {
+    let mut i = max.min(bytes.len());
+    while i > 0 && !str_boundary(bytes, i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Whether `index` is a valid slice boundary in `bytes`.
+fn str_boundary(bytes: &[u8], index: usize) -> bool {
+    index == 0 || index >= bytes.len() || (bytes[index] & 0xC0) != 0x80
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -492,14 +608,74 @@ mod tests {
     async fn pump_lines_is_bounded() {
         let mut cursor = std::io::Cursor::new(b"one\ntwo\n".to_vec());
         let mut lines = Vec::new();
-        pump_lines(&mut cursor, 64, |line| lines.push(line.to_string()))
-            .await
-            .unwrap();
+        let report = pump_lines(&mut cursor, 64, OverLong::Fail, |line| {
+            lines.push(line.to_string())
+        })
+        .await
+        .unwrap();
+        assert!(report.is_empty());
         assert_eq!(lines, vec!["one", "two"]);
 
+        // Protocol stream: an endless line is a framing violation.
         let mut cursor = std::io::Cursor::new(vec![b'y'; 4096]);
-        let err = pump_lines(&mut cursor, 64, |_| {}).await.unwrap_err();
+        let err = pump_lines(&mut cursor, 64, OverLong::Fail, |_| {})
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("exceeds"));
+    }
+
+    /// One over-long stderr line used to end the drain for good, which killed the
+    /// server and every later call with it. It must be truncated and discarded,
+    /// and the following lines must still arrive.
+    #[tokio::test]
+    async fn an_over_long_log_line_is_truncated_and_the_drain_continues() {
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(b"before\n");
+        input.extend(std::iter::repeat_n(b'y', 200 * 1024));
+        input.extend_from_slice(b"\nafter\n");
+        input.extend(std::iter::repeat_n(b'z', 150 * 1024));
+
+        let mut lines: Vec<String> = Vec::new();
+        let report = pump_lines(
+            &mut std::io::Cursor::new(input),
+            1024,
+            OverLong::Truncate,
+            |line| lines.push(line.to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.over_long_lines, 2, "{report:?}");
+        assert_eq!(lines[0], "before");
+        assert_eq!(lines[1].len(), 1024);
+        assert!(lines[1].bytes().all(|b| b == b'y'));
+        assert_eq!(lines[2], "after");
+        assert_eq!(lines[3].len(), 1024);
+        assert!(lines[3].bytes().all(|b| b == b'z'));
+    }
+
+    /// The cap must be applied on a UTF-8 boundary so a multi-byte log line is
+    /// not mangled into replacement characters.
+    #[tokio::test]
+    async fn an_over_long_utf8_log_line_is_truncated_on_a_char_boundary() {
+        let mut input: Vec<u8> = Vec::new();
+        input.extend("é".repeat(20_000).into_bytes());
+        input.push(b'\n');
+        input.extend_from_slice(b"tail\n");
+        let mut lines: Vec<String> = Vec::new();
+        let report = pump_lines(
+            &mut std::io::Cursor::new(input),
+            1025,
+            OverLong::Truncate,
+            |line| lines.push(line.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.over_long_lines, 1);
+        assert_eq!(lines.len(), 2);
+        assert!(!lines[0].contains('\u{FFFD}'), "{:?}", &lines[0].len());
+        assert_eq!(lines[0].len(), 1024);
+        assert_eq!(lines[1], "tail");
     }
 
     #[tokio::test]

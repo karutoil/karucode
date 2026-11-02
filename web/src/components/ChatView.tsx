@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import type { ChatItem } from '../state/chat';
 import { copyText } from '../lib/clipboard';
 import { useHeightVariable } from '../lib/dockHeight';
@@ -20,6 +20,7 @@ import { Tabs, type TabItem } from './Tabs';
 import { TerminalTab } from './TerminalTab';
 import {
   AlertIcon,
+  BranchIcon,
   ChatIcon,
   ChevronDownIcon,
   CircleCheckIcon,
@@ -64,6 +65,46 @@ export function transcriptToText(items: readonly ChatItem[], title: string): str
     }
   }
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd();
+}
+
+/**
+ * The current branch, as the mock's top-right chip.
+ *
+ * The mock always shows a branch because it is always in a repo; ours shows the
+ * chip only when the server reports a real branch, so a non-git workspace gets
+ * no fabricated state. Clicking it opens the inspector's Changes tab, which is
+ * where the diff for that branch lives.
+ */
+function BranchChip({ onShowChanges }: { onShowChanges?: () => void }): JSX.Element | null {
+  const projectId = store.currentProjectId.value;
+  const [branch, setBranch] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setBranch(null);
+    getGitStatus(projectId, { signal: controller.signal })
+      .then((status) => {
+        if (controller.signal.aborted) return;
+        setBranch(status.is_repo ? status.branch : null);
+      })
+      .catch(() => {
+        // No chip when git is unavailable; ChangesTab owns the loud error.
+      });
+    return () => controller.abort();
+  }, [projectId]);
+
+  if (!branch) return null;
+  return (
+    <button
+      type="button"
+      class="head-btn branch-chip"
+      title={`On branch ${branch} — open Changes`}
+      onClick={onShowChanges}
+    >
+      <BranchIcon size={13} />
+      <span class="branch-chip-name">{branch}</span>
+    </button>
+  );
 }
 
 function ProviderBanner(): JSX.Element | null {
@@ -145,7 +186,13 @@ function ChatSkeleton(): JSX.Element {
   );
 }
 
-function SessionHeader({ view }: { view: WorkspaceView }): JSX.Element {
+function SessionHeader({
+  view,
+  onSelectView,
+}: {
+  view: WorkspaceView;
+  onSelectView: (next: WorkspaceView) => void;
+}): JSX.Element {
   const session = store.activeSession.value;
   const activity = store.activity.value;
   const narrow = store.narrowViewport.value;
@@ -189,24 +236,23 @@ function SessionHeader({ view }: { view: WorkspaceView }): JSX.Element {
         <MenuIcon size={15} />
       </button>
 
-      <div class="head-title-wrap">
-        <div class="breadcrumb">
-          <strong title={project?.path ?? projectName}>{projectName}</strong>
-          <span class="crumb-sep" aria-hidden="true">
-            /
-          </span>
-          <span>sessions</span>
-          <span class="crumb-sep" aria-hidden="true">
-            /
-          </span>
-          <span class={`head-activity status-${activity.kind}`}>{activityWord}</span>
-        </div>
+      {/* The mock's breadcrumb is one line: the project (quiet) / the session
+       * (loud), with the activity word as a capsule beside it. The old second
+       * row - a 14px title under a project → sessions → activity trail - spent
+       * 20px saying the same thing twice. */}
+      <div class="breadcrumb">
+        <strong title={project?.path ?? projectName}>{projectName}</strong>
+        <span class="crumb-sep" aria-hidden="true">
+          /
+        </span>
         <h1 class="main-title" title={title}>
           {title}
         </h1>
+        <span class={`head-activity status-${activity.kind}`}>{activityWord}</span>
       </div>
 
       <div class="header-buttons">
+        <BranchChip onShowChanges={() => onSelectView('changes')} />
         <button
           type="button"
           class="head-btn theme-header-btn"
@@ -215,7 +261,7 @@ function SessionHeader({ view }: { view: WorkspaceView }): JSX.Element {
           aria-keyshortcuts="Control+Shift+T Meta+Shift+T"
           title={`Theme studio — ${modKey()}+Shift+T`}
         >
-          <PaletteIcon size={15} />
+          <PaletteIcon size={13} />
           <span class="theme-header-name">{activeThemeName.value}</span>
         </button>
         <button
@@ -226,7 +272,7 @@ function SessionHeader({ view }: { view: WorkspaceView }): JSX.Element {
           aria-keyshortcuts="Control+K Meta+K"
           title={`Command palette — ${modKey()}+K`}
         >
-          <SearchIcon size={15} />
+          <SearchIcon size={13} />
           <span>Commands</span>
           <span class="keycap">{modKey()} K</span>
         </button>
@@ -237,10 +283,9 @@ function SessionHeader({ view }: { view: WorkspaceView }): JSX.Element {
           disabled={store.chat.value.items.length === 0 || view !== 'chat'}
           title="Copy this conversation as Markdown"
         >
-          <CopyIcon size={15} />
+          <CopyIcon size={13} />
           <span class="head-btn-label">Copy</span>
         </button>
-        <div class="header-divider" aria-hidden="true" />
         <button
           type="button"
           class="head-btn head-icon"
@@ -285,7 +330,6 @@ function WorkspaceTabs({ view, onChange }: { view: WorkspaceView; onChange: (nex
         idPrefix="workspace"
         variant="workspace"
       />
-      <div class="tab-fill" />
       <p class="tab-note">
         {activity.kind === 'idle' ? (
           <CircleCheckIcon size={13} />
@@ -331,6 +375,15 @@ export function ChatView(): JSX.Element {
   const currentId = store.currentSessionId.value;
   const chat = store.chat.value;
   const [view, setView] = useState<WorkspaceView>('chat');
+  // Stable approval callback: an inline arrow here is a new prop identity on
+  // every render, which would make the transcript's memo boundaries compare
+  // unequal and re-render every row on every streamed token.
+  const decideApproval = useCallback(
+    (approvalId: string, decision: 'allow_once' | 'allow_session' | 'deny'): void => {
+      void actions.resolveApproval(approvalId, decision);
+    },
+    [],
+  );
   // Lazy panel: Changes mounts its git probe only after the user asks for it.
   const [changesMounted, setChangesMounted] = useState(false);
   // The terminal list is needed to decide whether the tab exists at all, so it
@@ -382,7 +435,7 @@ export function ChatView(): JSX.Element {
 
   return (
     <main class="chat-main" id="chat-main" aria-label="Workspace" tabIndex={-1}>
-      <SessionHeader view={view} />
+      <SessionHeader view={view} onSelectView={selectView} />
       <WorkspaceTabs view={view} onChange={selectView} />
 
       <div class="center-body">
@@ -443,7 +496,7 @@ export function ChatView(): JSX.Element {
                       <ChatTranscript
                         items={chat.items}
                         resolvingApprovals={store.resolvingApprovals.value}
-                        onApprovalDecision={(id, decision) => void actions.resolveApproval(id, decision)}
+                        onApprovalDecision={decideApproval}
                         onRewind={actions.openRewind}
                       />
                     </ErrorBoundary>

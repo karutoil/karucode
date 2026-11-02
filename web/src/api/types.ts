@@ -233,12 +233,19 @@ export interface ApprovalPolicy {
 }
 
 export interface SubagentConfig {
+  /** Subagent loops allowed to run at once, across the whole install. */
   max_concurrent: number;
   max_iterations: number;
   max_continues: number;
   allow_recursive: boolean;
   max_depth: number;
   timeout_secs: number;
+  /** Whether a spawn may detach and keep working after its tool call returns. */
+  allow_background: boolean;
+  /** Ceiling on live detached agents per session. */
+  max_background: number;
+  /** Default bound on `wait_for_agents`, in seconds. */
+  wait_timeout_secs: number;
 }
 
 export interface ConfigPluginSummary {
@@ -403,7 +410,15 @@ export interface Session {
 
 export interface SessionSummary extends Session {
   message_count: number;
-  last_run_status: RunStatus | null;
+  /**
+   * The newest run's status, or absent when the session has never run.
+   *
+   * `skip_serializing_if = "Option::is_none"` on the Rust side
+   * (`kc-core/src/store.rs`), so this key really can be missing. Every consumer
+   * compares it (`=== 'failed'`, `=== 'running'`), which is safe for `undefined`
+   * as well as `null` - the type says so rather than pretending otherwise.
+   */
+  last_run_status?: RunStatus | null;
   running: boolean;
 }
 
@@ -454,12 +469,31 @@ export interface RunRecord {
   status: RunStatus;
   model: string;
   prompt: string;
-  error: string | null;
+  /** Absent on the wire when the run did not fail (`skip_serializing_if`). */
+  error?: string | null;
   started_at: number;
-  finished_at: number | null;
+  /** Absent on the wire while the run is still in flight, or if it never settled. */
+  finished_at?: number | null;
 }
 
-export type AgentStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+/**
+ * A subagent's status.
+ *
+ * `paused` is live, not settled: the agent's loop is parked between iterations,
+ * it still holds a subagent slot, and it can be resumed or killed. Anything that
+ * asks "is this agent still around" has to treat `running | paused` as the answer.
+ */
+export type AgentStatus = 'running' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+
+/** Statuses whose loop is still alive. */
+export const LIVE_AGENT_STATUSES: readonly AgentStatus[] = ['running', 'paused'];
+
+export function isAgentLive(status: AgentStatus): boolean {
+  return LIVE_AGENT_STATUSES.includes(status);
+}
+
+/** `POST /api/agents/:id/:action`. */
+export type AgentAction = 'pause' | 'resume' | 'cancel';
 
 export interface AgentRecord {
   id: string;
@@ -478,6 +512,25 @@ export interface AgentRecord {
   created_at: number;
   updated_at: number;
   finished_at: number | null;
+  /** True when the spawn detached and the tool call returned immediately. */
+  background: boolean;
+  /**
+   * The agent's own last statement of what it is doing. Advisory, not measured.
+   *
+   * Optional because the server serialises it with
+   * `skip_serializing_if = "String::is_empty"`: an agent that has never called
+   * `report_status` sends no `note` key at all. The state layer fills in `''`
+   * (`sessionAgentFromRecord`), but a row can reach a component unnormalised, so
+   * readers must not assume it is a string.
+   */
+  note?: string;
+  /**
+   * The agent's claimed completion, 0..1. Absent when it has not said.
+   *
+   * `undefined` means the same as `null` here: the server skips a `None`
+   * `progress`, so "has not said" arrives as a missing key, not a null one.
+   */
+  progress?: number | null;
 }
 
 /**
@@ -490,7 +543,12 @@ export interface AgentRecord {
 export interface AgentSummary extends AgentRecord {
   session_title: string;
   workspace: string;
-  project_id: string | null;
+  /**
+   * Absent when the session has no project (`skip_serializing_if =
+   * "Option::is_none"`). Only `openAgentSession` reads it, as a truthiness guard
+   * before `switchProject`, so `undefined` and `null` behave the same.
+   */
+  project_id?: string | null;
 }
 
 /** `GET /api/agents/:id`: the agent and the transcript it wrote. */
@@ -629,15 +687,18 @@ export interface ApprovalRecord {
   id: string;
   session_id: string;
   run_id: string;
-  agent_id: string | null;
+  /** Absent when a top-level run raised the approval (`skip_serializing_if`). */
+  agent_id?: string | null;
   kind: ApprovalKind;
   title: string;
   detail: string;
   payload: JsonValue;
   status: ApprovalStatus;
-  decision: ApprovalDecision | null;
+  /** Absent while pending. Read through `??`/truthiness everywhere. */
+  decision?: ApprovalDecision | null;
   created_at: number;
-  resolved_at: number | null;
+  /** Absent while pending. Nothing in the UI reads it; safe either way. */
+  resolved_at?: number | null;
 }
 
 export interface ClaimRecord {
@@ -716,8 +777,23 @@ export interface QueuedMessage {
   kind: QueuedKind;
   /** The exact text the model will see (draft + one block per attachment). */
   content: string;
-  /** The draft to restore on recall; the content when nothing was attached. */
-  draft: string;
+  /**
+   * The draft to restore on recall; the content when nothing was attached.
+   *
+   * **Optional on the wire.** Rust declares it `Option<String>` with
+   * `skip_serializing_if = "Option::is_none"` (`kc-core/src/queue.rs`), so it is
+   * absent for the normal case - a message with no attachments, where the draft
+   * and the content are the same string. `GET /api/sessions/:id/queues` hides
+   * that behind `public_view()`, but the `queued_messages` SSE frame serialises
+   * the raw struct, so a required field here was a lie that only survived because
+   * every consumer happened to write `entry.draft || entry.content`.
+   *
+   * It is normalised once, at the state boundary (`queuedLists` in `chat.ts`), so
+   * everything downstream can read it as a string. Making it a required field on
+   * the type is the wrong fix: it would break the moment a frame omitted it, and
+   * the *server* is what should change (see the follow-up note in `chat.ts`).
+   */
+  draft?: string;
   attachments?: QueuedAttachment[];
   accepted_at: number;
 }
@@ -955,9 +1031,11 @@ export interface PluginManifest {
 export interface PluginDiagnostics {
   name: string;
   status: string;
-  manifest: PluginManifest | null;
+  /** Absent when the plugin failed before its manifest was read. Read as `?.`. */
+  manifest?: PluginManifest | null;
   tools: PluginToolSpec[];
-  error: string | null;
+  /** Absent when there is nothing wrong. Read as a truthiness test, so safe. */
+  error?: string | null;
   pid: number | null;
   restart_count: number;
 }
@@ -1075,8 +1153,28 @@ export type KnownEvent = EventEnvelope &
         task: string;
         model: string;
         parent_run_id: string;
+        /** True when the spawn detached instead of blocking its caller. */
+        background?: boolean;
       }
     | { type: 'agent_progress'; agent_id: string; iterations: number; note: string }
+    | { type: 'agent_paused'; agent_id: string; paused: boolean; by: string }
+    | {
+        /**
+         * A message reached (or was queued for) an agent. `to` is an agent id, or
+         * `run:<id>` when the recipient is the session's main agent.
+         */
+        type: 'agent_message';
+        from_agent_id: string | null;
+        to: string;
+        state: string;
+      }
+    | {
+        /** A subagent's own report of what it is doing. Advisory, not measured. */
+        type: 'agent_note';
+        agent_id: string;
+        note: string;
+        progress?: number | null;
+      }
     | {
         type: 'agent_finished';
         agent_id: string;

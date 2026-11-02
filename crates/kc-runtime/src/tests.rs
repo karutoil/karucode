@@ -9,7 +9,7 @@ use crate::approvals::{ApprovalRegistry, RuntimeApprovalGate};
 use crate::subagent::SPAWN_AGENT_TOOL;
 use crate::tests_support::{
     test_inner_with_settings, ApprovalTool, BigOutputTool, EchoTool, ExternalTool, FakeSettings,
-    FollowUpTool, Harness, HarnessBuilder, ImageTool, PanicTool, Script, ScriptedFactory,
+    FollowUpTool, GateTool, Harness, HarnessBuilder, ImageTool, PanicTool, Script, ScriptedFactory,
     SlowCancelTool, SteerTool,
 };
 use crate::{ActiveRun, QueuedInput, QueuedKind, RecoveryReport, Runtime, RuntimeDeps};
@@ -60,6 +60,9 @@ fn event_kind(event: &Event) -> &'static str {
         Event::AgentSpawned { .. } => "agent_spawned",
         Event::AgentProgress { .. } => "agent_progress",
         Event::AgentFinished { .. } => "agent_finished",
+        Event::AgentPaused { .. } => "agent_paused",
+        Event::AgentMessage { .. } => "agent_message",
+        Event::AgentNote { .. } => "agent_note",
         Event::Notice { .. } => "notice",
         Event::Notification { .. } => "notification",
         Event::StreamLagged { .. } => "stream_lagged",
@@ -2421,6 +2424,9 @@ async fn a_subagent_outlives_its_first_segment_instead_of_dying_at_the_budget() 
         allow_recursive: false,
         max_depth: 1,
         timeout_secs: 60,
+        allow_background: true,
+        max_background: 8,
+        wait_timeout_secs: 60,
     };
     let mut h = HarnessBuilder::new(vec![
         spawn_call("a long job", None, false),
@@ -2499,6 +2505,9 @@ async fn a_subagent_without_continuation_still_stops_at_its_budget() {
         allow_recursive: false,
         max_depth: 1,
         timeout_secs: 60,
+        allow_background: true,
+        max_background: 8,
+        wait_timeout_secs: 60,
     };
     let mut h = HarnessBuilder::new(vec![
         spawn_call("a job with a hard budget", None, false),
@@ -2576,6 +2585,9 @@ async fn recursion_is_allowed_when_enabled_and_depth_allows() {
         allow_recursive: true,
         max_depth: 2,
         timeout_secs: 30,
+        allow_background: true,
+        max_background: 8,
+        wait_timeout_secs: 60,
     };
     let mut h = HarnessBuilder::new(vec![
         spawn_call("outer task", None, true),
@@ -2609,6 +2621,9 @@ async fn subagent_depth_limit_stops_further_nesting() {
         allow_recursive: true,
         max_depth: 1,
         timeout_secs: 30,
+        allow_background: true,
+        max_background: 8,
+        wait_timeout_secs: 60,
     };
     let mut h = HarnessBuilder::new(vec![
         spawn_call("outer task", None, true),
@@ -2771,6 +2786,9 @@ async fn subagent_timeout_marks_the_agent_failed_but_not_the_parent() {
         allow_recursive: false,
         max_depth: 1,
         timeout_secs: 1,
+        allow_background: true,
+        max_background: 8,
+        wait_timeout_secs: 60,
     };
     let mut h = HarnessBuilder::new(vec![
         spawn_call("never finish", None, false),
@@ -2967,7 +2985,14 @@ async fn subagent_timeout_cancels_inflight_tool_before_dropping_the_loop() {
         max_continues: 0,
         allow_recursive: false,
         max_depth: 1,
-        timeout_secs: 1,
+        // Two seconds, not one: this asserts that a timed-out child's tool
+        // observes the cancellation token during the 500ms grace period, and at a
+        // one-second budget the whole suite running in parallel can starve the
+        // tool's wake-up. The behaviour under test is unchanged; only the margin is.
+        timeout_secs: 2,
+        allow_background: true,
+        max_background: 8,
+        wait_timeout_secs: 60,
     };
     let slow = Arc::new(SlowCancelTool::new("slow"));
     let started = slow.started();
@@ -3086,6 +3111,9 @@ async fn recover_marks_interrupted_work_and_expires_approvals() {
             created_at: 0,
             updated_at: 0,
             finished_at: None,
+            background: false,
+            note: String::new(),
+            progress: None,
         })
         .await
         .unwrap();
@@ -3135,12 +3163,20 @@ async fn builtins_are_present_in_the_tool_view_and_survive_set_tools() {
         .await;
 
     let tools = h.runtime.tools();
+    // The whole delegate family is a runtime built-in, not just `spawn_agent`:
+    // the control tools need the runtime's live agent registry, which no server
+    // tool can reach. Ordering is by name, so the mixed list is stable.
     assert_eq!(
         tools.names(),
-        vec!["echo".to_string(), SPAWN_AGENT_TOOL.to_string()]
+        sorted_with(&["echo"], Runtime::builtin_tool_names())
     );
-    assert!(tools.get(SPAWN_AGENT_TOOL).is_some());
-    assert_eq!(Runtime::builtin_tool_names(), &[SPAWN_AGENT_TOOL]);
+    for name in Runtime::builtin_tool_names() {
+        assert!(tools.get(name).is_some(), "missing built-in `{name}`");
+    }
+    assert_eq!(
+        Runtime::builtin_tool_names(),
+        crate::subagent::DELEGATE_TOOLS
+    );
 
     let mut replacement = ToolRegistry::new();
     replacement.register(EchoTool::boxed("other"));
@@ -3148,8 +3184,17 @@ async fn builtins_are_present_in_the_tool_view_and_survive_set_tools() {
     let tools = h.runtime.tools();
     assert_eq!(
         tools.names(),
-        vec!["other".to_string(), SPAWN_AGENT_TOOL.to_string()]
+        sorted_with(&["other"], Runtime::builtin_tool_names())
     );
+}
+
+/// The registry's ordering contract: every name, sorted.
+fn sorted_with(base: &[&str], builtins: &[&str]) -> Vec<String> {
+    let mut names: Vec<String> = base.iter().map(|name| name.to_string()).collect();
+    names.extend(builtins.iter().map(|name| name.to_string()));
+    names.sort();
+    names.dedup();
+    names
 }
 
 #[tokio::test]
@@ -3520,6 +3565,86 @@ async fn a_steer_is_never_a_trailing_system_note() {
     }
 }
 
+/// A follow-up still lands when the only thing "running" is a detached child.
+///
+/// This is the `has_active_run` question FIX 3 raised: the flag is top_level-only
+/// and stays that way on purpose. A background child is *not* a run, so it can
+/// neither accept a steer (there is nothing to fold it into) nor justify a
+/// follow-up (there is no run to follow). The window in which a detached child
+/// exists but its run does not is the run's own teardown, and the follow-up queue
+/// is drained by the run that finishes - so a follow-up accepted mid-teardown
+/// still starts.
+#[tokio::test]
+async fn a_detached_child_neither_accepts_a_steer_nor_blocks_a_follow_up() {
+    let (gate, handle) = GateTool::pair("gate");
+    let (parent_gate, parent_handle) = GateTool::pair("parent_gate");
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({
+            "task": "a long job", "name": "worker", "background": true
+        })),
+        Script::call(&[("c_parent", "parent_gate", "{}")]),
+        Script::text("parent done"),
+        Script::text("follow-up done"),
+    ])
+    .tool(Arc::new(gate))
+    .tool(Arc::new(parent_gate))
+    .settings(FakeSettings::default().with_subagents(fan_out_settings()))
+    .build()
+    .await;
+    h.factory
+        .key("a long job", vec![Script::call(&[("c1", "gate", "{}")])]);
+
+    h.submit("delegate").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while handle.arrived() == 0 || parent_handle.arrived() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // The run is in flight, so a follow-up is accepted with a `202`-style id.
+    let queued = h.follow_up("then summarise");
+    assert!(queued.id.starts_with("followup_"));
+
+    // Let the run end. Its child is reaped and the queued follow-up runs.
+    parent_handle.release();
+    let mut finished = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let event = h.next_event().await;
+        if matches!(event.event, Event::RunFinished { .. }) {
+            finished += 1;
+            if finished == 2 {
+                break;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "only {finished} of 2 runs finished; queue is {:?}",
+            h.runtime.queued_follow_ups(h.session())
+        );
+    }
+    let users: Vec<String> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|m| m.role == "user" && m.agent_id.is_none())
+        .map(|m| m.content)
+        .collect();
+    assert_eq!(
+        users,
+        vec!["delegate".to_string(), "then summarise".to_string()],
+        "the accepted follow-up must not be lost to the run-end reaping"
+    );
+    assert!(
+        !h.runtime.is_running(h.session()),
+        "nothing may be left writing after the follow-up finishes"
+    );
+    let _ = h.wait_idle().await;
+}
+
 /// A steer with no run in flight is refused rather than silently queued.
 #[tokio::test]
 async fn steering_with_nothing_running_is_refused() {
@@ -3664,6 +3789,85 @@ async fn a_queued_follow_up_starts_the_next_run() {
     );
     // The queue is empty: the follow-up was taken, not left to re-fire.
     assert!(h.runtime.queued_follow_ups(h.session()).is_empty());
+}
+
+/// **Every** queued follow-up runs, not just the first.
+///
+/// The chain used to drain the queue with `while let Some(next) = take_follow_up`:
+/// the run `start_run` had just started was registered as the session's
+/// top-level run, so the second `start_run` was refused with "a run is already
+/// active" and the `Err` arm ran `clear_follow_ups` - wiping the entire queue.
+/// `MAX_QUEUED_FOLLOW_UPS` is 8, so up to seven accepted follow-ups (each with a
+/// `202` and a `follow_up_id` the client could no longer recall) vanished in one
+/// go. One entry was tested, which is exactly the case that worked.
+#[tokio::test]
+async fn every_queued_follow_up_runs_in_order() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("c1", "queue_many", "{}")]),
+        Script::text("first answer"),
+        Script::text("second answer"),
+        Script::text("third answer"),
+        Script::text("fourth answer"),
+    ])
+    .build()
+    .await;
+    let tool = FollowUpTool::boxed_many(
+        "queue_many",
+        Arc::clone(&h.runtime),
+        h.session(),
+        vec![
+            "then run the tests".to_string(),
+            "then update the docs".to_string(),
+            "then summarise".to_string(),
+        ],
+    );
+    let mut registry = ToolRegistry::new();
+    registry.register(tool);
+    h.runtime.set_tools(Arc::new(registry));
+
+    h.submit("do the first job").await;
+
+    // Collect until the queue has drained *and* the store shows four prompts.
+    // Each follow-up is a whole run, so this is four `run_finished` frames.
+    let mut finished = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let event = h.next_event().await;
+        if matches!(event.event, Event::RunFinished { .. }) {
+            finished += 1;
+            if finished == 4 {
+                break;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "only {finished} of 4 runs finished; queue is {:?}",
+            h.runtime.queued_follow_ups(h.session())
+        );
+    }
+
+    let users: Vec<String> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content)
+        .collect();
+    assert_eq!(
+        users,
+        vec![
+            "do the first job".to_string(),
+            "then run the tests".to_string(),
+            "then update the docs".to_string(),
+            "then summarise".to_string(),
+        ],
+        "every accepted follow-up must run, in the order it was queued"
+    );
+    assert!(
+        h.runtime.queued_follow_ups(h.session()).is_empty(),
+        "the queue must be drained, not leaked: {:?}",
+        h.runtime.queued_follow_ups(h.session())
+    );
 }
 
 /// A follow-up with nothing running is refused; a plain `send` is what it means.
@@ -4800,4 +5004,974 @@ async fn a_retry_without_a_prompt_is_refused_before_anything_changes() {
         .await
         .iter()
         .all(|m| m.rewound_at.is_none()));
+}
+
+// ---------------------------------------------------------------------------
+// parallel and background subagents
+// ---------------------------------------------------------------------------
+
+/// One `spawn_agent` call with arbitrary arguments.
+fn spawn_args(args: serde_json::Value) -> Script {
+    Script::call(&[("call_spawn", SPAWN_AGENT_TOOL, &args.to_string())])
+}
+
+fn fan_out_args(tasks: serde_json::Value) -> Script {
+    let args = serde_json::json!({ "tasks": tasks });
+    Script::call(&[(
+        "call_fan",
+        crate::subagent::SPAWN_AGENTS_TOOL,
+        &args.to_string(),
+    )])
+}
+
+/// A `[subagents]` section with room to fan out.
+fn fan_out_settings() -> SubagentConfig {
+    SubagentConfig {
+        max_concurrent: 4,
+        max_iterations: 6,
+        max_continues: 0,
+        allow_recursive: true,
+        max_depth: 3,
+        timeout_secs: 30,
+        allow_background: true,
+        max_background: 4,
+        wait_timeout_secs: 5,
+    }
+}
+
+#[tokio::test]
+async fn a_fan_out_runs_its_children_together_and_returns_one_batch() {
+    // The point of `spawn_agents`: two blocking `spawn_agent` calls in one turn
+    // execute one after the other, so they never overlap. A fan-out starts both
+    // before waiting for either, which is what the limiter's peak records.
+    let mut h = HarnessBuilder::new(vec![
+        fan_out_args(serde_json::json!([
+            { "task": "review the parser", "name": "reviewer" },
+            { "task": "map the call sites", "name": "mapper" }
+        ])),
+        Script::text("parent done"),
+    ])
+    .settings(FakeSettings::default().with_subagents(fan_out_settings()))
+    .build()
+    .await;
+    h.factory.key(
+        "review the parser",
+        vec![Script::text("the parser looks fine")],
+    );
+    h.factory
+        .key("map the call sites", vec![Script::text("three call sites")]);
+
+    let events = h.run_to_finish("fan out the review").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(count(&events, "agent_spawned"), 2, "{:?}", kinds(&events));
+    assert_eq!(count(&events, "agent_finished"), 2);
+
+    let agents = h.store.agents();
+    assert_eq!(agents.len(), 2);
+    assert!(
+        agents.iter().all(|agent| agent.status == "completed"),
+        "{agents:?}"
+    );
+    assert_eq!(
+        h.runtime.subagents_peak(),
+        2,
+        "a fan-out must run its children concurrently"
+    );
+
+    let tool = tool_finished(&events)
+        .into_iter()
+        .find(|(call, _, _, _)| call == "call_fan")
+        .expect("the fan-out's own result");
+    assert!(tool.1, "a clean fan-out is ok: {}", tool.2);
+    assert!(tool.2.contains("the parser looks fine"), "{}", tool.2);
+    assert!(tool.2.contains("three call sites"), "{}", tool.2);
+}
+
+#[tokio::test]
+async fn a_background_spawn_returns_at_once_and_wait_collects_it() {
+    let (gate, handle) = GateTool::pair("gate");
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({
+            "task": "a slow job",
+            "name": "slowpoke",
+            "background": true
+        })),
+        // The parent asks for the result in its next turn, while the child is
+        // still inside its tool call. (A text-only answer would end the run.)
+        Script::call(&[(
+            "call_wait",
+            crate::subagent::WAIT_FOR_AGENTS_TOOL,
+            "{\"timeout_secs\":10}",
+        )]),
+        Script::text("parent done"),
+    ])
+    .tool(Arc::new(gate))
+    .settings(FakeSettings::default().with_subagents(fan_out_settings()))
+    .build()
+    .await;
+    h.factory.key(
+        "a slow job",
+        vec![
+            Script::call(&[("c1", "gate", "{}")]),
+            Script::text("the child answered"),
+        ],
+    );
+
+    let mut events = Vec::new();
+    h.submit("delegate without blocking").await;
+    // Read frames until the parent reaches its wait, releasing the child once it
+    // is genuinely parked inside the tool.
+    loop {
+        let event = h.next_event().await;
+        let waiting = matches!(
+            &event.event,
+            Event::ToolCallStarted { name, .. } if name == crate::subagent::WAIT_FOR_AGENTS_TOOL
+        );
+        let spawned = matches!(&event.event, Event::AgentSpawned { .. });
+        events.push(event);
+        if spawned {
+            // The spawn tool has returned by now only if the child is detached;
+            // the arrival counter proves the child is inside its first turn.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while handle.arrived() == 0 {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the background child never started its turn"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            handle.release();
+        }
+        if waiting {
+            break;
+        }
+    }
+    events.extend(h.collect_until_finished().await);
+
+    assert_eq!(finished_status(&events), "completed");
+
+    let started = tool_finished(&events)
+        .into_iter()
+        .find(|(call, _, _, _)| call == "call_spawn")
+        .expect("the spawn result");
+    assert!(started.1, "{}", started.2);
+    assert!(
+        started.2.contains("background"),
+        "the result has to say the agent kept working: {}",
+        started.2
+    );
+
+    let waited = tool_finished(&events)
+        .into_iter()
+        .find(|(call, _, _, _)| call == "call_wait")
+        .expect("the wait result");
+    assert!(waited.1, "the child finished: {}", waited.2);
+    assert!(
+        waited.2.contains("the child answered"),
+        "a wait returns the summary: {}",
+        waited.2
+    );
+
+    let agents = h.store.agents();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].status, "completed");
+    assert!(agents[0].background, "the row records that it was detached");
+}
+
+#[tokio::test]
+async fn a_background_spawn_is_refused_when_it_would_exceed_the_cap() {
+    // `max_background` is a hard ceiling on live detached agents, and the refusal
+    // names it: a model that reasons about the limit can adapt, while one that got
+    // a silent queue would just wait forever.
+    let (gate, handle) = GateTool::pair("gate");
+    let settings = SubagentConfig {
+        max_background: 1,
+        ..fan_out_settings()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({
+            "task": "first job", "name": "first", "background": true
+        })),
+        spawn_args(serde_json::json!({
+            "task": "second job", "name": "second", "background": true
+        })),
+        Script::text("parent done"),
+    ])
+    .tool(Arc::new(gate))
+    .settings(FakeSettings::default().with_subagents(settings))
+    .build()
+    .await;
+    h.factory.key(
+        "first job",
+        vec![
+            Script::call(&[("c1", "gate", "{}")]),
+            Script::text("first finished"),
+        ],
+    );
+
+    let mut events = Vec::new();
+    h.submit("two background jobs").await;
+    loop {
+        let event = h.next_event().await;
+        let second = matches!(
+            &event.event,
+            Event::ToolCallStarted { name, .. } if name == SPAWN_AGENT_TOOL
+        );
+        events.push(event);
+        if second {
+            break;
+        }
+    }
+    handle.release();
+    events.extend(h.collect_until_finished().await);
+    assert_eq!(finished_status(&events), "completed");
+
+    let results = tool_finished(&events);
+    assert!(results[0].1, "the first spawn fits: {}", results[0].2);
+    let refusal = &results[1];
+    assert!(!refusal.1, "the second must be refused: {}", refusal.2);
+    assert!(
+        refusal.2.contains("max_background"),
+        "the refusal has to name the limit: {}",
+        refusal.2
+    );
+}
+
+#[tokio::test]
+async fn background_spawns_are_refused_when_the_setting_is_off() {
+    let settings = SubagentConfig {
+        allow_background: false,
+        ..fan_out_settings()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({
+            "task": "detach me", "background": true
+        })),
+        Script::text("parent done"),
+    ])
+    .settings(FakeSettings::default().with_subagents(settings))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("try to detach").await;
+    let result = tool_finished(&events).remove(0);
+    assert!(!result.1);
+    assert!(
+        result.2.contains("allow_background"),
+        "the refusal has to name the switch: {}",
+        result.2
+    );
+    assert!(h.store.agents().is_empty(), "nothing was spawned");
+}
+
+#[tokio::test]
+async fn a_subagent_can_message_its_parent_and_the_parent_reads_it() {
+    // The case the mailbox exists for: a child hits something only its parent can
+    // answer. The message becomes an ordinary user turn in the parent's
+    // conversation, labelled with who sent it.
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({
+            "task": "look into the flaky test", "name": "probe"
+        })),
+        Script::text("parent done"),
+    ])
+    .settings(FakeSettings::default().with_subagents(fan_out_settings()))
+    .build()
+    .await;
+    h.factory.key(
+        "look into the flaky test",
+        vec![
+            Script::call(&[(
+                "call_msg",
+                crate::subagent::SEND_MESSAGE_TOOL,
+                "{\"message\":\"the fixture file is missing\"}",
+            )]),
+            Script::text("child done"),
+        ],
+    );
+
+    let events = h.run_to_finish("delegate the investigation").await;
+    assert_eq!(finished_status(&events), "completed");
+
+    let sent = tool_finished(&events)
+        .into_iter()
+        .find(|(call, _, _, _)| call == "call_msg")
+        .expect("the send_message result");
+    assert!(sent.1, "{}", sent.2);
+
+    // The parent's conversation carries the message as a user turn naming the
+    // sender, and the parent loop emits its own frame when it takes the message.
+    let messages = h.session_messages().await;
+    let delivered = messages
+        .iter()
+        .find(|m| m.role == "user" && m.content.contains("[message from probe"));
+    let delivered = delivered.unwrap_or_else(|| {
+        panic!(
+            "the parent must see the message: {:?}",
+            messages
+                .iter()
+                .map(|m| (m.role.clone(), m.content.clone()))
+                .collect::<Vec<_>>()
+        )
+    });
+    assert!(
+        delivered.content.contains("the fixture file is missing"),
+        "{}",
+        delivered.content
+    );
+    // Every frame is queued at send time; delivery is the parent's own.
+    let states: Vec<String> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::AgentMessage { state, .. } => Some(state.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(states.contains(&"queued".to_string()), "{states:?}");
+    assert!(states.contains(&"delivered".to_string()), "{states:?}");
+}
+
+#[tokio::test]
+async fn pause_parks_a_live_agent_and_resume_lets_it_finish() {
+    // A pause has to land between iterations, keep the agent visible, and be
+    // liftable - all three are what make it usable rather than a slow kill.
+    //
+    // The parent parks in its own gate so the run is still in flight while the
+    // test drives the child: a detached child may only exist for as long as the
+    // run that spawned it does (see `a_run_ending_cancels_its_background_children`).
+    let (gate, handle) = GateTool::pair("gate");
+    let (parent_gate, parent_handle) = GateTool::pair("parent_gate");
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({
+            "task": "a long job", "name": "worker", "background": true
+        })),
+        Script::call(&[("c_parent", "parent_gate", "{}")]),
+        Script::text("parent done"),
+    ])
+    .tool(Arc::new(gate))
+    .tool(Arc::new(parent_gate))
+    .settings(FakeSettings::default().with_subagents(fan_out_settings()))
+    .build()
+    .await;
+    h.factory.key(
+        "a long job",
+        vec![
+            Script::call(&[("c1", "gate", "{}")]),
+            Script::text("child finished"),
+        ],
+    );
+
+    h.submit("start it").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while handle.arrived() == 0 || parent_handle.arrived() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let agent_id = h.store.agents()[0].id.clone();
+    // Pause through the same path the HTTP route uses.
+    let status = h
+        .runtime
+        .control_agent(&agent_id, crate::AgentAction::Pause)
+        .await
+        .expect("pause a live agent");
+    assert_eq!(status.as_str(), "paused");
+    assert_eq!(
+        h.store
+            .get_agent(&agent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .agent
+            .status,
+        "paused",
+        "the row has to agree with the roster"
+    );
+    // The child still exists: a pause is not a kill.
+    assert_eq!(h.runtime.live_agent_count(h.session()), 1);
+
+    assert_eq!(
+        h.runtime
+            .control_agent(&agent_id, crate::AgentAction::Resume)
+            .await
+            .unwrap()
+            .as_str(),
+        "running"
+    );
+    handle.release();
+
+    // The child finishes on its own, then the parent is let go and completes.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let agents = h.store.agents();
+        if agents[0].status == "completed" {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child never finished: {}",
+            agents[0].status
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    parent_handle.release();
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "completed");
+}
+
+#[tokio::test]
+async fn killing_an_agent_stops_it_and_records_cancelled() {
+    // The parent parks in its own gate: the kill has to land while the run is
+    // alive, which is the only window a detached child exists in.
+    let (gate, handle) = GateTool::pair("gate");
+    let (parent_gate, parent_handle) = GateTool::pair("parent_gate");
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({
+            "task": "a job to stop", "name": "doomed", "background": true
+        })),
+        Script::call(&[("c_parent", "parent_gate", "{}")]),
+        Script::text("parent done"),
+    ])
+    .tool(Arc::new(gate))
+    .tool(Arc::new(parent_gate))
+    .settings(FakeSettings::default().with_subagents(fan_out_settings()))
+    .build()
+    .await;
+    h.factory.key(
+        "a job to stop",
+        vec![
+            Script::call(&[("c1", "gate", "{}")]),
+            Script::text("never reached"),
+        ],
+    );
+
+    h.submit("start it").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while handle.arrived() == 0 || parent_handle.arrived() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let agent_id = h.store.agents()[0].id.clone();
+    let status = h
+        .runtime
+        .control_agent(&agent_id, crate::AgentAction::Cancel)
+        .await
+        .expect("cancel a live agent");
+    assert_eq!(status.as_str(), "cancelled");
+
+    // The child is settled before the parent is let go, and the parent then
+    // completes on its own terms: a killed sibling is not the parent's problem.
+    handle.release();
+    parent_handle.release();
+    let events = h.collect_until_finished().await;
+    assert_eq!(
+        finished_status(&events),
+        "completed",
+        "the parent carries on"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let agents = h.store.agents();
+        if agents[0].status == "cancelled" {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the killed agent never settled: {:?}",
+            agents[0].status
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Its transcript stays readable: stopping is not deleting.
+    assert!(
+        !h.store.messages_for_agent(&agent_id).is_empty(),
+        "a killed agent keeps its transcript"
+    );
+}
+
+#[tokio::test]
+async fn controlling_an_unknown_agent_is_refused() {
+    let mut h = HarnessBuilder::new(vec![Script::text("parent done")])
+        .settings(FakeSettings::default().with_subagents(fan_out_settings()))
+        .build()
+        .await;
+    h.run_to_finish("nothing to delegate").await;
+
+    let error = h
+        .runtime
+        .control_agent("a_missing", crate::AgentAction::Pause)
+        .await
+        .expect_err("an unknown id is not a silent success");
+    assert!(
+        matches!(error, Error::NotFound(_)),
+        "an unknown agent is a 404: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_report_status_note_reaches_the_parents_listing() {
+    // The parent parks so the listing is read while the run - and therefore its
+    // detached child - is genuinely live.
+    let (gate, handle) = GateTool::pair("gate");
+    let (parent_gate, parent_handle) = GateTool::pair("parent_gate");
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({
+            "task": "index the repo", "name": "indexer", "background": true
+        })),
+        Script::call(&[("c_parent", "parent_gate", "{}")]),
+        Script::text("parent done"),
+    ])
+    .tool(Arc::new(gate))
+    .tool(Arc::new(parent_gate))
+    .settings(FakeSettings::default().with_subagents(fan_out_settings()))
+    .build()
+    .await;
+    h.factory.key(
+        "index the repo",
+        vec![
+            Script::call(&[(
+                "call_note",
+                crate::subagent::REPORT_STATUS_TOOL,
+                "{\"note\":\"halfway through crates/\",\"progress\":0.5}",
+            )]),
+            Script::call(&[("c1", "gate", "{}")]),
+            Script::text("child finished"),
+        ],
+    );
+
+    h.submit("delegate the index").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while handle.arrived() == 0 || parent_handle.arrived() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The note is stored on the row while the agent is still working, which is
+    // what makes it visible to a parent that asks now rather than later.
+    let agent = &h.store.agents()[0];
+    assert_eq!(agent.note, "halfway through crates/");
+    assert_eq!(agent.progress, Some(0.5));
+
+    // And the parent's own listing shows it, so a model can steer on it.
+    let listing = h
+        .runtime
+        .tools()
+        .get(crate::subagent::LIST_SUBAGENTS_TOOL)
+        .expect("the list tool");
+    let outcome = listing
+        .invoke(
+            kc_core::tool::ToolCallRequest {
+                call_id: "c_list".into(),
+                name: crate::subagent::LIST_SUBAGENTS_TOOL.into(),
+                arguments: serde_json::json!({}),
+            },
+            list_tool_ctx(&h),
+        )
+        .await;
+    assert!(outcome.ok, "{}", outcome.content);
+    assert!(
+        outcome.content.contains("halfway through crates/"),
+        "the parent must see the child's note: {}",
+        outcome.content
+    );
+
+    handle.release();
+    parent_handle.release();
+    // Both the run's own frames and the child's are wanted: the child settles as
+    // the parent is released, so `run_finished` is not the end of the stream.
+    let events = h.collect_until_quiet().await;
+    // The live frame carries the same claim, so a roster updates without polling.
+    let note = events.iter().find_map(|event| match &event.event {
+        Event::AgentNote { note, progress, .. } => Some((note.clone(), *progress)),
+        _ => None,
+    });
+    assert_eq!(
+        note,
+        Some(("halfway through crates/".to_string(), Some(0.5))),
+        "{:?}",
+        kinds(&events)
+    );
+}
+
+/// A tool context for calling a built-in delegate tool directly, as the main
+/// agent of the harness session would.
+fn list_tool_ctx(h: &Harness) -> kc_core::tool::ToolCtx {
+    let gate: Arc<dyn ApprovalGate> = Arc::new(RuntimeApprovalGate::new(
+        Arc::clone(h.runtime.shared()),
+        SessionId::from_string(h.session()),
+        RunId::from_string("r_probe"),
+        None,
+        CancellationToken::new(),
+        0,
+    ));
+    kc_core::tool::ToolCtx {
+        workspace: Arc::new(Workspace::new(&h.workspace_dir).expect("workspace")),
+        cancel: CancellationToken::new(),
+        approvals: kc_core::tool::ApprovalHandle::new(
+            gate,
+            SessionId::from_string(h.session()),
+            RunId::from_string("r_probe"),
+            None,
+        ),
+        events: Arc::new(|_| {}),
+        settings: Arc::clone(&h.settings) as Arc<dyn kc_core::settings::Settings>,
+        depth: 0,
+        supports_images: false,
+        checkpoints: None,
+    }
+}
+
+#[tokio::test]
+async fn a_child_cannot_control_an_agent_it_does_not_own() {
+    // Ownership is transitive and enforced: a child may message a sibling, but it
+    // may not stop one. Without this the hierarchy is advisory, not a hierarchy.
+    let (gate, handle) = GateTool::pair("gate");
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({ "task": "only child", "name": "one" })),
+        Script::text("parent done"),
+    ])
+    .tool(Arc::new(gate))
+    .settings(FakeSettings::default().with_subagents(fan_out_settings()))
+    .build()
+    .await;
+    h.factory.key(
+        "only child",
+        vec![
+            Script::call(&[(
+                "c_kill",
+                crate::subagent::KILL_AGENTS_TOOL,
+                "{\"agents\":[\"a_someone_else\"]}",
+            )]),
+            Script::call(&[("c1", "gate", "{}")]),
+            Script::text("one finished"),
+        ],
+    );
+
+    h.submit("fan out").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while handle.arrived() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    handle.release();
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "completed");
+
+    let kill = tool_finished(&events)
+        .into_iter()
+        .find(|(call, _, _, _)| call == "c_kill")
+        .expect("the kill attempt's result");
+    assert!(!kill.1, "a child may not kill an unknown agent: {}", kill.2);
+    assert!(
+        kill.2.contains("no agent") || kill.2.contains("not yours"),
+        "the refusal has to explain why: {}",
+        kill.2
+    );
+    assert_eq!(h.store.agents()[0].status, "completed");
+}
+
+/// A detached child must not make the session look busy **while its run lives**.
+///
+/// `has_active_run` is top_level-only, so a session with a background child keeps
+/// accepting prompts: a new run is registered next to the child's loop and the
+/// child is reaped by its own run's end, not by the new one. That is the property
+/// the flag exists for, and it is asserted here with the first run parked so the
+/// child is genuinely live.
+///
+/// The earlier version of this test also waited for the *first* run to finish
+/// before asserting, and then asserted the child was still live. That half
+/// contradicted `subagent.rs`/`subagents.md` ("a background agent outlives the
+/// turn that started it but not the run"): the run ending is exactly when the
+/// child is reaped. The corrected behaviour is covered by
+/// [`a_run_ending_cancels_its_background_children`].
+#[tokio::test]
+async fn a_detached_child_does_not_make_the_session_look_busy() {
+    let (gate, handle) = GateTool::pair("gate");
+    let (parent_gate, parent_handle) = GateTool::pair("parent_gate");
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({
+            "task": "a long job", "name": "worker", "background": true
+        })),
+        Script::call(&[("c_parent", "parent_gate", "{}")]),
+        Script::text("parent done"),
+    ])
+    .tool(Arc::new(gate))
+    .tool(Arc::new(parent_gate))
+    .settings(FakeSettings::default().with_subagents(fan_out_settings()))
+    .build()
+    .await;
+    h.factory.key(
+        "a long job",
+        vec![
+            Script::call(&[("c1", "gate", "{}")]),
+            Script::text("child finished"),
+        ],
+    );
+
+    h.submit("start the long job").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while handle.arrived() == 0 || parent_handle.arrived() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // The child is live and the run is still in flight: exactly one *run* is
+    // registered (the parent's), and the child is a loop of that run.
+    assert_eq!(h.runtime.live_agent_count(h.session()), 1);
+    assert!(
+        h.runtime.is_running(h.session()),
+        "the parent run is still working"
+    );
+    assert!(
+        h.runtime.has_active_run(h.session()),
+        "the parent run is the one the user typed into"
+    );
+
+    // The load-bearing half: `has_active_run` counts the user *run*, and the child's
+    // own loop is registered beside it as an agent loop (`agent_id: Some`) rather
+    // than as a second run. That is why a detached child never inflates the count.
+    let active = h.runtime.active_runs();
+    let runs_for_session: Vec<_> = active
+        .iter()
+        .filter(|run| run.session_id == h.session())
+        .collect();
+    assert_eq!(
+        runs_for_session
+            .iter()
+            .filter(|run| run.agent_id.is_none())
+            .count(),
+        1,
+        "exactly one user run is registered: {runs_for_session:?}"
+    );
+    assert_eq!(
+        runs_for_session
+            .iter()
+            .filter(|run| run.agent_id.is_some())
+            .count(),
+        1,
+        "the child's own loop is registered as an agent, not as a run: {runs_for_session:?}"
+    );
+
+    handle.release();
+    parent_handle.release();
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "completed");
+    let _ = h.wait_idle().await;
+    // A new prompt is accepted as soon as the run is over, which is the
+    // behaviour the flag exists for. No second script is queued: the submission
+    // succeeding is the assertion.
+    let started = h
+        .runtime
+        .submit(h.session(), "carry on please".to_string())
+        .await;
+    assert!(
+        started.is_ok(),
+        "a new run was refused after the previous one ended: {:?}",
+        started.err()
+    );
+    h.runtime.cancel(h.session());
+}
+
+/// The run's end reaps the background children it started.
+///
+/// Documented behaviour (`subagent.rs` module doc: "A background agent outlives
+/// the turn that started it but not the run: when the run ends its children are
+/// cancelled", repeated in `docs/internal/subagents.md`). It was not implemented:
+/// the run's cleanup tore down nothing, and the child's token was
+/// `ctx.cancel.child_token()` - so dropping it **detached** rather than cancelled,
+/// and a `background: true` agent kept working (up to
+/// `subagents.timeout_secs`, four hours) after the run that spawned it reported
+/// completed.
+#[tokio::test]
+async fn a_run_ending_cancels_its_background_children() {
+    // No `allow_background: false` escape hatch: this is the shipped default
+    // configuration for a background spawn.
+    let (gate, handle) = GateTool::pair("gate");
+    let (parent_gate, parent_handle) = GateTool::pair("parent_gate");
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({
+            "task": "an endless job", "name": "worker", "background": true
+        })),
+        Script::call(&[("c_parent", "parent_gate", "{}")]),
+        Script::text("parent done"),
+    ])
+    .tool(Arc::new(gate))
+    .tool(Arc::new(parent_gate))
+    .settings(FakeSettings::default().with_subagents(fan_out_settings()))
+    .build()
+    .await;
+    // The child parks in its gate: only cancellation can end it, so "did the run
+    // reap it" is unambiguous. The parent parks in its own gate so the child
+    // genuinely starts before the run is allowed to end.
+    h.factory.key(
+        "an endless job",
+        vec![Script::call(&[("c1", "gate", "{}")])],
+    );
+
+    h.submit("delegate and move on").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while handle.arrived() == 0 || parent_handle.arrived() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The child is detached and working while the run is alive - the documented
+    // and intended use.
+    assert_eq!(h.runtime.live_agent_count(h.session()), 1);
+    assert_eq!(h.store.agents()[0].status, "running");
+
+    // Let the run finish. Everything it started must be reaped with it.
+    parent_handle.release();
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "completed");
+
+    // The child must not be live once the run is over...
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if h.runtime.live_agent_count(h.session()) == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the background child outlived the run that spawned it ({:?})",
+            h.store
+                .agents()
+                .iter()
+                .map(|a| a.status.clone())
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // ...and its status must say *why*: cancelled (it honoured the token), never
+    // left `running`.
+    let agent = &h.store.agents()[0];
+    assert_ne!(
+        agent.status, "running",
+        "the reaped child is still recorded as running"
+    );
+    assert!(
+        agent.status == "cancelled" || agent.status == "interrupted",
+        "expected cancelled or interrupted, got {}",
+        agent.status
+    );
+    // Nothing is left writing for the session.
+    assert!(
+        !h.runtime.is_running(h.session()),
+        "a child loop outlived its run"
+    );
+    // Exactly one model call for the child: it was stopped, not allowed to run a
+    // second turn. Keyed on the child's first message, which is always its task.
+    let child_requests = h
+        .factory
+        .requests()
+        .into_iter()
+        .filter(|request| {
+            request
+                .messages
+                .iter()
+                .skip(1)
+                .any(|m| m.role == Role::User && m.content == "an endless job")
+        })
+        .count();
+    assert_eq!(
+        child_requests, 1,
+        "the child kept working after its run ended"
+    );
+}
+
+#[tokio::test]
+async fn a_child_keeps_the_coordination_tools_but_not_the_spawning_ones() {
+    // The split matters: a child that cannot report status is invisible to the
+    // parent, and one that cannot message cannot say it is blocked - but a child
+    // that can spawn with recursion off is exactly the unbounded fan-out the
+    // switch exists to prevent.
+    use crate::subagent::{COORDINATION_TOOLS, DELEGATION_ONLY_TOOLS};
+    assert!(
+        COORDINATION_TOOLS.contains(&crate::subagent::REPORT_STATUS_TOOL),
+        "report_status has to be available to every child"
+    );
+    assert!(COORDINATION_TOOLS.contains(&crate::subagent::SEND_MESSAGE_TOOL));
+    assert!(
+        DELEGATION_ONLY_TOOLS.contains(&SPAWN_AGENT_TOOL),
+        "spawning is what recursion gates"
+    );
+
+    let (gate, handle) = GateTool::pair("gate");
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({ "task": "look at this", "name": "child" })),
+        Script::text("parent done"),
+    ])
+    .tool(Arc::new(gate))
+    // Recursion off: the default, and the case that was silently stripping the
+    // coordination tools too.
+    .settings(FakeSettings::default().with_subagents(SubagentConfig {
+        allow_recursive: false,
+        ..fan_out_settings()
+    }))
+    .build()
+    .await;
+    h.factory.key(
+        "look at this",
+        vec![
+            Script::call(&[("c1", "gate", "{}")]),
+            Script::text("child finished"),
+        ],
+    );
+
+    h.submit("delegate").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while handle.arrived() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // The child's own request lists exactly which delegate tools it was given.
+    let child_request = h
+        .factory
+        .requests()
+        .into_iter()
+        .find(|request| {
+            request.messages[0]
+                .content
+                .starts_with("You are a focused subagent")
+        })
+        .expect("the child's request");
+    let offered: Vec<&str> = child_request
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    for name in COORDINATION_TOOLS {
+        assert!(
+            offered.contains(name),
+            "a child must keep `{name}`: {offered:?}"
+        );
+    }
+    for name in DELEGATION_ONLY_TOOLS {
+        assert!(
+            !offered.contains(name),
+            "recursion is off, so a child must not get `{name}`: {offered:?}"
+        );
+    }
+
+    handle.release();
+    let _ = h.collect_until_finished().await;
 }

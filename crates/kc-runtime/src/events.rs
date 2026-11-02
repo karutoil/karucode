@@ -21,6 +21,26 @@ pub(crate) fn now_ms() -> i64 {
     }
 }
 
+/// A short, human-readable "how long ago" for a timestamp in milliseconds.
+///
+/// Used where a model needs a sense of elapsed time rather than a clock reading:
+/// a message that says "sent 4m ago" tells it whether the sender is still
+/// waiting, while an epoch number tells it nothing it can act on.
+pub fn relative_ago(ts_ms: i64) -> String {
+    let delta = now_ms().saturating_sub(ts_ms);
+    if delta < 0 {
+        return "just now".to_string();
+    }
+    let seconds = delta / 1_000;
+    match seconds {
+        0..=4 => "just now".to_string(),
+        5..=59 => format!("{seconds}s ago"),
+        60..=3_599 => format!("{}m ago", seconds / 60),
+        3_600..=86_399 => format!("{}h ago", seconds / 3_600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
+}
+
 impl RuntimeInner {
     /// Stamp, publish and return one event.
     ///

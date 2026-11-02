@@ -27,6 +27,20 @@
 //
 // # What is protected
 //
+// * **The token** - with `KARUCODE_AUTH_TOKEN` set, every `/api/...` route and
+//   `/metrics` require `Authorization: Bearer <token>`; `?token=` is accepted
+//   only for the SSE stream and the terminal websocket (a browser can set
+//   neither a header on a top-level navigation nor on a websocket handshake).
+//   The **SPA shell and its static assets are served unauthenticated**: `GET /`,
+//   `/index.html`, `/assets/*`, `/favicon*`, `/brand/*` and any client-side deep
+//   link return the built frontend (or the "UI not built" placeholder) with
+//   `200`, because a browser cannot attach `Authorization` to the document that
+//   would run the app. Those bytes carry no data - the bundle is public in a
+//   source checkout - and the app then shows its own auth screen and asks for
+//   the token, which is what makes a token-protected deployment usable at all.
+//   A missing or wrong token for a non-`/api` path therefore never yields a
+//   `401`: it yields the shell. The fallback can only ever serve the frontend,
+//   so nothing else is reachable without the token.
 // * **Transport surface** - the API is same-origin only. No `Access-Control-*`
 //   header is ever sent.
 // * **CSRF** - `POST`/`PATCH`/`PUT`/`DELETE` require
@@ -40,7 +54,13 @@
 // * **Secrets** - API keys and MCP headers are write-only over the API, redacted in
 //   errors and never logged. The data directory is forced to `0700`.
 // * **Rendered content** - the UI disables raw HTML in Markdown and sanitises what
-//   it renders; the CSP allows no inline scripts.
+//   it renders; the CSP allows no inline scripts. `GET /api/workspace/raw` (the
+//   bytes behind an image or PDF preview) is served with a **route-local**
+//   `Content-Security-Policy: sandbox; default-src 'none'` plus `nosniff`, so the
+//   response is an opaque origin with script disabled: a workspace `.html` file
+//   can be hotlinked by `<img src>` or an iframe but cannot execute in the app's
+//   origin, cannot read its storage and cannot call `/api`. The shell keeps the
+//   app CSP; only the raw route is narrowed.
 // * **Plugin panels** - a plugin contributes *data*, never markup. The inspector
 //   draws the payload with a first-party component (or a read-only JSON view),
 //   so a plugin cannot execute code in the app's origin; the CSP and
@@ -72,8 +92,11 @@
 //   server user with that user's filesystem and network access. Approvals are the
 //   gate, not isolation.
 // * **The packaged unit does not sandbox the filesystem either.** It runs the
-//   agent as a dedicated unprivileged user under `NoNewPrivileges=yes`, but it
-//   sets no `ProtectSystem=`/`ProtectHome=`/`ReadWritePaths=`, so the agent can
+//   agent as an unprivileged account under `NoNewPrivileges=yes` - by default the
+//   human who ran the installer (`packaging/install.sh` runs the service as the
+//   installing account; the dedicated system account is only the fallback when no
+//   human can be identified) - and it sets no
+//   `ProtectSystem=`/`ProtectHome=`/`ReadWritePaths=`, so the agent can
 //   write anywhere that account can - deliberately, so ordinary work (`mv`, build
 //   caches, sibling checkouts) does not fail with `EROFS`. That account is the
 //   real boundary: give the service its own user and it cannot touch files that
@@ -188,6 +211,22 @@ pub fn build_router(state: AppState) -> Router {
 
 /// Bearer auth. `?token=` is accepted **only** for the SSE endpoint, because a
 /// `ReadableStream` fetch can set headers but some clients cannot.
+///
+/// Only `/api/...` and `/metrics` are gated. Everything else is the SPA shell and
+/// its static assets, which are served unauthenticated on purpose: a browser
+/// cannot attach an `Authorization` header to a top-level navigation or an
+/// `<script src>`, so gating them would leave a token-protected deployment with
+/// no usable UI at all - the bundle would 401 and `AuthScreen` (which asks for
+/// the token *inside* the app) could never render. The shell carries no data, so
+/// this is the standard SPA-with-token split: the app loads, then authenticates.
+///
+/// A wrong or missing token on a non-API path therefore never produces a `401`
+/// JSON body; it produces the shell. [`requires_auth`] is what decides, by path
+/// shape, so the fallback's behaviour and the middleware's decision cannot drift
+/// apart: `static_ui::serve_spa` only ever answers with a file from the web
+/// directory/embedded bundle or the placeholder page - it never lists a
+/// directory and cannot be walked out of (`static_ui::normalize` rejects `..`) -
+/// so an unauthenticated caller gets exactly the assets and nothing else.
 async fn auth_middleware(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -196,11 +235,38 @@ async fn auth_middleware(
     let Some(expected) = state.auth_token() else {
         return next.run(request).await;
     };
-    if authorized(&request, &expected) {
+    if !requires_auth(request.uri().path()) || authorized(&request, &expected) {
         next.run(request).await
     } else {
         ApiError::unauthorized().into_response()
     }
+}
+
+/// Whether a request path is behind the bearer token.
+///
+/// True for `/api` and everything below it, and for `/metrics` (the operator
+/// endpoint registered next to the API in [`build_router`]). False for the SPA
+/// shell, its assets and client-side deep links - see [`auth_middleware`] for
+/// why. `/apifoo` is *not* an API path: it is a client-side route, and the
+/// fallback serves the shell for it.
+///
+/// The path is compared after collapsing repeated slashes and `.`/`..` segments,
+/// so a request written as `//api/config` or `/x/../api/config` is gated too even
+/// though the router would send it to the SPA fallback: the decision fails closed
+/// even if a proxy or a future layer normalises the path before matching it.
+fn requires_auth(path: &str) -> bool {
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    let normalized = parts.join("/");
+    normalized == "metrics" || normalized == "api" || normalized.starts_with("api/")
 }
 
 fn authorized(request: &Request<Body>, expected: &str) -> bool {
@@ -357,15 +423,39 @@ async fn security_headers(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
-    );
-    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    // A route may narrow the CSP for its own response, and then that value wins:
+    // `GET /api/workspace/raw` and `GET /api/projects/:id/favicon` both serve
+    // bytes whose content type came from a file name, and both answer with
+    // `sandbox; default-src 'none'` (plus `sandbox`) so the document is an opaque
+    // origin with no script. Overwriting it here would silently restore
+    // `default-src 'self'` - which *allows* same-origin script - and turn a
+    // workspace `.html` file back into a same-origin XSS. The rule is therefore
+    // "a handler may only narrow": the two overrides in the tree both do.
+    if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        );
+    }
     headers.insert(
         header::HeaderName::from_static("cross-origin-resource-policy"),
         HeaderValue::from_static("same-origin"),
     );
+    // A document that carries its own `sandbox` CSP must be embeddable by *our*
+    // own pages, which is the whole point of it: the file preview puts a PDF or an
+    // image from `/api/workspace/raw` in an <iframe>/<img>, and `X-Frame-Options:
+    // DENY` on the response blocks the iframe (verified in Chromium: the PDF pane
+    // renders nothing with DENY, and correctly with no XFO). That header is
+    // redundant there anyway - the sandboxed document is an opaque origin with
+    // `default-src 'none'`, so it cannot be a clickjacking surface. Every page we
+    // serve ourselves still carries both DENY and `frame-ancestors 'none'`.
+    let sandboxed = headers
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|policy| policy.contains("sandbox"));
+    if !sandboxed {
+        headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    }
     response
 }
 
@@ -464,6 +554,38 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"abcd"));
+    }
+
+    /// The SPA shell is public, the API is not. Anything that could *become* an
+    /// API path after slashes or dot segments are collapsed is treated as one, so
+    /// the gate fails closed rather than relying on the router's normalisation.
+    #[test]
+    fn only_the_api_and_metrics_require_the_token() {
+        for gated in [
+            "/api",
+            "/api/",
+            "/api/config",
+            "/api/terminals/t_1/socket",
+            "/metrics",
+            "/metrics/",
+            "//api/config",
+            "/x/../api/config",
+            "/./api/health",
+        ] {
+            assert!(requires_auth(gated), "{gated} must require the token");
+        }
+        for open in [
+            "/",
+            "/index.html",
+            "/assets/index-1234abcd.js",
+            "/favicon.ico",
+            "/brand/logo.svg",
+            "/sessions/s_123",
+            "/apifoo",
+            "/metricsx",
+        ] {
+            assert!(!requires_auth(open), "{open} must stay open");
+        }
     }
 
     #[test]

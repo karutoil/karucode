@@ -4,6 +4,7 @@ import { SessionList, SessionsRail, sessionGroup, type SessionListProps } from '
 import { secondSummaryFixture, summaryFixture, NOW } from '../test/fixtures';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
+import * as sessionFacts from '../state/sessionFacts';
 
 function renderList(overrides: Partial<SessionListProps> = {}) {
   const props: SessionListProps = {
@@ -154,10 +155,22 @@ describe('SessionsRail shell', () => {
 
   beforeEach(seedStore);
 
-  it('shows the project heading, path and a platform-correct shortcut', () => {
+  it('loads fingerprints without an idle-render cache reset', async () => {
+    const load = vi.spyOn(sessionFacts, 'loadFactsFor').mockResolvedValue(undefined);
+    const invalidate = vi.spyOn(sessionFacts, 'invalidateFacts');
+    render(<SessionsRail />);
+    await vi.waitFor(() => expect(load).toHaveBeenCalledWith(['s_ab12', 's_cd34']));
+    expect(invalidate).toHaveBeenCalledWith();
+    load.mockRestore();
+    invalidate.mockRestore();
+  });
+
+  it('shows the workspace name, path and a platform-correct shortcut', () => {
     render(<SessionsRail />);
 
-    expect(screen.getByText('Your workspace')).not.toBeNull();
+    // The mock's `.ws` row: a glyph tile, the project name over its path. The
+    // "Your workspace" eyebrow above it was a second label for the same thing.
+    expect(screen.getByText('KaruCode')).not.toBeNull();
     expect(screen.getByText('/home/me/karucode')).not.toBeNull();
     const newSession = screen.getByRole('button', { name: /New session/ });
     expect(newSession.textContent).toContain('New session');

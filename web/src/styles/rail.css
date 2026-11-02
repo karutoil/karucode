@@ -8,8 +8,8 @@
 
 .project-rail {
   --project-rail-width: var(--rail-w);
-  --project-rail-item: 42px;
-  --project-rail-glyph: 35px;
+  --project-rail-item: 32px;
+  --project-rail-glyph: 27px;
   display: flex;
   flex: 0 0 var(--project-rail-width);
   flex-direction: column;
@@ -23,7 +23,10 @@
   /* Visible so the hover tooltips can escape the 64px column; the scroll area
      below owns its own overflow. */
   overflow: visible;
-  background: var(--rail);
+  /* The mock's `.rail`: the panel fill, a hairline, and a 10px/12px inset that
+   * stacks the glyphs from the top. */
+  padding: 10px 0 12px;
+  background: var(--panel-2);
   border-right: 1px solid var(--line);
   z-index: 8;
 }
@@ -32,38 +35,49 @@
   display: grid;
   place-items: center;
   width: 100%;
-  height: 70px;
+  height: auto;
+  margin-bottom: 9px;
   flex: 0 0 auto;
 }
 
+/* The mock's `.logo`: a 29px warm-gradient tile with dark ink. It is the only
+ * gradient in the frame, which is what makes it read as a mark rather than a
+ * button. Derived from the accent so every theme gets its own. */
 .brand-mark {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
-  border: 1px solid var(--btn-accent-line);
-  border-radius: calc(var(--radius) + 1px);
-  background: var(--accent-surface);
-  box-shadow: inset 0 1px var(--rail-glyph-line);
-  color: var(--accent-text-soft);
-  font-size: 19px;
-  font-weight: 750;
-  letter-spacing: -1.4px;
+  width: 29px;
+  height: 29px;
+  border-radius: 9px;
+  background: linear-gradient(
+    150deg,
+    color-mix(in srgb, var(--accent-fill) 55%, var(--text)),
+    var(--accent-fill) 55%,
+    color-mix(in srgb, var(--accent-fill) 62%, var(--bg))
+  );
+  box-shadow:
+    0 3px 14px color-mix(in srgb, var(--accent-fill) 35%, transparent),
+    inset 0 1px 0 rgb(255 255 255 / 45%);
+  color: var(--on-accent);
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0;
   line-height: 1;
   white-space: nowrap;
   user-select: none;
 }
 
 .brand-mark span {
-  color: var(--accent);
+  color: inherit;
 }
 
 .project-rail-divider {
-  width: 27px;
+  width: 24px;
   height: 1px;
-  margin: 0 0 17px;
-  background: var(--line-strong);
+  margin: 4px 0;
+  background: var(--line);
 }
 
 .project-rail-scroll {
@@ -87,7 +101,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -112,7 +126,7 @@
   height: var(--project-rail-item);
   padding: 0;
   border: 0;
-  border-radius: calc(var(--radius) + 3px);
+  border-radius: 9px;
   background: transparent;
   color: var(--rail-glyph-text);
   cursor: pointer;
@@ -127,13 +141,13 @@
   width: var(--project-rail-glyph);
   height: var(--project-rail-glyph);
   border: 1px solid var(--rail-glyph-line);
-  border-radius: calc(var(--radius) + 1px);
-  background: var(--surface-hover);
+  border-radius: 8px;
+  background: var(--surface-3);
   color: var(--rail-glyph-text);
   font-family: var(--font-ui);
-  font-size: 12px;
-  font-weight: 680;
-  letter-spacing: -0.25px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
   line-height: 1;
   text-transform: uppercase;
   user-select: none;
@@ -306,17 +320,17 @@
   flex: 0 0 auto;
   flex-direction: column;
   align-items: center;
-  gap: 15px;
-  padding: 0 0 19px;
+  gap: 6px;
+  padding: 0;
 }
 
 .rail-tool {
   position: relative;
   display: grid;
   place-items: center;
-  width: 35px;
-  height: 35px;
-  border-radius: var(--radius);
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
   color: var(--icon-quiet);
   transition:
     background-color var(--transition-fast),
@@ -339,13 +353,14 @@
 .rail-avatar {
   display: grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
+  width: 26px;
+  height: 26px;
+  margin-top: 5px;
   border: 1px solid var(--rail-avatar-line);
-  border-radius: calc(var(--radius) + 1px);
+  border-radius: 7px;
   background: var(--rail-avatar-bg);
   color: var(--rail-avatar-text);
-  font-size: 11px;
+  font-size: 9.5px;
   font-weight: 700;
   line-height: 1;
 }

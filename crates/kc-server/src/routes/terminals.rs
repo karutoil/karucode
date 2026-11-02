@@ -264,7 +264,7 @@ fn resolve_start_dir(
     }
     let resolved = workspace
         .resolve_existing(trimmed)
-        .map_err(|error| ApiError::from(error))?;
+        .map_err(ApiError::from)?;
     if !resolved.is_dir() {
         return Err(ApiError::bad_request(format!(
             "`cwd` must name a directory, and `{trimmed}` is not one"

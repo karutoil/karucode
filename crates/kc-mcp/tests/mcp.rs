@@ -918,3 +918,420 @@ async fn require_approval_false_exempts_the_server_but_keeps_the_external_class(
     manager.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// stdio server whose `noisy` tool writes one stderr line far past the 64 KiB
+/// cap, then answers normally.
+const NOISY_STDERR_SERVER: &str = r#"
+import json, sys
+
+SIZE = 200 * 1024
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "serverInfo": {"name": "noisy", "version": "0"}}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [
+            {"name": "noisy", "description": "Write a huge stderr line.",
+             "inputSchema": {"type": "object", "properties": {}}},
+            {"name": "echo", "description": "Echo.",
+             "inputSchema": {"type": "object", "properties": {}}}]}})
+    elif method == "tools/call":
+        if (req.get("params") or {}).get("name") == "noisy":
+            # One line, >64 KiB, no newline until the end.
+            sys.stderr.write("x" * SIZE)
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+            send({"jsonrpc": "2.0", "id": rid,
+                  "result": {"content": [{"type": "text", "text": "logged"}],
+                             "isError": False}})
+        else:
+            send({"jsonrpc": "2.0", "id": rid,
+                  "result": {"content": [{"type": "text", "text": "mcp echo"}],
+                             "isError": False}})
+    elif rid is not None:
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601,
+             "message": "unknown"}})
+"#;
+
+/// The bug FIX 2 is about, on the MCP transport: one over-long stderr line used
+/// to stop the drain, the closed read end made the server's next stderr write
+/// fail with `EPIPE`, and the process died — after which every call failed with
+/// "not running".
+#[tokio::test]
+async fn an_over_long_stderr_line_does_not_kill_the_server() {
+    let dir = temp_dir("stdio-noisy-stderr");
+    let script = dir.join("noisy_server.py");
+    std::fs::write(&script, NOISY_STDERR_SERVER).unwrap();
+    let mut config = stdio_server("noisy");
+    config.command = vec!["python3".to_string(), script.to_string_lossy().into_owned()];
+
+    let mut manager = McpManager::new(&[config]);
+    manager.set_timeouts(McpTimeouts {
+        connect: Duration::from_secs(5),
+        call: Duration::from_secs(5),
+    });
+    manager.connect_all().await;
+    assert_eq!(
+        manager.statuses()[0].status,
+        "connected",
+        "{:?}",
+        manager.statuses()[0].error
+    );
+
+    let out = call_tool(find(&manager.tools(), "mcp__noisy__noisy"), &dir, json!({})).await;
+    assert!(
+        out.ok,
+        "the over-long log line must not fail the call: {}",
+        out.content
+    );
+    assert_eq!(out.content, "logged");
+
+    // Still connected: the drain continued rather than closing the pipe.
+    assert_eq!(
+        manager.statuses()[0].status,
+        "connected",
+        "{:?}",
+        manager.statuses()[0].error
+    );
+    let out = call_tool(find(&manager.tools(), "mcp__noisy__echo"), &dir, json!({})).await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(out.content, "mcp echo");
+
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// stdio server whose `spawn` tool starts a long-lived helper that ignores
+/// SIGTERM and writes a marker file if it is still alive later.
+const HELPER_SPAWNING_SERVER: &str = r#"
+import json, os, subprocess, sys
+
+MARKER = os.environ["HELPER_MARKER"]
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "serverInfo": {"name": "helper", "version": "0"}}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [
+            {"name": "spawn", "description": "Start a helper.",
+             "inputSchema": {"type": "object", "properties": {}}}]}})
+    elif method == "tools/call":
+        subprocess.Popen(["sh", "-c",
+                          "trap '' TERM; sleep 6; echo alive > '%s'" % MARKER])
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"content": [{"type": "text", "text": "started"}],
+                         "isError": False}})
+    elif rid is not None:
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601,
+             "message": "unknown"}})
+"#;
+
+/// The proxy-server case: an `npx`-style server starts a child of its own, and
+/// teardown used to signal only the process karucode spawned.
+#[tokio::test]
+async fn an_mcp_servers_grandchildren_are_killed_with_it() {
+    let dir = temp_dir("stdio-grandchildren");
+    let script = dir.join("helper_server.py");
+    std::fs::write(&script, HELPER_SPAWNING_SERVER).unwrap();
+    let marker = dir.join("marker.txt");
+    let mut config = stdio_server("helper");
+    config.command = vec!["python3".to_string(), script.to_string_lossy().into_owned()];
+    config.env.insert(
+        "HELPER_MARKER".to_string(),
+        marker.to_string_lossy().into_owned(),
+    );
+
+    let mut manager = McpManager::new(&[config]);
+    manager.set_timeouts(McpTimeouts {
+        connect: Duration::from_secs(5),
+        call: Duration::from_secs(5),
+    });
+    manager.connect_all().await;
+    let out = call_tool(
+        find(&manager.tools(), "mcp__helper__spawn"),
+        &dir,
+        json!({}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+
+    let started = Instant::now();
+    manager.shutdown().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "shutdown took {:?}",
+        started.elapsed()
+    );
+
+    tokio::time::sleep(Duration::from_millis(7_000)).await;
+    assert!(
+        !marker.exists(),
+        "the server's grandchild survived shutdown and wrote {}",
+        marker.display()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// stdio server whose name and single tool name come from the environment, so
+/// two of them can be made to produce the same namespaced tool name.
+const COLLIDING_SERVER: &str = r#"
+import json, os, sys
+
+NAME = os.environ["COLLIDE_SERVER_NAME"]
+TOOL = os.environ["COLLIDE_TOOL_NAME"]
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "serverInfo": {"name": NAME, "version": "0"}}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [
+            {"name": TOOL, "description": "One tool.",
+             "inputSchema": {"type": "object", "properties": {}}}]}})
+    elif method == "tools/call":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "content": [{"type": "text", "text": "%s/%s" % (NAME, TOOL)}],
+            "isError": False}})
+    elif rid is not None:
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601,
+             "message": "unknown"}})
+"#;
+
+fn colliding_server(dir: &std::path::Path, slot: &str, name: &str, tool: &str) -> McpServerConfig {
+    let script = dir.join("colliding_server.py");
+    if !script.exists() {
+        std::fs::write(&script, COLLIDING_SERVER).unwrap();
+    }
+    let mut config = stdio_server(slot);
+    config.command = vec!["python3".to_string(), script.to_string_lossy().into_owned()];
+    config
+        .env
+        .insert("COLLIDE_SERVER_NAME".to_string(), name.to_string());
+    config
+        .env
+        .insert("COLLIDE_TOOL_NAME".to_string(), tool.to_string());
+    config
+}
+
+/// The bug FIX 5 is about on the MCP side: server `a` exposing `b__c` and server
+/// `a__b` exposing `c` both yield `mcp__a__b__c`, and the registry is a
+/// `HashMap`, so one of them used to be silently dropped.
+#[tokio::test]
+async fn a_namespaced_mcp_tool_name_collision_is_refused_loudly() {
+    let dir = temp_dir("mcp-collision");
+    let first = colliding_server(&dir, "a", "a", "b__c");
+    let second = colliding_server(&dir, "a__b", "a__b", "c");
+    let mut manager = McpManager::new(&[first, second]);
+    manager.set_timeouts(McpTimeouts {
+        connect: Duration::from_secs(5),
+        call: Duration::from_secs(5),
+    });
+    manager.connect_all().await;
+
+    let statuses = manager.statuses();
+    assert_eq!(statuses[0].status, "connected", "{:?}", statuses[0].error);
+    assert_eq!(statuses[1].status, "connected", "{:?}", statuses[1].error);
+
+    // The colliding name is exposed exactly once, by the first server.
+    let tools = manager.tools();
+    let names: Vec<String> = tools.iter().map(|t| t.spec().name).collect();
+    assert_eq!(
+        names.iter().filter(|n| *n == "mcp__a__b__c").count(),
+        1,
+        "{names:?}"
+    );
+    let only = find(&tools, "mcp__a__b__c");
+    assert_eq!(only.spec().origin, ToolOrigin::Mcp { server: "a".into() });
+    let out = call_tool(only, &dir, json!({})).await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(out.content, "a/b__c");
+
+    // The refusal is visible in `GET /api/mcp`, naming the tool and the winner.
+    let error = statuses[1].error.clone().unwrap_or_default();
+    assert!(error.contains("not exposing"), "{error}");
+    assert!(error.contains("mcp__a__b__c"), "{error}");
+    assert!(error.contains("server `a`"), "{error}");
+    assert!(
+        statuses[0].error.is_none(),
+        "the server that kept the name must not be flagged: {:?}",
+        statuses[0].error
+    );
+    // `collisions()` reports the same fact programmatically.
+    let collisions = manager.collisions();
+    let (owner, claimants) = collisions.get("mcp__a__b__c").expect("collision listed");
+    assert_eq!(owner, "a");
+    assert_eq!(claimants, &vec!["a__b".to_string()]);
+
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A canned SSE server that answers each request with a `text/event-stream`
+/// written **one byte at a time**, yielding between writes.
+///
+/// TCP is free to preserve or discard write boundaries; this makes the split
+/// certain rather than likely, so a decoder that assumes a chunk ends on a
+/// character boundary is caught every run.
+struct TrickleSse {
+    addr: SocketAddr,
+    stop: CancellationToken,
+}
+
+impl TrickleSse {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stop = CancellationToken::new();
+        let stop_task = stop.clone();
+        tokio::spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    _ = stop_task.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((mut stream, _)) = accepted else { break };
+                tokio::spawn(async move {
+                    let Some(request) = read_http_request(&mut stream).await else {
+                        return;
+                    };
+                    let body = request.json_body();
+                    let method = body
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    if method == "notifications/initialized" {
+                        let _ = stream
+                            .write_all(
+                                b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\
+                                  connection: close\r\n\r\n",
+                            )
+                            .await;
+                        return;
+                    }
+                    let id = body.get("id").cloned().unwrap_or(Value::Null);
+                    let result = match method.as_str() {
+                        "initialize" => json!({
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "trickle", "version": "0.1.0"},
+                        }),
+                        "tools/list" => json!({
+                            "tools": [{"name": "echo", "description": "Echo.",
+                                       "inputSchema": {"type": "object"}}]
+                        }),
+                        "tools/call" => json!({
+                            "content": [{"type": "text", "text": MULTIBYTE_ECHO}],
+                            "isError": false
+                        }),
+                        other => json!({"error": {"code": -32601, "message": other}}),
+                    };
+                    let payload = json!({"jsonrpc": "2.0", "id": id, "result": result});
+                    let bytes = format!("event: message\ndata: {payload}\n\n").into_bytes();
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream.flush().await;
+                    for byte in bytes {
+                        if stream.write_all(&[byte]).await.is_err() {
+                            break;
+                        }
+                        let _ = stream.flush().await;
+                        tokio::task::yield_now().await;
+                    }
+                });
+            }
+        });
+        Self { addr, stop }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}/mcp", self.addr)
+    }
+}
+
+impl Drop for TrickleSse {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+/// Content that is multi-byte in UTF-8, so a per-write decode turns it into
+/// `U+FFFD` and the JSON payload stops parsing.
+const MULTIBYTE_ECHO: &str = "héllo wörld — 日本語 ✓";
+
+/// The bug FIX 6 is about: the SSE reader decoded each TCP chunk with
+/// `String::from_utf8_lossy`, so a character split across two chunks became
+/// replacement characters, the `data:` payload stopped being valid JSON,
+/// `dispatch_event` silently dropped it, and the call failed with
+/// "no JSON-RPC response for request N in the SSE stream".
+#[tokio::test]
+async fn http_sse_survives_a_multibyte_character_split_across_writes() {
+    let server = TrickleSse::start().await;
+    let mut manager = McpManager::new(&[http_config("trickle", server.url(), BTreeMap::new())]);
+    manager.set_timeouts(McpTimeouts {
+        connect: Duration::from_secs(10),
+        call: Duration::from_secs(10),
+    });
+    manager.connect_all().await;
+    // Even `initialize`/`tools/list` go through the same one-byte-at-a-time SSE
+    // path, so a broken decoder cannot get this far.
+    assert_eq!(
+        manager.statuses()[0].status,
+        "connected",
+        "{:?}",
+        manager.statuses()[0].error
+    );
+
+    let dir = temp_dir("sse-multibyte");
+    let out = call_tool(
+        find(&manager.tools(), "mcp__trickle__echo"),
+        &dir,
+        json!({}),
+    )
+    .await;
+    assert!(
+        out.ok,
+        "a multi-byte character split across writes corrupted the SSE stream: {}",
+        out.content
+    );
+    assert_eq!(
+        out.content, MULTIBYTE_ECHO,
+        "the content must survive the chunk boundaries intact"
+    );
+
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}

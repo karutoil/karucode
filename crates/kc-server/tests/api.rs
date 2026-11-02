@@ -983,7 +983,17 @@ async fn approvals_endpoint_resolves_a_real_approval() {
 
 #[tokio::test]
 async fn workspace_explorer_confines_paths() {
-    let h = HarnessBuilder::new(Vec::new()).build().await;
+    // `strict_workspace` turns `allow_temp_dir` off. The harness workspace lives
+    // under the system temp dir, and the temp dir is *deliberately* a second
+    // allowed root by default, so `../../etc/passwd` would legitimately resolve
+    // to `<tmp>/etc/passwd` and be allowed. Proving the escape is refused means
+    // asking for project-only confinement - which is what an install outside
+    // `/tmp` gets by default anyway. See the `workspace_temp_dir_is_a_root_by_default`
+    // test below for the other half of the contract.
+    let h = HarnessBuilder::new(Vec::new())
+        .strict_workspace()
+        .build()
+        .await;
     std::fs::create_dir_all(h.workspace_path().join("src")).unwrap();
     std::fs::write(h.workspace_path().join("src/main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(h.workspace_path().join("README.md"), "# hi\n").unwrap();
@@ -1032,7 +1042,13 @@ async fn workspace_explorer_confines_paths() {
 /// `expected_size` and stays inside the workspace.
 #[tokio::test]
 async fn workspace_file_can_be_saved_from_the_editor() {
-    let h = HarnessBuilder::new(Vec::new()).build().await;
+    // Project-only confinement, for the same reason as
+    // `workspace_explorer_confines_paths`: the `..` escape assertion below is only
+    // meaningful when the temp dir is not an allowed root.
+    let h = HarnessBuilder::new(Vec::new())
+        .strict_workspace()
+        .build()
+        .await;
     std::fs::create_dir_all(h.workspace_path().join("docs")).unwrap();
     std::fs::write(h.workspace_path().join("docs/notes.md"), "# hi\n").unwrap();
 
@@ -1206,6 +1222,56 @@ async fn mutations_require_the_csrf_header_and_a_matching_origin() {
     // GET is not affected.
     let get = h.get("/api/sessions").await;
     assert_eq!(get.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn workspace_temp_dir_is_a_root_by_default() {
+    // The other half of the confinement contract, and the reason the two escape
+    // tests above ask for `strict_workspace`.
+    //
+    // `allow_temp_dir` defaults to ON, so the system temp directory is a second
+    // allowed root. That is deliberate (`app.rs`, "The temp directory is
+    // deliberately inside the fence"): `/tmp` was never outside the attacker's
+    // reach - `run_command` is unsandboxed and every process on the machine can
+    // write there - so fencing it off would only break builds and scratch files
+    // while adding no containment.
+    //
+    // This test exists so the default cannot be changed - or the escape tests
+    // "fixed" by relaxing them - without someone deciding to.
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let temp = std::env::temp_dir();
+    // The harness workspace is `<tmp>/kc-server-test-.../workspace`, so `../..`
+    // is the temp dir itself.
+    let inside_temp = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file?path=../../kc-temp-root-probe.txt&create=true",
+            Some(json!({ "content": "ok" })),
+            &[],
+        )
+        .await;
+    assert_eq!(
+        inside_temp.status,
+        StatusCode::OK,
+        "the temp root is allowed by default: {}",
+        inside_temp.text()
+    );
+    let written = temp.join("kc-temp-root-probe.txt");
+    assert_eq!(std::fs::read_to_string(&written).unwrap(), "ok");
+    let _ = std::fs::remove_file(&written);
+
+    // But it is still a *root*: `..` cannot climb out of it into `/etc`, and the
+    // refusal is the documented `400 path_escape`, not a not-found.
+    let escape = h
+        .get("/api/workspace/file?path=../../../../etc/passwd")
+        .await;
+    assert_eq!(
+        escape.status,
+        StatusCode::BAD_REQUEST,
+        "a path above the temp root must be refused: {}",
+        escape.text()
+    );
+    assert_eq!(escape.error_code(), "path_escape");
 }
 
 #[tokio::test]
@@ -2210,6 +2276,54 @@ async fn out_of_range_settings_are_rejected_with_the_bounds() {
     let body = boundary.json();
     assert_eq!(body["limits"]["max_file_read_bytes"], 5_000_000);
     assert_eq!(body["subagents"]["max_depth"], 0);
+
+    // The background tuning is part of the same contract: it is reported, it is
+    // patchable, and the bounds are enforced with the key named.
+    let background = h
+        .patch(
+            "/api/config",
+            json!({
+                "subagents": {
+                    "allow_background": false,
+                    "max_background": 2,
+                    "wait_timeout_secs": 30
+                }
+            }),
+        )
+        .await;
+    assert_eq!(background.status, StatusCode::OK, "{}", background.text());
+    let body = background.json();
+    assert_eq!(body["subagents"]["allow_background"], false);
+    assert_eq!(body["subagents"]["max_background"], 2);
+    assert_eq!(body["subagents"]["wait_timeout_secs"], 30);
+
+    for (key, value) in [
+        (
+            "subagents.max_background",
+            json!({ "subagents": { "max_background": 0 } }),
+        ),
+        (
+            "subagents.max_background",
+            json!({ "subagents": { "max_background": 17 } }),
+        ),
+        (
+            "subagents.wait_timeout_secs",
+            json!({ "subagents": { "wait_timeout_secs": 0 } }),
+        ),
+    ] {
+        let refused = h.patch("/api/config", value).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::BAD_REQUEST,
+            "{key} was accepted"
+        );
+        assert_eq!(refused.error_code(), "bad_request");
+        assert!(
+            refused.text().contains(key),
+            "the refusal has to name {key}: {}",
+            refused.text()
+        );
+    }
 }
 
 /// Write an executable marker script (used to prove git helpers do not run).
@@ -2445,7 +2559,15 @@ impl support::Harness {
 
 #[tokio::test]
 async fn first_message_titles_an_untitled_session() {
-    let h = HarnessBuilder::new(vec![text("ok")]).build().await;
+    let h = HarnessBuilder::new(vec![text("ok")])
+        .no_ai_titles()
+        .build()
+        .await;
+    // The deterministic title, by construction: `[titles]` is on by default and the
+    // harness provider is scripted, so the background titling turn would consume the
+    // next script and rename the session behind this assertion (that is the
+    // documented behaviour, and `an_auto_title_is_announced_on_the_event_stream`
+    // covers it). Turn the model title off to test the derived one.
     let id = h.create_session(None).await;
     assert_eq!(
         h.get(&format!("/api/sessions/{id}")).await.json()["session"]["title"],
@@ -2478,8 +2600,14 @@ async fn first_message_titles_an_untitled_session() {
 #[tokio::test]
 async fn second_message_keeps_the_derived_title() {
     let h = HarnessBuilder::new(vec![text("one"), text("two")])
+        .no_ai_titles()
         .build()
         .await;
+    // The deterministic title, by construction: `[titles]` is on by default and the
+    // harness provider is scripted, so the background titling turn would consume the
+    // next script and rename the session behind this assertion (that is the
+    // documented behaviour, and `an_auto_title_is_announced_on_the_event_stream`
+    // covers it). Turn the model title off to test the derived one.
     let id = h.create_session(None).await;
 
     let first = h
@@ -2682,6 +2810,60 @@ async fn agents_are_listable_workspace_wide_and_each_has_its_own_transcript() {
     let missing = h.get("/api/agents/a_does_not_exist").await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
     assert_eq!(missing.error_code(), "not_found");
+}
+
+#[tokio::test]
+async fn controlling_an_agent_is_routed_and_refuses_what_it_cannot_do() {
+    let h = HarnessBuilder::new(vec![
+        tool_call(
+            "spawn_agent",
+            r#"{"task":"review the diff","name":"reviewer"}"#,
+        ),
+        text("the diff looks fine"),
+        text("parent finished"),
+    ])
+    .build()
+    .await;
+    let session = h.create_session(Some("agent control")).await;
+    let started = h
+        .post(
+            &format!("/api/sessions/{session}/messages"),
+            json!({ "content": "delegate the review" }),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::ACCEPTED, "{}", started.text());
+    h.wait_until_idle(&session).await;
+
+    let list = h.get("/api/agents").await.json();
+    let agent_id = list["agents"][0]["id"].as_str().unwrap().to_string();
+
+    // The agent has settled, so there is nothing left to control. The route says
+    // so with a 404 rather than a no-op success: a browser that raced the finish
+    // has to be told, or its button looks broken forever.
+    for action in ["pause", "resume", "cancel"] {
+        let refused = h
+            .post(&format!("/api/agents/{agent_id}/{action}"), json!({}))
+            .await;
+        assert_eq!(
+            refused.status,
+            StatusCode::NOT_FOUND,
+            "{action} on a finished agent must be a 404: {}",
+            refused.text()
+        );
+        assert_eq!(refused.error_code(), "not_found");
+    }
+
+    // An unknown verb is a 400 that names the three that exist, not a 404 that
+    // looks like a missing agent.
+    let unknown = h
+        .post(&format!("/api/agents/{agent_id}/explode"), json!({}))
+        .await;
+    assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+    assert_eq!(unknown.error_code(), "bad_request");
+    let text = unknown.text();
+    for verb in ["pause", "resume", "cancel"] {
+        assert!(text.contains(verb), "{text}");
+    }
 }
 
 // ---------------------------------------------------------------------------

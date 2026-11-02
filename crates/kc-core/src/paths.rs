@@ -10,6 +10,21 @@
 //! * for writes, the deepest existing ancestor is canonicalised and checked, so
 //!   a symlinked directory cannot be used to escape either.
 //!
+//! # These are checks, not handles
+//!
+//! Resolution returns a *path*, and the caller then opens or writes that path by
+//! name. That is check-then-use: a component swapped for a symlink between the
+//! check and the `open`/`rename` defeats it. Closing that window needs
+//! `openat2(RESOLVE_BENEATH)` or `cap-std` style passed handles, not a second
+//! `stat` - a re-check just narrows the race.
+//!
+//! The window is deliberately not treated as a vulnerability of its own here,
+//! for the same reason [`crate::config::Config::allow_temp_dir`] is not: the
+//! agent can already run `run_command` as this user, so anything able to win
+//! that race can simply read the file directly. The rules below stop a *model*
+//! wandering out of its project with a normal `../` or a committed symlink; they
+//! are not a containment guarantee against a process racing the server.
+//!
 //! # Extra roots
 //!
 //! A workspace may carry a small allowlist of *additional* roots (see

@@ -54,11 +54,11 @@ describe('initTheme', () => {
     expect(root().dataset.theme).toBe('ember');
     expect(root().dataset.mode).toBe('dark');
     expect(root().dataset.density).toBe('comfortable');
-    expect(token('--theme-bg')).toBe('#111213');
-    expect(token('--theme-accent')).toBe('#dfb680');
+    expect(token('--theme-bg')).toBe('#08090b');
+    expect(token('--theme-accent')).toBe('#eaa06d');
     expect(root().style.colorScheme).toBe('dark');
     expect(document.querySelector('meta[name="theme-color"]')?.getAttribute('content')).toBe(
-      '#111213',
+      '#08090b',
     );
   });
 
@@ -96,8 +96,8 @@ describe('selecting a built-in', () => {
     expect(root().dataset.theme).toBe('daybreak');
     expect(root().dataset.mode).toBe('light');
     expect(root().style.colorScheme).toBe('light');
-    expect(token('--theme-bg')).toBe('#f7f8fb');
-    expect(token('--theme-text')).toBe('#1b283a');
+    expect(token('--theme-bg')).toBe('#f4f2ee');
+    expect(token('--theme-text')).toBe('#1c1a17');
     expect(draftEdited.value).toBe(false);
     expect(persisted()?.selected).toBe('daybreak');
   });
@@ -191,7 +191,7 @@ describe('editing a draft', () => {
     expect(root().dataset.mode).toBe('light');
     expect(activeTheme.value.mode).toBe('light');
     expect(activeTheme.value.colors.accent).toBe('#00aa88');
-    expect(activeTheme.value.colors.bg).not.toBe('#111213');
+    expect(activeTheme.value.colors.bg).not.toBe('#08090b');
     expect(root().style.colorScheme).toBe('light');
   });
 

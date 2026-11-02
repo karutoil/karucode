@@ -44,7 +44,7 @@ fn parse_status_filter(query: &QueryMap) -> ApiResult<Vec<String>> {
         }
         if AgentStatus::parse(status).is_none() {
             return Err(ApiError::bad_request(format!(
-                "unknown `status` value `{status}`; expected one of running, completed, failed, cancelled, interrupted"
+                "unknown `status` value `{status}`; expected one of running, paused, completed, failed, cancelled, interrupted"
             )));
         }
         if statuses.len() >= MAX_STATUS_FILTERS {
@@ -77,13 +77,29 @@ pub async fn list_agents(
                 .any(|status| status == &summary.agent.status)
         });
     }
+    // `running` is "alive and spending", which includes paused: a paused agent
+    // still holds a subagent slot, so a caller that used this count to decide
+    // whether it had capacity would be wrong if paused were excluded. The exact
+    // split is one `status` per row, which the client already has.
     let running = agents
         .iter()
-        .filter(|summary| summary.agent.status == AgentStatus::Running.as_str())
+        .filter(|summary| {
+            AgentStatus::parse(&summary.agent.status).is_some_and(|status| status.is_live())
+        })
+        .count();
+    let paused = agents
+        .iter()
+        .filter(|summary| summary.agent.status == AgentStatus::Paused.as_str())
         .count();
     Ok(Json(json!({
         "agents": agents,
         "running": running,
+        "paused": paused,
+        // The runtime's own view, which covers both scopes: the store list above
+        // can be filtered, while `live` is "loops that exist right now".
+        "live": state.runtime().live_agent_count(
+            session.unwrap_or_default()
+        ),
     })))
 }
 
@@ -111,5 +127,41 @@ pub async fn get_agent(
         "messages": messages,
         "messages_truncated": messages_truncated,
         "messages_limit": limit,
+    })))
+}
+
+/// `POST /api/agents/:id/{pause,resume,cancel}`
+///
+/// The human's control surface for a live subagent. Every one of the three is the
+/// same operation from the server's point of view - ask the runtime to change what
+/// a running loop is doing, then report what it is now - so one handler covers
+/// them and an unknown verb is a 400 naming the three that exist.
+///
+/// A pause takes effect at the agent's next iteration boundary: the turn in flight
+/// finishes, because that is the only point where stopping costs no work. A cancel
+/// fires the agent's token at once and lets its tools unwind, so the response says
+/// `cancelled` while the transcript catches up a moment later.
+///
+/// An unknown or already-settled agent is a 404 rather than a silent success: a
+/// browser that raced the finish has to be told, or its pause button looks broken
+/// forever.
+pub async fn control_agent(
+    State(state): State<AppState>,
+    Path((id, action)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let Some(action) = kc_runtime::AgentAction::parse(&action) else {
+        return Err(ApiError::bad_request(format!(
+            "unknown agent action `{action}`; expected pause, resume or cancel"
+        )));
+    };
+    let status = state.runtime().control_agent(&id, action).await?;
+    Ok(Json(json!({
+        "agent_id": id,
+        "action": match action {
+            kc_runtime::AgentAction::Pause => "pause",
+            kc_runtime::AgentAction::Resume => "resume",
+            kc_runtime::AgentAction::Cancel => "cancel",
+        },
+        "status": status.as_str(),
     })))
 }

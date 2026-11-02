@@ -100,6 +100,32 @@ pub(crate) fn map_reqwest_error(
     Error::Provider(format!("request to {url} failed: {detail}"))
 }
 
+/// Tag marking a failure that another attempt cannot fix.
+///
+/// [`retryable`](crate::retry::retryable) classifies by HTTP status, but some
+/// permanent failures arrive with a **200**: an endpoint that answers
+/// `stream: true` with a buffered JSON document (or a gateway that returns
+/// `{"error":{"message":"insufficient_quota"}}` with a 200), and a 200 whose body
+/// is empty. Those carry no status to classify, so the verdict travels in the
+/// message like [`HTTP_STATUS_TAG`] does.
+pub(crate) const PERMANENT_TAG: &str = "[permanent]";
+
+/// Does this message say another attempt cannot help?
+pub(crate) fn is_permanent(message: &str) -> bool {
+    message.contains(PERMANENT_TAG)
+}
+
+/// Mark an error permanent, so the retry layer surfaces it instead of re-sending
+/// the request up to 50 more times - each one a billed generation.
+pub(crate) fn permanent(err: Error) -> Error {
+    match err {
+        Error::Provider(message) if !is_permanent(&message) => {
+            Error::Provider(format!("{message} {PERMANENT_TAG}"))
+        }
+        other => other,
+    }
+}
+
 /// Read at most [`ERROR_BODY_LIMIT`] bytes of an error body and format a message
 /// for the given status.
 pub(crate) async fn http_status_error(
@@ -175,6 +201,62 @@ fn status_line(status: StatusCode) -> String {
         Some(reason) => format!("{} {reason}", status.as_u16()),
         None => status.as_u16().to_string(),
     }
+}
+
+/// A `200` whose body is a JSON document rather than an event stream.
+///
+/// Two shapes reach this: an endpoint that ignored `stream: true` and buffered a
+/// whole completion, and a gateway that reports a *rejection* with a 200 and an
+/// `error` object in the body. Both are permanent - re-sending the identical
+/// request produces the identical answer - and in the second case the body is
+/// the only place the real reason appears (`insufficient_quota`, a model that
+/// does not exist). The body is read and its reason surfaced, redacted as
+/// everywhere else.
+///
+/// A non-JSON body (an HTML or plain-text splash page) never reaches this: that
+/// is a dying channel, which the retry layer is supposed to try again.
+pub(crate) async fn non_stream_success_error(
+    resp: reqwest::Response,
+    url: &str,
+    model: &str,
+    content_type: &str,
+    secrets: &[String],
+) -> Error {
+    let status = resp.status();
+    let excerpt = body_excerpt(resp).await;
+    let excerpt = redact(&excerpt, secrets);
+    // The reason, when the body names one, belongs at the front of the message:
+    // "insufficient_quota" is what the operator has to act on, not the fact that
+    // a proxy buffered the stream.
+    let reason = json_error_message(&excerpt);
+    let head = format!(
+        "provider at {url} answered `{content_type}` instead of an event stream: \
+         the endpoint ignored `stream: true` (a buffering proxy or an incompatible API?)"
+    );
+    let mut text = match reason {
+        Some(reason) => format!("{head} (upstream said: {reason})"),
+        None => format!("{head}, and model `{model}` was not served"),
+    };
+    if !excerpt.is_empty() && !text.contains(&excerpt) {
+        text.push_str(&format!(" (response body: {excerpt})"));
+    }
+    Error::Provider(format!(
+        "{text} {HTTP_STATUS_TAG}{}] {PERMANENT_TAG}",
+        status.as_u16()
+    ))
+}
+
+/// The `error.message` (or bare `message`) of a JSON body, if it has one.
+fn json_error_message(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let message = value
+        .get("error")
+        .and_then(|error| error.get("message").or(Some(error)))
+        .or_else(|| value.get("message"))
+        .and_then(|message| message.as_str())
+        .map(str::trim)
+        .filter(|message| !message.is_empty())?;
+    Some(truncate_chars(message, ERROR_EXCERPT_CHARS))
 }
 
 async fn body_excerpt(mut resp: reqwest::Response) -> String {

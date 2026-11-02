@@ -1,22 +1,60 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import { useFocusTrap } from '../lib/dom';
 import { copyText } from '../lib/clipboard';
 import { modKey } from '../lib/platform';
 import type { SessionSummary } from '../api/types';
 import { formatCount, relativeTime } from '../lib/format';
+import { contextUsage } from '../state/selectors';
 import * as store from '../state/store';
 import * as actions from '../state/actions';
+import {
+  invalidateFacts,
+  loadFactsFor,
+  sessionFacts,
+  type SessionFacts,
+} from '../state/sessionFacts';
 import { Dialog } from './Dialog';
 import {
   AddProjectDialog,
   DeleteProjectDialog,
   RenameProjectDialog,
+  SessionGlyph,
   projectInitials,
 } from './ProjectRail';
 import { CloseIcon, KebabIcon, PlusIcon, SearchIcon, SettingsIcon } from './icons';
 
 const DAY = 86_400_000;
+
+/** The rail's one-tap filters, in the mock's order. */
+export type SessionFilter = 'all' | 'needs' | 'running' | 'changes';
+
+export const SESSION_FILTERS: ReadonlyArray<{
+  id: SessionFilter;
+  label: string;
+  title: string;
+}> = [
+  { id: 'all', label: 'All', title: 'Every session in this project' },
+  { id: 'needs', label: 'Needs you', title: 'Sessions with unread news or a failed run' },
+  { id: 'running', label: 'Running', title: 'Sessions with a run in flight' },
+  { id: 'changes', label: 'Changes', title: 'Sessions that touched files' },
+];
+
+/** Does one session pass the rail's filter? */
+export function passesFilter(
+  session: SessionSummary,
+  filter: SessionFilter,
+  unread: number,
+): boolean {
+  if (filter === 'all') return true;
+  if (filter === 'needs') {
+    return unread > 0 || session.last_run_status === 'failed' || session.last_run_status === 'interrupted';
+  }
+  if (filter === 'running') return session.running;
+  // "Changes" is about what the session *did*, and only a session the server has
+  // described can answer it. Unknown is not "no": it stays visible under All.
+  return false;
+}
 
 /** Bucket a session's last activity into the rail's date groups. */
 export function sessionGroup(updatedAt: number, now: number): string {
@@ -37,6 +75,8 @@ interface SessionRowProps {
   session: SessionSummary;
   active: boolean;
   now: number;
+  /** The facts read for this session, or `null` while they are unknown. */
+  facts: SessionFacts | null;
   /** Unread notifications for this session. */
   unreadCount: number;
   onSelect: (id: string) => void;
@@ -44,7 +84,16 @@ interface SessionRowProps {
   onRequestDelete: (session: SessionSummary, trigger: HTMLElement | null) => void;
 }
 
-function SessionRow({ session, active, now, unreadCount, onSelect, onRename, onRequestDelete }: SessionRowProps): JSX.Element {
+function SessionRow({
+  session,
+  active,
+  now,
+  facts,
+  unreadCount,
+  onSelect,
+  onRename,
+  onRequestDelete,
+}: SessionRowProps): JSX.Element {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.title);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -116,9 +165,23 @@ function SessionRow({ session, active, now, unreadCount, onSelect, onRename, onR
       : session.last_run_status === 'interrupted'
         ? 'warn'
         : null;
+  // The mock's row classes drive the status rail: a run in flight, a failure,
+  // and a session waiting on the reader (unread news) each paint it differently.
+  const rowState = [
+    session.running ? 'running' : '',
+    session.last_run_status === 'failed' ? 'failed' : '',
+    unreadCount > 0 ? 'needs' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const glyphs = facts?.tools ?? [];
+  const turns = facts ? facts.turns : null;
 
   return (
-    <li class={`session-row${active ? ' is-active' : ''}`} data-session-id={session.id}>
+    <li
+      class={`session-row${active ? ' is-active' : ''}${rowState ? ` ${rowState}` : ''}`}
+      data-session-id={session.id}
+    >
       {editing ? (
         <form
           class="session-rename"
@@ -153,6 +216,13 @@ function SessionRow({ session, active, now, unreadCount, onSelect, onRename, onR
         >
           <span class="session-head">
             <span class="session-title">{session.title || 'Untitled session'}</span>
+            {glyphs.length > 0 ? (
+              <span class="session-glyphs" aria-hidden="true">
+                {glyphs.map((kind) => (
+                  <SessionGlyph key={kind} kind={kind} />
+                ))}
+              </span>
+            ) : null}
             {unreadCount > 0 ? (
               <span
                 class="session-unread"
@@ -162,13 +232,24 @@ function SessionRow({ session, active, now, unreadCount, onSelect, onRename, onR
                 {unreadCount > 9 ? '9+' : unreadCount}
               </span>
             ) : null}
+            {statusTone ? <span class={`status-dot status-${statusTone}`} aria-hidden="true" /> : null}
           </span>
           <span class="session-meta">
-            {statusTone ? <span class={`status-dot status-${statusTone}`} aria-hidden="true" /> : null}
             {session.running ? <span class="sr-only">Running. </span> : null}
             <span>{relativeTime(session.updated_at, now)}</span>
             <span class="meta-dot" aria-hidden="true" />
-            <span title={`${session.message_count}`}>{formatCount(session.message_count)}</span>
+            <span title={`${session.message_count} messages`}>{formatCount(session.message_count)}</span>
+            {/* The mock's second line is the session's fingerprint. Ours is the
+             * one aggregate the server reports per session: how many turns it
+             * took, and how many tool calls it made to get there. A session the
+             * server has not described yet shows neither rather than a zero. */}
+            {turns !== null && turns > 0 ? (
+              <span class="session-turns">{turns === 1 ? '1 turn' : `${turns} turns`}</span>
+            ) : facts && facts.calls !== null ? (
+              <span class="session-turns">
+                {facts.calls === 1 ? '1 call' : `${facts.calls} calls`}
+              </span>
+            ) : null}
             {session.last_run_status === 'failed' ? <span class="sr-only">Last run failed.</span> : null}
             {session.last_run_status === 'interrupted' ? (
               <span class="sr-only">Last run interrupted.</span>
@@ -245,6 +326,8 @@ export interface SessionListProps {
   workspace?: string;
   /** Case-insensitive title filter typed into the rail's search field. */
   query?: string;
+  /** The chip filter in force; `all` shows everything. */
+  filter?: SessionFilter;
   onCreate: () => void;
   onSelect: (id: string) => void;
   onRename: (id: string, title: string) => void | Promise<boolean>;
@@ -259,6 +342,7 @@ export function SessionList({
   loading,
   workspace,
   query = '',
+  filter = 'all',
   onCreate,
   onSelect,
   onRename,
@@ -268,6 +352,10 @@ export function SessionList({
     session: SessionSummary;
     trigger: HTMLElement | null;
   } | null>(null);
+  // The per-session fingerprints under each title. Read lazily and bounded (see
+  // `state/sessionFacts.ts`): the rail still renders from the list endpoint, so
+  // a slow or refused read only costs the second line.
+  const facts = sessionFacts.value;
 
   const closeDelete = (): void => {
     const trigger = pendingDelete?.trigger;
@@ -290,7 +378,11 @@ export function SessionList({
   }
 
   const needle = query.trim().toLowerCase();
-  const visible = needle === '' ? sessions : sessions.filter((session) => (session.title || '').toLowerCase().includes(needle));
+  const unreadCounts = store.unread.value;
+  const visible = sessions.filter((session) => {
+    if (!passesFilter(session, filter, unreadCounts[session.id] ?? 0)) return false;
+    return needle === '' || (session.title || '').toLowerCase().includes(needle);
+  });
 
   // Preserve the server order (newest first) inside each date bucket.
   const groups: { label: string; items: SessionSummary[] }[] = [];
@@ -328,8 +420,14 @@ export function SessionList({
         <div class="rail-empty" role="status">
           <p class="rail-empty-title">No matching sessions</p>
           <p class="rail-empty-body">
-            Nothing in this project matches <strong>{query.trim()}</strong>. Searches only look at session
-            titles.
+            {query.trim() === '' ? (
+              <>No session in this project matches the {filter} filter right now.</>
+            ) : (
+              <>
+                Nothing in this project matches <strong>{query.trim()}</strong>. Searches only look at
+                session titles.
+              </>
+            )}
           </p>
           <button type="button" class="button" onClick={onCreate}>
             <PlusIcon size={14} /> New session
@@ -349,6 +447,7 @@ export function SessionList({
                   session={session}
                   active={session.id === currentId}
                   now={now}
+                  facts={facts[session.id] ?? null}
                   // The dot is the surface that works when a desktop notification
                   // could not be shown (no permission, no secure context, a mobile
                   // browser), and it clears when the session is opened.
@@ -609,8 +708,51 @@ export function SessionsRail(): JSX.Element {
   const menuRef = useRef<HTMLDivElement>(null);
   const optionsRef = useRef<HTMLButtonElement>(null);
   const [query, setQuery] = useState('');
+  const [sessionFilter, setSessionFilter] = useState<SessionFilter>('all');
   const [menu, setMenu] = useState<ProjectMenuState | null>(null);
   useFocusTrap(railRef, isNarrow && isSheetOpen, actions.closeSheets);
+  const unread = store.unread.value;
+
+  const filterCounts = useMemo<Record<SessionFilter, number>>(() => {
+    const counts: Record<SessionFilter, number> = { all: sessions.length, needs: 0, running: 0, changes: 0 };
+    for (const session of sessions) {
+      if (passesFilter(session, 'needs', unread[session.id] ?? 0)) counts.needs += 1;
+      if (session.running) counts.running += 1;
+    }
+    return counts;
+  }, [sessions, unread]);
+
+  // A filter whose count drops to zero (the last run finished) would strand the
+  // reader on an empty list with no obvious way back.
+  useEffect(() => {
+    if (sessionFilter !== 'all' && filterCounts[sessionFilter] === 0) setSessionFilter('all');
+  }, [sessionFilter, filterCounts]);
+
+  // The per-session fingerprints under each title. Bounded and coalesced by the
+  // loader, and keyed by the newest-first list, so a long rail reads the newest
+  // rows first and never more than the cap.
+  const sessionKey = sessions.map((session) => session.id).join(',');
+  const projectId = project?.id ?? null;
+  const previousRunning = useRef<Record<string, boolean>>({});
+  // A project switch must not let a late response from the previous project
+  // paint the new rail. The loader also guards the response, but clearing here
+  // removes old fingerprints immediately.
+  useEffect(() => {
+    invalidateFacts();
+  }, [projectId]);
+  useEffect(() => {
+    const finished = sessions
+      .filter((session) => previousRunning.current[session.id] === true && !session.running)
+      .map((session) => session.id);
+    if (finished.length > 0) invalidateFacts(finished);
+    previousRunning.current = Object.fromEntries(sessions.map((session) => [session.id, session.running]));
+  }, [sessionKey, sessions]);
+  // The loader owns TTL, concurrency and request coalescing. This effect only
+  // changes when the list identity changes, so status updates do not refetch.
+  useEffect(() => {
+    if (sessionKey === '') return;
+    void loadFactsFor(sessionKey.split(','));
+  }, [sessionKey, projectId]);
 
   // `/` focuses the session search, like the mock's keycap promises.
   useEffect(() => {
@@ -681,6 +823,13 @@ export function SessionsRail(): JSX.Element {
     store.pushToast(copied ? 'Project path copied.' : 'Could not copy the path.', copied ? 'success' : 'error');
   };
 
+  const contextUsageValue = contextUsage(store.chat.value, store.activeContextWindow.value);
+  const contextPercent = contextUsageValue
+    ? Math.round(contextUsageValue.fraction * 100)
+    : null;
+  const promptTokens = contextUsageValue?.tokens ?? null;
+  const contextWindow = contextUsageValue?.window ?? null;
+
   const providerLabel = store.providerConfigured.value
     ? store.activeModelLabel.value ?? 'Provider configured'
     : 'No provider';
@@ -701,11 +850,13 @@ export function SessionsRail(): JSX.Element {
          * sheet has one `Project options` button rather than two. */}
         {isNarrow ? null : (
           <div class="side-head">
-            <p class="eyebrow">Your workspace</p>
             <div class="project-heading">
-              <h2 class="project-title" title={project?.name ?? 'No project'}>
-                <span class="project-title-dot" aria-hidden="true" />
+              <span class="project-title-glyph" aria-hidden="true">
+                {(project?.name ?? 'k').trim().slice(0, 1).toLowerCase() || 'k'}
+              </span>
+              <h2 class="project-title" title={project?.path ?? 'No project'}>
                 <span class="project-title-text">{project?.name ?? 'No project'}</span>
+                <span class="path-hint">{project?.path ?? 'No project selected'}</span>
               </h2>
               <div class="side-head-actions">
                 <button
@@ -722,9 +873,6 @@ export function SessionsRail(): JSX.Element {
                 </button>
               </div>
             </div>
-            <p class="path-hint" title={project?.path ?? ''}>
-              {project?.path ?? 'No project selected'}
-            </p>
           </div>
         )}
 
@@ -773,6 +921,30 @@ export function SessionsRail(): JSX.Element {
           </span>
         </label>
 
+        {/* The mock's `.chips`: one-tap filters over the list, each with its own
+         * count, and a chip that would filter to nothing is not offered. */}
+        <div class="session-chips" role="group" aria-label="Filter sessions">
+          {SESSION_FILTERS.map((filter) => {
+            const count = filterCounts[filter.id] ?? 0;
+            if (filter.id !== 'all' && count === 0) return null;
+            return (
+              <button
+                key={filter.id}
+                type="button"
+                class={`filter-chip${sessionFilter === filter.id ? ' is-on' : ''}${
+                  filter.id === 'needs' ? ' is-alert' : ''
+                }`}
+                aria-pressed={sessionFilter === filter.id}
+                title={filter.title}
+                onClick={() => setSessionFilter(filter.id)}
+              >
+                {filter.label}
+                <span class="filter-chip-count">{count}</span>
+              </button>
+            );
+          })}
+        </div>
+
         <nav class="session-nav" aria-label="Session list">
           <SessionList
             sessions={sessions}
@@ -783,6 +955,7 @@ export function SessionsRail(): JSX.Element {
               project?.path ?? store.health.value?.workspace ?? store.config.value?.workspace
             }
             query={query}
+            filter={sessionFilter}
             onCreate={() => void actions.createSession()}
             onSelect={actions.switchSession}
             onRename={actions.renameSessionById}
@@ -791,6 +964,25 @@ export function SessionsRail(): JSX.Element {
         </nav>
 
         <div class="side-footer">
+          {/* The mock's "Workspace context" meter. Ours is the same number the
+           * composer's context pill shows - the newest call's prompt over the
+           * model's window - so the two can never disagree. It renders nothing
+           * when either side is unknown, because a bar drawn from a guess is
+           * worse than no bar. */}
+          {contextPercent !== null ? (
+            <div class="side-meter" title={`${promptTokens?.toLocaleString() ?? '?'} of ${contextWindow?.toLocaleString() ?? '?'} prompt tokens used`}>
+              <div class="side-meter-top">
+                <span>Context</span>
+                <span>{contextPercent}%</span>
+              </div>
+              <div class="side-meter-bar">
+                <i
+                  style={`width:${Math.max(2, Math.min(100, contextPercent))}%`}
+                  data-tone={contextPercent >= 90 ? 'hot' : contextPercent >= 70 ? 'warn' : 'ok'}
+                />
+              </div>
+            </div>
+          ) : null}
           <div class="online-row">
             <span class={`online-ind status-${connectionTone()}`} aria-hidden="true" />
             <span>{store.connectionLabel.value}</span>

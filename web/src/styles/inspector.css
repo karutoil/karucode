@@ -23,9 +23,9 @@
   justify-content: space-between;
   gap: 10px;
   flex: 0 0 auto;
-  height: var(--header-h);
-  min-height: var(--header-h);
-  padding: 0 20px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0 12px;
   border-bottom: 1px solid var(--line-soft);
 }
 
@@ -82,8 +82,8 @@
   display: flex;
   flex: 0 0 auto;
   gap: 0;
-  min-height: var(--tabs-h);
-  padding: 0 13px;
+  min-height: 36px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--line);
   overflow-x: auto;
   overflow-y: hidden;
@@ -113,8 +113,8 @@
   flex: 1 0 max-content;
   min-width: 0;
   max-width: 100%;
-  height: var(--tabs-h);
-  padding: 0 4px;
+  height: 36px;
+  padding: 0 8px;
   border: 0;
   background: transparent;
   color: var(--muted);
@@ -697,6 +697,7 @@
 
 .metric {
   min-width: 0;
+  min-height: 64px;
   padding: 12px;
   border: 1px solid var(--line-card);
   border-radius: 9px;
@@ -789,6 +790,13 @@
 
 .change-row:hover {
   background: var(--surface-raised);
+}
+
+.change-row:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .change-row.is-active {
@@ -1050,6 +1058,12 @@
   border-color: color-mix(in srgb, var(--accent) 42%, var(--line-card));
 }
 
+/* A paused agent is still live and still holds a slot, so it keeps a live-looking
+   border - the warn colour, not the accent: it is not working right now. */
+.agent-card[data-status='paused'] {
+  border-color: color-mix(in srgb, var(--warn) 38%, var(--line-card));
+}
+
 .agent-head {
   display: flex;
   flex-direction: column;
@@ -1133,6 +1147,70 @@
 .agent-card[data-status='running'] .agent-live {
   background: var(--accent-bg);
   color: var(--accent);
+}
+
+.agent-card[data-status='paused'] .agent-live,
+.agent-detail .agent-live[data-status='paused'] {
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  color: var(--warn);
+}
+
+/* ---------- live subagent controls, note and progress ---------------- */
+
+.agent-controls {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.agent-note {
+  margin: 0 0 8px;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-style: italic;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.agent-detail-note {
+  margin: 10px 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius);
+  background: var(--surface-command);
+}
+
+.agent-detail-note p {
+  margin: 4px 0 0;
+  color: var(--chip-ink);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.agent-badge {
+  padding: 1px 5px;
+  border: 1px solid var(--line-keycap);
+  border-radius: 4px;
+  color: var(--text-kicker);
+  font-size: 9px;
+  text-transform: lowercase;
+}
+
+.agent-progress {
+  display: block;
+  height: 3px;
+  margin: 6px 0 8px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+}
+
+.agent-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width var(--transition);
 }
 
 .agent-task {
@@ -1542,8 +1620,8 @@
 /* The mock's density switch tightens the inspector header by 2px more than the
  * shared `--header-h` scale does (52 vs 54). */
 :root[data-density='compact'] .inspector-top {
-  height: 52px;
-  min-height: 52px;
+  height: 40px;
+  min-height: 40px;
 }
 
 @media (prefers-reduced-motion: reduce) {

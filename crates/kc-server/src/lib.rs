@@ -22,7 +22,7 @@
 // @kc-title: Call the HTTP API
 // @kc-summary: Authenticate, send the CSRF header, and find the endpoint for sessions, config, approvals, files, git, plugins, MCP and the event stream.
 // @kc-tags: api, http, rest, sse, curl, endpoints
-// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/agents, route:GET /api/agents/:id, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:POST /api/workspace/upload, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, config:plugin_panels, route:GET /api/events, event:notification, event:queued_messages, event:session_rewound, config:[notifications], header:X-Karucode-Client, env:KARUCODE_AUTH_TOKEN, doc:docs/API.md
+// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:POST /api/workspace/upload, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, config:plugin_panels, route:GET /api/events, event:notification, event:queued_messages, event:session_rewound, config:[notifications], header:X-Karucode-Client, env:KARUCODE_AUTH_TOKEN, doc:docs/API.md
 //
 // The API is same-origin only; there is no CORS surface. Two rules matter:
 //
@@ -58,6 +58,7 @@
 // | `POST /api/sessions/:id/cancel` | cancel the active run |
 // | `GET`/`POST /api/sessions/:id/rewind` | preview, then hide the transcript after a message (optionally reverting its file changes, retrying it, or replacing it with a note) |
 // | `GET /api/agents`, `GET /api/agents/:id` | every subagent in a project, and one agent's own transcript |
+// | `POST /api/agents/:id/pause`, `/resume`, `/cancel` | pause a live subagent between iterations, release it, or stop it |
 // | `GET /api/approvals`, `POST /api/approvals/:id` | list and answer pending approvals |
 // | `GET /api/workspace/tree`, `/api/workspace/file` | workspace explorer, confined to the project |
 // | `PUT /api/workspace/file`, `GET /api/workspace/raw` | save a file from the editor, and serve its raw bytes for image/PDF previews |
@@ -69,6 +70,30 @@
 // | `GET /api/plugins/:name/panels/:panel` | one plugin panel's payload for the inspector |
 // | `GET /api/mcp` | MCP server status and discovered tools |
 // | `GET /api/events` | the SSE event stream for the open session |
+//
+// # Probing a provider
+//
+// `POST /api/provider/test` is a live probe: it sends the endpoint a `GET
+// /models` (falling back to a one-token chat when the gateway does not implement
+// it) and answers `200` with `{ok, models, error, latency_ms}` - a failing
+// endpoint is a result, not an HTTP error. Every field of the body is optional:
+//
+// ```bash
+// # the configured endpoint, with the configured key
+// curl -s -X POST localhost:8787/api/provider/test \
+//   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' -d '{}'
+// # a saved profile (and optionally one of its models)
+// ... -d '{"profile":"gateway","model":"qwen3-coder"}'
+// # a draft endpoint the user is still typing - it needs its own key
+// ... -d '{"base_url":"http://127.0.0.1:4000/v1","api_key":"sk-…","model":"m"}'
+// ```
+//
+// **A `base_url` override never carries the stored key.** Naming another endpoint
+// without an `api_key` drops the configured credential, so the probe goes out
+// keyless (right for a local gateway, a clean failure anywhere else) instead of
+// replaying the operator's secret at a host the caller chose. This route is not
+// part of the admin gate and ignores `lock_settings`, so that rule is the whole
+// defence: supply both halves, or neither.
 //
 // # Reading a long transcript
 //
@@ -235,9 +260,15 @@
 // `GET /api/workspace/raw?path=<file>[&project=<id>]` returns the bytes with a
 // guessed `Content-Type`, `Content-Disposition: inline` and `Cache-Control:
 // no-store`, up to 32 MiB (`413` above that). It exists because the JSON read
-// endpoint cannot be an `<img src>` or an embedded PDF. The bytes are served as an
-// inert asset: `X-Content-Type-Options: nosniff` is always on and the UI's CSP has
-// no inline script, so a workspace HTML file served here cannot execute.
+// endpoint cannot be an `<img src>` or an embedded PDF. The response carries its
+// own `Content-Security-Policy: sandbox; default-src 'none'`, which makes the
+// document an opaque origin with script disabled - so a workspace HTML file served
+// here cannot execute, even though it shares the app's origin and its content type
+// is guessed from the file name. That sandbox CSP is why this route is safe; the
+// app-wide CSP alone would not be, because its `script-src` falls back to `'self'`
+// and the response *is* `'self'`. The file preview depends on the response staying
+// `inline` and frameable (an `<img src>` and a PDF `<iframe>` both hotlink it), so
+// do not "harden" it into an attachment.
 //
 // Note that `binary` from the read endpoint is a NUL-byte sniff, and a PDF or an
 // SVG is ASCII - so it is `false` for both. Decide how to display a file from its
@@ -383,9 +414,10 @@
 // * `GET /api/agents?project=<id>` lists every agent in the project, newest
 //   first, with the session title/workspace flattened onto each record. Narrow it
 //   with `&session=<id>` or `&status=running,failed` (comma-separated; an unknown
-//   status is `400 bad_request`). The response also carries `running`, so a badge
-//   does not have to count the array. Without `?project=` it lists every agent on
-//   the server.
+//   status is `400 bad_request`). The response also carries `running` (alive and
+//   spending, which includes `paused`), `paused` and `live` (the runtime's own
+//   count of loops that exist right now), so a badge does not have to count the
+//   array. Without `?project=` it lists every agent on the server.
 // * `GET /api/agents/:id` returns `{ agent, messages, messages_truncated,
 //   messages_limit }`: only that agent's messages, oldest first, tail-limited by
 //   `?messages=N` (default 2000, max 50000). This is the drill-in transcript.
@@ -393,10 +425,24 @@
 // ```bash
 // curl -s 'localhost:8787/api/agents?project=p_ab12&status=running' | jq '.running, .agents[].name'
 // curl -s 'localhost:8787/api/agents/a_x?messages=200' | jq '.agent.status, (.messages | length)'
+// curl -s -X POST 'localhost:8787/api/agents/a_x/pause' | jq '.status'
+// curl -s -X POST 'localhost:8787/api/agents/a_x/resume' | jq '.status'
+// curl -s -X POST 'localhost:8787/api/agents/a_x/cancel' | jq '.status'
 // ```
 //
+// The control routes answer `{ agent_id, action, status }`. A pause takes effect
+// at the agent's next iteration: the turn in flight finishes first, because that
+// is the only point where stopping costs no work, so the status is `paused`
+// immediately and the agent keeps that status until it is resumed or stopped.
+// `cancel` fires the agent's token at once; the response says `cancelled` while
+// the transcript catches up a moment later. An unknown id, or one whose loop has
+// already finished, is `404 not_found` - a browser that raced the finish is told
+// rather than given a pause that will never land. An unknown verb is `400
+// bad_request` naming the three.
+//
 // The live event stream carries the same activity: `agent_spawned`,
-// `agent_progress`, `agent_finished` for lifecycle, and the normal `text_delta`,
+// `agent_progress`, `agent_paused`, `agent_message`, `agent_note` and
+// `agent_finished` for lifecycle, and the normal `text_delta`,
 // `tool_call_started/finished`, `command_*` and `approval_*` frames stamped with
 // the subagent's `agent_id`. One SSE connection therefore feeds every agent in
 // every session; no per-agent stream exists.
@@ -452,6 +498,7 @@ pub mod host;
 pub mod metrics;
 pub mod plugin_notifications;
 pub mod plugins_watch;
+pub mod retention;
 pub mod routes;
 pub mod scaffold;
 pub mod settings;

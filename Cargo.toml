@@ -18,7 +18,12 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-rust-version = "1.82"
+# Proven, not guessed: `cargo +1.89.0 check --workspace --all-targets` succeeds and
+# `cargo +1.88.0 check` refuses the graph ("uuid@1.29.0 requires rustc 1.89.0").
+# 1.88 is also the floor for globset/ignore/sha2 and 1.85 for the edition-2024
+# crates (hashbrown, chacha20), so 1.89 is the highest of the requirements. CI's
+# `msrv` job runs this same number.
+rust-version = "1.89"
 authors = ["karucode contributors"]
 repository = "https://github.com/karutoil/karucode"
 homepage = "https://github.com/karutoil/karucode"

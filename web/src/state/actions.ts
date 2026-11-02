@@ -2,6 +2,7 @@ import { ApiError, getAuthToken, onUnauthorized, setAuthToken, toErrorMessage } 
 import * as api from '../api/endpoints';
 import { startEventStream, type EventStreamHandle } from '../api/events';
 import type {
+  AgentAction,
   AgentSummary,
   ApprovalDecision,
   Config,
@@ -23,7 +24,13 @@ import type {
   SessionSummary,
 } from '../api/types';
 import { isNarrowViewport } from '../lib/dom';
-import { emptyChatState, seedChatState, type ChatState, type MessageItem } from './chat';
+import {
+  emptyChatState,
+  normalizeQueuedMessage,
+  seedChatState,
+  type ChatState,
+  type MessageItem,
+} from './chat';
 import * as agentConsole from './agentConsole';
 import { applyEventToChat, applyEventToSessions, markUserRun, sessionAgentFromRecord } from './eventReducer';
 import { syncProjectIcons } from './projectIcons';
@@ -838,7 +845,9 @@ export async function queueChatMessage(
     // does, because a reconnect refetches the snapshot).
     if (store.currentSessionId.value === sessionId && result.queued_message) {
       const current = store.chat.value;
-      const entry = result.queued_message;
+      // Normalised on the way in: the acceptance body is the raw struct too, so
+      // `draft` may be absent (`normalizeQueuedMessage`).
+      const entry = normalizeQueuedMessage(result.queued_message);
       store.chat.value = {
         ...current,
         queued: current.queued.some((queued) => queued.id === entry.id)
@@ -890,10 +899,13 @@ export async function recallQueuedMessage(queuedId: string): Promise<boolean> {
         queued: current.queued.filter((queued) => queued.id !== queuedId),
       };
       // The composer consumes the hand-off and appends to whatever the user has
-      // typed since, so a recall never silently replaces a fresh draft.
+      // typed since, so a recall never silently replaces a fresh draft. The
+      // recalled entry is normalised on the way in (`normalizeQueuedMessage`), so
+      // `draft` is a string here even when the server omitted it.
+      const recalled = normalizeQueuedMessage(entry);
       store.composerHandoff.value = {
-        text: entry.draft || entry.content,
-        attachments: entry.attachments ?? [],
+        text: recalled.draft ?? recalled.content,
+        attachments: recalled.attachments ?? [],
         token: nextHandoffToken(),
       };
       store.composerFocusTick.value += 1;
@@ -955,6 +967,17 @@ export async function resolveApproval(
               : item,
           ),
         };
+      }
+      // Any other failure leaves the card saying "waiting for this decision",
+      // which is a claim about the *server's* state that this call just proved it
+      // cannot read. Resolve it the way `sendChatMessage` resolves its own failed
+      // send: refetch, silently and forced, so the server's pending-approvals
+      // snapshot decides what the card says. Nothing is guessed locally - the
+      // approval may still be pending (a network blip), already applied, or
+      // expired by the runtime, and only the server knows which.
+      const sessionId = store.currentSessionId.value;
+      if (sessionId) {
+        void openSession(sessionId, { silent: true, force: true, preserveLive: true });
       }
     }
     return false;
@@ -1303,7 +1326,7 @@ export async function refreshSessionAgents(): Promise<void> {
   try {
     const detail = await api.getSession(sessionId);
     if (store.currentSessionId.value === sessionId) {
-      store.chat.value = { ...store.chat.value, agents: detail.agents };
+      store.chat.value = { ...store.chat.value, agents: detail.agents.map(sessionAgentFromRecord) };
     }
   } catch (error) {
     if (isUnauthorized(error)) enterAuthState();
@@ -1322,7 +1345,9 @@ export async function refreshAgents(): Promise<void> {
   store.agentsLoading.value = true;
   try {
     const list = await api.listAgents({ project: store.currentProjectId.value });
-    store.agentsAll.value = list;
+    // The server omits `note`, `progress` and `owned_paths` when empty; normalise
+    // here so every row in the store is fully populated.
+    store.agentsAll.value = list.map(sessionAgentFromRecord);
     store.agentsError.value = null;
   } catch (error) {
     if (isUnauthorized(error)) {
@@ -1346,6 +1371,49 @@ export function setAgentScope(scope: store.AgentScope): void {
 
 export function setAgentFilter(filter: store.AgentFilter): void {
   store.agentFilter.value = filter;
+}
+
+/**
+ * Pause, resume or cancel one live subagent.
+ *
+ * The response is the authority on what the agent is now, so the row is patched
+ * from it rather than from an optimistic guess: a pause lands at the agent's next
+ * iteration, and a cancel unwinds over a moment. A 404 means it finished while
+ * the user was reaching for the button, which is not an error to shout about.
+ */
+export async function controlAgent(id: string, action: AgentAction): Promise<void> {
+  if (store.agentControlPending.value[id]) return;
+  store.agentControlPending.value = { ...store.agentControlPending.value, [id]: action };
+  try {
+    const result = await api.controlAgent(id, action);
+    const patch = (agent: AgentSummary): AgentSummary =>
+      agent.id === id ? { ...agent, status: result.status, updated_at: Date.now() } : agent;
+    store.agentsAll.value = store.agentsAll.value.map(patch);
+    store.chat.value = {
+      ...store.chat.value,
+      agents: store.chat.value.agents.map((agent) =>
+        agent.id === id ? { ...agent, status: result.status } : agent,
+      ),
+    };
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+      return;
+    }
+    const status = error instanceof ApiError ? error.status : 0;
+    if (status === 404) {
+      // The agent settled between the click and the request. Refresh so the row
+      // shows the real final status instead of a pause that will never land.
+      store.pushToast('That agent already finished.');
+      if (store.agentScope.value === 'session') void refreshSessionAgents();
+      else void refreshAgents();
+      return;
+    }
+    store.pushToast(toErrorMessage(error));
+  } finally {
+    const { [id]: _done, ...rest } = store.agentControlPending.value;
+    store.agentControlPending.value = rest;
+  }
 }
 
 export function closeAgentDetail(): void {
@@ -1400,8 +1468,19 @@ export async function openAgentSession(agent: AgentSummary): Promise<void> {
 // Session information tab
 // ---------------------------------------------------------------------------
 
-/** One read in flight at a time; a burst of usage events must not fan out. */
-let sessionInfoInFlight: Promise<void> | null = null;
+/**
+ * One read in flight **per session**.
+ *
+ * Keyed, not a single flag: a read for session B used to be answered by A's
+ * in-flight promise, which resolves against A's URL and writes A's numbers. The
+ * guard below (`currentSessionId !== sessionId`) then dropped the result, so B
+ * simply never loaded - and A's `finally` cleared the flag and the loading signal
+ * that B was relying on, so B's own caller saw `sessionInfoLoading === false`
+ * while nothing had been read for it.
+ */
+const sessionInfoInFlight = new Map<string, Promise<void>>();
+/** Who currently owns each session's in-flight read, so `finally` cannot clear another's. */
+const sessionInfoOwners = new Map<string, object>();
 let sessionInfoCoalesce: number | null = null;
 
 /**
@@ -1424,9 +1503,16 @@ export async function refreshSessionInfo(): Promise<void> {
     store.sessionInfoLoading.value = false;
     return;
   }
-  if (sessionInfoInFlight) return sessionInfoInFlight;
+  const existing = sessionInfoInFlight.get(sessionId);
+  if (existing) return existing;
   store.sessionInfoLoading.value = true;
-  sessionInfoInFlight = (async () => {
+  // `finally` compares against an owner token created *before* the async body can
+  // run, not against the promise const: an async function starts executing
+  // synchronously, so a throw before the first `await` unwinds through `finally`
+  // while that const is still in its temporal dead zone.
+  const owner = {};
+  sessionInfoOwners.set(sessionId, owner);
+  const read = (async () => {
     try {
       const info = await api.getSessionInfo(sessionId);
       if (store.currentSessionId.value !== sessionId) return;
@@ -1441,11 +1527,21 @@ export async function refreshSessionInfo(): Promise<void> {
       }
       store.sessionInfoError.value = toErrorMessage(error);
     } finally {
-      store.sessionInfoLoading.value = false;
-      sessionInfoInFlight = null;
+      // Only clear the state this call still owns. A second caller for the same
+      // session joined this promise and relies on the same flag, and a read that
+      // has already been superseded must not report "not loading" for one that
+      // has not.
+      if (sessionInfoOwners.get(sessionId) === owner) {
+        sessionInfoOwners.delete(sessionId);
+        sessionInfoInFlight.delete(sessionId);
+        if (store.currentSessionId.value === sessionId) store.sessionInfoLoading.value = false;
+      }
     }
   })();
-  return sessionInfoInFlight;
+  // Only publish the promise if it is still running: a read that already settled
+  // synchronously must not be joinable.
+  if (sessionInfoOwners.get(sessionId) === owner) sessionInfoInFlight.set(sessionId, read);
+  return read;
 }
 
 /**
@@ -1770,6 +1866,12 @@ export function resetRuntimeForTests(): void {
   resyncAgain = false;
   resyncFailures = 0;
   pluginPanelInFlight.clear();
+  sessionInfoInFlight.clear();
+  sessionInfoOwners.clear();
+  if (sessionInfoCoalesce !== null) {
+    window.clearTimeout(sessionInfoCoalesce);
+    sessionInfoCoalesce = null;
+  }
   if (gapResyncTimer !== null) {
     window.clearTimeout(gapResyncTimer);
     gapResyncTimer = null;

@@ -41,6 +41,18 @@ use tokio_util::sync::CancellationToken;
 /// cap or cancellation) but the assistant message already carries the call.
 pub(crate) const SKIPPED_PREFIX: &str = "[skipped: ";
 
+/// How many times a follow-up chain re-checks that the previous run has
+/// deregistered before leaving the queue for the next run to pick up.
+///
+/// A cancelled run stays registered while it unwinds (resetting a 409 to a 409
+/// would be worse than waiting), so the chain polls a few times before giving up.
+/// Two hundred 5ms checks is a second - far longer than a deregistration takes,
+/// and the loop is not doing work meanwhile: it is waiting for one map entry to
+/// be removed.
+const FOLLOW_UP_START_ATTEMPTS: u32 = 200;
+/// Backoff between those checks: 5ms × 200 = 1s.
+const FOLLOW_UP_START_BACKOFF: Duration = Duration::from_millis(5);
+
 /// Everything one loop needs. Built by [`start_run`] for a session run and by
 /// the `spawn_agent` tool for a nested agent.
 pub(crate) struct LoopSpec {
@@ -81,6 +93,14 @@ pub(crate) struct LoopSpec {
     /// than read from `limits` everywhere so the budget cannot drift between the
     /// request, the run window and the per-turn cap.
     pub context_max_chars: usize,
+    /// Set for a subagent loop: its live entry in the runtime's agent hub.
+    ///
+    /// This is what makes a child addressable while it works - it is where
+    /// `send_message` leaves mail, where `pause_agents` sets the flag this loop
+    /// parks on, and where the roster reads what the agent last reported. A
+    /// top-level run has no hub entry; mail to it goes to the session's run
+    /// mailbox instead.
+    pub hub_entry: Option<Arc<crate::hub::LiveAgent>>,
 }
 
 impl LoopSpec {
@@ -174,6 +194,9 @@ pub(crate) async fn start_run(
 
     {
         let mut runs = inner.runs.lock().expect("runs lock");
+        // Only a *user run* blocks a new one. A subagent (in particular a
+        // detached one) registers its loop here too, and counting it would refuse
+        // every prompt for as long as a background agent worked.
         if runs
             .values()
             .any(|s| s.top_level && s.session_id.0 == session_id)
@@ -294,60 +317,102 @@ pub(crate) async fn start_run(
         // `submit` is legal. Start the next follow-up, if the user queued one while
         // this run was working.
         //
-        // This is deliberately a chain, not a fresh `tokio::spawn`: the follow-up
-        // belongs to the same "user is waiting on this session" sequence, and a
-        // chain keeps the ordering honest (one run at a time, queued in order). The
-        // hop through [`start_run_boxed`] is what lets the compiler size the type -
-        // `start_run` awaiting `start_run` directly would be an infinitely sized
-        // future, and spawning it would be a `Send` cycle between the two.
-        let session_id = spawned_state.session_id.0.clone();
-        while let Some(next) = runtime_for_follow_up.take_follow_up(&session_id) {
-            let runtime = Arc::clone(&runtime_for_follow_up);
-            let prompt = next.content.clone();
-            let next_id = next.id.clone();
-            match start_run_boxed(runtime, session_id.clone(), prompt).await {
-                Ok(handle) => {
-                    runtime_for_follow_up.emit(
-                        Some(&session_id),
-                        Some(&handle.run_id),
-                        None,
-                        Event::Notice {
-                            level: "info".into(),
-                            message: "Starting the queued follow-up.".into(),
-                        },
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session = %session_id,
-                        follow_up = %next_id,
-                        error = %e,
-                        "could not start a queued follow-up"
-                    );
-                    runtime_for_follow_up.emit(
-                        Some(&session_id),
-                        None,
-                        None,
-                        Event::Notice {
-                            level: "warn".into(),
-                            message: format!(
-                                "A queued follow-up could not be started: {e}. Send it again when the session is ready."
-                            ),
-                        },
-                    );
-                    // Do not spin: the queue is cleared so the user gets the
-                    // notice rather than the same failure retried forever.
-                    runtime_for_follow_up.clear_follow_ups(&session_id);
-                    break;
-                }
-            }
-        }
+        // **One** follow-up, and only now that this run has deregistered: a run
+        // started from inside this task is immediately registered as the
+        // session's top-level run, so a `while let` here would refuse its own
+        // next iteration with "a run is already active" and wipe the queue. The
+        // chain is therefore *carried by the run that starts*: `start_run` ends
+        // in this same block, so the next follow-up is taken by whoever finishes
+        // last - one run at a time, in order, and the queue drains itself.
+        //
+        // The hop through [`start_run_boxed`] is what lets the compiler size the
+        // type - `start_run` awaiting `start_run` directly would be an infinitely
+        // sized future, and spawning it would be a `Send` cycle between the two.
+        continue_with_follow_up(runtime_for_follow_up, spawned_state.session_id.0.clone()).await;
     });
 
     Ok(RunHandle {
         run_id: run_id.0,
         session_id: session_id.to_string(),
     })
+}
+
+/// Start the next queued follow-up for `session_id`, if the session is free.
+///
+/// Called by a run's spawned task **after** it removed its own registration, and
+/// by nothing else. That is the whole design: the run that finishes is the one
+/// that starts the next, so a run is never started while another is registered,
+/// the user's order is preserved, and no separate supervisor task is needed.
+///
+/// A failure does not cost the queue: the entry goes back at the front (the
+/// client already has its `follow_up_id`), and the next run to finish picks it
+/// up. Only a session with no run left and a queue that cannot start would leave
+/// entries behind, which is why the notice names them.
+async fn continue_with_follow_up(runtime: Arc<Runtime>, session_id: String) {
+    // A cancelled-but-unwinding run still blocks `start_run`, so wait for the
+    // registration to actually go. Bounded: a run that never deregisters must not
+    // hold a queue forever.
+    for _ in 0..FOLLOW_UP_START_ATTEMPTS {
+        if !runtime.top_level_run_registered(&session_id) {
+            break;
+        }
+        tokio::time::sleep(FOLLOW_UP_START_BACKOFF).await;
+    }
+    if runtime.top_level_run_registered(&session_id) {
+        tracing::warn!(
+            session = %session_id,
+            "the session still has a registered run; leaving queued follow-ups for it to pick up"
+        );
+        return;
+    }
+    let Some(next) = runtime.take_follow_up(&session_id) else {
+        return;
+    };
+    let next_id = next.id.clone();
+    match start_run_boxed(
+        Arc::clone(&runtime),
+        session_id.clone(),
+        next.content.clone(),
+    )
+    .await
+    {
+        Ok(handle) => {
+            runtime.emit(
+                Some(&session_id),
+                Some(&handle.run_id),
+                None,
+                Event::Notice {
+                    level: "info".into(),
+                    message: "Starting the queued follow-up.".into(),
+                },
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                session = %session_id,
+                follow_up = %next_id,
+                error = %e,
+                "could not start a queued follow-up"
+            );
+            // Back where it came from, not gone: the client was told 202 and
+            // holds this id, so it must still be recallable and must still run
+            // the next time the session is free. Dropping the whole queue here
+            // (the old behaviour) lost up to `MAX_QUEUED_FOLLOW_UPS - 1` accepted
+            // messages in one go.
+            runtime.requeue_follow_up(&session_id, next);
+            runtime.emit(
+                Some(&session_id),
+                None,
+                None,
+                Event::Notice {
+                    level: "warn".into(),
+                    message: format!(
+                        "A queued follow-up could not be started: {e}. It stays queued; send it again if the session does not pick it up."
+                    ),
+                },
+            );
+        }
+    }
 }
 
 /// Type-erased [`start_run`].
@@ -456,9 +521,21 @@ pub(crate) async fn run_top_level(
         journal: Some(journal),
         history,
         run_state: Some(Arc::clone(&state)),
+        hub_entry: None,
     };
 
     let outcome = run_loop(Arc::clone(&inner), spec).await;
+    // The run is over, so nothing it started may keep working: a `background:
+    // true` child outlives the *turn* that spawned it but not the run (see the
+    // `subagent` module doc). Done here, before the terminal state is persisted
+    // and announced, so a client that reacts to `RunFinished` by refetching the
+    // roster already sees the children settled.
+    crate::subagent::cancel_run_children(&inner, &state.run_id.0).await;
+    // Nothing may be left addressed to this run: a child that finished a moment
+    // ago can still have posted to it, and a message that outlived its run would
+    // otherwise be delivered into the next one, as if the old child were talking
+    // about work nobody remembers.
+    inner.hub.clear_run_mail(&state.session_id.0);
     kc_core::metrics::record_run_finished();
 
     let mut finish_error: Option<Error> = None;
@@ -589,6 +666,99 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
             ctx.notice("info", "run cancelled");
             return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
         }
+
+        // --- paused -----------------------------------------------------------
+        // A paused agent parks here, between iterations: the turn in flight has
+        // already finished and persisted its tool results, so nothing is lost by
+        // waiting. This is the only safe place to stop a loop, which is why the
+        // pause is a gate and not a token.
+        //
+        // A kill while parked is honoured by the `Cancelled` arm, so a paused
+        // agent is never unkillable - which is the one property a stop button
+        // must have.
+        if let Some(live) = &spec.hub_entry {
+            match crate::hub::wait_while_paused(live, &spec.cancel, spec.deadline).await {
+                crate::hub::PauseExit::Running => {}
+                crate::hub::PauseExit::Cancelled => {
+                    ctx.notice("info", "run cancelled");
+                    return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
+                }
+                crate::hub::PauseExit::Deadline => {
+                    let message =
+                        "the agent was still paused when its wall clock ran out".to_string();
+                    ctx.error("limit", message.clone());
+                    return LoopOutcome::new(
+                        RunStatus::Failed,
+                        Some(message),
+                        last_text,
+                        iterations,
+                    );
+                }
+            }
+            live.last_seen_ms
+                .store(crate::events::now_ms(), Ordering::Relaxed);
+        }
+
+        // --- inbound mail -----------------------------------------------------
+        // A message another agent (or the human) sent while this loop was
+        // working. It joins the conversation exactly where a user turn belongs,
+        // for the same reason a steer does: text appended *after* the last turn
+        // makes a reasoning model deliberate instead of acting.
+        //
+        // A subagent reads its own mailbox; a top-level run reads the session's
+        // run mailbox, which is where a child's "message my parent" lands.
+        let mail = match &spec.hub_entry {
+            Some(live) => live.take_mail(),
+            None if !spec.is_subagent => inner.hub.take_run_mail(&spec.session_id.0),
+            None => Vec::new(),
+        };
+        for inbound in mail {
+            // The sender is named in the turn itself. "another agent" is not
+            // enough: a child answering its parent needs to know which agent is
+            // talking, and the parent needs to know which child interrupted it.
+            let from = if inbound.from_name.trim().is_empty() {
+                "another agent".to_string()
+            } else {
+                inbound.from_name.clone()
+            };
+            let text = if inbound.sent_at > 0 {
+                format!(
+                    "[message from {from}, sent {}]\n{}",
+                    crate::events::relative_ago(inbound.sent_at),
+                    inbound.content
+                )
+            } else {
+                format!("[message from {from}]\n{}", inbound.content)
+            };
+            let message = Message::user(&text);
+            if let Err(e) = persist(
+                &inner,
+                &spec.session_id,
+                &spec.run_id,
+                spec.agent_id.as_ref(),
+                &message,
+            )
+            .await
+            {
+                ctx.error(
+                    "store",
+                    format!("could not persist a delivered message: {e}"),
+                );
+            }
+            // The transcript and the request must agree: an unpersisted message
+            // is still one the model acted on, so it goes into `history` either
+            // way.
+            history.push(message);
+            ctx.emit(Event::AgentMessage {
+                from_agent_id: inbound.from.clone(),
+                to: match &spec.agent_id {
+                    Some(agent) => agent.0.clone(),
+                    None => format!("run:{}", spec.run_id.0),
+                },
+                state: "delivered".to_string(),
+            });
+        }
+
         // --- steering ---------------------------------------------------------
         // A message the user sent *while this run was working*. It becomes an
         // ordinary `user` turn here, before the request is built, so the model

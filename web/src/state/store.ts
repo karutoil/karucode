@@ -1,5 +1,6 @@
 import { computed, signal } from '@preact/signals';
 import type {
+  AgentAction,
   AgentStatus,
   AgentSummary,
   Config,
@@ -13,6 +14,7 @@ import type {
   SessionSummary,
   Toast,
 } from '../api/types';
+import { isAgentLive } from '../api/types';
 import { emptyChatState, type ChatState } from './chat';
 import { agentActivity, pendingApprovals } from './selectors';
 import type { AgentActivity } from './agentConsole';
@@ -382,6 +384,14 @@ export const agentsLoading = signal(false);
 export const agentsError = signal<string | null>(null);
 export const agentScope = signal<AgentScope>('workspace');
 export const agentFilter = signal<AgentFilter>('all');
+/**
+ * Which control call is in flight per agent id.
+ *
+ * A pause request is not instant (it lands at the agent's next iteration), so the
+ * button has to show that something is happening and refuse a second click. Keyed
+ * by agent so pausing one does not disable the rest.
+ */
+export const agentControlPending = signal<Record<string, AgentAction>>({});
 /** The agent whose transcript is open in the Agents tab, if any. */
 export const selectedAgentId = signal<string | null>(null);
 /**
@@ -393,9 +403,18 @@ export const agentActivities = signal<Record<string, AgentActivity>>({});
 export const agentDetailLoading = signal(false);
 export const agentDetailError = signal<string | null>(null);
 
-/** Subagents running anywhere in the current project (the tab's badge). */
+/**
+ * Subagents alive anywhere in the current project (the inspector tab's badge).
+ *
+ * "Alive" is `running` **or** `paused`: a paused agent still holds a subagent
+ * slot and still exists as a loop, so the server counts it in its own `running`
+ * tally (`routes/agents.rs:80-89`, "a paused agent still holds a subagent slot")
+ * and `isAgentLive` is the shared definition. Counting only `running` here made
+ * the badge disagree with the server and with the rows underneath it, which
+ * already sort and label a paused agent as live.
+ */
 export const runningAgents = computed(
-  () => agentsAll.value.filter((agent) => agent.status === 'running').length,
+  () => agentsAll.value.filter((agent) => isAgentLive(agent.status)).length,
 );
 
 /**

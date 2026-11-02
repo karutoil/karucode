@@ -20,6 +20,20 @@ the whole security story on a laptop.
 
 ## What is protected
 
+* **The token** - with `KARUCODE_AUTH_TOKEN` set, every `/api/...` route and
+  `/metrics` require `Authorization: Bearer <token>`; `?token=` is accepted
+  only for the SSE stream and the terminal websocket (a browser can set
+  neither a header on a top-level navigation nor on a websocket handshake).
+  The **SPA shell and its static assets are served unauthenticated**: `GET /`,
+  `/index.html`, `/assets/*`, `/favicon*`, `/brand/*` and any client-side deep
+  link return the built frontend (or the "UI not built" placeholder) with
+  `200`, because a browser cannot attach `Authorization` to the document that
+  would run the app. Those bytes carry no data - the bundle is public in a
+  source checkout - and the app then shows its own auth screen and asks for
+  the token, which is what makes a token-protected deployment usable at all.
+  A missing or wrong token for a non-`/api` path therefore never yields a
+  `401`: it yields the shell. The fallback can only ever serve the frontend,
+  so nothing else is reachable without the token.
 * **Transport surface** - the API is same-origin only. No `Access-Control-*`
   header is ever sent.
 * **CSRF** - `POST`/`PATCH`/`PUT`/`DELETE` require
@@ -33,7 +47,13 @@ the whole security story on a laptop.
 * **Secrets** - API keys and MCP headers are write-only over the API, redacted in
   errors and never logged. The data directory is forced to `0700`.
 * **Rendered content** - the UI disables raw HTML in Markdown and sanitises what
-  it renders; the CSP allows no inline scripts.
+  it renders; the CSP allows no inline scripts. `GET /api/workspace/raw` (the
+  bytes behind an image or PDF preview) is served with a **route-local**
+  `Content-Security-Policy: sandbox; default-src 'none'` plus `nosniff`, so the
+  response is an opaque origin with script disabled: a workspace `.html` file
+  can be hotlinked by `<img src>` or an iframe but cannot execute in the app's
+  origin, cannot read its storage and cannot call `/api`. The shell keeps the
+  app CSP; only the raw route is narrowed.
 * **Plugin panels** - a plugin contributes *data*, never markup. The inspector
   draws the payload with a first-party component (or a read-only JSON view),
   so a plugin cannot execute code in the app's origin; the CSP and
@@ -65,8 +85,11 @@ downloads work without an approval prompt per scratch file.
   server user with that user's filesystem and network access. Approvals are the
   gate, not isolation.
 * **The packaged unit does not sandbox the filesystem either.** It runs the
-  agent as a dedicated unprivileged user under `NoNewPrivileges=yes`, but it
-  sets no `ProtectSystem=`/`ProtectHome=`/`ReadWritePaths=`, so the agent can
+  agent as an unprivileged account under `NoNewPrivileges=yes` - by default the
+  human who ran the installer (`packaging/install.sh` runs the service as the
+  installing account; the dedicated system account is only the fallback when no
+  human can be identified) - and it sets no
+  `ProtectSystem=`/`ProtectHome=`/`ReadWritePaths=`, so the agent can
   write anywhere that account can - deliberately, so ordinary work (`mv`, build
   caches, sibling checkouts) does not fail with `EROFS`. That account is the
   real boundary: give the service its own user and it cannot touch files that

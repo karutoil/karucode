@@ -293,6 +293,15 @@ export function ArrowRightIcon(props: IconProps): JSX.Element {
   );
 }
 
+/** The mock's `#i-arrow-up`: a bare up-arrow for the round send button. */
+export function ArrowUpIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M12 19V5M6 11l6-6 6 6" />
+    </svg>
+  );
+}
+
 export function CircleCheckIcon(props: IconProps): JSX.Element {
   return (
     <svg {...svgProps(props)}>
@@ -311,10 +320,11 @@ export function LockIcon(props: IconProps): JSX.Element {
   );
 }
 
+/** The mock's `#i-paperclip`. */
 export function PaperclipIcon(props: IconProps): JSX.Element {
   return (
     <svg {...svgProps(props)}>
-      <path d="m21 11.5-8.9 8.9a6 6 0 0 1-8.5-8.5l9.6-9.6a4 4 0 0 1 5.7 5.7l-10 10a2 2 0 0 1-2.8-2.8l9.2-9.2" />
+      <path d="M21 12.5 12.6 21a5 5 0 0 1-7-7l8-8a3.5 3.5 0 0 1 5 5l-8 8a2 2 0 0 1-3-3l7-7" />
     </svg>
   );
 }

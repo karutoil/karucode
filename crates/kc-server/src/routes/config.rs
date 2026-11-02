@@ -7,7 +7,7 @@ use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::Json;
-use kc_core::config::Config;
+use kc_core::config::{Config, ModelConfig};
 use kc_core::message::Message;
 use kc_core::provider::{ChatRequest, ProviderChunk};
 use serde::Deserialize;
@@ -54,6 +54,10 @@ pub async fn patch_config(State(state): State<AppState>, body: Bytes) -> ApiResu
 /// probes the active model exactly as before, and the settings screen can probe
 /// a profile that is not saved or selected yet (`profile`), or a draft endpoint
 /// the user is still typing (`base_url`/`api_key`/`model`).
+///
+/// A draft endpoint needs a draft key: naming a `base_url` without an `api_key`
+/// drops the stored key, so this route cannot be used to replay the configured
+/// credential at a host of the caller's choosing. See [`apply_body_overrides`].
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProviderTestBody {
@@ -98,19 +102,7 @@ pub async fn provider_test(State(state): State<AppState>, body: Bytes) -> ApiRes
         }
         None => config.effective_model(),
     };
-    if let Some(base_url) = &body.base_url {
-        model.base_url = base_url.trim().to_string();
-    }
-    if let Some(model_id) = &body.model {
-        model.model = model_id.trim().to_string();
-    }
-    if let Some(timeout) = body.request_timeout_secs {
-        model.request_timeout_secs = timeout.clamp(1, 3600);
-    }
-    if let Some(key) = &body.api_key {
-        let key = key.trim();
-        model.api_key = (!key.is_empty()).then(|| key.to_string());
-    }
+    apply_body_overrides(&mut model, &body);
 
     if let Err(error) = crate::settings::validate_base_url(&model.base_url) {
         return Ok(Json(probe_result(
@@ -165,6 +157,39 @@ pub async fn provider_test(State(state): State<AppState>, body: Bytes) -> ApiRes
     }
 }
 
+/// Fold a `POST /api/provider/test` body onto the model that would be probed.
+///
+/// **The stored key only ever goes to the configured endpoint.** The body may
+/// name another `base_url` (the settings screen probes a draft endpoint the user
+/// is still typing), so a key taken from the store would be sent to whatever
+/// host the request named - by an ordinary bearer-token client, outside the
+/// admin gate and past `lock_settings`. The rule is therefore:
+///
+/// * no `base_url` in the body - probe the configured endpoint with the stored
+///   key; that is the normal "test my provider" call and stays unchanged;
+/// * a `base_url` in the body - the stored key is **dropped**. The caller must
+///   pass its own `api_key`, or the probe goes out keyless (which is exactly
+///   right for a local gateway and a clean failure everywhere else);
+/// * an explicit `api_key` in the body always wins, including `""` to clear it.
+fn apply_body_overrides(model: &mut ModelConfig, body: &ProviderTestBody) {
+    if let Some(base_url) = &body.base_url {
+        if base_url.trim() != model.base_url.trim() {
+            model.api_key = None;
+        }
+        model.base_url = base_url.trim().to_string();
+    }
+    if let Some(model_id) = &body.model {
+        model.model = model_id.trim().to_string();
+    }
+    if let Some(timeout) = body.request_timeout_secs {
+        model.request_timeout_secs = timeout.clamp(1, 3600);
+    }
+    if let Some(key) = &body.api_key {
+        let key = key.trim();
+        model.api_key = (!key.is_empty()).then(|| key.to_string());
+    }
+}
+
 fn probe_result(ok: bool, models: Vec<String>, error: Option<String>, started: Instant) -> Value {
     let latency_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     json!({
@@ -178,7 +203,7 @@ fn probe_result(ok: bool, models: Vec<String>, error: Option<String>, started: I
 /// One-token completion. Success means the endpoint accepted a chat request.
 async fn chat_probe(
     provider: Arc<dyn kc_core::provider::Provider>,
-    model: &kc_core::config::ModelConfig,
+    model: &ModelConfig,
 ) -> Result<(), String> {
     let cancel = CancellationToken::new();
     let request = ChatRequest {
@@ -270,5 +295,97 @@ mod tests {
     fn rss_is_reported() {
         // Not portable enough to assert a value; just ensure it does not panic.
         let _ = rss_kb();
+    }
+
+    fn stored_model() -> ModelConfig {
+        ModelConfig {
+            base_url: "https://configured.example/v1".into(),
+            model: "configured-model".into(),
+            api_key: Some("sk-STORED-SECRET".into()),
+            ..ModelConfig::default()
+        }
+    }
+
+    /// The reported bug: a body carrying only `base_url` used to probe the
+    /// attacker-chosen host with the *stored* key, which is a credential
+    /// exfiltration path for any bearer-token client (this route is not
+    /// admin-gated and ignores `lock_settings`).
+    #[test]
+    fn a_base_url_override_never_carries_the_stored_key() {
+        let body = ProviderTestBody {
+            base_url: Some("https://attacker.example/v1".into()),
+            ..ProviderTestBody::default()
+        };
+        let mut model = stored_model();
+        apply_body_overrides(&mut model, &body);
+        assert_eq!(model.base_url, "https://attacker.example/v1");
+        assert_eq!(
+            model.api_key, None,
+            "the stored key must not be replayed to a body-supplied base_url"
+        );
+    }
+
+    /// The documented draft-endpoint case: both halves supplied, both used.
+    #[test]
+    fn a_base_url_override_with_its_own_key_still_works() {
+        let body = ProviderTestBody {
+            base_url: Some("https://draft.example/v1".into()),
+            api_key: Some("sk-DRAFT-KEY".into()),
+            model: Some("draft-model".into()),
+            ..ProviderTestBody::default()
+        };
+        let mut model = stored_model();
+        apply_body_overrides(&mut model, &body);
+        assert_eq!(model.base_url, "https://draft.example/v1");
+        assert_eq!(model.api_key.as_deref(), Some("sk-DRAFT-KEY"));
+        assert_eq!(model.model, "draft-model");
+    }
+
+    /// Probing the configured endpoint with the stored key is legitimate - it is
+    /// what the settings screen does on "test this profile".
+    #[test]
+    fn probing_the_configured_endpoint_keeps_the_stored_key() {
+        let body = ProviderTestBody {
+            model: Some("other-model".into()),
+            ..ProviderTestBody::default()
+        };
+        let mut model = stored_model();
+        apply_body_overrides(&mut model, &body);
+        assert_eq!(model.base_url, "https://configured.example/v1");
+        assert_eq!(
+            model.api_key.as_deref(),
+            Some("sk-STORED-SECRET"),
+            "an unchanged endpoint keeps the configured key"
+        );
+
+        // Naming the same endpoint the config already uses is not an override:
+        // it is the same request the UI would send.
+        let body = ProviderTestBody {
+            base_url: Some(" https://configured.example/v1 ".into()),
+            ..ProviderTestBody::default()
+        };
+        let mut model = stored_model();
+        apply_body_overrides(&mut model, &body);
+        assert_eq!(model.api_key.as_deref(), Some("sk-STORED-SECRET"));
+    }
+
+    /// An explicit `api_key` always wins - including `""`, which clears it.
+    #[test]
+    fn an_explicit_api_key_overrides_the_stored_one() {
+        let body = ProviderTestBody {
+            api_key: Some("sk-OTHER".into()),
+            ..ProviderTestBody::default()
+        };
+        let mut model = stored_model();
+        apply_body_overrides(&mut model, &body);
+        assert_eq!(model.api_key.as_deref(), Some("sk-OTHER"));
+
+        let body = ProviderTestBody {
+            api_key: Some("  ".into()),
+            ..ProviderTestBody::default()
+        };
+        let mut model = stored_model();
+        apply_body_overrides(&mut model, &body);
+        assert_eq!(model.api_key, None, "an empty api_key clears the key");
     }
 }

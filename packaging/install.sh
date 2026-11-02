@@ -36,11 +36,15 @@
 #   KARUCODE_RELEASE_BASE_URL override the download base (mirror, air-gapped host)
 #   KARUCODE_RELEASE_API_URL  override the "latest release" endpoint
 #   KARUCODE_UNIT_URL         override where the unit file is fetched from
+#   KARUCODE_UNIT_DIR         override where the unit and its drop-in live
+#                             (default /etc/systemd/system). The test suite uses
+#                             this to point a dry run at a scratch directory
+#                             instead of the host's real unit.
 #
 # Exit codes:
 #   0  installed, and (when systemd was requested) the service is running
-#   1  usage, download, verification or install failure - nothing was changed,
-#      or the systemd changes were rolled back
+#   1  usage, download, verification or install failure - the unit, the drop-in
+#      and the binary are rolled back to what was there before this run
 #   2  the binary and unit are installed but the service did not stay up; see
 #      the checklist printed at the end
 
@@ -193,7 +197,11 @@ HOST_ARG=""
 PORT_ARG=""
 ENV_FILE="/etc/karucode/karucode.env"
 
-UNIT_DIR="/etc/systemd/system"
+# UNIT_DIR is the real location on a host; KARUCODE_UNIT_DIR exists so the test
+# suite can point a dry run at a scratch directory. It is not a flag: an operator
+# who moved the unit wants --unit-file, and a flag here would be one more way to
+# write a unit somewhere systemd never reads.
+UNIT_DIR="${KARUCODE_UNIT_DIR:-/etc/systemd/system}"
 UNIT_PATH="${UNIT_DIR}/${SERVICE_NAME}.service"
 DROPIN_DIR="${UNIT_PATH}.d"
 DROPIN_PATH="${DROPIN_DIR}/10-install.conf"
@@ -213,6 +221,7 @@ BIN_DIR=""
 UNIT_BAK=""
 DROPIN_BAK=""
 BIN_BAK=""
+BIN_INSTALLED=0
 ROLLBACK=""
 
 # --- output -----------------------------------------------------------------
@@ -382,8 +391,105 @@ account_shell() {
     printf '%s\n' "$(printf '%s' "$_ent" | cut -d: -f7)"
 }
 
-# write_dropin prints the [Service] drop-in this run would install. Kept as one
-# function so the dry run shows the real bytes rather than a description of them.
+# --- read the configuration an earlier run wrote -----------------------------
+#
+# Re-running the installer is the upgrade path (packaging/README.md), and the
+# drop-in is rewritten on every run. So a flag that is ABSENT on this run must not
+# fall back to a built-in default: it has to fall back to the value the *previous*
+# run recorded, or an upgrade silently repoints the data directory and the service
+# comes up healthy on an empty database - sessions and the stored provider key
+# simply gone. That was the bug this section exists to prevent.
+#
+# Precedence, and nothing else: an explicit flag > the line in the existing
+# 10-install.conf > `systemctl show` on the loaded unit (which also sees
+# 20-local.conf and the unit's own defaults) > the built-in default.
+#
+# Every read is defensive. The file is parsed by matching the exact keys this
+# script writes, never sourced or eval'd, and a value that does not look like a
+# path/port/account is discarded with a warning rather than trusted: a corrupted
+# drop-in must degrade to today's behaviour, not to a directory the service cannot
+# write.
+#
+# KNOWN LIMITATION, stated here because it decides how the values are resolved: the
+# drop-in always writes a `WorkingDirectory=`. When no `--workspace` was given that
+# line names the *data dir* (systemd needs some existing directory), so a data dir
+# can be read back out of it but a workspace cannot be recovered from it - the two
+# are indistinguishable in the file. A workspace is therefore carried over only
+# when systemd can be asked directly (`systemctl show -p WorkingDirectory`).
+
+# existing_dropin_value KEY prints the last `KEY=value` line in the drop-in an
+# earlier run wrote, or nothing.
+existing_dropin_value() {
+    [ -f "$DROPIN_PATH" ] || return 0
+    _edv="$(sed -n "s/^$1=//p" "$DROPIN_PATH" 2>/dev/null | tail -n 1)" || _edv=""
+    printf '%s\n' "$_edv"
+}
+
+# existing_dropin_env NAME prints the value of `Environment=NAME=...` from the
+# drop-in an earlier run wrote, or nothing. install.sh writes one Environment= line
+# per variable, so this is a plain match on that exact shape.
+existing_dropin_env() {
+    [ -f "$DROPIN_PATH" ] || return 0
+    _ede="$(sed -n "s/^Environment=$1=//p" "$DROPIN_PATH" 2>/dev/null | tail -n 1)" || _ede=""
+    printf '%s\n' "$_ede"
+}
+
+# unit_prop NAME prints one property of the loaded unit, or nothing when systemd is
+# absent, the unit is not installed, or the value is systemd's empty sentinel. Used
+# only as the second-best source: the drop-in is what this script owns and what it
+# is about to overwrite, so it is tried first.
+unit_prop() {
+    command -v systemctl >/dev/null 2>&1 || return 0
+    [ -d /run/systemd/system ] || return 0
+    _up="$(systemctl show "$SERVICE_NAME" -p "$1" 2>/dev/null | sed -n "s/^$1=//p" | head -n 1)" || _up=""
+    case "$_up" in
+        ""|[Nn]ot-found|"[not set]") _up="" ;;
+    esac
+    printf '%s\n' "$_up"
+}
+
+# unit_env NAME prints NAME=value out of the unit's merged Environment=, which
+# systemd prints space-separated with values quoted when they contain spaces.
+unit_env() {
+    _ue_all="$(unit_prop Environment)"
+    [ -n "$_ue_all" ] || return 0
+    printf '%s\n' "$_ue_all" \
+        | tr ' ' '\n' \
+        | sed -n "s/^$1=//p" \
+        | head -n 1 \
+        | sed 's/^"//; s/"$//'
+}
+
+# is_abs_path PATH is true for an absolute path with no whitespace or newline in
+# it: the only shape that can safely be written into a unit file unquoted.
+is_abs_path() {
+    case "$1" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        *[[:space:]]*) return 1 ;;
+    esac
+    return 0
+}
+
+# name_is_sane NAME rejects the values that would turn into a `User=`/`Group=`
+# directive systemd cannot parse, or into something this script would then treat as
+# an account it does not have.
+name_is_sane() {
+    case "$1" in
+        ""|*[!A-Za-z0-9_.-]*) return 1 ;;
+    esac
+    return 0
+}
+
+# is_port PORT is true for a decimal port in range.
+is_port() {
+    case "$1" in
+        ""|*[!0-9]*) return 1 ;;
+    esac
+    [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
 write_dropin() {
     printf '# Generated by packaging/install.sh - rewritten on every run.\n'
     printf '# Put your own overrides in 20-local.conf; install.sh never touches it.\n'
@@ -567,6 +673,132 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$PREFIX" ] || die "--prefix may not be empty"
+
+# --- carry the previous run's configuration forward --------------------------
+#
+# Runs after the flags are parsed (an explicit flag always wins) and before
+# anything is resolved from a default. --no-systemd is excluded: a binary-only
+# install writes no drop-in and reads no unit, so there is nothing to carry.
+#
+# What is deliberately NOT carried: --prefix/--version/--binary (install-source and
+# binary-location choices, not site configuration), and the booleans
+# (--no-enable/--no-start/--no-restart/--no-jit). "Runs this time" is the only
+# honest semantics for a flag, and a sticky --no-start would keep a machine that
+# has been rebooted from ever coming back up.
+#
+# The workspace is the one value the drop-in cannot carry: its WorkingDirectory=
+# line names the data dir whenever no workspace was given (systemd needs *some*
+# existing directory), so a value read back could be the data dir. It is taken from
+# the drop-in only when a data dir is also known and the two differ - the signature
+# of a real workspace - and otherwise only from systemd.
+
+PREV_USER=""
+PREV_GROUP=""
+PREV_DATA_DIR=""
+PREV_HOST=""
+PREV_PORT=""
+# WorkingDirectory= has two possible sources and they are not interchangeable; both
+# are read and the difference decides whether either is a workspace (below).
+PREV_WD_FROM_DROPIN=""
+PREV_WD_FROM_UNIT=""
+
+if [ "$USE_SYSTEMD" -eq 1 ]; then
+    PREV_USER="$(existing_dropin_value User)"
+    PREV_GROUP="$(existing_dropin_value Group)"
+    PREV_WD_FROM_DROPIN="$(existing_dropin_value WorkingDirectory)"
+    PREV_DATA_DIR="$(existing_dropin_env KARUCODE_DATA_DIR)"
+    PREV_HOST="$(existing_dropin_env KARUCODE_HOST)"
+    PREV_PORT="$(existing_dropin_env KARUCODE_PORT)"
+    PREV_WD_FROM_UNIT="$(unit_prop WorkingDirectory)"
+    # NB: nothing else is read from the unit. The shipped unit is full of values
+    # (User=, Environment=KARUCODE_DATA_DIR/HOST/PORT) and reading them back makes
+    # "what the shipped unit says" indistinguishable from "what the previous install
+    # chose": a dry run on a machine whose unit file has been hand-edited, or a
+    # checkout whose unit changes, would then carry values nobody passed a flag for
+    # and write them into the drop-in as if they were deliberate. The drop-in this
+    # script writes is the only record of a previous *choice*; WorkingDirectory= is
+    # the one exception, because the unit is where a hand-install keeps it.
+fi
+
+# A previous value is only usable if it has the shape this script would write.
+# Anything else - a truncated file, a hand edit, a value with a `%` or a newline -
+# is dropped with a warning, which lands the caller on today's default rather than
+# on a path the service cannot write.
+if [ -n "$PREV_DATA_DIR" ] && ! is_abs_path "$PREV_DATA_DIR"; then
+    warn "the existing ${DROPIN_PATH} names a data dir that is not an absolute path: \"${PREV_DATA_DIR}\"; ignoring every recorded value in it"
+    PREV_USER=""; PREV_GROUP=""; PREV_HOST=""; PREV_PORT=""
+    PREV_WD_FROM_DROPIN=""; PREV_WD_FROM_UNIT=""
+    PREV_DATA_DIR=""
+fi
+if [ -n "$PREV_WD_FROM_DROPIN" ] && ! is_abs_path "$PREV_WD_FROM_DROPIN"; then
+    PREV_WD_FROM_DROPIN=""
+fi
+if [ -n "$PREV_WD_FROM_UNIT" ] && ! is_abs_path "$PREV_WD_FROM_UNIT"; then
+    PREV_WD_FROM_UNIT=""
+fi
+if [ -n "$PREV_PORT" ] && ! is_port "$PREV_PORT"; then
+    warn "ignoring the recorded port in the existing ${DROPIN_PATH} (\"${PREV_PORT}\" is not a port); using 8787"
+    PREV_PORT=""
+fi
+if [ -n "$PREV_HOST" ]; then
+    case "$PREV_HOST" in
+        *[[:space:]]*|*%*) warn "ignoring the recorded bind address in the existing ${DROPIN_PATH} (\"${PREV_HOST}\")"; PREV_HOST="" ;;
+    esac
+fi
+# The account is checked against passwd later (it is a *name*, and a name that no
+# longer exists is worth a clear error rather than a unit that fails with 217/USER),
+# so only its shape is checked here.
+if [ -n "$PREV_USER" ] && ! name_is_sane "$PREV_USER"; then
+    warn "ignoring the recorded service user in the existing ${DROPIN_PATH} (\"${PREV_USER}\"); using the default"
+    PREV_USER=""
+fi
+if [ -n "$PREV_GROUP" ] && ! name_is_sane "$PREV_GROUP"; then
+    warn "ignoring the recorded service group in the existing ${DROPIN_PATH} (\"${PREV_GROUP}\"); using ${PREV_USER:-the default}"
+    PREV_GROUP=""
+fi
+
+# User and group are carried as a pair: a carried user with a *derived* group is not
+# an upgrade of the previous configuration, it is a different one - and the account
+# may not even exist any more.
+if [ "$SERVICE_USER_EXPLICIT" -eq 0 ] && [ -n "$PREV_USER" ] && user_exists "$PREV_USER"; then
+    SERVICE_USER="$PREV_USER"
+    if [ "$SERVICE_GROUP_EXPLICIT" -eq 0 ] && [ -n "$PREV_GROUP" ] && group_exists "$PREV_GROUP"; then
+        SERVICE_GROUP="$PREV_GROUP"
+    fi
+elif [ "$SERVICE_USER_EXPLICIT" -eq 0 ] && [ -n "$PREV_USER" ]; then
+    warn "the service account recorded in ${DROPIN_PATH} (\"${PREV_USER}\") no longer exists; using the default instead"
+fi
+
+# The workspace, from systemd only (see the note above). An explicit --workspace
+# always wins, and an explicit --data-dir suppresses the drop-in comparison entirely
+# because the data dir in the file no longer describes this install.
+if [ -z "$WORKSPACE" ]; then
+    if [ -n "$PREV_WD_FROM_UNIT" ] \
+        && [ "$PREV_WD_FROM_UNIT" != "$PREV_DATA_DIR" ] \
+        && [ -d "$PREV_WD_FROM_UNIT" ]; then
+        WORKSPACE="$PREV_WD_FROM_UNIT"
+    elif [ -n "$PREV_WD_FROM_DROPIN" ] \
+        && [ "$DATA_DIR_EXPLICIT" -eq 0 ] \
+        && [ -n "$PREV_DATA_DIR" ] \
+        && [ "$PREV_WD_FROM_DROPIN" != "$PREV_DATA_DIR" ] \
+        && [ -d "$PREV_WD_FROM_DROPIN" ]; then
+        WORKSPACE="$PREV_WD_FROM_DROPIN"
+    fi
+fi
+
+if [ "$DATA_DIR_EXPLICIT" -eq 0 ] && [ -n "$PREV_DATA_DIR" ] \
+    && [ -z "$PREV_USER" -o "$SERVICE_USER" = "$PREV_USER" ]; then
+    DATA_DIR="$PREV_DATA_DIR"
+    # Signals "carried over" to the data-dir resolution below, which must not
+    # recompute it from the account's home.
+    DATA_DIR_EXPLICIT=2
+fi
+if [ -z "$HOST_ARG" ] && [ -n "$PREV_HOST" ]; then
+    HOST_ARG="$PREV_HOST"
+fi
+if [ -z "$PORT_ARG" ] && [ -n "$PREV_PORT" ]; then
+    PORT_ARG="$PREV_PORT"
+fi
 
 # --- resolve the service account and its group ------------------------------
 #

@@ -5,7 +5,19 @@ import { modKey } from '../lib/platform';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { Dialog } from './Dialog';
-import { KebabIcon, PaletteIcon, PlusIcon, SearchIcon } from './icons';
+import {
+  AgentsIcon,
+  EditIcon,
+  FileCodeIcon,
+  FileIcon,
+  FolderIcon,
+  GitIcon,
+  KebabIcon,
+  PaletteIcon,
+  PlusIcon,
+  SearchIcon,
+  TerminalIcon,
+} from './icons';
 import '../styles/rail.css';
 
 /**
@@ -49,6 +61,26 @@ function ProjectGlyph({ project }: { project: Project }): JSX.Element {
       <img class="project-rail-icon" src={iconUrl} alt="" draggable={false} decoding="async" />
     </span>
   );
+}
+
+/**
+ * The glyph for one tool name, as the sessions rail draws it.
+ *
+ * The mock puts up to three small symbols after a session's title so a glance
+ * says what the session *was*: shell work, edits, reads, searches. Anything
+ * unrecognised gets a generic file mark rather than nothing, so a plugin or MCP
+ * tool still reads as "this session called tools".
+ */
+export function SessionGlyph({ kind }: { kind: string }): JSX.Element {
+  const name = kind.replace(/^plugin__[^_]+__/, '');
+  if (name === 'run_command' || name === 'terminal') return <TerminalIcon size={10} />;
+  if (name === 'edit_file' || name === 'write_file' || name === 'apply_patch') return <EditIcon size={10} />;
+  if (name === 'read_file' || name === 'get_workspace_file') return <FileIcon size={10} />;
+  if (name === 'search_files' || name === 'grep') return <SearchIcon size={10} />;
+  if (name === 'list_dir' || name === 'get_workspace_tree') return <FolderIcon size={10} />;
+  if (name === 'git_diff' || name === 'git_status') return <GitIcon size={10} />;
+  if (name.startsWith('spawn_agent') || name === 'report_status') return <AgentsIcon size={10} />;
+  return <FileCodeIcon size={10} />;
 }
 
 function sessionLabel(count: number): string {

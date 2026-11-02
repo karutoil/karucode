@@ -9,6 +9,10 @@ kc-core.workspace = true
 async-trait.workspace = true
 # `flock` for the single-instance advisory lock on the data directory.
 libc.workspace = true
+# Connection mutexes. `parking_lot` rather than `std::sync` because its guard has
+# no poisoning: a panic inside one query must not make the store permanently
+# unusable (see `SqliteStore::with`).
+parking_lot.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

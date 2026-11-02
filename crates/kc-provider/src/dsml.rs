@@ -93,6 +93,14 @@ pub(crate) struct DsmlScanner {
     buf: String,
     /// An open block: offset of its start marker inside `buf`.
     block: Option<usize>,
+    /// How far the search for this block's closing marker has already got.
+    ///
+    /// An open block is the one case where `buf` grows without bound, so
+    /// re-walking it from the top on every delta is quadratic: measured 22 s for
+    /// one megabyte of unclosed block, against a `MAX_BLOCK_BYTES` ten times
+    /// that. [`find_marker_from`] reports where a failed search may resume, so
+    /// each delta only scans the bytes that arrived since the last one.
+    scanned: usize,
 }
 
 /// A block longer than this is not a tool call any more. Give up on it and let
@@ -105,6 +113,7 @@ impl DsmlScanner {
             tools,
             buf: String::new(),
             block: None,
+            scanned: 0,
         }
     }
 
@@ -126,11 +135,16 @@ impl DsmlScanner {
                     step.text.push_str(&self.buf[..found.at]);
                     self.buf.drain(..found.at);
                     self.block = Some(0);
+                    self.scanned = 0;
                 }
                 Some(start) => {
-                    let search_from = self.buf.len().min(close_hint(&self.buf, start));
-                    let Some(found) = find_marker(&self.buf, search_from, Tag::ToolCalls, true)
-                    else {
+                    let from = close_hint(&self.buf, start).max(self.scanned);
+                    let (found, resume) = find_marker_from(&self.buf, from, Tag::ToolCalls, true);
+                    let Some(found) = found else {
+                        // Everything before `resume` can never become the start of
+                        // a closing marker, so the next delta starts looking
+                        // there instead of at the front of an ever-growing block.
+                        self.scanned = resume;
                         if self.buf.len() > MAX_BLOCK_BYTES {
                             tracing::warn!(
                                 bytes = self.buf.len(),
@@ -138,6 +152,7 @@ impl DsmlScanner {
                             );
                             step.text.push_str(&std::mem::take(&mut self.buf));
                             self.block = None;
+                            self.scanned = 0;
                         }
                         return step;
                     };
@@ -146,6 +161,7 @@ impl DsmlScanner {
                     let block = self.buf[..found.end].to_string();
                     self.buf.drain(..found.end);
                     self.block = None;
+                    self.scanned = 0;
                     step.extend(self.decide(&block, start, found.end));
                 }
             }
@@ -158,6 +174,7 @@ impl DsmlScanner {
         let mut step = Step::default();
         step.text.push_str(&std::mem::take(&mut self.buf));
         self.block = None;
+        self.scanned = 0;
         step
     }
 
@@ -197,6 +214,12 @@ impl Step {
 
 /// Where to resume the search for a block's closing marker: never before the
 /// opening marker, which contains a similar tag name.
+///
+/// The opening marker is always complete - `find_marker` only returns one whose
+/// `>` has arrived - so this is a single scan of the marker at `start`, not a
+/// walk of the whole block. (Re-walking the block from offset 0 here is what
+/// made an unclosed block quadratic; the resume point of the failed search is
+/// kept in [`DsmlScanner::scanned`], so the search never starts over.)
 fn close_hint(buf: &str, start: usize) -> usize {
     match find_marker(buf, start, Tag::ToolCalls, false) {
         Some(found) => found.end,
@@ -226,21 +249,43 @@ struct Found {
 /// Find the next marker of `tag` at or after `from`. With `close = true` only a
 /// closing marker matches, with `close = false` only an opening one.
 fn find_marker(text: &str, from: usize, tag: Tag, close: bool) -> Option<Found> {
+    find_marker_from(text, from, tag, close).0
+}
+
+/// [`find_marker`] that also reports where a search which found nothing may be
+/// resumed from once more text arrives.
+///
+/// The result of a failed search is `(None, resume)`: `resume <= text.len()`, and
+/// appending to `text` cannot change what `find_marker` returns for any `from`
+/// in `0..resume`. Byte comparisons are translation invariant, so appending is
+/// the only way a later search for the same tag and polarity can differ - which
+/// is what makes this a safe cursor for the streaming scanner's open block,
+/// where the buffer grows by one delta at a time and rescanning it from the
+/// front would be quadratic.
+///
+/// On a match the second element is `found.at`, i.e. where a search for another
+/// marker could carry on.
+fn find_marker_from(text: &str, from: usize, tag: Tag, close: bool) -> (Option<Found>, usize) {
     let mut at = from;
     while let Some(found) = text[at..].find('<').map(|pos| at + pos) {
         match scan_marker(text, found) {
             Scan::Match(marker) if marker.tag == tag && marker.close == close => {
-                return Some(marker);
+                return (Some(marker), found);
             }
-            Scan::Match(_) | Scan::Mismatch => at = found + 1,
-            // Ran out of input mid-marker: nothing further can complete.
-            Scan::Incomplete => return None,
-        }
-        if at >= text.len() {
-            break;
+            // A complete marker: scanning consumed it whole, so no `<` can hide
+            // between `found` and its end and the search can skip to there.
+            Scan::Match(marker) => at = marker.end,
+            // The bytes from here to the next `<` are plain text. They cannot
+            // become a marker whatever arrives next.
+            Scan::Mismatch => at = found + 1,
+            // Ran out of input mid-marker: the rest may still arrive, so the
+            // search resumes from the `<` that started it.
+            Scan::Incomplete => return (None, found),
         }
     }
-    None
+    // No `<` is left, so the next candidate can only be in text that has not
+    // arrived yet: everything already here is safe to skip.
+    (None, text.len())
 }
 
 enum Scan {
@@ -903,6 +948,144 @@ mod tests {
     fn a_tool_prefixed_tag_name_is_not_tool_calls() {
         // `<|DSML|toolbox>` must not be read as `<|DSML|tool`.
         assert!(find_marker("<||DSML||toolbox>", 0, Tag::ToolCalls, false).is_none());
+    }
+
+    /// An unclosed block must not rescan the whole buffer on every delta.
+    ///
+    /// The shape that made this quadratic is an unclosed block full of `<` that
+    /// never completes a marker: with a rescan from offset 0 on every delta, one
+    /// megabyte of `< ` took 2.4 s in release (55 s in debug) and one megabyte
+    /// of invoke markup 4.7 s (48 s). Both are driven here in small deltas,
+    /// which is how a network stream arrives.
+    #[test]
+    fn an_unclosed_block_is_scanned_incrementally() {
+        const TOTAL: usize = 512 * 1024;
+        for (unit, chunk) in [
+            ("< ", 256usize),
+            ("<||DSML||parameter name=\"a\" string=\"true\">", 256),
+        ] {
+            let mut scanner = scanner(&["read_file"]);
+            let _ = scanner.push("<||DSML||tool_calls><||DSML||invoke name=\"read_file\">");
+            let filler: String = unit.repeat(chunk / unit.len() + 1);
+            let filler = &filler[..chunk];
+
+            let started = std::time::Instant::now();
+            let mut fed = 0usize;
+            while fed < TOTAL {
+                let take = chunk.min(TOTAL - fed);
+                let step = scanner.push(&filler[..take]);
+                assert!(step.text.is_empty(), "an open block stays buffered");
+                assert!(step.calls.is_empty());
+                fed += take;
+            }
+            let elapsed = started.elapsed();
+
+            // Still open at the end: an unterminated block is never a call.
+            assert!(scanner.push("").calls.is_empty());
+            // Two orders of magnitude above the fix (sub-millisecond per 512 KB
+            // in release) and far below a rescan from offset 0 (seconds), so it
+            // catches the quadratic shape without measuring the machine.
+            assert!(
+                elapsed < std::time::Duration::from_secs(2),
+                "{TOTAL} bytes of unclosed block in {chunk}-byte deltas took {elapsed:?}; \
+                 the open-block search must resume from where it stopped, not restart"
+            );
+        }
+    }
+
+    /// A closing marker split across delta boundaries must still be found when
+    /// the search resumes from the end of the previous one.
+    #[test]
+    fn a_resumed_search_still_spots_a_marker_straddling_the_boundary() {
+        let mut scanner = scanner(&["read_file"]);
+        // Open the block, then feed only text, so the scanner's resume cursor
+        // advances past everything it has seen.
+        let head = "<||DSML||tool_calls><||DSML||invoke name=\"read_file\">\
+                    <||DSML||parameter name=\"path\" string=\"true\">a.txt";
+        assert!(scanner.push(head).text.is_empty());
+        assert!(scanner.push(" and more prose").text.is_empty());
+
+        // Now hand it a marker one character at a time, so the closing marker is
+        // never whole inside a single delta.
+        let tail = "</||DSML||parameter></||DSML||invoke></||DSML||tool_calls>";
+        let mut calls = Vec::new();
+        for ch in tail.chars() {
+            let step = scanner.push(&ch.to_string());
+            calls.extend(step.calls);
+        }
+        assert_eq!(
+            calls.len(),
+            1,
+            "the split close must still be found: {calls:?}"
+        );
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(
+            calls[0].arguments, r#"{"path":"a.txt and more prose"}"#,
+            "the value must keep everything between the tags"
+        );
+    }
+
+    /// A `<` that is not a marker at all must not stop the scan from finding a
+    /// real marker that follows it, even when both arrive in separate deltas.
+    #[test]
+    fn a_false_start_does_not_hide_a_later_closing_marker() {
+        let mut scanner = scanner(&["read_file"]);
+        let head = "<||DSML||tool_calls><||DSML||invoke name=\"read_file\">\
+                    <||DSML||parameter name=\"path\" string=\"true\">a < b";
+        assert!(scanner.push(head).text.is_empty());
+        // A `<` that never becomes a tag, then the real close.
+        assert!(scanner.push(" and <not a tag").text.is_empty());
+        let step = scanner.push("></||DSML||parameter></||DSML||invoke></||DSML||tool_calls>");
+        assert_eq!(step.calls.len(), 1, "{step:?}");
+        assert_eq!(step.calls[0].name, "read_file");
+        assert_eq!(
+            step.calls[0].arguments,
+            r#"{"path":"a < b and <not a tag>"}"#
+        );
+    }
+
+    /// Feeding the same message in many small deltas must produce exactly what
+    /// one big delta produces: the incremental search changes when the buffer is
+    /// walked, never what is found.
+    #[test]
+    fn incremental_and_single_delta_scans_agree() {
+        let messages = [
+            REPORTED.to_string(),
+            format!("before{REPORTED}after"),
+            "<||DSML||tool_calls><||DSML||invoke name=\"read_file\">\
+             <||DSML||parameter name=\"path\" string=\"true\">a.txt</||DSML||parameter>\
+             </||DSML||invoke></||DSML||tool_calls>"
+                .to_string(),
+            "<||DSML||tool_calls><||DSML||invoke name=\"read_file\">\
+             <||DSML||parameter name=\"path\" string=\"true\">unclosed"
+                .to_string(),
+        ];
+        for message in messages {
+            let (whole_text, whole_calls) = run(&["read_file", "doc_knowledgebase"], &message);
+            let boundaries: Vec<usize> = message
+                .char_indices()
+                .map(|(at, _)| at)
+                .chain(std::iter::once(message.len()))
+                .collect();
+            for step in [1usize, 2, 3, 7] {
+                let mut scanner = scanner(&["read_file", "doc_knowledgebase"]);
+                let (mut text, mut calls) = (String::new(), Vec::new());
+                let mut at = 0usize;
+                while boundaries[at] < message.len() {
+                    let next = (at + step).min(boundaries.len() - 1);
+                    let piece = &message[boundaries[at]..boundaries[next]];
+                    at = next;
+                    let pushed = scanner.push(piece);
+                    text.push_str(&pushed.text);
+                    calls.extend(pushed.calls);
+                }
+                let tail = scanner.finish();
+                text.push_str(&tail.text);
+                calls.extend(tail.calls);
+                assert_eq!(text, whole_text, "step {step}: {message}");
+                assert_eq!(calls, whole_calls, "step {step}: {message}");
+            }
+        }
     }
 }
 

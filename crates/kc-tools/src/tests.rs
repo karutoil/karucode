@@ -219,6 +219,32 @@ fn env(tag: &str) -> TestEnv {
     env_with(tag, ask(), Limits::default(), ApprovalDecision::AllowOnce)
 }
 
+/// A `ToolCtx` for a workspace a test built itself (a nested repository, say)
+/// rather than the one `TempWorkspace` owns.
+fn ctx_for(ws: &Workspace) -> ToolCtx {
+    ToolCtx {
+        workspace: Arc::new(ws.clone()),
+        cancel: CancellationToken::new(),
+        approvals: ApprovalHandle::new(
+            Arc::new(RecordingGate {
+                decision: ApprovalDecision::AllowOnce,
+                requests: Mutex::new(Vec::new()),
+            }),
+            SessionId::new(),
+            RunId::new(),
+            None,
+        ),
+        events: kc_core::events::noop_sink(),
+        settings: Arc::new(TestSettings {
+            limits: Limits::default(),
+            policy: ask(),
+        }),
+        depth: 0,
+        supports_images: false,
+        checkpoints: None,
+    }
+}
+
 /// Like [`env`], but the workspace also allows `extra_roots` - the shape the
 /// server builds by default, with the system temp dir on the list.
 fn env_with_extra_roots(tag: &str, extra_roots: Vec<PathBuf>) -> TestEnv {
@@ -331,6 +357,40 @@ async fn read_file_refuses_binary_content() {
     assert!(!out.ok);
     assert!(out.content.contains("binary file"), "{}", out.content);
     assert!(out.content.contains("blob.bin"), "{}", out.content);
+}
+
+/// FIX 6(b): the NUL sniff used to look at the first 8 KiB only, so a binary file
+/// whose NUL came later was rendered as text and the U+0000 reached the model's
+/// context. The sniff now covers the window that is actually returned.
+#[tokio::test]
+async fn a_nul_past_the_old_sniff_window_is_still_refused() {
+    let env = env("read-nul-late");
+    let mut bytes = vec![b'a'; 20_000];
+    bytes.push(0);
+    bytes.extend_from_slice(b"tail\n");
+    env.tmp.write_bytes("late.bin", &bytes);
+
+    let out = call(&ReadFile, &env.ctx, json!({"path": "late.bin"})).await;
+    assert!(!out.ok, "a NUL at offset 20000 must be refused");
+    assert!(
+        out.content.contains("NUL byte at offset 20000"),
+        "the refusal must name the real offset: {}",
+        out.content
+    );
+    assert!(
+        !out.content.contains('\u{0}'),
+        "no NUL may reach the model: {:?}",
+        out.content
+    );
+
+    // The same file below the cap is refused for the same reason.
+    let out = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"path": "late.bin", "offset": 1, "limit": 2000}),
+    )
+    .await;
+    assert!(!out.ok, "{}", out.content);
 }
 
 /// The 8-byte PNG signature plus a truncated chunk: enough for the magic-byte
@@ -648,10 +708,89 @@ async fn list_dir_truncates_at_entry_cap() {
     // Exercise the public helper directly with a small cap.
     let rendered = file_ops::list_dir(&env.ws, ".", 3, 5).unwrap();
     assert!(rendered.truncated);
+    // The walk now stops at the cap instead of walking the whole tree and
+    // throwing it away, so the total is a *lower bound* (`5+`), not a count the
+    // call never established.
     assert!(
-        rendered.text.contains("showing the first 5 of 20"),
+        rendered.text.contains("showing the first 5 of 5+ entries"),
         "{}",
         rendered.text
+    );
+    assert_eq!(rendered.meta["shown"], json!(5));
+    assert_eq!(rendered.meta["entries_capped"], json!(true));
+    // What is shown stays sorted (directories first, then by path). The *set*
+    // that fits under the cap is whatever `readdir` yielded first - the walk no
+    // longer reads the whole tree to pick the alphabetically-first 5 - but the
+    // rows that are shown are ordered.
+    let rows: Vec<&str> = rendered
+        .text
+        .lines()
+        .skip(1)
+        .filter(|line| !line.starts_with('['))
+        .collect();
+    assert_eq!(rows.len(), 5, "{}", rendered.text);
+    let mut sorted = rows.clone();
+    sorted.sort_unstable();
+    assert_eq!(rows, sorted, "{}", rendered.text);
+
+    // A listing that fits has an exact count and no truncation note.
+    let roomy = env_with(
+        "list-cap-roomy",
+        ask(),
+        Limits::default(),
+        ApprovalDecision::AllowOnce,
+    );
+    for i in 0..3 {
+        roomy.tmp.write(&format!("f{i}.txt"), "x");
+    }
+    let rendered = file_ops::list_dir(&roomy.ws, ".", 1, 5).unwrap();
+    assert!(!rendered.truncated, "{}", rendered.text);
+    assert!(
+        rendered
+            .text
+            .starts_with("Listing . (depth 1, 3 entries, 3 shown)"),
+        "{}",
+        rendered.text
+    );
+    assert_eq!(rendered.meta["entries"], json!(3));
+    assert_eq!(rendered.meta["entries_capped"], json!(false));
+    assert!(!rendered.text.contains("truncated"), "{}", rendered.text);
+}
+
+/// FIX 6(a): the walk stops at the cap instead of materialising the whole tree.
+///
+/// The observable part is that the entry count is a lower bound (`N+`) for a
+/// truncated listing, and the number of rows equals the cap - a walk that kept
+/// going would still print `max_entries` rows, so the assertion that matters is
+/// that the *count* is a bound and the metadata says it was capped. The timing
+/// guard below fails if the walk ever goes back to reading every entry.
+#[tokio::test]
+async fn list_dir_stops_walking_at_the_cap() {
+    let env = env("list-walk-cap");
+    // 20 000 files: enough that a full walk is measurably slower than 500.
+    for i in 0..20_000 {
+        env.tmp.write(&format!("d{:02}/f{i:05}.txt", i % 20), "x");
+    }
+    let started = Instant::now();
+    let rendered = file_ops::list_dir(&env.ws, "d00", 1, 20).unwrap();
+    let elapsed = started.elapsed();
+    assert!(rendered.truncated, "{}", rendered.text);
+    assert_eq!(rendered.meta["shown"], json!(20));
+    assert_eq!(
+        rendered.meta["entries_capped"],
+        json!(true),
+        "{}",
+        rendered.text
+    );
+    assert!(
+        rendered.meta["entries"].as_u64().unwrap() <= 21,
+        "the walk must stop at the cap (one entry past it at most), not collect the \
+         tree: {}",
+        rendered.text
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "a capped listing must not walk the whole tree; took {elapsed:?}"
     );
 }
 
@@ -1199,6 +1338,170 @@ async fn run_command_does_not_kill_silent_commands_early() {
     assert!(!out.content.contains("timed out"), "{}", out.content);
 }
 
+/// FIX 3: a command that backgrounds a child and exits 0 must be reported as a
+/// success. The child inherits the output pipes, so waiting for EOF turned a
+/// command that finished in milliseconds into `ok: false, timed_out: true` once
+/// the child outlived the timeout.
+#[tokio::test]
+async fn a_backgrounded_child_does_not_turn_success_into_a_timeout() {
+    let limits = Limits {
+        max_command_timeout_secs: 30,
+        ..Default::default()
+    };
+    let env = env_with("cmd-background", ask(), limits, ApprovalDecision::AllowOnce);
+    // Exits immediately; `sleep 3` keeps the stdout/stderr pipes open for 3 s.
+    let started = Instant::now();
+    let out = call(
+        &RunCommand,
+        &env.ctx,
+        json!({"command": "sleep 3 & echo started; exit 0", "timeout_secs": 2}),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(out.ok, "{}", out.content);
+    let meta = out.meta.clone().unwrap();
+    assert_eq!(
+        meta["timed_out"],
+        json!(false),
+        "a successful command must not be reported as a timeout just because a \
+         background child holds the pipes: {}",
+        out.content
+    );
+    assert_eq!(meta["exit_code"], json!(0));
+    assert_eq!(meta["background_output"], json!(true));
+    assert!(
+        out.content.contains("started"),
+        "the output written before the leader exited must be kept: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("background"),
+        "the result must say the output may still be being produced: {}",
+        out.content
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the call must not wait for the background child: {elapsed:?}"
+    );
+}
+
+/// The doc comment on `GroupGuard` states the guarantee the drain grace must not
+/// weaken: "a surviving grandchild cannot keep the pipes open past this call". The
+/// success path now returns while a background child still holds the pipes, so
+/// prove the guard still kills it instead of leaving an orphan behind.
+#[tokio::test]
+async fn a_backgrounded_child_does_not_outlive_the_call() {
+    let env = env("cmd-background-reaped");
+    let pid_file = env.tmp.path().join("bg.pid");
+    let started = Instant::now();
+    let out = call(
+        &RunCommand,
+        &env.ctx,
+        json!({
+            "command": format!("sleep 30 & echo $! > '{}'; echo started; exit 0", pid_file.display()),
+            "timeout_secs": 60,
+        }),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(out.meta.clone().unwrap()["timed_out"], json!(false));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the call must return promptly, took {:?}",
+        started.elapsed()
+    );
+
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .expect("the child should have written its pid")
+        .trim()
+        .parse()
+        .expect("pid");
+    // The group guard is what stops it; give the signal a moment to land.
+    let mut gone = false;
+    for _ in 0..100 {
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        gone,
+        "background child {pid} survived the call: the group guard must still kill \
+         what the pipe drain left behind"
+    );
+}
+
+/// The counterpart: a *foreground* command that hangs is still a timeout, and the
+/// group is still killed.
+#[tokio::test]
+async fn a_hanging_foreground_command_still_times_out() {
+    let limits = Limits {
+        max_command_timeout_secs: 30,
+        ..Default::default()
+    };
+    let env = env_with("cmd-hang", ask(), limits, ApprovalDecision::AllowOnce);
+    let started = Instant::now();
+    let out = call(
+        &RunCommand,
+        &env.ctx,
+        json!({"command": "sleep 30", "timeout_secs": 1}),
+    )
+    .await;
+    assert!(!out.ok, "{}", out.content);
+    assert!(out.content.contains("timed out"), "{}", out.content);
+    let meta = out.meta.unwrap();
+    assert_eq!(meta["timed_out"], json!(true));
+    assert_eq!(meta["background_output"], json!(false));
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "a timed-out command must be killed promptly, took {:?}",
+        started.elapsed()
+    );
+}
+
+/// FIX 4: stderr used to vanish whenever stdout was long. Both streams were
+/// concatenated into one string and truncated from the front, so a 31 KB stdout
+/// pushed every stderr line past the cap (reproduced at the defaults: 50 stderr
+/// lines, all absent). Each stream now has its own budget.
+#[tokio::test]
+async fn a_long_stdout_does_not_evict_stderr() {
+    let env = env("cmd-stderr-survives");
+    // ~31 KB of stdout, then a diagnostic on stderr.
+    let out = call(
+        &RunCommand,
+        &env.ctx,
+        // The sentinel is assembled from two printf arguments so the literal
+        // does not also appear in the echoed `$ command` line of the header -
+        // otherwise this assertion would pass on the broken code too.
+        json!({"command": "seq 1 8000; printf 'STDERR-%s-42\\n' SENTINEL 1>&2"}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(
+        out.meta.as_ref().unwrap()["stdout_bytes"].as_u64().unwrap() > 30_000,
+        "the fixture must exceed the 24 KB tool-output cap: {:?}",
+        out.meta
+    );
+    assert!(
+        out.content.contains("--- stderr"),
+        "the stderr section must survive a long stdout:\n{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("STDERR-SENTINEL-42"),
+        "stderr must survive a long stdout:\n{}",
+        out.content
+    );
+    // The truncation stays visible to the model.
+    assert!(
+        out.content.contains("bytes omitted"),
+        "a truncated stream must still say so:\n{}",
+        out.content
+    );
+    assert!(out.truncated);
+}
+
 #[tokio::test]
 async fn run_command_clamps_the_requested_timeout() {
     let limits = Limits {
@@ -1519,6 +1822,109 @@ async fn git_status_and_diff_work_in_a_temp_repo() {
     let bad = call(&GitDiff, &env.ctx, json!({"base": "does-not-exist"})).await;
     assert!(!bad.ok);
     assert!(bad.content.contains("does-not-exist"), "{}", bad.content);
+}
+
+/// FIX 1: the workspace is a *subdirectory* of a bigger repository. git walks up
+/// to find the repository, so the tools used to report that repository: a status
+/// listing sibling paths outside the workspace and a diff printing their
+/// contents - with no approval, since both tools are read-only.
+#[tokio::test]
+async fn git_tools_do_not_report_the_enclosing_repository() {
+    if !git_available() {
+        eprintln!("git not installed; skipping");
+        return;
+    }
+    // `<outer>/` is the repository; `<outer>/inner/` is the workspace.
+    let outer = TempWorkspace::new("git-nested");
+    git(outer.path(), &["init", "-q", "-b", "main"]);
+    outer.write("sibling.txt", "SIBLING-SECRET one\n");
+    outer.write("inner/tracked.txt", "inner one\n");
+    git(outer.path(), &["add", "."]);
+    git(outer.path(), &["commit", "-qm", "init"]);
+    // A change *outside* the workspace and one inside it.
+    outer.write("sibling.txt", "SIBLING-SECRET two\n");
+    outer.write("inner/tracked.txt", "inner two\n");
+
+    let inner_root = outer.path().join("inner");
+    let ws = Workspace::new(&inner_root).unwrap();
+    let ctx = ctx_for(&ws);
+
+    let status = call(&GitStatus, &ctx, json!({})).await;
+    assert!(status.ok, "{}", status.content);
+    assert!(
+        !status.content.contains("sibling"),
+        "git_status must not name a path outside the workspace:\n{}",
+        status.content
+    );
+    assert!(
+        status.content.contains("tracked.txt"),
+        "the workspace's own change must still be reported:\n{}",
+        status.content
+    );
+    assert_eq!(status.meta.unwrap()["confined"], json!(true));
+
+    let patch = call(&GitDiff, &ctx, json!({})).await;
+    assert!(patch.ok, "{}", patch.content);
+    assert!(
+        !patch.content.contains("SIBLING-SECRET") && !patch.content.contains("sibling"),
+        "git_diff must not print the enclosing repository's diff:\n{}",
+        patch.content
+    );
+    assert!(
+        patch.content.contains("+inner two"),
+        "the workspace's own change must still be shown:\n{}",
+        patch.content
+    );
+    // The paths in the patch are workspace-relative, so the workspace name is
+    // not a directory component either.
+    assert!(
+        patch.content.contains("a/tracked.txt"),
+        "patch paths must be workspace-relative:\n{}",
+        patch.content
+    );
+
+    // A path argument still works, and still cannot reach outside.
+    let one = call(&GitDiff, &ctx, json!({"path": "tracked.txt"})).await;
+    assert!(one.ok, "{}", one.content);
+    assert!(one.content.contains("+inner two"), "{}", one.content);
+    let refused = call(&GitDiff, &ctx, json!({"path": "../sibling.txt"})).await;
+    assert!(!refused.ok, "{}", refused.content);
+}
+
+/// The single-repo case must be untouched: no confinement note, and the same
+/// paths and patch headers as before.
+#[tokio::test]
+async fn git_tools_in_a_plain_repo_are_unchanged() {
+    if !git_available() {
+        eprintln!("git not installed; skipping");
+        return;
+    }
+    let env = env("git-plain");
+    env.tmp.write("a.txt", "one\n");
+    git(env.tmp.path(), &["init", "-q", "-b", "main"]);
+    git(env.tmp.path(), &["add", "."]);
+    git(env.tmp.path(), &["commit", "-qm", "init"]);
+    env.tmp.write("a.txt", "two\n");
+
+    let status = call(&GitStatus, &env.ctx, json!({})).await;
+    assert!(status.ok, "{}", status.content);
+    assert_eq!(status.meta.unwrap()["confined"], json!(false));
+    assert!(
+        !status.content.contains("confined"),
+        "a plain repository needs no confinement note:\n{}",
+        status.content
+    );
+    assert!(status.content.contains(" M a.txt"), "{}", status.content);
+
+    let patch = call(&GitDiff, &env.ctx, json!({})).await;
+    assert!(patch.ok, "{}", patch.content);
+    assert!(patch.content.contains("a/a.txt"), "{}", patch.content);
+    assert!(patch.content.contains("+two"), "{}", patch.content);
+    assert!(
+        !patch.content.contains("confined"),
+        "a plain repository needs no confinement note:\n{}",
+        patch.content
+    );
 }
 
 // --------------------------------------------------------------- registry ---

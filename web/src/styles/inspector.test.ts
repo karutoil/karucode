@@ -63,8 +63,25 @@ describe('inspector tab strip stylesheet', () => {
     // The strip is sized by its tab, not by the scrollbar: on a platform whose
     // bar takes space the strip grows by the bar (44 -> 53px) instead of
     // clipping the tabs, so the panel below moves by a bar's height at most.
-    expect(strip['min-height']).toBe('var(--tabs-h)');
-    expect(tab['height']).toBe('var(--tabs-h)');
+    expect(strip['min-height']).toBe('36px');
+    expect(tab['height']).toBe('36px');
+  });
+});
+
+describe('changes panel stylesheet', () => {
+  it('keeps compact metric tiles and keyboard-visible file selection', () => {
+    expect(cssDeclarations('.metric')['min-height']).toBe('64px');
+    expect(cssDeclarations('.change-row')['padding']).toBe('12px 4px');
+    expect(cssSource).toMatch(/\.change-row:focus-visible\s*\{[^}]*outline: 2px solid var\(--accent\)/);
+  });
+
+  it('uses the mock\'s separated, directory-aware file row layout', () => {
+    expect(cssDeclarations('.change-row')['border-radius']).toBe('0');
+    expect(cssDeclarations('.change-row')['border-bottom']).toBe('1px solid var(--line)');
+    expect(cssDeclarations('.file-logo')['width']).toBe('26px');
+    expect(cssDeclarations('.file-logo')['height']).toBe('26px');
+    expect(cssDeclarations('.change-name')['font-family']).toBe('var(--font-mono)');
+    expect(cssDeclarations('.change-dir')['font-family']).toBe('var(--font-mono)');
   });
 });
 

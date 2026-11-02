@@ -312,7 +312,7 @@ pub async fn get_session(
     let agents = store.list_agents(&session.id).await?;
     let approvals = store.list_pending_approvals(Some(&session.id)).await?;
     let claims = store.list_claims(&session.id).await?;
-    let running = state.runtime().is_running(&session.id);
+    let running = state.runtime().has_active_run(&session.id);
     // When this session was last rewound, so the UI can offer "undo is not
     // available" honestly instead of implying the transcript is whole.
     let last_rewind_at = store.last_rewind_at(&session.id).await?;
@@ -502,7 +502,10 @@ pub async fn send_message(
             // Cheap up-front check gives the documented 409 instead of the
             // runtime's generic "already active" bad_request. `submit` still
             // re-checks under its lock, so the race window cannot start two runs.
-            if state.runtime().is_running(&id) {
+            // `has_active_run`, not `is_running`: a detached subagent keeps a
+            // loop registered for this session, and refusing every prompt for as
+            // long as one runs would make background work unusable.
+            if state.runtime().has_active_run(&id) {
                 return Err(ApiError::conflict(
                     "a run is already active for this session; send `?mode=steer` or \
                      `?mode=follow_up` to queue this message instead, or cancel the run",
@@ -619,7 +622,7 @@ pub async fn list_queues(
     let snapshot = state.runtime().queued_all(&session.id);
     Ok(Json(json!({
         "session_id": session.id,
-        "running": state.runtime().is_running(&session.id),
+        "running": state.runtime().has_active_run(&session.id),
         "steers": snapshot
             .steers
             .iter()

@@ -2,7 +2,7 @@
 // @kc-title: Use the browser workspace
 // @kc-summary: Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary.
 // @kc-tags: ui, web, frontend, panels, shortcuts, preact
-// @kc-applies-to: ui:ProjectRail, ui:project-switcher, ui:mobile-sheet, ui:mobile-layout, route:GET /api/projects/:id/favicon, ui:SessionsRail, ui:ChatView, ui:Composer, ui:TpsBadge, ui:ContextPill, ui:Inspector, ui:SessionInfoTab, route:GET /api/sessions/:id/info, file:web/src/components/SessionInfoTab.tsx, file:web/src/lib/sessionInfo.ts, ui:SettingsSheet, ui:NotificationsSection, ui:ToastRegion, ui:CommandPalette, ui:FileViewer, ui:FilePreview, ui:RewindDialog, ui:plugin-panel, route:GET /api/workspace/tree, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:POST /api/workspace/upload, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, event:session_rewound, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, config:providers.models.context_window, config:[notifications], event:usage, event:notification, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, event:queued_messages, event:steer_applied, file:web/src/components/pluginPanels.ts, file:web/src/state/queues.test.ts, file:web/src/styles/composer.css, file:scripts/verify_queues.py, file:web/src/components/PluginPanelView.tsx, file:web/src/components/RewindDialog.tsx, file:web/src/components/TpsBadge.tsx, file:web/src/components/NotificationsSettings.tsx, file:web/src/styles/mobile.test.ts, file:web/src/state/notifier.ts, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts, file:web/src/lib/tps.ts, file:web/src/state/promptTokens.ts, file:web/src/lib/dockHeight.ts, fn:registerPluginPanelRenderer, event:tool_call_finished, tool:read_file, config:model.supports_images, cmd:npm run dev, cmd:npm run build, file:web/dist, env:KARUCODE_WEB_DIR
+// @kc-applies-to: ui:ProjectRail, ui:project-switcher, ui:mobile-sheet, ui:mobile-layout, route:GET /api/projects/:id/favicon, ui:SessionsRail, ui:ChatView, ui:Composer, ui:TpsBadge, ui:ContextPill, ui:Inspector, ui:SessionInfoTab, route:GET /api/sessions/:id/info, file:web/src/components/SessionInfoTab.tsx, file:web/src/lib/sessionInfo.ts, ui:SettingsSheet, ui:NotificationsSection, ui:ToastRegion, ui:CommandPalette, ui:FileViewer, ui:FilePreview, ui:RewindDialog, ui:plugin-panel, route:GET /api/workspace/tree, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:POST /api/workspace/upload, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, event:session_rewound, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, config:providers.models.context_window, config:[notifications], event:usage, event:notification, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, event:queued_messages, event:steer_applied, ui:AgentsTab, route:GET /api/agents, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, event:agent_spawned, event:agent_paused, event:agent_note, event:agent_message, event:agent_finished, tool:spawn_agent, tool:report_status, file:web/src/components/AgentsTab.tsx, file:web/src/state/agentConsole.ts, file:web/src/components/pluginPanels.ts, file:web/src/state/queues.test.ts, file:web/src/styles/composer.css, file:scripts/verify_queues.py, file:web/src/components/PluginPanelView.tsx, file:web/src/components/RewindDialog.tsx, file:web/src/components/TpsBadge.tsx, file:web/src/components/NotificationsSettings.tsx, file:web/src/styles/mobile.test.ts, file:web/src/state/notifier.ts, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts, file:web/src/lib/tps.ts, file:web/src/state/promptTokens.ts, file:web/src/lib/dockHeight.ts, fn:registerPluginPanelRenderer, event:tool_call_finished, tool:read_file, config:model.supports_images, cmd:npm run dev, cmd:npm run build, file:web/dist, env:KARUCODE_WEB_DIR
 //
 // # Layout
 //
@@ -70,6 +70,13 @@
 // * **Inspector** (right): tabs for agents, changes (git diff), the session's
 //   own numbers and workspace files, plus one tab per **plugin panel** (see
 //   below). Click a file to open the viewer.
+// * **Agents tab** (inspector): every subagent in the project, live first. A
+//   running or paused agent has **Pause**/**Resume** and **Stop** buttons that
+//   call `POST /api/agents/:id/{pause,resume,cancel}`; a paused one is still
+//   live (it holds a subagent slot) and says so in the status chip. Each row
+//   shows what the agent last reported about itself (`report_status`) with a
+//   progress bar, and a `background` badge when the spawn detached. Clicking one
+//   opens its live transcript.
 // * **Session tab** (inspector): what this session *is* and what it *cost*,
 //   read from `GET /api/sessions/:id/info` rather than folded from the
 //   transcript on screen, because the transcript is a bounded window and the
@@ -89,7 +96,10 @@
 //   *Preview*/*Source* toggle), images and PDFs render from
 //   `GET /api/workspace/raw`, and every complete text file can be edited and
 //   saved. The preview follows your edits, so *Preview* is a live preview of the
-//   draft. `Ctrl/Cmd+S` saves; a save whose `expected_size` no longer matches the
+//   draft. Every preview kind fills the dialog: no `max-width` measure on the
+//   scrolling surface, because a `ch` cap there shrinks the pane itself and
+//   leaves a blank strip beside the prose. `Ctrl/Cmd+S` saves; a save whose
+//   `expected_size` no longer matches the
 //   file offers **Overwrite anyway** rather than clobbering the agent's work;
 //   closing with unsaved changes asks first. Binary and server-truncated files
 //   cannot be edited (a truncated save would discard everything past the read
@@ -382,6 +392,7 @@ import { AuthScreen } from './components/AuthScreen';
 import { BootErrorScreen, BootSkeleton } from './components/BootScreens';
 import { ChatView } from './components/ChatView';
 import { CommandPalette } from './components/CommandPalette';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { FileViewer } from './components/FileViewer';
 import { Inspector } from './components/Inspector';
 import { ProjectRail } from './components/ProjectRail';
@@ -546,16 +557,37 @@ export function App(): JSX.Element {
       <a class="skip-link" href="#chat-main">
         Skip to chat
       </a>
-      <div
-        class={`app${store.narrowViewport.value ? ' is-narrow' : ''}`}
-        data-rail-collapsed={store.railCollapsed.value ? 'true' : 'false'}
-        data-inspector-collapsed={store.inspectorCollapsed.value ? 'true' : 'false'}
-      >
-        <ProjectRail />
-        <SessionsRail />
-        <ChatView />
-        <Inspector />
-      </div>
+      {/* One boundary per panel.
+        *
+        * The app has two layers at least: this outer shell boundary and one per
+        * grid child or overlay. A malformed payload in the inspector, a plugin
+        * panel that returns something its renderer did not expect, a theme file
+        * with a corrupt token - each throws inside one component, and without a
+        * boundary around it the throw unmounts the whole tree and leaves a white
+        * page with no chat, no rails and no way back but the browser's reload.
+        *
+        * `ChatView` is deliberately NOT wrapped here: it carries its own
+        * boundaries for the transcript and each of its sub-panels, so a crash in
+        * the conversation does not also take the composer down.
+        */}
+      <ErrorBoundary scope="The workspace" root>
+        <div
+          class={`app${store.narrowViewport.value ? ' is-narrow' : ''}`}
+          data-rail-collapsed={store.railCollapsed.value ? 'true' : 'false'}
+          data-inspector-collapsed={store.inspectorCollapsed.value ? 'true' : 'false'}
+        >
+          <ErrorBoundary scope="The project rail">
+            <ProjectRail />
+          </ErrorBoundary>
+          <ErrorBoundary scope="The sessions rail">
+            <SessionsRail />
+          </ErrorBoundary>
+          <ChatView />
+          <ErrorBoundary scope="The inspector">
+            <Inspector />
+          </ErrorBoundary>
+        </div>
+      </ErrorBoundary>
 
       {store.mobileSheet.value !== null ? (
         <button
@@ -566,11 +598,26 @@ export function App(): JSX.Element {
         />
       ) : null}
 
-      <SettingsSheet />
-      <CommandPalette />
-      <ThemeStudio />
-      <RewindDialog />
-      <FileViewer />
+      <ErrorBoundary scope="Settings">
+        <SettingsSheet />
+      </ErrorBoundary>
+      <ErrorBoundary scope="The command palette">
+        <CommandPalette />
+      </ErrorBoundary>
+      <ErrorBoundary scope="The Theme studio">
+        <ThemeStudio />
+      </ErrorBoundary>
+      <ErrorBoundary scope="The rewind dialog">
+        <RewindDialog />
+      </ErrorBoundary>
+      <ErrorBoundary scope="The file viewer">
+        <FileViewer />
+      </ErrorBoundary>
+      {/* The toast region stays OUTSIDE every boundary on purpose: it is how a
+        * crash gets reported to the user ("could not save", "the stream died"),
+        * so replacing it with a crash card would hide the very messages it exists
+        * to deliver. It renders nothing but text and has no dependencies, so it
+        * has nothing to throw about. */}
       <ToastRegion />
     </div>
   );

@@ -528,6 +528,24 @@
   outline-offset: 1px;
 }
 
+/* The pane a file-view tab controls (`role="tabpanel"`).
+ *
+ * It is a pass-through: `Tabs` needs an element to point `aria-controls` at, and
+ * the real scrolling surface (`.file-preview-scroll`, `.file-code-scroll`) lives
+ * inside it. Without `flex: 1` here the pane would size to content and the file
+ * body would collapse to nothing in the column layout. */
+.file-view-pane {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.file-view-pane:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* The rendered half: one scrolling surface shared by every preview kind. */
 .file-preview-scroll {
   flex: 1 1 auto;
@@ -582,9 +600,18 @@
 }
 
 /* Markdown inside the preview is the chat's renderer, so it inherits `.markdown`
-   and only needs the surface it sits on. */
+   and only needs the surface it sits on.
+ *
+ * It must NOT carry a measure (`max-width: 78ch` was here). This element is the
+ * scrolling surface - `.file-preview-scroll` and `.file-preview-markdown` are the
+ * same node - so the cap shrank the *panel*, not the prose column: in a 1040px
+ * dialog the preview surface was 564px wide and the remaining 474px showed the
+ * dialog's own background as a strip of empty space down the right-hand side.
+ * Measured in Chromium at 1440x900: `.file-preview-scroll` 564px inside a
+ * 1038px `.file-view-pane`, while the HTML, image and PDF previews filled it.
+ * Every preview kind now uses the whole pane. */
 .file-preview-markdown {
-  max-width: 78ch;
+  max-width: none;
   color: var(--text-secondary);
 }
 

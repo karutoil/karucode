@@ -50,6 +50,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INSTALL_SH = ROOT / "packaging" / "install.sh"
+UNIT_FILE = ROOT / "packaging" / "karucode.service"
 
 # A real, runnable "karucode binary". The installer smoke-tests `--version` before
 # it will install anything, and reports this string in its summary.
@@ -117,8 +118,15 @@ class Case(unittest.TestCase):
         base = {
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "HOME": str(self.tmp / "home"),
+            # Keep the unit and drop-in inside this test's temp dir. Without it the
+            # dry run reads the host's real /etc/systemd/system/<name>.service.d
+            # and *carries that install's* data dir/host/port/user into the output,
+            # so a case would assert against this machine's configuration instead
+            # of the flags it passed - and the result would differ per host.
+            "KARUCODE_UNIT_DIR": str(self.tmp / "systemd"),
         }
         (self.tmp / "home").mkdir(exist_ok=True)
+        (self.tmp / "systemd").mkdir(exist_ok=True)
         base.update(env or {})
         argv = [
             "sh",
@@ -130,6 +138,11 @@ class Case(unittest.TestCase):
             str(self.prefix),
             "--workspace",
             str(self.workspace),
+            # Use the shipped unit as-is, by path. Otherwise the installer looks next
+            # to the binary (or fetches it), and a dry run reports what it found
+            # there rather than what this checkout ships.
+            "--unit-file",
+            str(UNIT_FILE),
         ]
         if systemd:
             # The dry run never touches systemd, but without this the script would
@@ -340,6 +353,55 @@ class DataDirectory(Case):
         )
         self.assert_ok(result)
         self.assertEqual(self.dropin(result).get("Environment"), f"KARUCODE_DATA_DIR={elsewhere}")
+
+    def write_previous_dropin(self, user, data_dir, port="9000"):
+        """Pretend an earlier run already installed with these values."""
+        dropin_dir = self.tmp / "systemd" / "karucode.service.d"
+        dropin_dir.mkdir(parents=True, exist_ok=True)
+        (dropin_dir / "10-install.conf").write_text(
+            "[Service]\n"
+            f"User={user}\n"
+            f"Group={user}\n"
+            "WorkingDirectory=/srv/app\n"
+            f"Environment=KARUCODE_DATA_DIR={data_dir}\n"
+            f"Environment=KARUCODE_PORT={port}\n",
+            encoding="utf-8",
+        )
+
+    @unittest.skipUnless(have_account("karucode"), "no `karucode` system account on this host")
+    def test_an_upgrade_keeps_the_data_dir_and_port_of_the_previous_install(self):
+        # The regression this covers: the drop-in is rewritten from this run's flags
+        # only, so `sudo sh install.sh --version X` (the documented upgrade, no
+        # flags) silently repointed the service at the default data dir - a healthy
+        # service on an EMPTY database, with the sessions and the provider API key
+        # still in the old one.
+        self.write_previous_dropin(self.me, "/srv/kc-data")
+        result = self.run_install({"SUDO_USER": self.me, "USER": "root"})
+        self.assert_ok(result)
+        values = self.dropin(result)
+        self.assertEqual(values.get("Environment"), "KARUCODE_DATA_DIR=/srv/kc-data")
+        self.assertIn("KARUCODE_PORT=9000", result.stdout)
+
+    def test_an_explicit_flag_still_beats_the_previous_install(self):
+        self.write_previous_dropin(self.me, "/srv/kc-data")
+        result = self.run_install(
+            {"SUDO_USER": self.me, "USER": "root"}, args=["--data-dir", "/new/data"]
+        )
+        self.assert_ok(result)
+        self.assertEqual(self.dropin(result).get("Environment"), "KARUCODE_DATA_DIR=/new/data")
+
+    @unittest.skipUnless(have_account("karucode"), "no `karucode` system account on this host")
+    def test_changing_the_service_user_does_not_inherit_the_old_accounts_data_dir(self):
+        # A carried data dir only makes sense for the account that owned it. Moving
+        # the service to another account must recompute from *that* account's home,
+        # or the new account cannot write its own database.
+        self.write_previous_dropin(self.me, "/srv/kc-data")
+        result = self.run_install(
+            {"SUDO_USER": self.me, "USER": "root"}, args=["--service-user", "karucode"]
+        )
+        self.assert_ok(result)
+        self.assertNotIn("/srv/kc-data", result.stdout)
+        self.assertEqual(self.dropin(result).get("User"), "karucode")
 
 
 # --- binary-only installs resolve nothing -----------------------------------

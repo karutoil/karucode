@@ -18,17 +18,17 @@ describe('fidelity roles', () => {
 
   it('gives Ember roles that keep the mock relationships', () => {
     const roles = resolveRoles(ember);
-    // Roles anchored on colours that did not move are still the mock's values.
-    expect(roles['--gold-send']).toBe('#b88b53');
-    expect(roles['--gold-send-hover']).toBe('#e3b47c');
-    expect(roles['--on-gold']).toBe('#181714');
+    // Roles anchored on the accent are now the mock's own coral, verbatim.
+    expect(roles['--gold-send']).toBe('#eaa06d');
+    expect(roles['--gold-send-hover']).toBe('#f5bd93');
+    expect(roles['--on-gold']).toBe('#1c0f06');
     // Roles anchored on surfaces moved with the palette (the panel ladder was
     // rebuilt so the stack separates), so assert the *relationship* instead of a
     // frozen hex. An input must read as a subtle inset on the card surface, and
     // a menu as a clearly raised one.
     const surface = ember.palette.surface;
-    expect(contrastRatio(roles['--surface-input']!, surface), 'input is an inset')
-      .toBeGreaterThan(1.02);
+    expect(contrastRatio(roles['--surface-input']!, surface), 'input is raised off the card')
+      .toBeGreaterThan(1.05);
     expect(contrastRatio(roles['--surface-menu']!, surface), 'menu is raised')
       .toBeGreaterThan(1.1);
     // The input, inset and menu must be three distinguishable fills, not one.
@@ -43,8 +43,8 @@ describe('fidelity roles', () => {
     const roles = resolveRoles(ember);
     const channels = (hex: string): number[] => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
     const delta = (a: string, b: string): number[] => channels(a).map((v, i) => v - channels(b)[i]!);
-    // In the mock, --surface-input (#1e2021) sits 2 channels above surface
-    // (#1c1d1f) and --surface-inset (#202223) 4 above. Those offsets still hold.
+    // The mock's own insets: --surface-input sits a few channels above the card
+    // surface and --surface-inset a step above that. Those offsets still hold.
     const inputDelta = delta(roles['--surface-input']!, ember.palette.surface);
     const insetDelta = delta(roles['--surface-inset']!, ember.palette.surface);
     expect(inputDelta.every((d) => d > 0), `input above surface: ${inputDelta}`).toBe(true);
@@ -54,13 +54,13 @@ describe('fidelity roles', () => {
 
   it('keeps neutral overlays palette-independent and mode-aware', () => {
     const dark = resolveRoles(ember);
-    expect(dark['--scrim']).toBe('rgb(0 0 0 / 47%)');
+    expect(dark['--scrim']).toBe('rgb(3 4 6 / 60%)');
     expect(dark['--rail-glyph-line']).toBe('rgb(255 255 255 / 8%)');
 
     const dawn = BUILTIN_THEMES.find((theme) => theme.mode === 'light');
     expect(dawn, 'a built-in light theme exists').toBeTruthy();
     const light = resolveRoles(resolveTheme(dawn!));
-    expect(light['--scrim']).toBe('rgb(0 0 0 / 47%)');
+    expect(light['--scrim']).toBe('rgb(3 4 6 / 60%)');
     expect(light['--rail-glyph-line']).toBe('rgb(0 0 0 / 10%)');
   });
 

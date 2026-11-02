@@ -52,6 +52,10 @@ impl RunStatus {
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Running,
+    /// The agent is alive but parked: a human paused it, or it is waiting for a
+    /// message it was told to expect. It still holds its subagent slot, so a
+    /// paused agent is a reason to spawn fewer, not more.
+    Paused,
     Completed,
     Failed,
     Cancelled,
@@ -62,6 +66,7 @@ impl AgentStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentStatus::Running => "running",
+            AgentStatus::Paused => "paused",
             AgentStatus::Completed => "completed",
             AgentStatus::Failed => "failed",
             AgentStatus::Cancelled => "cancelled",
@@ -72,12 +77,19 @@ impl AgentStatus {
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "running" => AgentStatus::Running,
+            "paused" => AgentStatus::Paused,
             "completed" => AgentStatus::Completed,
             "failed" => AgentStatus::Failed,
             "cancelled" => AgentStatus::Cancelled,
             "interrupted" => AgentStatus::Interrupted,
             _ => return None,
         })
+    }
+
+    /// Whether the agent's loop is still alive (running or parked), as opposed
+    /// to settled. A paused agent is live: it can be resumed and keep spending.
+    pub fn is_live(&self) -> bool {
+        matches!(self, AgentStatus::Running | AgentStatus::Paused)
     }
 }
 
@@ -284,6 +296,24 @@ pub struct AgentRecord {
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<i64>,
+    /// True when the spawn detached: the tool call returned immediately and the
+    /// agent kept working on its own.
+    #[serde(default)]
+    pub background: bool,
+    /// The agent's own last statement of what it is doing, from `report_status`.
+    /// Advisory: it is a claim, not a measurement.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// The agent's claimed completion, 0..=1. `None` means it has not said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<f32>,
+}
+
+impl AgentRecord {
+    /// Whether this agent's loop is still alive (running or paused).
+    pub fn is_live(&self) -> bool {
+        AgentStatus::parse(&self.status).is_some_and(|status| status.is_live())
+    }
 }
 
 /// An agent plus the session context the Agents view needs to group it.
