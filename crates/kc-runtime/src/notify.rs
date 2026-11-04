@@ -45,6 +45,9 @@ pub(crate) struct RunFinished<'a> {
     pub error: Option<&'a str>,
     /// The last assistant text the loop produced, used for the body.
     pub answer: &'a str,
+    /// The project the session runs in, so the browser can count the unread news
+    /// against that project's tile. Empty when the session names no project.
+    pub project_id: &'a str,
     pub started_at_ms: i64,
     pub finished_at_ms: i64,
     /// Whether the human asked for this run to stop. A user's own cancellation is
@@ -87,6 +90,7 @@ pub(crate) async fn run_finished(
         session_title,
         RUNTIME_SOURCE,
     )
+    .with_project(run.project_id)
     .sticky(kind == NotifyKind::NeedsInput);
     emit(inner, ctx, notification)
 }
@@ -107,7 +111,7 @@ pub(crate) async fn approval_requested(
     if !config.allows(NotifyKind::NeedsInput) {
         return None;
     }
-    let title = session_title(inner, &ctx.session_id).await;
+    let facts = session_facts(inner, &ctx.session_id).await;
     // The approval's own title is the most useful thing to show ("Write a file"),
     // and its detail names the target. Together they are what the card says.
     let body = if approval_detail.trim().is_empty() {
@@ -121,9 +125,10 @@ pub(crate) async fn approval_requested(
         "Approval needed",
         body,
         ctx.session_id.clone(),
-        title,
+        facts.title,
         RUNTIME_SOURCE,
     )
+    .with_project(facts.project_id)
     // An approval that scrolls away before it is read is worse than no
     // notification: it also has a timeout, after which it silently expires.
     .sticky(true);
@@ -149,34 +154,46 @@ pub(crate) async fn agent_failed(
     if !config.allows(NotifyKind::Error) {
         return None;
     }
+    let facts = session_facts(inner, session_id).await;
     let notification = Notify::new(
         NotifyKind::Error,
         format!("agent:{agent_id}"),
         format!("Subagent failed: {agent_name}"),
         error.unwrap_or("The subagent stopped without a reason."),
         session_id,
-        session_title(inner, session_id).await,
+        facts.title,
         RUNTIME_SOURCE,
-    );
+    )
+    .with_project(facts.project_id);
     Some(emit_with(inner, session_id, None, events, notification))
 }
 
-/// The session's title, for the notification's `session_title` field.
+/// What a notification needs to know about the session it describes.
 ///
 /// Read at emit time rather than carried around: a session can be renamed while a
-/// run is in flight, and the current name is the one worth showing. A missing row
-/// is not an error — the run works — so an empty title falls back to the caller's
-/// wording.
-async fn session_title(inner: &Arc<RuntimeInner>, session_id: &str) -> String {
-    inner
-        .deps
-        .store
-        .get_session(session_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|session| session.title)
-        .unwrap_or_default()
+/// run is in flight, and the current name is the one worth showing. The project is
+/// read here for the same reason — the browser counts unread news per project, and
+/// it only lists the sessions of the project it is showing, so the server has to
+/// say which project a notification belongs to.
+#[derive(Debug, Default, Clone)]
+struct SessionFacts {
+    title: String,
+    project_id: String,
+}
+
+/// The session's title and project. A missing row is not an error — the run works
+/// and the notification is still worth showing — so both fields are empty then.
+async fn session_facts(inner: &Arc<RuntimeInner>, session_id: &str) -> SessionFacts {
+    if session_id.is_empty() {
+        return SessionFacts::default();
+    }
+    match inner.deps.store.get_session(session_id).await {
+        Ok(Some(session)) => SessionFacts {
+            title: session.title,
+            project_id: session.project_id.unwrap_or_default(),
+        },
+        _ => SessionFacts::default(),
+    }
 }
 
 /// Publish one notification and hand it to the plugin `on_notify` hooks.
@@ -345,6 +362,7 @@ mod tests {
     fn the_body_prefers_the_first_answer_line_and_skips_leading_blanks() {
         let run = RunFinished {
             run_id: "r_1",
+            project_id: "",
             status: RunStatus::Completed,
             error: None,
             answer: "\n\n   Here is what I changed.\nAnd some more detail.\n",
@@ -364,6 +382,7 @@ mod tests {
         // The point of turning it off is to keep model output off a lock screen.
         let run = RunFinished {
             run_id: "r_1",
+            project_id: "",
             status: RunStatus::Completed,
             error: None,
             answer: "secret-looking model output",
@@ -386,6 +405,7 @@ mod tests {
         // karucode's own text rather than model output.
         let run = RunFinished {
             run_id: "r_1",
+            project_id: "",
             status: RunStatus::Failed,
             error: Some("the provider returned 401"),
             answer: "",
@@ -404,6 +424,7 @@ mod tests {
     fn an_empty_answer_falls_back_to_a_sentence_that_names_the_session() {
         let run = RunFinished {
             run_id: "r_1",
+            project_id: "",
             status: RunStatus::Completed,
             error: None,
             answer: "   \n\n ",
@@ -424,6 +445,7 @@ mod tests {
     fn a_limit_reached_body_explains_what_would_happen_next() {
         let run = RunFinished {
             run_id: "r_1",
+            project_id: "",
             status: RunStatus::LimitReached,
             error: None,
             answer: "half an answer",
@@ -441,6 +463,7 @@ mod tests {
         let long = "x".repeat(BODY_PREVIEW_CHARS * 3);
         let run = RunFinished {
             run_id: "r_1",
+            project_id: "",
             status: RunStatus::Completed,
             error: None,
             answer: &long,

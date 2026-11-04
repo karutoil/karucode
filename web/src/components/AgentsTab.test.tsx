@@ -207,4 +207,74 @@ describe('AgentsTab', () => {
     expect(screen.getByText('No subagents yet')).not.toBeNull();
     expect(screen.getByText('0 running · 0 total')).not.toBeNull();
   });
+
+  /**
+   * `subagents.max_concurrent = 0` is "no ceiling", so a single fan-out can be
+   * hundreds of children. The roster is a plain `map`, so without a page the tab
+   * would build every card - each with a live label and a progress bar that
+   * re-renders on the clock tick - for agents the user cannot scroll to quickly.
+   */
+  it('renders a page of a large roster and offers the rest', async () => {
+    const roster: AgentSummary[] = [];
+    for (let i = 0; i < 150; i += 1) {
+      roster.push(agent(`a_${i}`, { status: 'completed', created_at: NOW - i }));
+    }
+    // Four live agents buried at the bottom of the newest-first order: the sort
+    // must lift them into the rendered page, or the pinned list hides exactly the
+    // rows the user opened the tab for.
+    for (let i = 0; i < 4; i += 1) {
+      roster.push(
+        agent(`a_live_${i}`, { status: 'running', finished_at: null, created_at: NOW - 1_000 - i }),
+      );
+    }
+    store.agentsAll.value = roster;
+
+    const { container } = render(<AgentsTab />);
+    expect(container.querySelectorAll('.agent-card')).toHaveLength(60);
+    expect(screen.getByText('4 running · 154 total')).not.toBeNull();
+
+    const rendered = new Set(
+      [...container.querySelectorAll('.agent-card .agent-name')].map((node) => node.textContent),
+    );
+    for (let i = 0; i < 4; i += 1) {
+      expect(rendered.has(`a_live_${i}`), `live agent a_live_${i} must be on the first page`).toBe(
+        true,
+      );
+    }
+
+    // The tail says how much is left and how to see it.
+    expect(screen.getByText(/Showing 60 of 154 agents/)).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show all 154 agents' }));
+    await waitFor(() => expect(container.querySelectorAll('.agent-card')).toHaveLength(154));
+    expect(screen.queryByText(/Showing 60 of 154 agents/)).toBeNull();
+  });
+
+  it('does not cap a roster that fits on one page', () => {
+    store.agentsAll.value = [agent('a_1'), agent('a_2')];
+    const { container } = render(<AgentsTab />);
+    expect(container.querySelectorAll('.agent-card')).toHaveLength(2);
+    expect(container.querySelector('.agent-list-more')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Show all/ })).toBeNull();
+  });
+});
+
+
+describe('agent history pagination', () => {
+  beforeEach(() => resetAppState());
+  afterEach(() => { resetAppState(); vi.unstubAllGlobals(); });
+  it('loads an older page through the control and removes the incomplete notice', async () => {
+    const row = agent('a_runner');
+    store.agentsAll.value = [row];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/agents/')) return jsonResponse({ agent: row, messages: [stored({ id: url.includes('before=') ? 1 : 2, role: 'assistant', content: url.includes('before=') ? 'older output' : 'newer output' })], messages_truncated: !url.includes('before='), messages_before: url.includes('before=') ? null : 2, messages_limit: 2000 });
+      return jsonResponse({ agents: [row], running: 0 });
+    }));
+    render(<AgentsTab />);
+    fireEvent.click(await screen.findByRole('button', { name: /Open a_runner/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Load older history' }));
+    expect(await screen.findByText('older output')).toBeTruthy();
+    expect(screen.getByText('newer output')).toBeTruthy();
+    expect(screen.queryByText('Earlier history is not loaded.')).toBeNull();
+  });
 });

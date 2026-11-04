@@ -31,6 +31,10 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 /// that writes slowly must still stream to the end.
 const DRAIN_GRACE: Duration = Duration::from_millis(250);
 
+/// Bound queued pipe output; a full queue backpressures the child via its pipes.
+const OUTPUT_QUEUE_CHUNKS: usize = 32;
+const OUTPUT_CHUNK_BYTES: usize = 8192;
+
 /// Environment variables a command inherits from the server.
 ///
 /// The child gets a **cleared** environment plus this allowlist, never the
@@ -340,7 +344,7 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
         cwd: request.cwd_label.clone(),
     });
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<(Stream, Vec<u8>)>();
+    let (tx, mut rx) = mpsc::channel::<(Stream, Vec<u8>)>(OUTPUT_QUEUE_CHUNKS);
     let mut pumps = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         pumps.push(tokio::spawn(pump(stdout, Stream::Stdout, tx.clone())));
@@ -478,16 +482,16 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
     Ok(outcome)
 }
 
-async fn pump<R>(mut reader: R, stream: Stream, tx: mpsc::UnboundedSender<(Stream, Vec<u8>)>)
+async fn pump<R>(mut reader: R, stream: Stream, tx: mpsc::Sender<(Stream, Vec<u8>)>)
 where
     R: AsyncReadExt + Unpin,
 {
-    let mut buf = vec![0u8; 8192];
+    let mut buf = vec![0u8; OUTPUT_CHUNK_BYTES];
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
-                if tx.send((stream, buf[..n].to_vec())).is_err() {
+                if tx.send((stream, buf[..n].to_vec())).await.is_err() {
                     break;
                 }
             }
@@ -582,6 +586,30 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn pump_backpressures_and_stops_when_receiver_drops() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let data = vec![b'x'; OUTPUT_CHUNK_BYTES * 3];
+        let task = tokio::spawn(pump(std::io::Cursor::new(data), Stream::Stdout, tx));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while rx.len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished(), "full queue must block the pump");
+        let (stream, bytes) = rx.recv().await.unwrap();
+        assert_eq!(stream, Stream::Stdout);
+        assert_eq!(bytes.len(), OUTPUT_CHUNK_BYTES);
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     struct TestSettings;
 

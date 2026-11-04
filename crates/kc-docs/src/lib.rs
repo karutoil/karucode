@@ -112,11 +112,13 @@ include!(concat!(env!("OUT_DIR"), "/generated_docs.rs"));
 pub const REQUIRED_SLUGS: &[&str] = &[
     "approvals",
     "builtin-tools",
+    "central-control",
     "configuration",
     "deployment",
     "documentation",
     "http-api",
     "mcp",
+    "missions",
     "notifications",
     "plugins",
     "projects",

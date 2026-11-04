@@ -37,11 +37,22 @@ function nthToast(h: Harness, index: number) {
   return record;
 }
 
+/**
+ * The sessions a notification was recorded as *unread* for.
+ *
+ * The badge is derived from those flags (`store.unread`), so this is the same
+ * question the old counter answered: which sessions are waiting on the reader.
+ */
+function unreadSessions(h: Harness): string[] {
+  return h.recorded.filter((entry) => !entry.read).map((entry) => entry.sessionId);
+}
+
 interface Harness {
   notifier: Notifier;
   cues: CueName[];
   toasts: { message: string; tone: string; sessionId?: string }[];
-  unread: string[];
+  /** Everything handed to the notification centre, in order. */
+  recorded: { id: string; read: boolean; sessionId: string }[];
   focused: string[];
   desktop: {
     shown: { title: string; body: string; tag?: string; silent?: boolean; requireInteraction?: boolean; onClick?: () => void }[];
@@ -57,7 +68,7 @@ function harness(overrides: Partial<NotifyPayload> = {}): Harness {
   void overrides;
   const cues: CueName[] = [];
   const toasts: { message: string; tone: string; sessionId?: string }[] = [];
-  const unread: string[] = [];
+  const recorded: { id: string; read: boolean; sessionId: string }[] = [];
   const focused: string[] = [];
   const shown: Harness['desktop']['shown'] = [];
   let currentSession: string | null = 's_1';
@@ -100,7 +111,11 @@ function harness(overrides: Partial<NotifyPayload> = {}): Harness {
     isVisible: () => visible,
     focusSession: (id) => focused.push(id),
     toast: (message, tone, sessionId) => toasts.push({ message, tone, sessionId }),
-    markUnread: (id) => unread.push(id),
+    // The centre is fed every notification; `read` says whether it was already on
+    // screen. The unread badge is derived from these flags, so this is the record
+    // the badge assertions below read.
+    record: (payload, read) =>
+      recorded.push({ id: payload.id, read, sessionId: payload.session_id }),
     desktopEnabled: () => desktopEnabled,
   };
 
@@ -108,7 +123,7 @@ function harness(overrides: Partial<NotifyPayload> = {}): Harness {
     notifier: new Notifier(deps),
     cues,
     toasts,
-    unread,
+    recorded,
     focused,
     desktop: { shown },
     setCurrentSession: (id) => {
@@ -187,7 +202,7 @@ describe('the four surfaces', () => {
     const outcome = await h.notifier.handle(basePayload);
     expect(outcome.desktop).toBe('shown');
     expect(outcome.badge).toBe(true);
-    expect(h.unread).toEqual(['s_1']);
+    expect(unreadSessions(h)).toEqual(['s_1']);
   });
 
   it('stays quiet on the desktop for the session already on screen', async () => {
@@ -200,7 +215,7 @@ describe('the four surfaces', () => {
     // The toast covered it, and there is nothing unread.
     expect(outcome.toast).toBe(true);
     expect(outcome.badge).toBe(false);
-    expect(h.unread).toEqual([]);
+    expect(unreadSessions(h)).toEqual([]);
   });
 
   it('badges the open session when the tab is hidden', async () => {
@@ -210,7 +225,7 @@ describe('the four surfaces', () => {
     h.setCurrentSession('s_1');
     const outcome = await h.notifier.handle(basePayload);
     expect(outcome.badge).toBe(true);
-    expect(h.unread).toEqual(['s_1']);
+    expect(unreadSessions(h)).toEqual(['s_1']);
   });
 
   it('never badges a notification with no session', async () => {
@@ -221,7 +236,7 @@ describe('the four surfaces', () => {
       source: 'some-plugin',
     });
     expect(outcome.badge).toBe(false);
-    expect(h.unread).toEqual([]);
+    expect(unreadSessions(h)).toEqual([]);
     expect(outcome.toast).toBe(true);
   });
 });
@@ -265,7 +280,8 @@ describe('permissions and preferences', () => {
         isVisible: () => false,
         focusSession: () => undefined,
         toast: (message: string, tone: string) => h.toasts.push({ message, tone }),
-        markUnread: (id: string) => h.unread.push(id),
+        record: (payload: NotifyPayload, read: boolean) =>
+          h.recorded.push({ id: payload.id, read, sessionId: payload.session_id }),
         desktopEnabled: () => true,
       } as unknown as NotifierDeps),
     });
@@ -394,7 +410,7 @@ describe('clicking the desktop notification', () => {
       isVisible: () => false,
       focusSession: onClick,
       toast: () => undefined,
-      markUnread: () => undefined,
+      record: () => undefined,
       desktopEnabled: () => true,
     });
     await notifier.handle(basePayload);

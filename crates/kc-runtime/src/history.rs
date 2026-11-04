@@ -46,13 +46,46 @@ pub(crate) async fn repair_history(
     limit: usize,
     max_chars: usize,
 ) -> Result<Vec<Message>> {
-    let stored = store.list_messages(session_id, limit).await?;
-    let stored: Vec<StoredMessage> = stored
-        .into_iter()
-        // Subagent transcripts share the session but must never leak into the
-        // parent conversation; stored system prompts are rebuilt per iteration.
-        .filter(|m| m.agent_id.is_none() && m.role != Role::System.as_str())
-        .collect();
+    // Bound both the number of rows and encoded payload retained while loading.
+    // Four bytes per character accommodates UTF-8; images and JSON count by bytes.
+    let byte_budget = max_chars.saturating_mul(4).max(1);
+    let mut stored = Vec::new();
+    let mut before = None;
+    let mut bytes = 0usize;
+    while stored.len() < limit && bytes < byte_budget {
+        let page = store
+            .list_history_page(
+                session_id,
+                before,
+                (limit - stored.len()).min(128),
+                byte_budget - bytes,
+            )
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        before = page.last().map(|m| m.id);
+        for row in page {
+            let size = row
+                .content
+                .len()
+                .saturating_add(serde_json::to_string(&row.tool_calls).map_or(0, |s| s.len()))
+                .saturating_add(serde_json::to_string(&row.images).map_or(0, |s| s.len()))
+                .saturating_add(row.reasoning_content.as_ref().map_or(0, String::len))
+                .saturating_add(row.tool_call_id.as_ref().map_or(0, String::len))
+                .saturating_add(row.name.as_ref().map_or(0, String::len));
+            if !stored.is_empty() && bytes.saturating_add(size) > byte_budget {
+                break;
+            }
+            bytes = bytes.saturating_add(size);
+            stored.push(row);
+        }
+        // If the next row did not fit, do not skip it to include older rows.
+        if stored.last().map(|m| m.id) != before {
+            break;
+        }
+    }
+    stored.reverse();
 
     let (mut messages, synthesized) = repair_rows(&stored);
 
@@ -223,6 +256,61 @@ mod tests {
 
     fn roles(messages: &[Message]) -> Vec<Role> {
         messages.iter().map(|m| m.role).collect()
+    }
+
+    #[tokio::test]
+    async fn paged_history_keeps_newest_and_filters_before_count_limit() {
+        let store: Arc<dyn Store> = Arc::new(crate::tests_support::FakeStore::new());
+        for i in 0..150 {
+            store
+                .append_message(&crate::tests_support::new_message(
+                    "s",
+                    "user",
+                    &format!("m{i}"),
+                ))
+                .await
+                .unwrap();
+        }
+        for _ in 0..10 {
+            let mut child = crate::tests_support::new_message("s", "user", &"x".repeat(10000));
+            child.agent_id = Some("child".into());
+            store.append_message(&child).await.unwrap();
+        }
+        let history = repair_history(&store, "s", 140, 10000).await.unwrap();
+        assert_eq!(history.len(), 140);
+        assert_eq!(history.first().unwrap().content, "m10");
+        assert_eq!(history.last().unwrap().content, "m149");
+        let small = repair_history(&store, "s", 140, 5).await.unwrap();
+        assert_eq!(small.last().unwrap().content, "m149");
+        assert!(small.len() < 10);
+    }
+
+    #[tokio::test]
+    async fn oversized_latest_tool_result_keeps_task_and_exchange() {
+        let store: Arc<dyn Store> = Arc::new(crate::tests_support::FakeStore::new());
+        store
+            .append_message(&crate::tests_support::new_message(
+                "s",
+                "user",
+                "do the task",
+            ))
+            .await
+            .unwrap();
+        let mut assistant = crate::tests_support::new_message("s", "assistant", "");
+        assistant.tool_calls = assistant_call(2, "call_1").tool_calls;
+        store.append_message(&assistant).await.unwrap();
+        let mut tool = crate::tests_support::new_message("s", "tool", &"x".repeat(10000));
+        tool.tool_call_id = Some("call_1".into());
+        tool.name = Some("echo".into());
+        store.append_message(&tool).await.unwrap();
+        let history = repair_history(&store, "s", 100, 1000).await.unwrap();
+        assert_eq!(
+            roles(&history),
+            vec![Role::User, Role::Assistant, Role::Tool]
+        );
+        assert_eq!(history[0].content, "do the task");
+        assert!(history[2].content.contains("omitted"));
+        assert_eq!(history[2].tool_call_id.as_deref(), Some("call_1"));
     }
 
     #[test]

@@ -22,7 +22,7 @@ use kc_core::paths::Workspace;
 use kc_core::provider::ProviderFactory;
 use kc_core::queue::{QueuedKind, QueuedMessage, MAX_QUEUED_ATTACHMENTS};
 use kc_core::settings::Settings;
-use kc_core::store::{AgentStatus, SessionSummary, Store};
+use kc_core::store::{AgentStatus, Store};
 use kc_core::tool::ToolRegistry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -40,6 +40,7 @@ mod notify;
 mod restart;
 pub mod rewind;
 pub mod subagent;
+pub(crate) mod worktree;
 
 #[cfg(test)]
 mod tests;
@@ -107,6 +108,20 @@ pub trait WorkspaceProvider: Send + Sync {
     /// default workspace returns an error here instead, so a run cannot silently
     /// land somewhere nobody chose.
     fn workspace_for(&self, project_id: Option<&str>) -> Result<Arc<Workspace>>;
+
+    /// Resolve the workspace for a session that has already been loaded.
+    ///
+    /// A session with a project uses that project's workspace. A session without
+    /// one (the control chat) runs in its own recorded directory, which is how the
+    /// central chat stays outside every project. The default delegates so a
+    /// single-workspace provider keeps its old behaviour.
+    fn workspace_for_session(
+        &self,
+        project_id: Option<&str>,
+        _recorded: &str,
+    ) -> Result<Arc<Workspace>> {
+        self.workspace_for(project_id)
+    }
 }
 
 /// One workspace for every run.
@@ -219,7 +234,8 @@ pub(crate) struct RuntimeInner {
     /// The live half of subagents: pause gates, mailboxes and a registry of the
     /// agents whose loops exist right now. See [`hub`].
     pub hub: Arc<hub::AgentHub>,
-    pub seq: AtomicU64,
+    /// Serializes sequence allocation with broadcast publication.
+    pub seq: Mutex<u64>,
     pub events_emitted: AtomicU64,
     /// `allow_session` approvals, keyed by session + kind + target.
     pub session_allow: Mutex<HashSet<String>>,
@@ -425,7 +441,7 @@ impl Runtime {
             approvals: approvals::ApprovalRegistry::new(),
             subagents: Arc::new(subagent::SubagentLimiter::new(Default::default())),
             hub: Arc::new(hub::AgentHub::new()),
-            seq: AtomicU64::new(0),
+            seq: Mutex::new(0),
             events_emitted: AtomicU64::new(0),
             session_allow: Mutex::new(HashSet::new()),
             steers: Mutex::new(HashMap::new()),
@@ -530,33 +546,27 @@ impl Runtime {
         let store = &self.inner.deps.store;
         let started = std::time::Instant::now();
 
-        // Snapshot what a crash could have left mid-exchange *before* the
-        // statuses are rewritten: `list_sessions().running` is derived from
-        // `runs.status = 'running'`, so once `mark_interrupted_runs` has run
-        // nothing looks interrupted any more.
-        let sessions = store.list_sessions().await?;
-        // Best-effort: this snapshot only decides which claims to release and
-        // which sessions to repair first. A store that cannot answer it must not
-        // stop the server from starting.
-        let running_agents: Vec<(String, String)> = match store.list_agents_all(None).await {
-            Ok(agents) => agents
-                .into_iter()
-                .filter(|summary| summary.agent.status == AgentStatus::Running.as_str())
-                .map(|summary| (summary.agent.session_id, summary.agent.id))
-                .collect(),
+        // Snapshot before rewriting statuses; failed agent snapshots remain best-effort.
+        let (running_agents, include_agents) = match store.running_agent_ids().await {
+            Ok(agents) => (agents, true),
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "startup recovery: could not list agents; \
-                     interrupted agents' path claims will not be released"
-                );
-                Vec::new()
+                tracing::warn!(error = %e, "startup recovery: could not list agents; interrupted agents' path claims will not be released");
+                (Vec::new(), false)
             }
         };
-        let interrupted_sessions: HashSet<&str> = running_agents
-            .iter()
-            .map(|(session_id, _)| session_id.as_str())
-            .collect();
+        let skip_repair = skip_recovery_requested();
+        let cutoff = events::now_ms() - RECOVERY_MAX_AGE_DAYS * 86_400_000;
+        let (total_sessions, candidates) = store
+            .recovery_sessions(
+                cutoff,
+                if skip_repair {
+                    0
+                } else {
+                    RECOVERY_MAX_SESSIONS
+                },
+                include_agents,
+            )
+            .await?;
 
         let interrupted_runs = store.mark_interrupted_runs().await?;
         let interrupted_agents = store.mark_interrupted_agents().await?;
@@ -590,46 +600,18 @@ impl Runtime {
 
         let mut repaired_sessions = 0usize;
         let mut failed_sessions = 0usize;
-        let skipped_sessions: usize;
-        if skip_recovery_requested() {
-            skipped_sessions = sessions.len();
-            tracing::info!(
-                sessions = sessions.len(),
-                env = SKIP_RECOVERY_ENV,
-                "startup recovery: transcript repair skipped; every session is repaired by its first run"
-            );
+        let skipped_sessions = total_sessions.saturating_sub(candidates.len());
+        if skip_repair {
+            tracing::info!(sessions = total_sessions, env = SKIP_RECOVERY_ENV,
+                "startup recovery: transcript repair skipped; every session is repaired by its first run");
         } else {
-            let cutoff = events::now_ms() - RECOVERY_MAX_AGE_DAYS * 86_400_000;
-            // Interrupted sessions first: they are the ones a crash could have
-            // left mid-exchange, so they must not lose the cap to a busy install.
-            let mut candidates: Vec<&SessionSummary> = sessions
-                .iter()
-                .filter(|s| s.running || interrupted_sessions.contains(s.id.as_str()))
-                .collect();
-            let mut recent: Vec<&SessionSummary> = sessions
-                .iter()
-                .filter(|s| {
-                    !s.running
-                        && !interrupted_sessions.contains(s.id.as_str())
-                        && s.updated_at >= cutoff
-                })
-                .collect();
-            recent.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
-            candidates.extend(recent);
-
-            let to_repair = candidates.len().min(RECOVERY_MAX_SESSIONS);
-            skipped_sessions = sessions.len().saturating_sub(to_repair);
-            for session in candidates.into_iter().take(to_repair) {
-                match history::repair_history(store, &session.id, HISTORY_LIMIT, max_chars).await {
+            for session_id in candidates {
+                match history::repair_history(store, &session_id, HISTORY_LIMIT, max_chars).await {
                     Ok(_) => repaired_sessions += 1,
                     Err(e) => {
                         failed_sessions += 1;
-                        tracing::warn!(
-                            session = %session.id,
-                            error = %e,
-                            "startup recovery: could not repair this session's transcript; \
-                             its next run will repair it"
-                        );
+                        tracing::warn!(session = %session_id, error = %e,
+                            "startup recovery: could not repair this session's transcript; its next run will repair it");
                     }
                 }
             }
@@ -860,14 +842,6 @@ impl Runtime {
                 input.attachments.len()
             )));
         }
-        // A steer or a follow-up wants a *user run* to fold into or follow: a
-        // detached subagent still working in the session is not something a new
-        // prompt can steer, and queueing behind it would look like a lost message.
-        if !self.has_active_run(session_id) {
-            return Err(kc_core::Error::BadRequest(format!(
-                "session {session_id} has no run in flight; send a normal message instead"
-            )));
-        }
         let id = match kind {
             QueuedKind::Steer => format!("steer_{}", uuid::Uuid::new_v4().simple()),
             QueuedKind::FollowUp => format!("followup_{}", uuid::Uuid::new_v4().simple()),
@@ -887,6 +861,19 @@ impl Runtime {
             accepted_at: events::now_ms(),
         };
         {
+            // Serialize admission with run deregistration. Otherwise teardown can
+            // drain the queue between checking the run and inserting the message,
+            // leaving an accepted follow-up stranded indefinitely. Lock order is
+            // runs then queue; release both before publishing events.
+            let runs = self.inner.runs.lock().expect("runs lock");
+            if !runs
+                .values()
+                .any(|s| s.top_level && s.session_id.0 == session_id && !s.cancel.is_cancelled())
+            {
+                return Err(kc_core::Error::BadRequest(format!(
+                    "session {session_id} has no run in flight; send a normal message instead"
+                )));
+            }
             let mut queues = match kind {
                 QueuedKind::Steer => self.inner.steers.lock().expect("steers lock"),
                 QueuedKind::FollowUp => self.inner.follow_ups.lock().expect("follow ups lock"),

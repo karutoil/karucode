@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
-import { ChatView } from './ChatView';
+import { ChatView, projectMentionLoader } from './ChatView';
 import type { ChatItem } from '../state/chat';
 import * as store from '../state/store';
 import { configFixture, resetAppState } from '../test/fixtures';
@@ -651,5 +651,16 @@ describe('ChatView composer dock', () => {
     // see-through dock and the way back to the newest message.
     expect(panel().getAttribute('data-translucent')).toBe('true');
     expect(jumpButton()).not.toBeNull();
+  });
+});
+
+describe('control chat project mentions', () => {
+  it('lists registered projects as mention candidates', async () => {
+    const tree = await projectMentionLoader([
+      { id: 'p1', name: 'web-platform' },
+      { id: 'p2', name: 'atlas-api' },
+    ])(6);
+    expect(tree.entries.map((entry) => entry.path)).toEqual(['web-platform', 'atlas-api']);
+    expect(tree.entries.every((entry) => entry.kind === 'file')).toBe(true);
   });
 });

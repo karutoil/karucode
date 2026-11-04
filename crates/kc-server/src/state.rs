@@ -282,6 +282,22 @@ impl WorkspaceProvider for ProjectRegistry {
                 ))
             })
     }
+
+    fn workspace_for_session(
+        &self,
+        project_id: Option<&str>,
+        recorded: &str,
+    ) -> Result<Arc<Workspace>> {
+        if project_id.is_some() {
+            return self.workspace_for(project_id);
+        }
+        // No project: the session's own recorded directory is the confinement
+        // root. This is the control chat, which must never inherit a project.
+        Ok(Arc::new(Workspace::with_extra_roots(
+            recorded,
+            self.extra_roots.clone(),
+        )?))
+    }
 }
 
 /// Adapter that lets the runtime use the (mutably owned) plugin host as its
@@ -373,6 +389,9 @@ pub struct AppStateInner {
     pub started: Instant,
     /// Cancelled on SIGINT/SIGTERM so SSE streams end and the server can stop.
     pub shutdown: CancellationToken,
+    /// One scheduler supervisor per mission, shared by all state clones.
+    pub(crate) mission_schedulers:
+        std::sync::Mutex<HashMap<String, Arc<crate::routes::missions::SchedulerWake>>>,
 }
 
 #[derive(Clone)]
@@ -399,6 +418,7 @@ impl AppState {
                 terminals: Arc::new(TerminalRegistry::new()),
                 started: Instant::now(),
                 shutdown: CancellationToken::new(),
+                mission_schedulers: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -530,6 +550,13 @@ impl AppState {
             let mcp = self.inner.mcp.lock().await;
             registry.register_all(mcp.tools());
         }
+        registry.register(crate::control::tool(self.clone()));
+        registry.register(crate::control::list_tool(self.clone()));
+        for tool in crate::control_sessions::tools(self.clone()) {
+            registry.register(tool);
+        }
+        registry.register(crate::mission_coordinator::tool(self.clone()));
+        registry.register(crate::mission_coordinator::revise_tool(self.clone()));
         self.inner.runtime.set_tools(Arc::new(registry));
     }
 

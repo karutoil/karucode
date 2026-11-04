@@ -75,7 +75,9 @@ directory. `provider_configured` is computed from the effective model (below).
                  "timeout_secs": 300 },
   "subagents": { "max_concurrent": 3, "max_iterations": 200,
                  "max_continues": 60, "allow_recursive": false,
-                 "max_depth": 1, "timeout_secs": 14400 },
+                 "max_depth": 1, "timeout_secs": 14400,
+                 "allow_background": true, "max_background": 8,
+                 "wait_timeout_secs": 600 },
   "notifications": { "enabled": true, "run_finished": true, "needs_input": true,
                      "error": true, "info": true, "plugin": true,
                      "min_run_secs": 0, "say_body": true,
@@ -132,7 +134,17 @@ selection; with no profiles it is the flat `[model] supports_images`.
 ```
 
 Every section is optional and unknown fields are rejected (`400 bad_request`), so a
-misspelt key cannot silently do nothing.
+misspelt key cannot silently do nothing. A numeric tunable outside its documented
+range is the same `400`, naming the field, the range and the value it was given -
+nothing is silently clamped.
+
+**`[subagents]` and zero.** Three values in this section are meaningful at `0`, and
+they do not agree with each other: `max_concurrent` and `max_background` mean *no
+ceiling* (`0..=1024`, with `0` granting every spawn a slot immediately), while
+`max_depth` means *no delegation* (`0..=255`, the field being a `u8`) and
+`max_continues = 0` restores the one-shot budget. `max_iterations` is `1..=10000`
+and `wait_timeout_secs` is `1..=3600`. A `max_depth` above `255` fails JSON
+deserialisation rather than being truncated to a smaller number.
 
 **Admin gate.** When `KARUCODE_ADMIN_TOKEN` is set, a patch that changes
 `approvals`, `model.base_url`, `model.api_key`, `providers`, `active_provider` or
@@ -443,8 +455,13 @@ that project's directory. The optional `model` pins the new session immediately
   "last_rewind_at": null }
 ```
 `approvals` contains **pending** approvals only; resolved and expired decisions are
-not exposed by any endpoint yet. `messages` is the most recent page (newest 400,
-returned in chronological order). `last_rewind_at` is the unix-ms timestamp of
+not exposed by any endpoint yet. `messages` is the most recent page (default 5000,
+maximum 50000, controlled by `?messages=`, returned in chronological order).
+Both session and agent detail pages also have an approximately 1 MiB stored-payload
+budget; one oversized message is returned alone to guarantee progress.
+`messages_truncated` means older visible rows remain and `messages_before` is the
+exclusive message ID cursor to pass as `?before=<id>`; otherwise it is null.
+The budget counts stored fields, not serialized response bytes. `last_rewind_at` is the unix-ms timestamp of
 the session's newest rewind, or `null` if it was never rewound; `messages`
 already excludes the hidden rows, so it is informational.
 
@@ -787,7 +804,7 @@ the delegated work itself.
 `GET /api/agents/:id?messages=N` → one agent and the transcript it wrote:
 ```json
 { "agent": AgentSummary, "messages": [StoredMessage],
-  "messages_truncated": false, "messages_limit": 2000 }
+  "messages_truncated": false, "messages_limit": 2000, "messages_before": null }
 ```
 `messages` contains only rows whose `agent_id` matches, oldest first, tail-limited
 by `?messages=` (default 2000, max 50000). It is the same `StoredMessage` shape the
@@ -1105,7 +1122,7 @@ When a resume is not possible, the client has to notice what it missed:
 | `agent_progress` | `agent_id`, `iterations`, `note` |
 | `agent_finished` | `agent_id`, `status`, `summary`, `error` |
 | `notice` | `level`, `message` |
-| `notification` | `notification` — a `{id, kind, title, body, session_id, session_title, source, sound?, sticky}` payload. `kind` is `run_finished`, `needs_input`, `error` or `info`; `source` is `runtime` or a plugin's name. Emitted after the state it describes is persisted, and **not emitted at all** when `[notifications] enabled = false`. Render an unknown `kind` as `info` rather than dropping it. |
+| `notification` | `notification` — a `{id, kind, title, body, session_id, session_title, project_id?, source, sound?, sticky}` payload. `kind` is `run_finished`, `needs_input`, `error` or `info`; `source` is `runtime` or a plugin's name. `project_id` is the project the session belongs to and is **omitted** when the notice names no session or its session could not be read — the browser uses it to count unread news per project tile, since it only ever lists the open project's sessions. Emitted after the state it describes is persisted, and **not emitted at all** when `[notifications] enabled = false`. Render an unknown `kind` as `info` rather than dropping it. |
 | `stream_lagged` | `skipped` - the SSE pump dropped frames for this client; refetch the session (emitted by the server, not the runtime) |
 | `error` | `message`, `kind` |
 
@@ -1132,3 +1149,29 @@ Every response also carries an `X-Request-Id` header (a fresh v4 id per request)
 and the same id appears in the access-log line for that request, so a log entry and
 a client report can be matched. The access log records method, path, status and
 latency — never the query string (which can carry `?token=`) and never a body.
+
+Post-start mission replanning: `POST /api/missions/:id/tasks/:task_id/replan`
+requires an explicit user action and JSON `expected: {project_id, prompt,
+dependencies}` plus at least one replacement field among `project_id`, `prompt`,
+and `dependencies`. It returns the updated task; stale or ineligible changes
+return 400. Only never-claimed pending/blocked tasks in active or paused missions
+are eligible. The scheduler may claim the task immediately after approval.
+
+### Central control chat
+
+`POST /api/control/session` reserves or reopens one persistent central chat and
+returns `{session_id, project_id, created}`. It requires a registered project;
+the first reservation chooses one as its workspace and retains that binding.
+Use the ordinary session transcript, message, event and approval APIs. The chat
+is not an isolation boundary: its normal tools operate in its bound workspace.
+
+Only that chat's root agent can call `control_start_session`, with a unique
+`request_id`, explicit registered `project_id`, `title`, and `prompt`. The
+approval presents the target project, path and complete prompt. `read_only`
+refuses, `ask` and `ask_commands` ask, and `auto` permits the dispatch. A
+transaction reserves the request and creates an ordinary project-local session;
+reusing the key with different input is rejected and identical replays never
+start another run. Reservation and runtime submission are not atomic: after a
+crash or failed submission inspect the returned session rather than generating
+a new request key. Deleting the control chat leaves its reservation intact and
+cannot silently create a replacement. This mechanism does not change missions.

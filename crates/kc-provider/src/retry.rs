@@ -329,6 +329,12 @@ impl RetryState {
             }
 
             if self.current.is_none() {
+                if let Some(admission) = &self.request.admission {
+                    if let Err(err) = admission.admit().await {
+                        self.done = true;
+                        return Some(Err(err));
+                    }
+                }
                 self.attempt = self.attempt.saturating_add(1);
                 match self
                     .inner

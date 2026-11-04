@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useEffect } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import type { AgentAction, AgentRecord, AgentStatus, AgentSummary } from '../api/types';
 import { isAgentLive } from '../api/types';
 import { formatDuration, jsonSummary, relativeTime, truncate } from '../lib/format';
@@ -7,6 +7,8 @@ import * as actions from '../state/actions';
 import {
   AGENT_ACTIVITY_LIMIT,
   emptyActivity,
+  activityFromMessages,
+  mergeActivities,
   type AgentActivity,
   type AgentActivityItem,
 } from '../state/agentConsole';
@@ -64,6 +66,18 @@ function agentGlyph(role: string | null | undefined, name: string | null | undef
   }
   return <AgentsIcon size={15} />;
 }
+
+/**
+ * How many agent rows are rendered before the list asks to be expanded.
+ *
+ * `subagents.max_concurrent = 0` means "no ceiling", so a fan-out can be
+ * hundreds of children and the roster is a plain `map`. Sixty rows is enough to
+ * fill the inspector several times over; past it the user asks for the rest
+ * instead of the tab building every card, every live label and every progress
+ * bar on a timer. The cap is safe because `sortAgents` puts live agents first -
+ * the rows that can still change are always inside the first page.
+ */
+const AGENT_RENDER_CAP = 60;
 
 /**
  * Live agents first (a paused one is still live), then newest first: the ones
@@ -396,10 +410,11 @@ function AgentDetail({
   activity: AgentActivity;
   now: number;
 }): JSX.Element {
-  const items = activity.items;
+  const history = store.agentHistory.value?.id === agent.id ? store.agentHistory.value : null;
+  const items = history ? mergeActivities(activityFromMessages(history.messages, agent.id, true), activity, true).items : activity.items;
   const running = agent.status === 'running';
   const steps = items.filter((item) => !(item.kind === 'message' && item.role === 'user'));
-  const trimmed = items.length >= AGENT_ACTIVITY_LIMIT;
+  const trimmed = history ? history.truncated : items.length >= AGENT_ACTIVITY_LIMIT;
 
   return (
     <div class="agent-detail">
@@ -503,6 +518,12 @@ function AgentDetail({
               : `${steps.length}${trimmed ? '+' : ''} steps${running ? ' · live' : ''}`}
           </span>
         </div>
+        {history?.truncated ? <div>
+          <p>Earlier history is not loaded.</p>
+          {history.before !== null ? <button type="button" class="button button-small" disabled={history.loading} onClick={() => void actions.loadOlderAgent()}>{history.loading ? 'Loading…' : 'Load older history'}</button> : <p>Older history is unavailable from this server.</p>}
+          {history.error ? <p role="alert">{history.error}</p> : null}
+        </div> : null}
+        {store.agentDetailError.value ? <p role="alert">{store.agentDetailError.value}</p> : null}
         {steps.length === 0 ? (
           <p class="agent-activity-empty">
             {running
@@ -545,6 +566,16 @@ export function AgentsTab(): JSX.Element {
   const agents = scope === 'session' ? sessionAgents : workspaceAgents;
   const counts = statusCounts(agents);
   const visible = sortAgents(filter === 'all' ? agents : agents.filter((agent) => agent.status === filter));
+
+  // A large fan-out must not build every card at once, so the list renders a
+  // page and offers the rest. Switching scope or filter is a new question, so the
+  // next list starts collapsed again.
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => {
+    setShowAll(false);
+  }, [scope, filter]);
+  const capped = !showAll && visible.length > AGENT_RENDER_CAP;
+  const shown = capped ? visible.slice(0, AGENT_RENDER_CAP) : visible;
 
   // The tab is mounted lazily: make sure the workspace list is current when it
   // opens, and let SSE keep it live afterwards.
@@ -642,7 +673,7 @@ export function AgentsTab(): JSX.Element {
         <AgentsEmpty filtered={agents.length > 0} />
       ) : (
         <div class="agent-list">
-          {visible.map((agent) => (
+          {shown.map((agent) => (
             <AgentCard
               key={agent.id}
               agent={agent}
@@ -652,6 +683,22 @@ export function AgentsTab(): JSX.Element {
               onOpen={() => void actions.openAgentDetail(agent.id)}
             />
           ))}
+          {capped ? (
+            <div class="agent-list-more">
+              <p class="agent-list-more-note">
+                Showing {AGENT_RENDER_CAP} of {visible.length} agents. Live agents are listed
+                first, so anything still running is already here.
+              </p>
+              <button
+                type="button"
+                class="button"
+                onClick={() => setShowAll(true)}
+                aria-label={`Show all ${visible.length} agents`}
+              >
+                Show all {visible.length}
+              </button>
+            </div>
+          ) : null}
         </div>
       )}
 

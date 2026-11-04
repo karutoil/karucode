@@ -27,7 +27,10 @@ whether that class is allowed, asked or denied.
 | `read_only` | deny | deny | deny | allow |
 
 `read_only` is the mode to use for a session you do not trust or a workspace you
-only want inspected: asking would imply the answer could be yes.
+only want inspected: asking would imply the answer could be yes. The mission
+coordinator's `mission_draft_task` is a mutating tool: it is denied in
+`read_only`, asks in `ask`, and is allowed in `ask_commands` or `auto`.
+Workspace path allowlists do not apply to mission task drafts.
 
 ## Allowlists
 

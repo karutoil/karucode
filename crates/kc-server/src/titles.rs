@@ -144,6 +144,7 @@ fn title_request(model: &ModelConfig, prompt: &str, titles: &TitlesConfig) -> Ch
     let instruction = TITLE_INSTRUCTION.replace("{max_chars}", &max_chars.to_string());
     let excerpt = truncate_chars(prompt.trim(), TITLE_PROMPT_CHARS);
     ChatRequest {
+        admission: None,
         model: model.model.clone(),
         messages: vec![Message::system(instruction), Message::user(excerpt)],
         // No tools: a titling turn must not be able to call anything.
@@ -365,8 +366,13 @@ pub async fn generate_title(
     model: &ModelConfig,
     titles: &TitlesConfig,
     prompt: &str,
+    session_id: &str,
 ) -> Option<String> {
-    let request = title_request(model, prompt, titles);
+    let mut request = title_request(model, prompt, titles);
+    request.admission = Some(kc_core::provider::AttemptAdmission {
+        store: state.store().clone(),
+        session_id: session_id.to_owned(),
+    });
     let provider = match state.providers().build(model).await {
         Ok(provider) => provider,
         Err(error) => {
@@ -422,7 +428,8 @@ pub async fn maybe_auto_title(
         return;
     };
 
-    let Some(title) = generate_title(state, &model, &config.titles, prompt).await else {
+    let Some(title) = generate_title(state, &model, &config.titles, prompt, session_id).await
+    else {
         tracing::debug!(
             session = %session_id,
             model = %model.model,

@@ -42,3 +42,4 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 uuid.workspace = true
+rusqlite.workspace = true

@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 20;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -327,6 +327,96 @@ CREATE INDEX IF NOT EXISTS idx_messages_run_id ON messages(run_id);
 /// reasoning read back as `None`.
 const MIGRATION_11: &str = "";
 
+const MIGRATION_19: &str = r#"
+CREATE TABLE IF NOT EXISTS control_chat (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), session_id TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS control_dispatches (request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL, title TEXT NOT NULL, workspace TEXT NOT NULL, prompt TEXT NOT NULL);
+"#;
+
+/// Schema v20: control sessions are a set, not a singleton.
+///
+/// The marker moves onto `sessions` (the column is in [`ADDED_COLUMNS`]) so any
+/// number of control sessions can exist; the old singleton row is carried over
+/// and the table dropped, because its `CHECK(singleton = 1)` is exactly what made
+/// a second control chat impossible.
+const MIGRATION_20: &str = r#"
+UPDATE sessions SET control = 1 WHERE id IN (SELECT session_id FROM control_chat);
+DROP TABLE IF EXISTS control_chat;
+CREATE INDEX IF NOT EXISTS idx_sessions_control ON sessions(control);
+"#;
+
+const MIGRATION_12: &str = r#"
+CREATE TABLE IF NOT EXISTS missions (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ title TEXT NOT NULL, description TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_missions_project ON missions(project_id);
+CREATE TABLE IF NOT EXISTS mission_sessions (
+ mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+ request_id TEXT NOT NULL, session_id TEXT NOT NULL UNIQUE,
+ title TEXT NOT NULL, prompt TEXT NOT NULL, created_at INTEGER NOT NULL,
+ PRIMARY KEY (mission_id, request_id)
+);
+"#;
+
+// Legacy mission sessions always belonged to the mission's home project. Keep
+// this immutable request identity even if the session or target project is deleted.
+const MIGRATION_13: &str = r#"
+UPDATE mission_sessions SET project_id = (SELECT project_id FROM missions WHERE id = mission_id)
+WHERE project_id IS NULL;
+"#;
+
+const MIGRATION_14: &str = r#"
+CREATE TABLE IF NOT EXISTS mission_schedules (mission_id TEXT PRIMARY KEY REFERENCES missions(id) ON DELETE CASCADE, concurrency INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS mission_tasks (
+ id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+ project_id TEXT NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL, dependencies TEXT NOT NULL,
+ state TEXT NOT NULL, session_id TEXT, run_id TEXT, error TEXT, created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mission_tasks_mission ON mission_tasks(mission_id);
+"#;
+
+// Records contain only explicitly published text, never a file snapshot or a
+// claim that verification was independently performed.
+const MIGRATION_15: &str = r#"
+CREATE TABLE IF NOT EXISTS mission_records (
+ id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+ request_id TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL,
+ task_id TEXT, session_id TEXT, artifact_id TEXT, created_at INTEGER NOT NULL,
+ UNIQUE(mission_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mission_records_mission ON mission_records(mission_id, kind);
+"#;
+
+// Durable request ledger and history of replaced attempts.
+const MIGRATION_16: &str = r#"
+CREATE TABLE IF NOT EXISTS mission_task_retries (
+ mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+ request_id TEXT NOT NULL, task_id TEXT NOT NULL, project_id TEXT,
+ previous_project_id TEXT NOT NULL, previous_state TEXT NOT NULL,
+ previous_session_id TEXT, previous_run_id TEXT, previous_error TEXT,
+ PRIMARY KEY(mission_id, request_id)
+);
+"#;
+
+// Independent of missions and sessions so deleting either never resets a budget.
+const MIGRATION_18: &str = r#"
+CREATE TABLE IF NOT EXISTS mission_attempt_budgets (
+ mission_id TEXT PRIMARY KEY, max_attempts INTEGER, attempts INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS mission_attempt_sessions (
+ session_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL
+);
+INSERT OR IGNORE INTO mission_attempt_budgets (mission_id) SELECT id FROM missions;
+INSERT OR IGNORE INTO mission_attempt_sessions SELECT session_id, mission_id FROM mission_sessions;
+INSERT OR IGNORE INTO mission_attempt_sessions SELECT session_id, mission_id FROM mission_tasks WHERE session_id IS NOT NULL;
+INSERT OR IGNORE INTO mission_attempt_sessions SELECT previous_session_id, mission_id FROM mission_task_retries WHERE previous_session_id IS NOT NULL;
+CREATE TRIGGER IF NOT EXISTS mission_attempt_session_insert AFTER INSERT ON mission_sessions
+BEGIN
+ SELECT CASE WHEN EXISTS(SELECT 1 FROM mission_attempt_sessions WHERE session_id=NEW.session_id AND mission_id != NEW.mission_id) THEN RAISE(ABORT, 'session belongs to another mission') END;
+ INSERT OR IGNORE INTO mission_attempt_sessions (session_id, mission_id) VALUES (NEW.session_id, NEW.mission_id);
+END;
+"#;
+
 /// Every `ADD COLUMN` in the schema, as `(version, table, column, declaration)`.
 ///
 /// SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (it is a syntax
@@ -351,6 +441,20 @@ const ADDED_COLUMNS: &[(i64, &str, &str, &str)] = &[
     (9, "agents", "note", "TEXT NOT NULL DEFAULT ''"),
     (9, "agents", "progress", "REAL"),
     (11, "messages", "reasoning_content", "TEXT"),
+    (13, "mission_sessions", "project_id", "TEXT"),
+    (
+        17,
+        "mission_tasks",
+        "artifact_ids",
+        "TEXT NOT NULL DEFAULT '[]'",
+    ),
+    (
+        15,
+        "mission_schedules",
+        "state",
+        "TEXT NOT NULL DEFAULT 'active'",
+    ),
+    (20, "sessions", "control", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 pub struct SqliteStore {
@@ -622,9 +726,18 @@ fn map_session_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
     })
 }
 
+/// What a session listing covers.
+#[derive(Clone, Copy)]
+enum SessionScope<'a> {
+    All,
+    Project(&'a str),
+    /// Control-plane chats: their own set, never part of a project's list.
+    Control,
+}
+
 fn summarize_sessions(
     conn: &rusqlite::Connection,
-    project_id: Option<&str>,
+    scope: SessionScope<'_>,
 ) -> Result<Vec<SessionSummary>> {
     let base =
         "SELECT s.id, s.title, s.workspace, s.project_id, s.model, s.created_at, s.updated_at,
@@ -636,16 +749,21 @@ fn summarize_sessions(
                        EXISTS(SELECT 1 FROM runs r
                                WHERE r.session_id = s.id AND r.status = 'running') AS running
                   FROM sessions s";
-    let sql = match project_id {
-        Some(_) => format!("{base} WHERE s.project_id = ?1 ORDER BY s.updated_at DESC, s.id DESC"),
-        None => format!("{base} ORDER BY s.updated_at DESC, s.id DESC"),
+    let sql = match scope {
+        SessionScope::Project(_) => {
+            format!("{base} WHERE s.project_id = ?1 ORDER BY s.updated_at DESC, s.id DESC")
+        }
+        SessionScope::All => format!("{base} ORDER BY s.updated_at DESC, s.id DESC"),
+        SessionScope::Control => {
+            format!("{base} WHERE s.control = 1 ORDER BY s.updated_at DESC, s.id DESC")
+        }
     };
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| db_err("list_sessions prepare", e))?;
-    let rows = match project_id {
-        Some(id) => stmt.query_map(params![id], map_session_summary),
-        None => stmt.query_map([], map_session_summary),
+    let rows = match scope {
+        SessionScope::Project(id) => stmt.query_map(params![id], map_session_summary),
+        SessionScope::All | SessionScope::Control => stmt.query_map([], map_session_summary),
     }
     .map_err(|e| db_err("list_sessions query", e))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1126,6 +1244,15 @@ impl SqliteStore {
                     9 => MIGRATION_9,
                     10 => MIGRATION_10,
                     11 => MIGRATION_11,
+                    12 => MIGRATION_12,
+                    13 => MIGRATION_13,
+                    14 => MIGRATION_14,
+                    15 => MIGRATION_15,
+                    16 => MIGRATION_16,
+                    17 => "",
+                    18 => MIGRATION_18,
+                    19 => MIGRATION_19,
+                    20 => MIGRATION_20,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -1152,8 +1279,765 @@ impl SqliteStore {
     }
 }
 
+fn map_mission(row: &Row<'_>) -> rusqlite::Result<Mission> {
+    Ok(Mission {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn map_mission_record(row: &Row<'_>) -> rusqlite::Result<MissionRecord> {
+    Ok(MissionRecord {
+        id: row.get(0)?,
+        mission_id: row.get(1)?,
+        request_id: row.get(2)?,
+        kind: row.get(3)?,
+        title: row.get(4)?,
+        content: row.get(5)?,
+        task_id: row.get(6)?,
+        session_id: row.get(7)?,
+        artifact_id: row.get(8)?,
+        created_at: row.get(9)?,
+    })
+}
+
 #[async_trait]
 impl Store for SqliteStore {
+    async fn publish_mission_record(
+        &self,
+        mut record: MissionRecord,
+    ) -> Result<(MissionRecord, bool)> {
+        self.with(move |conn| {
+            let tx = conn.transaction().map_err(|e| db_err("record transaction", e))?;
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM missions WHERE id=?1)", [&record.mission_id], |r| r.get(0)).map_err(|e| db_err("mission lookup", e))?;
+            if !exists { return Err(Error::NotFound("mission not found".into())); }
+            let old = tx.query_row("SELECT id,mission_id,request_id,kind,title,content,task_id,session_id,artifact_id,created_at FROM mission_records WHERE mission_id=?1 AND request_id=?2", params![record.mission_id,record.request_id], map_mission_record).optional().map_err(|e| db_err("record lookup",e))?;
+            if let Some(old) = old {
+                if old.kind != record.kind || old.title != record.title || old.content != record.content || old.task_id != record.task_id || old.session_id != record.session_id || old.artifact_id != record.artifact_id {
+                    return Err(Error::BadRequest("request_id already used for a different record".into()));
+                }
+                return Ok((old, false));
+            }
+            if let Some(ref task) = record.task_id {
+                let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM mission_tasks WHERE mission_id=?1 AND id=?2 AND (?3 IS NULL OR session_id=?3 OR EXISTS(SELECT 1 FROM mission_task_retries WHERE mission_id=?1 AND task_id=?2 AND previous_session_id=?3)))", params![record.mission_id,task,record.session_id], |r| r.get(0)).map_err(|e| db_err("record task lookup",e))?;
+                if !valid { return Err(Error::BadRequest("task must belong to the mission and match the supplied session".into())); }
+            }
+            if let Some(ref session) = record.session_id {
+                let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM mission_sessions WHERE mission_id=?1 AND session_id=?2 UNION ALL SELECT 1 FROM mission_tasks WHERE mission_id=?1 AND session_id=?2 UNION ALL SELECT 1 FROM mission_task_retries WHERE mission_id=?1 AND previous_session_id=?2)", params![record.mission_id,session], |r| r.get(0)).map_err(|e| db_err("record session lookup",e))?;
+                if !valid { return Err(Error::BadRequest("session must belong to the mission".into())); }
+            }
+            if let Some(ref artifact) = record.artifact_id {
+                let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM mission_records WHERE mission_id=?1 AND id=?2 AND kind='artifact')", params![record.mission_id,artifact], |r| r.get(0)).map_err(|e| db_err("artifact lookup",e))?;
+                if record.kind != "evidence" || !valid { return Err(Error::BadRequest("artifact_id must reference an artifact in this mission and is only valid on evidence".into())); }
+            }
+            if record.kind != "artifact" && record.kind != "evidence" { return Err(Error::BadRequest("invalid record kind".into())); }
+            record.created_at = now_ms();
+            tx.execute("INSERT INTO mission_records VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![record.id,record.mission_id,record.request_id,record.kind,record.title,record.content,record.task_id,record.session_id,record.artifact_id,record.created_at]).map_err(|e| db_err("publish record",e))?;
+            tx.commit().map_err(|e| db_err("commit record",e))?;
+            Ok((record, true))
+        }).await
+    }
+    async fn list_mission_records(
+        &self,
+        mission_id: &str,
+        kind: &str,
+    ) -> Result<Vec<MissionRecord>> {
+        let mission_id = mission_id.to_owned();
+        let kind = kind.to_owned();
+        self.read(move |conn| {
+            let mut stmt = conn.prepare("SELECT id,mission_id,request_id,kind,title,content,task_id,session_id,artifact_id,created_at FROM mission_records WHERE mission_id=?1 AND kind=?2 ORDER BY rowid").map_err(|e| db_err("list records",e))?;
+            let rows = stmt.query_map(params![mission_id,kind], map_mission_record).map_err(|e| db_err("list records",e))?;
+            rows.collect::<std::result::Result<Vec<_>,_>>().map_err(|e| db_err("list records",e))
+        }).await
+    }
+    async fn get_mission_artifacts(
+        &self,
+        mission_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<MissionRecord>> {
+        if ids.len() > 16 {
+            return Err(Error::BadRequest(
+                "at most 16 artifacts may be selected".into(),
+            ));
+        }
+        let mission_id = mission_id.to_owned();
+        let ids = ids.to_vec();
+        self.read(move |conn| {
+            let mut stmt = conn.prepare("SELECT id,mission_id,request_id,kind,title,content,task_id,session_id,artifact_id,created_at FROM mission_records WHERE id=?1 AND mission_id=?2 AND kind='artifact'")
+                .map_err(|e| db_err("selected artifact lookup", e))?;
+            let mut selected = Vec::with_capacity(ids.len());
+            let mut seen = std::collections::HashSet::new();
+            let mut total = 0usize;
+            for id in &ids {
+                if !seen.insert(id) {
+                    return Err(Error::BadRequest("artifact IDs must be unique".into()));
+                }
+                let record = stmt.query_row(params![id, mission_id], map_mission_record)
+                    .optional().map_err(|e| db_err("selected artifact lookup", e))?
+                    .ok_or_else(|| Error::Store("selected mission artifact no longer exists".into()))?;
+                total += record.title.len() + record.content.len();
+                if total > 256 * 1024 {
+                    return Err(Error::Store("selected artifact content exceeds 256 KiB".into()));
+                }
+                selected.push(record);
+            }
+            Ok(selected)
+        }).await
+    }
+    async fn create_mission_task(&self, task: MissionTask) -> Result<MissionTask> {
+        self.with(move |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("task transaction", e))?;
+            let mission: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM missions WHERE id=?1)",
+                    [&task.mission_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| db_err("mission lookup", e))?;
+            if !mission {
+                return Err(Error::NotFound("mission not found".into()));
+            }
+            let project: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+                    [&task.project_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| db_err("project lookup", e))?;
+            if !project {
+                return Err(Error::NotFound("project not found".into()));
+            }
+            let started: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM mission_schedules WHERE mission_id=?1)",
+                    [&task.mission_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| db_err("schedule lookup", e))?;
+            if started {
+                return Err(Error::BadRequest("mission already started".into()));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for dep in &task.dependencies {
+                let exists: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM mission_tasks WHERE id=?1 AND mission_id=?2)",
+                        params![dep, task.mission_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| db_err("dependency lookup", e))?;
+                if dep == &task.id || !exists || !seen.insert(dep) {
+                    return Err(Error::BadRequest(
+                        "dependencies must be unique existing tasks in this mission".into(),
+                    ));
+                }
+            }
+            let mut seen_artifacts = std::collections::HashSet::new();
+            if task.artifact_ids.len() > 16 {
+                return Err(Error::BadRequest("at most 16 artifacts may be selected".into()));
+            }
+            let mut total = 0usize;
+            for artifact in &task.artifact_ids {
+                if !seen_artifacts.insert(artifact) {
+                    return Err(Error::BadRequest("artifact IDs must be unique".into()));
+                }
+                let size: Option<i64> = tx.query_row(
+                    "SELECT length(CAST(content AS BLOB)) + length(CAST(title AS BLOB)) FROM mission_records WHERE id=?1 AND mission_id=?2 AND kind='artifact'",
+                    params![artifact, task.mission_id], |r| r.get(0)
+                ).optional().map_err(|e| db_err("artifact lookup", e))?;
+                total += size.ok_or_else(|| Error::BadRequest("artifact must exist in this mission".into()))? as usize;
+            }
+            if total > 256 * 1024 {
+                return Err(Error::BadRequest("selected artifact content exceeds 256 KiB".into()));
+            }
+            let artifact_ids = serde_json::to_string(&task.artifact_ids).map_err(|e| Error::Store(e.to_string()))?;
+            let deps = serde_json::to_string(&task.dependencies)
+                .map_err(|e| Error::Store(e.to_string()))?;
+            tx.execute(
+                "INSERT INTO mission_tasks (id,mission_id,project_id,title,prompt,dependencies,state,session_id,run_id,error,created_at,artifact_ids) VALUES (?1,?2,?3,?4,?5,?6,'draft',NULL,NULL,NULL,?7,?8)",
+                params![
+                    task.id,
+                    task.mission_id,
+                    task.project_id,
+                    task.title,
+                    task.prompt,
+                    deps,
+                    now_ms(),
+                    artifact_ids
+                ],
+            )
+            .map_err(|e| db_err("create task", e))?;
+            tx.commit().map_err(|e| db_err("commit task", e))?;
+            Ok(task)
+        })
+        .await
+    }
+    async fn revise_mission_task(
+        &self,
+        mission_id: &str,
+        task_id: &str,
+        project_id: Option<String>,
+        prompt: Option<String>,
+        dependencies: Option<Vec<String>>,
+    ) -> Result<MissionTask> {
+        let (mission_id, task_id) = (mission_id.to_owned(), task_id.to_owned());
+        self.with(move |conn| {
+            let tx = conn.transaction().map_err(|e| db_err("revise task", e))?;
+            let started: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM mission_schedules WHERE mission_id=?1)", [&mission_id], |r| r.get(0)).map_err(|e| db_err("schedule lookup", e))?;
+            if started { return Err(Error::BadRequest("mission already started".into())); }
+            let mut tasks = {
+                let mut stmt = tx.prepare("SELECT id,mission_id,project_id,title,prompt,dependencies,state,session_id,run_id,error,artifact_ids FROM mission_tasks WHERE mission_id=?1").map_err(|e| db_err("list tasks", e))?;
+                let rows = stmt.query_map([&mission_id], |r| {
+                    let deps: String = r.get(5)?;
+                    let artifacts: String = r.get(10)?;
+                    Ok(MissionTask { id:r.get(0)?, mission_id:r.get(1)?, project_id:r.get(2)?, title:r.get(3)?, prompt:r.get(4)?, dependencies:serde_json::from_str(&deps).map_err(|e| rusqlite::Error::FromSqlConversionFailure(5,rusqlite::types::Type::Text,Box::new(e)))?, state:r.get(6)?, session_id:r.get(7)?, run_id:r.get(8)?, error:r.get(9)?, artifact_ids:serde_json::from_str(&artifacts).map_err(|e| rusqlite::Error::FromSqlConversionFailure(10,rusqlite::types::Type::Text,Box::new(e)))? })
+                }).map_err(|e| db_err("list tasks", e))?;
+                rows.collect::<std::result::Result<Vec<_>,_>>().map_err(|e| db_err("list tasks", e))?
+            };
+            let index = tasks.iter().position(|t| t.id == task_id).ok_or_else(|| Error::NotFound("task not found in mission".into()))?;
+            if tasks[index].state != "draft" { return Err(Error::BadRequest("task is not a draft".into())); }
+            if let Some(project) = project_id {
+                let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)", [&project], |r| r.get(0)).map_err(|e| db_err("project lookup",e))?;
+                if !exists { return Err(Error::NotFound("project not found".into())); }
+                tasks[index].project_id = project;
+            }
+            if let Some(prompt) = prompt { tasks[index].prompt = prompt; }
+            if let Some(deps) = dependencies {
+                if deps.len() > 256 { return Err(Error::BadRequest("too many dependencies".into())); }
+                let mut seen = std::collections::HashSet::new();
+                for dep in &deps {
+                    if dep == &task_id || !seen.insert(dep) || !tasks.iter().any(|t| &t.id == dep) {
+                        return Err(Error::BadRequest("dependencies must be unique existing tasks in this mission".into()));
+                    }
+                }
+                // Following dependencies from each new edge must never reach this task.
+                let mut stack = deps.clone();
+                let mut visited = std::collections::HashSet::new();
+                while let Some(id) = stack.pop() {
+                    if id == task_id { return Err(Error::BadRequest("dependencies would create a cycle".into())); }
+                    if visited.insert(id.clone()) {
+                        if let Some(task) = tasks.iter().find(|t| t.id == id) { stack.extend(task.dependencies.iter().cloned()); }
+                    }
+                }
+                tasks[index].dependencies = deps;
+            }
+            let task = tasks.swap_remove(index);
+            let deps = serde_json::to_string(&task.dependencies).map_err(|e| Error::Store(e.to_string()))?;
+            tx.execute("UPDATE mission_tasks SET project_id=?1,prompt=?2,dependencies=?3 WHERE id=?4 AND mission_id=?5", params![task.project_id,task.prompt,deps,task.id,mission_id]).map_err(|e| db_err("revise task",e))?;
+            tx.commit().map_err(|e| db_err("commit revision",e))?;
+            Ok(task)
+        }).await
+    }
+    async fn replan_mission_task(
+        &self,
+        mission_id: &str,
+        task_id: &str,
+        expected: MissionTaskPlan,
+        project_id: Option<String>,
+        prompt: Option<String>,
+        dependencies: Option<Vec<String>>,
+    ) -> Result<MissionTask> {
+        let (mission_id, task_id) = (mission_id.to_owned(), task_id.to_owned());
+        self.with(move |conn| {
+            let tx = conn.transaction().map_err(|e| db_err("revise task", e))?;
+            let schedule: Option<String> = tx.query_row("SELECT state FROM mission_schedules WHERE mission_id=?1", [&mission_id], |r| r.get(0)).optional().map_err(|e| db_err("schedule lookup", e))?;
+            if !matches!(schedule.as_deref(), Some("active" | "paused")) { return Err(Error::BadRequest("mission must be started and not cancelled".into())); }
+            let mut tasks = {
+                let mut stmt = tx.prepare("SELECT id,mission_id,project_id,title,prompt,dependencies,state,session_id,run_id,error,artifact_ids FROM mission_tasks WHERE mission_id=?1").map_err(|e| db_err("list tasks", e))?;
+                let rows = stmt.query_map([&mission_id], |r| {
+                    let deps: String = r.get(5)?;
+                    let artifacts: String = r.get(10)?;
+                    Ok(MissionTask { id:r.get(0)?, mission_id:r.get(1)?, project_id:r.get(2)?, title:r.get(3)?, prompt:r.get(4)?, dependencies:serde_json::from_str(&deps).map_err(|e| rusqlite::Error::FromSqlConversionFailure(5,rusqlite::types::Type::Text,Box::new(e)))?, state:r.get(6)?, session_id:r.get(7)?, run_id:r.get(8)?, error:r.get(9)?, artifact_ids:serde_json::from_str(&artifacts).map_err(|e| rusqlite::Error::FromSqlConversionFailure(10,rusqlite::types::Type::Text,Box::new(e)))? })
+                }).map_err(|e| db_err("list tasks", e))?;
+                rows.collect::<std::result::Result<Vec<_>,_>>().map_err(|e| db_err("list tasks", e))?
+            };
+            let index = tasks.iter().position(|t| t.id == task_id).ok_or_else(|| Error::NotFound("task not found in mission".into()))?;
+            let task = &tasks[index];
+            let retried: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM mission_task_retries WHERE mission_id=?1 AND task_id=?2)", params![mission_id,task_id], |r| r.get(0)).map_err(|e| db_err("retry lookup",e))?;
+            if !matches!(task.state.as_str(), "pending" | "blocked") || task.session_id.is_some() || task.run_id.is_some() || retried { return Err(Error::BadRequest("only never-claimed pending or blocked tasks can be replanned".into())); }
+            if task.project_id != expected.project_id || task.prompt != expected.prompt || task.dependencies != expected.dependencies { return Err(Error::BadRequest("task plan changed; refresh and review it again".into())); }
+            if let Some(project) = project_id {
+                let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)", [&project], |r| r.get(0)).map_err(|e| db_err("project lookup",e))?;
+                if !exists { return Err(Error::NotFound("project not found".into())); }
+                tasks[index].project_id = project;
+            }
+            if let Some(prompt) = prompt { tasks[index].prompt = prompt; }
+            if let Some(deps) = dependencies {
+                if deps.len() > 256 { return Err(Error::BadRequest("too many dependencies".into())); }
+                let mut seen = std::collections::HashSet::new();
+                for dep in &deps {
+                    if dep == &task_id || !seen.insert(dep) || !tasks.iter().any(|t| &t.id == dep) {
+                        return Err(Error::BadRequest("dependencies must be unique existing tasks in this mission".into()));
+                    }
+                }
+                // Following dependencies from each new edge must never reach this task.
+                let mut stack = deps.clone();
+                let mut visited = std::collections::HashSet::new();
+                while let Some(id) = stack.pop() {
+                    if id == task_id { return Err(Error::BadRequest("dependencies would create a cycle".into())); }
+                    if visited.insert(id.clone()) {
+                        if let Some(task) = tasks.iter().find(|t| t.id == id) { stack.extend(task.dependencies.iter().cloned()); }
+                    }
+                }
+                tasks[index].dependencies = deps;
+            }
+            // Reconsider the edited blocked task and its blocked descendants; the
+            // scheduler will re-block any whose dependencies still failed.
+            if tasks[index].state == "blocked" { tasks[index].state = "pending".into(); tasks[index].error = None; }
+            let task = tasks.swap_remove(index);
+            let deps = serde_json::to_string(&task.dependencies).map_err(|e| Error::Store(e.to_string()))?;
+            tx.execute("UPDATE mission_tasks SET project_id=?1,prompt=?2,dependencies=?3,state=?6,error=?7 WHERE id=?4 AND mission_id=?5", params![task.project_id,task.prompt,deps,task.id,mission_id,task.state,task.error]).map_err(|e| db_err("revise task",e))?;
+            tx.execute("UPDATE mission_tasks SET state='pending',error=NULL WHERE mission_id=?1 AND state='blocked'", [&mission_id]).map_err(|e| db_err("reconsider blocked tasks",e))?;
+            tx.commit().map_err(|e| db_err("commit revision",e))?;
+            Ok(task)
+        }).await
+    }
+    async fn list_mission_tasks(&self, mission_id: &str) -> Result<Vec<MissionTask>> {
+        let mission_id = mission_id.to_owned();
+        self.read(move |conn| {
+            let mut stmt = conn.prepare("SELECT id,mission_id,project_id,title,prompt,dependencies,state,session_id,run_id,error,artifact_ids FROM mission_tasks WHERE mission_id=?1 ORDER BY rowid").map_err(|e| db_err("list tasks",e))?;
+            let rows = stmt.query_map([mission_id], |r| { let deps: String = r.get(5)?; Ok(MissionTask { id:r.get(0)?, mission_id:r.get(1)?, project_id:r.get(2)?, title:r.get(3)?, prompt:r.get(4)?, dependencies:serde_json::from_str(&deps).map_err(|e| rusqlite::Error::FromSqlConversionFailure(5,rusqlite::types::Type::Text,Box::new(e)))?, artifact_ids: serde_json::from_str(&r.get::<_, String>(10)?).map_err(|e| rusqlite::Error::FromSqlConversionFailure(10,rusqlite::types::Type::Text,Box::new(e)))?, state:r.get(6)?, session_id:r.get(7)?, run_id:r.get(8)?, error:r.get(9)? }) }).map_err(|e| db_err("list tasks",e))?;
+            rows.collect::<std::result::Result<Vec<_>,_>>().map_err(|e| db_err("list tasks",e))
+        }).await
+    }
+    async fn start_mission_tasks(&self, mission_id: &str, limit: u32) -> Result<()> {
+        let id = mission_id.to_owned();
+        self.with(move |conn| {
+            let tx = conn.transaction().map_err(|e| db_err("start mission", e))?;
+            let exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM missions WHERE id=?1)",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| db_err("mission lookup", e))?;
+            if !exists {
+                return Err(Error::NotFound("mission not found".into()));
+            }
+            if !(1..=8).contains(&limit) {
+                return Err(Error::BadRequest("max_concurrency must be 1..=8".into()));
+            }
+            tx.execute(
+                "INSERT INTO mission_schedules (mission_id,concurrency) VALUES (?1,?2) ON CONFLICT(mission_id) DO NOTHING",
+                params![id, limit],
+            )
+            .map_err(|e| db_err("start mission", e))?;
+            tx.execute(
+                "UPDATE mission_tasks SET state='pending' WHERE mission_id=?1 AND state='draft'",
+                [&id],
+            )
+            .map_err(|e| db_err("approve tasks", e))?;
+            tx.commit().map_err(|e| db_err("commit start", e))?;
+            Ok(())
+        })
+        .await
+    }
+    async fn mission_schedule_state(&self, mission_id: &str) -> Result<Option<String>> {
+        let id = mission_id.to_owned();
+        self.with(move |conn| {
+            conn.query_row(
+                "SELECT state FROM mission_schedules WHERE mission_id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| db_err("schedule state", e))
+        })
+        .await
+    }
+    async fn control_mission_tasks(&self, mission_id: &str, action: &str) -> Result<()> {
+        let (id, action) = (mission_id.to_owned(), action.to_owned());
+        self.with(move |conn| {
+            let tx = conn.transaction().map_err(|e| db_err("control mission", e))?;
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM missions WHERE id=?1)", [&id], |r| r.get(0)).map_err(|e| db_err("mission lookup", e))?;
+            if !exists { return Err(Error::NotFound("mission not found".into())); }
+            let current: Option<String> = tx.query_row("SELECT state FROM mission_schedules WHERE mission_id=?1", [&id], |r| r.get(0)).optional().map_err(|e| db_err("schedule lookup", e))?;
+            let next = match (action.as_str(), current.as_deref()) {
+                ("pause", Some("active" | "paused")) => "paused",
+                ("resume", Some("paused" | "active")) => "active",
+                ("cancel", Some("active" | "paused" | "cancelled")) => "cancelled",
+                _ => return Err(Error::BadRequest("invalid mission control transition".into())),
+            };
+            tx.execute("UPDATE mission_schedules SET state=?2 WHERE mission_id=?1", params![id, next]).map_err(|e| db_err("control schedule", e))?;
+            if next == "cancelled" {
+                tx.execute("UPDATE mission_tasks SET state='cancelled', error='mission cancelled before claim' WHERE mission_id=?1 AND state IN ('draft','pending')", [&id]).map_err(|e| db_err("cancel tasks", e))?;
+            }
+            tx.commit().map_err(|e| db_err("commit mission control", e))?;
+            Ok(())
+        }).await
+    }
+    async fn retry_mission_task(
+        &self,
+        mission_id: &str,
+        task_id: &str,
+        request_id: &str,
+        project_id: Option<&str>,
+    ) -> Result<bool> {
+        let (mission, task, request, project) = (
+            mission_id.to_owned(),
+            task_id.to_owned(),
+            request_id.to_owned(),
+            project_id.map(str::to_owned),
+        );
+        self.with(move |conn| {
+            let tx = conn.transaction().map_err(|e| db_err("retry task", e))?;
+            let existing: Option<(String, Option<String>)> = tx.query_row(
+                "SELECT task_id,project_id FROM mission_task_retries WHERE mission_id=?1 AND request_id=?2",
+                params![mission, request], |r| Ok((r.get(0)?,r.get(1)?)))
+                .optional().map_err(|e| db_err("retry lookup", e))?;
+            if let Some((old_task, old_project)) = existing {
+                if old_task != task || old_project != project { return Err(Error::BadRequest("request_id already used for a different retry".into())); }
+                return Ok(false);
+            }
+            let schedule: Option<String> = tx.query_row("SELECT state FROM mission_schedules WHERE mission_id=?1", [&mission], |r| r.get(0)).optional().map_err(|e| db_err("retry schedule",e))?;
+            if !matches!(schedule.as_deref(), Some("active" | "paused")) { return Err(Error::BadRequest("mission must be started and not cancelled".into())); }
+            let previous: Option<(String,String,Option<String>,Option<String>,Option<String>)> = tx.query_row(
+                "SELECT project_id,state,session_id,run_id,error FROM mission_tasks WHERE mission_id=?1 AND id=?2", params![mission,task],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(|e| db_err("retry task lookup",e))?;
+            let (old_project, old_state, session, run, error) = previous.ok_or_else(|| Error::NotFound("task not found".into()))?;
+            if !matches!(old_state.as_str(), "failed" | "interrupted" | "cancelled") { return Err(Error::BadRequest("only failed, interrupted or cancelled tasks can be retried".into())); }
+            let target = project.as_deref().unwrap_or(&old_project);
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",[target],|r|r.get(0)).map_err(|e|db_err("retry project",e))?;
+            if !exists { return Err(Error::NotFound("project not found".into())); }
+            tx.execute("INSERT INTO mission_task_retries VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![mission,request,task,project,old_project,old_state,session,run,error]).map_err(|e| db_err("reserve retry",e))?;
+            tx.execute("UPDATE mission_tasks SET project_id=?3,state='pending',session_id=NULL,run_id=NULL,error=NULL WHERE mission_id=?1 AND id=?2",params![mission,task,target]).map_err(|e|db_err("retry task",e))?;
+            // Previously blocked descendants are reconsidered; the scheduler will
+            // re-block those still depending on any other failed task.
+            tx.execute("UPDATE mission_tasks SET state='pending',error=NULL WHERE mission_id=?1 AND state='blocked'",[&mission]).map_err(|e|db_err("reconsider blocked tasks",e))?;
+            tx.commit().map_err(|e|db_err("commit retry",e))?;
+            Ok(true)
+        }).await
+    }
+    async fn claim_mission_task(
+        &self,
+        mission_id: &str,
+        session_id: &str,
+    ) -> Result<Option<MissionTask>> {
+        let id = mission_id.to_owned();
+        let sid = session_id.to_owned();
+        self.with(move |conn| {
+            let tx=conn.transaction().map_err(|e| db_err("claim task",e))?;
+            let limit: Option<i64>=tx.query_row("SELECT concurrency FROM mission_schedules WHERE mission_id=?1 AND state='active'",[&id],|r|r.get(0)).optional().map_err(|e|db_err("schedule",e))?;
+            let Some(limit)=limit else { return Ok(None) };
+            // Propagate terminal dependency failures to a fixed point.
+            loop {
+                let n=tx.execute("UPDATE mission_tasks SET state='blocked', error='dependency did not complete' WHERE mission_id=?1 AND state='pending' AND EXISTS (SELECT 1 FROM json_each(mission_tasks.dependencies) d JOIN mission_tasks parent ON parent.id=d.value WHERE parent.state IN ('failed','blocked','cancelled','interrupted'))",[&id]).map_err(|e|db_err("block tasks",e))?;
+                if n==0 { break; }
+            }
+            let running:i64=tx.query_row("SELECT COUNT(*) FROM mission_tasks WHERE mission_id=?1 AND state='running'",[&id],|r|r.get(0)).map_err(|e|db_err("count tasks",e))?;
+            let task_id:Option<String>=if running < limit { tx.query_row("SELECT id FROM mission_tasks WHERE mission_id=?1 AND state='pending' AND NOT EXISTS (SELECT 1 FROM json_each(mission_tasks.dependencies) d JOIN mission_tasks parent ON parent.id=d.value WHERE parent.state != 'completed') ORDER BY rowid LIMIT 1",[&id],|r|r.get(0)).optional().map_err(|e|db_err("ready task",e))? } else { None };
+            let task = if let Some(task_id) = task_id {
+                tx.execute("INSERT INTO mission_attempt_sessions (session_id,mission_id) VALUES (?1,?2)",params![sid,id]).map_err(|e|db_err("reserve task attribution",e))?;
+                tx.execute("UPDATE mission_tasks SET state='running', session_id=?2 WHERE id=?1 AND state='pending'",params![task_id,sid]).map_err(|e|db_err("claim task",e))?;
+                Some(tx.query_row("SELECT id,mission_id,project_id,title,prompt,dependencies,state,session_id,run_id,error,artifact_ids FROM mission_tasks WHERE id=?1", [&task_id], |r| {
+                    let deps: String = r.get(5)?;
+                    Ok(MissionTask { id:r.get(0)?, mission_id:r.get(1)?, project_id:r.get(2)?, title:r.get(3)?, prompt:r.get(4)?, dependencies:serde_json::from_str(&deps).map_err(|e| rusqlite::Error::FromSqlConversionFailure(5,rusqlite::types::Type::Text,Box::new(e)))?, artifact_ids: serde_json::from_str(&r.get::<_, String>(10)?).map_err(|e| rusqlite::Error::FromSqlConversionFailure(10,rusqlite::types::Type::Text,Box::new(e)))?, state:r.get(6)?, session_id:r.get(7)?, run_id:r.get(8)?, error:r.get(9)? })
+                }).map_err(|e|db_err("read claimed task",e))?)
+            } else { None };
+            tx.commit().map_err(|e|db_err("commit claim",e))?; Ok(task)
+        }).await
+    }
+    async fn finish_mission_task(
+        &self,
+        id: &str,
+        state: &str,
+        run_id: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let (id, state, run_id, error) = (
+            id.to_owned(),
+            state.to_owned(),
+            run_id.map(str::to_owned),
+            error.map(str::to_owned),
+        );
+        self.with(move |conn| {
+            let tx = conn.transaction().map_err(|e| db_err("finish task transaction", e))?;
+            if state != "running" {
+                // Capture only persisted facts for this exact attempt, atomically with
+                // the terminal transition. A missing run is not a successful run.
+                let task: Option<(String, Option<String>)> = tx.query_row(
+                    "SELECT mission_id,session_id FROM mission_tasks WHERE id=?1 AND state='running'", [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                ).optional().map_err(|e| db_err("capture task", e))?;
+                if let Some((mission, Some(session))) = task {
+                    let run: Option<(String, Option<String>, i64, Option<i64>)> = match &run_id {
+                        Some(run_id) => tx.query_row(
+                            "SELECT model,error,started_at,finished_at FROM runs WHERE id=?1 AND session_id=?2",
+                            params![run_id, session], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+                        ).optional().map_err(|e| db_err("capture run", e))?,
+                        None => None,
+                    };
+                    let counts: (i64, i64, i64) = match &run_id {
+                        Some(run_id) => tx.query_row(
+                            "SELECT COUNT(*), COALESCE(SUM(role='assistant'),0), COALESCE(SUM(role='tool'),0) FROM messages WHERE session_id=?1 AND run_id=?2 AND rewound_at IS NULL",
+                            params![session,run_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+                        ).map_err(|e| db_err("capture messages", e))?,
+                        None => (0,0,0),
+                    };
+                    let content = serde_json::json!({
+                        "description": "Runtime observations, not a verification verdict. Message counts do not establish command success.",
+                        "task_state": state, "task_error": error, "run_id": run_id,
+                        "persisted_run": run.map(|(model, error, started_at, finished_at)| serde_json::json!({"model":model,"error":error,"started_at":started_at,"finished_at":finished_at})),
+                        "visible_message_counts": {"total":counts.0,"assistant":counts.1,"tool":counts.2}
+                    }).to_string();
+                    let request = format!("_karucode_auto_evidence_{}_{}", id, session);
+                    tx.execute("INSERT OR IGNORE INTO mission_records (id,mission_id,request_id,kind,title,content,task_id,session_id,artifact_id,created_at) VALUES (?1,?2,?3,'evidence','Automatic task run observations',?4,?5,?6,NULL,?7)", params![request,mission,request,content,id,session,now_ms()]).map_err(|e| db_err("capture evidence", e))?;
+                }
+            }
+            tx.execute("UPDATE mission_tasks SET state=?2,run_id=COALESCE(?3,run_id),error=?4 WHERE id=?1 AND state='running'",params![id,state,run_id,error]).map_err(|e|db_err("finish task",e))?;
+            tx.commit().map_err(|e| db_err("commit task finish", e))?;
+            Ok(())
+        }).await
+    }
+    async fn recover_mission_tasks(&self) -> Result<Vec<String>> {
+        self.with(move |conn| {
+            conn.execute("UPDATE mission_tasks SET state='interrupted',error='server stopped during dispatch or execution' WHERE state='running'",[]).map_err(|e|db_err("recover tasks",e))?;
+            let mut stmt=conn.prepare("SELECT mission_id FROM mission_schedules").map_err(|e|db_err("recover schedules",e))?;
+            let rows=stmt.query_map([],|r|r.get(0)).map_err(|e|db_err("recover schedules",e))?;
+            rows.collect::<std::result::Result<Vec<String>,_>>().map_err(|e|db_err("recover schedules",e))
+        }).await
+    }
+    async fn admit_provider_attempt(&self, session_id: &str) -> Result<()> {
+        let session_id = session_id.to_owned();
+        self.with(move |conn| {
+            let tx = conn.transaction().map_err(|e| db_err("attempt transaction", e))?;
+            let mission: Option<String> = tx.query_row("SELECT mission_id FROM mission_attempt_sessions WHERE session_id=?1", [&session_id], |r| r.get(0)).optional().map_err(|e| db_err("attempt attribution", e))?;
+            if let Some(mission) = mission {
+                let n = tx.execute("UPDATE mission_attempt_budgets SET attempts=attempts+1 WHERE mission_id=?1 AND (max_attempts IS NULL OR attempts < max_attempts)", [&mission]).map_err(|e| db_err("attempt admission", e))?;
+                if n != 1 { return Err(Error::Store(format!("mission {mission} provider attempt budget exhausted or unavailable"))); }
+            }
+            tx.commit().map_err(|e| db_err("commit attempt admission", e))?;
+            Ok(())
+        }).await
+    }
+    async fn mission_attempt_budget(&self, id: &str) -> Result<Option<(Option<u32>, u32)>> {
+        let id = id.to_owned();
+        self.read(move |conn| {
+            conn.query_row(
+                "SELECT max_attempts,attempts FROM mission_attempt_budgets WHERE mission_id=?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| db_err("read mission budget", e))
+        })
+        .await
+    }
+
+    async fn create_mission(
+        &self,
+        id: &str,
+        project_id: &str,
+        title: &str,
+        description: &str,
+        max_provider_attempts: Option<u32>,
+    ) -> Result<Mission> {
+        let (id, project_id, title, description) = (
+            id.to_owned(),
+            project_id.to_owned(),
+            title.to_owned(),
+            description.to_owned(),
+        );
+        self.with(move |conn| {
+            let now = now_ms();
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("create mission transaction", e))?;
+            tx.execute(
+                "INSERT INTO missions VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                params![id, project_id, title, description, now],
+            )
+            .map_err(|e| db_err("create mission", e))?;
+            tx.execute(
+                "INSERT INTO mission_attempt_budgets (mission_id,max_attempts) VALUES (?1,?2)",
+                params![id, max_provider_attempts],
+            )
+            .map_err(|e| db_err("create mission budget", e))?;
+            tx.commit().map_err(|e| db_err("commit mission", e))?;
+            Ok(Mission {
+                id,
+                project_id,
+                title,
+                description,
+                created_at: now,
+                updated_at: now,
+            })
+        })
+        .await
+    }
+
+    async fn list_missions(&self, project_id: &str) -> Result<Vec<Mission>> {
+        let project_id = project_id.to_owned();
+        self.read(move |conn| {
+            let mut stmt = conn.prepare("SELECT id, project_id, title, description, created_at, updated_at FROM missions WHERE project_id = ?1 ORDER BY created_at DESC, id").map_err(|e| db_err("list missions", e))?;
+            let rows = stmt.query_map(params![project_id], map_mission).map_err(|e| db_err("list missions", e))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(|e| db_err("list missions", e))
+        }).await
+    }
+
+    async fn get_mission(&self, id: &str) -> Result<Option<Mission>> {
+        let id = id.to_owned();
+        self.read(move |conn| conn.query_row("SELECT id, project_id, title, description, created_at, updated_at FROM missions WHERE id = ?1", params![id], map_mission).optional().map_err(|e| db_err("get mission", e))).await
+    }
+
+    async fn coordinator_mission(&self, session_id: &str) -> Result<Option<Mission>> {
+        let session_id = session_id.to_owned();
+        self.read(move |conn| conn.query_row("SELECT m.id, m.project_id, m.title, m.description, m.created_at, m.updated_at FROM missions m JOIN mission_sessions s ON s.mission_id=m.id WHERE s.session_id=?1 AND s.request_id='_karucode_coordinator'", params![session_id], map_mission).optional().map_err(|e| db_err("find coordinator mission", e))).await
+    }
+
+    async fn delete_mission(&self, id: &str) -> Result<()> {
+        let id = id.to_owned();
+        self.with(move |conn| {
+            let n = conn
+                .execute("DELETE FROM missions WHERE id = ?1", params![id])
+                .map_err(|e| db_err("delete mission", e))?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("mission {id}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn create_mission_session(
+        &self,
+        mission_id: &str,
+        request_id: &str,
+        session_id: &str,
+        project_id: &str,
+        title: &str,
+        workspace: &str,
+        prompt: &str,
+    ) -> Result<bool> {
+        let (mission_id, request_id, session_id, project_id, title, workspace, prompt) = (
+            mission_id.to_owned(),
+            request_id.to_owned(),
+            session_id.to_owned(),
+            project_id.to_owned(),
+            title.to_owned(),
+            workspace.to_owned(),
+            prompt.to_owned(),
+        );
+        self.with(move |conn| {
+            let tx = conn.transaction().map_err(|e| db_err("mission session transaction", e))?;
+            let existing: Option<(String, String, String)> = tx.query_row("SELECT title, prompt, project_id FROM mission_sessions WHERE mission_id = ?1 AND request_id = ?2", params![mission_id, request_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional().map_err(|e| db_err("mission request lookup", e))?;
+            if let Some((old_title, old_prompt, old_project)) = existing {
+                if old_title != title || old_prompt != prompt || old_project != project_id { return Err(Error::BadRequest("request_id already used with different input".into())); }
+                return Ok(false);
+            }
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM missions WHERE id = ?1)", params![mission_id], |r| r.get(0)).map_err(|e| db_err("mission lookup", e))?;
+            if !exists { return Err(Error::NotFound(format!("mission {mission_id}"))); }
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)", params![project_id], |r| r.get(0)).map_err(|e| db_err("project lookup", e))?;
+            if !exists { return Err(Error::NotFound(format!("project {project_id}"))); }
+            let now = now_ms();
+            tx.execute("INSERT INTO sessions (id,title,workspace,project_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?5)", params![session_id,title,workspace,project_id,now]).map_err(|e| db_err("create mission session", e))?;
+            tx.execute("INSERT INTO mission_sessions (mission_id,request_id,session_id,title,prompt,created_at,project_id) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![mission_id,request_id,session_id,title,prompt,now,project_id]).map_err(|e| db_err("link mission session", e))?;
+            tx.execute("UPDATE missions SET updated_at = ?2 WHERE id = ?1", params![mission_id,now]).map_err(|e| db_err("touch mission", e))?;
+            tx.commit().map_err(|e| db_err("commit mission session", e))?;
+            Ok(true)
+        }).await
+    }
+
+    async fn list_mission_sessions(&self, mission_id: &str) -> Result<Vec<MissionSession>> {
+        let mission_id = mission_id.to_owned();
+        self.read(move |conn| {
+            let mut stmt = conn.prepare("SELECT session_id, request_id, prompt, created_at, project_id FROM mission_sessions WHERE mission_id = ?1 ORDER BY created_at, session_id").map_err(|e| db_err("list mission sessions", e))?;
+            let rows = stmt.query_map(params![mission_id], |r| Ok(MissionSession { session_id:r.get(0)?, request_id:r.get(1)?, prompt:r.get(2)?, created_at:r.get(3)?, project_id:r.get(4)? })).map_err(|e| db_err("list mission sessions", e))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(|e| db_err("list mission sessions", e))
+        }).await
+    }
+
+    async fn create_control_session(
+        &self,
+        id: &str,
+        title: &str,
+        workspace: &str,
+    ) -> Result<Session> {
+        let (id, title, workspace) = (id.to_owned(), title.to_owned(), workspace.to_owned());
+        self.with(move |conn| {
+            let now = now_ms();
+            conn.execute(
+                "INSERT INTO sessions (id,title,workspace,project_id,created_at,updated_at,control) VALUES (?1,?2,?3,NULL,?4,?4,1)",
+                params![id, title, workspace, now],
+            )
+            .map_err(|e| db_err("create control session", e))?;
+            conn.query_row(
+                "SELECT id,title,workspace,project_id,model,created_at,updated_at FROM sessions WHERE id=?1",
+                params![id],
+                map_session,
+            )
+            .map_err(|e| db_err("read control session", e))
+        })
+        .await
+    }
+    async fn list_control_sessions(&self) -> Result<Vec<SessionSummary>> {
+        self.read(|conn| summarize_sessions(conn, SessionScope::Control))
+            .await
+    }
+    async fn detach_control_session(&self, id: &str, workspace: &str) -> Result<()> {
+        let (id, workspace) = (id.to_owned(), workspace.to_owned());
+        self.with(move |conn| {
+            conn.execute(
+                "UPDATE sessions SET project_id=NULL, workspace=?2, updated_at=?3 WHERE id=?1 AND control=1",
+                params![id, workspace, now_ms()],
+            )
+            .map_err(|e| db_err("detach control session", e))?;
+            Ok(())
+        })
+        .await
+    }
+    async fn is_control_session(&self, id: &str) -> Result<bool> {
+        let id = id.to_owned();
+        self.read(move |conn| {
+            conn.query_row(
+                "SELECT COALESCE((SELECT control FROM sessions WHERE id=?1), 0)",
+                params![id],
+                |r| r.get::<_, i64>(0).map(|value| value == 1),
+            )
+            .map_err(|e| db_err("control chat lookup", e))
+        })
+        .await
+    }
+    async fn reserve_control_dispatch(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        project_id: &str,
+        title: &str,
+        workspace: &str,
+        prompt: &str,
+    ) -> Result<(String, bool)> {
+        let (request_id, session_id, project_id, title, workspace, prompt) = (
+            request_id.to_owned(),
+            session_id.to_owned(),
+            project_id.to_owned(),
+            title.to_owned(),
+            workspace.to_owned(),
+            prompt.to_owned(),
+        );
+        self.with(move |conn| {
+            let tx = conn.transaction().map_err(|e| db_err("control dispatch transaction",e))?;
+            let old: Option<(String,String,String,String,String)> = tx.query_row("SELECT session_id,project_id,title,workspace,prompt FROM control_dispatches WHERE request_id=?1",params![request_id],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(|e| db_err("control dispatch lookup",e))?;
+            if let Some((id,p,t,w,body)) = old {
+                if p != project_id || t != title || w != workspace || body != prompt { return Err(Error::BadRequest("request_id already used with different input".into())); }
+                return Ok((id,false));
+            }
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1 AND path=?2)",params![project_id,workspace],|r| r.get(0)).map_err(|e| db_err("control project lookup",e))?;
+            if !exists { return Err(Error::BadRequest("target project changed or no longer exists".into())); }
+            let now = now_ms();
+            tx.execute("INSERT INTO sessions (id,title,workspace,project_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?5)",params![session_id,title,workspace,project_id,now]).map_err(|e| db_err("create control dispatch session",e))?;
+            tx.execute("INSERT INTO control_dispatches VALUES (?1,?2,?3,?4,?5,?6)",params![request_id,session_id,project_id,title,workspace,prompt]).map_err(|e| db_err("reserve control dispatch",e))?;
+            tx.commit().map_err(|e| db_err("commit control dispatch",e))?;
+            Ok((session_id,true))
+        }).await
+    }
+
     async fn create_session(
         &self,
         id: &str,
@@ -1185,13 +2069,52 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn recovery_sessions(
+        &self,
+        cutoff: i64,
+        limit: usize,
+        include_agents: bool,
+    ) -> Result<(usize, Vec<String>)> {
+        self.read(move |conn| {
+            let total: usize = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+                .map_err(|e| db_err("recovery session count", e))?;
+            let mut stmt = conn.prepare(
+                "SELECT id FROM (SELECT s.id, s.updated_at,
+                    (EXISTS(SELECT 1 FROM runs r WHERE r.session_id = s.id AND r.status = 'running')
+                     OR (?3 AND EXISTS(SELECT 1 FROM agents a WHERE a.session_id = s.id AND a.status = 'running'))) AS interrupted
+                 FROM sessions s)
+                 WHERE interrupted OR updated_at >= ?1
+                 ORDER BY interrupted DESC, updated_at DESC, id DESC LIMIT ?2"
+            ).map_err(|e| db_err("recovery sessions prepare", e))?;
+            let ids = stmt.query_map(params![cutoff, i64::try_from(limit).unwrap_or(i64::MAX), include_agents], |r| r.get(0))
+                .map_err(|e| db_err("recovery sessions query", e))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("recovery sessions rows", e))?;
+            Ok((total, ids))
+        }).await
+    }
+
+    async fn running_agent_ids(&self) -> Result<Vec<(String, String)>> {
+        self.read(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT session_id, id FROM agents WHERE status = 'running'")
+                .map_err(|e| db_err("running agents prepare", e))?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| db_err("running agents query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("running agents rows", e))
+        })
+        .await
+    }
+
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
-        self.read(|conn| summarize_sessions(conn, None)).await
+        self.read(|conn| summarize_sessions(conn, SessionScope::All)).await
     }
 
     async fn list_sessions_for_project(&self, project_id: &str) -> Result<Vec<SessionSummary>> {
         let project_id = project_id.to_string();
-        self.read(move |conn| summarize_sessions(conn, Some(&project_id)))
+        self.read(move |conn| summarize_sessions(conn, SessionScope::Project(&project_id)))
             .await
     }
 
@@ -1497,6 +2420,131 @@ impl Store for SqliteStore {
                 .map_err(|e| db_err("list_messages rows", e))
         })
         .await
+    }
+
+    async fn list_message_page(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+        before_id: Option<i64>,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<MessagePage> {
+        let session_id = session_id.to_string();
+        let agent_id = agent_id.map(str::to_owned);
+        self.read(move |conn| {
+            // Read sizes first so an excluded oversized row is never materialized.
+            // Both queries use the same read transaction for a consistent snapshot.
+            let tx = conn.unchecked_transaction().map_err(|e| db_err("message page begin", e))?;
+            let mut stmt = tx.prepare(
+                "SELECT id, length(CAST(session_id AS BLOB)) + COALESCE(length(CAST(run_id AS BLOB)),0)
+                    + COALESCE(length(CAST(agent_id AS BLOB)),0) + length(CAST(role AS BLOB))
+                    + length(CAST(content AS BLOB)) + COALESCE(length(CAST(tool_calls AS BLOB)),0)
+                    + COALESCE(length(CAST(tool_call_id AS BLOB)),0) + COALESCE(length(CAST(name AS BLOB)),0)
+                    + COALESCE(length(CAST(images AS BLOB)),0) + COALESCE(length(CAST(reasoning_content AS BLOB)),0)
+                   FROM messages WHERE session_id = ?1 AND rewound_at IS NULL
+                    AND (?2 IS NULL OR agent_id = ?2) AND (?3 IS NULL OR id < ?3)
+                   ORDER BY id DESC LIMIT ?4"
+            ).map_err(|e| db_err("message page sizes prepare", e))?;
+            let mut rows = stmt.query(params![session_id, agent_id, before_id, limit_i64(limit.saturating_add(1))])
+                .map_err(|e| db_err("message page sizes query", e))?;
+            let mut ids = Vec::new();
+            let mut bytes = 0usize;
+            let mut has_more = false;
+            while let Some(row) = rows.next().map_err(|e| db_err("message page sizes rows", e))? {
+                let id: i64 = row.get(0).map_err(|e| db_err("message page id", e))?;
+                let size: i64 = row.get(1).map_err(|e| db_err("message page size", e))?;
+                let size = usize::try_from(size).unwrap_or(usize::MAX);
+                if ids.len() >= limit || (!ids.is_empty() && bytes.saturating_add(size) > max_bytes) {
+                    has_more = true;
+                    break;
+                }
+                bytes = bytes.saturating_add(size);
+                ids.push(id);
+            }
+            drop(rows);
+            drop(stmt);
+            let mut messages = Vec::with_capacity(ids.len());
+            let mut stmt = tx.prepare(
+                "SELECT id, session_id, run_id, agent_id, role, content, tool_calls,
+                        tool_call_id, name, images, reasoning_content, rewound_at, created_at
+                   FROM messages WHERE id = ?1"
+            ).map_err(|e| db_err("message page rows prepare", e))?;
+            for id in ids.into_iter().rev() {
+                messages.push(stmt.query_row(params![id], map_stored_message)
+                    .map_err(|e| db_err("message page row", e))?);
+            }
+            Ok(MessagePage { messages, has_more })
+        }).await
+    }
+
+    async fn list_history_page(
+        &self,
+        session_id: &str,
+        before_id: Option<i64>,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        let session_id = session_id.to_owned();
+        self.read(move |conn| {
+            // Calculate payload lengths in SQLite, before copying any row into Rust.
+            // BLOB length counts UTF-8 bytes rather than Unicode code points.
+            let mut stmt = conn.prepare(
+                "WITH bounded AS (
+                    SELECT id, session_id, run_id, agent_id, role,
+                           CASE WHEN role = 'tool' AND length(CAST(content AS BLOB)) > ?4 / 2
+                                THEN '[tool result omitted: exceeds history byte budget]' ELSE content END AS content,
+                           tool_calls, tool_call_id, name, images, reasoning_content, rewound_at, created_at
+                    FROM messages WHERE session_id = ?1 AND rewound_at IS NULL
+                     AND agent_id IS NULL AND role != 'system' AND (?2 IS NULL OR id < ?2)
+                    ORDER BY id DESC LIMIT ?3
+                 )
+                 SELECT id, session_id, run_id, agent_id, role, content, tool_calls,
+                        tool_call_id, name, images, reasoning_content, rewound_at, created_at,
+                        COALESCE(length(CAST(content AS BLOB)), 0) + COALESCE(length(CAST(tool_calls AS BLOB)), 0) +
+                        COALESCE(length(CAST(images AS BLOB)), 0) + COALESCE(length(CAST(reasoning_content AS BLOB)), 0) +
+                        COALESCE(length(CAST(tool_call_id AS BLOB)), 0) + COALESCE(length(CAST(name AS BLOB)), 0)
+                   FROM bounded ORDER BY id DESC"
+            ).map_err(|e| db_err("list_history_page prepare", e))?;
+            let mut rows = stmt.query(params![session_id, before_id, limit_i64(limit), limit_i64(max_bytes)])
+                .map_err(|e| db_err("list_history_page query", e))?;
+            let mut out = Vec::new();
+            let mut bytes = 0usize;
+            while let Some(row) = rows.next().map_err(|e| db_err("list_history_page rows", e))? {
+                let size: i64 = row.get(13).map_err(|e| db_err("list_history_page size", e))?;
+                let size = usize::try_from(size).unwrap_or(usize::MAX);
+                if !out.is_empty() && bytes.saturating_add(size) > max_bytes { break; }
+                out.push(map_stored_message(row).map_err(|e| db_err("list_history_page row", e))?);
+                bytes = bytes.saturating_add(size);
+            }
+            Ok(out)
+        }).await
+    }
+
+    async fn rewind_tool_names(
+        &self,
+        session_id: &str,
+        after_id: i64,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<String>> {
+        let session_id = session_id.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn.prepare("SELECT length(CAST(tool_calls AS BLOB)), tool_calls FROM messages WHERE id IN (SELECT id FROM messages WHERE session_id = ?1 AND id > ?2 AND rewound_at IS NULL ORDER BY id ASC LIMIT ?3) ORDER BY id ASC")
+                .map_err(|e| db_err("rewind_tool_names prepare", e))?;
+            let mut rows = stmt.query(params![session_id, after_id, limit_i64(limit)]).map_err(|e| db_err("rewind_tool_names query", e))?;
+            let mut remaining = max_bytes;
+            let mut names = Vec::new();
+            while let Some(row) = rows.next().map_err(|e| db_err("rewind_tool_names row", e))? {
+                let size: Option<i64> = row.get(0).map_err(|e| db_err("rewind_tool_names length", e))?;
+                let size = size.unwrap_or(0).max(0) as usize;
+                if size > remaining { return Err(Error::BadRequest("rewind tool scan exceeds byte limit".into())); }
+                remaining -= size;
+                let json: Option<String> = row.get(1).map_err(|e| db_err("rewind_tool_names calls", e))?;
+                for call in json_vec::<ToolCall>(json, "messages.tool_calls") { names.push(call.name); }
+            }
+            Ok(names)
+        }).await
     }
 
     async fn list_messages_after(
@@ -1854,6 +2902,69 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn list_checkpoint_metadata(
+        &self,
+        session_id: &str,
+        after_id: i64,
+    ) -> Result<Vec<FileCheckpoint>> {
+        let session_id = session_id.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, session_id, run_id, agent_id, call_id, tool, path, existed,
+                        capture_failed, message_id, created_at FROM checkpoints
+                 WHERE session_id = ?1 AND (message_id = 0 OR message_id > ?2) ORDER BY id ASC",
+                )
+                .map_err(|e| db_err("list_checkpoint_metadata prepare", e))?;
+            let rows = stmt
+                .query_map(params![session_id, after_id], |row| {
+                    Ok(FileCheckpoint {
+                        id: row.get("id")?,
+                        session_id: row.get("session_id")?,
+                        run_id: row.get("run_id")?,
+                        agent_id: row.get("agent_id")?,
+                        call_id: row.get("call_id")?,
+                        tool: row.get("tool")?,
+                        path: row.get("path")?,
+                        existed: row.get::<_, i64>("existed")? != 0,
+                        content: String::new(),
+                        capture_failed: row.get::<_, i64>("capture_failed")? != 0,
+                        message_id: row.get("message_id")?,
+                        created_at: row.get("created_at")?,
+                    })
+                })
+                .map_err(|e| db_err("list_checkpoint_metadata query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("list_checkpoint_metadata rows", e))
+        })
+        .await
+    }
+
+    async fn checkpoint_content_bounded(
+        &self,
+        id: i64,
+        max_bytes: usize,
+    ) -> Result<Option<String>> {
+        self.read(move |conn| {
+            let mut stmt = conn.prepare("SELECT length(b.data), CAST(b.data AS TEXT) FROM checkpoints c JOIN checkpoint_blobs b ON b.id = c.content_id WHERE c.id = ?1")
+                .map_err(|e| db_err("checkpoint_content_bounded prepare", e))?;
+            let mut rows = stmt.query(params![id]).map_err(|e| db_err("checkpoint_content_bounded query", e))?;
+            let Some(row) = rows.next().map_err(|e| db_err("checkpoint_content_bounded row", e))? else { return Ok(None); };
+            let size: i64 = row.get(0).map_err(|e| db_err("checkpoint_content_bounded length", e))?;
+            if size < 0 || size as u64 > max_bytes as u64 { return Err(Error::BadRequest("rewind preview before-images exceed byte limit".into())); }
+            row.get(1).map(Some).map_err(|e| db_err("checkpoint_content_bounded content", e))
+        }).await
+    }
+
+    async fn checkpoint_content(&self, id: i64) -> Result<Option<String>> {
+        self.read(move |conn| {
+            conn.query_row(
+                "SELECT CAST(b.data AS TEXT) FROM checkpoints c JOIN checkpoint_blobs b ON b.id = c.content_id WHERE c.id = ?1",
+                params![id], |row| row.get(0),
+            ).optional().map_err(|e| db_err("checkpoint_content", e))
+        }).await
+    }
+
     async fn delete_checkpoint(&self, id: i64) -> Result<()> {
         self.with(move |conn| {
             let tx = conn
@@ -2196,6 +3307,32 @@ impl Store for SqliteStore {
                 }
             }
             Ok(out)
+        })
+        .await
+    }
+
+    async fn mission_usage(&self, mission_id: &str) -> Result<Option<UsageTotals>> {
+        let mission_id = mission_id.to_owned();
+        self.read(move |conn| {
+            conn.query_row(
+                "SELECT COUNT(*), COALESCE(SUM(u.input_tokens), 0),
+                        COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cached_tokens), 0),
+                        COUNT(u.cached_tokens)
+                   FROM usage_calls u JOIN mission_attempt_sessions s ON s.session_id = u.session_id
+                  WHERE s.mission_id = ?1",
+                [mission_id],
+                |row| {
+                    Ok(Some(UsageTotals {
+                        calls: u32_of(row.get(0)?),
+                        input_tokens: u64_of(row.get(1)?),
+                        output_tokens: u64_of(row.get(2)?),
+                        cached_tokens: u64_of(row.get(3)?),
+                        cached_known_calls: u32_of(row.get(4)?),
+                        last_input_tokens: 0,
+                    }))
+                },
+            )
+            .map_err(|e| db_err("mission_usage", e))
         })
         .await
     }
@@ -3049,6 +4186,15 @@ mod tests {
                 9 => MIGRATION_9,
                 10 => MIGRATION_10,
                 11 => MIGRATION_11,
+                12 => MIGRATION_12,
+                13 => MIGRATION_13,
+                14 => MIGRATION_14,
+                15 => MIGRATION_15,
+                16 => MIGRATION_16,
+                17 => "",
+                18 => MIGRATION_18,
+                19 => MIGRATION_19,
+                20 => MIGRATION_20,
                 other => panic!("no batch for v{other}"),
             };
             for (_, table, column, decl) in ADDED_COLUMNS
@@ -3059,6 +4205,196 @@ mod tests {
             }
             conn.execute_batch(batch).expect("schema batch");
         }
+    }
+
+    #[tokio::test]
+    async fn mission_attempt_admission_is_atomic_and_survives_deletion() {
+        let db = TempDb::new("mission-attempts");
+        let store = Arc::new(db.open().await);
+        store.create_project("p", "P", "/p").await.unwrap();
+        store
+            .create_mission("m", "p", "M", "", Some(5))
+            .await
+            .unwrap();
+        for i in 0..10 {
+            store
+                .create_mission_session(
+                    "m",
+                    &format!("r{i}"),
+                    &format!("s{i}"),
+                    "p",
+                    "T",
+                    "/p",
+                    "prompt",
+                )
+                .await
+                .unwrap();
+        }
+        let mut tasks = Vec::new();
+        for i in 0..10 {
+            let store = Arc::clone(&store);
+            tasks.push(tokio::spawn(async move {
+                store.admit_provider_attempt(&format!("s{i}")).await.is_ok()
+            }));
+        }
+        let mut admitted = 0;
+        for task in tasks {
+            admitted += usize::from(task.await.unwrap());
+        }
+        assert_eq!(admitted, 5);
+        assert_eq!(
+            store.mission_attempt_budget("m").await.unwrap(),
+            Some((Some(5), 5))
+        );
+        store.delete_mission("m").await.unwrap();
+        assert!(store.admit_provider_attempt("s0").await.is_err());
+        assert!(store.admit_provider_attempt("ordinary").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn control_sessions_are_a_set_with_independent_workspaces() {
+        let db = TempDb::new("control-set");
+        let store = Arc::new(db.open().await);
+        store.create_project("q", "Q", "/q").await.unwrap();
+        let first = store
+            .create_control_session("a", "Control chat", "/control/a")
+            .await
+            .unwrap();
+        let second = store
+            .create_control_session("b", "Control chat 2", "/control/b")
+            .await
+            .unwrap();
+        assert_eq!(first.project_id, None);
+        assert_eq!(second.project_id, None);
+        assert_eq!(first.workspace, "/control/a");
+        assert_eq!(second.workspace, "/control/b");
+        assert!(store.is_control_session("a").await.unwrap());
+        assert!(store.is_control_session("b").await.unwrap());
+        let listed = store.list_control_sessions().await.unwrap();
+        assert_eq!(listed.len(), 2, "several control chats coexist: {listed:?}");
+        assert!(listed.iter().all(|session| session.project_id.is_none()));
+        // A project session is not a control session and is never listed with them.
+        let ordinary = store
+            .create_session("n", "Project work", "/q", Some("q"))
+            .await
+            .unwrap();
+        assert!(!store.is_control_session(&ordinary.id).await.unwrap());
+        assert_eq!(store.list_control_sessions().await.unwrap().len(), 2);
+        // Deleting one control chat leaves the others alone, and the dispatch
+        // ledger survives it.
+        assert_eq!(
+            store
+                .reserve_control_dispatch("r", "dispatched", "q", "T", "/q", "body")
+                .await
+                .unwrap(),
+            ("dispatched".into(), true)
+        );
+        store.delete_session("a").await.unwrap();
+        assert!(!store.is_control_session("a").await.unwrap());
+        assert!(store.is_control_session("b").await.unwrap());
+        assert_eq!(store.list_control_sessions().await.unwrap().len(), 1);
+        // A legacy project-bound chat is detached, not recreated.
+        store
+            .with(|conn| {
+                conn.execute("UPDATE sessions SET project_id='q' WHERE id='b'", [])
+                    .map_err(|e| db_err("legacy control chat", e))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store.detach_control_session("b", "/control/moved").await.unwrap();
+        let detached = store.get_session("b").await.unwrap().unwrap();
+        assert_eq!(detached.project_id, None);
+        assert_eq!(detached.workspace, "/control/moved");
+        assert!(store.is_control_session("b").await.unwrap());
+        assert_eq!(
+            store
+                .reserve_control_dispatch("r", "duplicate", "q", "T", "/q", "body")
+                .await
+                .unwrap(),
+            ("dispatched".into(), false)
+        );
+    }
+
+    /// v19 held one control chat in a singleton table; v20 turns that row into a
+    /// marked session and drops the table so more chats can exist.
+    #[tokio::test]
+    async fn migration_v20_turns_the_singleton_into_a_control_session() {
+        let db = TempDb::new("control-migration");
+        let store = Arc::new(db.open().await);
+        store.create_project("p", "P", "/p").await.unwrap();
+        let legacy = store
+            .create_session("legacy", "Control chat", "/p", Some("p"))
+            .await
+            .unwrap();
+        store
+            .with(|conn| {
+                conn.execute_batch(
+                    "CREATE TABLE control_chat (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), session_id TEXT NOT NULL UNIQUE);
+                     INSERT INTO control_chat VALUES (1, 'legacy');
+                     PRAGMA user_version = 19;",
+                )
+                .map_err(|e| db_err("legacy control schema", e))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        drop(store);
+        let store = db.open().await;
+        assert!(store.is_control_session("legacy").await.unwrap());
+        assert_eq!(
+            store.list_control_sessions().await.unwrap()[0].id,
+            legacy.id
+        );
+        let table: bool = store
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='control_chat')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| db_err("control chat table", e))
+            })
+            .await
+            .unwrap();
+        assert!(!table, "the singleton table is gone");
+    }
+
+    #[tokio::test]
+    async fn mission_budget_survives_restart_project_deletion_and_missing_budget() {
+        let db = TempDb::new("mission-budget-reopen");
+        let store = db.open().await;
+        store.create_project("p", "P", "/p").await.unwrap();
+        store
+            .create_mission("m", "p", "M", "", Some(2))
+            .await
+            .unwrap();
+        store
+            .create_mission_session("m", "r", "s", "p", "T", "/p", "prompt")
+            .await
+            .unwrap();
+        store.admit_provider_attempt("s").await.unwrap();
+        drop(store);
+        let store = db.open().await;
+        assert_eq!(
+            store.mission_attempt_budget("m").await.unwrap(),
+            Some((Some(2), 1))
+        );
+        store.delete_project("p").await.unwrap();
+        store.admit_provider_attempt("s").await.unwrap();
+        assert!(store.admit_provider_attempt("s").await.is_err());
+        store
+            .with(|conn| {
+                conn.execute(
+                    "DELETE FROM mission_attempt_budgets WHERE mission_id='m'",
+                    [],
+                )
+                .unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(store.admit_provider_attempt("s").await.is_err());
     }
 
     async fn count(store: &SqliteStore, sql: &str) -> i64 {
@@ -3081,6 +4417,858 @@ mod tests {
             })
             .await
             .expect("user_version")
+    }
+
+    #[tokio::test]
+    async fn mission_controls_persist_and_preserve_claimed_work() {
+        let db = TempDb::new("mission-controls");
+        let store = db.open().await;
+        store.create_project("p", "One", "/one").await.unwrap();
+        store
+            .create_mission("m", "p", "Mission", "", None)
+            .await
+            .unwrap();
+        for id in ["a", "b"] {
+            store
+                .create_mission_task(MissionTask {
+                    id: id.into(),
+                    mission_id: "m".into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    prompt: "work".into(),
+                    dependencies: vec![],
+                    artifact_ids: vec![],
+                    state: "draft".into(),
+                    session_id: None,
+                    run_id: None,
+                    error: None,
+                })
+                .await
+                .unwrap();
+        }
+        assert!(store.control_mission_tasks("m", "pause").await.is_err());
+        store.start_mission_tasks("m", 1).await.unwrap();
+        store.claim_mission_task("m", "s1").await.unwrap().unwrap();
+        store.control_mission_tasks("m", "pause").await.unwrap();
+        assert_eq!(
+            store.mission_schedule_state("m").await.unwrap().as_deref(),
+            Some("paused")
+        );
+        store.start_mission_tasks("m", 1).await.unwrap();
+        assert!(store
+            .claim_mission_task("m", "paused-session")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store.mission_schedule_state("m").await.unwrap().as_deref(),
+            Some("paused")
+        );
+        drop(store);
+        let store = db.open().await;
+        assert_eq!(
+            store.mission_schedule_state("m").await.unwrap().as_deref(),
+            Some("paused")
+        );
+        store.control_mission_tasks("m", "resume").await.unwrap();
+        store.control_mission_tasks("m", "cancel").await.unwrap();
+        let tasks = store.list_mission_tasks("m").await.unwrap();
+        assert_eq!(tasks[0].state, "running");
+        assert_eq!(tasks[1].state, "cancelled");
+        store
+            .finish_mission_task("a", "completed", Some("r"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.list_mission_tasks("m").await.unwrap()[0].state,
+            "completed"
+        );
+        let evidence = store.list_mission_records("m", "evidence").await.unwrap();
+        assert_eq!(evidence.len(), 1);
+        let observations: serde_json::Value = serde_json::from_str(&evidence[0].content).unwrap();
+        assert_eq!(observations["task_state"], "completed");
+        assert_eq!(observations["run_id"], "r");
+        assert!(observations["persisted_run"].is_null());
+        assert_eq!(observations["visible_message_counts"]["tool"], 0);
+        store
+            .finish_mission_task("a", "completed", Some("r"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .list_mission_records("m", "evidence")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store.control_mission_tasks("m", "resume").await.is_err());
+        assert!(store
+            .claim_mission_task("m", "cancelled-session")
+            .await
+            .unwrap()
+            .is_none());
+        drop(store);
+        let store = db.open().await;
+        assert_eq!(
+            store.mission_schedule_state("m").await.unwrap().as_deref(),
+            Some("cancelled")
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_evidence_captures_exact_run_and_retry() {
+        let db = TempDb::new("automatic-evidence");
+        let store = db.open().await;
+        store.create_project("p", "One", "/one").await.unwrap();
+        store.create_mission("m", "p", "M", "", None).await.unwrap();
+        store
+            .create_mission_task(MissionTask {
+                id: "t".into(),
+                mission_id: "m".into(),
+                project_id: "p".into(),
+                title: "T".into(),
+                prompt: "work".into(),
+                dependencies: vec![],
+                artifact_ids: vec![],
+                state: "draft".into(),
+                session_id: None,
+                run_id: None,
+                error: None,
+            })
+            .await
+            .unwrap();
+        store.start_mission_tasks("m", 1).await.unwrap();
+        store.claim_mission_task("m", "s").await.unwrap().unwrap();
+        store
+            .create_mission_session("m", "session-key", "s", "p", "T", "/one", "work")
+            .await
+            .unwrap();
+        store.create_run("r", "s", "model", "work").await.unwrap();
+        let mut msg = new_message("s", "tool", "untrusted output");
+        msg.run_id = Some("r".into());
+        store.append_message(&msg).await.unwrap();
+        msg.run_id = Some("other".into());
+        store.append_message(&msg).await.unwrap();
+        store
+            .finish_run("r", RunStatus::Failed, Some("failed"))
+            .await
+            .unwrap();
+        store
+            .finish_mission_task("t", "failed", Some("r"), Some("failed"))
+            .await
+            .unwrap();
+        let records = store.list_mission_records("m", "evidence").await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&records[0].content).unwrap();
+        assert_eq!(value["task_state"], "failed");
+        assert_eq!(value["persisted_run"]["model"], "model");
+        assert_eq!(value["persisted_run"]["error"], "failed");
+        assert_eq!(value["visible_message_counts"]["tool"], 1);
+        assert!(!records[0].content.contains("untrusted output"));
+        store
+            .retry_mission_task("m", "t", "retry", None)
+            .await
+            .unwrap();
+        store.claim_mission_task("m", "s2").await.unwrap().unwrap();
+        store
+            .finish_mission_task("t", "interrupted", None, Some("not submitted"))
+            .await
+            .unwrap();
+        let records = store.list_mission_records("m", "evidence").await.unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].session_id.as_deref(), Some("s2"));
+        let retry: serde_json::Value = serde_json::from_str(&records[1].content).unwrap();
+        assert!(retry["persisted_run"].is_null());
+        assert_eq!(retry["task_state"], "interrupted");
+    }
+
+    #[tokio::test]
+    async fn mission_records_survive_reopen_and_cascade() {
+        let db = TempDb::new("mission-records");
+        let store = db.open().await;
+        store.create_project("p", "One", "/one").await.unwrap();
+        store
+            .create_mission("m", "p", "Mission", "", None)
+            .await
+            .unwrap();
+        let record = MissionRecord {
+            id: "a".into(),
+            mission_id: "m".into(),
+            request_id: "r".into(),
+            kind: "artifact".into(),
+            title: "Artifact".into(),
+            content: "text".into(),
+            task_id: None,
+            session_id: None,
+            artifact_id: None,
+            created_at: 0,
+        };
+        let (created, is_new) = store.publish_mission_record(record.clone()).await.unwrap();
+        assert!(is_new);
+        drop(store);
+        let store = db.open().await;
+        let records = store.list_mission_records("m", "artifact").await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, created.id);
+        assert!(!store.publish_mission_record(record).await.unwrap().1);
+        store.delete_mission("m").await.unwrap();
+        assert!(store
+            .list_mission_records("m", "artifact")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn mission_retry_is_transactional_idempotent_and_reassigns() {
+        let db = TempDb::new("mission-retry");
+        let store = db.open().await;
+        store.create_project("p", "P", "/p").await.unwrap();
+        store.create_project("q", "Q", "/q").await.unwrap();
+        store.create_mission("m", "p", "M", "", None).await.unwrap();
+        for (id, dependencies) in [("a", vec![]), ("b", vec!["a".to_string()])] {
+            store
+                .create_mission_task(MissionTask {
+                    id: id.into(),
+                    mission_id: "m".into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    prompt: "work".into(),
+                    dependencies,
+                    artifact_ids: vec![],
+                    state: "draft".into(),
+                    session_id: None,
+                    run_id: None,
+                    error: None,
+                })
+                .await
+                .unwrap();
+        }
+        store.start_mission_tasks("m", 1).await.unwrap();
+        assert!(store
+            .retry_mission_task("m", "a", "key", Some("q"))
+            .await
+            .is_err());
+        store.claim_mission_task("m", "old").await.unwrap().unwrap();
+        assert!(store
+            .retry_mission_task("m", "a", "key", Some("q"))
+            .await
+            .is_err());
+        store
+            .finish_mission_task("a", "failed", Some("run"), Some("bad"))
+            .await
+            .unwrap();
+        assert!(store
+            .claim_mission_task("m", "unused")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store.list_mission_tasks("m").await.unwrap()[1].state,
+            "blocked"
+        );
+        store.control_mission_tasks("m", "pause").await.unwrap();
+        assert!(store
+            .retry_mission_task("m", "a", "key", Some("q"))
+            .await
+            .unwrap());
+        assert!(!store
+            .retry_mission_task("m", "a", "key", Some("q"))
+            .await
+            .unwrap());
+        assert!(store
+            .retry_mission_task("m", "a", "key", None)
+            .await
+            .is_err());
+        assert!(store
+            .claim_mission_task("m", "new")
+            .await
+            .unwrap()
+            .is_none());
+        let tasks = store.list_mission_tasks("m").await.unwrap();
+        assert_eq!(
+            (
+                tasks[0].project_id.as_str(),
+                tasks[0].state.as_str(),
+                tasks[1].state.as_str()
+            ),
+            ("q", "pending", "pending")
+        );
+        store.control_mission_tasks("m", "resume").await.unwrap();
+        let claimed = store.claim_mission_task("m", "new").await.unwrap().unwrap();
+        assert_eq!(claimed.session_id.as_deref(), Some("new"));
+        assert_eq!(claimed.run_id, None);
+        store
+            .finish_mission_task("a", "completed", Some("newrun"), None)
+            .await
+            .unwrap();
+        assert!(!store
+            .retry_mission_task("m", "a", "key", Some("q"))
+            .await
+            .unwrap());
+        assert!(store
+            .retry_mission_task("m", "a", "another", None)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .claim_mission_task("m", "child")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            "b"
+        );
+    }
+
+    #[tokio::test]
+    async fn mission_record_provenance_accepts_historical_attempts_only_for_matching_task() {
+        let db = TempDb::new("historical-provenance");
+        let store = db.open().await;
+        store.create_project("p", "P", "/p").await.unwrap();
+        store.create_mission("m", "p", "M", "", None).await.unwrap();
+        store
+            .create_mission("other", "p", "Other", "", None)
+            .await
+            .unwrap();
+        for id in ["a", "b"] {
+            store
+                .create_mission_task(MissionTask {
+                    id: id.into(),
+                    mission_id: "m".into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    prompt: "work".into(),
+                    dependencies: vec![],
+                    artifact_ids: vec![],
+                    state: "draft".into(),
+                    session_id: None,
+                    run_id: None,
+                    error: None,
+                })
+                .await
+                .unwrap();
+        }
+        store.start_mission_tasks("m", 1).await.unwrap();
+        store.claim_mission_task("m", "old").await.unwrap().unwrap();
+        store
+            .finish_mission_task("a", "failed", None, None)
+            .await
+            .unwrap();
+        store
+            .retry_mission_task("m", "a", "retry", None)
+            .await
+            .unwrap();
+        store.claim_mission_task("m", "new").await.unwrap().unwrap();
+        let record =
+            |id: &str, mission: &str, task: Option<&str>, session: Option<&str>| MissionRecord {
+                id: id.into(),
+                mission_id: mission.into(),
+                request_id: id.into(),
+                kind: "artifact".into(),
+                title: "T".into(),
+                content: "C".into(),
+                task_id: task.map(str::to_owned),
+                session_id: session.map(str::to_owned),
+                artifact_id: None,
+                created_at: 0,
+            };
+        store
+            .publish_mission_record(record("historical", "m", Some("a"), Some("old")))
+            .await
+            .unwrap();
+        store
+            .publish_mission_record(record("current", "m", Some("a"), Some("new")))
+            .await
+            .unwrap();
+        store
+            .publish_mission_record(record("session-only", "m", None, Some("old")))
+            .await
+            .unwrap();
+        assert!(store
+            .publish_mission_record(record("wrong-task", "m", Some("b"), Some("old")))
+            .await
+            .is_err());
+        assert!(store
+            .publish_mission_record(record("wrong-mission", "other", None, Some("old")))
+            .await
+            .is_err());
+        assert!(store
+            .publish_mission_record(record("unknown", "m", Some("a"), Some("unknown")))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn selected_artifact_lookup_is_ordered_scoped_and_bounded() {
+        let db = TempDb::new("selected-artifact-lookup");
+        let store = db.open().await;
+        store.create_project("p", "P", "/p").await.unwrap();
+        store.create_mission("m", "p", "M", "", None).await.unwrap();
+        store
+            .create_mission("other", "p", "Other", "", None)
+            .await
+            .unwrap();
+        for (id, mission, kind, content) in [
+            ("a", "m", "artifact", "a".into()),
+            ("b", "m", "artifact", "b".into()),
+            ("foreign", "other", "artifact", "x".into()),
+            ("evidence", "m", "evidence", "x".into()),
+            ("large", "m", "artifact", "x".repeat(256 * 1024)),
+        ] {
+            store
+                .publish_mission_record(MissionRecord {
+                    id: id.into(),
+                    mission_id: mission.into(),
+                    request_id: id.into(),
+                    kind: kind.into(),
+                    title: "T".into(),
+                    content,
+                    task_id: None,
+                    session_id: None,
+                    artifact_id: None,
+                    created_at: 0,
+                })
+                .await
+                .unwrap();
+        }
+        let ids = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let selected = store
+            .get_mission_artifacts("m", &ids(&["b", "a"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            selected.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
+        assert!(store
+            .get_mission_artifacts("m", &[])
+            .await
+            .unwrap()
+            .is_empty());
+        for bad in [
+            vec!["foreign"],
+            vec!["evidence"],
+            vec!["missing"],
+            vec!["a", "a"],
+            vec!["large"],
+            vec!["a"; 17],
+        ] {
+            assert!(store.get_mission_artifacts("m", &ids(&bad)).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn mission_task_artifact_selection_is_scoped_bounded_and_durable() {
+        let db = TempDb::new("artifact-handoff");
+        let store = db.open().await;
+        store.create_project("p", "One", "/one").await.unwrap();
+        store
+            .create_mission("m", "p", "Mission", "", None)
+            .await
+            .unwrap();
+        store
+            .create_mission("other", "p", "Other", "", None)
+            .await
+            .unwrap();
+        let record = |id: &str, mission: &str, kind: &str, content: String| MissionRecord {
+            id: id.into(),
+            mission_id: mission.into(),
+            request_id: id.into(),
+            kind: kind.into(),
+            title: "source".into(),
+            content,
+            task_id: None,
+            session_id: None,
+            artifact_id: None,
+            created_at: 0,
+        };
+        for r in [
+            record("a", "m", "artifact", "data".into()),
+            record("foreign", "other", "artifact", "data".into()),
+            record("evidence", "m", "evidence", "claim".into()),
+            record("large", "m", "artifact", "x".repeat(256 * 1024)),
+        ] {
+            store.publish_mission_record(r).await.unwrap();
+        }
+        let task = |ids: Vec<&str>| MissionTask {
+            id: "task".into(),
+            mission_id: "m".into(),
+            project_id: "p".into(),
+            title: "Task".into(),
+            prompt: "work".into(),
+            dependencies: vec![],
+            artifact_ids: ids.into_iter().map(str::to_owned).collect(),
+            state: "draft".into(),
+            session_id: None,
+            run_id: None,
+            error: None,
+        };
+        for ids in [
+            vec!["foreign"],
+            vec!["evidence"],
+            vec!["missing"],
+            vec!["a", "a"],
+            vec!["large"],
+            vec!["a"; 17],
+        ] {
+            assert!(store.create_mission_task(task(ids)).await.is_err());
+        }
+        store.create_mission_task(task(vec!["a"])).await.unwrap();
+        drop(store);
+        let store = db.open().await;
+        assert_eq!(
+            store.list_mission_tasks("m").await.unwrap()[0].artifact_ids,
+            vec!["a"]
+        );
+        store.start_mission_tasks("m", 1).await.unwrap();
+        assert_eq!(
+            store
+                .claim_mission_task("m", "sid")
+                .await
+                .unwrap()
+                .unwrap()
+                .artifact_ids,
+            vec!["a"]
+        );
+    }
+
+    #[tokio::test]
+    async fn mission_replan_guards_claims_stale_plans_and_cycles() {
+        let db = TempDb::new("mission-replan");
+        let store = db.open().await;
+        store.create_project("p", "One", "/one").await.unwrap();
+        store
+            .create_mission("m", "p", "Mission", "", None)
+            .await
+            .unwrap();
+        for (id, deps) in [("a", vec![]), ("b", vec!["a".into()])] {
+            store
+                .create_mission_task(MissionTask {
+                    id: id.into(),
+                    mission_id: "m".into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    prompt: "old".into(),
+                    dependencies: deps,
+                    artifact_ids: vec![],
+                    state: "draft".into(),
+                    session_id: None,
+                    run_id: None,
+                    error: None,
+                })
+                .await
+                .unwrap();
+        }
+        let expected = || MissionTaskPlan {
+            project_id: "p".into(),
+            prompt: "old".into(),
+            dependencies: vec![],
+        };
+        assert!(store
+            .replan_mission_task("m", "a", expected(), None, Some("new".into()), None)
+            .await
+            .is_err());
+        store.start_mission_tasks("m", 1).await.unwrap();
+        assert!(store
+            .replan_mission_task("m", "a", expected(), None, None, Some(vec!["b".into()]))
+            .await
+            .is_err());
+        let (edit, claim) = tokio::join!(
+            store.replan_mission_task("m", "a", expected(), None, Some("new".into()), None),
+            store.claim_mission_task("m", "session")
+        );
+        let claimed = claim.unwrap().unwrap();
+        assert_eq!(claimed.prompt, if edit.is_ok() { "new" } else { "old" });
+        assert!(store
+            .replan_mission_task("m", "a", expected(), None, Some("late".into()), None)
+            .await
+            .is_err());
+        let b_expected = MissionTaskPlan {
+            project_id: "p".into(),
+            prompt: "old".into(),
+            dependencies: vec!["a".into()],
+        };
+        store
+            .replan_mission_task(
+                "m",
+                "b",
+                b_expected.clone(),
+                None,
+                Some("updated".into()),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .replan_mission_task("m", "b", b_expected, None, Some("stale".into()), None)
+            .await
+            .is_err());
+        assert_eq!(
+            store.list_mission_tasks("m").await.unwrap()[1].prompt,
+            "updated"
+        );
+    }
+
+    #[tokio::test]
+    async fn mission_revision_persists_and_serializes_with_start() {
+        let db = TempDb::new("mission-revision");
+        let store = db.open().await;
+        store.create_project("p", "One", "/one").await.unwrap();
+        store.create_project("q", "Two", "/two").await.unwrap();
+        store
+            .create_mission("m", "p", "Mission", "", None)
+            .await
+            .unwrap();
+        for id in ["a", "b"] {
+            store
+                .create_mission_task(MissionTask {
+                    id: id.into(),
+                    mission_id: "m".into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    prompt: "old".into(),
+                    dependencies: vec![],
+                    artifact_ids: vec![],
+                    state: "draft".into(),
+                    session_id: None,
+                    run_id: None,
+                    error: None,
+                })
+                .await
+                .unwrap();
+        }
+        store
+            .revise_mission_task(
+                "m",
+                "a",
+                Some("q".into()),
+                Some("new".into()),
+                Some(vec!["b".into()]),
+            )
+            .await
+            .unwrap();
+        drop(store);
+        let store = db.open().await;
+        let tasks = store.list_mission_tasks("m").await.unwrap();
+        assert_eq!(tasks[0].prompt, "new");
+        assert_eq!(tasks[0].project_id, "q");
+        assert_eq!(tasks[0].dependencies, vec!["b"]);
+        assert!(store
+            .revise_mission_task("m", "b", None, None, Some(vec!["a".into()]))
+            .await
+            .is_err());
+        let (edit, start) = tokio::join!(
+            store.revise_mission_task("m", "a", None, Some("raced".into()), None),
+            store.start_mission_tasks("m", 1)
+        );
+        start.unwrap();
+        let tasks = store.list_mission_tasks("m").await.unwrap();
+        assert_eq!(tasks[0].prompt, if edit.is_ok() { "raced" } else { "new" });
+        assert_ne!(tasks[0].state, "draft");
+        assert!(store
+            .revise_mission_task("m", "a", None, Some("late".into()), None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn mission_tasks_enforce_dependencies_capacity_and_recovery() {
+        let db = TempDb::new("mission-tasks");
+        let store = db.open().await;
+        store.create_project("p", "One", "/one").await.unwrap();
+        store
+            .create_mission("m", "p", "Mission", "", None)
+            .await
+            .unwrap();
+        let task = |id: &str, deps: Vec<&str>| MissionTask {
+            id: id.into(),
+            mission_id: "m".into(),
+            project_id: "p".into(),
+            title: id.into(),
+            prompt: "work".into(),
+            dependencies: deps.into_iter().map(str::to_owned).collect(),
+            artifact_ids: vec![],
+            state: "draft".into(),
+            session_id: None,
+            run_id: None,
+            error: None,
+        };
+        assert!(store
+            .create_mission_task(task("bad", vec!["missing"]))
+            .await
+            .is_err());
+        store.create_mission_task(task("a", vec![])).await.unwrap();
+        store
+            .create_mission_task(task("b", vec!["a"]))
+            .await
+            .unwrap();
+        store
+            .create_mission_task(task("c", vec!["b"]))
+            .await
+            .unwrap();
+        store.create_mission_task(task("d", vec![])).await.unwrap();
+        assert!(store.claim_mission_task("m", "s0").await.unwrap().is_none());
+        store.start_mission_tasks("m", 1).await.unwrap();
+        assert_eq!(
+            store
+                .claim_mission_task("m", "s1")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            "a"
+        );
+        assert!(store.claim_mission_task("m", "s2").await.unwrap().is_none());
+        store
+            .finish_mission_task("a", "failed", Some("r1"), Some("failure"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .claim_mission_task("m", "s2")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            "d"
+        );
+        let tasks = store.list_mission_tasks("m").await.unwrap();
+        assert_eq!(tasks[1].state, "blocked");
+        assert_eq!(tasks[2].state, "blocked");
+        assert_eq!(store.recover_mission_tasks().await.unwrap(), vec!["m"]);
+        assert_eq!(
+            store.list_mission_tasks("m").await.unwrap()[3].state,
+            "interrupted"
+        );
+        assert!(store.claim_mission_task("m", "s3").await.unwrap().is_none());
+        assert!(store
+            .create_mission_task(task("late", vec![]))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn claim_rolls_back_if_claimed_row_cannot_be_decoded() {
+        let db = TempDb::new("mission-claim-rollback");
+        let store = db.open().await;
+        store.create_project("p", "One", "/one").await.unwrap();
+        store
+            .create_mission("m", "p", "Mission", "", None)
+            .await
+            .unwrap();
+        store
+            .create_mission_task(MissionTask {
+                id: "a".into(),
+                mission_id: "m".into(),
+                project_id: "p".into(),
+                title: "A".into(),
+                prompt: "work".into(),
+                dependencies: vec![],
+                artifact_ids: vec![],
+                state: "draft".into(),
+                session_id: None,
+                run_id: None,
+                error: None,
+            })
+            .await
+            .unwrap();
+        store.start_mission_tasks("m", 1).await.unwrap();
+        store.with(|conn| { conn.execute("CREATE TRIGGER corrupt_claim AFTER UPDATE OF state ON mission_tasks WHEN NEW.state='running' BEGIN UPDATE mission_tasks SET dependencies='not-json' WHERE id=NEW.id; END", []).unwrap(); Ok(()) }).await.unwrap();
+        assert!(store.claim_mission_task("m", "s").await.is_err());
+        let tasks = store.list_mission_tasks("m").await.unwrap();
+        assert_eq!(tasks[0].state, "pending");
+        assert!(tasks[0].session_id.is_none());
+        store
+            .with(|conn| {
+                conn.execute("DROP TRIGGER corrupt_claim", []).unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .claim_mission_task("m", "s")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            "a"
+        );
+    }
+
+    #[tokio::test]
+    async fn mission_sessions_are_durable_and_retries_never_recreate() {
+        let db = TempDb::new("mission-sessions");
+        let store = db.open().await;
+        store.create_project("p1", "One", "/one").await.unwrap();
+        store.create_project("p2", "Two", "/two").await.unwrap();
+        store
+            .create_mission("m1", "p1", "Mission", "Description", None)
+            .await
+            .unwrap();
+        assert_eq!(store.list_missions("p1").await.unwrap().len(), 1);
+        assert!(store.list_missions("p2").await.unwrap().is_empty());
+        assert!(store
+            .create_mission_session("m1", "key", "s1", "p1", "Title", "/one", "prompt")
+            .await
+            .unwrap());
+        assert!(!store
+            .create_mission_session("m1", "key", "s2", "p1", "Title", "/one", "prompt")
+            .await
+            .unwrap());
+        assert!(store
+            .create_mission_session("m1", "key", "s2", "p1", "Title", "/one", "other")
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .get_session("s1")
+                .await
+                .unwrap()
+                .unwrap()
+                .project_id
+                .as_deref(),
+            Some("p1")
+        );
+        store.rename_session("s1", "Changed").await.unwrap();
+        assert!(!store
+            .create_mission_session("m1", "key", "s2", "p1", "Title", "/one", "prompt")
+            .await
+            .unwrap());
+        store.delete_session("s1").await.unwrap();
+        assert!(!store
+            .create_mission_session("m1", "key", "s2", "p1", "Title", "/one", "prompt")
+            .await
+            .unwrap());
+        assert!(store.get_session("s2").await.unwrap().is_none());
+        drop(store);
+        let store = db.open().await;
+        assert_eq!(store.list_mission_sessions("m1").await.unwrap().len(), 1);
+        store.delete_mission("m1").await.unwrap();
+        assert!(store.get_mission("m1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn mission_v12_migration_preserves_deleted_session_request_identity() {
+        let db = TempDb::new("mission-v12");
+        std::fs::create_dir_all(db.path.parent().unwrap()).unwrap();
+        {
+            let conn = rusqlite::Connection::open(&db.path).unwrap();
+            write_schema_to(&conn, 12);
+            conn.execute_batch("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('p1','One','/one',1,1); INSERT INTO missions VALUES ('m1','p1','Mission','',1,1); INSERT INTO mission_sessions VALUES ('m1','key','gone','Title','prompt',1); PRAGMA user_version=12;").unwrap();
+        }
+        let store = db.open().await;
+        let links = store.list_mission_sessions("m1").await.unwrap();
+        assert_eq!(links[0].project_id, "p1");
+        assert!(!store
+            .create_mission_session("m1", "key", "new", "p1", "Title", "/one", "prompt")
+            .await
+            .unwrap());
+        assert!(store
+            .create_mission_session("m1", "key", "new", "p2", "Title", "/two", "prompt")
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -3322,6 +5510,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_queries_prioritize_interrupted_and_bound_results() {
+        let db = TempDb::new("recovery-candidates");
+        let store = db.open().await;
+        for id in ["old_run", "old_agent", "old_done", "recent_a", "recent_b"] {
+            store.create_session(id, id, "/w", None).await.unwrap();
+        }
+        store
+            .create_run("run", "old_run", "model", "prompt")
+            .await
+            .unwrap();
+        store
+            .upsert_agent(&agent("running", "old_agent", "running"))
+            .await
+            .unwrap();
+        store
+            .upsert_agent(&agent("done", "old_done", "completed"))
+            .await
+            .unwrap();
+        store.with(|conn| {
+            conn.execute("UPDATE sessions SET updated_at = CASE id WHEN 'old_run' THEN 1 WHEN 'old_agent' THEN 2 WHEN 'old_done' THEN 3 ELSE 100 END", []).map_err(|e| db_err("test", e))?;
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(
+            store.running_agent_ids().await.unwrap(),
+            vec![("old_agent".into(), "running".into())]
+        );
+        let (total, ids) = store.recovery_sessions(50, 3, true).await.unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(ids, ["old_agent", "old_run", "recent_b"]);
+        assert_eq!(
+            store.recovery_sessions(50, 10, false).await.unwrap().1,
+            ["old_run", "recent_b", "recent_a"]
+        );
+        assert_eq!(
+            store.recovery_sessions(50, 0, true).await.unwrap(),
+            (5, vec![])
+        );
+        // Simulate rows left by the preceding server instance.
+        store
+            .with(|conn| {
+                conn.execute("UPDATE runs SET instance_id = 'previous'", [])
+                    .map_err(|e| db_err("test runs", e))?;
+                conn.execute("UPDATE agents SET instance_id = 'previous'", [])
+                    .map_err(|e| db_err("test agents", e))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store.mark_interrupted_runs().await.unwrap();
+        store.mark_interrupted_agents().await.unwrap();
+        assert_eq!(
+            store.recovery_sessions(50, 10, true).await.unwrap().1,
+            ["recent_b", "recent_a"]
+        );
+    }
+
+    #[tokio::test]
     async fn list_sessions_reports_counts_status_and_ordering() {
         let db = TempDb::new("session-summary");
         let store = db.open().await;
@@ -3375,6 +5620,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_page_bounds_bytes_and_uses_exclusive_cursor() {
+        let db = TempDb::new("history-page");
+        let store = db.open().await;
+        store.create_session("s", "t", "/w", None).await.unwrap();
+        let old = store
+            .append_message(&new_message("s", "user", "old"))
+            .await
+            .unwrap();
+        store
+            .append_message(&new_message("s", "system", &"s".repeat(10000)))
+            .await
+            .unwrap();
+        let mut child = new_message("s", "user", &"a".repeat(10000));
+        child.agent_id = Some("child".into());
+        store.append_message(&child).await.unwrap();
+        let middle = store
+            .append_message(&new_message("s", "assistant", "éé"))
+            .await
+            .unwrap();
+        let newest = store
+            .append_message(&new_message("s", "user", "latest"))
+            .await
+            .unwrap();
+        let page = store.list_history_page("s", None, 100, 10).await.unwrap();
+        assert_eq!(page.iter().map(|r| r.id).collect::<Vec<_>>(), vec![newest]);
+        let page = store
+            .list_history_page("s", Some(newest), 100, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![middle, old]
+        );
+        assert!(store
+            .list_history_page("s", None, 0, 100)
+            .await
+            .unwrap()
+            .is_empty());
+        let oversized = store.list_history_page("s", None, 100, 1).await.unwrap();
+        assert_eq!(oversized.len(), 1);
+        assert_eq!(oversized[0].id, newest);
+        store.mark_messages_rewound("s", middle).await.unwrap();
+        assert_eq!(
+            store.list_history_page("s", None, 100, 100).await.unwrap()[0].id,
+            middle
+        );
+    }
+
+    #[tokio::test]
+    async fn history_page_omits_oversized_tool_before_loading_payload() {
+        let db = TempDb::new("history_oversized_tool");
+        let store = db.open().await;
+        store.create_session("s", "t", "/w", None).await.unwrap();
+        store
+            .append_message(&new_message("s", "user", "task"))
+            .await
+            .unwrap();
+        let mut assistant = new_message("s", "assistant", "");
+        assistant.tool_calls.push(kc_core::message::ToolCall {
+            id: "call".into(),
+            name: "echo".into(),
+            arguments: "{}".into(),
+        });
+        store.append_message(&assistant).await.unwrap();
+        let mut tool = new_message("s", "tool", &"é".repeat(10000));
+        tool.tool_call_id = Some("call".into());
+        tool.name = Some("echo".into());
+        store.append_message(&tool).await.unwrap();
+        let page = store.list_history_page("s", None, 100, 1000).await.unwrap();
+        assert_eq!(page.len(), 3);
+        assert!(page[0].content.contains("omitted"));
+        assert_eq!(page[0].tool_call_id.as_deref(), Some("call"));
+        assert_eq!(page[2].content, "task");
+        assert_eq!(
+            store
+                .list_messages("s", 10)
+                .await
+                .unwrap()
+                .last()
+                .unwrap()
+                .content,
+            tool.content
+        );
+    }
+
+    #[tokio::test]
     async fn messages_keep_insertion_order_and_limit_returns_tail() {
         let db = TempDb::new("messages");
         let store = db.open().await;
@@ -3417,6 +5748,116 @@ mod tests {
             .await
             .expect("zero")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn message_page_obeys_cursor_filter_budget_and_rewind() {
+        let db = TempDb::new("message-page");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .create_session("s_2", "t", "/w", None)
+            .await
+            .expect("other session");
+        let first = store
+            .append_message(&new_message("s_1", "user", "first"))
+            .await
+            .unwrap();
+        let mut agent = new_message("s_1", "assistant", "éé");
+        agent.agent_id = Some("a".into());
+        let second = store.append_message(&agent).await.unwrap();
+        store
+            .append_message(&new_message("s_2", "user", "other"))
+            .await
+            .unwrap();
+        let third = store
+            .append_message(&new_message("s_1", "user", &"x".repeat(1000)))
+            .await
+            .unwrap();
+        let page = store
+            .list_message_page("s_1", None, None, 2, usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![second, third]
+        );
+        assert!(page.has_more);
+        let previous = store
+            .list_message_page("s_1", None, Some(second), 10, usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            previous.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![first]
+        );
+        assert!(!previous.has_more);
+        let tiny = store
+            .list_message_page("s_1", None, None, 10, 1)
+            .await
+            .unwrap();
+        assert_eq!(tiny.messages[0].id, third);
+        assert_eq!(tiny.messages.len(), 1);
+        assert!(tiny.has_more);
+        let filtered = store
+            .list_message_page("s_1", Some("a"), None, 10, usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            filtered.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![second]
+        );
+        assert!(!filtered.has_more);
+        let empty = store
+            .list_message_page("s_1", None, None, 0, 100)
+            .await
+            .unwrap();
+        assert!(empty.messages.is_empty());
+        assert!(empty.has_more);
+        store.mark_messages_rewound("s_1", second).await.unwrap();
+        let visible = store
+            .list_message_page("s_1", None, None, 10, usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            visible.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        assert!(!visible.has_more);
+    }
+
+    #[tokio::test]
+    async fn rewind_scan_reads_only_calls_and_enforces_aggregate_budget() {
+        let db = TempDb::new("rewind-scan-budget");
+        let store = db.open().await;
+        store.create_session("s_1", "t", "/w", None).await.unwrap();
+        let mut msg = new_message("s_1", "assistant", &"x".repeat(1024 * 1024));
+        msg.tool_calls = vec![ToolCall {
+            id: "1".into(),
+            name: "shell".into(),
+            arguments: "abc".into(),
+        }];
+        let size = serde_json::to_string(&msg.tool_calls).unwrap().len();
+        store.append_message(&msg).await.unwrap();
+        store.append_message(&msg).await.unwrap();
+        assert_eq!(
+            store
+                .rewind_tool_names("s_1", 0, 2, size * 2)
+                .await
+                .unwrap(),
+            vec!["shell", "shell"]
+        );
+        assert!(store
+            .rewind_tool_names("s_1", 0, 2, size * 2 - 1)
+            .await
+            .is_err());
+        assert_eq!(
+            store.rewind_tool_names("s_1", 0, 1, size).await.unwrap(),
+            vec!["shell"]
+        );
     }
 
     #[tokio::test]
@@ -5555,6 +7996,55 @@ mod tests {
             after.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(),
             vec!["b.rs", "empty.rs"]
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_metadata_and_individual_content_are_lazy() {
+        let db = TempDb::new("checkpoint-lazy");
+        let store = db.open().await;
+        store.create_session("s_1", "t", "/w", None).await.unwrap();
+        let large = "x".repeat(1024 * 1024);
+        let first = store
+            .record_checkpoint(&checkpoint("s_1", "a", &large, 10))
+            .await
+            .unwrap();
+        let second = store
+            .record_checkpoint(&checkpoint("s_1", "a", &large, 11))
+            .await
+            .unwrap();
+        let empty = store
+            .record_checkpoint(&checkpoint("s_1", "empty", "", 12))
+            .await
+            .unwrap();
+        let mut failed = checkpoint("s_1", "failed", "", 0);
+        failed.capture_failed = true;
+        let failed_id = store.record_checkpoint(&failed).await.unwrap();
+        let rows = store.list_checkpoint_metadata("s_1", 10).await.unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![second, empty, failed_id]
+        );
+        assert!(rows.iter().all(|r| r.content.is_empty()));
+        assert!(rows[2].capture_failed);
+        assert!(store
+            .checkpoint_content_bounded(first, large.len() - 1)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .checkpoint_content_bounded(first, large.len())
+                .await
+                .unwrap(),
+            Some(large.clone())
+        );
+        assert_eq!(store.checkpoint_content_bounded(-1, 0).await.unwrap(), None);
+        assert_eq!(store.checkpoint_content(first).await.unwrap(), Some(large));
+        assert_eq!(
+            store.checkpoint_content(empty).await.unwrap(),
+            Some(String::new())
+        );
+        assert_eq!(store.checkpoint_content(failed_id).await.unwrap(), None);
+        assert_eq!(store.checkpoint_content(-1).await.unwrap(), None);
     }
 
     #[tokio::test]

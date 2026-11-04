@@ -176,8 +176,8 @@ than restart. Subagents follow the same rule with their own numbers:
 
 ```toml
 [subagents]
-max_concurrent = 3      # subagent loops running at once
-max_background = 8      # live detached agents per session
+max_concurrent = 3      # subagent loops running at once (0 = no ceiling)
+max_background = 8      # live detached agents per session (0 = no ceiling)
 allow_background = true # permitted to spawn with `background = true`
 wait_timeout_secs = 600 # default bound on `wait_for_agents`
 max_iterations = 200    # model turns per subagent segment
@@ -189,9 +189,17 @@ timeout_secs = 14400    # 4h wall clock for one delegated task
 fan-out or a `background: true` spawn runs beside its caller, so several loops
 can be live at once. `max_background` is a separate ceiling on *detached*
 agents in one session, because each one keeps a provider stream open after the
-turn that started it has ended. A spawn past either limit is refused by name,
+turn that started it has ended. A spawn past a finite limit is refused by name,
 never quietly queued. `wait_timeout_secs` bounds `wait_for_agents`: a wait that
 runs out reports which agents are still working instead of hanging.
+
+**`max_concurrent = 0` and `max_background = 0` mean no ceiling**, for an
+install that wants the harness out of the model's way: every spawn is granted
+a slot immediately and a `spawn_agents` fan-out starts all of its children.
+Each live loop is a provider stream and a transcript, so an unbounded setting
+makes cost the only limit - a model that fans out two hundred ways bills for
+two hundred loops. `max_depth` is the other kind of zero: `0` forbids
+delegation outright, and the field holds at most 255 generations.
 
 `max_continues = 0` restores the one-shot budget (the subagent stops at
 `max_iterations`), and `limits.auto_continue = false` switches continuation off

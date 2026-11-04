@@ -265,6 +265,36 @@
   opacity: 1;
 }
 
+/* The iOS-style count on a project tile: unread notifications from that project,
+   including the ones that arrived while you were looking at a different one. A
+   filled pill rather than a tinted one, in the `--danger` / `--danger-bg` pair —
+   those two are always each other's contrast in every theme and in light mode, so
+   the digits stay readable whichever way round they are used. The ring is the
+   rail's own fill, which is what makes it read as sitting on the corner of the
+   tile instead of inside it. */
+.project-rail-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  z-index: 2;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  box-shadow: 0 0 0 2px var(--rail);
+  color: var(--danger-bg);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 16px;
+  text-align: center;
+  /* One hit target per tile: the tile's button carries the number in its name. */
+  pointer-events: none;
+}
+
 .project-rail-skeleton {
   width: var(--project-rail-item);
   height: var(--project-rail-item);

@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
+    pub admission: Option<AttemptAdmission>,
     pub model: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
@@ -20,6 +21,25 @@ pub struct ChatRequest {
     pub parallel_tool_calls: bool,
     pub extra_headers: Vec<(String, String)>,
     pub extra_body: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A durable admission check invoked before every physical provider attempt.
+#[derive(Clone)]
+pub struct AttemptAdmission {
+    pub store: Arc<dyn crate::store::Store>,
+    pub session_id: String,
+}
+impl std::fmt::Debug for AttemptAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttemptAdmission")
+            .field("session_id", &self.session_id)
+            .finish()
+    }
+}
+impl AttemptAdmission {
+    pub async fn admit(&self) -> Result<()> {
+        self.store.admit_provider_attempt(&self.session_id).await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

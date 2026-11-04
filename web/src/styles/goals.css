@@ -1,0 +1,457 @@
+/**
+ * Styles for the kc-goals plugin panel.
+ *
+ * Copy to `web/src/styles/goals.css` and `@import` it from
+ * `web/src/styles/index.css`, next to `todo.css`.
+ *
+ * Scope note: when the panel is drawn by the shell, `PluginPanelView` already
+ * provides the `.inspector-section.plugin-panel` wrapper, header, refresh button
+ * and footer. This file styles only the contents. Every colour is a theme token,
+ * so the tab follows the Theme studio live.
+ */
+
+.goals-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* ---------- summary strip --------------------------------------------- */
+
+.goals-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.goals-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--surface-inset);
+  color: var(--text-subtle);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.goals-count strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.goals-count-on {
+  color: var(--accent);
+}
+
+.goals-refresh {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-subtle);
+  cursor: pointer;
+}
+
+.goals-refresh:hover {
+  background: var(--surface-inset);
+  color: var(--text);
+}
+
+/* ---------- one goal --------------------------------------------------- */
+
+.goals-goal {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line-inset);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
+.goals-goal-active {
+  border-left: 2px solid var(--accent);
+}
+
+.goals-goal-waiting {
+  border-left: 2px solid var(--text-kicker);
+}
+
+.goals-goal-done {
+  border-left: 2px solid var(--text-subtle);
+}
+
+.goals-goal-bad {
+  border-left: 2px solid var(--muted);
+}
+
+.goals-goal-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.goals-goal-titles {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.goals-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.goals-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.goals-subtle {
+  color: var(--text-subtle);
+  font-size: 11px;
+}
+
+.goals-score {
+  color: var(--text-subtle);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.goals-continuations {
+  flex: 0 0 auto;
+  color: var(--text-subtle);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---------- status pills ----------------------------------------------- */
+
+.goals-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  background: var(--surface-inset);
+  color: var(--text-subtle);
+}
+
+.goals-pill-active {
+  color: var(--accent);
+}
+
+.goals-pill-done,
+.goals-pill-ok {
+  color: var(--text);
+}
+
+.goals-pill-waiting {
+  color: var(--text-kicker);
+}
+
+.goals-pill-bad {
+  color: var(--muted);
+}
+
+/* ---------- progress --------------------------------------------------- */
+
+.goals-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+
+.goals-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 160ms ease;
+}
+
+/* ---------- contract, notes, next -------------------------------------- */
+
+.goals-statement {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.goals-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--surface-inset);
+  color: var(--text-subtle);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.goals-note svg {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  margin-top: 1px;
+}
+
+.goals-note-waiting {
+  color: var(--text-kicker);
+}
+
+.goals-note-bad {
+  color: var(--muted);
+}
+
+.goals-next {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- criteria --------------------------------------------------- */
+
+.goals-criteria {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.goals-criterion {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.goals-mark {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.goals-criterion-met .goals-mark {
+  color: var(--text);
+}
+
+.goals-mark-empty {
+  display: block;
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--line-inset);
+  border-radius: 3px;
+}
+
+.goals-criterion-body {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.goals-criterion-text {
+  color: var(--text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.goals-criterion-met .goals-criterion-text {
+  color: var(--text-subtle);
+}
+
+.goals-criterion-id {
+  color: var(--text-kicker);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.goals-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.goals-check-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--surface-inset);
+  font-size: 10px;
+}
+
+.goals-command {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-subtle);
+  overflow-wrap: anywhere;
+}
+
+.goals-evidence {
+  margin: 0;
+  padding-left: 6px;
+  border-left: 2px solid var(--line-inset);
+  color: var(--text-subtle);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- engine verdict -------------------------------------------- */
+
+.goals-engine-text {
+  display: block;
+  color: var(--text-subtle);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- actions ---------------------------------------------------- */
+
+.goals-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.goals-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--line-inset);
+  border-radius: 7px;
+  background: var(--surface-inset);
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.goals-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.goals-btn:disabled {
+  color: var(--text-subtle);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.goals-btn-primary:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.goals-btn-danger:not(:disabled) {
+  color: var(--muted);
+}
+
+.goals-action-note {
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.goals-action-note-bad {
+  color: var(--muted);
+}
+
+.goals-hint {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 10px;
+}
+
+/* ---------- options, journal, log ------------------------------------- */
+
+.goals-details summary {
+  cursor: pointer;
+  color: var(--text-subtle);
+  font-size: 11px;
+}
+
+.goals-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 10px;
+  margin: 6px 0;
+}
+
+.goals-option {
+  display: contents;
+}
+
+.goals-option dt {
+  color: var(--text-subtle);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.goals-option dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.goals-journal,
+.goals-log {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-subtle);
+  overflow-wrap: anywhere;
+}
+
+.goals-journal-next {
+  color: var(--text-kicker);
+  font-style: normal;
+}
+
+.goals-log-kind {
+  display: inline-flex;
+  align-items: center;
+  height: 15px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--surface-inset);
+  font-size: 10px;
+}

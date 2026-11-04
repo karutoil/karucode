@@ -5,6 +5,7 @@ import { initTheme } from './theme';
 // Draws the kc-todo plugin's inspector panel with a first-party component
 // instead of the generic JSON fallback; imported for its side effect.
 import './components/todoPanelRegister';
+import './components/goalsPanelRegister';
 import './styles/index.css';
 
 // Paint the persisted theme before the first render so the workspace never

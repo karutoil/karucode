@@ -23,6 +23,7 @@ fn model_config(server: &MockServer) -> ModelConfig {
 
 fn chat_request() -> ChatRequest {
     ChatRequest {
+        admission: None,
         model: "mock-model".into(),
         messages: vec![kc_core::message::Message::user("hello")],
         tools: Vec::new(),

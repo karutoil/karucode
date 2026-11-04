@@ -190,6 +190,54 @@ impl Store for FakeStore {
         Ok(session)
     }
 
+    async fn recovery_sessions(
+        &self,
+        cutoff: i64,
+        limit: usize,
+        include_agents: bool,
+    ) -> Result<(usize, Vec<String>)> {
+        let db = self.db();
+        let mut candidates: Vec<_> = db
+            .sessions
+            .iter()
+            .filter_map(|s| {
+                let interrupted = db
+                    .runs
+                    .iter()
+                    .any(|r| r.session_id == s.id && r.status == "running")
+                    || (include_agents
+                        && db
+                            .agents
+                            .iter()
+                            .any(|a| a.session_id == s.id && a.status == "running"));
+                (interrupted || s.updated_at >= cutoff).then_some((
+                    interrupted,
+                    s.updated_at,
+                    s.id.clone(),
+                ))
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.cmp(a));
+        Ok((
+            db.sessions.len(),
+            candidates
+                .into_iter()
+                .take(limit)
+                .map(|(_, _, id)| id)
+                .collect(),
+        ))
+    }
+
+    async fn running_agent_ids(&self) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .db()
+            .agents
+            .iter()
+            .filter(|a| a.status == "running")
+            .map(|a| (a.session_id.clone(), a.id.clone()))
+            .collect())
+    }
+
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         Ok(self
             .db()
@@ -393,6 +441,76 @@ impl Store for FakeStore {
             out = out.split_off(out.len() - limit);
         }
         Ok(out)
+    }
+
+    async fn list_history_page(
+        &self,
+        session_id: &str,
+        before_id: Option<i64>,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        let db = self.db();
+        let mut out = Vec::new();
+        let mut bytes = 0usize;
+        for row in db
+            .messages
+            .iter()
+            .rev()
+            .filter(|m| {
+                m.session_id == session_id
+                    && m.rewound_at.is_none()
+                    && m.agent_id.is_none()
+                    && m.role != "system"
+                    && before_id.is_none_or(|id| m.id < id)
+            })
+            .take(limit)
+        {
+            let mut row = row.clone();
+            if row.role == "tool" && row.content.len() > max_bytes / 2 {
+                row.content = "[tool result omitted: exceeds history byte budget]".into();
+            }
+            let size = row.content.len()
+                + serde_json::to_string(&row.tool_calls).unwrap().len()
+                + serde_json::to_string(&row.images).unwrap().len()
+                + row.reasoning_content.as_ref().map_or(0, String::len)
+                + row.tool_call_id.as_ref().map_or(0, String::len)
+                + row.name.as_ref().map_or(0, String::len);
+            if !out.is_empty() && bytes.saturating_add(size) > max_bytes {
+                break;
+            }
+            out.push(row);
+            bytes = bytes.saturating_add(size);
+        }
+        Ok(out)
+    }
+
+    async fn rewind_tool_names(
+        &self,
+        session_id: &str,
+        after_id: i64,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<String>> {
+        let db = self.db();
+        let mut remaining = max_bytes;
+        let mut names = Vec::new();
+        for m in db
+            .messages
+            .iter()
+            .filter(|m| m.session_id == session_id && m.id > after_id && m.rewound_at.is_none())
+            .take(limit)
+        {
+            let size = serde_json::to_string(&m.tool_calls).unwrap().len();
+            if size > remaining {
+                return Err(kc_core::error::Error::BadRequest(
+                    "rewind tool scan exceeds byte limit".into(),
+                ));
+            }
+            remaining -= size;
+            names.extend(m.tool_calls.iter().map(|c| c.name.clone()));
+        }
+        Ok(names)
     }
 
     async fn list_messages_after(
@@ -871,6 +989,53 @@ impl Store for FakeStore {
             })
             .cloned()
             .collect())
+    }
+
+    async fn list_checkpoint_metadata(
+        &self,
+        session_id: &str,
+        after_id: i64,
+    ) -> Result<Vec<kc_core::checkpoint::FileCheckpoint>> {
+        let db = self.db();
+        Ok(db
+            .checkpoints
+            .iter()
+            .filter(|c| {
+                c.session_id == session_id && (c.message_id == 0 || c.message_id > after_id)
+            })
+            .map(|c| {
+                let mut row = c.clone();
+                row.content.clear();
+                row
+            })
+            .collect())
+    }
+
+    async fn checkpoint_content_bounded(
+        &self,
+        id: i64,
+        max_bytes: usize,
+    ) -> Result<Option<String>> {
+        let db = self.db();
+        let row = db
+            .checkpoints
+            .iter()
+            .find(|c| c.id == id && c.existed && !c.capture_failed);
+        if row.is_some_and(|c| c.content.len() > max_bytes) {
+            return Err(kc_core::error::Error::BadRequest(
+                "rewind preview before-images exceed byte limit".into(),
+            ));
+        }
+        Ok(row.map(|c| c.content.clone()))
+    }
+
+    async fn checkpoint_content(&self, id: i64) -> Result<Option<String>> {
+        Ok(self
+            .db()
+            .checkpoints
+            .iter()
+            .find(|c| c.id == id && c.existed && !c.capture_failed)
+            .map(|c| c.content.clone()))
     }
 
     async fn delete_checkpoint(&self, id: i64) -> Result<()> {
@@ -1678,10 +1843,9 @@ impl Tool for RequiredArgsTool {
         match self.mode {
             RequiredMode::Ok => ToolOutcome::ok(format!("invoked:{}", request.name)),
             RequiredMode::Fail => ToolOutcome::err("boom"),
-            RequiredMode::Refuse => ToolOutcome::err(Error::BadRequest(
-                "pattern may not be empty".to_string(),
-            )
-            .to_string()),
+            RequiredMode::Refuse => ToolOutcome::err(
+                Error::BadRequest("pattern may not be empty".to_string()).to_string(),
+            ),
         }
     }
 }
@@ -1894,6 +2058,12 @@ pub(crate) struct HarnessBuilder {
     scripts: Vec<Script>,
     settings: FakeSettings,
     tools: Vec<Arc<dyn Tool>>,
+    /// The project the harness session belongs to, when a test cares.
+    ///
+    /// `None` is the ordinary case: most tests are about one conversation, not
+    /// about which project it lives in. A notification carries its session's
+    /// project, so a test of that field opts in here.
+    project_id: Option<String>,
 }
 
 impl HarnessBuilder {
@@ -1902,7 +2072,14 @@ impl HarnessBuilder {
             scripts,
             settings: FakeSettings::default(),
             tools: Vec::new(),
+            project_id: None,
         }
+    }
+
+    /// Put the harness session in a project, so emitted notifications name it.
+    pub(crate) fn project(mut self, project_id: &str) -> Self {
+        self.project_id = Some(project_id.to_string());
+        self
     }
 
     pub(crate) fn settings(mut self, settings: FakeSettings) -> Self {
@@ -1945,7 +2122,12 @@ impl HarnessBuilder {
         let events = runtime.subscribe();
         let session_id = format!("s_{}", uuid::Uuid::new_v4().simple());
         store
-            .create_session(&session_id, "test session", &dir.to_string_lossy(), None)
+            .create_session(
+                &session_id,
+                "test session",
+                &dir.to_string_lossy(),
+                self.project_id.as_deref(),
+            )
             .await
             .expect("create session");
 
@@ -2099,7 +2281,7 @@ pub(crate) fn test_inner_with_settings(settings: FakeSettings) -> Arc<RuntimeInn
         approvals: ApprovalRegistry::new(),
         subagents: Arc::new(SubagentLimiter::new(Default::default())),
         hub: Arc::new(crate::hub::AgentHub::new()),
-        seq: AtomicU64::new(0),
+        seq: Mutex::new(0),
         events_emitted: AtomicU64::new(0),
         session_allow: Mutex::new(std::collections::HashSet::new()),
         steers: Mutex::new(HashMap::new()),

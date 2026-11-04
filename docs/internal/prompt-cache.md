@@ -83,14 +83,15 @@ max_tool_output_bytes = 24000
 * The digest is a `user` turn on purpose. An `assistant` turn would make the
   model believe it had said the summary itself, which invites it to repeat or
   re-plan work it already finished.
-* A tool result that repeats an identical answer gets a note after the third
-  time ("this exact call has now returned an identical result 3 times"). The
-  fourth identical read-only call, with no write in between, is **refused**
-  with a `[blocked: ...]` result instead of being executed: re-reading an
-  unchanged page cannot produce new information, and one review run was
-  measured re-reading the same file 27 times. A read after an edit is always
-  allowed - the mutation counter resets the check.
+* A tool result that repeats an identical answer raises a warning after the
+  third time. The fourth identical read-only call, with no write by this run in
+  between, is **refused** with a `[blocked: ...]` result instead of being
+  executed: re-reading an unchanged page cannot produce new information, and one
+  review run was measured re-reading the same file 27 times. A read after an
+  edit is allowed - the mutation counter resets the check - and the refusal is
+  capped at two, because a change made by a subagent, the user or an editor does
+  not move that counter.
 * Two tool calls with the same arguments in the same turn are not de-duplicated;
-  only the note above is applied.
+  only the warning above is raised.
 * `prompt_cache_key` (OpenAI) is not sent. Prefix caching works without it; the
   key only improves routing across cache shards on very large providers.

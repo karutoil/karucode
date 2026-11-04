@@ -6,6 +6,7 @@ import * as store from '../state/store';
 import { Dialog } from './Dialog';
 import {
   ArrowRightIcon,
+  BellIcon,
   FileIcon,
   PanelIcon,
   PlusIcon,
@@ -77,6 +78,17 @@ export function CommandPalette(): JSX.Element | null {
         group: 'Actions',
         icon: <SettingsIcon size={15} />,
         run: actions.openSettings,
+      },
+      {
+        id: 'open-notifications',
+        label: 'Open notifications',
+        group: 'Actions',
+        hint:
+          store.unreadTotal.value > 0
+            ? `${store.unreadTotal.value} unread`
+            : `${store.notifications.value.length} kept`,
+        icon: <BellIcon size={15} />,
+        run: actions.openNotificationCenter,
       },
     ];
 

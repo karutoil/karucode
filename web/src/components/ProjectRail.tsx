@@ -3,8 +3,10 @@ import type { JSX } from 'preact';
 import type { Project } from '../api/types';
 import { modKey } from '../lib/platform';
 import * as actions from '../state/actions';
+import * as railPeek from '../state/railPeek';
 import * as store from '../state/store';
 import { Dialog } from './Dialog';
+import { controlPlaneOpen } from '../state/controlPlane';
 import {
   AgentsIcon,
   EditIcon,
@@ -85,6 +87,11 @@ export function SessionGlyph({ kind }: { kind: string }): JSX.Element {
 
 function sessionLabel(count: number): string {
   return count === 1 ? '1 session' : `${count} sessions`;
+}
+
+/** "1 unread notification" / "4 unread notifications", for the tile's name. */
+export function unreadLabel(count: number): string {
+  return count === 1 ? '1 unread notification' : `${count} unread notifications`;
 }
 
 /** Absolute-path validation shared by the hint and the submit guard. */
@@ -375,6 +382,9 @@ export function ProjectRail(): JSX.Element {
   const loading = store.projectsLoading.value;
   const activeProject = store.currentProject.value;
   const activeId = activeProject?.id ?? null;
+  // Unread notifications per project, for the counters on the tiles. Derived from
+  // the notification log, so opening the session behind one clears it.
+  const unreadByProject = store.unreadByProject.value;
 
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -459,9 +469,9 @@ export function ProjectRail(): JSX.Element {
     <>
       <nav class="project-rail" aria-label="Projects" data-testid="project-rail">
         <div class="project-rail-brand">
-          <span class="brand-mark" title="karucode" aria-hidden="true">
+          <button type="button" class="brand-mark control-plane-trigger" title="Control plane" aria-label="Open control plane" aria-pressed={controlPlaneOpen.value} onClick={() => { controlPlaneOpen.value = true; }}>
             k<span>.</span>
-          </span>
+          </button>
         </div>
         <div class="project-rail-divider" aria-hidden="true" />
 
@@ -482,25 +492,44 @@ export function ProjectRail(): JSX.Element {
             {projects.map((project) => {
               const active = project.id === activeId;
               const sessions = sessionLabel(project.session_count);
+              const unread = unreadByProject[project.id] ?? 0;
+              const unreadNote = unread > 0 ? `, ${unreadLabel(unread)}` : '';
               const tooltip =
-                project.session_count > 0
+                (project.session_count > 0
                   ? `${project.name}\n${project.path}\n${sessions}`
-                  : `${project.name}\n${project.path}`;
+                  : `${project.name}\n${project.path}`) + (unread > 0 ? `\n${unreadLabel(unread)}` : '');
               return (
                 <li
                   class={`project-rail-item-wrap${active ? ' is-active' : ''}`}
                   key={project.id}
                   data-project-id={project.id}
+                  // While the session list is collapsed, resting on a project shows
+                  // its sessions beside the rail (see state/railPeek.ts). Both
+                  // handlers are inert when the rail is open: a hover must never
+                  // open a second copy of a list that is already on screen.
+                  //
+                  // `mouseenter`/`mouseleave` rather than the pointer pair: a
+                  // hovering mouse always produces these, and a desktop browser is
+                  // the only place this can happen (the fly-out is off on a phone).
+                  // Pointer events were tried first and a real browser issued only
+                  // `mouseover`/`mousemove` for a moved cursor, so the fly-out never
+                  // opened outside a test that dispatched `pointerenter` by hand.
+                  onMouseEnter={() => railPeek.openPeek(project.id)}
+                  onMouseLeave={() => railPeek.schedulePeekClose()}
                 >
                   <button
                     type="button"
                     ref={active ? activeButtonRef : undefined}
                     class={`project-rail-item${active ? ' is-active' : ''}`}
-                    aria-label={`Switch to ${project.name} (${project.path})`}
+                    aria-label={`Switch to ${project.name} (${project.path})${unreadNote}`}
                     aria-current={active ? 'true' : undefined}
                     title={tooltip}
                     onClick={() => {
+                      controlPlaneOpen.value = false;
                       if (!active) void actions.switchProject(project.id);
+                      // Follow the click: the fly-out keeps showing a list, now the
+                      // one for the project the reader just chose.
+                      railPeek.openPeek(project.id);
                     }}
                     onContextMenu={(event) => {
                       if (!active) return;
@@ -509,6 +538,14 @@ export function ProjectRail(): JSX.Element {
                     }}
                   >
                     <ProjectGlyph project={project} />
+                    {/* The iOS-style count: unread notifications in this project,
+                      * capped so a long absence stays one badge wide. Decorative
+                      * here - the button's own name carries the number. */}
+                    {unread > 0 ? (
+                      <span class="project-rail-badge" aria-hidden="true">
+                        {unread > 99 ? '99+' : unread}
+                      </span>
+                    ) : null}
                   </button>
 
                   {active ? (

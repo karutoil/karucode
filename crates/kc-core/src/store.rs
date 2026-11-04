@@ -111,6 +111,67 @@ pub struct Session {
     pub updated_at: i64,
 }
 
+/// A durable grouping owned by one project, containing project-local sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Mission {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub description: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionTask {
+    pub id: String,
+    pub mission_id: String,
+    pub project_id: String,
+    pub title: String,
+    pub prompt: String,
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub artifact_ids: Vec<String>,
+    pub state: String,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub error: Option<String>,
+}
+
+/// The reviewed editable portion of a task, used as a compare-and-swap guard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MissionTaskPlan {
+    pub project_id: String,
+    pub prompt: String,
+    pub dependencies: Vec<String>,
+}
+
+/// An explicitly published, immutable mission record. Content and provenance are
+/// assertions by the publisher, not verified by the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionRecord {
+    pub id: String,
+    pub mission_id: String,
+    pub request_id: String,
+    pub kind: String,
+    pub title: String,
+    pub content: String,
+    pub task_id: Option<String>,
+    pub session_id: Option<String>,
+    pub artifact_id: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionSession {
+    pub project_id: String,
+    pub session_id: String,
+    pub request_id: String,
+    pub prompt: String,
+    pub created_at: i64,
+}
+
 /// A workspace the agent may work in, shown as one entry in the project rail.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -175,6 +236,13 @@ pub struct StoredMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewound_at: Option<i64>,
     pub created_at: i64,
+}
+
+/// A chronological page of visible transcript messages.
+#[derive(Debug, Clone)]
+pub struct MessagePage {
+    pub messages: Vec<StoredMessage>,
+    pub has_more: bool,
 }
 
 impl StoredMessage {
@@ -537,8 +605,223 @@ impl TerminalSession {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait Store: Send + Sync {
+    /// Returns the existing record on an identical request-id replay.
+    async fn publish_mission_record(
+        &self,
+        _record: MissionRecord,
+    ) -> Result<(MissionRecord, bool)> {
+        Err(crate::error::Error::Store(
+            "mission records unsupported".into(),
+        ))
+    }
+    async fn list_mission_records(
+        &self,
+        _mission_id: &str,
+        _kind: &str,
+    ) -> Result<Vec<MissionRecord>> {
+        Err(crate::error::Error::Store(
+            "mission records unsupported".into(),
+        ))
+    }
+    /// Fetch only the selected artifacts, in caller order, within the handoff limits.
+    async fn get_mission_artifacts(
+        &self,
+        _mission_id: &str,
+        _ids: &[String],
+    ) -> Result<Vec<MissionRecord>> {
+        Err(crate::error::Error::Store(
+            "mission artifacts unsupported".into(),
+        ))
+    }
+    async fn create_mission_task(&self, _task: MissionTask) -> Result<MissionTask> {
+        Err(crate::error::Error::Store(
+            "mission tasks unsupported".into(),
+        ))
+    }
+    async fn revise_mission_task(
+        &self,
+        _mission_id: &str,
+        _task_id: &str,
+        _project_id: Option<String>,
+        _prompt: Option<String>,
+        _dependencies: Option<Vec<String>>,
+    ) -> Result<MissionTask> {
+        Err(crate::error::Error::Store(
+            "mission tasks unsupported".into(),
+        ))
+    }
+    /// Atomically replan only a never-claimed task whose reviewed plan still matches.
+    async fn replan_mission_task(
+        &self,
+        _mission_id: &str,
+        _task_id: &str,
+        _expected: MissionTaskPlan,
+        _project_id: Option<String>,
+        _prompt: Option<String>,
+        _dependencies: Option<Vec<String>>,
+    ) -> Result<MissionTask> {
+        Err(crate::error::Error::Store(
+            "mission replanning unsupported".into(),
+        ))
+    }
+    async fn list_mission_tasks(&self, _mission_id: &str) -> Result<Vec<MissionTask>> {
+        Err(crate::error::Error::Store(
+            "mission tasks unsupported".into(),
+        ))
+    }
+    async fn start_mission_tasks(&self, _mission_id: &str, _limit: u32) -> Result<()> {
+        Err(crate::error::Error::Store(
+            "mission tasks unsupported".into(),
+        ))
+    }
+    async fn mission_schedule_state(&self, _mission_id: &str) -> Result<Option<String>> {
+        Err(crate::error::Error::Store(
+            "mission schedules unsupported".into(),
+        ))
+    }
+    async fn control_mission_tasks(&self, _mission_id: &str, _action: &str) -> Result<()> {
+        Err(crate::error::Error::Store(
+            "mission controls unsupported".into(),
+        ))
+    }
+    /// Atomically reserve a retry request and requeue one terminal task.
+    async fn retry_mission_task(
+        &self,
+        _mission_id: &str,
+        _task_id: &str,
+        _request_id: &str,
+        _project_id: Option<&str>,
+    ) -> Result<bool> {
+        Err(crate::error::Error::Store(
+            "mission task retries unsupported".into(),
+        ))
+    }
+    async fn claim_mission_task(
+        &self,
+        _mission_id: &str,
+        _session_id: &str,
+    ) -> Result<Option<MissionTask>> {
+        Err(crate::error::Error::Store(
+            "mission tasks unsupported".into(),
+        ))
+    }
+    async fn finish_mission_task(
+        &self,
+        _id: &str,
+        _state: &str,
+        _run_id: Option<&str>,
+        _error: Option<&str>,
+    ) -> Result<()> {
+        Err(crate::error::Error::Store(
+            "mission tasks unsupported".into(),
+        ))
+    }
+    async fn recover_mission_tasks(&self) -> Result<Vec<String>> {
+        Err(crate::error::Error::Store(
+            "mission tasks unsupported".into(),
+        ))
+    }
+
+    /// Atomically account for a physical provider attempt, or refuse it.
+    async fn admit_provider_attempt(&self, _session_id: &str) -> Result<()> {
+        Err(crate::error::Error::Store(
+            "provider attempt admission unsupported".into(),
+        ))
+    }
+    async fn mission_attempt_budget(&self, _id: &str) -> Result<Option<(Option<u32>, u32)>> {
+        Err(crate::error::Error::Store(
+            "mission budgets unsupported".into(),
+        ))
+    }
+    async fn create_mission(
+        &self,
+        _id: &str,
+        _project_id: &str,
+        _title: &str,
+        _description: &str,
+        _max_provider_attempts: Option<u32>,
+    ) -> Result<Mission> {
+        Err(crate::error::Error::Store("missions unsupported".into()))
+    }
+    async fn list_missions(&self, _project_id: &str) -> Result<Vec<Mission>> {
+        Err(crate::error::Error::Store("missions unsupported".into()))
+    }
+    async fn get_mission(&self, _id: &str) -> Result<Option<Mission>> {
+        Err(crate::error::Error::Store("missions unsupported".into()))
+    }
+    async fn delete_mission(&self, _id: &str) -> Result<()> {
+        Err(crate::error::Error::Store("missions unsupported".into()))
+    }
+    /// Atomically reserve a request and create its session. Returns false on replay.
+    async fn create_mission_session(
+        &self,
+        _mission_id: &str,
+        _request_id: &str,
+        _session_id: &str,
+        _project_id: &str,
+        _title: &str,
+        _workspace: &str,
+        _prompt: &str,
+    ) -> Result<bool> {
+        Err(crate::error::Error::Store("missions unsupported".into()))
+    }
+    async fn list_mission_sessions(&self, _mission_id: &str) -> Result<Vec<MissionSession>> {
+        Err(crate::error::Error::Store("missions unsupported".into()))
+    }
+    /// Find the mission whose reserved coordinator session is this session.
+    async fn coordinator_mission(&self, _session_id: &str) -> Result<Option<Mission>> {
+        Ok(None)
+    }
+
+    /// Reserve the singleton control chat and return (session, created).
+    /// Create one durable control-plane session.
+    ///
+    /// Control sessions are server-owned: they have no project and each gets its
+    /// own directory, so several can run at once without touching a project.
+    async fn create_control_session(
+        &self,
+        _id: &str,
+        _title: &str,
+        _workspace: &str,
+    ) -> Result<Session> {
+        Err(crate::error::Error::Store(
+            "control sessions unsupported".into(),
+        ))
+    }
+    /// Every control session, newest activity first.
+    async fn list_control_sessions(&self) -> Result<Vec<SessionSummary>> {
+        Err(crate::error::Error::Store(
+            "control sessions unsupported".into(),
+        ))
+    }
+    /// Detach one control session from a project (legacy rows), rebinding its
+    /// workspace to the server-owned directory.
+    async fn detach_control_session(&self, _id: &str, _workspace: &str) -> Result<()> {
+        Err(crate::error::Error::Store(
+            "control sessions unsupported".into(),
+        ))
+    }
+    async fn is_control_session(&self, _id: &str) -> Result<bool> {
+        Ok(false)
+    }
+    /// Atomically reserve a control-plane dispatch; false means identical replay.
+    async fn reserve_control_dispatch(
+        &self,
+        _request_id: &str,
+        _session_id: &str,
+        _project_id: &str,
+        _title: &str,
+        _workspace: &str,
+        _prompt: &str,
+    ) -> Result<(String, bool)> {
+        Err(crate::error::Error::Store(
+            "control dispatch unsupported".into(),
+        ))
+    }
+
     async fn create_session(
         &self,
         id: &str,
@@ -546,6 +829,17 @@ pub trait Store: Send + Sync {
         workspace: &str,
         project_id: Option<&str>,
     ) -> Result<Session>;
+    /// Total sessions and up to `limit` recovery candidates, interrupted first
+    /// then recent, each ordered by update time and id descending. Call before
+    /// marking runs or agents interrupted. Exclude agents if their snapshot failed.
+    async fn recovery_sessions(
+        &self,
+        cutoff: i64,
+        limit: usize,
+        include_agents: bool,
+    ) -> Result<(usize, Vec<String>)>;
+    /// Lightweight snapshot for releasing claims of running agents.
+    async fn running_agent_ids(&self) -> Result<Vec<(String, String)>>;
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>>;
     async fn list_sessions_for_project(&self, project_id: &str) -> Result<Vec<SessionSummary>>;
     async fn get_session(&self, id: &str) -> Result<Option<Session>>;
@@ -571,6 +865,68 @@ pub trait Store: Send + Sync {
 
     async fn append_message(&self, message: &NewMessage) -> Result<i64>;
     async fn list_messages(&self, session_id: &str, limit: usize) -> Result<Vec<StoredMessage>>;
+    /// Newest visible messages before an exclusive cursor, in ascending id order.
+    /// An oversized newest message is returned alone to guarantee progress.
+    async fn list_message_page(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+        before_id: Option<i64>,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<MessagePage> {
+        // Compatibility fallback for stores without a native paged query. SQLite
+        // overrides this to avoid loading the transcript into memory.
+        let mut messages = self.list_messages(session_id, usize::MAX).await?;
+        messages.retain(|m| {
+            before_id.is_none_or(|id| m.id < id)
+                && agent_id.is_none_or(|id| m.agent_id.as_deref() == Some(id))
+        });
+        let mut selected = Vec::new();
+        let mut bytes = 0usize;
+        let mut has_more = false;
+        for message in messages.into_iter().rev() {
+            let size = serde_json::to_vec(&message)
+                .map_err(|e| crate::error::Error::Store(format!("encode message: {e}")))?
+                .len();
+            if selected.len() >= limit
+                || (!selected.is_empty() && bytes.saturating_add(size) > max_bytes)
+            {
+                has_more = true;
+                break;
+            }
+            bytes = bytes.saturating_add(size);
+            selected.push(message);
+        }
+        selected.reverse();
+        Ok(MessagePage {
+            messages: selected,
+            has_more,
+        })
+    }
+    /// Parent conversation rows before an exclusive cursor, newest first. Excludes
+    /// rewound, system and subagent rows. Stop before exceeding `max_bytes`, except
+    /// that the newest row is returned alone if it is oversized. Zero limit is empty.
+    /// Oversized tool content may be replaced with an explicit omission marker to
+    /// leave room for its call and preceding context. Implementations must apply
+    /// the byte bound before materializing row payloads.
+    async fn list_history_page(
+        &self,
+        session_id: &str,
+        before_id: Option<i64>,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<StoredMessage>>;
+    /// Tool names in the first `limit` visible messages after the cursor, without
+    /// loading message bodies. Fail closed if scan payloads exceed `max_bytes`.
+    async fn rewind_tool_names(
+        &self,
+        session_id: &str,
+        after_id: i64,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<String>>;
+
     async fn list_messages_after(
         &self,
         session_id: &str,
@@ -619,6 +975,21 @@ pub trait Store: Send + Sync {
         session_id: &str,
         after_id: i64,
     ) -> Result<Vec<FileCheckpoint>>;
+
+    /// List checkpoint metadata without materializing before-image blobs.
+    async fn list_checkpoint_metadata(
+        &self,
+        session_id: &str,
+        after_id: i64,
+    ) -> Result<Vec<FileCheckpoint>>;
+
+    /// Fetch a before-image only if it fits the remaining preview byte budget.
+    /// An oversized blob must fail before its bytes are materialized.
+    async fn checkpoint_content_bounded(&self, id: i64, max_bytes: usize)
+        -> Result<Option<String>>;
+
+    /// Fetch one checkpoint before-image. None means the row or its blob is missing.
+    async fn checkpoint_content(&self, id: i64) -> Result<Option<String>>;
 
     /// Delete one journal row, once its undo has been applied.
     async fn delete_checkpoint(&self, id: i64) -> Result<()>;
@@ -690,6 +1061,12 @@ pub trait Store: Send + Sync {
     ) -> Result<BTreeMap<Option<String>, UsageTotals>> {
         let _ = session_id;
         Ok(BTreeMap::new())
+    }
+
+    /// Persisted usage for all attributed mission sessions, including prior retries.
+    /// None means that the store does not support this aggregation.
+    async fn mission_usage(&self, _mission_id: &str) -> Result<Option<UsageTotals>> {
+        Ok(None)
     }
 
     /// Counts a summary view needs that a transcript page cannot give: the

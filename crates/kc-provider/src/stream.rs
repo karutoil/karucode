@@ -236,15 +236,16 @@ impl StreamState {
         if text.is_empty() {
             return;
         }
-        for event in self.parser.push(&text) {
+        let (events, oversized) = self.parser.push_limited(&text, MAX_SSE_EVENT_BYTES);
+        for event in events {
             self.handle_event(event);
             if self.input_done {
                 return;
             }
         }
-        if self.parser.buffered_len() > MAX_SSE_EVENT_BYTES {
+        if oversized {
             self.fail(format!(
-                "provider sent more than {MAX_SSE_EVENT_BYTES} bytes without terminating an SSE event"
+                "provider sent an SSE event exceeding {MAX_SSE_EVENT_BYTES} bytes"
             ));
         }
     }
@@ -624,6 +625,19 @@ mod tests {
             out.push(item);
         }
         out
+    }
+
+    #[tokio::test]
+    async fn oversized_complete_event_is_rejected() {
+        let body = format!("data: {}\n\n", "x".repeat(MAX_SSE_EVENT_BYTES));
+        let mut state = state_with_chunks(vec![]);
+        state.bytes = stream::iter(vec![Ok(Bytes::from(body))]).boxed();
+        let items = drain(state).await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(
+            matches!(&items[0], Ok(ProviderChunk::Error { message, .. }) if message.contains("SSE event exceeding")),
+            "{items:?}"
+        );
     }
 
     /// A stream that never ends must be stopped by the attempt deadline, not left

@@ -17,11 +17,13 @@ cargo run -p kc-docs -- --check   # what CI runs
 | --- | --- | --- |
 | [`approvals`](approvals.md) | The four approval modes, the allowlists behind them, and how a pending approval is answered or times out. | `crates/kc-core/src/approval.rs:1` |
 | [`builtin-tools`](builtin-tools.md) | What each first-party tool does, how it is gated, and the limits and gotchas that shape its output. | `crates/kc-tools/src/lib.rs:7` |
+| [`central-control`](central-control.md) | Open as many control-plane chats as you need; each audits, steers and starts sessions under normal approvals, outside every project. | `crates/kc-server/src/control.rs:3` |
 | [`configuration`](configuration.md) | The four config layers, which settings apply live, and how secrets and invalid values are handled. | `crates/kc-server/src/settings.rs:14` |
 | [`deployment`](deployment.md) | Install the binary and a hardened unit, keep it enabled across reboots, and upgrade or roll back without losing the paths it needs. | `crates/kc-server/src/main.rs:6` |
 | [`documentation`](documentation.md) | Doc blocks in the code compile into the built-in docs the agent reads; add, update and delete them with the code. | `crates/kc-docs/src/lib.rs:33` |
 | [`http-api`](http-api.md) | Authenticate, send the CSRF header, and find the endpoint for sessions, config, approvals, files, git, plugins, MCP and the event stream. | `crates/kc-server/src/lib.rs:21` |
 | [`mcp`](mcp.md) | Add stdio or streamable-HTTP MCP servers to the config and use their tools through the same approval policy. | `crates/kc-mcp/src/lib.rs:18` |
+| [`missions`](missions.md) | Group explicitly started project-local sessions across projects in durable missions. | `crates/kc-server/src/routes/missions.rs:3` |
 | [`notifications`](notifications.md) | karucode pings you when a run settles, parks on an approval or fails — with a sound per kind, desktop notifications, an unread badge, and four independent ways to turn it off. | `crates/kc-core/src/notify.rs:24` |
 | [`plugins`](plugins.md) | Build an out-of-process plugin that adds tools, hooks and inspector panels, register it, and debug it when it fails to start. | `crates/kc-plugin-sdk/src/lib.rs:49` |
 | [`projects`](projects.md) | How projects map to directories, how sessions are confined to one, and what happens when a project's directory moves or is deleted. | `crates/kc-server/src/state.rs:6` |
@@ -36,4 +38,4 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`tool-call-errors`](tool-call-errors.md) | A call that fails because of how it was written comes back with a working version of itself, so the next attempt is correct instead of another guess. | `crates/kc-core/src/tool.rs:1` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-20 topic(s).
+22 topic(s).

@@ -67,6 +67,47 @@
     visibility 0s linear 160ms;
 }
 
+/* Hovering a project while the rail is collapsed (`components/SessionsRail.tsx`'s
+ * `RailPeek`, driven by `state/railPeek.ts`).
+ *
+ * Fixed, against the project rail, and out of flow: a preview that took flex space
+ * would resize the conversation every time the pointer crossed the rail, which is
+ * exactly the jump the collapsed rail exists to avoid. It carries a shadow so it
+ * reads as an overlay rather than a panel, and it starts right where the project
+ * rail ends — no gap for the pointer to fall through on its way across.
+ *
+ * The collapsed rule above is `.app[data-rail-collapsed='true'] .rail`, which is
+ * more specific than a bare `.rail-peek`; both selectors are spelled out here so the
+ * zero width and `visibility: hidden` that hide the real rail cannot also hide the
+ * fly-out that stands in for it. */
+.rail.rail-peek,
+.app[data-rail-collapsed='true'] .rail.rail-peek {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: var(--rail-w);
+  z-index: 30;
+  flex: 0 0 var(--sidebar-w);
+  width: var(--sidebar-w);
+  height: 100dvh;
+  visibility: visible;
+  border-right: 1px solid var(--line-strong);
+  background: var(--panel-2);
+  box-shadow: 12px 0 34px -18px var(--shadow-lg);
+  animation: rail-peek-in 130ms ease-out;
+}
+
+@keyframes rail-peek-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 /* The mock's `.ws` row: a 27px glyph tile, the name over the path, a chevron.
  * It is the workspace switcher, so it reads as a control rather than a heading. */
 .side-head {
@@ -1142,6 +1183,40 @@
    Ctrl+B never leaves the rail unreachable by pointer. */
 .head-btn.sessions-toggle {
   display: none;
+}
+
+/* The notification centre's bell. The badge is an iOS-style count: a filled pill
+   on the corner of a 26px button, ringed in the header's own fill so it reads as
+   sitting on top rather than inside. `--danger` and `--danger-bg` are a contrast
+   pair in every theme and in light mode, so the pill stays legible when they are
+   swapped (a filled badge, not a tinted one). */
+.notifications-head {
+  position: relative;
+}
+
+.notifications-head.has-unread {
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+
+.head-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  box-shadow: 0 0 0 2px var(--bg);
+  color: var(--danger-bg);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  pointer-events: none;
 }
 
 .theme-header-btn svg {

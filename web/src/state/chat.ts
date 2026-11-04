@@ -522,7 +522,7 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
     for (const item of previous.items) {
       if (seen.has(item.id)) continue;
       if (item.kind === 'approval' && item.approval.status !== 'pending') items.push(item);
-      else if (item.kind === 'notice' || item.kind === 'interrupted') items.push(item);
+      else if ((item.kind === 'notice' && item.id !== 'notice:history-truncated') || item.kind === 'interrupted') items.push(item);
     }
   }
 
@@ -537,14 +537,12 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
   // of the transcript, otherwise it just starts mid-conversation with no
   // explanation of where the earlier history went.
   if (detail.messages_truncated) {
-    const limit = detail.messages_limit;
-    const window = limit && limit > 0 ? `the last ${limit.toLocaleString()} messages` : 'the most recent messages';
     ordered.unshift({
       kind: 'notice',
       id: 'notice:history-truncated',
       at: ordered[0]?.at ?? 0,
       level: 'info',
-      message: `Showing ${window}; earlier history is not loaded.`,
+      message: 'Earlier history is not loaded.',
     });
   }
 

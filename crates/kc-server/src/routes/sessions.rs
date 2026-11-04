@@ -1,7 +1,9 @@
 //! Session CRUD, message submission and cancellation.
 
 use crate::error::{ApiError, ApiResult};
-use crate::routes::{parse_required, query_str, query_usize, QueryMap};
+use crate::routes::{
+    message_before, parse_required, query_str, query_usize, QueryMap, TRANSCRIPT_PAGE_BYTES,
+};
 use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -301,13 +303,20 @@ pub async fn get_session(
     // the browser would silently show a transcript whose beginning is missing.
     let limit = query_usize(&query, "messages")?.unwrap_or(MESSAGE_LIMIT);
     let limit = limit.clamp(1, MESSAGE_LIMIT_MAX);
-    let mut messages = store.list_messages(&session.id, limit + 1).await?;
-    let messages_truncated = messages.len() > limit;
-    if messages_truncated {
-        // `list_messages` returns the tail; drop the overflowing oldest row.
-        let excess = messages.len() - limit;
-        messages.drain(..excess);
-    }
+    let page = store
+        .list_message_page(
+            &session.id,
+            None,
+            message_before(&query)?,
+            limit,
+            TRANSCRIPT_PAGE_BYTES,
+        )
+        .await?;
+    let messages_truncated = page.has_more;
+    let messages = page.messages;
+    let messages_before = messages_truncated
+        .then(|| messages.first().map(|m| m.id))
+        .flatten();
     let runs = store.list_runs(&session.id, RUN_LIMIT).await?;
     let agents = store.list_agents(&session.id).await?;
     let approvals = store.list_pending_approvals(Some(&session.id)).await?;
@@ -336,6 +345,7 @@ pub async fn get_session(
         "messages": messages,
         "messages_truncated": messages_truncated,
         "messages_limit": limit,
+        "messages_before": messages_before,
         "runs": runs,
         "agents": agents,
         "approvals": approvals,

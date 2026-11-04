@@ -734,6 +734,65 @@ describe('SettingsSheet controls', () => {
     expect(patches).toHaveLength(0);
   });
 
+  /**
+   * `0` is the "no ceiling" spelling the server documents, and `255` is the
+   * deepest the `u8` depth field holds. The form used to reject both: it capped
+   * concurrency at 32 and depth at 10, so an operator asking for the widest
+   * setting got a validation error that the server would have accepted.
+   */
+  it('round-trips 0 concurrency and depth 255 as an unbounded install', async () => {
+    const config = twoProfileConfig();
+    const { patches } = installFetch(config);
+    renderSheet(config);
+
+    await settleOnTab('Agent', 'Max concurrent', config);
+    await openAdvanced();
+    const panel = visiblePanel();
+
+    const concurrent = within(panel).getByLabelText('Max concurrent') as HTMLInputElement;
+    const background = within(panel).getByLabelText('Live background agents') as HTMLInputElement;
+    const depth = within(panel).getByLabelText('Max depth') as HTMLInputElement;
+
+    // The inputs themselves advertise the wider range, so a browser's own
+    // spinners do not refuse a value the server accepts.
+    expect(concurrent.min).toBe('0');
+    expect(concurrent.max).toBe('1024');
+    expect(background.min).toBe('0');
+    expect(background.max).toBe('1024');
+    expect(depth.max).toBe('255');
+
+    fireEvent.input(concurrent, { target: { value: '0' } });
+    fireEvent.input(background, { target: { value: '0' } });
+    fireEvent.input(depth, { target: { value: '255' } });
+    expect(concurrent.value).toBe('0');
+    expect(depth.value).toBe('255');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.subagents?.max_concurrent).toBe(0);
+    expect(patches[0]?.subagents?.max_background).toBe(0);
+    expect(patches[0]?.subagents?.max_depth).toBe(255);
+    // Nothing was rejected locally, so no error text is on screen.
+    expect(visiblePanel().querySelector('.field-error')).toBeNull();
+  });
+
+  it('still rejects a concurrency value above the server ceiling', async () => {
+    const config = twoProfileConfig();
+    const { patches } = installFetch(config);
+    renderSheet(config);
+
+    await settleOnTab('Agent', 'Max concurrent', config);
+    await openAdvanced();
+    const panel = visiblePanel();
+    fireEvent.input(within(panel).getByLabelText('Max concurrent'), { target: { value: '1025' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(
+      await screen.findByText('Concurrency must be 0 (no ceiling) or 1–1024.'),
+    ).not.toBeNull();
+    expect(patches).toHaveLength(0);
+  });
+
   it('exposes every toggle as a labelled, described switch and saves the flip', async () => {
     const { patches } = installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());

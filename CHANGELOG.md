@@ -8,7 +8,57 @@ under **Changed**.
 
 ## [Unreleased]
 
+### Added
+
+- **Hovering a project with the session list collapsed peeks at that project's
+  sessions.** `Ctrl/Cmd+B` gives the rail zero width, which is right for a wide
+  conversation and a dead end when all you wanted was to open a session: the only
+  way back was to restore the rail, click, and collapse it again. Resting on a
+  project tile now shows that project's sessions as a fly-out against the project
+  rail — the same rows, the same rename and delete menus, the same fingerprints —
+  as a `position: fixed` overlay, so the conversation never resizes to make room.
+  Hovering the project already open reads nothing (the store has that list);
+  hovering another costs one bounded read of its sessions, cached for 15 s
+  (`web/src/state/railPeek.ts`). Opening a row from another project switches
+  project first, the fly-out offers **Open this project** (and **New session**
+  when it is the project already open), and **Pin the session list open** is the
+  same as `Ctrl+B`. It closes when the mouse leaves — after a 260 ms grace period,
+  so clipping the edge on the way past does not flash the list — and on Escape,
+  which is checked before the Escape that stops a run. It never appears while the
+  rail is open, on a phone, in the control plane, or behind an open dialog.
+- **Unread notification counters on the project rail.** Each project tile carries
+  an iOS-style count of its unread notifications, so a run that finished in a
+  project you are not looking at is visible without opening anything. The number
+  is in the tile's accessible name and tooltip as well as in the pill, it is
+  capped at `99+`, and it clears when the notifications behind it are read.
+- **A notification centre**, opened from the bell in the chat header or *Open
+  notifications* in the command palette: every notification the server has sent to
+  this browser, newest first, with the unread ones marked, the kind spelled out
+  (**Finished**, **Needs you**, **Failed**, **Notice**), the body, the session and
+  project it came from, and how long ago. Per-row **Mark as read**, **Mark all
+  read**, **Clear**, and a click that opens the session behind the row — switching
+  project first when it lives in another one. It exists because none of the other
+  surfaces persist: a toast is gone in seconds, a desktop notification can be
+  refused, and a dot on a session row says *that* something happened without
+  saying what.
+
 ### Changed
+
+- **The unread badge, the project counters, the title total and the notification
+  centre are derived from one list.** `store.notifications` is the single source
+  (`web/src/state/store.ts`); `store.unread`, `store.unreadByProject` and
+  `store.unreadTotal` are computed from it, so marking anything read clears all of
+  them and they can never disagree. The list is kept in this browser's
+  `localStorage` (`karucode.notifications`, capped at 100 entries and pruned after
+  a week) because the server stores no notifications — they describe live state.
+  The notifier now hands every notification to that list (`NotifierDeps.record`)
+  instead of counting an unread total itself; one about the session already on
+  screen is recorded as read rather than dropped.
+- **`notification` events carry `project_id`.** The project the notifying session
+  belongs to, omitted when the notice names no session or the session could not be
+  read. The browser only ever holds the open project's sessions, so it cannot work
+  out the owner itself — without this field a badge on a project you are not
+  looking at is impossible. See the event table in `docs/API.md`.
 
 - **The service runs as the user who installed it.** `install.sh` defaulted
   `SERVICE_USER` to a dedicated `karucode` system account, which meant the agent
@@ -93,6 +143,26 @@ under **Changed**.
   which is still true and unrelated to the unit.
 
 ### Added
+
+- **Unbounded subagents: `0` now means "no ceiling".** `subagents.max_concurrent`
+  was capped at 16 by the settings API and `0` was rewritten to `1` on load, so the
+  widest fan-out an operator could ask for was 16 loops — and asking for `0`, the
+  natural spelling of "no limit", produced the *narrowest* possible install. Both
+  switchers now read `0` as no ceiling: `SubagentLimiter` grants every slot (while
+  still counting `active`/`peak`), and `spawn_batch` skips the `max_background`
+  capacity check instead of comparing against zero, which had made every
+  background spawn a guaranteed refusal. `max_background` follows the same rule,
+  `max_depth` keeps its own (`0` = no delegation, `255` = the `u8` ceiling), and
+  the bounds are now `0..=1024` for the two counts and `0..=255` for depth, with
+  anything above them a `400` that names the field and the range. Depth and time
+  still bound a spawn, so what stops a runaway is cost, not a counter.
+
+  The Settings screen had drifted the other way — it accepted up to 32 concurrent
+  agents and depth 10, so a value the form allowed came back as a server `400` it
+  could not explain. One `SUBAGENT_BOUNDS` table now mirrors the server's, the
+  three inputs carry the same `min`/`max`, and each says what zero means. A roster
+  that an unbounded fan-out can now fill renders its first 60 rows (live agents
+  first) behind a **Show all N** control instead of building hundreds of cards.
 
 - **Steer a running turn, queue a follow-up, and take either back again.** While
   a run is working the composer queues instead of sending, with a **Steer** /

@@ -541,6 +541,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         None => ProjectRegistry::without_default(config.extra_roots()),
     });
     seed_projects(&store, &projects, workspace.as_ref()).await?;
+    detach_control_sessions(&store, &config.data_dir).await?;
 
     let plugin_tools = {
         let host = plugins.lock().await;
@@ -587,6 +588,14 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         allowed_hosts: std::env::var(crate::host::ALLOWED_HOSTS_ENV).ok(),
     });
     state.reload_tools().await;
+    for mission_id in state
+        .store()
+        .recover_mission_tasks()
+        .await
+        .map_err(|e| anyhow!("mission recovery failed: {e}"))?
+    {
+        crate::routes::missions::spawn_scheduler(state.clone(), mission_id);
+    }
 
     // Plugin-raised notifications: drain the host channel into the same event
     // stream the runtime publishes on, so a plugin notification is
@@ -944,6 +953,39 @@ fn workspace_was_requested(config: &Config) -> bool {
     config.workspace_explicit
 }
 
+/// Keep control sessions out of projects, and give each its own directory.
+///
+/// A chat created by an older version was bound to a project (often the first one)
+/// and inherited that project's workspace. It is detached here rather than on the
+/// next click, so it never shows up in a project's session list and its tools never
+/// touch project files. Each chat gets `<data_dir>/control-workspaces/<id>`.
+async fn detach_control_sessions(
+    store: &Arc<dyn kc_core::store::Store>,
+    data_dir: &Path,
+) -> anyhow::Result<()> {
+    let base = data_dir.join("control-workspaces");
+    tokio::fs::create_dir_all(&base).await?;
+    let base = std::fs::canonicalize(&base)?;
+    for session in store.list_control_sessions().await? {
+        let recorded = std::fs::canonicalize(&session.workspace).ok();
+        let inside = recorded.as_ref().is_some_and(|path| path.starts_with(&base));
+        if session.project_id.is_none() && inside {
+            continue;
+        }
+        let target = base.join(&session.id);
+        tokio::fs::create_dir_all(&target).await?;
+        store
+            .detach_control_session(&session.id, &target.to_string_lossy())
+            .await?;
+        tracing::info!(
+            session = %session.id,
+            path = %target.display(),
+            "detached a control chat from its project"
+        );
+    }
+    Ok(())
+}
+
 /// Make sure every session has a project and the registry knows every project.
 ///
 /// * no projects at all -> create one for the configured workspace;
@@ -980,6 +1022,12 @@ async fn seed_projects(
 
     for session in store.list_sessions().await? {
         if session.project_id.is_some() {
+            continue;
+        }
+        // The control chat lives in a server directory on purpose. Adopting it as
+        // a project on the next restart would put it back inside the project rail
+        // and defeat the separation, so it is never attached.
+        if store.is_control_session(&session.id).await.unwrap_or(false) {
             continue;
         }
         let raw = session.workspace.trim();

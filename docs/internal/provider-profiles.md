@@ -292,23 +292,37 @@ or gateway that already parses DSML itself keeps working - it sends
 
 ## A stream that degenerates into a repetition loop
 Some models occasionally stop producing language and start repeating one
-short block - `Let me write. Go. Now. OK.` over and over - usually inside the
+block - `Let me write. Go. Now. OK.` over and over - usually inside the
 reasoning channel, where a turn can burn its whole output budget without
-writing a word of content. The runtime watches both channels for a block of up
-to 48 characters repeating eight times in a row at the end of the stream:
+writing a word of content. The runtime watches both channels for a *cycle* at
+the end of the stream: the same block, back to back, with nothing new between
+the copies. Whitespace is compared collapsed, so a model that alternates
+`Let me write.` and `Let me write.\n\nGo.` is still one cycle.
 
 * **reasoning** that loops is abandoned and the same request is re-issued under
   `retry_max_stream_restarts` (nothing of that attempt was persisted, so
   nothing is duplicated). `stream_retry` carries the reason starting with
-  `the model's reasoning repeated a N-character block`.
-* **answer text** that loops is trimmed back to the last clean paragraph and the
-  turn completes, because the model did produce something worth keeping; the
+  `the model's reasoning repeated`.
+* **answer text** that loops is cut back to where the run starts and the turn
+  completes, because the model did produce something worth keeping; the
   repeated tail is never persisted, so it cannot become the model's own habit
-  on the next request.
+  on the next request. Fenced code is never compared, so a repetitive program
+  is safe.
 
-Eight repetitions is high on purpose: a table row or a short sentence may
-legitimately appear several times, and a run of punctuation or a repeated
-200-character paragraph is not treated as a loop.
+The bar is deliberately high, because a false positive throws away a good
+answer or a whole attempt:
+
+* reasoning needs **8** copies, answer text **10**;
+* the block may be up to **512** characters, short enough that a stuck model is
+  caught in its first few hundred characters;
+* the whole run must be at least **240** characters, and **1024** when the block
+  is one character repeated, so a markdown rule or a border of `=` is not a loop;
+* copies must be adjacent. A model that weighs up ten gateways serving the same
+  model repeats `deepseek-v3.2-flash-1017` ten times while every provider is
+  new, and that is not a cycle: the text between the copies differs. Counting a
+  repeated n-gram instead - which this detector used to do - turned that
+  ordinary reasoning into a "loop", abandoned the attempt and eventually failed
+  the run.
 
 A cancellation is never retried, and neither is a configuration error: no
 attempt count fixes an empty `base_url` or an unsendable header.

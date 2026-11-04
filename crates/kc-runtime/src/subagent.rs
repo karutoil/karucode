@@ -90,23 +90,43 @@
 //
 // ```toml
 // [subagents]
-// max_concurrent = 3       # loops running at once;  KARUCODE_SUBAGENT_CONCURRENCY
-// max_background = 8       # live background agents per session
+// max_concurrent = 3       # loops at once; 0 = no ceiling, KARUCODE_SUBAGENT_CONCURRENCY
+// max_background = 8       # live background agents per session; 0 = no ceiling
 // allow_background = true  # KARUCODE_SUBAGENT_ALLOW_BACKGROUND
-// max_background = 8       # KARUCODE_SUBAGENT_MAX_BACKGROUND
 // wait_timeout_secs = 600  # default bound on wait_for_agents
 // max_iterations = 200     # turns per segment; KARUCODE_SUBAGENT_MAX_ITERATIONS
 // max_continues = 60       # segment refreshes;   KARUCODE_SUBAGENT_MAX_CONTINUES
 // allow_recursive = false  # KARUCODE_ALLOW_RECURSIVE_SUBAGENTS
-// max_depth = 1
+// max_depth = 1            # 0 = no delegation; at most 255
 // timeout_secs = 14400     # 4h wall clock;      KARUCODE_SUBAGENT_TIMEOUT_SECS
 // ```
 //
 // Concurrency is enforced by a semaphore, iterations and wall clock per subagent,
 // and a hard backstop on top of the in-loop deadline. Cancelling the parent cancels
-// children through a child token. A spawn past `max_concurrent` or
+// children through a child token. A spawn past a finite `max_concurrent` or
 // `max_background` is **refused**, never queued: a model that says "go" and then
 // sees nothing happen is worse than one that was told "no".
+//
+// # Unlimited subagents
+//
+// `max_concurrent = 0` and `max_background = 0` each mean **no ceiling**, which is
+// how an install says "get out of the way": every spawn is granted a slot
+// immediately, and a `spawn_agents` fan-out starts every child it was given. Both
+// are needed for a wide fan-out, because the two limits apply on top of each
+// other - a background batch reads `max_background` for its capacity check and
+// `max_concurrent` for its slots. `max_depth = 255` removes the practical nesting
+// limit (the field is a `u8`, so that is the deepest it can express).
+//
+// Nothing else has to change: `active` and `peak` are still counted, the roster and
+// the stats stay honest, and a spawn is still bounded by `max_depth`,
+// `timeout_secs` and the install's wall clock. What stops a runaway is cost, not a
+// counter - every live loop is a provider stream and a transcript, so a model that
+// fans out two hundred ways bills for two hundred loops. That is the trade the
+// setting makes, and it is why the defaults are small.
+//
+// Zero does not mean the same thing for every field in this section:
+// `max_depth = 0` forbids delegation outright and `max_continues = 0` restores the
+// one-shot budget, so read each field's own rule rather than one rule for all.
 //
 // # A subagent runs as long as the task needs
 //
@@ -141,6 +161,11 @@
 // Interrupted - carry counts and filter the list; switching to **This session**
 // narrows it to the working session. A running agent has pause and stop buttons.
 //
+// With an unbounded `max_concurrent` a single fan-out can leave hundreds of rows
+// here, so the list renders the first 60 - live agents first - and offers **Show
+// all**. The count above the list and the filter chips always describe the whole
+// set, not the rendered page.
+//
 // Click an agent to open its drill-in view: the task it was given, its model and
 // parent, its last reported note, and its live transcript - assistant text,
 // thinking, each tool call with status and output, commands with exit codes, and
@@ -161,17 +186,25 @@
 //
 // # Gotchas
 //
-// * There is no separate worktree or checkout: subagents edit the same files. Two
-//   subagents editing one file will conflict; that is what `owned_paths` is for,
-//   and it is advisory only.
+// * **Git worktrees isolate subagent work** when the workspace is a git repository.
+//   A worktree is created for each subagent and cleaned up when it completes,
+//   preventing direct file conflicts with the parent and sibling agents. The
+//   worktree is detached, so creating and removing one leaves no branch behind in
+//   your repository. If the workspace is not a git repository or worktree creation
+//   fails, subagents transparently reuse the shared workspace and `owned_paths`
+//   provides advisory conflict reporting.
 // * Recursion is off by default; enabling it without a depth budget turns one
 //   question into an expensive fan-out.
 // * Subagent runs cost tokens and time. Delegating a one-file read is slower than
 //   reading the file.
 // * Tool calls inside a turn execute in order, so a blocking fan-out still issues
 //   its children one after another; `spawn_agents` is what makes them overlap.
-// * `max_background` caps *live background* agents per session. A blocking spawn is
-//   bounded by `max_concurrent` instead, because it holds its parent's turn.
+// * `max_background` caps *live background* agents per session, when it is
+//   finite. A blocking spawn is bounded by `max_concurrent` instead, because it
+//   holds its parent's turn.
+// * Setting `max_concurrent` to `0` does not make spawning free: it removes one
+//   counter. `max_depth`, `timeout_secs`, the install's run clock and the bill for
+//   every concurrent provider stream still apply.
 // * A background agent outlives the turn that started it but not the run: when
 //   the run ends its children are cancelled, and a restart marks them
 //   `interrupted`.
@@ -323,10 +356,14 @@ impl SubagentLimiter {
     /// A background spawn must never park its parent's turn, so it either gets a
     /// slot immediately or is refused with an explanation. Waiting would turn a
     /// tool call into a sleep the model cannot see or break out of.
+    ///
+    /// `max == 0` is the documented "no ceiling": the slot is always granted, and
+    /// `active`/`peak` are still counted so the stats stay honest. Note this is
+    /// the *only* meaning 0 can have here - a reader who expected 0 to mean
+    /// "allow nothing" would turn every spawn into a refusal.
     pub fn try_acquire(self: &Arc<Self>, max: usize) -> Option<SubagentPermit> {
-        let max = max.max(1);
         let mut active = self.active.lock().expect("subagent limiter");
-        if *active >= max {
+        if !slot_available(*active, max) {
             return None;
         }
         *active += 1;
@@ -342,14 +379,13 @@ impl SubagentLimiter {
         max: usize,
         cancel: &CancellationToken,
     ) -> Option<SubagentPermit> {
-        let max = max.max(1);
         loop {
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
                 let mut active = self.active.lock().expect("subagent limiter");
-                if *active < max {
+                if slot_available(*active, max) {
                     *active += 1;
                     self.peak.fetch_max(*active, Ordering::Relaxed);
                     return Some(SubagentPermit {
@@ -364,6 +400,15 @@ impl SubagentLimiter {
             }
         }
     }
+}
+
+/// Is a slot free under a ceiling of `max`?
+///
+/// `0` is "no ceiling", which is why this is a named rule rather than an inline
+/// `active < max`: the saturating form would make 0 mean "allow nothing", the
+/// exact opposite of what the docs promise.
+fn slot_available(active: usize, max: usize) -> bool {
+    max == 0 || active < max
 }
 
 /// Holds one concurrency slot; released on drop, even on early return.
@@ -796,8 +841,10 @@ async fn spawn_batch(
     // Capacity is checked for the whole batch before anything is registered: a
     // fan-out that started half its children and then refused the rest would
     // leave the parent holding ids it did not ask for and cannot easily attribute.
+    // `max_background = 0` is "no ceiling", so the check is skipped rather than
+    // compared against zero - which would refuse every background spawn.
     let live_background = inner.hub.background_count(&session_id.0);
-    if options.background {
+    if options.background && cfg.max_background > 0 {
         let would_be = live_background.saturating_add(tasks.len());
         if would_be > cfg.max_background {
             return Ok(ToolOutcome::err(format!(
@@ -1327,7 +1374,7 @@ async fn run_child_loop(
     inner: Arc<RuntimeInner>,
     live: Arc<LiveAgent>,
     record: AgentRecord,
-    spec: LoopSpec,
+    mut spec: LoopSpec,
     _permit: SubagentPermit,
     mut warnings: Vec<String>,
     _task: String,
@@ -1338,6 +1385,44 @@ async fn run_child_loop(
         let cfg = inner.deps.settings.subagent_config().await;
         cfg.timeout_secs.max(1)
     };
+
+    // Try to create a git worktree for this subagent if the repository supports it.
+    // If the workspace is not a git repo or worktree creation fails, we fall back
+    // to using the main workspace path.
+    let worktree =
+        match crate::worktree::WorktreeGuard::try_create(spec.workspace.root(), &agent_id).await {
+            Ok(wt) => {
+                if wt.is_active() {
+                    tracing::debug!(
+                        agent_id = %agent_id.0,
+                        worktree_path = %wt.path().display(),
+                        "subagent using git worktree"
+                    );
+                }
+                wt
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id.0,
+                    error = %e,
+                    "worktree creation error, proceeding with main workspace"
+                );
+                crate::worktree::WorktreeGuard::try_create(spec.workspace.root(), &agent_id)
+                    .await
+                    .unwrap_or_else(|_| {
+                        // Last resort: create an inactive guard that points to the main workspace
+                        crate::worktree::WorktreeGuard::fallback(spec.workspace.root())
+                    })
+            }
+        };
+
+    // Update the spec's workspace to point to the worktree (or main workspace if fallback)
+    if worktree.is_active() || worktree.path() != spec.workspace.root() {
+        spec.workspace = Arc::new(
+            kc_core::paths::Workspace::new(worktree.path())
+                .unwrap_or_else(|_| (*spec.workspace).clone()),
+        );
+    }
 
     let guarded = std::panic::AssertUnwindSafe(crate::agent::run_loop(Arc::clone(&inner), spec))
         .catch_unwind();
@@ -1409,6 +1494,9 @@ async fn run_child_loop(
     inner.runs.lock().expect("runs lock").remove(&agent_id.0);
 
     // --- finish ---------------------------------------------------------------
+    // The worktree guard is dropped here, cleaning up the worktree if it was active.
+    drop(worktree);
+
     let (summary_raw, _) = truncate_output(&outcome.text, MAX_SUMMARY_BYTES);
     let summary = if summary_raw.trim().is_empty() {
         outcome.error.clone().unwrap_or_default()
@@ -2059,6 +2147,7 @@ impl Tool for AgentHistoryTool {
                 "type": "object",
                 "properties": {
                     "agent_id": { "type": "string", "description": "The agent whose transcript to read." },
+                    "before": { "type": "integer", "description": "Exclusive message id cursor for older messages." },
                     "messages": {
                         "type": "integer",
                         "description": "How many of the newest messages to read (default 60)."
@@ -2099,29 +2188,63 @@ impl Tool for AgentHistoryTool {
             Err(e) => return ToolOutcome::err(format!("could not look up `{agent_id}`: {e}")),
         }
         let limit = request.opt_u64("messages").unwrap_or(60).clamp(1, 500) as usize;
-        let messages = match inner.deps.store.list_agent_messages(agent_id, limit).await {
-            Ok(messages) => messages,
+        let before = match request.arguments.get("before") {
+            None => None,
+            Some(value) => match value.as_i64().filter(|id| *id > 0) {
+                Some(id) => Some(id),
+                None => return ToolOutcome::err("`before` must be a positive message id"),
+            },
+        };
+        let page = match inner
+            .deps
+            .store
+            .list_message_page(
+                &ctx.approvals.session_id.0,
+                Some(agent_id),
+                before,
+                limit,
+                MAX_HISTORY_BYTES,
+            )
+            .await
+        {
+            Ok(page) => page,
             Err(e) => return ToolOutcome::err(format!("could not read the transcript: {e}")),
         };
+        let messages = page.messages;
         if messages.is_empty() {
-            return ToolOutcome::ok(format!("agent `{agent_id}` has no stored transcript"));
+            return ToolOutcome::ok(format!(
+                "agent `{agent_id}` has no stored transcript on this page"
+            ));
         }
-        let mut content = String::new();
+        // Put pagination information first: the runtime may truncate tool output
+        // again to a smaller configured limit before the model sees it.
+        let header = if page.has_more {
+            format!(
+                "Older messages available: call agent_history with agent_id={agent_id:?} and before={}.\n\n",
+                messages[0].id
+            )
+        } else {
+            "No older messages on this transcript page.\n\n".to_string()
+        };
+        let mut body = String::new();
         for message in &messages {
             let role = message.role.as_str();
-            content.push_str(&format!("[{role}]\n{}\n\n", message.content));
+            body.push_str(&format!("[{role}]\n{}\n\n", message.content));
             for call in &message.tool_calls {
-                content.push_str(&format!("  -> {}({})\n", call.name, call.arguments));
+                body.push_str(&format!("  -> {}({})\n", call.name, call.arguments));
             }
         }
-        let (content, cut) = truncate_output(&content, MAX_HISTORY_BYTES);
+        let (body, cut) = truncate_output(&body, MAX_HISTORY_BYTES.saturating_sub(header.len()));
+        let content = format!("{header}{body}");
         ToolOutcome {
             ok: true,
             content,
-            truncated: cut,
+            truncated: cut || page.has_more,
             meta: Some(serde_json::json!({
                 "agent_id": agent_id,
                 "messages": messages.len(),
+                "messages_truncated": page.has_more,
+                "messages_before": if page.has_more { messages.first().map(|m| m.id) } else { None },
             })),
             images: Vec::new(),
         }
@@ -2518,6 +2641,44 @@ mod tests {
         );
         drop(first);
         assert!(limiter.try_acquire(1).is_some());
+    }
+
+    /// `0` is the "no ceiling" spelling, and the two paths that read it have to
+    /// agree: a background spawn (which must never park its parent) and a
+    /// blocking one (which may). Reading 0 as "allow nothing" here would turn the
+    /// widest setting an operator can choose into a harness that refuses every
+    /// spawn - the exact inverse of the documented contract.
+    #[test]
+    fn a_zero_ceiling_grants_every_slot() {
+        let limiter = Arc::new(SubagentLimiter::new(Default::default()));
+        let mut permits = Vec::new();
+        for _ in 0..500 {
+            permits.push(
+                limiter
+                    .try_acquire(0)
+                    .expect("no ceiling means a slot is always free"),
+            );
+        }
+        assert_eq!(limiter.active(), 500, "slots are still counted honestly");
+        assert_eq!(limiter.peak(), 500);
+
+        // The blocking path agrees with the immediate one, and does not depend on
+        // a permit being released first.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        rt.block_on(async {
+            let another = limiter
+                .acquire(0, &cancel)
+                .await
+                .expect("the unlimited acquire must not block");
+            drop(another);
+        });
+
+        drop(permits);
+        assert_eq!(limiter.active(), 0, "every permit is released on drop");
     }
 
     #[test]

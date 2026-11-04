@@ -185,6 +185,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod bounded_pipe;
 pub mod command;
 pub mod docs_tool;
 pub mod favicon;

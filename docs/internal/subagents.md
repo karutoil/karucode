@@ -79,23 +79,43 @@ labelled with who sent it.
 
 ```toml
 [subagents]
-max_concurrent = 3       # loops running at once;  KARUCODE_SUBAGENT_CONCURRENCY
-max_background = 8       # live background agents per session
+max_concurrent = 3       # loops at once; 0 = no ceiling, KARUCODE_SUBAGENT_CONCURRENCY
+max_background = 8       # live background agents per session; 0 = no ceiling
 allow_background = true  # KARUCODE_SUBAGENT_ALLOW_BACKGROUND
-max_background = 8       # KARUCODE_SUBAGENT_MAX_BACKGROUND
 wait_timeout_secs = 600  # default bound on wait_for_agents
 max_iterations = 200     # turns per segment; KARUCODE_SUBAGENT_MAX_ITERATIONS
 max_continues = 60       # segment refreshes;   KARUCODE_SUBAGENT_MAX_CONTINUES
 allow_recursive = false  # KARUCODE_ALLOW_RECURSIVE_SUBAGENTS
-max_depth = 1
+max_depth = 1            # 0 = no delegation; at most 255
 timeout_secs = 14400     # 4h wall clock;      KARUCODE_SUBAGENT_TIMEOUT_SECS
 ```
 
 Concurrency is enforced by a semaphore, iterations and wall clock per subagent,
 and a hard backstop on top of the in-loop deadline. Cancelling the parent cancels
-children through a child token. A spawn past `max_concurrent` or
+children through a child token. A spawn past a finite `max_concurrent` or
 `max_background` is **refused**, never queued: a model that says "go" and then
 sees nothing happen is worse than one that was told "no".
+
+## Unlimited subagents
+
+`max_concurrent = 0` and `max_background = 0` each mean **no ceiling**, which is
+how an install says "get out of the way": every spawn is granted a slot
+immediately, and a `spawn_agents` fan-out starts every child it was given. Both
+are needed for a wide fan-out, because the two limits apply on top of each
+other - a background batch reads `max_background` for its capacity check and
+`max_concurrent` for its slots. `max_depth = 255` removes the practical nesting
+limit (the field is a `u8`, so that is the deepest it can express).
+
+Nothing else has to change: `active` and `peak` are still counted, the roster and
+the stats stay honest, and a spawn is still bounded by `max_depth`,
+`timeout_secs` and the install's wall clock. What stops a runaway is cost, not a
+counter - every live loop is a provider stream and a transcript, so a model that
+fans out two hundred ways bills for two hundred loops. That is the trade the
+setting makes, and it is why the defaults are small.
+
+Zero does not mean the same thing for every field in this section:
+`max_depth = 0` forbids delegation outright and `max_continues = 0` restores the
+one-shot budget, so read each field's own rule rather than one rule for all.
 
 ## A subagent runs as long as the task needs
 
@@ -130,6 +150,11 @@ somewhere else. The status chips - Running, Paused, Done, Failed, Cancelled,
 Interrupted - carry counts and filter the list; switching to **This session**
 narrows it to the working session. A running agent has pause and stop buttons.
 
+With an unbounded `max_concurrent` a single fan-out can leave hundreds of rows
+here, so the list renders the first 60 - live agents first - and offers **Show
+all**. The count above the list and the filter chips always describe the whole
+set, not the rendered page.
+
 Click an agent to open its drill-in view: the task it was given, its model and
 parent, its last reported note, and its live transcript - assistant text,
 thinking, each tool call with status and output, commands with exit codes, and
@@ -150,17 +175,25 @@ failure, so it notifies and leaves it in its row and its summary.
 
 ## Gotchas
 
-* There is no separate worktree or checkout: subagents edit the same files. Two
-  subagents editing one file will conflict; that is what `owned_paths` is for,
-  and it is advisory only.
+* **Git worktrees isolate subagent work** when the workspace is a git repository.
+  A worktree is created for each subagent and cleaned up when it completes,
+  preventing direct file conflicts with the parent and sibling agents. The
+  worktree is detached, so creating and removing one leaves no branch behind in
+  your repository. If the workspace is not a git repository or worktree creation
+  fails, subagents transparently reuse the shared workspace and `owned_paths`
+  provides advisory conflict reporting.
 * Recursion is off by default; enabling it without a depth budget turns one
   question into an expensive fan-out.
 * Subagent runs cost tokens and time. Delegating a one-file read is slower than
   reading the file.
 * Tool calls inside a turn execute in order, so a blocking fan-out still issues
   its children one after another; `spawn_agents` is what makes them overlap.
-* `max_background` caps *live background* agents per session. A blocking spawn is
-  bounded by `max_concurrent` instead, because it holds its parent's turn.
+* `max_background` caps *live background* agents per session, when it is
+  finite. A blocking spawn is bounded by `max_concurrent` instead, because it
+  holds its parent's turn.
+* Setting `max_concurrent` to `0` does not make spawning free: it removes one
+  counter. `max_depth`, `timeout_secs`, the install's run clock and the bill for
+  every concurrent provider stream still apply.
 * A background agent outlives the turn that started it but not the run: when
   the run ends its children are cancelled, and a restart marks them
   `interrupted`.

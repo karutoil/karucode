@@ -2,7 +2,7 @@
 // @kc-title: Use the browser workspace
 // @kc-summary: Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary.
 // @kc-tags: ui, web, frontend, panels, shortcuts, preact
-// @kc-applies-to: ui:ProjectRail, ui:project-switcher, ui:mobile-sheet, ui:mobile-layout, route:GET /api/projects/:id/favicon, ui:SessionsRail, ui:ChatView, ui:Composer, ui:TpsBadge, ui:ContextPill, ui:Inspector, ui:SessionInfoTab, route:GET /api/sessions/:id/info, file:web/src/components/SessionInfoTab.tsx, file:web/src/lib/sessionInfo.ts, ui:SettingsSheet, ui:NotificationsSection, ui:ToastRegion, ui:CommandPalette, ui:FileViewer, ui:FilePreview, ui:RewindDialog, ui:plugin-panel, route:GET /api/workspace/tree, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, file:web/src/components/Dialog.tsx, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, event:session_rewound, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, config:providers.models.context_window, config:[notifications], event:usage, event:notification, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, event:queued_messages, event:steer_applied, ui:AgentsTab, route:GET /api/agents, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, event:agent_spawned, event:agent_paused, event:agent_note, event:agent_message, event:agent_finished, tool:spawn_agent, tool:report_status, file:web/src/components/AgentsTab.tsx, file:web/src/state/agentConsole.ts, file:web/src/components/pluginPanels.ts, file:web/src/state/queues.test.ts, file:web/src/styles/composer.css, file:scripts/verify_queues.py, file:web/src/components/PluginPanelView.tsx, file:web/src/components/RewindDialog.tsx, file:web/src/components/TpsBadge.tsx, file:web/src/components/NotificationsSettings.tsx, file:web/src/styles/mobile.test.ts, file:web/src/state/notifier.ts, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts, file:web/src/lib/tps.ts, file:web/src/state/promptTokens.ts, file:web/src/lib/dockHeight.ts, fn:registerPluginPanelRenderer, event:tool_call_finished, tool:read_file, config:model.supports_images, cmd:npm run dev, cmd:npm run build, file:web/dist, env:KARUCODE_WEB_DIR
+// @kc-applies-to: ui:ProjectRail, ui:project-switcher, ui:mobile-sheet, ui:mobile-layout, route:GET /api/projects/:id/favicon, ui:SessionsRail, ui:RailPeek, ui:ChatView, ui:Composer, ui:TpsBadge, ui:ContextPill, ui:Inspector, ui:SessionInfoTab, route:GET /api/sessions/:id/info, file:web/src/components/SessionInfoTab.tsx, file:web/src/lib/sessionInfo.ts, ui:SettingsSheet, ui:NotificationsSection, ui:ToastRegion, ui:NotificationCenter, ui:notification-bell, ui:CommandPalette, ui:FileViewer, ui:FilePreview, ui:RewindDialog, ui:plugin-panel, route:GET /api/workspace/tree, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, file:web/src/components/Dialog.tsx, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, event:session_rewound, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, config:providers.models.context_window, config:[notifications], event:usage, event:notification, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, event:queued_messages, event:steer_applied, ui:AgentsTab, route:GET /api/agents, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, event:agent_spawned, event:agent_paused, event:agent_note, event:agent_message, event:agent_finished, tool:spawn_agent, tool:report_status, file:web/src/components/AgentsTab.tsx, file:web/src/state/agentConsole.ts, file:web/src/components/pluginPanels.ts, file:web/src/state/queues.test.ts, file:web/src/styles/composer.css, file:scripts/verify_queues.py, file:web/src/components/PluginPanelView.tsx, file:web/src/components/RewindDialog.tsx, file:web/src/components/TpsBadge.tsx, file:web/src/components/NotificationsSettings.tsx, file:web/src/styles/mobile.test.ts, file:web/src/state/notifier.ts, file:web/src/state/railPeek.ts, file:web/src/state/notifications.test.ts, file:web/src/components/NotificationCenter.tsx, file:web/src/components/SessionsRail.tsx, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts, file:web/src/lib/tps.ts, file:web/src/state/promptTokens.ts, file:web/src/lib/dockHeight.ts, fn:registerPluginPanelRenderer, event:tool_call_finished, tool:read_file, config:model.supports_images, cmd:npm run dev, cmd:npm run build, file:web/dist, env:KARUCODE_WEB_DIR
 //
 // # Layout
 //
@@ -11,11 +11,44 @@
 //   studio** button, the **command palette** button and a settings shortcut.
 //   Collapses to an icon column with `Ctrl/Cmd+B` on the session rail. Below
 //   1024 px it is hidden entirely and the sessions sheet carries a **project
-//   switcher** instead (see **Mobile**).
+//   switcher** instead (see **Mobile**). The **k.** button opens the control
+//   plane. On narrow screens the sessions sheet's **Control plane** button
+//   opens the same view.
+// * **Control plane**: browse sessions across projects (search, status filters,
+//   running first), select one to switch to its project and open its ordinary
+//   chat, or open a **control chat**. Control chats are their own unlimited set,
+//   listed above the sessions; **＋ New** starts another. They have a private
+//   workspace rather than a project, so they act on projects only through their
+//   tools, and their `@` menu lists projects. With nothing selected the plane is a
+//   dashboard: a launch box that hands a draft to a control chat, running work as
+//   cards, a recent-sessions table, and columns for what needs attention, live
+//   agents and projects. From 1560px it is two columns; the whole block is capped
+//   at 1880px so a 4K monitor does not strand a narrow column of text. An open
+//   conversation gains a facts panel (where, state, messages, session id, and
+//   *Open in project* / *Stop this run*) from 1400px. The list refreshes every five
+//   seconds and **Project workspace** exits the plane. See `central-control` for the
+//   tools, dispatch and approval semantics.
 // * **Sessions rail**: the current project, a session search (`/`), sessions
 //   grouped by last activity, newest first, with running indicators; create one
 //   with `Ctrl/Cmd+N`. On a phone it is a full-height sheet, headed by the
 //   project switcher and a **Close** button.
+// * **Peeking at the collapsed rail**: `Ctrl/Cmd+B` gives the rail zero width, so
+//   hovering a project tile in the project rail shows *that project's* sessions as
+//   a fly-out beside the rail — same rows, same rename/delete menus, no need to
+//   restore the rail to open a session. It is `position: fixed` against the project
+//   rail so the conversation never resizes to make room, it closes when the pointer
+//   leaves (after a ~260 ms grace period) or on Escape, and it never appears while
+//   the rail is open, on a phone, in the control plane, or behind an open dialog.
+//   Hovering the project you are already in reads nothing (the store has that list);
+//   hovering another costs one bounded read of its sessions, cached for 15 s by
+//   `src/state/railPeek.ts`, because the store only holds one project's sessions at
+//   a time. Opening a row from another project switches project first, and the
+//   fly-out offers **Open this project** for the same reason.
+// * **Unread counts on the rail**: each project tile carries an iOS-style counter of
+//   its unread notifications, so a run that finished in a project you are not
+//   looking at is visible without opening anything. The number is in the tile's
+//   accessible name and tooltip as well as in the pill, it is capped at `99+`, and
+//   it clears when the notifications behind it are read.
 // * **Chat**: streaming Markdown, tool cards whose footer carries the duration
 //   and a **Show output** disclosure, command output, diff cards with a review
 //   footer, approval cards, thinking blocks, and the composer with a model
@@ -142,20 +175,32 @@
 //
 // # Notifications
 //
-// One `notification` event from the server feeds four surfaces, and
+// One `notification` event from the server feeds five surfaces, and
 // `src/state/notifier.ts` is the only place that decides which one fires:
 //
 // * an in-app toast that names the session and offers **Open**;
-// * an unread count on the session row and in `document.title`
-//   (`(2) Fix the login redirect — karucode`), which is the only thing visible
-//   from another tab;
+// * an unread count on the session row, on the project's tile in the rail, and in
+//   `document.title` (`(2) Fix the login redirect — karucode`), which is the only
+//   thing visible from another tab;
 // * a synthesized sound cue (see below);
 // * a desktop notification, when the browser allows one and the event is not about
-//   the session you are already looking at.
+//   the session you are already looking at;
+// * an entry in the **notification centre** (the bell in the chat header, and
+//   *Open notifications* in the command palette) — a newest-first list of everything
+//   that arrived, with **Mark all read**, per-row **Mark as read**, **Clear**, and a
+//   click that opens the session behind the row (switching project when it lives in
+//   another one).
 //
 // The notifier is fed from the event dispatch path, **before** the current-session
 // filter, because the server reports every terminal run — a run finishing in
 // another project is exactly the case this exists for.
+//
+// The five surfaces are not five counters: `store.notifications` is one list, and the
+// session dot, the project counter, the title total and the centre are all derived
+// from it (`store.unread`, `store.unreadByProject`, `store.unreadTotal`), so marking
+// anything read clears all of them and they can never disagree. The list is persisted
+// per browser (`karucode.notifications`, capped at 100 entries and pruned after a
+// week), because the server keeps no notification table: they describe live state.
 //
 // Sounds are synthesized with Web Audio rather than shipped as files: the page CSP
 // has no `media-src`, so it falls back to `default-src 'self'` and a `blob:` audio
@@ -414,7 +459,11 @@ import { CommandPalette } from './components/CommandPalette';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { FileViewer } from './components/FileViewer';
 import { Inspector } from './components/Inspector';
+import { NotificationCenter } from './components/NotificationCenter';
 import { ProjectRail } from './components/ProjectRail';
+import { ControlPlane } from './components/ControlPlane';
+import { controlPlaneOpen } from './state/controlPlane';
+import * as railPeek from './state/railPeek';
 import { RewindDialog } from './components/RewindDialog';
 import { SessionsRail } from './components/SessionsRail';
 import { SettingsSheet } from './components/SettingsSheet';
@@ -426,6 +475,7 @@ function isDialogOpen(): boolean {
     store.settingsOpen.value ||
     store.paletteOpen.value ||
     store.themeStudioOpen.value ||
+    store.notificationCenterOpen.value ||
     store.rewindTarget.value !== null ||
     store.fileViewerPath.value !== null
   );
@@ -509,8 +559,18 @@ export function App(): JSX.Element {
       }
       if (isDialogOpen()) return;
 
+      // The collapsed rail's fly-out is not a dialog and has no focus trap, so it
+      // closes itself here — before the Escape that stops a run, which would
+      // otherwise cancel a run when all the reader wanted was to dismiss the list.
+      if (event.key === 'Escape' && railPeek.peekProjectId.value !== null) {
+        railPeek.closePeek();
+        return;
+      }
+
       if (mod && key === 'b') {
         event.preventDefault();
+        // A peek is a stand-in for the rail: collapsing or restoring it is over.
+        railPeek.closePeek();
         actions.toggleRail();
         return;
       }
@@ -598,13 +658,13 @@ export function App(): JSX.Element {
           <ErrorBoundary scope="The project rail">
             <ProjectRail />
           </ErrorBoundary>
-          <ErrorBoundary scope="The sessions rail">
+          {controlPlaneOpen.value ? <ErrorBoundary scope="Mission control"><ControlPlane /></ErrorBoundary> : <><ErrorBoundary scope="The sessions rail">
             <SessionsRail />
           </ErrorBoundary>
           <ChatView />
           <ErrorBoundary scope="The inspector">
             <Inspector />
-          </ErrorBoundary>
+          </ErrorBoundary></>}
         </div>
       </ErrorBoundary>
 
@@ -625,6 +685,9 @@ export function App(): JSX.Element {
       </ErrorBoundary>
       <ErrorBoundary scope="The Theme studio">
         <ThemeStudio />
+      </ErrorBoundary>
+      <ErrorBoundary scope="Notifications">
+        <NotificationCenter />
       </ErrorBoundary>
       <ErrorBoundary scope="The rewind dialog">
         <RewindDialog />

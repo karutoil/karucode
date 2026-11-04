@@ -302,7 +302,10 @@ async fn a_clean_rewind_emits_a_session_rewound_event() {
 #[tokio::test]
 async fn rewinding_a_session_that_is_running_is_a_conflict() {
     use support::Script;
-    let h = HarnessBuilder::new(vec![Script::Hang]).build().await;
+    let h = HarnessBuilder::new(vec![Script::Hang])
+        .no_ai_titles()
+        .build()
+        .await;
     let id = h.create_session(None).await;
     h.post(
         &format!("/api/sessions/{id}/messages"),

@@ -943,6 +943,27 @@
   gap: 10px;
 }
 
+/* The tail of a capped roster: an unbounded `max_concurrent` can produce
+ * hundreds of agents, so the list renders a page and this is how the rest is
+ * asked for. It sits inside the list so it reads as the next row, not as a
+ * separate footer. */
+.agent-list-more {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line-card);
+  border-radius: var(--radius);
+  background: var(--surface-inset);
+}
+
+.agent-list-more-note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 /* Scope switch + status filters: the two controls that make a long agent list
  * answerable instead of a wall of cards. */
 .agent-scope {

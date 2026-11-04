@@ -4,6 +4,7 @@ import type { Project } from '../api/types';
 import * as store from '../state/store';
 import * as actions from '../state/actions';
 import { ProjectRail, pathHint, projectInitials } from './ProjectRail';
+import * as railPeek from '../state/railPeek';
 
 vi.mock('../state/actions', () => ({
   switchProject: vi.fn(async () => undefined),
@@ -323,6 +324,116 @@ describe('ProjectRail', () => {
     const activeItem = screen.getByRole('button', { name: 'Switch to KaruCode (/home/me/karucode)' });
     fireEvent.contextMenu(activeItem);
     expect(screen.getByRole('menu', { name: 'Project actions for KaruCode' })).not.toBeNull();
+  });
+});
+
+describe('ProjectRail unread counters and the collapsed rail', () => {
+  function notify(projectId: string | undefined, id: string, sessionId = 's_1'): void {
+    store.recordNotification(
+      {
+        id,
+        kind: 'run_finished',
+        title: 'Run finished',
+        body: '',
+        session_id: sessionId,
+        session_title: 'Fix login bug',
+        ...(projectId === undefined ? {} : { project_id: projectId }),
+        source: 'runtime',
+        sticky: false,
+      },
+      false,
+    );
+  }
+
+  beforeEach(() => {
+    store.notifications.value = [];
+    store.notificationCenterOpen.value = false;
+    store.settingsOpen.value = false;
+    store.paletteOpen.value = false;
+    store.themeStudioOpen.value = false;
+    store.rewindTarget.value = null;
+    store.fileViewerPath.value = null;
+    store.narrowViewport.value = false;
+    store.railCollapsed.value = false;
+    railPeek.resetRailPeek();
+  });
+
+  it('counts unread notifications per project, iOS style, on the tile', () => {
+    notify(mainProject.id, 'run:r_1');
+    notify(mainProject.id, 'run:r_2');
+    notify(docsProject.id, 'run:r_3', 's_9');
+    const { container } = renderRail();
+
+    const badges = container.querySelectorAll('.project-rail-badge');
+    expect(badges).toHaveLength(2);
+    // Newest project first in the list, so KaruCode's count comes first.
+    expect(badges[0]?.textContent).toBe('2');
+    expect(badges[1]?.textContent).toBe('1');
+
+    // The number is part of the button's name, not only its pixels.
+    expect(
+      screen.getByRole('button', { name: 'Switch to KaruCode (/home/me/karucode), 2 unread notifications' }),
+    ).not.toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Switch to Docs Site (/home/me/docs), 1 unread notification' }),
+    ).not.toBeNull();
+    // ...and the tooltip says it too, for a pointer instead of a screen reader.
+    expect(
+      screen.getByRole('button', { name: /Switch to Docs Site/ }).getAttribute('title'),
+    ).toContain('1 unread notification');
+  });
+
+  it('caps the count so a long absence stays one badge wide', () => {
+    for (let index = 0; index < 120; index += 1) notify(mainProject.id, `run:r_${index}`);
+    const { container } = renderRail();
+    expect(container.querySelector('.project-rail-badge')?.textContent).toBe('99+');
+  });
+
+  it('drops the badge once the notifications behind it are read', async () => {
+    notify(mainProject.id, 'run:r_1');
+    renderRail();
+    expect(badgeText()).toBe('1');
+
+    store.markProjectNotificationsRead(mainProject.id);
+    await vi.waitFor(() => expect(badgeText()).toBeNull());
+
+    function badgeText(): string | null {
+      return document.querySelector('.project-rail-badge')?.textContent ?? null;
+    }
+  });
+
+  it('peeks at a project’s sessions when the rail is collapsed and it is hovered', () => {
+    store.railCollapsed.value = true;
+    renderRail();
+
+    const tile = screen.getByRole('button', { name: 'Switch to Docs Site (/home/me/docs)' });
+    fireEvent.mouseEnter(tile.closest('li') as HTMLElement);
+    expect(railPeek.peekProjectId.value).toBe(docsProject.id);
+
+    // The rail is already open, so a hover must not summon a second list.
+    store.railCollapsed.value = false;
+    railPeek.resetRailPeek();
+    fireEvent.mouseEnter(tile.closest('li') as HTMLElement);
+    expect(railPeek.peekProjectId.value).toBeNull();
+  });
+
+  it('closes the fly-out when the pointer leaves the rail', () => {
+    vi.useFakeTimers();
+    try {
+      store.railCollapsed.value = true;
+      renderRail();
+      const item = screen
+        .getByRole('button', { name: 'Switch to Docs Site (/home/me/docs)' })
+        .closest('li') as HTMLElement;
+
+      fireEvent.mouseEnter(item);
+      fireEvent.mouseLeave(item);
+      expect(railPeek.peekProjectId.value).toBe(docsProject.id);
+      vi.advanceTimersByTime(railPeek.PEEK_CLOSE_MS + 1);
+      expect(railPeek.peekProjectId.value).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

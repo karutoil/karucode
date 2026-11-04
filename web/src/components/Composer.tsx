@@ -272,6 +272,8 @@ export interface ComposerProps {
   usageLabel?: string;
   /** Override the workspace tree fetch behind `@` suggestions (tests). */
   loadMentionTree?: TreeLoader;
+  /** What `@` lists, for the hint line. The control chat mentions projects. */
+  mentionLabel?: string;
   /** Override the attachment upload call (tests). */
   uploadFile?: (file: File, context: UploadContext) => Promise<{ path: string }>;
 }
@@ -326,6 +328,7 @@ export function Composer({
   focusTick,
   usageLabel,
   loadMentionTree,
+  mentionLabel,
   uploadFile,
 }: ComposerProps): JSX.Element {
   const [draft, setDraft] = useState('');
@@ -757,6 +760,7 @@ export function Composer({
             error={ranked.length === 0 ? indexError : null}
             onPick={chooseMention}
             onHover={setActiveOption}
+            title={mentionLabel === 'projects' ? 'Projects' : undefined}
           />
         ) : null}
 
@@ -1010,7 +1014,7 @@ export function Composer({
                 <>
                   <strong>Ctrl Enter</strong> to send
                   <span class="composer-hint-sep">·</span>
-                  <strong>@</strong> mention files
+                  <strong>@</strong> mention {mentionLabel ?? 'files'}
                 </>
               )}
             </span>

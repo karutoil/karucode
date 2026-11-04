@@ -181,8 +181,8 @@
 //
 // ```toml
 // [subagents]
-// max_concurrent = 3      # subagent loops running at once
-// max_background = 8      # live detached agents per session
+// max_concurrent = 3      # subagent loops running at once (0 = no ceiling)
+// max_background = 8      # live detached agents per session (0 = no ceiling)
 // allow_background = true # permitted to spawn with `background = true`
 // wait_timeout_secs = 600 # default bound on `wait_for_agents`
 // max_iterations = 200    # model turns per subagent segment
@@ -194,9 +194,17 @@
 // fan-out or a `background: true` spawn runs beside its caller, so several loops
 // can be live at once. `max_background` is a separate ceiling on *detached*
 // agents in one session, because each one keeps a provider stream open after the
-// turn that started it has ended. A spawn past either limit is refused by name,
+// turn that started it has ended. A spawn past a finite limit is refused by name,
 // never quietly queued. `wait_timeout_secs` bounds `wait_for_agents`: a wait that
 // runs out reports which agents are still working instead of hanging.
+//
+// **`max_concurrent = 0` and `max_background = 0` mean no ceiling**, for an
+// install that wants the harness out of the model's way: every spawn is granted
+// a slot immediately and a `spawn_agents` fan-out starts all of its children.
+// Each live loop is a provider stream and a transcript, so an unbounded setting
+// makes cost the only limit - a model that fans out two hundred ways bills for
+// two hundred loops. `max_depth` is the other kind of zero: `0` forbids
+// delegation outright, and the field holds at most 255 generations.
 //
 // `max_continues = 0` restores the one-shot budget (the subagent stops at
 // `max_iterations`), and `limits.auto_continue = false` switches continuation off
@@ -1976,13 +1984,19 @@ const LIMITS_BOUNDS: &[(&str, u64, u64)] = &[
 ];
 
 const SUBAGENT_BOUNDS: &[(&str, u64, u64)] = &[
-    ("subagents.max_concurrent", 1, 16),
+    // `0` is the documented "no ceiling": every spawn gets a slot immediately.
+    // The finite ceiling is generous on purpose - a fan-out of 64 is a normal
+    // review sweep - and what stops a runaway is the cost of 64 provider streams,
+    // not a number in this table.
+    ("subagents.max_concurrent", 0, 1024),
     ("subagents.max_iterations", 1, 10_000),
     ("subagents.max_continues", 0, 1_000),
-    ("subagents.max_depth", 0, 4),
-    // Background agents are live loops with a provider stream each, so the same
-    // ceiling as `max_concurrent` applies for the same reason.
-    ("subagents.max_background", 1, 16),
+    // `0` forbids delegation; the field is a `u8`, so 255 is its own ceiling and
+    // is "no practical limit" for nesting.
+    ("subagents.max_depth", 0, u8::MAX as u64),
+    // Background agents are live loops with a provider stream each, so they get
+    // the same ceiling and the same `0` = unlimited meaning as `max_concurrent`.
+    ("subagents.max_background", 0, 1024),
     ("subagents.wait_timeout_secs", 1, 3_600),
 ];
 
@@ -2050,8 +2064,12 @@ fn validate_approvals(policy: &ApprovalPolicy) -> Result<()> {
 }
 
 fn validate_subagents(subagents: &SubagentConfig) -> Result<()> {
-    // `max_depth = 0` is meaningful: it forbids delegation entirely, and
-    // `max_continues = 0` is the one-shot budget (stop at `max_iterations`).
+    // Three values are meaningful at zero, and they do not agree with each other
+    // on purpose: `max_concurrent = 0` and `max_background = 0` are *no ceiling*
+    // (the widest setting there is), `max_depth = 0` is the narrowest (delegation
+    // is forbidden), and `max_continues = 0` is the one-shot budget. A single
+    // "zero means X" rule across the section would be wrong in one direction or
+    // the other, so each field documents its own.
     let values: [(&str, u64); 6] = [
         ("subagents.max_concurrent", subagents.max_concurrent as u64),
         (
@@ -2841,12 +2859,11 @@ mod tests {
     #[test]
     fn subagent_bounds_are_enforced_and_depth_zero_is_allowed() {
         let cases: Vec<(&str, u64)> = vec![
-            ("subagents.max_concurrent", 0),
-            ("subagents.max_concurrent", 17),
+            ("subagents.max_concurrent", 1_025),
             ("subagents.max_iterations", 0),
             ("subagents.max_iterations", 10_001),
             ("subagents.max_continues", 1_001),
-            ("subagents.max_depth", 5),
+            ("subagents.max_background", 1_025),
             ("subagents.timeout_secs", 0),
             ("subagents.timeout_secs", 604_801),
         ];
@@ -2856,12 +2873,21 @@ mod tests {
                 "subagents.max_concurrent" => cfg.subagents.max_concurrent = value as usize,
                 "subagents.max_iterations" => cfg.subagents.max_iterations = value as u32,
                 "subagents.max_continues" => cfg.subagents.max_continues = value as u32,
+                "subagents.max_background" => cfg.subagents.max_background = value as usize,
                 "subagents.timeout_secs" => cfg.subagents.timeout_secs = value,
                 _ => cfg.subagents.max_depth = value as u8,
             }
             let error = validate_settings(&cfg).unwrap_err().to_string();
             assert!(error.contains(field), "{field}={value}: {error}");
         }
+
+        // `max_depth` is a `u8`, so the type is the ceiling and `256` cannot be
+        // constructed here at all - a JSON body claiming it fails deserialisation
+        // before validation runs (see `tests/api.rs`). What this test owns is the
+        // other end: `0` and `255` are both valid.
+        let mut cfg = Config::default();
+        cfg.subagents.max_depth = u8::MAX;
+        assert!(validate_settings(&cfg).is_ok(), "max_depth = 255 is valid");
 
         let mut cfg = Config::default();
         cfg.subagents.max_depth = 0;
@@ -2874,6 +2900,36 @@ mod tests {
             validate_settings(&cfg).is_ok(),
             "max_continues = 0 restores the one-shot behaviour"
         );
+    }
+
+    /// The "unlimited" spelling has to survive the whole stack, because three
+    /// different readers depend on it agreeing: the settings API, the limiter and
+    /// the background check. A clamp anywhere in the middle turns the widest
+    /// setting an operator can ask for into the narrowest one silently.
+    #[test]
+    fn unbounded_subagents_are_a_supported_setting() {
+        let mut cfg = Config::default();
+        cfg.subagents.max_concurrent = 0;
+        cfg.subagents.max_background = 0;
+        cfg.subagents.max_depth = u8::MAX;
+        cfg.subagents.allow_recursive = true;
+        assert!(
+            validate_settings(&cfg).is_ok(),
+            "0 concurrency, 0 background and max depth are all valid: {:?}",
+            validate_settings(&cfg)
+        );
+
+        // And the settings round-trip keeps them: a clamp on the write path would
+        // make the form lie about what it saved.
+        let rows: Vec<(String, String)> = rows_for(&cfg)
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let mut restored = Config::default();
+        apply_rows(&mut restored, &rows);
+        assert_eq!(restored.subagents.max_concurrent, 0);
+        assert_eq!(restored.subagents.max_background, 0);
+        assert_eq!(restored.subagents.max_depth, u8::MAX);
     }
 
     #[test]
@@ -3065,20 +3121,48 @@ mod tests {
     }
 
     #[test]
-    fn patch_rejects_zero_concurrency() {
+    fn patch_accepts_zero_concurrency_as_unlimited() {
         let mut cfg = test_config();
         apply_patch(
             &mut cfg,
             &ConfigPatch {
                 subagents: Some(SubagentsPatch {
                     max_concurrent: Some(0),
+                    max_background: Some(0),
+                    max_depth: Some(u8::MAX),
+                    allow_recursive: Some(true),
                     ..Default::default()
                 }),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert!(validate_settings(&cfg).is_err());
+        assert!(
+            validate_settings(&cfg).is_ok(),
+            "0 concurrency means no ceiling, not an invalid value: {:?}",
+            validate_settings(&cfg)
+        );
+        assert_eq!(cfg.subagents.max_concurrent, 0);
+        assert_eq!(cfg.subagents.max_background, 0);
+        assert_eq!(cfg.subagents.max_depth, u8::MAX);
+    }
+
+    #[test]
+    fn patch_rejects_concurrency_over_the_finite_ceiling() {
+        let mut cfg = test_config();
+        apply_patch(
+            &mut cfg,
+            &ConfigPatch {
+                subagents: Some(SubagentsPatch {
+                    max_concurrent: Some(1_025),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let error = validate_settings(&cfg).unwrap_err().to_string();
+        assert!(error.contains("subagents.max_concurrent"), "{error}");
     }
 
     #[test]

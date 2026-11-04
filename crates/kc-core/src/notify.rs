@@ -25,7 +25,7 @@
 // @kc-title: Get told when a run finishes or needs an answer
 // @kc-summary: karucode pings you when a run settles, parks on an approval or fails — with a sound per kind, desktop notifications, an unread badge, and four independent ways to turn it off.
 // @kc-tags: notifications, sounds, alerts, approvals, unread, plugin notify, desktop
-// @kc-applies-to: config:[notifications], config:notifications.enabled, config:notifications.run_finished, config:notifications.needs_input, config:notifications.error, config:notifications.info, config:notifications.plugin, config:notifications.min_run_secs, config:notifications.say_body, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, route:GET /api/config, route:PATCH /api/config, route:GET /api/events, event:notification, method:notify, hook:on_notify, ui:SettingsSheet, ui:SessionsRail, ui:ToastRegion, file:web/src/state/notifier.ts, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts
+// @kc-applies-to: config:[notifications], config:notifications.enabled, config:notifications.run_finished, config:notifications.needs_input, config:notifications.error, config:notifications.info, config:notifications.plugin, config:notifications.min_run_secs, config:notifications.say_body, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, route:GET /api/config, route:PATCH /api/config, route:GET /api/events, event:notification, method:notify, hook:on_notify, ui:SettingsSheet, ui:SessionsRail, ui:ToastRegion, ui:NotificationCenter, ui:ProjectRail, file:web/src/state/notifier.ts, file:web/src/state/notifications.test.ts, file:web/src/components/NotificationCenter.tsx, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts
 //
 // A long run is exactly the case where you stop watching. The agent works for
 // minutes, you switch windows, and without a signal the only way to find out it
@@ -152,6 +152,25 @@
 // were not watching also gets an unread count in the rail, and the tab title carries
 // the total (`(2) Fix the login redirect — karucode`), which is the only thing visible
 // from another tab. Opening the session clears its count.
+//
+// Every notification is also kept in the **notification centre** — a list behind the
+// bell in the chat header, newest first, with the unread ones marked and **Mark all
+// read** / **Clear** above them. It exists because none of the other surfaces persist:
+// a toast is gone in seconds, a desktop notification can be refused, and a dot on a
+// session row says *that* something happened without saying what. Each entry names the
+// session and the project, and opening one switches project first when the session
+// lives somewhere else.
+//
+// The centre, the per-session dot, the count on a project's tile in the rail and the
+// title counter are all derived from that one list, so they cannot disagree and marking
+// something read clears all of them. The list is kept in this browser's `localStorage`
+// (bounded to 100 entries and a week), because the server does not store notifications:
+// they describe live state, and the server would have to grow a table to remember them.
+//
+// Each payload carries the id of the project its session belongs to (`project_id`,
+// omitted when the server could not read the session). That is what makes a badge on a
+// project you are *not* looking at possible: the browser only ever holds the open
+// project's sessions, so it cannot work out the owner itself.
 //
 // # Plugins
 //
@@ -290,6 +309,14 @@ pub struct Notify {
     /// The session's title at emit time, so a notification is readable on its own
     /// ("Fix the login redirect" rather than "karucode").
     pub session_title: String,
+    /// The project the session belongs to, so the UI can count unread news per
+    /// project without asking who owns a session it has never listed.
+    ///
+    /// Empty when nothing named a session (a plugin notice that is not about one)
+    /// or when the session could not be read; the client treats that as "unknown
+    /// project" and shows the notification in the global list only.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project_id: String,
     /// [`RUNTIME_SOURCE`] or the name of the plugin that raised it.
     pub source: String,
     /// A cue override. `None` means "the kind's default cue". The UI owns the
@@ -329,10 +356,22 @@ impl Notify {
                 &single_line(&session_title.into()),
                 MAX_NOTIFY_TITLE_CHARS,
             ),
+            project_id: String::new(),
             source: truncate_chars(&source.into(), MAX_NOTIFY_TITLE_CHARS),
             sound: None,
             sticky: false,
         }
+    }
+
+    /// Name the project the notifying session belongs to.
+    ///
+    /// Separate from [`Notify::new`] so the seven required arguments stay as they
+    /// were: attribution is a refinement, and a call site that does not know the
+    /// project (a plugin describing no session at all) must still be able to build
+    /// a notification.
+    pub fn with_project(mut self, project_id: impl Into<String>) -> Self {
+        self.project_id = truncate_chars(project_id.into().trim(), MAX_NOTIFY_TITLE_CHARS);
+        self
     }
 
     /// Set the cue override, capped. Over-long names are truncated rather than
@@ -476,6 +515,25 @@ mod tests {
         let sound = notify.sound.unwrap();
         assert!(sound.chars().count() <= MAX_NOTIFY_SOUND_CHARS + 1);
         assert!(!sound.starts_with(' '));
+    }
+
+    #[test]
+    fn a_project_id_is_optional_and_omitted_when_unknown() {
+        // A notification about no session, or one whose session could not be read,
+        // carries no project: the key is absent rather than an empty string, so a
+        // client can tell "unknown" from a project whose id is somehow blank.
+        let unattributed = Notify::new(NotifyKind::Info, "i", "t", "b", "", "", RUNTIME_SOURCE);
+        let json = serde_json::to_value(&unattributed).unwrap();
+        assert!(json.get("project_id").is_none());
+
+        let attributed = unattributed.clone().with_project("  p_docs  ");
+        assert_eq!(attributed.project_id, "p_docs");
+        let json = serde_json::to_value(&attributed).unwrap();
+        assert_eq!(json["project_id"], serde_json::json!("p_docs"));
+        // A payload from before this field existed still parses.
+        let back: Notify = serde_json::from_value(serde_json::to_value(&unattributed).unwrap())
+            .expect("an older payload without project_id must parse");
+        assert_eq!(back.project_id, "");
     }
 
     #[test]

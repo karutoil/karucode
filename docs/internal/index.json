@@ -1,5 +1,5 @@
 {
-  "count": 20,
+  "count": 22,
   "generated_by": "cargo run -p kc-docs -- --write",
   "topics": [
     {
@@ -74,6 +74,35 @@
         "git"
       ],
       "title": "The built-in tools the agent can call"
+    },
+    {
+      "applies_to": [
+        "route:GET /api/control/sessions",
+        "route:POST /api/control/sessions",
+        "tool:control_start_session",
+        "tool:control_list_projects",
+        "tool:control_list_sessions",
+        "tool:control_read_session",
+        "tool:control_send_message",
+        "tool:control_cancel_run",
+        "tool:control_rename_session",
+        "file:crates/kc-server/src/control.rs",
+        "file:crates/kc-server/src/control_sessions.rs",
+        "file:web/src/components/ControlPlane.tsx"
+      ],
+      "path": "central-control.md",
+      "slug": "central-control",
+      "source": "crates/kc-server/src/control.rs:3",
+      "summary": "Open as many control-plane chats as you need; each audits, steers and starts sessions under normal approvals, outside every project.",
+      "tags": [
+        "control",
+        "projects",
+        "sessions",
+        "dispatch",
+        "approvals",
+        "audit"
+      ],
+      "title": "Coordinate work across projects"
     },
     {
       "applies_to": [
@@ -321,6 +350,31 @@
     },
     {
       "applies_to": [
+        "route:GET /api/missions",
+        "route:POST /api/missions",
+        "route:GET /api/missions/:id",
+        "route:DELETE /api/missions/:id",
+        "route:POST /api/missions/:id/sessions",
+        "route:POST /api/missions/:id/tasks",
+        "route:POST /api/missions/:id/start",
+        "route:POST /api/missions/:id/pause",
+        "route:POST /api/missions/:id/resume",
+        "route:POST /api/missions/:id/cancel"
+      ],
+      "path": "missions.md",
+      "slug": "missions",
+      "source": "crates/kc-server/src/routes/missions.rs:3",
+      "summary": "Group explicitly started project-local sessions across projects in durable missions.",
+      "tags": [
+        "missions",
+        "sessions",
+        "projects",
+        "runs"
+      ],
+      "title": "Organize work into missions"
+    },
+    {
+      "applies_to": [
         "config:[notifications]",
         "config:notifications.enabled",
         "config:notifications.run_finished",
@@ -344,7 +398,11 @@
         "ui:SettingsSheet",
         "ui:SessionsRail",
         "ui:ToastRegion",
+        "ui:NotificationCenter",
+        "ui:ProjectRail",
         "file:web/src/state/notifier.ts",
+        "file:web/src/state/notifications.test.ts",
+        "file:web/src/components/NotificationCenter.tsx",
         "file:web/src/lib/notifySound.ts",
         "file:web/src/lib/notifyDesktop.ts"
       ],
@@ -771,6 +829,7 @@
         "ui:mobile-layout",
         "route:GET /api/projects/:id/favicon",
         "ui:SessionsRail",
+        "ui:RailPeek",
         "ui:ChatView",
         "ui:Composer",
         "ui:TpsBadge",
@@ -783,6 +842,8 @@
         "ui:SettingsSheet",
         "ui:NotificationsSection",
         "ui:ToastRegion",
+        "ui:NotificationCenter",
+        "ui:notification-bell",
         "ui:CommandPalette",
         "ui:FileViewer",
         "ui:FilePreview",
@@ -831,6 +892,10 @@
         "file:web/src/components/NotificationsSettings.tsx",
         "file:web/src/styles/mobile.test.ts",
         "file:web/src/state/notifier.ts",
+        "file:web/src/state/railPeek.ts",
+        "file:web/src/state/notifications.test.ts",
+        "file:web/src/components/NotificationCenter.tsx",
+        "file:web/src/components/SessionsRail.tsx",
         "file:web/src/lib/notifySound.ts",
         "file:web/src/lib/notifyDesktop.ts",
         "file:web/src/lib/tps.ts",

@@ -465,7 +465,7 @@ Required to run this as a service someone else depends on.
 Not blockers, but each is something a production coding harness is expected to have.
 
 - **Compaction is trimming, not summarisation.** A model-assisted summary would let long sessions keep their thread instead of losing their beginning.
-- **No per-subagent worktree.** `owned_paths` warns about overlap; it does not isolate. Concurrent subagents editing one file can conflict.
+- **Git worktrees isolate subagent work.** When a subagent is spawned in a git repository, a worktree is created automatically (git worktree add). This isolates concurrent work and prevents file conflicts between parent and sibling agents. Worktrees are cleaned up when the subagent completes. If worktree creation fails or the workspace is not a git repository, subagents fall back to using the shared workspace transparently.
 - **MCP is tools only.** Resources, prompts, sampling and the legacy SSE transport are unimplemented; servers connect once at startup and enable/disable requires a restart.
 - **Resolved approvals are not exposed** by any endpoint; only pending ones are. There is no audit view of what was approved and when.
 - **Approval expiry granularity** — subagent approvals are marked `resolved` with decision `expired`, so the UI shows them as resolved rather than expired.

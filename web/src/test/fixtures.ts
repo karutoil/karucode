@@ -310,7 +310,13 @@ export function resetAppState(): void {
   store.sessions.value = [];
   store.sessionsLoading.value = true;
   store.currentSessionId.value = null;
+  // The notification log backs the unread badges, the project counters and the
+  // centre, so a test that leaks entries would leak counts into the next one.
+  store.notifications.value = [];
+  store.notificationCenterOpen.value = false;
   store.chat.value = emptyChatState(null);
+  store.sessionHistory.value = null;
+  store.agentHistory.value = null;
   store.chatLoading.value = false;
   store.chatError.value = null;
   store.connection.value = { api: 'unknown', stream: 'idle', lastError: null, checkedAt: null };

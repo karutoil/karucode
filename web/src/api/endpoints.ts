@@ -209,8 +209,8 @@ export async function getProjectIcon(
   }
 }
 
-export function getSession(id: string, options: CallOptions = {}): Promise<SessionDetail> {
-  return apiRequest<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`, options);
+export function getSession(id: string, options: CallOptions = {}, before?: number): Promise<SessionDetail> {
+  return apiRequest<SessionDetail>(withQuery(`/api/sessions/${encodeURIComponent(id)}`, { before }), options);
 }
 
 /**
@@ -399,11 +399,11 @@ export function listAgents(
 /** One agent plus the transcript it wrote (its own messages only). */
 export function getAgent(
   id: string,
-  params: { messages?: number } = {},
+  params: { messages?: number; before?: number } = {},
   options: CallOptions = {},
 ): Promise<AgentDetail> {
   return apiRequest<AgentDetail>(
-    withQuery(`/api/agents/${encodeURIComponent(id)}`, { messages: params.messages }),
+    withQuery(`/api/agents/${encodeURIComponent(id)}`, { messages: params.messages, before: params.before }),
     options,
   );
 }

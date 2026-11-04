@@ -183,7 +183,15 @@ auto_approve_paths = []
 timeout_secs = 300
 
 [subagents]
+# Subagent loops running at once, install-wide. 0 = no ceiling: every spawn is
+# granted a slot immediately and a spawn_agents fan-out starts every child. Each
+# live loop is a provider stream and a transcript, so an unbounded value makes
+# cost the only limit - the small default is deliberate.
 max_concurrent = 3
+# Live detached agents one session may keep running at once. 0 = no ceiling.
+# `allow_background = false` is the switch that turns background work off.
+max_background = 8
+allow_background = true
 # Model turns in one segment of a subagent. Like a run, a subagent treats this as
 # a checkpoint: a delegated coding task is a whole piece of work, not one answer.
 max_iterations = 200
@@ -192,6 +200,8 @@ max_iterations = 200
 # (max_continues + 1) * max_iterations turns, bounded by timeout_secs.
 max_continues = 60
 allow_recursive = false
+# Generations of subagents that may nest below a run. 0 = no delegation at all;
+# the field holds at most 255.
 max_depth = 1
 # Wall clock for one delegated task, across every segment (4h).
 timeout_secs = 14400

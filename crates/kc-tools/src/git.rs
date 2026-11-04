@@ -5,10 +5,14 @@ use kc_core::paths::Workspace;
 use kc_core::{Error, Result};
 use std::path::Path;
 
+const GIT_STDOUT_LIMIT: usize = 1024 * 1024;
+const GIT_STDERR_LIMIT: usize = 64 * 1024;
+
 struct GitRun {
     code: Option<i32>,
     stdout: String,
     stderr: String,
+    stdout_truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -105,11 +109,12 @@ async fn git_with_env(
     for (key, value) in extra_env {
         command.env(key, value);
     }
-    let output = command
+    let mut child = command
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
-        .output()
-        .await
+        .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 Error::Tool("git executable not found on PATH".into())
@@ -117,10 +122,27 @@ async fn git_with_env(
                 Error::Tool(format!("failed to run `git {}`: {e}", args.join(" ")))
             }
         })?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let (stdout, stderr, status) = tokio::join!(
+        crate::bounded_pipe::read(stdout, GIT_STDOUT_LIMIT),
+        crate::bounded_pipe::read(stderr, GIT_STDERR_LIMIT),
+        child.wait()
+    );
+    let (stdout, stdout_truncated) =
+        stdout.map_err(|e| Error::Tool(format!("failed to read git stdout: {e}")))?;
+    let (stderr, stderr_truncated) =
+        stderr.map_err(|e| Error::Tool(format!("failed to read git stderr: {e}")))?;
+    let status = status.map_err(|e| Error::Tool(format!("failed to wait for git: {e}")))?;
+    let mut stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+    if stderr_truncated {
+        stderr.push_str("\n[git stderr truncated]");
+    }
     Ok(GitRun {
-        code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        code: status.code(),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr,
+        stdout_truncated,
     })
 }
 
@@ -143,6 +165,12 @@ async fn filter_driver_names(dir: &Path) -> Result<Vec<String>> {
             ))
         }
     };
+    // An incomplete list would leave unenumerated executable filters enabled.
+    if run.stdout_truncated {
+        return Err(Error::Tool(
+            "git filter enumeration exceeded its output limit".into(),
+        ));
+    }
     // Exit code 1 simply means "no filter configured".
     if run.code != Some(0) && run.code != Some(1) {
         return Err(Error::Tool(format!(
@@ -364,6 +392,11 @@ async fn repo_scope(ws: &Workspace, path: Option<&str>) -> Result<Option<Scope>>
             }
         )));
     }
+    if run.stdout_truncated {
+        return Err(Error::Tool(
+            "git repository scope exceeded its output limit".into(),
+        ));
+    }
     let mut lines = run.stdout.lines();
     let toplevel = lines.next().unwrap_or_default().to_string();
     let prefix = lines.next().unwrap_or_default().to_string();
@@ -430,6 +463,11 @@ pub async fn status(ws: &Workspace, path: Option<&str>) -> Result<StatusReport> 
         )));
     }
 
+    if run.stdout_truncated {
+        return Err(Error::Tool(
+            "git status exceeded its output limit; narrow the path".into(),
+        ));
+    }
     let (branch, entries) = parse_status_records(&run.stdout, &scope);
 
     let mut text = format!(
@@ -620,6 +658,9 @@ pub async fn diff(
     }
 
     let mut text = run.stdout;
+    if run.stdout_truncated {
+        text.push_str("\n[git diff output truncated]\n");
+    }
     if scope.confined() && !text.ends_with('\n') {
         text.push('\n');
     }
@@ -669,6 +710,36 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         out
+    }
+
+    #[tokio::test]
+    async fn oversized_filter_listing_fails_closed() {
+        let dir = temp_dir("filter-limit");
+        git_in(&dir, &["init", "-q", "."]);
+        let mut config = std::fs::read_to_string(dir.join(".git/config")).unwrap();
+        for i in 0..40000 {
+            config.push_str(&format!(
+                "\n[filter \"driver{i:08}xxxxxxxxxxxxxxxx\"]\n clean = cat\n"
+            ));
+        }
+        std::fs::write(dir.join(".git/config"), config).unwrap();
+        let err = filter_env(&dir).await.unwrap_err().to_string();
+        assert!(err.contains("enumeration exceeded"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn large_git_diff_is_bounded_and_marked() {
+        let dir = temp_dir("diff-limit");
+        git_in(&dir, &["init", "-q", "."]);
+        std::fs::write(dir.join("a"), "old\n").unwrap();
+        git_in(&dir, &["add", "a"]);
+        std::fs::write(dir.join("a"), "new line\n".repeat(200000)).unwrap();
+        let ws = Workspace::new(&dir).unwrap();
+        let report = diff(&ws, None, false, None).await.unwrap();
+        assert!(report.text.contains("[git diff output truncated]"));
+        assert!(report.text.len() < GIT_STDOUT_LIMIT + 100);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn marker_script(dir: &Path, name: &str, marker: &Path) -> PathBuf {

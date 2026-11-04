@@ -385,6 +385,35 @@ describe('startEventStream', () => {
     handle.stop();
   });
 
+  it.each(['/api/events', '/api/events?session=s_1'])(
+    'handles a resync control even at the existing watermark on %s',
+    async (url) => {
+      const marker = JSON.stringify({
+        seq: 5, ts_ms: 1, session_id: 's_1', type: 'resync',
+        requested_id: 2, oldest_available: 4, reason: 'replay gap',
+      });
+      const received: RawEvent[] = [];
+      const onResync = vi.fn();
+      const onGap = vi.fn();
+      const handle = startEventStream({
+        url,
+        fetchImpl: vi.fn(async () => sseResponse([
+          `data: ${eventPayload(5, 'before')}\n\n`,
+          `event: resync\ndata: ${marker}\n\n`,
+          `data: ${eventPayload(6, 'after')}\n\n`,
+        ], false)) as unknown as typeof fetch,
+        onResync,
+        onGap,
+        onEvent: (event) => received.push(event),
+      });
+      await vi.waitFor(() => expect(received).toHaveLength(2));
+      expect(onResync).toHaveBeenCalledTimes(1);
+      expect(onGap).not.toHaveBeenCalled();
+      expect(received.map((event) => event.delta)).toEqual(['before', 'after']);
+      handle.stop();
+    },
+  );
+
   it('stops cleanly when aborted while the stream is open', async () => {
     const holder: { controller: ReadableStreamDefaultController<Uint8Array> | null } = {
       controller: null,

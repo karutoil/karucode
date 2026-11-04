@@ -1,5 +1,5 @@
 /**
- * One reducer, four surfaces.
+ * One reducer, five surfaces.
  *
  * A `notification` event from the server feeds every way a human can be told that
  * something happened, and this module is the only place that decides which of them
@@ -11,9 +11,12 @@
  * | 2 | sound cue | unless muted, and unless a cue is already playing |
  * | 3 | desktop notification | permission granted, and the event is not about the open, visible session |
  * | 4 | unread badge + title counter | unless the event is about the open session |
+ * | 5 | the notification centre's log | always; already-read when it was on screen |
  *
  * Keeping them in one function is what makes "off" mean off: there is no second
- * path that could still make a noise.
+ * path that could still make a noise. The centre is the exception to "off" on
+ * purpose: it is a history of what the server reported, and a notification nobody
+ * was shown is exactly the one worth finding there later.
  *
  * ## Why the split between the sound and the desktop notification
  *
@@ -97,8 +100,15 @@ export interface NotifierDeps {
   focusSession: (sessionId: string) => void;
   /** An in-app toast. */
   toast: (message: string, tone: 'info' | 'success' | 'error', sessionId?: string) => void;
-  /** Record an unread notification against a session. */
-  markUnread: (sessionId: string) => void;
+  /**
+   * Record the notification for the notification centre.
+   *
+   * `read` is true when it arrived about something already in front of the reader:
+   * the toast was seen, so it must not also raise an unread badge. The entry is kept
+   * either way — the centre is a history, not a dismissal queue — and the per-session
+   * badge, the per-project count and the title counter are all derived from it.
+   */
+  record: (payload: NotifyPayload, read: boolean) => void;
   /** Whether the desktop surface is switched on by the user (a browser preference). */
   desktopEnabled: () => boolean;
 }
@@ -164,7 +174,10 @@ export class Notifier {
 
     // 4. The badge, for a session the user is not looking at.
     const badge = sessionId !== '' && !(aboutCurrentSession && visible);
-    if (badge) this.deps.markUnread(sessionId);
+    // Everything is kept for the notification centre; only the badge (and the
+    // per-project count derived from it) depends on whether it was already on
+    // screen.
+    this.deps.record(payload, !badge);
 
     return { toast: true, sound, desktop, badge };
   }

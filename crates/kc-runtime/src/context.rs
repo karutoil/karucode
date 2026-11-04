@@ -120,15 +120,16 @@ use kc_core::tool::truncate_output;
 // * The digest is a `user` turn on purpose. An `assistant` turn would make the
 //   model believe it had said the summary itself, which invites it to repeat or
 //   re-plan work it already finished.
-// * A tool result that repeats an identical answer gets a note after the third
-//   time ("this exact call has now returned an identical result 3 times"). The
-//   fourth identical read-only call, with no write in between, is **refused**
-//   with a `[blocked: ...]` result instead of being executed: re-reading an
-//   unchanged page cannot produce new information, and one review run was
-//   measured re-reading the same file 27 times. A read after an edit is always
-//   allowed - the mutation counter resets the check.
+// * A tool result that repeats an identical answer raises a warning after the
+//   third time. The fourth identical read-only call, with no write by this run in
+//   between, is **refused** with a `[blocked: ...]` result instead of being
+//   executed: re-reading an unchanged page cannot produce new information, and one
+//   review run was measured re-reading the same file 27 times. A read after an
+//   edit is allowed - the mutation counter resets the check - and the refusal is
+//   capped at two, because a change made by a subagent, the user or an editor does
+//   not move that counter.
 // * Two tool calls with the same arguments in the same turn are not de-duplicated;
-//   only the note above is applied.
+//   only the warning above is raised.
 // * `prompt_cache_key` (OpenAI) is not sent. Prefix caching works without it; the
 //   key only improves routing across cache shards on very large providers.
 
@@ -195,15 +196,43 @@ pub fn turn_budget(max_chars: usize) -> usize {
     max_chars / 2
 }
 
-/// Characters charged for one attached image.
-///
-/// The base64 payload is *not* what the provider bills: an image costs roughly
-/// `width * height / 750` tokens, capped a little above 1k for a large one. Four
-/// characters per token puts a full-size image near 8k characters. Counting the
-/// base64 instead would overcharge by two orders of magnitude and evict every
-/// image on the next turn; counting zero would let a session of screenshots
-/// silently overrun the window. This is the middle: a flat, documented estimate.
+/// Approximate model context cost per image (2,000 tokens at four chars/token).
 pub const IMAGE_CONTEXT_CHARS: usize = 8_000;
+/// Maximum combined encoded image bytes retained in a request or run window.
+pub const IMAGE_BYTES_BUDGET: usize = 20 * 1024 * 1024;
+
+/// Keep the newest images that fit the separate encoded-payload memory budget.
+fn cap_image_bytes(messages: &mut [Message]) {
+    let mut remaining = IMAGE_BYTES_BUDGET;
+    for message in messages.iter_mut().rev() {
+        let mut omitted = 0;
+        let mut keep = vec![false; message.images.len()];
+        for (i, image) in message.images.iter().enumerate().rev() {
+            let bytes = image
+                .data
+                .len()
+                .saturating_add(image.media_type.len())
+                .saturating_add(13);
+            if bytes <= remaining {
+                remaining -= bytes;
+                keep[i] = true;
+            } else {
+                omitted += 1;
+            }
+        }
+        let mut i = 0;
+        message.images.retain(|_| {
+            let retained = keep[i];
+            i += 1;
+            retained
+        });
+        if omitted > 0 {
+            message.content.push_str(&format!(
+                "\n[{omitted} image(s) omitted: encoded image byte budget exceeded]"
+            ));
+        }
+    }
+}
 
 /// Number of characters a message contributes to the budget.
 ///
@@ -220,7 +249,10 @@ pub fn message_chars(message: &Message) -> usize {
         .as_ref()
         .map(|r| r.chars().count())
         .unwrap_or(0);
-    message.content.chars().count() + calls + reasoning + message.images.len() * IMAGE_CONTEXT_CHARS
+    message.content.chars().count()
+        + calls
+        + reasoning
+        + message.images.len().saturating_mul(IMAGE_CONTEXT_CHARS)
 }
 
 /// The result of fitting a conversation into a character budget.
@@ -290,7 +322,7 @@ pub fn fit_detailed(
     max_chars: usize,
     max_tool_output_bytes: usize,
 ) -> FitOutcome {
-    let prepared: Vec<Message> = messages
+    let mut prepared: Vec<Message> = messages
         .into_iter()
         .map(|mut m| {
             if m.role == Role::Tool {
@@ -300,6 +332,7 @@ pub fn fit_detailed(
             m
         })
         .collect();
+    cap_image_bytes(&mut prepared);
 
     let total: usize = prepared.iter().map(message_chars).sum();
     if total <= max_chars {
@@ -409,6 +442,7 @@ pub fn fit_detailed(
 /// short-but-huge history is exactly the case this function exists for, so
 /// "few messages" must never mean "send 8x the budget".
 pub fn compact_run_window(history: &mut Vec<Message>, max_chars: usize) {
+    cap_image_bytes(history);
     let total: usize = history.iter().map(message_chars).sum();
     if total <= max_chars {
         return;
@@ -1663,5 +1697,55 @@ mod run_window_tests {
 
     fn common_prefix(a: &str, b: &str) -> usize {
         a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
+    }
+}
+
+#[cfg(test)]
+mod image_budget_tests {
+    use super::*;
+    fn image(size: usize) -> kc_core::message::ImageAttachment {
+        kc_core::message::ImageAttachment {
+            data: "a".repeat(size),
+            media_type: "image/png".into(),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn screenshot_is_charged_as_model_estimate_and_preserved() {
+        let mut user = Message::user("task");
+        user.images.push(image(1_000_000));
+        assert_eq!(message_chars(&user), 4 + IMAGE_CONTEXT_CHARS);
+        let mut history = vec![Message::system("system"), user];
+        compact_run_window(&mut history, 240_000);
+        let out = fit(history, 240_000, 24_000);
+        assert_eq!(out[1].images.len(), 1);
+        assert!(!out[1].content.contains("omitted"));
+    }
+    #[test]
+    fn byte_cap_keeps_newest_and_marks_omissions_in_fit_and_history() {
+        let mut old = Message::user("old");
+        old.images.push(image(IMAGE_BYTES_BUDGET / 2));
+        let mut newest = Message::user("new");
+        newest.images.push(image(IMAGE_BYTES_BUDGET / 2));
+        let input = vec![old, newest];
+        for out in [fit(input.clone(), 240_000, 24_000), {
+            let mut history = input;
+            compact_run_window(&mut history, 240_000);
+            history
+        }] {
+            assert!(out[0].images.is_empty());
+            assert!(out[0].content.contains("image(s) omitted"));
+            assert_eq!(out[1].images.len(), 1);
+        }
+    }
+    #[test]
+    fn oversized_newest_image_is_visibly_omitted() {
+        let mut user = Message::user("task");
+        user.images.push(image(IMAGE_BYTES_BUDGET + 1));
+        let out = fit(vec![user], 240_000, 24_000);
+        assert!(out[0].images.is_empty());
+        assert!(out[0]
+            .content
+            .contains("encoded image byte budget exceeded"));
     }
 }

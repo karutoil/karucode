@@ -34,6 +34,8 @@ import {
 import * as agentConsole from './agentConsole';
 import { applyEventToChat, applyEventToSessions, markUserRun, sessionAgentFromRecord } from './eventReducer';
 import { syncProjectIcons } from './projectIcons';
+import { controlPlaneOpen } from './controlPlane';
+import * as railPeek from './railPeek';
 import * as notifyWiring from './notifyWiring';
 import * as promptTokens from './promptTokens';
 import { summaryFromDetail } from './selectors';
@@ -42,6 +44,7 @@ import * as store from './store';
 let stream: EventStreamHandle | null = null;
 let bootstrapPromise: Promise<void> | null = null;
 let sessionGeneration = 0;
+let agentDetailGeneration = 0;
 let refreshingSessionId: string | null = null;
 let refreshQueue: KarucodeEvent[] = [];
 let sessionsRefreshTimer: number | null = null;
@@ -121,6 +124,7 @@ export function startStream(): void {
     // The stream never replays: a `seq` hole means frames are gone, so refetch
     // the transcript instead of leaving a stale answer on screen.
     onGap: () => scheduleGapResync(),
+    onResync: () => scheduleGapResync(),
     onStatus: (state, detail) => {
       store.connection.value = {
         ...store.connection.value,
@@ -461,6 +465,18 @@ async function doRefreshSessions(): Promise<void> {
     void refreshAgents();
     const current = store.currentSessionId.value;
     if (current && !list.some((session) => session.id === current)) {
+      // A project-less session (the control chat) is never in a project's list, so
+      // refreshing that list must not close it. Ask the global list before
+      // treating the open session as gone.
+      let projectless = false;
+      try {
+        const all = await api.listSessions();
+        projectless = all.some((session) => session.id === current && !session.project_id);
+      } catch {
+        // Offline: keep the current session rather than closing it on a guess.
+        projectless = true;
+      }
+      if (projectless) return;
       const next = list[0] ?? null;
       if (next) void openSession(next.id);
       else clearSelection();
@@ -601,6 +617,8 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
   if (id === store.currentSessionId.value && !silent && !options.force) return false;
 
   const generation = (sessionGeneration += 1);
+  if (store.sessionHistory.value?.id !== id) store.sessionHistory.value = null;
+  else if (store.sessionHistory.value.loading) store.sessionHistory.value = { ...store.sessionHistory.value, loading: false };
   store.currentSessionId.value = id;
   store.writeLastSessionId(id);
   // Opening a session is what "reads" its notifications: the badge clears here
@@ -627,6 +645,7 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
   try {
     const detail = await api.getSession(id);
     if (generation !== sessionGeneration) return false;
+    store.sessionHistory.value = { id, messages: detail.messages, before: detail.messages_before ?? null, truncated: !!detail.messages_truncated, loading: false, error: null };
     if (options.preserveLive && detail.running && hasLiveAnswer(id)) {
       // Never delete an answer that is still streaming - but do not throw the
       // snapshot away either. It is the only thing that can restore a tool card,
@@ -1247,7 +1266,7 @@ export async function switchProject(id: string): Promise<void> {
   // transcripts instead of showing them until the first refresh lands.
   store.agentsAll.value = [];
   store.agentActivities.value = {};
-  store.selectedAgentId.value = null;
+  closeAgentDetail();
   store.agentFilter.value = 'all';
   store.sessionInfo.value = null;
   store.sessionInfoFor.value = null;
@@ -1417,6 +1436,8 @@ export async function controlAgent(id: string, action: AgentAction): Promise<voi
 }
 
 export function closeAgentDetail(): void {
+  agentDetailGeneration += 1;
+  store.agentDetailLoading.value = false;
   store.selectedAgentId.value = null;
   store.agentDetailError.value = null;
 }
@@ -1428,30 +1449,74 @@ export function closeAgentDetail(): void {
  * frames keep appending on top (merged by stable item id, never duplicated).
  */
 export async function openAgentDetail(id: string): Promise<void> {
+  const generation = ++agentDetailGeneration;
   store.selectedAgentId.value = id;
+  store.agentHistory.value = null;
   store.agentDetailError.value = null;
   store.mobileSheet.value = null;
   store.agentDetailLoading.value = true;
   try {
     const detail = await api.getAgent(id);
-    if (store.selectedAgentId.value !== id) return;
+    if (generation !== agentDetailGeneration || store.selectedAgentId.value !== id) return;
+    store.agentHistory.value = { id, messages: detail.messages, before: detail.messages_before ?? null, truncated: detail.messages_truncated, loading: false, error: null };
     store.agentsAll.value = agentConsole.mergeAgentList(store.agentsAll.value, [detail.agent]);
-    const seeded = agentConsole.activityFromMessages(detail.messages, id);
-    if (seeded.items.length > 0) {
-      const live = store.agentActivities.value[id];
-      store.agentActivities.value = {
-        ...store.agentActivities.value,
-        [id]: live ? agentConsole.mergeActivities(seeded, live) : seeded,
-      };
-    }
+
   } catch (error) {
+    if (generation !== agentDetailGeneration || store.selectedAgentId.value !== id) return;
     if (isUnauthorized(error)) {
       enterAuthState();
       return;
     }
     store.agentDetailError.value = toErrorMessage(error);
   } finally {
-    store.agentDetailLoading.value = false;
+    if (generation === agentDetailGeneration && store.selectedAgentId.value === id) store.agentDetailLoading.value = false;
+  }
+}
+
+
+/** Fetch an older page without discarding live events or the already loaded tail. */
+export async function loadOlderSession(): Promise<void> {
+  const history = store.sessionHistory.value;
+  if (!history || history.loading || history.before === null) return;
+  const generation = sessionGeneration;
+  store.sessionHistory.value = { ...history, loading: true, error: null };
+  try {
+    const detail = await api.getSession(history.id, {}, history.before);
+    if (generation !== sessionGeneration || store.sessionHistory.value?.id !== history.id) return;
+    const current = store.sessionHistory.value;
+    const byId = new Map(current.messages.map((message) => [message.id, message]));
+    for (const message of detail.messages) byId.set(message.id, message);
+    detail.messages = [...byId.values()].sort((a, b) => a.id - b.id);
+    store.sessionHistory.value = { id: history.id, messages: detail.messages, before: detail.messages_before ?? null, truncated: !!detail.messages_truncated, loading: false, error: null };
+    const live = store.chat.value;
+    const seeded = seedChatState(detail, live);
+    seeded.items = seeded.items.map((item) => {
+      const current = live.items.find((entry) => entry.id === item.id);
+      return current ?? item;
+    });
+    const ids = new Set(seeded.items.map((item) => item.id));
+    const extra = live.items.filter((item) => item.id !== 'notice:history-truncated' && !ids.has(item.id));
+    store.chat.value = { ...live, items: [...seeded.items, ...extra].sort((a, b) => a.id === 'notice:history-truncated' ? -1 : b.id === 'notice:history-truncated' ? 1 : a.at - b.at) };
+  } catch (error) {
+    if (generation === sessionGeneration && store.sessionHistory.value?.id === history.id)
+      store.sessionHistory.value = { ...store.sessionHistory.value, loading: false, error: toErrorMessage(error) };
+  }
+}
+
+export async function loadOlderAgent(): Promise<void> {
+  const history = store.agentHistory.value;
+  if (!history || history.loading || history.before === null) return;
+  const generation = agentDetailGeneration;
+  store.agentHistory.value = { ...history, loading: true, error: null };
+  try {
+    const detail = await api.getAgent(history.id, { before: history.before });
+    if (generation !== agentDetailGeneration || store.selectedAgentId.value !== history.id || store.agentHistory.value?.id !== history.id) return;
+    const byId = new Map(store.agentHistory.value.messages.map((message) => [message.id, message]));
+    for (const message of detail.messages) byId.set(message.id, message);
+    store.agentHistory.value = { id: history.id, messages: [...byId.values()].sort((a, b) => a.id - b.id), before: detail.messages_before ?? null, truncated: detail.messages_truncated, loading: false, error: null };
+  } catch (error) {
+    if (generation === agentDetailGeneration && store.selectedAgentId.value === history.id && store.agentHistory.value?.id === history.id)
+      store.agentHistory.value = { ...store.agentHistory.value, loading: false, error: toErrorMessage(error) };
   }
 }
 
@@ -1460,7 +1525,7 @@ export async function openAgentSession(agent: AgentSummary): Promise<void> {
   if (agent.project_id && agent.project_id !== store.currentProjectId.value) {
     await switchProject(agent.project_id);
   }
-  store.selectedAgentId.value = null;
+  closeAgentDetail();
   await openSession(agent.session_id);
 }
 
@@ -1672,6 +1737,8 @@ export function openSettings(): void {
   store.fileViewerPath.value = null;
   store.paletteOpen.value = false;
   store.mobileSheet.value = null;
+  // The rail's fly-out is a hover affordance, not a place: a modal owns the screen.
+  railPeek.closePeek();
   store.settingsOpen.value = true;
 }
 
@@ -1687,6 +1754,7 @@ export function togglePalette(): void {
   store.settingsOpen.value = false;
   store.fileViewerPath.value = null;
   store.mobileSheet.value = null;
+  railPeek.closePeek();
   store.paletteOpen.value = true;
 }
 
@@ -1700,6 +1768,7 @@ export function openThemeStudio(): void {
   store.paletteOpen.value = false;
   store.fileViewerPath.value = null;
   store.mobileSheet.value = null;
+  railPeek.closePeek();
   store.themeStudioOpen.value = true;
 }
 
@@ -1710,6 +1779,47 @@ export function closeThemeStudio(): void {
 export function toggleThemeStudio(): void {
   if (store.themeStudioOpen.value) closeThemeStudio();
   else openThemeStudio();
+}
+
+/**
+ * Open the notification centre.
+ *
+ * Mutually exclusive with the other overlays for the same reason they are with each
+ * other: two dialogs stacked is one too many, and the notification centre is exactly
+ * the thing you open to leave the thing you were doing.
+ */
+export function openNotificationCenter(): void {
+  store.settingsOpen.value = false;
+  store.paletteOpen.value = false;
+  store.themeStudioOpen.value = false;
+  store.fileViewerPath.value = null;
+  store.mobileSheet.value = null;
+  railPeek.closePeek();
+  store.notificationCenterOpen.value = true;
+}
+
+export function closeNotificationCenter(): void {
+  store.notificationCenterOpen.value = false;
+}
+
+export function toggleNotificationCenter(): void {
+  if (store.notificationCenterOpen.value) closeNotificationCenter();
+  else openNotificationCenter();
+}
+
+/**
+ * Open the session a notification is about, and mark it read.
+ *
+ * The session may belong to another project, which is the whole point of the
+ * centre: a run finished somewhere you are not looking.
+ */
+export async function openNotification(
+  entry: Pick<store.NotificationEntry, 'id' | 'sessionId' | 'projectId'>,
+): Promise<void> {
+  store.markNotificationRead(entry.id);
+  closeNotificationCenter();
+  if (entry.sessionId === '') return;
+  await openSessionInProject(entry.projectId, entry.sessionId);
 }
 
 /** Put text in the composer and focus it (used by the empty state's prompts). */
@@ -1742,6 +1852,28 @@ export function switchSession(id: string): void {
   store.mobileSheet.value = null;
   store.paletteOpen.value = false;
   void openSession(id);
+}
+
+/**
+ * Open a session that may live in another project.
+ *
+ * The store holds one project's sessions at a time, so opening a session from
+ * elsewhere (the notification centre, the collapsed rail's fly-out) has to move the
+ * project first — otherwise the rail would keep listing the old project while the
+ * chat shows a session from the new one. The project switch already opens that
+ * project's newest session, so this follows it with the one that was asked for.
+ */
+export async function openSessionInProject(
+  projectId: string | null,
+  sessionId: string,
+): Promise<boolean> {
+  if (projectId !== null && projectId !== store.currentProjectId.value) {
+    if (controlPlaneOpen.value) controlPlaneOpen.value = false;
+    await switchProject(projectId);
+  }
+  store.mobileSheet.value = null;
+  store.paletteOpen.value = false;
+  return openSession(sessionId);
 }
 
 // ---------------------------------------------------------------------------

@@ -556,6 +556,7 @@ export interface AgentDetail {
   agent: AgentSummary;
   messages: StoredMessage[];
   messages_truncated: boolean;
+  messages_before?: number | null;
   messages_limit: number;
 }
 
@@ -718,7 +719,9 @@ export interface SessionDetail {
    * mid-conversation on a long session.
    */
   messages_truncated?: boolean;
-  /** The window size the server applied (default 5 000). */
+  /** Exclusive cursor for the next older page, when available. */
+  messages_before?: number | null;
+  /** The maximum row count, not necessarily the number returned (byte limits also apply). */
   messages_limit?: number;
   runs: RunRecord[];
   agents: AgentRecord[];
@@ -1268,6 +1271,14 @@ export interface NotifyPayload {
   session_id: string;
   /** The session's title at emit time, so the notification is readable on its own. */
   session_title: string;
+  /**
+   * The project the session belongs to, when the server could read it.
+   *
+   * Absent on a server that predates the field, and for a notice that names no
+   * session at all. This is what lets the rail count unread news per project
+   * without knowing which project owns a session it has never listed.
+   */
+  project_id?: string;
   /** `runtime`, or the plugin's name. */
   source: string;
   /** A cue override; absent means "the kind's default". */

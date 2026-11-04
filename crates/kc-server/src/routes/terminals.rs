@@ -76,6 +76,7 @@ pub async fn create_terminal(State(state): State<AppState>, body: Bytes) -> ApiR
         ));
     }
 
+    let _operation = state.terminals().operation.lock().await;
     let store = state.store();
     // The cap is checked against the *rows*, not the live processes: closing a
     // shell must not free a slot that a restart would immediately take back, and
@@ -143,6 +144,7 @@ pub async fn rename_terminal(
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
     let body: RenameBody = parse_body(&body)?;
+    let _operation = state.terminals().operation.lock().await;
     let store = state.store();
     if store.get_terminal(&id).await?.is_none() {
         return Err(ApiError::not_found(format!("no terminal with id `{id}`")));
@@ -174,6 +176,7 @@ pub async fn delete_terminal(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    let _operation = state.terminals().operation.lock().await;
     let store = state.store();
     if store.get_terminal(&id).await?.is_none() {
         return Err(ApiError::not_found(format!("no terminal with id `{id}`")));
@@ -194,6 +197,7 @@ pub async fn restart_terminal(
     Path(id): Path<String>,
     Query(query): Query<QueryMap>,
 ) -> ApiResult<Json<Value>> {
+    let _operation = state.terminals().operation.lock().await;
     let store = state.store();
     let row = store
         .get_terminal(&id)

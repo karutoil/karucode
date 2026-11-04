@@ -38,6 +38,7 @@ fn base_config(server: &MockServer) -> ModelConfig {
 
 fn full_request() -> ChatRequest {
     ChatRequest {
+        admission: None,
         model: "gpt-test".into(),
         send_temperature: true,
         messages: vec![

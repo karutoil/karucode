@@ -164,6 +164,10 @@ const FALLBACK_SCROLLBACK: usize = 256 * 1024;
 /// than slowing the shell down: PTY output must never block on a browser.
 const OUTPUT_CHANNEL: usize = 256;
 
+/// Bound per-terminal replay snapshots and stalled websocket tasks.
+const MAX_ATTACHMENTS: usize = 4;
+const SOCKET_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// How long a `pty` write may block before the reader is treated as gone.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -422,44 +426,27 @@ impl Terminal {
         if self.is_dead() {
             return false;
         }
-        let mut io = self.io.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(master) = io.master.as_mut() else {
-            return false;
-        };
-        match master.write_all(bytes) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
-                // The shell is gone; the reader will publish the exit.
-                false
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                drop(io);
-                self.write_retry(bytes)
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// A write that would block: retry on a short timer rather than dropping the
-    /// keystrokes. The fd is non-blocking so a wedged reader cannot hang the
-    /// websocket task forever; a browser typing into a paused shell (`Ctrl+S`,
-    /// a debugger at a prompt) is exactly this case.
-    fn write_retry(&self, bytes: &[u8]) -> bool {
+        // Track partial writes: write_all may write a prefix before WouldBlock,
+        // and retrying the entire frame would duplicate that prefix.
         let deadline = Instant::now() + WRITE_TIMEOUT;
         let mut pending = bytes;
         while !pending.is_empty() {
             if self.is_dead() || Instant::now() > deadline {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(2));
-            let mut io = self.io.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(master) = io.master.as_mut() else {
-                return false;
+            let result = {
+                let mut io = self.io.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(master) = io.master.as_mut() else {
+                    return false;
+                };
+                master.write(pending)
             };
-            match master.write(pending) {
+            match result {
                 Ok(0) => return false,
                 Ok(n) => pending = &pending[n..],
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => return false,
             }
@@ -509,12 +496,13 @@ impl Terminal {
     }
 
     pub fn mark_detached(&self) {
-        let previous = self.attached.load(Ordering::Acquire);
-        if previous > 0 {
-            self.attached.fetch_sub(1, Ordering::AcqRel);
-        }
+        // Publish the new idle timestamp before the final attachment disappears.
+        // An acquire load observing zero must also observe this timestamp.
         self.last_seen
             .store(crate::state::now_ms(), Ordering::Release);
+        let _ = self
+            .attached
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
     }
 
     pub fn attached(&self) -> u32 {
@@ -814,11 +802,27 @@ fn group_alive(pid: u32) -> bool {
 #[derive(Default)]
 pub struct TerminalRegistry {
     live: Mutex<HashMap<String, Arc<Terminal>>>,
+    // Weak entries preserve the same budget across process generations while
+    // any old socket still owns a permit, without retaining deleted IDs forever.
+    slots: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Semaphore>>>,
+    /// Serialize row lifecycle operations across async store calls.
+    pub(crate) operation: tokio::sync::Mutex<()>,
 }
 
 impl TerminalRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn attachment_slots(&self, id: &str) -> Arc<tokio::sync::Semaphore> {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots.retain(|_, value| value.strong_count() > 0);
+        if let Some(existing) = slots.get(id).and_then(std::sync::Weak::upgrade) {
+            return existing;
+        }
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_ATTACHMENTS));
+        slots.insert(id.to_string(), Arc::downgrade(&semaphore));
+        semaphore
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<Terminal>> {
@@ -830,10 +834,16 @@ impl TerminalRegistry {
     }
 
     pub fn insert(&self, terminal: Arc<Terminal>) {
-        self.live
+        let replaced = self
+            .live
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(terminal.id.clone(), terminal);
+            .insert(terminal.id.clone(), Arc::clone(&terminal));
+        if let Some(old) = replaced {
+            if !Arc::ptr_eq(&old, &terminal) {
+                old.shutdown();
+            }
+        }
     }
 
     /// Remove and return a terminal. The caller decides whether to shut it down.
@@ -890,17 +900,20 @@ impl TerminalRegistry {
             return Vec::new();
         }
         let cutoff = crate::state::now_ms() - (idle_secs as i64) * 1000;
-        let mut reaped = Vec::new();
-        let terminals: Vec<Arc<Terminal>> = self.all();
-        for terminal in terminals {
-            if terminal.attached() > 0 || terminal.last_seen() > cutoff {
-                continue;
-            }
-            reaped.push(terminal.id.clone());
-            // Mark it dead so the next attach starts a new shell; the tab and its
-            // scrollback row are untouched.
+        // Reserve attachments and remove idle entries under the same lock. Never
+        // remove by stale id after releasing it: an entry may have been replaced.
+        let removed: Vec<_> = {
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            let ids: Vec<_> = live
+                .iter()
+                .filter(|(_, t)| t.attached() == 0 && t.last_seen() <= cutoff)
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter().filter_map(|id| live.remove(&id)).collect()
+        };
+        let reaped = removed.iter().map(|t| t.id.clone()).collect();
+        for terminal in removed {
             terminal.shutdown();
-            self.remove(&terminal.id);
         }
         reaped
     }
@@ -976,16 +989,17 @@ pub fn ensure_live(
         ));
     }
     let registry = state.terminals();
-    if let Some(existing) = registry.get(&row.id) {
+    // Keep lookup and spawn atomic, including for callers outside the HTTP routes.
+    let mut live = registry.live.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = live.get(&row.id) {
         if !existing.is_dead() {
-            return Ok(existing);
+            return Ok(Arc::clone(existing));
         }
-        // A dead process behind a live row is exactly the restart-after-crash
-        // case: drop it and start a fresh shell in the same directory.
-        registry.remove(&row.id);
     }
     let terminal = Terminal::spawn(&row.id, row, &settings, cols, rows)?;
-    registry.insert(Arc::clone(&terminal));
+    if let Some(old) = live.insert(row.id.clone(), Arc::clone(&terminal)) {
+        old.shutdown();
+    }
     Ok(terminal)
 }
 
@@ -1005,6 +1019,7 @@ pub async fn socket(
     // A browser cannot set a header on the websocket handshake, so `?token=` is
     // accepted here exactly as on `/api/events`.
     check_origin(&headers, &state)?;
+    let _operation = state.terminals().operation.lock().await;
     let row = state
         .store()
         .get_terminal(&id)
@@ -1020,12 +1035,31 @@ pub async fn socket(
         .map(clamp_rows)
         .unwrap_or(DEFAULT_ROWS);
 
-    let terminal = ensure_live(&state, &row, cols, rows)?;
+    let attachment = loop {
+        let terminal = ensure_live(&state, &row, cols, rows)?;
+        let registry = state.terminals();
+        let live = registry.live.lock().unwrap_or_else(|e| e.into_inner());
+        if !live
+            .get(&id)
+            .is_some_and(|current| Arc::ptr_eq(current, &terminal))
+        {
+            continue;
+        }
+        let permit = registry
+            .attachment_slots(&id)
+            .try_acquire_owned()
+            .map_err(|_| ApiError::bad_request("too many terminal attachments"))?;
+        terminal.mark_attached();
+        break Attachment {
+            terminal,
+            _permit: permit,
+        };
+    };
     let _ = state.store().touch_terminal(&id).await;
     let shutdown = state.shutdown_token();
     Ok(ws
         .max_message_size(1024 * 1024)
-        .on_upgrade(move |socket| pump(socket, terminal, shutdown)))
+        .on_upgrade(move |socket| pump(socket, attachment, shutdown)))
 }
 
 /// A cross-origin page must not be able to open a shell.
@@ -1126,18 +1160,29 @@ fn origin_is_explicitly_allowlisted(origin: &str, allowlist: &HostAllowlist) -> 
     }
 }
 
+/// Counts upgrades as attachments too; dropping a failed upgrade releases both
+/// the idle-reaper reservation and the replay-memory slot.
+struct Attachment {
+    terminal: Arc<Terminal>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+impl Drop for Attachment {
+    fn drop(&mut self) {
+        self.terminal.mark_detached();
+    }
+}
+
 /// Both directions of the websocket until either side goes away.
 async fn pump(
     mut socket: WebSocket,
-    terminal: Arc<Terminal>,
+    attachment: Attachment,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
+    let terminal = &attachment.terminal;
     // Subscribe before snapshotting the replay so a byte written in between is
     // delivered once: it is either in the snapshot or on the channel.
     let mut output = terminal.subscribe();
     let replay = terminal.replay();
-    terminal.mark_attached();
-
     let ready = json!({
         "type": "ready",
         "replay": !replay.is_empty(),
@@ -1145,12 +1190,24 @@ async fn pump(
         "pid": terminal.pid(),
         "running": !terminal.is_dead(),
     });
-    if socket.send(Message::Text(ready.to_string())).await.is_err() {
-        terminal.mark_detached();
+    if tokio::time::timeout(
+        SOCKET_SEND_TIMEOUT,
+        socket.send(Message::Text(ready.to_string())),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .is_none()
+    {
         return;
     }
-    if !replay.is_empty() && socket.send(Message::Binary(replay)).await.is_err() {
-        terminal.mark_detached();
+    if !replay.is_empty()
+        && tokio::time::timeout(SOCKET_SEND_TIMEOUT, socket.send(Message::Binary(replay)))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .is_none()
+    {
         return;
     }
 
@@ -1163,13 +1220,25 @@ async fn pump(
             loop {
                 match output.recv().await {
                     Ok(Output::Data(bytes)) => {
-                        if sender.send(Message::Binary(bytes)).await.is_err() {
+                        if tokio::time::timeout(
+                            SOCKET_SEND_TIMEOUT,
+                            sender.send(Message::Binary(bytes)),
+                        )
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .is_none()
+                        {
                             return;
                         }
                     }
                     Ok(Output::Exit(code)) => {
                         let frame = json!({ "type": "exit", "code": code });
-                        let _ = sender.send(Message::Text(frame.to_string())).await;
+                        let _ = tokio::time::timeout(
+                            SOCKET_SEND_TIMEOUT,
+                            sender.send(Message::Text(frame.to_string())),
+                        )
+                        .await;
                         return;
                     }
                     // A lagging browser: it missed frames, so tell it to resync
@@ -1177,7 +1246,15 @@ async fn pump(
                     // reconnects and gets the replay buffer.
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
                         let frame = json!({ "type": "lagged", "missed": missed });
-                        if sender.send(Message::Text(frame.to_string())).await.is_err() {
+                        if tokio::time::timeout(
+                            SOCKET_SEND_TIMEOUT,
+                            sender.send(Message::Text(frame.to_string())),
+                        )
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .is_none()
+                        {
                             return;
                         }
                         return;
@@ -1190,7 +1267,7 @@ async fn pump(
 
     // Browser -> shell.
     let from_browser = {
-        let terminal = Arc::clone(&terminal);
+        let terminal = Arc::clone(terminal);
         async move {
             while let Some(frame) = receiver.next().await {
                 let frame = match frame {
@@ -1200,7 +1277,11 @@ async fn pump(
                 match frame {
                     Message::Binary(bytes) => {
                         terminal.record_activity();
-                        if !terminal.write(&bytes) {
+                        let writer = Arc::clone(&terminal);
+                        if !tokio::task::spawn_blocking(move || writer.write(&bytes))
+                            .await
+                            .unwrap_or(false)
+                        {
                             return;
                         }
                     }
@@ -1212,7 +1293,13 @@ async fn pump(
                                     terminal.resize(cols, rows);
                                 }
                                 Control::Input { data } => {
-                                    if !terminal.write(data.as_bytes()) {
+                                    let writer = Arc::clone(&terminal);
+                                    if !tokio::task::spawn_blocking(move || {
+                                        writer.write(data.as_bytes())
+                                    })
+                                    .await
+                                    .unwrap_or(false)
+                                    {
                                         return;
                                     }
                                 }
@@ -1235,7 +1322,6 @@ async fn pump(
         _ = from_browser => {}
         _ = shutdown.cancelled() => {}
     }
-    terminal.mark_detached();
 }
 
 /// A text frame from the browser. Unknown types are ignored rather than treated
@@ -1542,6 +1628,95 @@ mod tests {
         // Garbage and unknown types never panic and never become input.
         assert!(parse_control("not json").is_none());
         assert!(parse_control(r#"{"type":"nonsense"}"#).is_some());
+    }
+
+    #[test]
+    fn attachment_slots_are_bounded_and_drop_releases_reservation() {
+        let terminal = Terminal::spawn("t_slots", &session(&cwd()), &settings(), 80, 24).unwrap();
+        let registry = TerminalRegistry::new();
+        let slots = registry.attachment_slots("t_slots");
+        let mut attachments = Vec::new();
+        for _ in 0..MAX_ATTACHMENTS {
+            let permit = Arc::clone(&slots).try_acquire_owned().unwrap();
+            terminal.mark_attached();
+            attachments.push(Attachment {
+                terminal: Arc::clone(&terminal),
+                _permit: permit,
+            });
+        }
+        assert!(Arc::clone(&slots).try_acquire_owned().is_err());
+        assert_eq!(terminal.attached(), MAX_ATTACHMENTS as u32);
+        drop(attachments.pop());
+        assert_eq!(terminal.attached(), MAX_ATTACHMENTS as u32 - 1);
+        assert!(Arc::clone(&slots).try_acquire_owned().is_ok());
+        drop(attachments);
+        terminal.shutdown();
+    }
+
+    #[test]
+    fn attachment_budget_survives_terminal_replacement() {
+        let registry = TerminalRegistry::new();
+        let old = Terminal::spawn("t_generation", &session(&cwd()), &settings(), 80, 24).unwrap();
+        registry.insert(Arc::clone(&old));
+        let permits: Vec<_> = (0..MAX_ATTACHMENTS)
+            .map(|_| {
+                registry
+                    .attachment_slots("t_generation")
+                    .try_acquire_owned()
+                    .unwrap()
+            })
+            .collect();
+        let new = Terminal::spawn("t_generation", &session(&cwd()), &settings(), 80, 24).unwrap();
+        registry.insert(new);
+        assert!(registry
+            .attachment_slots("t_generation")
+            .try_acquire_owned()
+            .is_err());
+        drop(permits);
+        assert!(registry
+            .attachment_slots("t_generation")
+            .try_acquire_owned()
+            .is_ok());
+        registry.shutdown_all();
+    }
+
+    #[test]
+    fn detach_refreshes_idle_before_reaper_can_observe_zero() {
+        let registry = Arc::new(TerminalRegistry::new());
+        let terminal = Terminal::spawn("t_detach", &session(&cwd()), &settings(), 80, 24).unwrap();
+        registry.insert(Arc::clone(&terminal));
+        for _ in 0..1000 {
+            terminal.mark_attached();
+            terminal
+                .last_seen
+                .store(crate::state::now_ms() - 120_000, Ordering::Release);
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            std::thread::scope(|scope| {
+                let barrier2 = Arc::clone(&barrier);
+                let registry = Arc::clone(&registry);
+                scope.spawn(move || {
+                    barrier2.wait();
+                    registry.reap_idle(60);
+                });
+                barrier.wait();
+                terminal.mark_detached();
+            });
+            assert!(registry.get("t_detach").is_some());
+        }
+        registry.shutdown_all();
+    }
+
+    #[test]
+    fn replacing_entry_shuts_down_old_shell() {
+        let registry = TerminalRegistry::new();
+        let old = Terminal::spawn("t_replace", &session(&cwd()), &settings(), 80, 24).unwrap();
+        let new = Terminal::spawn("t_replace", &session(&cwd()), &settings(), 80, 24).unwrap();
+        registry.insert(Arc::clone(&old));
+        registry.insert(Arc::clone(&new));
+        assert!(old.is_dead());
+        assert!(!new.is_dead());
+        assert!(Arc::ptr_eq(&registry.get("t_replace").unwrap(), &new));
+        registry.shutdown_all();
     }
 
     /// The registry reaps only terminals nobody is attached to *and* that have

@@ -208,10 +208,7 @@ with `auto` approval on an untrusted repository.
 shared token. Any process that can read the token can use the agent. On a shared
 machine, run it under your own account and keep the data directory private.
 
-**Shared workspaces.** Sessions in the same workspace see each other's file
-changes. Subagents share the same workspace; `owned_paths` is advisory conflict
-reporting (a warning in the subagent result and a row in the claims table), not
-file locking or isolation. There is no per-subagent worktree.
+**Shared workspaces (with git worktree isolation).** Sessions in the same workspace see each other's file changes. Subagents use git worktrees (when the workspace is a git repository) to isolate work and prevent direct file conflicts. If the workspace is not a git repository or worktree creation fails, subagents reuse the parent's workspace and `owned_paths` serves as advisory conflict reporting (a warning in the subagent result and a row in the claims table), not file locking or isolation.
 
 **Model provider.** Whatever you point `base_url` at receives your prompts, file
 contents the agent reads, and command output. Use a gateway you trust, ideally on

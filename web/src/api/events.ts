@@ -32,6 +32,8 @@ export interface EventStreamOptions {
    * normal.
    */
   onGap?: (gap: EventStreamGap) => void;
+  /** The server cannot replay the requested cursor; refetch authoritative state. */
+  onResync?: () => void;
   minDelayMs?: number;
   maxDelayMs?: number;
   /**
@@ -298,9 +300,16 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
 
         const deliver = (events: RawEvent[]): void => {
           for (const event of events) {
-            // A lag marker describes the transport, not the session: it is stamped
-            // with a seq this client may already have seen, so it is exempt from the
-            // dedupe and must never advance the watermark.
+            // Resync is a transport control frame, not a replayable event. Its
+            // watermark can equal an already seen sequence, including on filtered
+            // streams, but it must still trigger recovery.
+            if (event.type === 'resync') {
+              lastSeq = Math.max(lastSeq, event.seq);
+              attempt = 0;
+              safely(() => options.onResync?.());
+              continue;
+            }
+            // Lag markers are also transport controls and bypass deduplication.
             if (event.type === 'stream_lagged') {
               const skipped = typeof event.skipped === 'number' ? event.skipped : 0;
               const after = watermark();

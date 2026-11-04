@@ -199,9 +199,10 @@ pub async fn search_with_rg(
             // `read_matches` takes ownership of the pipe so it is closed the
             // moment the cap is reached; otherwise ripgrep would block writing
             // to a full pipe while we wait for it to exit.
-            let (matches, hit_limit) =
-                read_matches(stdout_pipe.take(), ws, &base, max_results).await;
-            let stderr = read_pipe(&mut stderr_pipe).await;
+            let ((matches, hit_limit), stderr) = tokio::join!(
+                read_matches(stdout_pipe.take(), ws, &base, max_results),
+                read_pipe(&mut stderr_pipe)
+            );
             let status = child.wait().await;
             (matches, hit_limit, stderr, status)
         } => res,
@@ -326,9 +327,16 @@ async fn read_pipe<R: tokio::io::AsyncRead + Unpin>(pipe: &mut Option<R>) -> Vec
     let Some(pipe) = pipe.as_mut() else {
         return Vec::new();
     };
-    let mut buf = Vec::new();
-    let _ = pipe.read_to_end(&mut buf).await;
-    buf
+    const STDERR_LIMIT: usize = 64 * 1024;
+    match crate::bounded_pipe::read(pipe, STDERR_LIMIT).await {
+        Ok((mut buf, truncated)) => {
+            if truncated {
+                buf.extend_from_slice(b"\n[ripgrep stderr truncated]");
+            }
+            buf
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Parse one `--null` record: `path\0line:text`.
@@ -524,6 +532,22 @@ fn truncate_columns(line: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[tokio::test]
+    async fn stderr_is_drained_concurrently_and_bounded() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let producer = tokio::spawn(async move {
+            writer.write_all(&vec![b'x'; 200_000]).await.unwrap();
+        });
+        let mut pipe = Some(reader);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), read_pipe(&mut pipe))
+            .await
+            .unwrap();
+        producer.await.unwrap();
+        assert!(result.ends_with(b"[ripgrep stderr truncated]"));
+        assert!(result.len() < 66_000);
+    }
 
     /// Minimal temp workspace; the crate-level test harness lives in
     /// `crate::tests`, which this module cannot reach.

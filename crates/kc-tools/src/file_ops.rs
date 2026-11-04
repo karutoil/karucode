@@ -364,6 +364,15 @@ fn sniff_other_image(head: &[u8]) -> Option<&'static str> {
     None
 }
 
+// Read at most one byte beyond the limit, even if the file grows after metadata.
+fn read_bounded(reader: impl Read, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// Read an image file and encode it for a vision model.
 ///
 /// `media_type` comes from [`probe_image`]; the bytes are read once, so the
@@ -391,7 +400,8 @@ pub fn read_image(
             format_size(max_bytes as u64)
         )));
     }
-    let bytes = std::fs::read(&abs).map_err(|e| Error::io(&abs, e))?;
+    let file = std::fs::File::open(&abs).map_err(|e| Error::io(&abs, e))?;
+    let bytes = read_bounded(file, max_bytes as u64).map_err(|e| Error::io(&abs, e))?;
     if bytes.len() > max_bytes {
         // The file grew between the metadata check and the read.
         return Err(Error::BadRequest(format!(
@@ -652,7 +662,14 @@ pub fn plan_edit(
         ));
     }
 
-    let bytes = std::fs::read(&abs).map_err(|e| Error::io(&abs, e))?;
+    let file = std::fs::File::open(&abs).map_err(|e| Error::io(&abs, e))?;
+    let bytes = read_bounded(file, MAX_EDIT_BYTES).map_err(|e| Error::io(&abs, e))?;
+    if bytes.len() as u64 > MAX_EDIT_BYTES {
+        return Err(Error::BadRequest(format!(
+            "`{rel}` exceeds the {} MiB edit_file limit while being read",
+            MAX_EDIT_BYTES / (1024 * 1024)
+        )));
+    }
     if bytes.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0) {
         return Err(Error::BadRequest(format!(
             "`{rel}` looks like a binary file (NUL byte in the first {BINARY_SNIFF_BYTES} bytes); \
@@ -693,9 +710,27 @@ pub fn plan_edit(
         )));
     }
 
+    // Check the exact result size before allocating or expanding replacements.
+    let result_len = indices
+        .len()
+        .checked_mul(old.len())
+        .and_then(|removed| content.len().checked_sub(removed))
+        .and_then(|remaining| {
+            indices
+                .len()
+                .checked_mul(new.len())
+                .and_then(|added| remaining.checked_add(added))
+        })
+        .filter(|size| *size as u64 <= MAX_EDIT_BYTES)
+        .ok_or_else(|| {
+            Error::BadRequest(format!(
+                "replacement result exceeds the {} MiB edit_file limit",
+                MAX_EDIT_BYTES / (1024 * 1024)
+            ))
+        })?;
     let line_numbers = line_numbers_within(&content, &indices, content.len());
 
-    let mut new_content = String::with_capacity(content.len());
+    let mut new_content = String::with_capacity(result_len);
     let mut last = 0usize;
     for idx in &indices {
         new_content.push_str(&content[last..*idx]);
@@ -1010,6 +1045,35 @@ mod tests {
             rendered.text.lines().last()
         );
         assert!(rendered.text.contains("max_file_read_bytes"));
+    }
+
+    #[test]
+    fn bounded_read_stops_after_one_extra_byte_even_for_an_unending_reader() {
+        let bytes = read_bounded(std::io::repeat(b'x'), 32).unwrap();
+        assert_eq!(bytes.len(), 33);
+        assert_eq!(read_bounded(&b"short"[..], 5).unwrap(), b"short");
+    }
+
+    #[test]
+    fn replacement_size_is_checked_before_expansion() {
+        let tmp = TempWs::new("edit-amplification");
+        tmp.write("a.txt", "xx");
+        let ws = tmp.ws();
+        let replacement = "a".repeat(MAX_EDIT_BYTES as usize / 2 + 1);
+        let err = plan_edit(&ws, "a.txt", "x", &replacement, true).unwrap_err();
+        assert!(err.to_string().contains("replacement result exceeds"));
+        assert_eq!(
+            std::fs::read_to_string(ws.resolve_existing("a.txt").unwrap()).unwrap(),
+            "xx"
+        );
+        let exact = "a".repeat(MAX_EDIT_BYTES as usize / 2);
+        assert_eq!(
+            plan_edit(&ws, "a.txt", "x", &exact, true)
+                .unwrap()
+                .new_content
+                .len(),
+            MAX_EDIT_BYTES as usize
+        );
     }
 
     /// Line numbers must be right across many matches, not just the first: the old

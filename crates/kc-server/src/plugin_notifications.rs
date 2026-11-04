@@ -51,7 +51,7 @@ pub fn spawn(state: AppState, mut rx: UnboundedReceiver<kc_plugin_host::PluginNo
             } else {
                 notice.session_id.clone()
             };
-            let title = session_title(&state, &session_id).await;
+            let facts = session_facts(&state, &session_id).await;
             let notification = Notify::new(
                 notice.kind,
                 // `<plugin>:<title>` rather than a counter: a plugin that raises the
@@ -61,9 +61,10 @@ pub fn spawn(state: AppState, mut rx: UnboundedReceiver<kc_plugin_host::PluginNo
                 notice.title,
                 notice.body,
                 session_id,
-                title,
+                facts.title,
                 notice.plugin,
             )
+            .with_project(facts.project_id)
             .with_sound(notice.sound)
             .sticky(notice.sticky);
 
@@ -82,23 +83,35 @@ pub fn spawn(state: AppState, mut rx: UnboundedReceiver<kc_plugin_host::PluginNo
     });
 }
 
-/// The session title for a notice, when it named a session.
+/// What a plugin notification borrows from the session it names.
+#[derive(Debug, Default)]
+struct SessionFacts {
+    title: String,
+    project_id: String,
+}
+
+/// The session title and project for a notice, when it named a session.
 ///
 /// A lookup failure is not an error: the notification is still worth showing, and
-/// the client falls back to the plugin's own title.
-async fn session_title(state: &AppState, session_id: &str) -> String {
+/// the client falls back to the plugin's own title. `project_id` is what lets the
+/// browser put the notice on the right project's tile even though it never listed
+/// that project's sessions.
+async fn session_facts(state: &AppState, session_id: &str) -> SessionFacts {
     if session_id.is_empty() {
-        return String::new();
+        return SessionFacts::default();
     }
     match state.store().get_session(session_id).await {
-        Ok(Some(session)) => session.title,
+        Ok(Some(session)) => SessionFacts {
+            title: session.title,
+            project_id: session.project_id.unwrap_or_default(),
+        },
         Ok(None) => {
             warn!(session = %session_id, "a plugin notified about a session that does not exist");
-            String::new()
+            SessionFacts::default()
         }
         Err(e) => {
             warn!(session = %session_id, error = %e, "could not read a session title for a plugin notification");
-            String::new()
+            SessionFacts::default()
         }
     }
 }

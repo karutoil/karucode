@@ -215,8 +215,7 @@ sticky-bottom with a "Jump to latest" affordance).
   given deployment.
 * **Shell is not sandboxed**, by design and documented prominently. Approvals are
   a gate, not isolation.
-* **No per-subagent worktree.** `owned_paths` warns about overlap; it does not
-  isolate. Concurrent subagents editing one file can conflict.
+* **Git worktrees isolate subagent work** when available. A worktree is created for each subagent spawned in a git repository and cleaned up when it completes. If the workspace is not a git repository or worktree creation fails, subagents fall back to the shared workspace and `owned_paths` provides advisory conflict reporting.
 * **Approval expiry granularity**: subagent approvals are marked `resolved` with
   decision `expired` (the store has no per-id `expired` status), so the UI shows
   them as resolved rather than expired.

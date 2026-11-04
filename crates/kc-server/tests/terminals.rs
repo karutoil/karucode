@@ -183,6 +183,75 @@ async fn the_terminal_budget_is_enforced() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_creates_respect_the_row_budget() {
+    let h = HarnessBuilder::new(Vec::new())
+        .terminals(kc_core::config::TerminalConfig {
+            max_terminals: 1,
+            ..Default::default()
+        })
+        .build()
+        .await;
+    let (a, b, c, d) = tokio::join!(
+        h.post("/api/terminals", json!({})),
+        h.post("/api/terminals", json!({})),
+        h.post("/api/terminals", json!({})),
+        h.post("/api/terminals", json!({})),
+    );
+    let responses = [a, b, c, d];
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|r| r.status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|r| r.status == StatusCode::BAD_REQUEST)
+            .count(),
+        3
+    );
+    let list = h.get("/api/terminals").await.json();
+    let ids = ids(&list);
+    assert_eq!(ids.len(), 1);
+    h.delete(&format!("/api/terminals/{}", ids[0])).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_ensure_live_returns_one_shell() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let created = h.post("/api/terminals", json!({})).await.json();
+    let id = created["terminal"]["id"].as_str().unwrap();
+    let old = h.state.terminals().remove(id).unwrap();
+    old.shutdown();
+    let row = h.state.store().get_terminal(id).await.unwrap().unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let terminals = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let state = &h.state;
+                let row = &row;
+                scope.spawn(move || {
+                    barrier.wait();
+                    kc_server::terminals::ensure_live(state, row, 80, 24).unwrap()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(terminals
+        .iter()
+        .all(|t| std::sync::Arc::ptr_eq(t, &terminals[0])));
+    assert_eq!(h.state.terminals().len(), 1);
+    h.delete(&format!("/api/terminals/{id}")).await;
+}
+
 /// `terminals.enabled = false` removes the whole surface: no list, no create.
 #[tokio::test]
 async fn a_disabled_terminal_refuses_every_route() {
@@ -300,4 +369,19 @@ async fn the_terminal_routes_keep_the_security_posture() {
     assert!(no_csrf.error_message().contains("X-Karucode-Client"));
 
     h.delete(&format!("/api/terminals/{id}")).await;
+}
+
+#[tokio::test]
+async fn concurrent_rename_and_delete_are_serialized() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    for title in [json!({}), json!({"title":"renamed"})] {
+        for _ in 0..20 {
+            let created = h.post("/api/terminals", json!({})).await.json();
+            let id = created["terminal"]["id"].as_str().unwrap();
+            let path = format!("/api/terminals/{id}");
+            let (rename, delete) = tokio::join!(h.patch(&path, title.clone()), h.delete(&path));
+            assert!(rename.status == StatusCode::OK || rename.status == StatusCode::NOT_FOUND);
+            assert_eq!(delete.status, StatusCode::OK);
+        }
+    }
 }

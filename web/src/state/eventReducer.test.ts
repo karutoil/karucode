@@ -602,7 +602,7 @@ describe('seedChatState', () => {
     const first = current.items[0];
     expect(first?.kind).toBe('notice');
     expect(first?.kind === 'notice' ? first.message : '').toBe(
-      'Showing the last 5,000 messages; earlier history is not loaded.',
+      'Earlier history is not loaded.',
     );
     // The notice leads the transcript; the real messages follow it.
     expect(current.items.filter((item) => item.kind === 'message')).toHaveLength(3);
@@ -617,7 +617,7 @@ describe('seedChatState', () => {
     const current = seedChatState({ ...detailFixture, messages_truncated: true });
     const first = current.items[0];
     expect(first?.kind === 'notice' ? first.message : '').toBe(
-      'Showing the most recent messages; earlier history is not loaded.',
+      'Earlier history is not loaded.',
     );
   });
 });

@@ -462,6 +462,14 @@ def main() -> int:
         )
 
         # The tab strip and the footer must not scroll with the panel.
+        #
+        # The Agent tab's Advanced block is opened first, for the same reason a
+        # reader opens it: every subagent field lives behind that fold, so a
+        # collapsed panel can fit the viewport exactly (611px of content in a
+        # 611px box here) and then nothing scrolls - which made this check assert
+        # "the panel scrolls" about a panel that had nothing to scroll. Opening the
+        # fold is what makes the content taller than the box, and that is the
+        # condition this check is about.
         pinned = session.evaluate(
             """
             const agent = Array.from(document.querySelectorAll('[role=tab]')).find(
@@ -469,9 +477,14 @@ def main() -> int:
             );
             agent.click();
             await new Promise((resolve) => setTimeout(resolve, 300));
+            const panel = document.querySelector('.settings-panels > .tab-panel:not([hidden])');
+            const details = panel.querySelector('details.settings-advanced');
+            if (details && !details.open) {
+              details.querySelector('summary').click();
+              await new Promise((resolve) => setTimeout(resolve, 300));
+            }
             const strip = document.querySelector('.settings-tabs');
             const footer = document.querySelector('.settings-footer');
-            const panel = document.querySelector('.settings-panels > .tab-panel:not([hidden])');
             const before = {
               strip: strip.getBoundingClientRect().top,
               footer: footer.getBoundingClientRect().top,
@@ -493,7 +506,8 @@ def main() -> int:
         check(
             "the panel is the thing that scrolls",
             pinned["after"]["panelScroll"] > 0,
-            f'scrolled {pinned["after"]["panelScroll"]}px',
+            f'scrolled {pinned["after"]["panelScroll"]}px '
+            f'({pinned["before"]["scrollable"]=}, body {pinned["before"]["panelScroll"]})',
         )
         check(
             "the tab strip and the footer stay put while it does",

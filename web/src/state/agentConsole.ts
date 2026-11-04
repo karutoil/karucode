@@ -649,6 +649,7 @@ function toolArgs(raw: string | null | undefined): JsonValue {
 export function activityFromMessages(
   messages: StoredMessage[],
   agentId: string,
+  uncapped = false,
 ): AgentActivity {
   const items: AgentActivityItem[] = [];
   const calls = new Map<string, number>();
@@ -747,7 +748,7 @@ export function activityFromMessages(
     }
   }
 
-  return { items: trimItems(items), lastSeq: 0 };
+  return { items: uncapped ? items : trimItems(items), lastSeq: 0 };
 }
 
 /**
@@ -756,7 +757,7 @@ export function activityFromMessages(
  * Items are keyed by their stable id (`msg:<row>` / `tool:<call_id>`), so a live
  * item wins over the stored copy of the same call and both are ordered by time.
  */
-export function mergeActivities(base: AgentActivity, overlay: AgentActivity): AgentActivity {
+export function mergeActivities(base: AgentActivity, overlay: AgentActivity, uncapped = false): AgentActivity {
   if (overlay.items.length === 0) return base;
   if (base.items.length === 0) return overlay;
   const byId = new Map<string, AgentActivityItem>();
@@ -764,7 +765,7 @@ export function mergeActivities(base: AgentActivity, overlay: AgentActivity): Ag
   for (const item of overlay.items) byId.set(item.id, item);
   const items = [...byId.values()].sort((a, b) => a.at - b.at);
   return {
-    items: trimItems(items),
+    items: uncapped ? items : trimItems(items),
     lastSeq: Math.max(base.lastSeq, overlay.lastSeq),
   };
 }

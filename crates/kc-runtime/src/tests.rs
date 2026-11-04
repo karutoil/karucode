@@ -439,38 +439,304 @@ async fn a_degenerate_text_loop_is_trimmed_and_the_turn_still_completes() {
     );
 }
 
+/// The same model, served by ten different gateways: the case that used to be
+/// mistaken for a loop.
+fn enumerated_gateways() -> String {
+    [
+        "openrouter",
+        "a6api/ali",
+        "together",
+        "fireworks",
+        "deepinfra",
+        "novita",
+        "hyperbolic",
+        "parasail",
+        "synthetic",
+        "ncompass",
+    ]
+    .iter()
+    .map(|provider| format!("{provider}/deepseek-v3.2-flash-1017"))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+#[tokio::test]
+async fn reasoning_that_enumerates_providers_is_not_called_a_loop() {
+    // The reported bug. A model weighing up ten gateways that serve one model
+    // repeats the model id ten times in its reasoning while every provider is new.
+    // Counting a repeated 24-character window made that look exactly like a
+    // degenerate loop: the attempt was thrown away, the identical request was
+    // re-issued, and once the restart budget was spent the run failed. A loop is a
+    // cycle; a shared name is not.
+    let reasoning = format!(
+        "Which gateways serve deepseek-v3.2-flash-1017? {}. Ten providers, one model. \
+         The cheapest is enough, so answer.",
+        enumerated_gateways()
+    );
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![
+        ProviderChunk::Reasoning(reasoning),
+        ProviderChunk::Text("Ten gateways serve it.".into()),
+        ProviderChunk::Finish {
+            reason: "stop".into(),
+        },
+    ])])
+    .build()
+    .await;
+
+    let events = h.run_to_finish("which gateways serve it?").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.event, Event::StreamRetry { .. })),
+        "an enumeration must not abandon the attempt: {events:?}"
+    );
+    assert_eq!(
+        h.factory.requests().len(),
+        1,
+        "the request must not be re-issued"
+    );
+    let messages = h.session_messages().await;
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.content == "Ten gateways serve it."),
+        "{messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_enumeration_in_the_answer_is_not_trimmed() {
+    // The same list in the answer text, where cutting it would silently delete the
+    // part of the reply the user asked for.
+    let answer = format!("Ten gateways serve it: {}.", enumerated_gateways());
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![
+        ProviderChunk::Text(answer.clone()),
+        ProviderChunk::Finish {
+            reason: "stop".into(),
+        },
+    ])])
+    .build()
+    .await;
+
+    let events = h.run_to_finish("which gateways?").await;
+    assert_eq!(finished_status(&events), "completed");
+    let messages = h.session_messages().await;
+    let stored = messages
+        .iter()
+        .find(|m| m.role == "assistant")
+        .expect("an assistant turn");
+    assert_eq!(stored.content, answer);
+}
+
+#[tokio::test]
+async fn repetitive_fenced_code_is_preserved_and_prose_loops_still_stop() {
+    let code = format!(
+        "Example:\n```rust\n{}\n```\nDone.",
+        "    println!(\"repeated statement\");\n".repeat(30)
+    );
+    // Split every character, including the fence, as a streaming provider may.
+    let mut chunks: Vec<_> = code
+        .chars()
+        .map(|c| ProviderChunk::Text(c.to_string()))
+        .collect();
+    chunks.push(ProviderChunk::Finish {
+        reason: "stop".into(),
+    });
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(chunks)])
+        .build()
+        .await;
+    let events = h.run_to_finish("show code").await;
+    assert_eq!(finished_status(&events), "completed", "{events:?}");
+    assert!(h
+        .session_messages()
+        .await
+        .iter()
+        .any(|m| m.role == "assistant" && m.content == code));
+
+    let input = format!(
+        "~~~~\n{}~~~~\nA preface. {}",
+        "repeated code statement here\n".repeat(20),
+        "Let me write. Go. Now. OK. ".repeat(12)
+    );
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![ProviderChunk::Text(input)])])
+        .build()
+        .await;
+    h.run_to_finish("show code").await;
+    let messages = h.session_messages().await;
+    let answer = messages.iter().find(|m| m.role == "assistant").unwrap();
+    assert!(answer.content.contains("A preface."));
+    assert!(!answer.content.contains("Let me write"));
+}
+
+#[tokio::test]
+async fn spaced_closing_fences_resume_prose_repetition_detection() {
+    for (open, close) in [("```rust", "``` \t\r"), ("~~~~", "  ~~~~~\t ")] {
+        let input = format!(
+            "{open}\n{}{close}\nA preface. {}",
+            "repeated code statement here\n".repeat(20),
+            "Let me write. Go. Now. OK. ".repeat(14)
+        );
+        let chunks = input
+            .chars()
+            .map(|c| ProviderChunk::Text(c.to_string()))
+            .collect();
+        let mut h = HarnessBuilder::new(vec![Script::Chunks(chunks)])
+            .build()
+            .await;
+        h.run_to_finish("show code").await;
+        let messages = h.session_messages().await;
+        let answer = messages.iter().find(|m| m.role == "assistant").unwrap();
+        assert!(answer.content.contains("A preface."), "{}", answer.content);
+        assert!(
+            !answer.content.contains("Let me write"),
+            "{}",
+            answer.content
+        );
+    }
+}
+
 #[test]
 fn the_repetition_detector_ignores_normal_text() {
-    use crate::agent::{repeated_phrase, REASONING_REPEATS, TEXT_REPEATS};
+    use crate::agent::{detect_loop, REPEATS_REASONING, REPEATS_TEXT};
 
     // Ordinary code, layout and a line or two repeated are not loops.
-    assert!(repeated_phrase(
+    assert!(detect_loop(
         "fn main() {\n    let x = compute();\n    println!(\"{x}\");\n}\n",
-        REASONING_REPEATS
+        REPEATS_REASONING
     )
     .is_none());
-    assert!(repeated_phrase(&"- ".repeat(200), REASONING_REPEATS).is_some());
-    assert!(repeated_phrase(&"| flaky | rerun |\n".repeat(3), REASONING_REPEATS).is_none());
+    assert!(detect_loop(&"- ".repeat(200), REPEATS_REASONING).is_some());
+    assert!(detect_loop(&"| flaky | rerun |\n".repeat(3), REPEATS_REASONING).is_none());
 
     // What the model actually did: the same few words, over and over.
     let looped = "Let me write. Go. Now. OK. ".repeat(12);
-    let sample = repeated_phrase(&looped, REASONING_REPEATS).expect("a loop must be caught");
-    assert!(sample.contains("Let me write"), "{sample}");
+    let caught = detect_loop(&looped, REPEATS_REASONING).expect("a loop must be caught");
+    assert!(caught.block.contains("Let me write"), "{}", caught.block);
 
     // The same loop with the whitespace varied - which is what defeated the
     // first, exact-cycle version of this detector.
     let varied = "Let me write.\n\nGo.\nNow.\n\nOK.\n\n".repeat(10);
-    assert!(repeated_phrase(&varied, REASONING_REPEATS).is_some());
+    assert!(detect_loop(&varied, REPEATS_REASONING).is_some());
 
     // A single character forever, and a whole paragraph ten times, are both loops.
-    assert!(repeated_phrase(&"a".repeat(600), REASONING_REPEATS).is_some());
+    assert!(detect_loop(&"a".repeat(600), REPEATS_REASONING).is_some());
     let para = "the parser rejects an empty path and returns a bad request error ";
-    assert!(repeated_phrase(&para.repeat(10), REASONING_REPEATS).is_some());
+    assert!(detect_loop(&para.repeat(10), REPEATS_REASONING).is_some());
 
     // Answer text is content, so it needs ten repeats before anything is cut:
     // eight is enough for reasoning, not for the answer.
-    assert!(repeated_phrase(&looped, TEXT_REPEATS).is_some());
-    assert!(repeated_phrase(&"Let me write. Go. Now. OK. ".repeat(8), TEXT_REPEATS).is_none());
+    assert!(detect_loop(&looped, REPEATS_TEXT).is_some());
+    assert!(detect_loop(&"Let me write. Go. Now. OK. ".repeat(8), REPEATS_TEXT).is_none());
+
+    // A rule, a border and a capped sweep of code are punctuation and layout, not
+    // a stuck model: a repeated block of one character has to run absurdly long.
+    assert!(detect_loop(&"-".repeat(300), REPEATS_TEXT).is_none());
+    assert!(detect_loop(&"=".repeat(600), REPEATS_TEXT).is_none());
+    assert!(detect_loop(&"*".repeat(120), REPEATS_REASONING).is_none());
+}
+
+#[test]
+fn a_list_that_repeats_one_long_name_is_not_a_loop() {
+    // The reported bug. Reasoning that weighs up ten gateways serving the *same*
+    // model repeats the model id ten times while every provider is new. The old
+    // detector counted a repeated 24-character window and called that a loop, so
+    // an attempt was thrown away and re-issued, then the run failed after the
+    // restart budget was spent. A loop is a cycle; a shared name is not.
+    use crate::agent::{detect_loop, REPEATS_REASONING, REPEATS_TEXT};
+
+    let providers = [
+        "openrouter/",
+        "a6api/ali/",
+        "together/",
+        "fireworks/",
+        "deepinfra/",
+        "novita/",
+        "hyperbolic/",
+        "parasail/",
+        "synthetic/",
+        "ncompass/",
+    ];
+    let enumerated: String = providers
+        .iter()
+        .map(|p| format!("{p}deepseek-v3.2-flash-1017"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for text in [
+        format!("Which gateways serve it? {enumerated}. That is ten providers, one model."),
+        // One per line, as a reader would write a list.
+        providers
+            .iter()
+            .map(|p| format!("- {p}deepseek-v3.2-flash-1017"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        // The same list as a markdown table with a long shared cell.
+        providers
+            .iter()
+            .map(|p| format!("| {p} | deepseek-v3.2-flash-1017 | tier a |"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        // One shared directory prefix, ten files.
+        format!(
+            "The files are {}.",
+            ["agent", "context", "subagent", "restart", "budget", "journal", "emit", "hub"]
+                .iter()
+                .map(|f| format!("/home/karutoil/karucode/crates/kc-runtime/src/{f}.rs"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        // A link list, where every line shares a long URL stem.
+        (1..=10)
+            .map(|n| {
+                format!("- [web-ui.md](https://github.com/karutoil/karucode/blob/main/docs/{n}.md)")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        // Ten commands that share a flag tail but name different crates.
+        (1..=10)
+            .map(|n| format!("cargo test -p kc-crate-{n} --workspace --all-features"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ] {
+        assert!(
+            detect_loop(&text, REPEATS_REASONING).is_none(),
+            "reasoning was called a loop: {text}"
+        );
+        assert!(
+            detect_loop(&text, REPEATS_TEXT).is_none(),
+            "answer text was called a loop: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_caught_loop_reports_the_block_and_keeps_what_came_before_it() {
+    use crate::agent::trim_loop;
+    use crate::agent::{detect_loop, REPEATS_TEXT};
+
+    let answer = format!(
+        "Nine findings follow. {}",
+        "Let me write. Go. Now. OK. ".repeat(12)
+    );
+    let caught = detect_loop(&answer, REPEATS_TEXT).expect("a loop must be caught");
+    // The sample is one period of the cycle named from where the run starts, so it
+    // can be a rotation of what the model typed - it only has to be readable in the
+    // notice, and one period long.
+    assert_eq!(caught.block.chars().count(), 27, "{}", caught.block);
+    assert!(
+        format!("{b}{b}", b = caught.block).contains("Let me write. Go. Now. OK. "),
+        "{}",
+        caught.block
+    );
+    // Everything before the loop survives, including the full stop that ends it:
+    // the cut lands on the first complete copy, not in the middle of one.
+    let kept = trim_loop(&answer, caught.at);
+    assert_eq!(kept, "Nine findings follow.");
+
+    // A loop with no prose in front of it leaves an empty answer, not a fragment.
+    let bare = "Let me write. Go. Now. OK. ".repeat(12);
+    let caught = detect_loop(&bare, REPEATS_TEXT).expect("a loop must be caught");
+    assert_eq!(trim_loop(&bare, caught.at), "");
 }
 
 #[tokio::test]
@@ -571,6 +837,48 @@ async fn an_identical_read_is_blocked_instead_of_re_executed() {
         tools[4].content
     );
     // A block is a tool result, not a run failure.
+    assert_eq!(h.store.runs()[0].status, "completed");
+}
+
+#[tokio::test]
+async fn a_refused_repeat_is_let_through_rather_than_deadlocking_the_run() {
+    // The refusal only knows what *this* loop has written. A subagent, the user or
+    // an editor can change a file while `mutations` stays put, so a permanent block
+    // would leave the model unable to re-read a page it knows changed. The refusal
+    // is therefore bounded: the fourth and fifth calls are refused, the sixth runs.
+    let arg = "{\"path\":\"a.txt\"}";
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "echo", arg)]),
+        Script::call(&[("call_2", "echo", arg)]),
+        Script::call(&[("call_3", "echo", arg)]),
+        Script::call(&[("call_4", "echo", arg)]),
+        Script::call(&[("call_5", "echo", arg)]),
+        Script::call(&[("call_6", "echo", arg)]),
+        Script::text("fine"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .build()
+    .await;
+
+    let _ = h.run_to_finish("read a.txt").await;
+    let messages = h.session_messages().await;
+    let tools: Vec<_> = messages.iter().filter(|m| m.role == "tool").collect();
+    assert_eq!(tools.len(), 6);
+    assert!(
+        tools[3].content.starts_with("[blocked:"),
+        "{}",
+        tools[3].content
+    );
+    assert!(
+        tools[4].content.starts_with("[blocked:"),
+        "{}",
+        tools[4].content
+    );
+    assert!(
+        !tools[5].content.starts_with("[blocked:"),
+        "the block must not be permanent: {}",
+        tools[5].content
+    );
     assert_eq!(h.store.runs()[0].status, "completed");
 }
 
@@ -828,7 +1136,10 @@ async fn a_malformed_call_gets_the_working_version_back() {
     let events = h.run_to_finish("bad args").await;
     assert_eq!(finished_status(&events), "completed");
     let finished = tool_finished(&events);
-    assert!(!finished[0].1, "a repaired call is still not run for the model");
+    assert!(
+        !finished[0].1,
+        "a repaired call is still not run for the model"
+    );
 
     let messages = h.session_messages().await;
     let tool_message = messages.iter().find(|m| m.role == "tool").unwrap();
@@ -838,9 +1149,9 @@ async fn a_malformed_call_gets_the_working_version_back() {
         tool_message.content
     );
     assert!(
-        tool_message
-            .content
-            .contains("Re-issue the call as: {\"name\":\"echo\",\"arguments\":{\"path\":\"a.txt\"}}"),
+        tool_message.content.contains(
+            "Re-issue the call as: {\"name\":\"echo\",\"arguments\":{\"path\":\"a.txt\"}}"
+        ),
         "the repaired, runnable call must be in the result: {}",
         tool_message.content
     );
@@ -867,8 +1178,7 @@ async fn an_unparseable_call_still_shows_the_required_shape() {
     let finished = tool_finished(&events);
     assert!(!finished[0].1);
     assert!(
-        finished[0].2.contains("Required shape:")
-            && finished[0].2.contains("\"path\""),
+        finished[0].2.contains("Required shape:") && finished[0].2.contains("\"path\""),
         "{}",
         finished[0].2
     );
@@ -923,10 +1233,10 @@ async fn a_missing_required_argument_is_named_with_the_example() {
     let finished = tool_finished(&events);
     assert!(!finished[0].1);
     assert!(
-        finished[0]
-            .2
-            .contains("missing required argument `path`")
-            && finished[0].2.contains("missing required argument `content`"),
+        finished[0].2.contains("missing required argument `path`")
+            && finished[0]
+                .2
+                .contains("missing required argument `content`"),
         "{}",
         finished[0].2
     );
@@ -970,14 +1280,16 @@ async fn a_tool_that_refuses_the_request_itself_gets_the_working_call() {
     let finished = tool_finished(&events);
     assert!(!finished[0].1);
     assert!(
-        finished[0].2.contains("invalid request: pattern may not be empty"),
+        finished[0]
+            .2
+            .contains("invalid request: pattern may not be empty"),
         "{}",
         finished[0].2
     );
     assert!(
-        finished[0]
-            .2
-            .contains("[how to call `picky`: {\"name\":\"picky\",\"arguments\":{\"pattern\":\"<string>\"}}"),
+        finished[0].2.contains(
+            "[how to call `picky`: {\"name\":\"picky\",\"arguments\":{\"pattern\":\"<string>\"}}"
+        ),
         "{}",
         finished[0].2
     );
@@ -4062,6 +4374,38 @@ async fn every_queued_follow_up_runs_in_order() {
     );
 }
 
+/// Queue insertion must hold the run registration lock until the entry is in
+/// the queue; otherwise teardown can drain an empty queue and strand a 202.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn follow_up_admission_serializes_with_deregistration() {
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![])])
+        .build()
+        .await;
+    h.submit("long job").await;
+    let inner = Arc::clone(h.runtime.shared());
+    let queue_guard = inner.follow_ups.lock().unwrap();
+    let runtime = Arc::clone(&h.runtime);
+    let session = h.session().to_string();
+    let worker = std::thread::spawn(move || runtime.enqueue_follow_up(&session, "after"));
+    // Wait until admission has reached the queue lock. At that point it must
+    // still own the runs lock; the old check-then-insert code did not.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if inner.runs.try_lock().is_err() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "admission did not hold the runs lock while waiting for the queue"
+        );
+        std::thread::yield_now();
+    }
+    drop(queue_guard);
+    worker.join().unwrap().unwrap();
+    assert_eq!(h.runtime.queued_follow_ups(h.session()).len(), 1);
+    h.runtime.cancel(h.session());
+}
+
 /// A follow-up with nothing running is refused; a plain `send` is what it means.
 #[tokio::test]
 async fn a_follow_up_with_nothing_running_is_refused() {
@@ -4378,6 +4722,7 @@ fn notify_of(event: &EventEnvelope) -> kc_core::notify::Notify {
 #[tokio::test]
 async fn a_finished_run_emits_one_notification_after_the_terminal_state() {
     let mut h = HarnessBuilder::new(vec![Script::text("Done: the bug is fixed.")])
+        .project("p_docs")
         .build()
         .await;
 
@@ -4410,6 +4755,9 @@ async fn a_finished_run_emits_one_notification_after_the_terminal_state() {
     assert_eq!(notify.session_id, h.session());
     // The session's title travels with it so a notification is readable on its own.
     assert_eq!(notify.session_title, "test session");
+    // And so does its project: the browser counts unread news per project tile,
+    // and it only lists the sessions of the project it is showing.
+    assert_eq!(notify.project_id, "p_docs");
     // The body is the first line of the answer.
     assert!(
         notify.body.contains("the bug is fixed"),
@@ -4791,6 +5139,43 @@ async fn a_rewind_refuses_while_a_run_is_in_flight() {
     assert!(err.to_string().contains("run in flight"), "{err}");
     h.runtime.cancel(h.session());
     h.wait_idle().await;
+}
+
+#[tokio::test]
+async fn rewind_preview_rejects_aggregate_images_before_mutation() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("c1", "write_file", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(journaling_write("a", "after"))
+    .build()
+    .await;
+    std::fs::write(h.workspace_dir.join("a"), "before").unwrap();
+    h.run_to_finish("edit").await;
+    h.wait_idle().await;
+    let prompt = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "user")
+        .unwrap();
+    let mut row = h.store.list_checkpoints(h.session(), 0).await.unwrap()[0].clone();
+    row.path = "b".into();
+    row.content = "x".repeat(8 * 1024 * 1024);
+    h.store.record_checkpoint(&row).await.unwrap();
+    let error = h
+        .runtime
+        .rewind_preview(h.session(), prompt.id)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("before-images exceed"));
+    assert!(h
+        .runtime
+        .rewind(h.session(), prompt.id, true, true)
+        .await
+        .is_err());
+    assert_eq!(read_file(&h.workspace_dir, "a").as_deref(), Some("after"));
+    assert!(!h.session_messages().await.is_empty());
 }
 
 #[tokio::test]
@@ -5277,6 +5662,79 @@ async fn a_fan_out_runs_its_children_together_and_returns_one_batch() {
     assert!(tool.1, "a clean fan-out is ok: {}", tool.2);
     assert!(tool.2.contains("the parser looks fine"), "{}", tool.2);
     assert!(tool.2.contains("three call sites"), "{}", tool.2);
+}
+
+/// Twenty is more than the old finite ceiling of sixteen, so this fails if
+/// `max_concurrent = 0` (the "no ceiling" spelling) is ever read as "allow
+/// nothing" or clamped back to a small number on the way in.
+///
+/// It is a *background* fan-out on purpose: that path takes a slot with
+/// `try_acquire` and is separately gated by `max_background`, so one test covers
+/// both unlimited switches and the batch capacity check that sits between them.
+#[tokio::test]
+async fn an_unbounded_setting_starts_its_whole_fan_out() {
+    const WIDTH: usize = 20;
+    let tasks: Vec<serde_json::Value> = (0..WIDTH)
+        .map(|i| {
+            serde_json::json!({
+                "task": format!("job {i}"),
+                "name": format!("worker-{i}"),
+            })
+        })
+        .collect();
+    let args = serde_json::json!({ "tasks": tasks, "background": true });
+    let settings = SubagentConfig {
+        max_concurrent: 0,
+        max_background: 0,
+        ..fan_out_settings()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[(
+            "call_fan",
+            crate::subagent::SPAWN_AGENTS_TOOL,
+            &args.to_string(),
+        )]),
+        Script::text("parent done"),
+    ])
+    .settings(FakeSettings::default().with_subagents(settings))
+    .build()
+    .await;
+    for i in 0..WIDTH {
+        h.factory
+            .key(&format!("job {i}"), vec![Script::text("done")]);
+    }
+
+    let events = h.run_to_finish("fan out twenty jobs").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(
+        count(&events, "agent_spawned"),
+        WIDTH,
+        "every child in an unbounded fan-out has to start: {:?}",
+        kinds(&events)
+    );
+
+    let tool = tool_finished(&events)
+        .into_iter()
+        .find(|(call, _, _, _)| call == "call_fan")
+        .expect("the fan-out's own result");
+    assert!(
+        tool.1,
+        "an unbounded fan-out must not be refused: {}",
+        tool.2
+    );
+    assert!(
+        tool.2
+            .contains(&format!("started {WIDTH} background subagents")),
+        "the batch reports every child it started: {}",
+        tool.2
+    );
+    assert!(
+        !tool.2.contains("refused"),
+        "nothing was refused: {}",
+        tool.2
+    );
+    let live = h.store.agents();
+    assert_eq!(live.len(), WIDTH, "every child has its own row: {live:?}");
 }
 
 #[tokio::test]

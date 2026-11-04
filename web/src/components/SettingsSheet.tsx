@@ -155,6 +155,22 @@ function integerAtLeast(value: string, min: number, max: number): boolean {
   return parsed !== null && Number.isInteger(parsed) && parsed >= min && parsed <= max;
 }
 
+/**
+ * Bounds for the `[subagents]` numeric fields, mirroring `SUBAGENT_BOUNDS` in
+ * `crates/kc-server/src/settings.rs`.
+ *
+ * These two lists had drifted apart: this form accepted up to 32 concurrent
+ * agents while the server rejected anything over 16, so the local validation
+ * passed and the save came back as a 400 the user could not act on. Keep them in
+ * step, and keep `0` meaning what the server's doc comments say it means -
+ * "no ceiling" for the two counts, "no delegation" for depth.
+ */
+const SUBAGENT_BOUNDS = {
+  concurrent: { min: 0, max: 1024 },
+  maxDepth: { min: 0, max: 255 },
+  maxBackground: { min: 0, max: 1024 },
+} as const;
+
 function validate(form: FormState): Record<string, string> {
   const errors: Record<string, string> = {};
 
@@ -199,8 +215,14 @@ function validate(form: FormState): Record<string, string> {
   if (!integerAtLeast(form.approvalTimeout, 1, 86_400)) {
     errors.approvalTimeout = 'Approval timeout must be 1–86400 seconds.';
   }
-  if (!integerAtLeast(form.subagentConcurrent, 1, 32)) {
-    errors.subagentConcurrent = 'Concurrency must be 1–32.';
+  if (
+    !integerAtLeast(
+      form.subagentConcurrent,
+      SUBAGENT_BOUNDS.concurrent.min,
+      SUBAGENT_BOUNDS.concurrent.max,
+    )
+  ) {
+    errors.subagentConcurrent = 'Concurrency must be 0 (no ceiling) or 1–1024.';
   }
   if (!integerAtLeast(form.subagentIterations, 1, 10_000)) {
     errors.subagentIterations = 'Iterations must be 1–10000.';
@@ -208,14 +230,26 @@ function validate(form: FormState): Record<string, string> {
   if (!integerAtLeast(form.subagentContinues, 0, 1_000)) {
     errors.subagentContinues = 'Auto-continues must be 0–1000.';
   }
-  if (!integerAtLeast(form.subagentMaxDepth, 0, 10)) {
-    errors.subagentMaxDepth = 'Max depth must be 0–10.';
+  if (
+    !integerAtLeast(
+      form.subagentMaxDepth,
+      SUBAGENT_BOUNDS.maxDepth.min,
+      SUBAGENT_BOUNDS.maxDepth.max,
+    )
+  ) {
+    errors.subagentMaxDepth = 'Max depth must be 0–255 (0 = no delegation).';
   }
   if (!integerAtLeast(form.subagentTimeout, 1, 604_800)) {
     errors.subagentTimeout = 'Timeout must be 1–604800 seconds.';
   }
-  if (!integerAtLeast(form.subagentMaxBackground, 1, 16)) {
-    errors.subagentMaxBackground = 'Live background agents must be 1–16.';
+  if (
+    !integerAtLeast(
+      form.subagentMaxBackground,
+      SUBAGENT_BOUNDS.maxBackground.min,
+      SUBAGENT_BOUNDS.maxBackground.max,
+    )
+  ) {
+    errors.subagentMaxBackground = 'Live background agents must be 0 (no ceiling) or 1–1024.';
   }
   if (!integerAtLeast(form.subagentWaitTimeout, 1, 3_600)) {
     errors.subagentWaitTimeout = 'Wait timeout must be 1–3600 seconds.';
@@ -2605,20 +2639,23 @@ export function SettingsSheet(): JSX.Element | null {
                         id="subagent-concurrent"
                         label="Max concurrent"
                         error={errors.subagentConcurrent}
+                        hint="Loops running at once, install-wide. 0 = no ceiling: a fan-out starts every child it was given."
                       >
                         <input
                           id="subagent-concurrent"
                           class="input mono"
                           type="number"
-                          min="1"
-                          max="32"
+                          min={SUBAGENT_BOUNDS.concurrent.min}
+                          max={SUBAGENT_BOUNDS.concurrent.max}
                           step="1"
                           value={form.subagentConcurrent}
                           disabled={disabled}
                           onInput={(event) => update({ subagentConcurrent: event.currentTarget.value })}
                           aria-invalid={errors.subagentConcurrent ? 'true' : undefined}
                           aria-describedby={
-                            errors.subagentConcurrent ? 'subagent-concurrent-error' : undefined
+                            errors.subagentConcurrent
+                              ? 'subagent-concurrent-error'
+                              : 'subagent-concurrent-hint'
                           }
                         />
                       </Field>
@@ -2674,14 +2711,14 @@ export function SettingsSheet(): JSX.Element | null {
                         id="subagent-max-depth"
                         label="Max depth"
                         error={errors.subagentMaxDepth}
-                        hint="Only meaningful when recursion is allowed."
+                        hint="How many generations may nest. 0 = no delegation at all; 255 is the deepest the field holds."
                       >
                         <input
                           id="subagent-max-depth"
                           class="input mono"
                           type="number"
-                          min="0"
-                          max="10"
+                          min={SUBAGENT_BOUNDS.maxDepth.min}
+                          max={SUBAGENT_BOUNDS.maxDepth.max}
                           step="1"
                           value={form.subagentMaxDepth}
                           disabled={disabled}
@@ -2710,15 +2747,15 @@ export function SettingsSheet(): JSX.Element | null {
                       <Field
                         id="subagent-max-background"
                         label="Live background agents"
-                        hint="How many detached subagents one session may keep running at once."
+                        hint="How many detached subagents one session may keep running at once. 0 = no ceiling."
                         error={errors.subagentMaxBackground}
                       >
                         <input
                           id="subagent-max-background"
                           class="input mono"
                           type="number"
-                          min="1"
-                          max="16"
+                          min={SUBAGENT_BOUNDS.maxBackground.min}
+                          max={SUBAGENT_BOUNDS.maxBackground.max}
                           step="1"
                           value={form.subagentMaxBackground}
                           disabled={disabled}

@@ -51,6 +51,7 @@ macro_rules! id_type {
     };
 }
 
+id_type!(MissionId, "m");
 id_type!(SessionId, "s");
 id_type!(RunId, "r");
 id_type!(AgentId, "a");

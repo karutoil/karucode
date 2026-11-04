@@ -224,6 +224,16 @@ export function KebabIcon(props: IconProps): JSX.Element {
   );
 }
 
+/** The notification centre: a bell, with the clapper drawn as the unread dot. */
+export function BellIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M18 8a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6" />
+      <path d="M10.5 20a2 2 0 0 0 3 0" />
+    </svg>
+  );
+}
+
 export function ChevronLeftIcon(props: IconProps): JSX.Element {
   return (
     <svg {...svgProps(props)}>

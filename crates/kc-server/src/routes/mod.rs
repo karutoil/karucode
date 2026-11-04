@@ -7,6 +7,7 @@ pub mod events;
 pub mod git;
 pub mod health;
 pub mod info;
+pub mod missions;
 pub mod models;
 pub mod plugins;
 pub mod projects;
@@ -24,7 +25,7 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -54,6 +55,10 @@ pub fn api_router() -> Router<AppState> {
     // JSON routes: one explicit body limit for the whole group.
     let json_routes = Router::new()
         .route("/health", get(health::health))
+        .route(
+            "/control/sessions",
+            get(crate::control::list_sessions).post(crate::control::create_session),
+        )
         .route(
             "/config",
             get(config::get_config).patch(patch_config_guarded),
@@ -97,6 +102,36 @@ pub fn api_router() -> Router<AppState> {
             axum::routing::patch(projects::rename_project).delete(projects::delete_project),
         )
         .route("/projects/:id/favicon", get(projects::project_favicon))
+        .route("/missions", get(missions::list).post(missions::create))
+        .route("/missions/:id", get(missions::get).delete(missions::delete))
+        .route("/missions/:id/sessions", post(missions::start_session))
+        .route("/missions/:id/coordinator", post(missions::coordinator))
+        .route("/missions/:id/tasks", post(missions::create_task))
+        .route("/missions/:id/tasks/:task_id", patch(missions::revise_task))
+        .route(
+            "/missions/:id/tasks/:task_id/replan",
+            post(missions::replan_task),
+        )
+        .route(
+            "/missions/:id/tasks/:task_id/verification",
+            post(missions::create_verification_task),
+        )
+        .route(
+            "/missions/:id/tasks/:task_id/retry",
+            post(missions::retry_task),
+        )
+        .route(
+            "/missions/:id/artifacts",
+            get(missions::list_artifacts).post(missions::publish_artifact),
+        )
+        .route(
+            "/missions/:id/evidence",
+            get(missions::list_evidence).post(missions::publish_evidence),
+        )
+        .route("/missions/:id/start", post(missions::start))
+        .route("/missions/:id/pause", post(missions::pause))
+        .route("/missions/:id/resume", post(missions::resume))
+        .route("/missions/:id/cancel", post(missions::cancel))
         .route("/agents", get(agents::list_agents))
         .route("/agents/:id", get(agents::get_agent))
         // One route for the three control verbs: they take the same path shape,
@@ -272,6 +307,24 @@ pub fn query_usize(query: &QueryMap, name: &str) -> ApiResult<Option<usize>> {
         }),
     }
 }
+
+/// Exclusive message cursor shared by transcript endpoints.
+pub fn message_before(query: &QueryMap) -> ApiResult<Option<i64>> {
+    match query_str(query, "before") {
+        None => Ok(None),
+        Some(raw) => raw
+            .parse::<i64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .map(Some)
+            .ok_or_else(|| {
+                ApiError::bad_request("query parameter `before` must be a positive message id")
+            }),
+    }
+}
+
+/// Approximate stored payload budget; one oversized message is returned alone.
+pub const TRANSCRIPT_PAGE_BYTES: usize = 1024 * 1024;
 
 pub fn query_bool(query: &QueryMap, name: &str) -> ApiResult<bool> {
     match query_str(query, name) {

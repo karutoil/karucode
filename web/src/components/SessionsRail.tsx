@@ -15,6 +15,8 @@ import {
   type SessionFacts,
 } from '../state/sessionFacts';
 import { Dialog } from './Dialog';
+import { controlPlaneOpen } from '../state/controlPlane';
+import * as railPeek from '../state/railPeek';
 import {
   AddProjectDialog,
   DeleteProjectDialog,
@@ -22,7 +24,7 @@ import {
   SessionGlyph,
   projectInitials,
 } from './ProjectRail';
-import { CloseIcon, KebabIcon, PlusIcon, SearchIcon, SettingsIcon } from './icons';
+import { CloseIcon, FolderIcon, KebabIcon, PanelIcon, PlusIcon, SearchIcon, SettingsIcon } from './icons';
 
 const DAY = 86_400_000;
 
@@ -697,6 +699,187 @@ interface ProjectMenuState {
   left: number;
 }
 
+/**
+ * The collapsed rail's fly-out: one project's sessions, over the chat.
+ *
+ * `Ctrl/Cmd+B` gives the sessions rail zero width, which is right for a wide
+ * conversation and a dead end when all you want is to open a session. Hovering a
+ * project tile while the rail is collapsed shows this instead: the same rows, the
+ * same rename and delete menus, positioned against the project rail and out of flow
+ * so the conversation never resizes to make room. Hovering a *different* project
+ * shows that project — the rows come from `state/railPeek.ts`, which reads the list
+ * once and caches it, because the store only holds the open project's sessions.
+ *
+ * It closes when the pointer leaves (after a short grace period, so clipping the
+ * edge on the way past does not flash it) and when a row is opened. It is a view,
+ * not a mode: nothing is remembered once it is gone.
+ */
+export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
+  const projects = store.projects.value;
+  const project = projects.find((candidate) => candidate.id === projectId) ?? null;
+  const isCurrent = store.currentProjectId.value === projectId;
+  const sessions = isCurrent
+    ? store.sessions.value
+    : railPeek.peekSessions.value[projectId] ?? [];
+  const loading = isCurrent
+    ? store.sessionsLoading.value
+    : railPeek.peekLoading.value[projectId] ?? false;
+  const error = isCurrent ? null : railPeek.peekError.value[projectId] ?? null;
+  const initial = (project?.name ?? 'k').trim().slice(0, 1).toLowerCase() || 'k';
+
+  // The same fingerprints the full rail shows under each title, from the same
+  // bounded loader: a peek that dropped them would make the rows twice as wide and
+  // half as informative as the list it replaces.
+  const sessionKey = sessions.map((session) => session.id).join(',');
+  useEffect(() => {
+    if (sessionKey === '') return;
+    void loadFactsFor(sessionKey.split(','));
+  }, [sessionKey, projectId]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') railPeek.closePeek();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const openSession = (id: string): void => {
+    railPeek.closePeek();
+    if (isCurrent) actions.switchSession(id);
+    else void actions.openSessionInProject(projectId, id);
+  };
+
+  const createSession = (): void => {
+    railPeek.closePeek();
+    void actions.createSession();
+  };
+
+  // Renames and deletes are by session id, so they work for any project; the cached
+  // list has to be re-read because it is not the store's current-project list.
+  const refreshPeek = (): void => {
+    if (isCurrent) return;
+    railPeek.invalidatePeekSessions(projectId);
+    void railPeek.loadPeekSessions(projectId, true);
+  };
+
+  return (
+    <aside
+      class="rail rail-peek"
+      aria-label={`Sessions in ${project?.name ?? 'this project'}`}
+      data-project-id={projectId}
+      onMouseEnter={railPeek.holdPeek}
+      onMouseLeave={() => railPeek.schedulePeekClose()}
+    >
+      <div class="rail-inner">
+        <div class="side-head">
+          <div class="project-heading">
+            <span class="project-title-glyph" aria-hidden="true">
+              {initial}
+            </span>
+            <h2 class="project-title" title={project?.path ?? 'Unknown project'}>
+              <span class="project-title-text">{project?.name ?? 'Unknown project'}</span>
+              <span class="path-hint">
+                {isCurrent ? project?.path ?? '' : `${sessions.length} ${sessions.length === 1 ? 'session' : 'sessions'}`}
+              </span>
+            </h2>
+            <div class="side-head-actions">
+              <button
+                type="button"
+                class="side-mini-btn"
+                aria-label="Pin the session list open"
+                aria-keyshortcuts="Control+B Meta+B"
+                title={`Pin the session list open — ${modKey()} B`}
+                onClick={() => {
+                  railPeek.closePeek();
+                  // The rail is collapsed by definition while peeking, so this
+                  // toggle is what shows it for real.
+                  actions.toggleRail();
+                }}
+              >
+                <PanelIcon size={15} />
+              </button>
+              <button
+                type="button"
+                class="side-mini-btn"
+                aria-label="Close the session preview"
+                title="Close (Esc)"
+                onClick={railPeek.closePeek}
+              >
+                <CloseIcon size={15} />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {isCurrent ? (
+          <button
+            type="button"
+            class="new-session"
+            onClick={createSession}
+            aria-label={`New session (${modKey()} + N)`}
+          >
+            <span class="new-left">
+              <PlusIcon size={15} /> New session
+            </span>
+            <span class="shortcut">{modKey()} N</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            class="new-session"
+            aria-label={`Open ${project?.name ?? 'this project'}`}
+            onClick={() => {
+              railPeek.closePeek();
+              void actions.switchProject(projectId);
+            }}
+          >
+            <span class="new-left">
+              <FolderIcon size={15} /> Open this project
+            </span>
+          </button>
+        )}
+
+        <nav class="session-nav" aria-label={`Sessions in ${project?.name ?? 'this project'}`}>
+          {error ? (
+            <div class="rail-empty" role="status">
+              <p class="rail-empty-title">Could not read those sessions</p>
+              <p class="rail-empty-body">{error}</p>
+              <button
+                type="button"
+                class="button"
+                onClick={() => void railPeek.loadPeekSessions(projectId, true)}
+              >
+                Try again
+              </button>
+            </div>
+          ) : (
+            <SessionList
+              sessions={sessions}
+              currentId={isCurrent ? store.currentSessionId.value : null}
+              now={store.clock.value}
+              loading={loading}
+              workspace={project?.path}
+              onCreate={createSession}
+              onSelect={openSession}
+              onRename={async (id, title) => {
+                const ok = await actions.renameSessionById(id, title);
+                if (ok) refreshPeek();
+                return ok;
+              }}
+              onDelete={async (id) => {
+                const ok = await actions.deleteSessionById(id);
+                if (ok) refreshPeek();
+                return ok;
+              }}
+            />
+          )}
+        </nav>
+      </div>
+    </aside>
+  );
+}
+
 export function SessionsRail(): JSX.Element {
   const sessions = store.sessions.value;
   const currentId = store.currentSessionId.value;
@@ -834,6 +1017,12 @@ export function SessionsRail(): JSX.Element {
     ? store.activeModelLabel.value ?? 'Provider configured'
     : 'No provider';
 
+  // The collapsed rail's fly-out replaces the rail rather than sitting beside it, so
+  // the page never holds two session lists (and two "Sessions" landmarks) at once.
+  const peekId = railPeek.peekProjectId.value;
+  const peekActive = peekId !== null && !isNarrow && store.railCollapsed.value && !controlPlaneOpen.value;
+  if (peekActive && peekId !== null) return <RailPeek projectId={peekId} />;
+
   return (
     <aside
       ref={railRef}
@@ -843,7 +1032,7 @@ export function SessionsRail(): JSX.Element {
       aria-modal={isSheetOpen ? 'true' : undefined}
     >
       <div class="rail-inner">
-        {isNarrow ? <ProjectSwitcher /> : null}
+        {isNarrow ? <><ProjectSwitcher /><button type="button" class="new-session" onClick={() => { actions.closeSheets(); controlPlaneOpen.value = true; }}>Control plane</button></> : null}
         {/* The switcher above owns the project story on a phone — name, every
          * project, the add button, the project menu — so this head is a duplicate
          * there. It is not rendered at all rather than hidden in CSS, so the

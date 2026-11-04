@@ -44,6 +44,10 @@ const JOURNALING_TOOLS: &[&str] = &["write_file", "edit_file"];
 /// answer a dialog. The cap is generous: past it the list is a sample, which is
 /// all an "this cannot be undone" warning needs.
 const REVERSIBLE_SCAN_LIMIT: usize = 5_000;
+// A preview is also returned by the rewind action; fail before any mutation if
+// the complete answer cannot fit, rather than silently misrepresenting it.
+const PREVIEW_CONTENT_LIMIT: usize = 8 * 1024 * 1024;
+const TOOL_SCAN_BYTES: usize = 8 * 1024 * 1024;
 
 /// The [`JournalHandle`] a run hands to its tools.
 ///
@@ -186,10 +190,27 @@ impl Rewinder {
         message_id: i64,
     ) -> Result<(RewindPoint, RewindPreview)> {
         let point = self.store.rewind_point(session_id, message_id).await?;
-        let rows = self
+        let mut rows = self
             .store
-            .list_checkpoints(session_id, point.keep_through)
+            .list_checkpoint_metadata(session_id, point.keep_through)
             .await?;
+        let mut seen = std::collections::HashSet::new();
+        let mut remaining = PREVIEW_CONTENT_LIMIT;
+        for row in &mut rows {
+            if seen.insert(row.path.clone()) && row.existed && row.undoable() {
+                match self
+                    .store
+                    .checkpoint_content_bounded(row.id, remaining)
+                    .await?
+                {
+                    Some(content) => {
+                        remaining -= content.len();
+                        row.content = content;
+                    }
+                    None => row.capture_failed = true,
+                }
+            }
+        }
         let opaque = self.opaque_tools(session_id, point.keep_through).await?;
         let preview = summarize(session_id, &point, &rows, opaque);
         Ok((point, preview))
@@ -201,19 +222,19 @@ impl Rewinder {
     /// reversible. `write_file` and `edit_file` journal themselves; a shell
     /// command, a plugin call or an MCP call can change anything and says so.
     async fn opaque_tools(&self, session_id: &str, keep_through: i64) -> Result<Vec<String>> {
-        let stored = self
+        let names = self
             .store
-            .list_messages_after(session_id, keep_through, REVERSIBLE_SCAN_LIMIT)
+            .rewind_tool_names(
+                session_id,
+                keep_through,
+                REVERSIBLE_SCAN_LIMIT,
+                TOOL_SCAN_BYTES,
+            )
             .await?;
         let mut seen: Vec<String> = Vec::new();
-        for message in stored {
-            for call in &message.tool_calls {
-                if JOURNALING_TOOLS.contains(&call.name.as_str()) {
-                    continue;
-                }
-                if !seen.contains(&call.name) {
-                    seen.push(call.name.clone());
-                }
+        for name in names {
+            if !JOURNALING_TOOLS.contains(&name.as_str()) && !seen.contains(&name) {
+                seen.push(name);
             }
         }
         Ok(seen)
@@ -225,7 +246,9 @@ impl Rewinder {
         session_id: &str,
         keep_through: i64,
     ) -> Result<Vec<FileCheckpoint>> {
-        self.store.list_checkpoints(session_id, keep_through).await
+        self.store
+            .list_checkpoint_metadata(session_id, keep_through)
+            .await
     }
 
     /// Undo every row, newest first.
@@ -300,7 +323,18 @@ impl Rewinder {
                 return UndoOutcome::Failed;
             }
         };
-        match write_restored(&abs, row.content.as_bytes()) {
+        let content = match self.store.checkpoint_content(row.id).await {
+            Ok(Some(content)) => content,
+            Ok(None) => {
+                tracing::warn!(checkpoint = row.id, "checkpoint before-image is missing");
+                return UndoOutcome::Failed;
+            }
+            Err(e) => {
+                tracing::warn!(checkpoint = row.id, error = %e, "could not read checkpoint before-image");
+                return UndoOutcome::Failed;
+            }
+        };
+        match write_restored(&abs, content.as_bytes()) {
             Ok(()) => UndoOutcome::Restored,
             Err(e) => {
                 tracing::warn!(path = %row.path, error = %e, "could not restore a file");

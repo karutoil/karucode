@@ -12,7 +12,7 @@
 //!   own messages are deliberately not part of this response.
 
 use crate::error::{ApiError, ApiResult};
-use crate::routes::{query_str, query_usize, QueryMap};
+use crate::routes::{message_before, query_str, query_usize, QueryMap, TRANSCRIPT_PAGE_BYTES};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -115,18 +115,27 @@ pub async fn get_agent(
         .ok_or_else(|| ApiError::not_found(format!("agent {id}")))?;
     let limit = query_usize(&query, "messages")?.unwrap_or(AGENT_MESSAGE_LIMIT);
     let limit = limit.clamp(1, AGENT_MESSAGE_LIMIT_MAX);
-    let mut messages = state.store().list_agent_messages(&id, limit + 1).await?;
-    let messages_truncated = messages.len() > limit;
-    if messages_truncated {
-        // `list_agent_messages` returns the tail; drop the overflowing oldest row.
-        let excess = messages.len() - limit;
-        messages.drain(..excess);
-    }
+    let page = state
+        .store()
+        .list_message_page(
+            &agent.agent.session_id,
+            Some(&id),
+            message_before(&query)?,
+            limit,
+            TRANSCRIPT_PAGE_BYTES,
+        )
+        .await?;
+    let messages_truncated = page.has_more;
+    let messages = page.messages;
+    let messages_before = messages_truncated
+        .then(|| messages.first().map(|m| m.id))
+        .flatten();
     Ok(Json(json!({
         "agent": agent,
         "messages": messages,
         "messages_truncated": messages_truncated,
         "messages_limit": limit,
+        "messages_before": messages_before,
     })))
 }
 

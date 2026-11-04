@@ -7,7 +7,7 @@
 
 - **Slug:** `notifications`
 - **Tags:** notifications, sounds, alerts, approvals, unread, plugin notify, desktop
-- **Applies to:** `config:[notifications]`, `config:notifications.enabled`, `config:notifications.run_finished`, `config:notifications.needs_input`, `config:notifications.error`, `config:notifications.info`, `config:notifications.plugin`, `config:notifications.min_run_secs`, `config:notifications.say_body`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/events`, `event:notification`, `method:notify`, `hook:on_notify`, `ui:SettingsSheet`, `ui:SessionsRail`, `ui:ToastRegion`, `file:web/src/state/notifier.ts`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`
+- **Applies to:** `config:[notifications]`, `config:notifications.enabled`, `config:notifications.run_finished`, `config:notifications.needs_input`, `config:notifications.error`, `config:notifications.info`, `config:notifications.plugin`, `config:notifications.min_run_secs`, `config:notifications.say_body`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/events`, `event:notification`, `method:notify`, `hook:on_notify`, `ui:SettingsSheet`, `ui:SessionsRail`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:ProjectRail`, `file:web/src/state/notifier.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`
 - **Source:** `crates/kc-core/src/notify.rs:24`
 
 ---
@@ -137,6 +137,25 @@ A toast names the session and offers **Open**: the click jumps there. A session 
 were not watching also gets an unread count in the rail, and the tab title carries
 the total (`(2) Fix the login redirect — karucode`), which is the only thing visible
 from another tab. Opening the session clears its count.
+
+Every notification is also kept in the **notification centre** — a list behind the
+bell in the chat header, newest first, with the unread ones marked and **Mark all
+read** / **Clear** above them. It exists because none of the other surfaces persist:
+a toast is gone in seconds, a desktop notification can be refused, and a dot on a
+session row says *that* something happened without saying what. Each entry names the
+session and the project, and opening one switches project first when the session
+lives somewhere else.
+
+The centre, the per-session dot, the count on a project's tile in the rail and the
+title counter are all derived from that one list, so they cannot disagree and marking
+something read clears all of them. The list is kept in this browser's `localStorage`
+(bounded to 100 entries and a week), because the server does not store notifications:
+they describe live state, and the server would have to grow a table to remember them.
+
+Each payload carries the id of the project its session belongs to (`project_id`,
+omitted when the server could not read the session). That is what makes a badge on a
+project you are *not* looking at possible: the browser only ever holds the open
+project's sessions, so it cannot work out the owner itself.
 
 ## Plugins
 

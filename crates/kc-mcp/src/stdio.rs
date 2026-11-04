@@ -37,7 +37,7 @@ struct Inner {
 
 #[derive(Default)]
 struct State {
-    out: Option<mpsc::UnboundedSender<String>>,
+    out: Option<mpsc::Sender<String>>,
     kill: Option<oneshot::Sender<()>>,
     pid: Option<u32>,
     error: Option<String>,
@@ -265,7 +265,7 @@ impl Transport for StdioTransport {
         })?;
         let stderr = child.stderr.take();
 
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+        let (out_tx, mut out_rx) = mpsc::channel::<String>(OUTGOING_CAPACITY);
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
         {
             let mut st = self.inner.lock();
@@ -376,30 +376,36 @@ impl Transport for StdioTransport {
         timeout: Duration,
         cancel: Option<&CancellationToken>,
     ) -> Result<Value, McpError> {
-        let (id, rx) = self.inner.pending.register();
-        let line = request_body(id, method, params).to_string();
         let sender = self.inner.lock().out.clone();
         let Some(sender) = sender else {
-            self.inner.pending.forget(id);
             return Err(McpError::Transport(self.exit_reason()));
         };
-        if sender.send(line).is_err() {
-            self.inner.pending.forget(id);
-            return Err(McpError::Transport(self.exit_reason()));
-        }
-        let wait = async {
-            match rx.await {
-                Ok(reply) => reply.into_result(),
-                Err(_) => Err(McpError::Transport(format!(
-                    "MCP server `{}` dropped the response for `{method}`",
-                    self.inner.name
-                ))),
-            }
-        };
-        let result = bounded(wait, timeout, cancel).await;
-        // Reclaim the slot for timeouts/cancellations (a no-op when resolved).
-        self.inner.pending.forget(id);
-        result
+        bounded(
+            async {
+                // Reserve capacity before registering or serializing, so blocked senders
+                // do not add entries to the pending map or fill an unbounded queue.
+                let permit = sender
+                    .reserve()
+                    .await
+                    .map_err(|_| McpError::Transport(self.exit_reason()))?;
+                let (id, rx) = self.inner.pending.register();
+                let _guard = PendingGuard {
+                    pending: &self.inner.pending,
+                    id,
+                };
+                permit.send(request_body(id, method, params).to_string());
+                match rx.await {
+                    Ok(reply) => reply.into_result(),
+                    Err(_) => Err(McpError::Transport(format!(
+                        "MCP server `{}` dropped the response for `{method}`",
+                        self.inner.name
+                    ))),
+                }
+            },
+            timeout,
+            cancel,
+        )
+        .await
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
@@ -407,9 +413,12 @@ impl Transport for StdioTransport {
         let Some(sender) = sender else {
             return Err(McpError::Transport(self.exit_reason()));
         };
-        sender
-            .send(notification_body(method, params).to_string())
-            .map_err(|_| McpError::Transport(self.exit_reason()))
+        let permit = sender
+            .reserve()
+            .await
+            .map_err(|_| McpError::Transport(self.exit_reason()))?;
+        permit.send(notification_body(method, params).to_string());
+        Ok(())
     }
 
     async fn close(&self) {
@@ -439,6 +448,21 @@ impl Transport for StdioTransport {
         "stdio"
     }
 }
+
+// A dropped request future must also remove its waiter, not only explicit timeouts.
+struct PendingGuard<'a> {
+    pending: &'a Pending,
+    id: u64,
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.pending.forget(self.id);
+    }
+}
+
+/// Maximum queued messages waiting for the stdin writer.
+const OUTGOING_CAPACITY: usize = 32;
 
 /// Largest protocol line buffered from a server. Anything bigger means the
 /// server is not speaking the protocol; the channel is closed instead of growing.
@@ -602,6 +626,56 @@ mod tests {
         assert_eq!(t.inner.pending.len(), 0);
         let (_id, _rx) = t.inner.pending.register();
         assert_eq!(t.inner.pending.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn outgoing_backpressure_and_dropped_requests_clean_up() {
+        let t = Arc::new(StdioTransport::new("x".into(), vec![], BTreeMap::new()));
+        let (tx, mut rx) = mpsc::channel(OUTGOING_CAPACITY);
+        t.inner.lock().out = Some(tx.clone());
+        for _ in 0..OUTGOING_CAPACITY {
+            tx.try_send("full".into()).unwrap();
+        }
+        let task = {
+            let t = Arc::clone(&t);
+            tokio::spawn(async move {
+                t.request("test", Value::Null, Duration::from_secs(10), None)
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        assert_eq!(t.inner.pending.len(), 0);
+        assert!(matches!(
+            tx.try_send("overflow".into()),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        rx.recv().await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(t.inner.pending.len(), 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(t.inner.pending.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn timeout_and_cancellation_cover_queue_wait() {
+        let t = StdioTransport::new("x".into(), vec![], BTreeMap::new());
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send("full".into()).unwrap();
+        t.inner.lock().out = Some(tx);
+        assert!(t
+            .request("test", Value::Null, Duration::from_millis(10), None)
+            .await
+            .is_err());
+        assert_eq!(t.inner.pending.len(), 0);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert!(t
+            .request("test", Value::Null, Duration::from_secs(10), Some(&cancel))
+            .await
+            .is_err());
+        assert_eq!(t.inner.pending.len(), 0);
     }
 
     #[tokio::test]

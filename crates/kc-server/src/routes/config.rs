@@ -207,6 +207,7 @@ async fn chat_probe(
 ) -> Result<(), String> {
     let cancel = CancellationToken::new();
     let request = ChatRequest {
+        admission: None,
         model: model.model.clone(),
         messages: vec![Message::user("Reply with the single word: ok")],
         tools: Vec::new(),

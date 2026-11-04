@@ -5,6 +5,7 @@ import { secondSummaryFixture, summaryFixture, NOW } from '../test/fixtures';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import * as sessionFacts from '../state/sessionFacts';
+import * as railPeek from '../state/railPeek';
 
 function renderList(overrides: Partial<SessionListProps> = {}) {
   const props: SessionListProps = {
@@ -376,5 +377,138 @@ describe('SessionsRail project switcher (phones)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close sessions panel' }));
     expect(close).toHaveBeenCalledTimes(1);
     close.mockRestore();
+  });
+});
+
+describe('the collapsed rail’s fly-out (RailPeek)', () => {
+  function seedPeek(overrides: { collapsed?: boolean } = {}): void {
+    store.sessions.value = [summaryFixture];
+    store.sessionsLoading.value = false;
+    store.currentSessionId.value = summaryFixture.id;
+    store.currentProjectId.value = 'p_karucode';
+    store.projects.value = [
+      {
+        id: 'p_karucode',
+        name: 'KaruCode',
+        path: '/home/me/karucode',
+        created_at: NOW,
+        updated_at: NOW,
+        session_count: 1,
+      },
+      {
+        id: 'p_docs',
+        name: 'Docs Site',
+        path: '/home/me/docs',
+        created_at: NOW,
+        updated_at: NOW,
+        session_count: 1,
+      },
+    ];
+    store.clock.value = NOW;
+    store.narrowViewport.value = false;
+    store.mobileSheet.value = null;
+    store.railCollapsed.value = overrides.collapsed ?? true;
+    store.settingsOpen.value = false;
+    store.paletteOpen.value = false;
+    store.themeStudioOpen.value = false;
+    store.notificationCenterOpen.value = false;
+    store.fileViewerPath.value = null;
+    store.rewindTarget.value = null;
+    railPeek.resetRailPeek();
+  }
+
+  beforeEach(() => {
+    seedPeek();
+    vi.spyOn(sessionFacts, 'loadFactsFor').mockResolvedValue(undefined);
+  });
+
+  it('replaces the rail with the hovered project’s sessions, not both', () => {
+    railPeek.peekProjectId.value = 'p_docs';
+    railPeek.peekSessions.value = { p_docs: [secondSummaryFixture] };
+    const { container } = render(<SessionsRail />);
+
+    const peek = container.querySelector('.rail-peek');
+    expect(peek).not.toBeNull();
+    expect(peek?.getAttribute('aria-label')).toBe('Sessions in Docs Site');
+    expect(within(peek as HTMLElement).getByText('Add workspace tree')).not.toBeNull();
+    // One list, one landmark: the full rail is not rendered behind the fly-out.
+    expect(container.querySelectorAll('.rail')).toHaveLength(1);
+    expect(within(peek as HTMLElement).queryByLabelText('Find a session')).toBeNull();
+  });
+
+  it('opens a session in another project by switching to it first', () => {
+    const open = vi.spyOn(actions, 'openSessionInProject').mockResolvedValue(true);
+    railPeek.peekProjectId.value = 'p_docs';
+    railPeek.peekSessions.value = { p_docs: [secondSummaryFixture] };
+    render(<SessionsRail />);
+
+    fireEvent.click(screen.getByText('Add workspace tree'));
+    expect(open).toHaveBeenCalledWith('p_docs', secondSummaryFixture.id);
+    // The list has done its job; the chat is the destination.
+    expect(railPeek.peekProjectId.value).toBeNull();
+    open.mockRestore();
+  });
+
+  it('opens a session in the project already on screen without a project switch', () => {
+    const select = vi.spyOn(actions, 'switchSession').mockImplementation(() => undefined);
+    railPeek.peekProjectId.value = 'p_karucode';
+    render(<SessionsRail />);
+
+    fireEvent.click(screen.getByText('Fix login bug'));
+    expect(select).toHaveBeenCalledWith(summaryFixture.id);
+    expect(railPeek.peekProjectId.value).toBeNull();
+    select.mockRestore();
+  });
+
+  it('offers to open the project when the peeked one is somewhere else', () => {
+    const project = vi.spyOn(actions, 'switchProject').mockResolvedValue(undefined);
+    railPeek.peekProjectId.value = 'p_docs';
+    railPeek.peekSessions.value = { p_docs: [secondSummaryFixture] };
+    render(<SessionsRail />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Docs Site' }));
+    expect(project).toHaveBeenCalledWith('p_docs');
+    expect(railPeek.peekProjectId.value).toBeNull();
+    project.mockRestore();
+  });
+
+  it('creates a session from the peek when it is already the open project', () => {
+    const create = vi.spyOn(actions, 'createSession').mockResolvedValue(null);
+    railPeek.peekProjectId.value = 'p_karucode';
+    render(<SessionsRail />);
+
+    fireEvent.click(screen.getByRole('button', { name: /New session/ }));
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(railPeek.peekProjectId.value).toBeNull();
+    create.mockRestore();
+  });
+
+  it('closes on Escape, which must not also stop the run', () => {
+    railPeek.peekProjectId.value = 'p_karucode';
+    render(<SessionsRail />);
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(railPeek.peekProjectId.value).toBeNull();
+  });
+
+  it('says why a project’s sessions could not be read, and offers a retry', () => {
+    const load = vi.spyOn(railPeek, 'loadPeekSessions').mockResolvedValue(undefined);
+    railPeek.peekProjectId.value = 'p_docs';
+    railPeek.peekError.value = { p_docs: 'the server said no' };
+    render(<SessionsRail />);
+
+    expect(screen.getByText('Could not read those sessions')).not.toBeNull();
+    expect(screen.getByText('the server said no')).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(load).toHaveBeenCalledWith('p_docs', true);
+    load.mockRestore();
+  });
+
+  it('is not rendered while the rail is open, however the peek was left', () => {
+    railPeek.peekProjectId.value = 'p_docs';
+    store.railCollapsed.value = false;
+    const { container } = render(<SessionsRail />);
+    expect(container.querySelector('.rail-peek')).toBeNull();
+    expect(screen.getByLabelText('Find a session')).not.toBeNull();
   });
 });

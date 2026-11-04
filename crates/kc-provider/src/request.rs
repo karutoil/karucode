@@ -379,6 +379,7 @@ mod tests {
 
     fn request() -> ChatRequest {
         ChatRequest {
+            admission: None,
             model: "gpt-test".into(),
             messages: vec![],
             tools: vec![],

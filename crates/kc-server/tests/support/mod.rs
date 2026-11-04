@@ -54,6 +54,8 @@ pub enum Script {
     Fail(String),
     /// Stream one chunk and then never finish (keeps a run active).
     Hang,
+    /// Hold a response until the test explicitly releases it.
+    GatedText(Arc<tokio::sync::Notify>, String),
 }
 
 pub fn text(value: &str) -> Script {
@@ -77,6 +79,9 @@ pub enum ModelsMode {
 struct FactoryInner {
     scripts: Mutex<VecDeque<Script>>,
     models: Mutex<ModelsMode>,
+    /// Every provider request's message contents, in call order. Tests use this
+    /// to prove what the model actually saw (tool results included).
+    prompts: Mutex<Vec<Vec<String>>>,
 }
 
 pub struct ScriptedFactory {
@@ -89,8 +94,14 @@ impl ScriptedFactory {
             inner: Arc::new(FactoryInner {
                 scripts: Mutex::new(scripts.into()),
                 models: Mutex::new(models),
+                prompts: Mutex::new(Vec::new()),
             }),
         }
+    }
+
+    /// Every message content the scripted model has been sent, one entry per call.
+    pub fn prompts(&self) -> Vec<Vec<String>> {
+        self.inner.prompts.lock().unwrap().clone()
     }
 
     pub fn push(&self, script: Script) {
@@ -132,9 +143,19 @@ impl Provider for ScriptedProvider {
 
     async fn stream_chat(
         &self,
-        _request: ChatRequest,
+        request: ChatRequest,
         _cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ProviderStream> {
+        if let Some(admission) = &request.admission {
+            admission.admit().await?;
+        }
+        self.inner.prompts.lock().unwrap().push(
+            request
+                .messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect(),
+        );
         let script = self
             .inner
             .scripts
@@ -175,6 +196,15 @@ impl Provider for ScriptedProvider {
                     }),
                 ];
                 Ok(Box::pin(futures_util::stream::iter(items)))
+            }
+            Script::GatedText(gate, text) => {
+                gate.notified().await;
+                Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(ProviderChunk::Text(text)),
+                    Ok(ProviderChunk::Finish {
+                        reason: "stop".into(),
+                    }),
+                ])))
             }
             Script::Fail(message) => Err(Error::Provider(message)),
             Script::Hang => Ok(Box::pin(

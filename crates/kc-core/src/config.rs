@@ -736,6 +736,13 @@ pub struct SubagentConfig {
     /// fan-out or a `background` agent runs beside the caller, so this is the
     /// ceiling on real parallelism - and on how many provider streams one model
     /// can open at once.
+    ///
+    /// **`0` means no ceiling**: every spawn gets a slot immediately, and
+    /// `spawn_agents` answers its whole fan-out. That is the setting to pick when
+    /// you want the harness out of the model's way and are willing to pay for the
+    /// concurrency - each live loop is a provider stream and a transcript. A
+    /// finite value is the safer default because a model that fans out 200 ways on
+    /// a whim bills for 200 loops.
     #[serde(default = "d_sub_concurrency")]
     pub max_concurrent: usize,
     /// Model round-trips allowed in one *segment* of a subagent.
@@ -756,6 +763,17 @@ pub struct SubagentConfig {
     pub max_continues: u32,
     #[serde(default)]
     pub allow_recursive: bool,
+    /// How many generations of subagents may nest below the top-level run.
+    ///
+    /// `0` forbids delegation outright, which is why `allow_recursive` and this
+    /// field are two switches and not one: recursion can be enabled and still
+    /// produce nothing, because the depth budget is what decides. A child at
+    /// `max_depth` keeps working but gets no delegate tools.
+    ///
+    /// The field is a `u8`, so `255` is the largest value it can hold - deep
+    /// enough that it is "no practical limit" rather than a number anyone should
+    /// aim at. Each level is a nested loop holding its own transcript, and a
+    /// blocking chain of them nests on the stack, so a sensible budget is 2-4.
     #[serde(default = "d_sub_depth")]
     pub max_depth: u8,
     /// Wall-clock limit for one subagent task, across every segment.
@@ -776,6 +794,10 @@ pub struct SubagentConfig {
     /// this is a memory and cost bound rather than a taste one: past it, a spawn
     /// is refused instead of queued. `max_concurrent` still applies on top, so
     /// the useful setting is at least as large as the fan-out you actually want.
+    ///
+    /// **`0` means no ceiling**, matching [`SubagentConfig::max_concurrent`]. The
+    /// switch that turns background work off entirely is
+    /// [`SubagentConfig::allow_background`], so `0` here never means "off".
     #[serde(default = "d_sub_max_background")]
     pub max_background: usize,
     /// How long `wait_for_agents` blocks by default, in seconds.
@@ -1871,15 +1893,10 @@ impl Config {
                 host = cfg.host
             )));
         }
-        if cfg.subagents.max_concurrent == 0 {
-            cfg.subagents.max_concurrent = 1;
-        }
-        // `max_background = 0` would make `background = true` a guaranteed
-        // refusal rather than a limit, so it means "one at a time" - the switch
-        // that turns background work off entirely is `allow_background`.
-        if cfg.subagents.max_background == 0 {
-            cfg.subagents.max_background = 1;
-        }
+        // `max_concurrent = 0` and `max_background = 0` mean *no ceiling* and are
+        // kept as written: the limiter and the background check read 0 as
+        // "unlimited", so clamping it here would silently turn the widest setting
+        // an operator can ask for into the narrowest one.
         if cfg.subagents.wait_timeout_secs == 0 {
             cfg.subagents.wait_timeout_secs = 1;
         }

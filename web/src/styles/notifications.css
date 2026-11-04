@@ -1,0 +1,266 @@
+/* Notification centre — the list behind the bell in the chat header.
+ *
+ * A dialog rather than a drawer: it is read top-to-bottom and then dismissed, and
+ * the app already has one modal shell with a focus trap, Escape and a scroll lock
+ * (`components/Dialog.tsx`). Every row is a full-width button so the whole line is
+ * one target, with the kind chip, the body and where it came from stacked inside it
+ * — the shape a notification has on a lock screen, which is the model this is
+ * imitating.
+ */
+
+.notification-center {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(78dvh, 720px);
+}
+
+.notification-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.notification-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.notification-count svg {
+  color: var(--accent);
+}
+
+.notification-toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.notification-toolbar-actions .button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+
+/* The list owns the scroll, not the dialog: the toolbar and the header stay put
+   while a long history scrolls under them. */
+.notification-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  gap: 2px;
+  min-height: 0;
+  margin: 0;
+  padding: 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+
+.notification-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  border-radius: var(--radius);
+}
+
+.notification-row:hover {
+  background: var(--surface);
+}
+
+.notification-open {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.notification-open:hover {
+  border-color: var(--line);
+}
+
+.notification-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* A hairline on the left in the kind's tone: the row's reason, without a coloured
+   block competing with the title. */
+.notification-row {
+  border-left: 2px solid transparent;
+}
+
+.notification-row[data-tone='ok'] {
+  border-left-color: color-mix(in srgb, var(--success) 55%, transparent);
+}
+
+.notification-row[data-tone='warn'] {
+  border-left-color: color-mix(in srgb, var(--warn) 55%, transparent);
+}
+
+.notification-row[data-tone='danger'] {
+  border-left-color: color-mix(in srgb, var(--danger) 60%, transparent);
+}
+
+.notification-row[data-tone='muted'] {
+  border-left-color: color-mix(in srgb, var(--line-strong) 90%, transparent);
+}
+
+.notification-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.notification-kind {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.notification-row[data-tone='warn'] .notification-kind {
+  color: var(--warn);
+}
+
+.notification-row[data-tone='danger'] .notification-kind {
+  color: var(--danger);
+}
+
+.notification-title {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notification-time {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.notification-body {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.notification-where {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notification-sep {
+  color: var(--faint);
+}
+
+/* Read rows stay in the list — it is a history — but recede: no full-strength
+   title, no left rule. */
+.notification-row.is-read {
+  border-left-color: transparent;
+}
+
+.notification-row.is-read .notification-title {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.notification-row.is-read .notification-body {
+  color: var(--muted);
+}
+
+.notification-mark {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 26px;
+  height: 26px;
+  margin-right: 6px;
+  opacity: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--muted);
+}
+
+.notification-row:hover .notification-mark,
+.notification-row:focus-within .notification-mark {
+  opacity: 1;
+}
+
+.notification-mark:hover {
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+
+.notification-read-flag {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  align-self: center;
+  width: 26px;
+  height: 26px;
+  margin-right: 6px;
+  color: var(--faint);
+}
+
+.notification-empty {
+  padding: 26px 22px 30px;
+}
+
+@media (max-width: 640px) {
+  .notification-center {
+    width: 100%;
+    max-height: calc(100dvh - 24px);
+  }
+
+  /* The toolbar buttons keep their labels but lose the icon gutter: on a phone
+     every pixel of the row is a character of the count. */
+  .notification-toolbar {
+    padding: 8px 14px;
+  }
+
+  .notification-toolbar-actions .button svg {
+    display: none;
+  }
+}

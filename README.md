@@ -203,7 +203,8 @@ The keys that matter most:
 | `KARUCODE_COMMAND_TIMEOUT_SECS` | `120` | default shell timeout |
 | `KARUCODE_MAX_TOOL_OUTPUT_BYTES` | `24000` | tool result bytes kept for the model |
 | `KARUCODE_CONTEXT_MAX_CHARS` | `0` | `0` = derive from the model's window |
-| `KARUCODE_SUBAGENT_CONCURRENCY` | `3` | concurrent subagents |
+| `KARUCODE_SUBAGENT_CONCURRENCY` | `3` | concurrent subagents (`0` = no ceiling) |
+| `KARUCODE_SUBAGENT_MAX_BACKGROUND` | `8` | live detached agents per session (`0` = no ceiling) |
 | `KARUCODE_ALLOW_RECURSIVE_SUBAGENTS` | `false` | nested delegation |
 | `KARUCODE_LOG` | `info` | tracing filter, e.g. `info,karucode=debug` |
 | `KARUCODE_ALLOWED_HOSTS` | empty | extra `Host` names for the loopback guard |
@@ -511,8 +512,9 @@ Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). HTTP contract:
 
 * **No shell sandbox.** Commands run as the server user. Use a container or VM
   for untrusted code or unattended `auto` mode.
-* **No per-subagent worktree.** Subagents share the workspace; path ownership is
-  advisory conflict reporting.
+* **Git worktrees isolate subagent work** when the workspace is a git repository.
+  For non-git workspaces, subagents reuse the shared workspace and `owned_paths`
+  provides advisory conflict reporting.
 * **Sequential tool execution** within a turn (deterministic approvals and
   events): parallel calls from the model are executed in order.
 * **MCP** supports stdio and streamable HTTP; the legacy SSE-only transport is

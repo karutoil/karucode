@@ -87,16 +87,24 @@ defence: supply both halves, or neither.
 
 A session with thousands of tool calls has far more messages than one screen.
 `GET /api/sessions/:id` returns the **newest** `messages` rows (default 5000,
-`?messages=N` up to 50000) and two fields that make the cut explicit instead
+`?messages=N` up to 50000) and three fields that make the cut explicit instead
 of silent:
 
 ```json
-{ "messages": [ ... ], "messages_limit": 5000, "messages_truncated": true }
+{ "messages": [ ... ], "messages_limit": 5000, "messages_truncated": true,
+  "messages_before": 4211 }
 ```
 
-`messages_truncated: true` means older messages exist in the database and a
-larger `?messages=` (or a client-side "load older") will fetch them; nothing
-is deleted. A non-numeric `messages` is `400 bad_request`.
+The page is bounded by **stored payload bytes** (about 1 MiB), not by the row
+count alone, so a handful of large tool results fills it before `?messages=`
+does; one oversized message is returned alone so paging always progresses.
+That keeps both the response and the server's transient copies proportional to
+one page rather than to the whole transcript.
+
+`messages_truncated: true` means older visible rows remain; `messages_before`
+is the exclusive row-ID cursor, and `?before=<id>` asks for the page older than
+it. `GET /api/agents/:id` behaves the same way for one agent's transcript.
+Nothing is deleted. A non-numeric `messages` or `before` is `400 bad_request`.
 
 An assistant row may also carry `reasoning_content` when the endpoint streams
 analysis separately from the answer. That text is stored with the turn and

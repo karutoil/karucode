@@ -233,3 +233,228 @@ describe('resolveApproval', () => {
     expect(item?.kind === 'approval' ? item.approval.status : null).toBe('expired');
   });
 });
+describe('the notification centre’s actions', () => {
+  const entry = {
+    id: 'run:r_9',
+    sessionId: 's_other',
+    projectId: 'p_docs',
+  };
+
+  /** A notification about another project's session, as the server reported it. */
+  function recordNotification(): void {
+    store.recordNotification(
+      {
+        id: entry.id,
+        kind: 'run_finished',
+        title: 'Run finished',
+        body: 'Docs rebuilt.',
+        session_id: entry.sessionId,
+        session_title: 'Rebuild the docs',
+        project_id: 'p_docs',
+        source: 'runtime',
+        sticky: false,
+      },
+      false,
+    );
+  }
+
+  it('opens the overlay, and only the overlay', () => {
+    store.settingsOpen.value = true;
+    actions.openNotificationCenter();
+    expect(store.notificationCenterOpen.value).toBe(true);
+    expect(store.settingsOpen.value).toBe(false);
+
+    actions.toggleNotificationCenter();
+    expect(store.notificationCenterOpen.value).toBe(false);
+    actions.toggleNotificationCenter();
+    expect(store.notificationCenterOpen.value).toBe(true);
+    actions.closeNotificationCenter();
+    expect(store.notificationCenterOpen.value).toBe(false);
+  });
+
+  it('switches project before opening a session that lives in another one', async () => {
+    // The rail only ever holds one project's sessions, so opening a session from
+    // the centre without moving the project would leave the rail describing one
+    // project while the chat showed another.
+    store.currentProjectId.value = 'p_karucode';
+    store.currentSessionId.value = 's_here';
+    recordNotification();
+    store.notificationCenterOpen.value = true;
+
+    const requested: string[] = [];
+    stubFetch((url) => {
+      requested.push(url);
+      if (url === '/api/sessions/s_other') {
+        return jsonResponse({
+          ...detailFixture,
+          session: { ...detailFixture.session, id: 's_other', project_id: 'p_docs' },
+        });
+      }
+      if (url.startsWith('/api/sessions?')) {
+        return jsonResponse({ sessions: [] });
+      }
+      if (url.startsWith('/api/agents')) {
+        return jsonResponse({ agents: [] });
+      }
+      return jsonResponse({});
+    });
+
+    await actions.openNotification(entry);
+
+    // Marking read is part of opening: the badge clears without a second gesture.
+    expect(store.unreadTotal.value).toBe(0);
+    expect(store.notificationCenterOpen.value).toBe(false);
+    expect(store.currentProjectId.value).toBe('p_docs');
+    expect(store.currentSessionId.value).toBe('s_other');
+    // The project's sessions were read *before* the session itself, which is the
+    // order the rail depends on.
+    expect(requested).toContain('/api/sessions?project=p_docs');
+    expect(requested).toContain('/api/sessions/s_other');
+    expect(requested.indexOf('/api/sessions?project=p_docs')).toBeLessThan(
+      requested.indexOf('/api/sessions/s_other'),
+    );
+  });
+
+  it('does not switch project for a session already in the open one', async () => {
+    store.currentProjectId.value = 'p_docs';
+    store.currentSessionId.value = 's_elsewhere';
+    recordNotification();
+
+    const requested: string[] = [];
+    stubFetch((url) => {
+      requested.push(url);
+      if (url === '/api/sessions/s_other') {
+        return jsonResponse({
+          ...detailFixture,
+          session: { ...detailFixture.session, id: 's_other', project_id: 'p_docs' },
+        });
+      }
+      if (url.startsWith('/api/agents')) return jsonResponse({ agents: [] });
+      return jsonResponse({});
+    });
+
+    await actions.openNotification(entry);
+
+    expect(store.currentProjectId.value).toBe('p_docs');
+    expect(store.currentSessionId.value).toBe('s_other');
+    expect(requested).not.toContain('/api/sessions?project=p_docs');
+  });
+
+  it('marks a notice about no session read without navigating anywhere', async () => {
+    store.recordNotification(
+      {
+        id: 'plugin:kc-todo:x',
+        kind: 'info',
+        title: 'Todo list updated',
+        body: '',
+        session_id: '',
+        session_title: '',
+        source: 'kc-todo',
+        sticky: false,
+      },
+      false,
+    );
+    const fetchMock = stubFetch(() => jsonResponse({}));
+
+    await actions.openNotification({ id: 'plugin:kc-todo:x', sessionId: '', projectId: null });
+
+    expect(store.unreadTotal.value).toBe(0);
+    expect(store.notificationCenterOpen.value).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('transcript pagination', () => {
+  it('loads older session pages by exclusive cursor and retains the current tail', async () => {
+    const tail = detailFixture.messages[0]!;
+    const older = { ...tail, id: tail.id - 1, content: 'older page', created_at: tail.created_at - 1 };
+    const fetchMock = stubFetch((url) => jsonResponse({ ...detailFixture, messages: url.includes('before=') ? [older] : [tail], messages_truncated: !url.includes('before='), messages_before: url.includes('before=') ? null : tail.id }));
+    await actions.openSession(detailFixture.session.id, { force: true });
+    expect(store.sessionHistory.value?.before).toBe(tail.id);
+    await actions.loadOlderSession();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes(`before=${tail.id}`))).toBe(true);
+    expect(store.sessionHistory.value?.messages.map((m) => m.id)).toEqual([older.id, tail.id]);
+    expect(store.chat.value.items.some((item) => item.kind === 'message' && item.content === 'older page')).toBe(true);
+    expect(store.chat.value.items.some((item) => item.id === 'notice:history-truncated')).toBe(false);
+  });
+
+  it('loads agent pages and reports failures without dropping the cursor', async () => {
+    const agent = (await import('../test/fixtures')).wireAgentSummary('a_page');
+    const message = { ...detailFixture.messages[0]!, agent_id: agent.id };
+    let fail = true;
+    stubFetch((url) => {
+      if (url.includes('before=') && fail) return errorResponse('error', 'page failed', 500);
+      return jsonResponse({ agent, messages: [url.includes('before=') ? { ...message, id: message.id - 1 } : message], messages_truncated: !url.includes('before='), messages_before: url.includes('before=') ? null : message.id, messages_limit: 2000 });
+    });
+    await actions.openAgentDetail(agent.id);
+    await actions.loadOlderAgent();
+    expect(store.agentHistory.value?.error).toBeTruthy();
+    expect(store.agentHistory.value?.before).toBe(message.id);
+    fail = false;
+    await actions.loadOlderAgent();
+    expect(store.agentHistory.value?.messages.map((m) => m.id)).toEqual([message.id - 1, message.id]);
+    expect(store.agentHistory.value?.truncated).toBe(false);
+  });
+  it('replaces cached history and cursor on refresh after a gap or rewind', async () => {
+    const base = detailFixture.messages[0]!;
+    let messages = [10, 11].map((id) => ({ ...base, id }));
+    let before: number | null = 10;
+    stubFetch((url) => jsonResponse({ ...detailFixture, messages: url.includes('before=') ? [{ ...base, id: 9 }] : messages, messages_truncated: before !== null, messages_before: url.includes('before=') ? null : before }));
+    await actions.openSession(detailFixture.session.id, { force: true });
+    await actions.loadOlderSession();
+    messages = [20, 21].map((id) => ({ ...base, id })); before = 20;
+    await actions.openSession(detailFixture.session.id, { silent: true });
+    expect(store.sessionHistory.value?.messages.map((m) => m.id)).toEqual([20, 21]);
+    expect(store.sessionHistory.value?.before).toBe(20);
+    messages = [{ ...base, id: 5 }]; before = null;
+    await actions.openSession(detailFixture.session.id, { silent: true });
+    expect(store.sessionHistory.value?.messages.map((m) => m.id)).toEqual([5]);
+    expect(store.sessionHistory.value?.before).toBeNull();
+  });
+
+  it('unblocks an older-page loader when a same-session refresh fails', async () => {
+    const base = detailFixture.messages[0]!;
+    const page = deferred<Response>();
+    let fail = false;
+    stubFetch((url) => url.includes('before=') ? page.promise : fail ? errorResponse('error', 'failed', 500) : jsonResponse({ ...detailFixture, messages: [base], messages_truncated: true, messages_before: base.id }));
+    await actions.openSession(detailFixture.session.id, { force: true });
+    const pending = actions.loadOlderSession(); fail = true;
+    await actions.openSession(detailFixture.session.id, { silent: true });
+    expect(store.sessionHistory.value?.loading).toBe(false);
+    page.resolve(jsonResponse({ ...detailFixture, messages: [], messages_truncated: false, messages_before: null }));
+    await pending;
+    expect(store.sessionHistory.value?.before).toBe(base.id);
+  });
+
+  it('keeps live tool state when a page overlaps its persisted call', async () => {
+    const base = detailFixture.messages[0]!;
+    const call = { ...base, id: 10, role: 'assistant', content: '', tool_calls: [{ id: 'c1', name: 'example', arguments: '{}' }] };
+    stubFetch((url) => jsonResponse({ ...detailFixture, messages: url.includes('before=') ? [{ ...base, id: 9 }] : [call], messages_truncated: !url.includes('before='), messages_before: url.includes('before=') ? null : 10 }));
+    await actions.openSession(detailFixture.session.id, { force: true });
+    store.chat.value = { ...store.chat.value, items: store.chat.value.items.map((item) => item.id === 'tool:c1' && item.kind === 'tool' ? { ...item, status: 'running', output: 'live output' } : item) };
+    await actions.loadOlderSession();
+    expect(store.chat.value.items.find((item) => item.id === 'tool:c1')).toMatchObject({ status: 'running', output: 'live output' });
+  });
+
+  it('ignores stale agent detail and page responses after reopening the same agent', async () => {
+    const agent = (await import('../test/fixtures')).wireAgentSummary('a_race');
+    const base = { ...detailFixture.messages[0]!, agent_id: agent.id };
+    const old = deferred<Response>(); const page = deferred<Response>(); let reads = 0;
+    stubFetch((url) => {
+      if (url.includes('before=')) return page.promise;
+      if (++reads === 1) return old.promise;
+      return jsonResponse({ agent, messages: [base], messages_truncated: true, messages_before: base.id });
+    });
+    const first = actions.openAgentDetail(agent.id);
+    await actions.openAgentDetail(agent.id);
+    const pendingPage = actions.loadOlderAgent();
+    await actions.openAgentDetail(agent.id);
+    old.resolve(errorResponse('error', 'stale failure', 500));
+    page.resolve(jsonResponse({ agent, messages: [{ ...base, id: base.id - 1 }], messages_truncated: false, messages_before: null }));
+    await Promise.all([first, pendingPage]);
+    expect(store.agentDetailError.value).toBeNull();
+    expect(store.agentHistory.value?.messages.map((m) => m.id)).toEqual([base.id]);
+    expect(store.agentHistory.value?.before).toBe(base.id);
+  });
+
+});

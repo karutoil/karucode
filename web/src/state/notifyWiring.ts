@@ -65,7 +65,9 @@ export function notifierInstance(): Notifier {
       toast: (message, tone, sessionId) => {
         store.pushToast(message, tone, 9000, sessionId);
       },
-      markUnread: (sessionId) => store.markUnread(sessionId),
+      // Every notification goes into the centre; the unread badge, the per-project
+      // count and the title counter are all derived from that one list.
+      record: (payload, read) => store.recordNotification(payload, read),
       desktopEnabled: () => store.desktopEnabled.value,
     } as ConstructorParameters<typeof Notifier>[0]);
   }

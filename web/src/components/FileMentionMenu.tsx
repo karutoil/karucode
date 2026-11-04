@@ -14,6 +14,8 @@ export interface FileMentionMenuProps {
   error?: string | null;
   onPick: (candidate: MentionCandidate) => void;
   onHover: (index: number) => void;
+  /** What the list contains: files by default, projects in the control chat. */
+  title?: string;
 }
 
 function optionId(id: string, index: number): string {
@@ -44,12 +46,13 @@ export function FileMentionMenu({
   error = null,
   onPick,
   onHover,
+  title = 'Files in this workspace',
 }: FileMentionMenuProps): JSX.Element {
   const empty = items.length === 0;
   return (
     <div class="mention-popover">
       <div class="mention-head">
-        <span class="mention-title">Files in this workspace</span>
+        <span class="mention-title">{title}</span>
         {query !== '' ? <code class="mention-query">{query}</code> : null}
       </div>
 

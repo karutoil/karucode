@@ -13,7 +13,7 @@
 //! snapshot only contains persisted messages, so it deletes output that is still
 //! streaming.
 //!
-//! The replay comes from a bounded per-session ring ([`RING_CAPACITY`] envelopes).
+//! The replay comes from a globally byte- and count-bounded ring per runtime.
 //! A recorder task per runtime fills it, so frames are kept even while no client
 //! is connected - which is exactly the window a reconnect has to cover. When the
 //! requested id is older than the ring, the gap cannot be filled from memory, so
@@ -75,8 +75,9 @@ const CLIENT_BUFFER: usize = 1024;
 /// client. Long enough to survive a render hiccup, short enough that a dead
 /// socket does not hold a task forever.
 const SLOW_CLIENT_GRACE: Duration = Duration::from_secs(5);
-/// Envelopes kept per session for `Last-Event-ID` replay.
+/// Maximum retained envelopes and encoded bytes per runtime.
 const RING_CAPACITY: usize = 1000;
+const MAX_REPLAY_BYTES: usize = 8 * 1024 * 1024;
 
 pub async fn stream(
     State(state): State<AppState>,
@@ -208,9 +209,7 @@ async fn pump(
         last_seq = resync.newest;
     }
     for envelope in replay.frames {
-        let Some(chunk) = encode(&envelope, &filter) else {
-            continue;
-        };
+        let chunk = envelope.frame.clone();
         if !send_frame(&tx, &queued, chunk, last_seq).await {
             return;
         }
@@ -412,7 +411,7 @@ fn encode_resync(resync: &Resync, session: Option<&str>) -> Bytes {
 
 /// What a reconnect can be given.
 struct Replay {
-    frames: Vec<EventEnvelope>,
+    frames: Vec<ReplayFrame>,
     resync: Option<Resync>,
 }
 
@@ -422,40 +421,78 @@ struct Resync {
     newest: u64,
 }
 
-/// The last [`RING_CAPACITY`] envelopes per session, plus the session-less ones.
+/// A single FIFO bounds the whole runtime, including session metadata. Retaining
+/// serialized frames avoids keeping arbitrarily large event payloads unaccounted.
 #[derive(Default)]
 struct SessionRings {
     inner: Mutex<RingsInner>,
 }
 
+#[derive(Clone)]
+struct ReplayFrame {
+    seq: u64,
+    session: Option<String>,
+    frame: Bytes,
+    size: usize,
+}
+
 #[derive(Default)]
 struct RingsInner {
-    sessions: HashMap<String, VecDeque<EventEnvelope>>,
-    /// Events with no `session_id` (process-wide notices). Kept separately so a
-    /// `?session=` stream never replays them.
-    unscoped: VecDeque<EventEnvelope>,
+    frames: VecDeque<ReplayFrame>,
+    bytes: usize,
+    /// Highest sequence that may have been lost, for any session. A global
+    /// watermark is deliberately conservative for filtered streams: remembering
+    /// a watermark per evicted session would itself grow without bound.
+    lost_through: u64,
+    newest: u64,
+    lagged: bool,
 }
 
 impl SessionRings {
     fn push(&self, envelope: EventEnvelope) {
+        let seq = envelope.seq;
+        let frame = encode(&envelope, &None);
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let ring = match envelope.session_id.clone() {
-            Some(session) => inner.sessions.entry(session).or_default(),
-            None => &mut inner.unscoped,
-        };
-        if ring.len() == RING_CAPACITY {
-            ring.pop_front();
+        if inner.lagged {
+            inner.lost_through = inner.lost_through.max(seq.saturating_sub(1));
+            inner.lagged = false;
         }
-        ring.push_back(envelope);
+        inner.newest = inner.newest.max(seq);
+        let Some(frame) = frame else {
+            inner.lost_through = inner.lost_through.max(seq);
+            return;
+        };
+        let session = envelope.session_id;
+        // Include the duplicated session string and fixed allocation overhead in
+        // the budget, not just the wire payload.
+        let size = frame
+            .len()
+            .saturating_add(session.as_ref().map_or(0, |s| s.capacity()))
+            .saturating_add(std::mem::size_of::<ReplayFrame>());
+        if size > MAX_REPLAY_BYTES {
+            inner.lost_through = inner.lost_through.max(seq);
+            return;
+        }
+        while inner.frames.len() >= RING_CAPACITY || inner.bytes > MAX_REPLAY_BYTES - size {
+            let old = inner.frames.pop_front().expect("nonempty replay ring");
+            inner.bytes -= old.size;
+            inner.lost_through = inner.lost_through.max(old.seq);
+        }
+        inner.bytes += size;
+        inner.frames.push_back(ReplayFrame {
+            seq,
+            session,
+            frame,
+            size,
+        });
     }
 
-    /// Frames newer than `after`, or a resync when the ring no longer reaches back
-    /// that far.
-    ///
-    /// `after == None` is a *fresh* connection, not a cursor at zero: it gets no
-    /// replay and no resync, because there is nothing to resume from. Treating it
-    /// as `Some(0)` would hand every new client a spurious `resync` as soon as the
-    /// ring had evicted its first frames.
+    fn mark_lagged(&self) {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).lagged = true;
+    }
+
+    /// Missing data triggers resync, including gaps from global eviction or a
+    /// lagging recorder. A fresh connection never requests historical data.
     fn replay(&self, filter: Option<&str>, after: Option<u64>) -> Replay {
         let Some(after) = after else {
             return Replay {
@@ -464,46 +501,27 @@ impl SessionRings {
             };
         };
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let mut candidates: Vec<&EventEnvelope> = Vec::new();
-        match filter {
-            Some(session) => {
-                if let Some(ring) = inner.sessions.get(session) {
-                    candidates.extend(ring.iter());
-                }
-            }
-            None => {
-                for ring in inner.sessions.values() {
-                    candidates.extend(ring.iter());
-                }
-                candidates.extend(inner.unscoped.iter());
-            }
-        }
-        if candidates.is_empty() {
-            return Replay {
-                frames: Vec::new(),
-                resync: None,
-            };
-        }
-        let oldest = candidates.iter().map(|e| e.seq).min().unwrap_or(0);
-        let newest = candidates.iter().map(|e| e.seq).max().unwrap_or(0);
-        // `after + 1 < oldest` means at least one frame between the cursor and the
-        // oldest retained one is gone. `after == oldest - 1` is a clean resume.
-        if after.saturating_add(1) < oldest {
+        // Until the first surviving event after a lag arrives, its upper bound
+        // is unknown, even when the cursor is ahead of the recorder.
+        if after < inner.lost_through || inner.lagged {
             return Replay {
                 frames: Vec::new(),
                 resync: Some(Resync {
                     requested: after,
-                    oldest,
-                    newest,
+                    oldest: inner
+                        .frames
+                        .front()
+                        .map_or(inner.newest.saturating_add(1), |e| e.seq),
+                    newest: inner.newest.max(after),
                 }),
             };
         }
-        let mut frames: Vec<EventEnvelope> = candidates
-            .into_iter()
-            .filter(|envelope| envelope.seq > after)
+        let frames = inner
+            .frames
+            .iter()
+            .filter(|e| e.seq > after && filter.is_none_or(|s| e.session.as_deref() == Some(s)))
             .cloned()
             .collect();
-        frames.sort_by_key(|envelope| envelope.seq);
         Replay {
             frames,
             resync: None,
@@ -569,6 +587,7 @@ fn ensure_recorder(runtime: &Arc<Runtime>) -> Arc<SessionRings> {
                 // gone; the next client that needs them gets a `resync`.
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::debug!(skipped, "event replay recorder lagged");
+                    recorder.mark_lagged();
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -701,9 +720,9 @@ mod tests {
             rings.push(notice(seq, Some("s_1")));
         }
         let inner = rings.inner.lock().unwrap();
-        assert_eq!(inner.sessions["s_1"].len(), RING_CAPACITY);
+        assert_eq!(inner.frames.len(), RING_CAPACITY);
         assert_eq!(
-            inner.sessions["s_1"].front().map(|e| e.seq),
+            inner.frames.front().map(|e| e.seq),
             Some(RING_CAPACITY as u64 + 1),
             "the oldest frames should have been evicted"
         );
@@ -755,6 +774,51 @@ mod tests {
         );
         // The same ring with an explicit cursor of 0 *is* a gap.
         assert!(rings.replay(Some("s_1"), Some(0)).resync.is_some());
+    }
+
+    #[test]
+    fn replay_budget_is_global_and_eviction_resyncs_filtered_clients() {
+        let rings = SessionRings::default();
+        for seq in 1..=12 {
+            rings.push(envelope(
+                seq,
+                Some(&format!("session-{seq}")),
+                Event::TextDelta {
+                    delta: "x".repeat(1024 * 1024),
+                },
+            ));
+        }
+        let inner = rings.inner.lock().unwrap();
+        assert!(inner.bytes <= MAX_REPLAY_BYTES);
+        assert!(inner.frames.len() < 12);
+        drop(inner);
+        assert!(rings.replay(None, Some(0)).resync.is_some());
+        assert!(rings.replay(Some("session-1"), Some(0)).resync.is_some());
+        assert!(rings.replay(Some("session-1"), None).resync.is_none());
+    }
+
+    #[test]
+    fn oversized_frame_and_recorder_lag_force_resync() {
+        let rings = SessionRings::default();
+        rings.push(envelope(
+            1,
+            Some("a"),
+            Event::TextDelta {
+                delta: "x".repeat(MAX_REPLAY_BYTES),
+            },
+        ));
+        assert!(rings.replay(Some("a"), Some(0)).resync.is_some());
+        assert!(rings.inner.lock().unwrap().frames.is_empty());
+        rings.push(notice(2, Some("b")));
+        rings.mark_lagged();
+        assert!(rings.replay(None, Some(2)).resync.is_some());
+        assert!(
+            rings.replay(None, Some(3)).resync.is_some(),
+            "lag upper bound is not known yet"
+        );
+        rings.push(notice(5, Some("b")));
+        assert!(rings.replay(None, Some(2)).resync.is_some());
+        assert!(rings.replay(None, Some(4)).resync.is_none());
     }
 
     #[test]

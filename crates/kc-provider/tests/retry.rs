@@ -32,6 +32,7 @@ fn model_config(server: &MockServer) -> ModelConfig {
 
 fn chat_request() -> ChatRequest {
     ChatRequest {
+        admission: None,
         model: "mock-model".into(),
         messages: vec![kc_core::message::Message::user("hello")],
         tools: Vec::new(),
@@ -659,4 +660,53 @@ async fn a_splash_page_still_retries_and_recovers() {
 
     assert_eq!(texts(stream).await, "ok", "the retry must recover the turn");
     assert_eq!(hit_count(&server), 3, "two splashes then the winner");
+}
+
+#[tokio::test]
+async fn mission_budget_is_enforced_at_each_physical_retry() {
+    use kc_core::store::Store;
+    let dir = std::env::temp_dir().join(format!("kc-retry-budget-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let store = Arc::new(
+        kc_store::SqliteStore::open(dir.join("store.db"))
+            .await
+            .unwrap(),
+    );
+    store.create_project("p", "P", "/p").await.unwrap();
+    store
+        .create_mission("m", "p", "M", "", Some(2))
+        .await
+        .unwrap();
+    store
+        .create_mission_session("m", "r", "s", "p", "T", "/p", "prompt")
+        .await
+        .unwrap();
+    let server = flaky_server(
+        10,
+        response("500 Internal Server Error", "text/plain", "boom"),
+    )
+    .await;
+    let mut request = chat_request();
+    request.admission = Some(kc_core::provider::AttemptAdmission {
+        store: store.clone(),
+        session_id: "s".into(),
+    });
+    let mut stream = retrying(&server, 5)
+        .stream_chat(request, CancellationToken::new())
+        .await
+        .unwrap();
+    let mut refused = false;
+    while let Some(item) = stream.next().await {
+        if let Err(error) = item {
+            refused = error.to_string().contains("budget exhausted");
+        }
+    }
+    assert!(refused);
+    assert_eq!(hit_count(&server), 2);
+    assert_eq!(
+        store.mission_attempt_budget("m").await.unwrap(),
+        Some((Some(2), 2))
+    );
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
 }

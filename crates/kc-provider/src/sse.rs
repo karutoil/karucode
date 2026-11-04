@@ -18,6 +18,12 @@ impl SseParser {
 
     /// Feed raw bytes; returns every complete event found so far.
     pub fn push(&mut self, chunk: &str) -> Vec<SseEvent> {
+        self.push_limited(chunk, usize::MAX).0
+    }
+
+    /// Parse complete blocks up to `max_bytes` raw bytes each, including the
+    /// terminator. Return already parsed events and whether a block exceeded it.
+    pub fn push_limited(&mut self, chunk: &str, max_bytes: usize) -> (Vec<SseEvent>, bool) {
         self.buffer.push_str(chunk);
         // A proxy may prefix the stream with a UTF-8 BOM. Left in place it turns
         // the first `data:` line into an unrecognised one and silently drops the
@@ -27,12 +33,20 @@ impl SseParser {
         }
         let mut out = Vec::new();
         while let Some(end) = find_event_end(&self.buffer) {
+            if end > max_bytes {
+                self.buffer.clear();
+                return (out, true);
+            }
             let block: String = self.buffer.drain(..end).collect();
             if let Some(event) = parse_block(&block) {
                 out.push(event);
             }
         }
-        out
+        let oversized = self.buffer.len() > max_bytes;
+        if oversized {
+            self.buffer.clear();
+        }
+        (out, oversized)
     }
 
     /// Bytes held back because no event terminator has been seen yet. Callers
@@ -90,6 +104,36 @@ fn parse_block(block: &str) -> Option<SseEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limited_blocks_are_checked_before_parsing() {
+        for terminator in ["\n\n", "\r\n\r\n"] {
+            let exact = format!("data: x{terminator}");
+            let limit = exact.len();
+            let mut p = SseParser::new();
+            let (events, oversized) = p.push_limited(&exact, limit);
+            assert!(!oversized);
+            assert_eq!(events[0].data, "x");
+
+            let mut p = SseParser::new();
+            let input = format!("data: a\n\ndata: xx{terminator}data: b\n\n");
+            let (events, oversized) = p.push_limited(&input, limit);
+            assert!(oversized);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].data, "a");
+
+            let mut p = SseParser::new();
+            let split = format!("data: xx{terminator}");
+            let (events, oversized) = p.push_limited(&split[..limit], limit);
+            assert!(events.is_empty());
+            assert!(!oversized);
+            assert!(p.push_limited(&split[limit..], limit).1);
+        }
+        let mut p = SseParser::new();
+        assert!(p.push_limited(": oversized comment\n\n", 8).1);
+        let mut p = SseParser::new();
+        assert!(p.push_limited("data: unfinished", 8).1);
+    }
 
     #[test]
     fn parses_split_events() {

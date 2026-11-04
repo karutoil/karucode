@@ -54,7 +54,11 @@ impl RuntimeInner {
         agent_id: Option<&str>,
         event: Event,
     ) -> EventEnvelope {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        // A sequence is a publication cursor, not just a unique ID: allocation
+        // and send must be atomic with respect to other emitters.
+        let mut sequence = self.seq.lock().unwrap_or_else(|e| e.into_inner());
+        *sequence += 1;
+        let seq = *sequence;
         let envelope = EventEnvelope {
             seq,
             ts_ms: now_ms(),
@@ -65,6 +69,7 @@ impl RuntimeInner {
         };
         self.events_emitted.fetch_add(1, Ordering::Relaxed);
         let _ = self.events.send(envelope.clone());
+        drop(sequence);
         envelope
     }
 
@@ -201,6 +206,39 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap().seq, a.seq);
         assert_eq!(rx.try_recv().unwrap().seq, b.seq);
         assert_eq!(inner.events_emitted.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn concurrent_publishers_deliver_sequences_in_order() {
+        let inner = test_inner();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(1024);
+        // The test helper's small broadcast ring cannot hold all events.
+        let inner = Arc::try_unwrap(inner).ok().expect("unique inner");
+        let inner = Arc::new(RuntimeInner {
+            events: tx,
+            ..inner
+        });
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let inner = &inner;
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        inner.emit(
+                            None,
+                            None,
+                            None,
+                            Event::Notice {
+                                level: "info".into(),
+                                message: "concurrent".into(),
+                            },
+                        );
+                    }
+                });
+            }
+        });
+        for expected in 1..=800 {
+            assert_eq!(rx.try_recv().unwrap().seq, expected);
+        }
     }
 
     #[test]

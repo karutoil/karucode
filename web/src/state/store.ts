@@ -6,6 +6,8 @@ import type {
   Config,
   ConnectionState,
   Health,
+  NotifyKind,
+  NotifyPayload,
   PluginPanelSummary,
   Project,
   ProviderProfile,
@@ -168,6 +170,8 @@ export const projectSheetOpen = signal(false);
  */
 export const projectIcons = signal<Record<string, string>>({});
 export const chat = signal<ChatState>(emptyChatState());
+export const sessionHistory = signal<{ id: string; messages: import('../api/types').StoredMessage[]; before: number | null; truncated: boolean; loading: boolean; error: string | null } | null>(null);
+export const agentHistory = signal<{ id: string; messages: import('../api/types').StoredMessage[]; before: number | null; truncated: boolean; loading: boolean; error: string | null } | null>(null);
 export const chatLoading = signal(false);
 export const chatError = signal<string | null>(null);
 
@@ -263,15 +267,217 @@ export const fileViewerPath = signal<string | null>(null);
 /** Bumped when the UI itself writes a workspace file, so the explorer refetches. */
 export const workspaceRefreshTick = signal(0);
 export const toasts = signal<Toast[]>([]);
+
 /**
- * Unread notification counts per session, cleared when that session is opened.
+ * One notification the server sent, kept so it can be read later.
  *
- * A session rail row shows a dot for a nonzero count. This is the surface that works
- * when the desktop notification does not: it needs no permission, it survives a
- * flash of the tab, and it is the only thing visible from another tab (through the
- * title counter below).
+ * The toast disappears, the desktop notification is gone once dismissed, and an
+ * unread dot on a row says *that* something happened without saying what. This is
+ * the record behind the notification centre: what arrived, for which session and
+ * project, and whether it has been read.
  */
-export const unread = signal<Record<string, number>>({});
+export interface NotificationEntry {
+  /** The server's id (`run:<id>`, `approval:<id>`, `plugin:<name>:<title>`). */
+  id: string;
+  kind: NotifyKind;
+  title: string;
+  body: string;
+  /** The session it is about; `''` for a notice that names none. */
+  sessionId: string;
+  /** The session's title at emit time, so a row reads on its own. */
+  sessionTitle: string;
+  /** The project that session belongs to, when the server said. */
+  projectId: string | null;
+  /** `runtime`, or the plugin that raised it. */
+  source: string;
+  /** Milliseconds since the epoch, in this browser's clock, when it arrived. */
+  at: number;
+  read: boolean;
+}
+
+/** How many notifications the centre keeps. */
+export const NOTIFICATION_LIMIT = 100;
+const NOTIFICATION_LOG_KEY = 'karucode.notifications';
+/**
+ * Entries older than this are dropped when the log is loaded.
+ *
+ * The list is a convenience, not an archive: a week is longer than anyone scrolls,
+ * and an unbounded file in `localStorage` is a slow leak.
+ */
+const NOTIFICATION_MAX_AGE_MS = 7 * 86_400_000;
+
+const NOTIFY_KINDS: readonly NotifyKind[] = ['run_finished', 'needs_input', 'error', 'info'];
+
+function isNotificationKind(value: unknown): value is NotifyKind {
+  return typeof value === 'string' && (NOTIFY_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * Read the persisted log, keeping only entries that still make sense.
+ *
+ * Everything here is untrusted: it comes back from `localStorage`, which another
+ * version of the app (or a person with the dev tools open) may have written. A row
+ * that cannot be read is dropped rather than rendered as `undefined`.
+ */
+export function readNotificationLog(): NotificationEntry[] {
+  try {
+    if (typeof localStorage === 'undefined') return [];
+    const raw = localStorage.getItem(NOTIFICATION_LOG_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const cutoff = Date.now() - NOTIFICATION_MAX_AGE_MS;
+    const entries: NotificationEntry[] = [];
+    for (const candidate of parsed) {
+      if (!candidate || typeof candidate !== 'object') continue;
+      const row = candidate as Record<string, unknown>;
+      if (typeof row.id !== 'string' || typeof row.title !== 'string') continue;
+      if (!isNotificationKind(row.kind)) continue;
+      const at = typeof row.at === 'number' && Number.isFinite(row.at) ? row.at : 0;
+      if (at < cutoff) continue;
+      entries.push({
+        id: row.id,
+        kind: row.kind,
+        title: row.title,
+        body: typeof row.body === 'string' ? row.body : '',
+        sessionId: typeof row.sessionId === 'string' ? row.sessionId : '',
+        sessionTitle: typeof row.sessionTitle === 'string' ? row.sessionTitle : '',
+        projectId: typeof row.projectId === 'string' && row.projectId !== '' ? row.projectId : null,
+        source: typeof row.source === 'string' ? row.source : '',
+        at,
+        read: row.read === true,
+      });
+      if (entries.length >= NOTIFICATION_LIMIT) break;
+    }
+    return entries;
+  } catch {
+    // Malformed JSON, a denied storage read: an empty list is the honest answer.
+    return [];
+  }
+}
+
+/**
+ * Every notification this browser has seen, newest first.
+ *
+ * In memory and in `localStorage`: the server does not keep them (a notification
+ * describes live state), so this is the only copy, and losing it on every reload
+ * would make the centre useless exactly when a run finished while the tab was
+ * closed.
+ */
+export const notifications = signal<NotificationEntry[]>(readNotificationLog());
+/** The notification centre (a dialog) is open. */
+export const notificationCenterOpen = signal(false);
+
+function persistNotifications(list: NotificationEntry[]): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(NOTIFICATION_LOG_KEY, JSON.stringify(list));
+  } catch {
+    // Storage disabled or full: the list still works for this tab.
+  }
+}
+
+function setNotifications(next: NotificationEntry[]): void {
+  notifications.value = next.slice(0, NOTIFICATION_LIMIT);
+  persistNotifications(notifications.value);
+}
+
+/**
+ * Record one notification, newest first, deduped by the server's id.
+ *
+ * `read` is true when the notification arrives about something already in front of
+ * the reader: the toast was seen, so it must not also raise a badge. The entry is
+ * still kept — the centre is a history, not a queue of things to dismiss.
+ */
+export function recordNotification(payload: NotifyPayload, read: boolean): void {
+  if (typeof payload.id !== 'string' || payload.id === '') return;
+  if (notifications.value.some((entry) => entry.id === payload.id)) return;
+  const entry: NotificationEntry = {
+    id: payload.id,
+    kind: isNotificationKind(payload.kind) ? payload.kind : 'info',
+    title: typeof payload.title === 'string' ? payload.title : '',
+    body: typeof payload.body === 'string' ? payload.body : '',
+    sessionId: typeof payload.session_id === 'string' ? payload.session_id : '',
+    sessionTitle: typeof payload.session_title === 'string' ? payload.session_title : '',
+    projectId: typeof payload.project_id === 'string' && payload.project_id !== '' ? payload.project_id : null,
+    source: typeof payload.source === 'string' ? payload.source : '',
+    at: Date.now(),
+    read,
+  };
+  setNotifications([entry, ...notifications.value]);
+}
+
+/** Mark one notification read. */
+export function markNotificationRead(id: string): void {
+  if (!notifications.value.some((entry) => entry.id === id && !entry.read)) return;
+  setNotifications(
+    notifications.value.map((entry) => (entry.id === id ? { ...entry, read: true } : entry)),
+  );
+}
+
+/** Mark everything read: the centre's "Mark all read" button. */
+export function markAllNotificationsRead(): void {
+  if (!notifications.value.some((entry) => !entry.read)) return;
+  setNotifications(notifications.value.map((entry) => ({ ...entry, read: true })));
+}
+
+/** Forget the history. The unread counts go with it, since they are derived. */
+export function clearNotifications(): void {
+  if (notifications.value.length === 0) return;
+  setNotifications([]);
+}
+
+/**
+ * Drop one session's notifications (the session was deleted).
+ *
+ * Distinct from marking them read: a deleted session is not going to be opened, so
+ * keeping the row would leave a permanent unread badge with nothing behind it.
+ */
+export function forgetSessionNotifications(sessionId: string): void {
+  if (sessionId === '') return;
+  if (!notifications.value.some((entry) => entry.sessionId === sessionId)) return;
+  setNotifications(notifications.value.filter((entry) => entry.sessionId !== sessionId));
+}
+
+/**
+ * Unread counts per session, derived from the log.
+ *
+ * A session rail row shows a dot for a nonzero count. This is the surface that
+ * works when the desktop notification does not: it needs no permission, it survives
+ * a flash of the tab, and it is the only thing visible from another tab (through the
+ * title counter below). Derived rather than counted separately so the badge, the
+ * project counter and the notification centre can never disagree.
+ */
+export const unread = computed<Record<string, number>>(() => {
+  const counts: Record<string, number> = {};
+  for (const entry of notifications.value) {
+    if (entry.read || entry.sessionId === '') continue;
+    counts[entry.sessionId] = (counts[entry.sessionId] ?? 0) + 1;
+  }
+  return counts;
+});
+
+/**
+ * Unread notifications per project, for the counts on the project rail's tiles.
+ *
+ * Keyed by project id and independent of which project is open: the server reports
+ * every terminal run, and a run in a project you are not looking at is exactly the
+ * case a badge is for. A notification the server could not attribute to a project
+ * (a plugin notice about no session) counts in `unreadTotal` only.
+ */
+export const unreadByProject = computed<Record<string, number>>(() => {
+  const counts: Record<string, number> = {};
+  for (const entry of notifications.value) {
+    if (entry.read || entry.projectId === null) continue;
+    counts[entry.projectId] = (counts[entry.projectId] ?? 0) + 1;
+  }
+  return counts;
+});
+
+/** Total unread across every session, for the document title and the bell. */
+export const unreadTotal = computed<number>(
+  () => notifications.value.reduce((sum, entry) => sum + (entry.read ? 0 : 1), 0),
+);
 
 /**
  * Whether the user wants sound. A browser preference, not a server setting: it
@@ -315,28 +521,37 @@ export function persistDesktopEnabled(enabled: boolean): void {
   writeString(NOTIFY_DESKTOP_KEY, String(enabled));
 }
 
-/** Count one unread notification against a session. */
-export function markUnread(sessionId: string): void {
-  if (!sessionId) return;
-  unread.value = {
-    ...unread.value,
-    [sessionId]: (unread.value[sessionId] ?? 0) + 1,
-  };
-}
-
-/** Clear a session's unread count (it was opened). */
+/**
+ * Mark one session's notifications read, because it was opened.
+ *
+ * This is what "reading" means: the badge clears when the session is in front of
+ * the reader, not after a timer. The entry stays in the centre, marked read.
+ */
 export function clearUnread(sessionId: string | null): void {
   if (!sessionId) return;
-  if (!(sessionId in unread.value)) return;
-  const next = { ...unread.value };
-  delete next[sessionId];
-  unread.value = next;
+  if (!notifications.value.some((entry) => entry.sessionId === sessionId && !entry.read)) return;
+  setNotifications(
+    notifications.value.map((entry) =>
+      entry.sessionId === sessionId && !entry.read ? { ...entry, read: true } : entry,
+    ),
+  );
 }
 
-/** Total unread across every session, for the document title. */
-export const unreadTotal = computed<number>(() =>
-  Object.values(unread.value).reduce((sum, count) => sum + count, 0),
-);
+/** Mark one project's notifications read (the tile's menu does this). */
+export function markProjectNotificationsRead(projectId: string): void {
+  if (!projectId) return;
+  if (
+    !notifications.value.some((entry) => entry.projectId === projectId && !entry.read)
+  ) {
+    return;
+  }
+  setNotifications(
+    notifications.value.map((entry) =>
+      entry.projectId === projectId && !entry.read ? { ...entry, read: true } : entry,
+    ),
+  );
+}
+
 export const resolvingApprovals = signal<Record<string, boolean>>({});
 export const stopping = signal(false);
 export const clock = signal(Date.now());
@@ -382,7 +597,7 @@ export function resetToastTimers(): void {
 export const agentsAll = signal<AgentSummary[]>([]);
 export const agentsLoading = signal(false);
 export const agentsError = signal<string | null>(null);
-export const agentScope = signal<AgentScope>('workspace');
+export const agentScope = signal<AgentScope>('session');
 export const agentFilter = signal<AgentFilter>('all');
 /**
  * Which control call is in flight per agent id.
