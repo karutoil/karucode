@@ -15,7 +15,7 @@
 // @kc-title: Change karucode's configuration
 // @kc-summary: The four config layers, which settings apply live, and how secrets and invalid values are handled.
 // @kc-tags: config, settings, configuration, toml, env
-// @kc-applies-to: file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_AUTO_CONTINUE, env:KARUCODE_MAX_CONTINUES, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_MAX_CONTINUES, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_continues, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:notifications.enabled, config:notifications.min_run_secs, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings
+// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_AUTO_CONTINUE, env:KARUCODE_MAX_CONTINUES, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_MAX_CONTINUES, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_continues, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:notifications.enabled, config:notifications.min_run_secs, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings
 //
 // # Where the settings come from
 //
@@ -264,6 +264,27 @@
 // turn, which is why the cap exists. Count one image as about 8,000 characters of
 // the context budget (`limits.context_max_chars`); the base64 length is not
 // counted, because the provider bills the picture, not the encoding.
+//
+// # Resident memory
+//
+// A karucode server holds the transcript window, the event replay buffer and each
+// plugin's JSON-RPC traffic, so its resident set follows what it has done, not
+// only what it is doing. Two allocator knobs keep that from becoming a ratchet:
+//
+// ```bash
+// KARUCODE_MALLOC_ARENA_MAX=2   # glibc arenas; default 2, 0/absent = 2
+// KARUCODE_MALLOC_TRIM_SECS=60  # return free heap to the kernel; 0 disables
+// ```
+//
+// glibc gives every thread that allocates its own arena (up to `8 * nproc`) and
+// does not hand a freed page back to the kernel. On a 16-core box with six
+// plugins and a dozen sessions that left tens of MiB of *empty* heap resident;
+// capping the arenas and trimming while idle returns it. Both are process-wide
+// and read once at startup, so changing them needs a restart. Set the trim
+// interval to `0` if you would rather trade the memory back for a few
+// microseconds every minute, or if you build against musl, where both knobs are
+// no-ops. `scripts/measure_steady_memory.py` reproduces the numbers on your own
+// machine.
 //
 // # Minimal config
 //

@@ -63,3 +63,7 @@ Thumbs.db
 *~
 *.orig
 *.rej
+
+node_modules/
+# Generated screenshots from the browser-based design verification report.
+docs/internal/design-verify/screens/

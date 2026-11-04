@@ -276,6 +276,75 @@ pub fn diff_args(staged: bool, base: Option<&str>, pathspec: Option<&str>) -> Ve
     args
 }
 
+/// Upper bound on any ref the HTTP layer or a tool hands to git. Long enough for
+/// a real branch name, short enough that a ref cannot be used as a payload.
+pub const MAX_REF_CHARS: usize = 120;
+
+/// Validate a *revision* argument (a `base=`, a start point, a commit range):
+/// the conservative `^[A-Za-z0-9._/~^-]{1,120}$` grammar the read-only diff
+/// endpoint has always used, because a ref is the one string that ends up in a
+/// flag position (`git diff <base>`, `git switch -c <new> <start>`).
+///
+/// A leading `-` is refused separately from the character class: `-c` and
+/// `--upload-pack=…` are valid characters inside the class but are options, not
+/// refs, and git parses them as such.
+///
+/// Returned as a plain `String` so both callers can wrap it in their own error
+/// type (`kc_core::Error::BadRequest`, `ApiError::bad_request`) without this
+/// module depending on either.
+pub fn validate_revision_arg(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.chars().count() > MAX_REF_CHARS {
+        return Err(format!("a git ref must be 1-{MAX_REF_CHARS} characters"));
+    }
+    if value.starts_with('-') {
+        return Err("a git ref may not start with `-`".to_string());
+    }
+    let allowed =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '~' | '^' | '-');
+    if !value.chars().all(allowed) {
+        return Err("a git ref may only contain letters, digits and . _ / ~ ^ -".to_string());
+    }
+    Ok(())
+}
+
+/// Validate a name that will be *created* as a branch (`git branch <name>`,
+/// `git switch -c <name>`).
+///
+/// Stricter than [`validate_revision_arg`], because a revision may legitimately
+/// carry `~`/`^`/`..` (`HEAD~3`, `main..feat`) while a branch name may not. The
+/// rules are the subset of `git check-ref-format --branch` that a UI can explain
+/// without a subprocess: printable ASCII without whitespace, no `~^:?*[\`, no
+/// `..`, no `@{`, no `//`, no leading/trailing `/`, no trailing `.` or `.lock`,
+/// and no `-` first (it would parse as an option and also reads as a flag).
+pub fn validate_branch_name(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.chars().count() > MAX_REF_CHARS {
+        return Err(format!(
+            "a branch name must be 1-{MAX_REF_CHARS} characters"
+        ));
+    }
+    if value.starts_with('-') {
+        return Err("a branch name may not start with `-`".to_string());
+    }
+    if value.starts_with('/') || value.ends_with('/') || value.contains("//") {
+        return Err("a branch name may not begin, end or double a `/`".to_string());
+    }
+    if value.ends_with('.') || value.ends_with(".lock") {
+        return Err("a branch name may not end with `.` or `.lock`".to_string());
+    }
+    if value.contains("..") || value.contains("@{") || value == "@" {
+        return Err("a branch name may not contain `..`, `@{` or be `@`".to_string());
+    }
+    for c in value.chars() {
+        if c.is_ascii_control()
+            || c.is_ascii_whitespace()
+            || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | ']' | '\\')
+        {
+            return Err(format!("a branch name may not contain {c:?}"));
+        }
+    }
+    Ok(())
+}
+
 /// How a read-only git command is confined to the workspace.
 ///
 /// # The policy: confine to the workspace, never report the enclosing repository
@@ -353,8 +422,11 @@ impl Scope {
 ///
 /// Deliberately *not* part of [`safe_env`], which `kc-server` shares: this is the
 /// tools' confinement policy, and keeping it here means the HTTP routes keep the
-/// argv they had.
-fn literal_pathspec_env() -> [(String, String); 1] {
+/// argv they had. The *mutating* git routes opt in explicitly (see
+/// `kc_server::routes::git`), because `git add -- a[1].txt` would otherwise stage
+/// a glob match and `git restore -- *.rs` would discard files the user never
+/// selected.
+pub fn literal_pathspec_env() -> [(String, String); 1] {
     [("GIT_LITERAL_PATHSPECS".to_string(), "1".to_string())]
 }
 
@@ -710,6 +782,54 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         out
+    }
+
+    #[test]
+    fn ref_and_branch_names_are_validated_before_they_reach_git() {
+        // Revisions allow `~`/`^`/`..` (HEAD~3, main..feat) and dots in a path.
+        for ok in [
+            "main",
+            "feat/x-1",
+            "HEAD~3",
+            "v1.2.3",
+            "origin/main",
+            "main..feat",
+        ] {
+            assert!(validate_revision_arg(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "-c", "--upload-pack=evil", "a b", "x*y", "a\nb"] {
+            assert!(validate_revision_arg(bad).is_err(), "{bad:?}");
+        }
+        assert!(validate_revision_arg(&"a".repeat(MAX_REF_CHARS + 1)).is_err());
+
+        for ok in ["main", "feat/x-1", "release_2.0", "a.b.c"] {
+            assert!(validate_branch_name(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "-dash",
+            "/lead",
+            "trail/",
+            "double//slash",
+            "ends.",
+            "x.lock",
+            "a..b",
+            "at@{1}",
+            "@",
+            "sp ace",
+            "tab\there",
+            "caret^",
+            "tilde~",
+            "colon:",
+            "question?",
+            "star*",
+            "brack[et]",
+            "back\\slash",
+            "nul\u{0}",
+        ] {
+            assert!(validate_branch_name(bad).is_err(), "{bad:?}");
+        }
+        assert!(validate_branch_name(&"a".repeat(MAX_REF_CHARS + 1)).is_err());
     }
 
     #[tokio::test]

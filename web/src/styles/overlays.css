@@ -5,6 +5,46 @@
  * `.toast-stack` blocks. Colours and radii come from tokens only.
  */
 
+/* ---------- the one scrim ---------------------------------------------- */
+/* Every overlay family shares one veil. It used to be authored twice: a literal
+ * `#000` at 67% here and `var(--scrim)` at 60% in theme-studio.css, with blur 4px
+ * against 3px. A black veil over a light canvas drags Daybreak's 95.5%-L page
+ * down to 31.5% L, so the veil derives from `--scrim` and is thinned in light
+ * mode. This is the single definition; no other stylesheet may author a scrim or
+ * its blur.
+ * (The mode-derived value belongs in tokens.css as `--scrim` — roles.ts still
+ * publishes one fixed 60% black — and this alias can then be retired.) */
+:root {
+  --overlay-scrim: var(--scrim);
+  --overlay-blur: blur(4px);
+}
+
+/* `--scrim` is 60% of a near-black anchored to `bg`, which is a dark theme's
+ * veil. Thinned to 30% of itself it was still cold and still heavy: measured on
+ * Daybreak the canvas fell 95.5% L -> 78.3% L and the warm paper turned grey, so
+ * the app behind a dialog read as blacked out rather than dimmed. The light veil
+ * is now the theme's own ink at 12% — 95.5% -> 85.2% L, still warm — which leaves
+ * the dialog (90.4% L) clearly above the page it covers and lets a paper- or
+ * mint-themed install keep its own hue in the veil. */
+:root[data-mode='light'] {
+  --overlay-scrim: color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+/* ---------- one veil per stack ------------------------------------------ */
+/* A second overlay opened over the first painted a second veil: Settings ->
+ * Theme studio -> Ctrl+K dimmed the page twice (18% over 18% = 32.8%) while the
+ * drawer *between* the two veils was dimmed once, so depth inverted at exactly
+ * the moment the user stacked layers. Every layer shares z-index 100 and is
+ * portalled into <body> in order, so the topmost one is the last sibling: it
+ * owns the veil and the layers under it drop theirs. The older drawer is still
+ * dimmed — by the newer veil, which covers the whole viewport. */
+body
+  > :is(.dialog-layer, .theme-studio-layer):has(~ :is(.dialog-layer, .theme-studio-layer))
+  :is(.dialog-backdrop, .theme-shade) {
+  background: transparent;
+  backdrop-filter: none;
+}
+
 /* ---------- modal shell ------------------------------------------------ */
 
 .dialog-layer {
@@ -13,14 +53,14 @@
   z-index: 100;
   display: grid;
   place-items: center;
-  padding: 24px;
+  padding: var(--space-9);
 }
 
 .dialog-backdrop {
   position: absolute;
   inset: 0;
-  background: color-mix(in srgb, #000 67%, transparent);
-  backdrop-filter: blur(4px);
+  background: var(--overlay-scrim);
+  backdrop-filter: var(--overlay-blur);
 }
 
 .dialog {
@@ -28,9 +68,9 @@
   display: flex;
   flex-direction: column;
   max-height: calc(100dvh - 48px);
-  border: 1px solid var(--line-overlay);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius);
-  background: var(--surface-menu);
+  background: var(--surface-raised);
   box-shadow: var(--shadow-overlay);
   overflow: hidden;
   animation: dialog-in 160ms ease-out;
@@ -51,16 +91,16 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-6);
   flex: 0 0 auto;
-  padding: 18px 16px 16px 22px;
+  padding: var(--space-8) var(--space-7) var(--space-7) var(--space-9);
   border-bottom: 1px solid var(--line);
 }
 
 .dialog-headings {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-3);
   min-width: 0;
 }
 
@@ -68,7 +108,7 @@
   overflow-wrap: anywhere;
   color: var(--text);
   font-family: var(--font-ui);
-  font-size: 18px;
+  font-size: var(--fs-title);
   font-weight: 700;
   letter-spacing: -0.4px;
   line-height: 1.25;
@@ -76,7 +116,7 @@
 
 .dialog-description {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   line-height: 1.55;
 }
 
@@ -85,7 +125,7 @@
   width: 31px;
   height: 31px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius);
   background: var(--surface-raised);
   color: var(--muted);
 }
@@ -104,9 +144,9 @@
 }
 
 .confirm-body {
-  padding: 16px 22px 20px;
+  padding: var(--space-7) var(--space-9) var(--space-8);
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: var(--fs-message);
   line-height: 1.7;
 }
 
@@ -118,8 +158,8 @@
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  margin-top: 18px;
+  gap: var(--space-4);
+  margin-top: var(--space-8);
 }
 
 /* ---------- command palette ------------------------------------------- */
@@ -135,11 +175,11 @@
 .palette-search {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-6);
   flex: 0 0 auto;
   min-height: 56px;
-  padding: 0 18px;
-  border-bottom: 1px solid var(--line-hair);
+  padding: 0 var(--space-8);
+  border-bottom: 1px solid var(--line-soft);
   color: var(--text-caption);
 }
 
@@ -150,20 +190,16 @@
   border: 0;
   background: transparent;
   color: var(--text);
-  font-size: 13px;
-}
-
-.palette-input:focus {
-  outline: none;
-  box-shadow: none;
+  font-size: var(--fs-body);
 }
 
 .palette-input:focus-visible {
-  border-radius: 4px;
-  outline: none;
+  border-radius: var(--radius-xs);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
-/* The whole search row is the focus target, as in the mock: no inner box. */
+/* The underline is an extra cue on the whole row, not the only one. */
 .palette-search:focus-within {
   border-bottom-color: var(--accent);
   box-shadow: inset 0 -1px 0 var(--accent);
@@ -178,39 +214,46 @@
   min-height: 0;
   max-height: 380px;
   margin: 0;
-  padding: 9px;
+  padding: var(--space-5);
   overflow-y: auto;
   list-style: none;
   scrollbar-gutter: stable;
 }
 
 .palette-group-label {
-  padding: 8px 11px 6px;
+  padding: var(--space-4) var(--space-6) var(--space-3);
   color: var(--text-kicker);
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.9px;
+  font-size: var(--fs-micro);
+  font-weight: var(--weight-kicker);
+  letter-spacing: var(--tracking-kicker);
   text-transform: uppercase;
 }
 
 .palette-item {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: var(--space-6);
   width: 100%;
   min-height: 40px;
-  padding: 0 11px;
-  border-radius: 6px;
+  padding: 0 var(--space-6);
+  border-radius: var(--radius-sm);
   color: var(--text-body);
-  font-size: 12px;
+  font-size: var(--fs-label);
   text-align: left;
   cursor: pointer;
 }
 
-.palette-item:hover,
+.palette-item:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* The row Enter will run. The ink is the accent's *text* half, not the accent
+ * itself: `--row-selected-text` anchors to the accent fill and measured 3.61:1
+ * in Daybreak (DESIGN-AUDIT overlays B4). */
 .palette-item.is-active {
   background: var(--row-selected-bg);
-  color: var(--row-selected-text);
+  color: var(--accent-fill);
 }
 
 .palette-item-icon {
@@ -227,12 +270,12 @@
   justify-content: center;
   flex: 0 0 auto;
   height: 18px;
-  padding: 2px 4px;
-  border: 1px solid var(--line-keycap);
-  border-radius: 4px;
-  color: var(--icon-pill-down);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1;
 }
 
@@ -248,7 +291,7 @@
   flex: 0 0 auto;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   white-space: nowrap;
 }
 
@@ -257,27 +300,27 @@
 }
 
 .palette-empty {
-  padding: 17px;
+  padding: var(--space-7);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-label);
 }
 
 .palette-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-7);
   flex: 0 0 auto;
-  padding: 9px 14px;
-  border-top: 1px solid var(--line-hair);
+  padding: var(--space-5) var(--space-7);
+  border-top: 1px solid var(--line-soft);
   color: var(--text-menu-title);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
 }
 
 .palette-footer span {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
 }
 
 .palette-footer kbd {
@@ -286,13 +329,13 @@
   justify-content: center;
   min-width: 16px;
   height: 16px;
-  padding: 0 4px;
-  border: 1px solid var(--line-keycap);
-  border-radius: 4px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
   background: var(--chip-surface);
-  color: var(--faint);
+  color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
   line-height: 1;
 }
 
@@ -309,8 +352,8 @@
   border: 0;
   border-left: 1px solid var(--line-strong);
   border-radius: 0;
-  background: var(--sidebar);
-  box-shadow: -22px 0 90px var(--shadow-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-overlay);
   animation: slide-in-right 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
@@ -326,20 +369,20 @@
 }
 
 .dialog-sheet .dialog-header {
-  padding: 23px 16px 20px 23px;
+  padding: var(--space-9) var(--space-7) var(--space-8) var(--space-9);
   border-bottom: 1px solid var(--line);
 }
 
 .dialog-sheet .dialog-title {
   font-family: var(--font-ui);
-  font-size: 18px;
+  font-size: var(--fs-title);
   font-weight: 700;
   letter-spacing: 0;
 }
 
 .dialog-sheet .dialog-description {
-  margin-top: 2px;
-  font-size: 11px;
+  margin-top: var(--space-1);
+  font-size: var(--fs-tiny);
   line-height: 1.55;
 }
 
@@ -351,13 +394,13 @@
 }
 
 .dialog-file .dialog-header {
-  padding: 11px 12px;
+  padding: var(--space-6) var(--space-6);
 }
 
 .dialog-file .dialog-title {
   color: var(--text-user);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   font-weight: 500;
   letter-spacing: 0;
 }
@@ -373,17 +416,17 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-5);
   flex: 0 0 auto;
-  padding: 9px 14px;
-  border-bottom: 1px solid var(--line-card);
+  padding: var(--space-5) var(--space-7);
+  border-bottom: 1px solid var(--line);
   background: var(--surface-menu);
 }
 
 .file-meta {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: var(--space-4);
   flex-wrap: wrap;
   min-width: 0;
 }
@@ -391,21 +434,21 @@
 .file-size {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
 }
 
 .file-toolbar-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
   flex: 0 0 auto;
 }
 
 .file-loading {
   display: flex;
   flex-direction: column;
-  gap: 9px;
-  padding: 16px;
+  gap: var(--space-5);
+  padding: var(--space-7);
 }
 
 .skeleton-code {
@@ -413,13 +456,13 @@
 }
 
 .file-notice {
-  margin: 10px 14px;
-  padding: 9px 11px;
+  margin: var(--space-5) var(--space-7);
+  padding: var(--space-5) var(--space-6);
   border: 1px solid var(--accent-line);
   border-radius: var(--radius-sm);
   background: var(--accent-bg);
   color: var(--accent-hi);
-  font-size: 11.5px;
+  font-size: var(--fs-small);
 }
 
 .file-code-scroll {
@@ -429,7 +472,7 @@
   min-height: 0;
   overflow: auto;
   background: var(--surface-preview);
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 20px;
 }
 
@@ -439,12 +482,12 @@
   z-index: 1;
   flex: 0 0 auto;
   min-width: 48px;
-  padding: 12px 8px;
-  border-right: 1px solid var(--line-preview);
+  padding: var(--space-6) var(--space-4);
+  border-right: 1px solid var(--line);
   background: var(--surface-preview);
   color: var(--faint);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 20px;
   text-align: right;
   user-select: none;
@@ -459,10 +502,10 @@
   flex: 1 1 auto;
   min-width: max-content;
   margin: 0;
-  padding: 12px;
+  padding: var(--space-6);
   background: transparent;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 20px;
   tab-size: 2;
 }
@@ -481,18 +524,18 @@
 .file-tabbar {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   flex: 0 0 auto;
-  padding: 6px 14px;
-  border-bottom: 1px solid var(--line-card);
+  padding: var(--space-3) var(--space-7);
+  border-bottom: 1px solid var(--line);
   background: var(--surface-preview);
 }
 
 .file-view-tabs {
   display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--line-keycap);
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface-menu);
 }
@@ -500,14 +543,14 @@
 .file-view-tab {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 9px;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-5);
   border: 0;
   border-radius: calc(var(--radius-sm) - 2px);
   background: none;
   color: var(--muted);
   font-family: var(--font-ui);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   font-weight: 600;
   letter-spacing: 0.02em;
   cursor: pointer;
@@ -524,8 +567,8 @@
 }
 
 .file-view-tab:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* The pane a file-view tab controls (`role="tabpanel"`).
@@ -542,19 +585,19 @@
 }
 
 .file-view-pane:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
 /* The rendered half: one scrolling surface shared by every preview kind. */
 .file-preview-scroll {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 18px 22px;
+  padding: var(--space-8) var(--space-9);
   overflow: auto;
   background: var(--surface-preview);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--fs-body);
   line-height: 1.65;
 }
 
@@ -563,13 +606,13 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-6);
 }
 
 .file-preview-image {
   max-width: 100%;
   max-height: 100%;
-  border: 1px solid var(--line-preview);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   /* A transparent PNG reads as a `broken image` on a dark surface otherwise. */
   background: repeating-conic-gradient(var(--surface-menu) 0 25%, var(--surface-preview) 0 50%) 0 0 / 16px 16px;
@@ -581,7 +624,7 @@
   flex: 1 1 auto;
   width: 100%;
   min-height: 320px;
-  border: 1px solid var(--line-preview);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   /* No background here: the framed document paints its own `Canvas` colour, and
      a white box behind a dark-themed page would flash through. */
@@ -595,7 +638,7 @@
 .file-preview-note {
   margin: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   text-align: center;
 }
 
@@ -620,13 +663,13 @@
   min-height: 0;
   width: 100%;
   margin: 0;
-  padding: 12px;
+  padding: var(--space-6);
   border: 0;
   border-radius: 0;
   background: var(--surface-preview);
   color: var(--text-user);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 20px;
   tab-size: 2;
   resize: none;
@@ -635,53 +678,49 @@
   overflow: auto;
 }
 
-.file-editor:focus {
-  outline: none;
-}
-
 .file-editor:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
 .file-confirm {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-6);
   flex: 0 0 auto;
-  margin: 10px 14px 0;
-  padding: 9px 11px;
-  border: 1px solid var(--line-keycap);
+  margin: var(--space-5) var(--space-7) 0;
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface-menu);
   color: var(--text-secondary);
-  font-size: 11.5px;
+  font-size: var(--fs-small);
 }
 
 .file-confirm-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
   flex: 0 0 auto;
 }
 
 .file-save-error {
-  margin: 10px 14px 0;
+  margin: var(--space-5) var(--space-7) 0;
 }
 
 .file-statusbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-6);
   flex: 0 0 auto;
-  padding: 6px 14px;
-  border-top: 1px solid var(--line-card);
+  padding: var(--space-3) var(--space-7);
+  border-top: 1px solid var(--line);
   background: var(--surface-menu);
   color: var(--faint);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
 }
 
 .file-statusbar-hint {
@@ -703,7 +742,7 @@
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 9px;
+  gap: var(--space-5);
   max-width: min(420px, calc(100vw - 32px));
   pointer-events: none;
 }
@@ -711,18 +750,18 @@
 .toast {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: var(--space-6);
   max-width: 100%;
-  padding: 12px 10px 12px 15px;
-  border: 1px solid var(--line-toast);
+  padding: var(--space-6) var(--space-5) var(--space-6) var(--space-7);
+  border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: var(--surface-toast);
+  background: var(--surface-raised);
   color: var(--text-toast);
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.5;
   pointer-events: auto;
   animation: toast-in 200ms ease-out;
-  box-shadow: 0 20px 60px var(--shadow-lg);
+  box-shadow: var(--shadow-menu);
 }
 
 @keyframes toast-in {
@@ -759,9 +798,11 @@
 
 .toast-close {
   flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
-  margin-right: -3px;
+  /* 24px is the smallest honest target; 22 was under it (see the palette's own
+   * keycaps, which are indicators and not targets). */
+  width: 24px;
+  height: 24px;
+  margin-right: calc(-1 * var(--space-2));
   color: var(--muted);
 }
 
@@ -771,17 +812,18 @@
  */
 .toast-action {
   flex: 0 0 auto;
-  padding: 3px 9px;
-  border: 1px solid var(--line-toast);
+  padding: var(--space-2) var(--space-5);
+  border: 1px solid var(--line);
   border-radius: calc(var(--radius) - 2px);
   color: var(--text-toast);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   font-weight: 600;
   white-space: nowrap;
 }
 
+/* §5.4: a hover is a token, not a tint mixed here. */
 .toast-action:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--text-toast) 10%, transparent);
+  background: var(--surface-hover);
 }
 
 .toast-close:hover:not(:disabled) {
@@ -794,41 +836,41 @@
   display: grid;
   place-items: center;
   min-height: 100dvh;
-  padding: 24px;
+  padding: var(--space-9);
   background: var(--bg);
 }
 
 .state-card {
   width: min(500px, 100%);
-  padding: 28px;
+  padding: var(--space-10);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: 0 25px 90px var(--shadow-lg);
+  box-shadow: var(--shadow-overlay);
 }
 
 .state-title {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 20px 0 10px;
+  gap: var(--space-4);
+  margin: var(--space-8) 0 var(--space-5);
   color: var(--text);
-  font-size: 19px;
-  font-weight: 650;
+  font-size: var(--fs-display);
+  font-weight: 660;
   letter-spacing: -0.4px;
 }
 
 .state-body {
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: var(--fs-message);
   line-height: 1.72;
 }
 
 .state-body code,
 .state-footnote code {
-  padding: 1px 4px;
+  padding: var(--space-1) var(--space-2);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--surface-raised);
   color: var(--text-secondary);
   font-size: 0.9em;
@@ -837,44 +879,44 @@
 .state-error {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  margin-top: 14px;
-  padding: 9px 11px;
+  gap: var(--space-4);
+  margin-top: var(--space-7);
+  padding: var(--space-5) var(--space-6);
   border: 1px solid var(--danger);
   border-radius: var(--radius-sm);
   background: var(--danger-bg);
   color: var(--danger);
-  font-size: 12px;
+  font-size: var(--fs-label);
 }
 
 .state-error svg {
   flex: 0 0 auto;
-  margin-top: 2px;
+  margin-top: var(--space-1);
 }
 
 .auth-form {
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  margin-top: 22px;
+  gap: var(--space-4);
+  margin-top: var(--space-9);
 }
 
 .auth-form .button {
   align-self: flex-start;
-  margin-top: 6px;
+  margin-top: var(--space-3);
 }
 
 .state-footnote {
-  margin-top: 20px;
-  padding-top: 14px;
+  margin-top: var(--space-8);
+  padding-top: var(--space-7);
   border-top: 1px solid var(--line);
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   line-height: 1.7;
 }
 
 .state-card > .button {
-  margin-top: 18px;
+  margin-top: var(--space-8);
 }
 
 /* ---------- responsive overlays --------------------------------------- */
@@ -900,7 +942,7 @@
   }
 
   .dialog-palette .dialog-header {
-    padding: 12px 12px 12px 18px;
+    padding: var(--space-6) var(--space-6) var(--space-6) var(--space-8);
   }
 
   .palette-item {
@@ -953,15 +995,15 @@
 .rewind-body {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-7);
 }
 
 /* The message being recalled to, quoted so there is no doubt which turn it is. */
 .rewind-target {
   margin: 0;
-  padding: 10px 12px;
+  padding: var(--space-5) var(--space-6);
   border-left: 2px solid var(--line-strong);
-  background: var(--surface-1, transparent);
+  background: var(--surface);
   color: var(--text-secondary);
   font-size: var(--fs-small);
   line-height: 1.6;
@@ -983,20 +1025,20 @@
 
 .rewind-modes legend,
 .rewind-revert legend {
-  padding: 0 0 7px;
-  color: var(--text-subtle);
+  padding: 0 0 var(--space-4);
+  color: var(--muted);
   font-size: var(--fs-micro);
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-weight: var(--weight-kicker);
+  letter-spacing: var(--tracking-kicker);
   text-transform: uppercase;
 }
 
 .rewind-mode {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 2px 9px;
-  margin-bottom: 5px;
-  padding: 9px 11px;
+  gap: var(--space-1) var(--space-5);
+  margin-bottom: var(--space-3);
+  padding: var(--space-5) var(--space-6);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm, 8px);
   cursor: pointer;
@@ -1008,7 +1050,7 @@
 }
 
 .rewind-mode input {
-  margin: 2px 0 0;
+  margin: var(--space-1) 0 0;
   accent-color: var(--accent);
 }
 
@@ -1021,21 +1063,21 @@
 .rewind-mode-hint {
   grid-column: 2;
   color: var(--muted);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   line-height: 1.55;
 }
 
 .rewind-note {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .rewind-note-label {
-  color: var(--text-subtle);
+  color: var(--muted);
   font-size: var(--fs-micro);
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-weight: var(--weight-kicker);
+  letter-spacing: var(--tracking-kicker);
   text-transform: uppercase;
 }
 
@@ -1050,27 +1092,27 @@
 .rewind-toggle {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: var(--space-4);
   color: var(--text-secondary);
   font-size: var(--fs-small);
   cursor: pointer;
 }
 
 .rewind-toggle input {
-  margin: 2px 0 0;
+  margin: var(--space-1) 0 0;
   accent-color: var(--accent);
 }
 
 .rewind-empty {
-  margin: 6px 0 0;
+  margin: var(--space-3) 0 0;
   color: var(--muted);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   line-height: 1.6;
 }
 
 .rewind-files {
   max-height: 220px;
-  margin: 10px 0 0;
+  margin: var(--space-5) 0 0;
   padding: 0;
   overflow-y: auto;
   list-style: none;
@@ -1081,8 +1123,8 @@
 .rewind-file {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 3px 9px;
-  padding: 8px 11px;
+  gap: var(--space-2) var(--space-5);
+  padding: var(--space-4) var(--space-6);
   border-bottom: 1px solid var(--line);
 }
 
@@ -1092,9 +1134,9 @@
 
 .rewind-file-action {
   align-self: start;
-  padding: 0 6px;
-  border-radius: 999px;
-  font-size: 9px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -1102,13 +1144,13 @@
 }
 
 .rewind-file-action.is-restore {
-  color: var(--ok, var(--accent));
-  background: color-mix(in srgb, var(--ok, var(--accent)) 14%, transparent);
+  color: var(--success);
+  background: var(--success-bg);
 }
 
 .rewind-file-action.is-remove {
-  color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  color: var(--danger);
+  background: var(--danger-bg);
 }
 
 .rewind-file-path {
@@ -1119,15 +1161,15 @@
 
 .rewind-file-meta {
   grid-column: 2;
-  color: var(--text-subtle);
-  font-size: var(--fs-micro);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
   font-variant-numeric: tabular-nums;
 }
 
 .rewind-file-warn {
   grid-column: 2;
   color: var(--warn);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   line-height: 1.55;
 }
 
@@ -1136,17 +1178,17 @@
 }
 
 .rewind-warn {
-  margin: 10px 0 0;
-  padding: 8px 11px;
+  margin: var(--space-5) 0 0;
+  padding: var(--space-4) var(--space-6);
   border-left: 2px solid var(--warn);
-  color: color-mix(in srgb, var(--warn) 62%, var(--text-secondary));
-  font-size: var(--fs-micro);
+  color: var(--warn);
+  font-size: var(--fs-tiny);
   line-height: 1.6;
 }
 
 .rewind-error {
   margin: 0;
-  padding: 8px 11px;
+  padding: var(--space-4) var(--space-6);
   border-left: 2px solid var(--danger);
   color: var(--danger);
   font-size: var(--fs-small);

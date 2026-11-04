@@ -15,31 +15,38 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  /* The frame reserves `--inspector-w` and then spends 1px of it on its own
+   * `border-left`, so an inner element asking for the same width overhangs by
+   * one pixel - measured right edge 1441 at a 1440 viewport, and 1024 at 1023 in
+   * the slide-over sheet. The frame hides it with `overflow: hidden`, which is
+   * why the last pixel of the tab strip and the scrollbar were simply clipped.
+   * `100%` is the frame's content box, at every breakpoint. */
+  width: 100%;
 }
 
 .inspector-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-5);
   flex: 0 0 auto;
   height: 66px;
   min-height: 66px;
-  padding: 0 20px;
+  padding: 0 var(--space-8);
   border-bottom: 1px solid var(--line-soft);
 }
 
 .inspector-head {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
   min-width: 0;
 }
 
 .inspector-label {
   color: var(--text-caption);
-  font-size: 10px;
-  font-weight: 740;
+  font-size: var(--fs-micro);
+  font-weight: 720;
   letter-spacing: 1.3px;
   line-height: 1.2;
   text-transform: uppercase;
@@ -47,8 +54,11 @@
 
 .inspector-subtitle {
   overflow: hidden;
-  color: var(--text-subtle);
-  font-size: 10px;
+  /* §4: `--faint` and the roles cut from it are decoration only. This is the
+   * panel's subtitle — a sentence a user reads — so it uses the readable quiet
+   * voice. It measured 3.02:1 in Daybreak. */
+  color: var(--muted);
+  font-size: var(--fs-tiny);
   line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -84,7 +94,7 @@
   gap: 0;
   height: 44px;
   min-height: 44px;
-  padding: 0 13px;
+  padding: 0 var(--space-6);
   border-bottom: 1px solid var(--line);
   overflow-x: auto;
   overflow-y: hidden;
@@ -102,7 +112,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: var(--space-3);
   /* `max-content` basis with `flex-shrink: 0` is the whole fix: while the labels
    * fit, `flex-grow: 1` shares the strip evenly between them (the mock's look
    * for the built-in four), and once they do not, a tab keeps its content width
@@ -115,11 +125,11 @@
   min-width: 0;
   max-width: 100%;
   height: 44px;
-  padding: 0 8px;
+  padding: 0 var(--space-4);
   border: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   font-weight: 550;
   letter-spacing: 0;
   text-transform: none;
@@ -149,7 +159,7 @@
   bottom: 0;
   left: 9px;
   height: 2px;
-  border-radius: 3px 3px 0 0;
+  border-radius: var(--radius-xs) var(--radius-xs) 0 0;
   background: var(--accent);
 }
 
@@ -159,13 +169,13 @@
   justify-content: center;
   min-width: 16px;
   height: 16px;
-  padding: 0 5px;
+  padding: 0 var(--space-2);
   border: 1px solid var(--line-keycap);
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   background: var(--surface-hover);
   color: var(--chip-ink);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   font-weight: 500;
   letter-spacing: 0;
   line-height: 1;
@@ -196,25 +206,26 @@
 .inspector-section {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-5);
   min-width: 0;
-  padding: 16px 17px;
+  padding: 16px var(--space-7);
 }
 
 /* Workspace root / branch pill: mono path, copy affordance pinned right. */
 .workspace-path {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: var(--space-3);
   height: 35px;
   min-width: 0;
-  padding: 0 10px;
+  padding: 0 var(--space-5);
   border: 1px solid var(--line-inset);
-  border-radius: 7px;
-  background: var(--surface-inset);
+  border-radius: var(--radius-sm);
+  /* A path chip is a recess, not a card. */
+  background: var(--bg);
   color: var(--chip-ink);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   overflow: hidden;
   white-space: nowrap;
 }
@@ -237,7 +248,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-5);
 }
 
 /* `.inspector-inline-head` is the mock's "QUICK PREVIEW · Open" row. */
@@ -245,25 +256,25 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  margin-top: 2px;
+  gap: var(--space-5);
+  margin-top: var(--space-1);
 }
 
 .inspector-kicker {
   margin: 0;
   color: var(--text-kicker);
-  font-size: 10px;
-  font-weight: 710;
+  font-size: var(--fs-micro);
+  font-weight: 720;
   letter-spacing: 0.9px;
   line-height: 1.4;
   text-transform: uppercase;
 }
 
 .inspector-kicker-note {
-  margin-left: 8px;
+  margin-left: var(--space-4);
   color: var(--text-subtle);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   font-weight: 500;
   letter-spacing: 0;
   text-transform: none;
@@ -272,7 +283,7 @@
 .inspector-mini {
   width: 24px;
   height: 24px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-subtle);
 }
 
@@ -284,13 +295,13 @@
 .tiny-link {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-2);
   flex: 0 0 auto;
   padding: 0;
   border: 0;
   background: none;
   color: var(--text-caption);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.4;
 }
 
@@ -301,41 +312,41 @@
 .inspector-note {
   margin: 0;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   line-height: 1.65;
 }
 
 .inspector-note svg {
   vertical-align: -2px;
-  margin-right: 4px;
+  margin-right: var(--space-2);
 }
 
 /* ---------- empty & error states -------------------------------------- */
 
 .empty-inspector {
-  padding: 14px 0 2px;
+  padding: var(--space-6) 0 2px;
 }
 
 .empty-inspector-title {
-  margin-bottom: 6px;
+  margin-bottom: var(--space-3);
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 600;
   letter-spacing: -0.15px;
 }
 
 .empty-inspector p {
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--fs-small);
   line-height: 1.7;
 }
 
 .empty-inspector .button {
-  margin-top: 12px;
+  margin-top: var(--space-6);
 }
 
 .tree-empty {
-  padding: 12px 0;
+  padding: var(--space-6) 0;
 }
 
 /* ---------- file tree -------------------------------------------------- */
@@ -345,24 +356,24 @@
   flex-direction: column;
   gap: 0;
   margin: 0;
-  padding: 12px 0 16px;
+  padding: var(--space-6) 0 var(--space-7);
   list-style: none;
 }
 
 .tree-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
   width: 100%;
   min-width: 0;
   height: 29px;
-  padding: 0 8px;
+  padding: 0 var(--space-4);
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   text-align: left;
   white-space: nowrap;
   cursor: pointer;
@@ -433,16 +444,16 @@
 
 .tree-size {
   flex: 0 0 auto;
-  padding-left: 8px;
+  padding-left: var(--space-4);
   color: var(--faint);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
 }
 
 .tree-loading {
   flex: 0 0 auto;
-  padding-left: 6px;
+  padding-left: var(--space-3);
   color: var(--faint);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
   font-style: italic;
 }
 
@@ -457,7 +468,7 @@
 .git-loading {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .skeleton-tree-row {
@@ -471,7 +482,7 @@
 /* ---------- quick preview (last opened file) -------------------------- */
 
 .preview-panel {
-  margin: 10px 0 0;
+  margin: var(--space-5) 0 0;
   border: 1px solid var(--line-preview);
   border-radius: var(--radius);
   background: var(--surface-preview);
@@ -481,8 +492,8 @@
 .preview-head {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 11px 12px;
+  gap: var(--space-4);
+  padding: var(--space-5) 12px;
   border-bottom: 1px solid var(--line-preview);
   color: var(--muted);
 }
@@ -493,7 +504,7 @@
   overflow: hidden;
   color: var(--text-user);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -502,7 +513,7 @@
   flex: 0 0 auto;
   color: var(--text-kicker);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
@@ -511,11 +522,11 @@
 .preview-code {
   max-height: 8.6em;
   margin: 0;
-  padding: 12px 9px;
+  padding: 12px var(--space-4);
   overflow: hidden;
   color: var(--chip-ink);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 2;
   white-space: pre;
 }
@@ -527,17 +538,17 @@
 
 .preview-placeholder {
   margin: 0;
-  padding: 12px;
+  padding: var(--space-6);
   color: var(--text-kicker);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   line-height: 1.65;
 }
 
 .preview-path {
-  padding: 10px 12px;
+  padding: var(--space-5) var(--space-6);
   color: var(--text-kicker);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
@@ -546,12 +557,12 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 9px 11px;
+  gap: var(--space-5);
+  padding: var(--space-4) var(--space-5);
   border-top: 1px solid var(--line-preview);
   color: var(--meta-text);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
 }
 
 .preview-foot .tiny-link {
@@ -571,9 +582,9 @@
 }
 
 .panel-kicker {
-  margin: 0 0 9px;
+  margin: 0 0 var(--space-4);
   color: var(--text-kicker-panel);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 1.2px;
   text-transform: uppercase;
@@ -582,16 +593,16 @@
 .panel-title {
   margin: 0;
   color: var(--text);
-  font-size: 23px;
-  font-weight: 690;
+  font-size: var(--fs-hero);
+  font-weight: 700;
   letter-spacing: -0.8px;
   line-height: 1.25;
 }
 
 .panel-desc {
-  margin: 7px 0 0;
+  margin: var(--space-3) 0 0;
   color: var(--text-empty-copy);
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.7;
 }
 
@@ -600,8 +611,8 @@
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 10px;
-  margin: 24px 0 14px;
+  gap: var(--space-5);
+  margin: 24px 0 var(--space-6);
 }
 
 /* `.panel-action-btn` is declared once, in settings.css: the settings sheet and
@@ -610,29 +621,30 @@
 .panel-change-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-6);
 }
 
 .panel-change-file {
   border: 1px solid var(--line-card);
   border-radius: var(--radius);
-  background: var(--surface-inset);
+  /* Pane -> card (§3.1). */
+  background: var(--surface);
   overflow: hidden;
 }
 
 .panel-file-title {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-5);
   width: 100%;
   min-width: 0;
-  padding: 14px;
+  padding: var(--space-6);
   border: 0;
   border-bottom: 1px solid transparent;
   background: transparent;
   color: var(--text-user);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   text-align: left;
 }
 
@@ -660,7 +672,7 @@
 .panel-file-title .change-status {
   flex-direction: row;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .panel-file-title .change-status-label {
@@ -685,7 +697,7 @@
 }
 
 .panel-file-diff .inline-error {
-  margin: 12px;
+  margin: var(--space-6);
 }
 
 /* ---------- git changes ------------------------------------------------ */
@@ -693,23 +705,24 @@
 .change-summary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .metric {
   min-width: 0;
   min-height: 64px;
-  padding: 12px;
+  padding: var(--space-6);
   border: 1px solid var(--line-card);
-  border-radius: 9px;
-  background: var(--surface-inset);
+  border-radius: var(--radius-md);
+  /* A tile on the inspector pane: one ladder step up (§3.1), not a literal. */
+  background: var(--surface);
 }
 
 .metric-num {
   overflow: hidden;
   color: var(--text);
-  font-size: 21px;
-  font-weight: 670;
+  font-size: var(--fs-display);
+  font-weight: 660;
   letter-spacing: -0.7px;
   line-height: 1.2;
   text-overflow: ellipsis;
@@ -718,34 +731,34 @@
 
 .metric-num .metric-sub {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-weight: 550;
   letter-spacing: 0;
 }
 
 .metric-label {
-  margin-top: 2px;
+  margin-top: var(--space-1);
   color: var(--meta-text);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.4;
 }
 
 .git-group {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
 }
 
 .git-group-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-4);
   margin: 0;
-  padding: 2px 2px 6px;
+  padding: var(--space-1) var(--space-1) var(--space-3);
   color: var(--text-kicker);
-  font-size: 10px;
-  font-weight: 710;
+  font-size: var(--fs-micro);
+  font-weight: 720;
   letter-spacing: 0.9px;
   text-transform: uppercase;
 }
@@ -753,7 +766,7 @@
 .git-count {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   font-weight: 500;
   letter-spacing: 0;
 }
@@ -777,10 +790,10 @@
 .change-row {
   display: flex;
   align-items: flex-start;
-  gap: 9px;
+  gap: var(--space-4);
   width: 100%;
   min-width: 0;
-  padding: 12px 4px;
+  padding: var(--space-6) var(--space-2);
   border: 0;
   border-bottom: 1px solid var(--line);
   border-radius: 0;
@@ -796,7 +809,7 @@
 .change-row:focus-visible {
   position: relative;
   z-index: 1;
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: -2px;
 }
 
@@ -814,17 +827,17 @@
   flex: 0 0 auto;
   width: 26px;
   height: 26px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--surface-raised) 55%, var(--line-card));
   color: var(--icon-rust);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
 }
 
 .change-desc {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -833,7 +846,7 @@
   overflow: hidden;
   color: var(--text-user);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -842,7 +855,7 @@
   overflow: hidden;
   color: var(--text-subtle);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -851,21 +864,21 @@
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 1px;
+  gap: var(--space-1);
   flex: 0 0 auto;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.4;
 }
 
 .change-status .git-status {
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   font-weight: 600;
 }
 
 .change-status-label {
   color: var(--text-kicker);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
   text-transform: lowercase;
 }
 
@@ -874,7 +887,7 @@
   width: 16px;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   text-align: center;
 }
 
@@ -891,7 +904,7 @@
 }
 
 .git-diff {
-  margin-top: 4px;
+  margin-top: var(--space-2);
   border: 1px solid var(--line-card);
   border-radius: var(--radius);
   background: var(--surface-preview);
@@ -901,10 +914,11 @@
 .git-diff-head {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 8px 10px;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
   border-bottom: 1px solid var(--line-card);
-  background: var(--surface-inset);
+  /* Header strip inside the diff card: nested one step up. */
+  background: var(--surface-raised);
 }
 
 .git-diff-path {
@@ -913,7 +927,7 @@
   overflow: hidden;
   color: var(--text-user);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -932,7 +946,7 @@
 .command-list {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: var(--space-4);
 }
 
 /* ---------- agents ----------------------------------------------------- */
@@ -940,7 +954,7 @@
 .agent-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-5);
 }
 
 /* The tail of a capped roster: an unbounded `max_concurrent` can produce
@@ -951,17 +965,18 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 6px;
-  padding: 10px 12px;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-6);
   border: 1px dashed var(--line-card);
   border-radius: var(--radius);
-  background: var(--surface-inset);
+  /* It reads as the next row of the list, not as a card on a card. */
+  background: var(--surface);
 }
 
 .agent-list-more-note {
   margin: 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--fs-label);
 }
 
 /* Scope switch + status filters: the two controls that make a long agent list
@@ -969,21 +984,22 @@
 .agent-scope {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 3px;
-  margin-bottom: 8px;
-  padding: 3px;
+  gap: var(--space-1);
+  margin-bottom: var(--space-4);
+  padding: var(--space-1);
   border: 1px solid var(--line-card);
   border-radius: var(--radius);
-  background: var(--surface-inset);
+  /* A segmented control is a well: the segments sit inside it. */
+  background: var(--bg);
 }
 
 .agent-scope-button {
-  padding: 5px 6px;
+  padding: var(--space-2) 6px;
   border: 0;
   border-radius: calc(var(--radius) - 3px);
   background: transparent;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   font-weight: 550;
   cursor: pointer;
   transition: background var(--transition), color var(--transition);
@@ -994,7 +1010,9 @@
 }
 
 .agent-scope-button.is-active {
-  background: var(--surface-command);
+  /* The selected segment lifts out of the well it sits in: one ladder step from
+   * the pane the well is cut into, not a literal that matched nothing. */
+  background: var(--surface);
   color: var(--text-user);
   box-shadow: 0 0 0 1px var(--line-card);
 }
@@ -1002,21 +1020,21 @@
 .agent-filters {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
-  margin-bottom: 12px;
+  gap: var(--space-2);
+  margin-bottom: var(--space-6);
 }
 
 .agent-filter {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 7px;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
   border: 1px solid var(--line-card);
   border-radius: var(--radius-pill);
   background: transparent;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
   letter-spacing: 0;
   cursor: pointer;
   transition: border-color var(--transition), color var(--transition), background var(--transition);
@@ -1041,7 +1059,7 @@
 .agent-filter-count {
   min-width: 12px;
   color: inherit;
-  font-size: 9px;
+  font-size: var(--fs-tiny);
   text-align: right;
   opacity: 0.8;
 }
@@ -1059,10 +1077,12 @@
 }
 
 .agent-card {
-  padding: 13px;
+  padding: var(--space-6);
   border: 1px solid var(--line-card);
   border-radius: var(--radius);
-  background: var(--surface-command);
+  /* Pane -> card (§3.1). `--surface-command` was 1.05:1 from the panel and the
+   * same fill as the event rows inside it, so nesting had no direction. */
+  background: var(--surface);
   cursor: pointer;
   transition: border-color var(--transition), background var(--transition);
 }
@@ -1072,7 +1092,7 @@
 }
 
 .agent-card:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -1089,13 +1109,13 @@
 .agent-head {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
 }
 
 .agent-title-row {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: var(--space-4);
   min-width: 0;
 }
 
@@ -1106,7 +1126,7 @@
   width: 28px;
   height: 28px;
   border: 1px solid var(--line-avatar-agent);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--surface-avatar-agent);
   color: var(--accent);
 }
@@ -1114,7 +1134,7 @@
 .agent-titles {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: var(--space-1);
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -1122,8 +1142,8 @@
 .agent-name {
   overflow: hidden;
   color: var(--text-user);
-  font-size: 11px;
-  font-weight: 650;
+  font-size: var(--fs-tiny);
+  font-weight: 660;
   line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1132,7 +1152,7 @@
 .agent-role {
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.4;
   text-overflow: ellipsis;
   text-transform: none;
@@ -1142,13 +1162,13 @@
 .agent-live {
   flex: 0 0 auto;
   max-width: 46%;
-  padding: 3px 6px;
+  padding: var(--space-1) 6px;
   overflow: hidden;
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   background: var(--success-bg);
   color: var(--text-symbol);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--fs-tiny);
   letter-spacing: 0;
   text-overflow: ellipsis;
   text-transform: lowercase;
@@ -1181,64 +1201,71 @@
 
 .agent-controls {
   display: flex;
-  gap: 6px;
-  margin-top: 10px;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
 }
 
 .agent-note {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-4);
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   font-style: italic;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .agent-detail-note {
-  margin: 10px 0;
-  padding: 9px 10px;
+  margin: var(--space-5) 0;
+  padding: var(--space-4) 10px;
   border: 1px solid var(--line-card);
   border-radius: var(--radius);
-  background: var(--surface-command);
+  /* Nested card inside the agent detail: one step up from the pane. */
+  background: var(--surface-raised);
 }
 
 .agent-detail-note p {
-  margin: 4px 0 0;
+  margin: var(--space-2) 0 0;
   color: var(--chip-ink);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   line-height: 1.5;
 }
 
 .agent-badge {
-  padding: 1px 5px;
+  padding: var(--space-1) var(--space-2);
   border: 1px solid var(--line-keycap);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-kicker);
-  font-size: 9px;
+  font-size: var(--fs-tiny);
   text-transform: lowercase;
 }
 
 .agent-progress {
   display: block;
-  height: 3px;
-  margin: 6px 0 8px;
+  height: 6px;
+  margin: var(--space-3) 0 var(--space-4);
   overflow: hidden;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--muted) 22%, transparent);
+  border-radius: var(--radius-xs);
+  /* A 22% veil of --muted over the card measured 1.50:1 — the groove of the bar
+   * was not there, so a 40%-complete agent looked like a 0%-complete one.
+   * `--line-strong` replaced it and was still only 1.37:1 on an Ember card
+   * (1.27:1 in Daybreak): a hairline is not a groove. 32% of --muted over the
+   * surface it is drawn on is (1.8:1 Ember, 1.5:1 Daybreak), and it is the same
+   * recipe as `.goals-bar`, so the two affordances read as one component. */
+  background: color-mix(in srgb, var(--muted) 32%, transparent);
 }
 
 .agent-progress-fill {
   display: block;
   height: 100%;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   background: var(--accent);
   transition: width var(--transition);
 }
 
 .agent-task {
-  margin: 10px 0;
+  margin: var(--space-5) 0;
   color: var(--chip-ink);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -1247,10 +1274,10 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-4);
   color: var(--text-kicker);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
 }
 
 .agent-card-foot .mono {
@@ -1274,20 +1301,20 @@
 .agent-detail-top {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
 }
 
 .agent-detail-top .inspector-mini {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: var(--space-1);
 }
 
 .agent-detail-kicker {
   flex: 1 1 auto;
   color: var(--muted);
-  font-size: 9.5px;
+  font-size: var(--fs-micro);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -1295,66 +1322,68 @@
 .agent-detail-head {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding-bottom: 10px;
+  gap: var(--space-4);
+  padding-bottom: var(--space-5);
   border-bottom: 1px solid var(--line);
 }
 
 .agent-detail-session {
-  margin: 8px 0 0;
+  margin: var(--space-4) 0 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .agent-detail-task {
-  margin-top: 10px;
+  margin-top: var(--space-5);
 }
 
 .agent-detail-error {
-  margin: 0 0 10px;
-  padding: 8px 10px;
+  margin: 0 0 var(--space-5);
+  padding: var(--space-4) var(--space-5);
   border: 1px solid var(--danger-bg);
   border-radius: var(--radius);
   background: var(--danger-bg);
   color: var(--danger);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
 }
 
 .agent-activity {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 12px;
+  gap: var(--space-4);
+  margin-top: var(--space-6);
 }
 
 .agent-activity-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .agent-activity-count {
   color: var(--text-kicker);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
 }
 
 .agent-activity-empty {
   margin: 0;
   color: var(--text-subtle);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   line-height: 1.5;
 }
 
 .agent-bubble {
-  padding: 8px 10px;
+  padding: var(--space-4) var(--space-5);
   border: 1px solid var(--line-card);
   border-radius: var(--radius);
-  background: var(--surface-inset);
+  /* Was `--surface-inset` (#f0f0f0 in Daybreak), *brighter* than the panel it
+   * sat in, so a bubble read as a hole in a hole. */
+  background: var(--surface-raised);
 }
 
 .agent-bubble-task {
@@ -1365,10 +1394,10 @@
 .agent-bubble-role,
 .agent-bubble summary {
   display: block;
-  margin-bottom: 3px;
+  margin-bottom: var(--space-1);
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--fs-micro);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   cursor: pointer;
@@ -1376,30 +1405,31 @@
 
 .agent-bubble-body {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   line-height: 1.6;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
 .agent-bubble-reasoning {
-  margin: 4px 0 0;
+  margin: var(--space-2) 0 0;
   max-height: 220px;
   overflow: auto;
   color: var(--text-subtle);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .agent-event {
-  padding: 8px 10px;
+  padding: var(--space-4) var(--space-5);
   border: 1px solid var(--line-card);
   border-left: 2px solid var(--line-keycap);
   border-radius: var(--radius);
-  background: var(--surface-command);
+  /* Card -> nested card: one step up again, never the parent's own fill. */
+  background: var(--surface-raised);
 }
 
 .agent-event[data-status='running'] {
@@ -1419,14 +1449,14 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .agent-event-name {
   min-width: 0;
   overflow: hidden;
   color: var(--text-user);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1436,58 +1466,60 @@
   flex: 0 0 auto;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--fs-tiny);
   text-transform: lowercase;
 }
 
 .agent-event-detail {
-  margin: 4px 0 0;
+  margin: var(--space-2) 0 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .agent-event-note {
-  margin: 3px 0 0;
+  margin: var(--space-1) 0 0;
   overflow-wrap: anywhere;
   color: var(--text-subtle);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
 }
 
 .agent-event-output {
-  margin: 6px 0 0;
+  margin: var(--space-3) 0 0;
   max-height: 260px;
-  padding: 7px 8px;
+  padding: var(--space-3) 8px;
   overflow: auto;
-  border-radius: 6px;
-  background: var(--surface-inset);
+  border-radius: var(--radius-sm);
+  /* An output well: the one place a recess is correct, so it goes *down* to
+   * the canvas rather than up the ladder. */
+  background: var(--bg);
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .agent-event-more {
-  margin-top: 6px;
+  margin-top: var(--space-3);
 }
 
 .agent-event-more summary {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
   cursor: pointer;
 }
 
 .agent-meta {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 12px;
-  margin: 10px 0 0;
-  padding: 9px 0 0;
+  gap: var(--space-4) var(--space-6);
+  margin: var(--space-5) 0 0;
+  padding: var(--space-4) 0 0;
   border-top: 1px solid var(--line);
 }
 
@@ -1497,55 +1529,56 @@
 
 .agent-meta dt {
   color: var(--muted);
-  font-size: 9.5px;
+  font-size: var(--fs-micro);
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
 .agent-meta dd {
-  margin: 2px 0 0;
+  margin: var(--space-1) 0 0;
   overflow: hidden;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .agent-meta dd.mono {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
 }
 
 .agent-paths,
 .agent-summary,
 .agent-error {
-  margin-top: 10px;
+  margin-top: var(--space-5);
 }
 
 .agent-paths ul {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin: 5px 0 0;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
   list-style: none;
 }
 
 .path-chip {
-  padding: 1px 5px;
+  padding: var(--space-1) var(--space-2);
   border: 1px solid var(--line-card);
-  border-radius: 4px;
-  background: var(--surface-inset);
+  border-radius: var(--radius-xs);
+  /* A chip is a recess, not a card. */
+  background: var(--bg);
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
   overflow-wrap: anywhere;
 }
 
 .agent-summary p,
 .agent-error p {
-  margin-top: 4px;
+  margin-top: var(--space-2);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1559,7 +1592,7 @@
 
 .side-bottom-panel {
   flex: 0 0 auto;
-  padding: 14px 17px 20px;
+  padding: var(--space-6) var(--space-7) 20px;
   border-top: 1px solid var(--line);
   background: var(--sidebar);
 }
@@ -1567,10 +1600,10 @@
 .branch-line {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
   color: var(--chip-ink);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
 }
 
 .branch-line svg {
@@ -1589,16 +1622,16 @@
 .branch-status {
   display: flex;
   justify-content: space-between;
-  gap: 10px;
-  margin-top: 8px;
+  gap: var(--space-5);
+  margin-top: var(--space-4);
   color: var(--text-subtle);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
 }
 
 .branch-status span {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1616,26 +1649,26 @@
   /* The mock has no narrow rule for the centre panel; keep the title readable
    * instead of letting 28px gutters squeeze it. */
   .secondary-panel {
-    padding: 20px 14px 28px;
+    padding: 20px var(--space-6) var(--space-9);
   }
 }
 
 @media (max-width: 460px) {
   .inspector-top {
-    padding: 0 14px;
+    padding: 0 var(--space-6);
   }
 
   .inspector-section {
-    padding: 14px 13px;
+    padding: var(--space-6) var(--space-6);
   }
 
   .tab {
-    font-size: 10.5px;
-    padding: 0 2px;
+    font-size: var(--fs-tiny);
+    padding: 0 var(--space-1);
   }
 
   .side-bottom-panel {
-    padding: 12px 13px 13px;
+    padding: 12px var(--space-6) var(--space-6);
   }
 }
 
@@ -1658,12 +1691,13 @@
   display: grid;
   place-items: center;
   min-height: 62px;
-  padding: 12px;
+  padding: var(--space-6);
 }
 
 .preview-empty {
-  color: var(--text-subtle);
-  font-size: 11px;
+  /* Same rule: this is the sentence that tells you what the panel is for. */
+  color: var(--muted);
+  font-size: var(--fs-tiny);
   text-align: center;
 }
 
@@ -1674,18 +1708,19 @@
  * so it is never rendered as markup and never becomes a URL.
  */
 .plugin-panel {
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .plugin-panel-badge {
-  margin-left: 8px;
-  padding: 1px 6px;
+  margin-left: var(--space-4);
+  padding: var(--space-1) 6px;
   border: 1px solid var(--line-inset);
-  border-radius: 999px;
-  background: var(--surface-inset);
+  border-radius: var(--radius-pill);
+  /* A badge is a recess, not a card. */
+  background: var(--bg);
   color: var(--text-subtle);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
   font-weight: 500;
   letter-spacing: 0;
   text-transform: none;
@@ -1695,7 +1730,7 @@
 .plugin-panel-refresh {
   width: 24px;
   height: 24px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-subtle);
 }
 
@@ -1705,42 +1740,43 @@
 }
 
 .plugin-panel-json-note {
-  margin-bottom: 8px;
+  margin-bottom: var(--space-4);
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   line-height: 1.6;
 }
 
 .plugin-panel-json {
   max-height: 420px;
   overflow: auto;
-  padding: 10px 11px;
+  padding: 10px var(--space-5);
   border: 1px solid var(--line-inset);
-  border-radius: 7px;
-  background: var(--surface-inset);
+  border-radius: var(--radius-sm);
+  /* A JSON well is the deepest recess in the panel. */
+  background: var(--bg);
   color: var(--chip-ink);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
 
 .plugin-panel-json-list {
   margin: 0;
-  padding-left: 14px;
+  padding-left: var(--space-6);
   list-style: disc;
 }
 
 .plugin-panel-json-object {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-1);
   margin: 0;
 }
 
 .plugin-panel-json-row {
   display: flex;
-  gap: 8px;
+  gap: var(--space-4);
   min-width: 0;
 }
 
@@ -1772,7 +1808,7 @@
 
 .plugin-panel-fetched {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
 }
 
 /* ---------- session information ---------------------------------------- */
@@ -1785,19 +1821,19 @@
 .si-info {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: var(--space-7);
 }
 
 .si-section {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: var(--space-4);
 }
 
 .si-tiles {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .si-metric[data-tone='ok'] .metric-num {
@@ -1807,7 +1843,7 @@
 /* The shared `.metric-sub` sits flush against the number ("33calls"); in the
  * inspector's narrow column it needs the gap to read as a unit label. */
 .si-metric .metric-sub {
-  margin-left: 4px;
+  margin-left: var(--space-2);
 }
 
 .si-metric[data-tone='warn'] .metric-num {
@@ -1822,14 +1858,17 @@
 .si-window {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .si-window-meter {
   position: relative;
   height: 7px;
-  border-radius: 999px;
-  background: var(--surface-inset);
+  border-radius: var(--radius-pill);
+  /* `--surface-inset` is #f0f0f0 in Daybreak, against a #f4f1eb panel: 1.01:1,
+   * so the context-window meter had no track at all in light mode. Same recipe
+   * as the progress bars, so the three meters in the shell agree. */
+  background: color-mix(in srgb, var(--muted) 32%, transparent);
   overflow: hidden;
 }
 
@@ -1853,26 +1892,26 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .si-window-percent {
   color: var(--text);
-  font-size: 15px;
-  font-weight: 650;
+  font-size: var(--fs-lead);
+  font-weight: 660;
   letter-spacing: -0.2px;
 }
 
 .si-window-numbers {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
 }
 
 .si-note {
   margin: 0;
   color: var(--text-subtle);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   line-height: 1.5;
 }
 
@@ -1888,8 +1927,8 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 10px;
-  padding: 6px 0;
+  gap: var(--space-5);
+  padding: var(--space-3) 0;
   border-bottom: 1px solid var(--line);
 }
 
@@ -1900,7 +1939,7 @@
 .si-meta dt {
   flex: 0 0 auto;
   color: var(--text-kicker);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
 }
 
 .si-meta dd {
@@ -1909,7 +1948,7 @@
   overflow: hidden;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1917,13 +1956,13 @@
 
 .si-live {
   display: inline-block;
-  margin-left: 6px;
-  padding: 1px 6px;
-  border-radius: 999px;
+  margin-left: var(--space-3);
+  padding: var(--space-1) 6px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   color: var(--accent);
-  font-size: 9px;
-  font-weight: 650;
+  font-size: var(--fs-micro);
+  font-weight: 660;
   letter-spacing: 0.5px;
   text-transform: uppercase;
   vertical-align: middle;
@@ -1933,7 +1972,7 @@
 .si-tools {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .si-tool-list {
@@ -1942,15 +1981,15 @@
   margin: 0;
   padding: 0;
   list-style: none;
-  gap: 1px;
+  gap: var(--space-1);
 }
 
 .si-tool {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
-  padding: 4px 0;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
   border-bottom: 1px solid var(--line);
 }
 
@@ -1961,7 +2000,7 @@
 .si-tool-name {
   overflow: hidden;
   color: var(--text-user);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1970,7 +2009,7 @@
   flex: 0 0 auto;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
 }
 
 /* Subagent rows: a compact card each, because each one is a separate actor. */
@@ -1980,14 +2019,15 @@
   margin: 0;
   padding: 0;
   list-style: none;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .si-agent {
-  padding: 9px 10px;
+  padding: var(--space-4) 10px;
   border: 1px solid var(--line-card);
   border-radius: var(--radius);
-  background: var(--surface-command);
+  /* Pane -> card (§3.1). */
+  background: var(--surface);
 }
 
 .si-agent[data-status='running'] {
@@ -2001,7 +2041,7 @@
 .si-agent-head {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: var(--space-3);
   min-width: 0;
 }
 
@@ -2011,8 +2051,9 @@
   flex: 0 0 auto;
   width: 22px;
   height: 22px;
-  border-radius: 5px;
-  background: var(--surface-inset);
+  border-radius: var(--radius-xs);
+  /* Icon tile inside that card: nested, so one step up. */
+  background: var(--surface-raised);
   color: var(--muted);
 }
 
@@ -2026,7 +2067,7 @@
 .si-agent-name {
   overflow: hidden;
   color: var(--text);
-  font-size: 11.5px;
+  font-size: var(--fs-small);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2035,7 +2076,7 @@
 .si-agent-role {
   overflow: hidden;
   color: var(--text-subtle);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2044,7 +2085,7 @@
   flex: 0 0 auto;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
   text-transform: lowercase;
 }
 
@@ -2063,8 +2104,8 @@
 .si-agent-meta {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px 8px;
-  margin: 8px 0 0;
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-4) 0 0;
 }
 
 .si-agent-meta > div {
@@ -2075,7 +2116,7 @@
 
 .si-agent-meta dt {
   color: var(--text-kicker);
-  font-size: 9px;
+  font-size: var(--fs-micro);
   letter-spacing: 0.3px;
   text-transform: uppercase;
 }
@@ -2085,7 +2126,7 @@
   overflow: hidden;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2101,14 +2142,14 @@
   margin: 0;
   padding: 0;
   list-style: none;
-  gap: 2px;
+  gap: var(--space-1);
 }
 
 .si-run {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 2px 8px;
-  padding: 6px 0;
+  gap: var(--space-1) var(--space-4);
+  padding: var(--space-3) 0;
   border-bottom: 1px solid var(--line);
 }
 
@@ -2119,7 +2160,7 @@
 .si-run-status {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
   text-transform: lowercase;
 }
 
@@ -2139,7 +2180,7 @@
 .si-run-prompt {
   overflow: hidden;
   color: var(--text);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2148,14 +2189,14 @@
   grid-column: 2;
   color: var(--text-subtle);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
 }
 
 .si-error {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px;
+  gap: var(--space-4);
+  padding: var(--space-6);
   border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line-card));
   border-radius: var(--radius);
   background: var(--danger-bg);
@@ -2164,7 +2205,7 @@
 .si-error p {
   margin: 0;
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   line-height: 1.5;
 }
 

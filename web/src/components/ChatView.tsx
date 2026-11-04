@@ -11,7 +11,7 @@ import * as actions from '../state/actions';
 import * as terminalState from '../state/terminals';
 import { totalUsage } from '../state/selectors';
 import * as store from '../state/store';
-import { ChangesTab } from './ChangesTab';
+import { GitManager } from './git/GitManager';
 import { ChatTranscript } from './ChatTranscript';
 import { Composer } from './Composer';
 import { EmptyState } from './EmptyState';
@@ -90,7 +90,8 @@ function BranchChip({ onShowChanges }: { onShowChanges?: () => void }): JSX.Elem
         setBranch(status.is_repo ? status.branch : null);
       })
       .catch(() => {
-        // No chip when git is unavailable; ChangesTab owns the loud error.
+        // No chip when git is unavailable; the source-control manager owns the loud
+        // error.
       });
     return () => controller.abort();
   }, [projectId]);
@@ -209,7 +210,7 @@ function SessionHeader({
 
   const title =
     view === 'changes'
-      ? 'Review changes'
+      ? 'Source control'
       : view === 'terminal'
         ? 'Terminal'
         : session
@@ -339,7 +340,12 @@ function WorkspaceTabs({ view, onChange }: { view: WorkspaceView; onChange: (nex
   const changeCount = useChangeCount();
   const items: TabItem<WorkspaceView>[] = [
     { id: 'chat', label: 'Conversation', icon: <ChatIcon size={15} /> },
-    { id: 'changes', label: 'Changes', icon: <GitIcon size={15} />, count: changeCount ?? undefined },
+    {
+      id: 'changes',
+      label: 'Source control',
+      icon: <GitIcon size={15} />,
+      count: changeCount ?? undefined,
+    },
   ];
   // The terminal is only offered when the server has it enabled: hiding the tab
   // is the UI half of `KARUCODE_TERMINALS=0`.
@@ -610,16 +616,17 @@ export function ChatView({ emptyContent, mentionProjects }: ChatViewProps = {}):
 
         {changesMounted ? (
           <div
-            class="center-panel workspace-view"
+            class="center-panel workspace-view git-workspace"
             id="workspace-panel-changes"
             role="tabpanel"
             aria-labelledby="workspace-tab-changes"
             hidden={view !== 'changes'}
             tabIndex={0}
           >
-            {/* The page variant owns the mock's `.secondary-panel` chrome
-                (kicker, title, description, actions, change cards). */}
-            <ChangesTab variant="page" />
+            {/* The source-control manager owns the whole panel: its two regions
+                scroll independently, so the tabpanel itself is not a scroll host
+                (`.git-workspace` turns that off). */}
+            <GitManager variant="page" active={view === 'changes'} />
           </div>
         ) : null}
 

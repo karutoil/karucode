@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod approvals;
+pub mod artifacts;
 pub mod config;
 pub mod events;
 pub mod git;
@@ -147,8 +148,26 @@ pub fn api_router() -> Router<AppState> {
         // `./style.css` and `../logo.png` against this URL's path, so the path
         // has to be the workspace path. See `workspace::preview`.
         .route("/workspace/preview/*rest", get(workspace::preview))
+        // Chat artifacts: the isolated document a transcript renders a fenced
+        // block in. `POST` publishes the source (registered below with its own
+        // body limit), `GET` serves it as a page with its own policy — see
+        // `crate::artifacts`.
+        .route("/artifacts/:id", get(artifacts::get_artifact))
         .route("/git/status", get(git::status))
         .route("/git/diff", get(git::diff))
+        // The source-control manager: reads that describe the repository, then
+        // the local mutations. Nothing here touches the network (see
+        // `routes::git`), so there is no fetch/pull/push route.
+        .route("/git/branches", get(git::branches).post(git::create_branch))
+        .route("/git/branches/delete", post(git::delete_branch))
+        .route("/git/checkout", post(git::checkout))
+        .route("/git/log", get(git::log))
+        .route("/git/commits/:sha", get(git::commit_detail))
+        .route("/git/stage", post(git::stage))
+        .route("/git/unstage", post(git::unstage))
+        .route("/git/discard", post(git::discard))
+        .route("/git/commit", post(git::commit))
+        .route("/git/stash", get(git::stash_list).post(git::stash))
         .route(
             "/terminals",
             get(terminals::list_terminals).post(terminals::create_terminal),
@@ -182,9 +201,17 @@ pub fn api_router() -> Router<AppState> {
         .route("/workspace/file", axum::routing::put(workspace::write_file))
         .layer(DefaultBodyLimit::max(MAX_WRITE_BODY_BYTES));
 
+    // A chat artifact is up to 1 MiB of HTML with JSON escaping on top, so it
+    // needs its own transport limit for the same reason the editor does: the
+    // handler's 413 names the real limit, and a transport rejection does not.
+    let artifact_routes = Router::new()
+        .route("/artifacts", post(artifacts::create))
+        .layer(DefaultBodyLimit::max(artifacts::MAX_ARTIFACT_BODY_BYTES));
+
     json_routes
         .merge(upload_routes)
         .merge(write_routes)
+        .merge(artifact_routes)
         .fallback(api_not_found)
         // Outermost, so a transport-level rejection from *any* extractor is
         // rewritten into the documented JSON error shape.

@@ -29,14 +29,18 @@
   max-width: var(--content-max);
   margin: 0 auto;
   border: 1px solid var(--line-strong);
-  /* The mock's 15px, held locally: Theme Studio's rounding override list never
-   * reshapes the composer, and this file owns the value. */
-  --radius-composer: 15px;
+  /* Held locally so Theme Studio's rounding override list never reshapes the
+   * composer; the value itself is the scale's card radius (§3.4). */
+  --radius-composer: var(--radius);
   border-radius: var(--radius-composer);
-  /* Translucent so the transcript stays readable underneath. The fill keeps
-   * `--surface-input`'s own contrast in light and dark themes; `--dock-opacity`
-   * is the knob the scrolled state turns down (see below). */
-  background: color-mix(in srgb, var(--surface-input) calc(var(--dock-opacity, 100) * 1%), transparent);
+  /* Translucent so the transcript stays readable underneath. The fill is the
+   * ladder rung that is *nearer than the canvas* in both modes — `--surface`
+   * (Ember 12.9% vs a 5.5% canvas, Daybreak #ffffff vs #f6f4f1) — because this
+   * is a dock floating over the transcript, not a field painted on it. The input
+   * role it used before sits 8.8 points off the canvas in Ember but only 1.4 in
+   * Daybreak, where the box read as part of the page. `--dock-opacity` is the
+   * knob the scrolled state turns down (see below). */
+  background: color-mix(in srgb, var(--surface) calc(var(--dock-opacity, 100) * 1%), transparent);
   box-shadow:
     var(--shadow-composer),
     var(--shadow-dock),
@@ -51,6 +55,10 @@
 
 .composer:focus-within {
   border-color: var(--focus-input);
+  /* §5.6: the ring is the token, at the documented width and offset. It sits on
+   * the box because the box is the control a reader is in. */
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* ---------- scrolled away: step back so the text behind shows through ----------
@@ -108,20 +116,21 @@
   --compose-input-max: 170px;
   min-height: 35px;
   max-height: var(--compose-input-max);
-  padding: 12px 13px 3px;
+  padding: var(--space-6) var(--space-6) var(--space-2);
   overflow-y: auto;
   border: 0;
   background: transparent;
   color: var(--text);
   font-family: var(--font-ui);
   /* Fixed, like the mock — density no longer stretches the input's type. */
-  font-size: 13px;
+  font-size: var(--fs-body);
   line-height: 1.55;
   resize: none;
 }
 
 .composer-input:focus,
 .composer-input:focus-visible {
+  /* One ring per control: `.composer:focus-within` draws it around the dock. */
   outline: none;
   box-shadow: none;
 }
@@ -140,21 +149,21 @@
 .composer-attachments {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: var(--space-3);
   margin: 0;
-  padding: 6px 11px 1px 12px;
+  padding: var(--space-3) var(--space-6) var(--space-1) var(--space-6);
   list-style: none;
 }
 
 .attachment-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
   max-width: min(100%, 280px);
   min-height: 22px;
-  padding: 3px 5px 3px 7px;
+  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
   border: 1px solid var(--chip-line);
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   background: var(--chip-surface);
 }
 
@@ -162,7 +171,7 @@
   display: grid;
   flex: 0 0 auto;
   place-items: center;
-  color: var(--text-menu-meta);
+  color: var(--muted);
 }
 
 .attachment-chip[data-mode='inline'] .attachment-chip-icon {
@@ -180,22 +189,22 @@
   overflow: hidden;
   color: var(--chip-ink);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .attachment-chip-meta {
   overflow: hidden;
-  color: var(--text-menu-meta);
-  font-size: 9.5px;
+  color: var(--muted);
+  font-size: var(--fs-micro);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .attachment-chip-reading .attachment-chip-meta,
 .attachment-chip-uploading .attachment-chip-meta {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .attachment-chip-error {
@@ -216,7 +225,7 @@
   height: 16px;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--icon-pill-down);
   cursor: pointer;
@@ -228,7 +237,7 @@
 }
 
 .attachment-chip-remove:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: 0;
 }
 
@@ -239,18 +248,18 @@
  * one - and it has to look like the dock, not like a second box competing with
  * the composer. */
 .queued-panel {
-  margin-bottom: 6px;
-  padding: 7px 10px 8px;
+  margin-bottom: var(--space-3);
+  padding: var(--space-4) var(--space-5) var(--space-4);
   border: 1px solid var(--chip-line);
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   background: var(--chip-surface);
   pointer-events: auto;
 }
 
 .queued-head {
-  margin: 0 0 5px;
-  color: var(--text-menu-meta);
-  font-size: 9.5px;
+  margin: 0 0 var(--space-3);
+  color: var(--muted);
+  font-size: var(--fs-micro);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -266,7 +275,7 @@
 .queued-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -275,18 +284,18 @@
 .queued-row {
   display: flex;
   align-items: flex-start;
-  gap: 7px;
+  gap: var(--space-4);
   min-width: 0;
 }
 
 .queued-kind {
   flex: 0 0 auto;
-  padding: 1px 5px;
-  border-radius: 4px;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-xs);
   background: var(--accent-surface);
   color: var(--accent-text-soft);
-  font-size: 9px;
-  font-weight: 650;
+  font-size: var(--fs-micro);
+  font-weight: 660;
   letter-spacing: 0.03em;
   text-transform: uppercase;
   cursor: default;
@@ -296,14 +305,14 @@
  * one is changing the work in progress, the other is waiting its turn. */
 .queued-row[data-kind='follow_up'] .queued-kind {
   background: var(--surface-raised);
-  color: var(--text-menu-meta);
+  color: var(--muted);
 }
 
 .queued-body {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-2);
   min-width: 0;
 }
 
@@ -311,7 +320,7 @@
   display: -webkit-box;
   overflow: hidden;
   color: var(--chip-ink);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   line-height: 1.35;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -320,20 +329,20 @@
 .queued-attachments {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--space-2);
 }
 
 .queued-attachment {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   max-width: 220px;
-  padding: 1px 5px;
+  padding: var(--space-1) var(--space-3);
   border: 1px solid var(--chip-line);
-  border-radius: 4px;
-  color: var(--text-menu-meta);
+  border-radius: var(--radius-xs);
+  color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-micro);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -341,12 +350,12 @@
 
 .queued-recall {
   flex: 0 0 auto;
-  padding: 2px 7px;
+  padding: var(--space-1) var(--space-4);
   border: 1px solid var(--chip-line);
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   background: transparent;
-  color: var(--row-accent-ink);
-  font-size: 10px;
+  color: var(--accent-text);
+  font-size: var(--fs-micro);
   font-weight: 600;
   cursor: pointer;
 }
@@ -357,12 +366,12 @@
 }
 
 .queued-recall:disabled {
-  color: var(--text-menu-meta);
+  color: var(--muted);
   cursor: default;
 }
 
 .queued-recall:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: 0;
 }
 
@@ -375,38 +384,38 @@
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-1);
   height: 29px;
-  padding: 2px;
+  padding: var(--space-1);
   border: 1px solid var(--chip-line);
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: var(--chip-surface);
 }
 
 .queue-mode-option {
   height: 23px;
-  padding: 0 8px;
+  padding: 0 var(--space-4);
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   background: transparent;
-  color: var(--text-menu-meta);
-  font-size: 10px;
-  font-weight: 620;
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
 }
 
 .queue-mode-option:hover {
-  color: var(--row-accent-ink);
+  color: var(--accent-text);
 }
 
 .queue-mode-option[data-active='true'] {
   background: var(--surface-hover-strong);
-  color: var(--row-accent-ink);
+  color: var(--accent-text);
 }
 
 .queue-mode-option:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: 0;
 }
 
@@ -417,14 +426,14 @@
 .compose-bottom {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   min-height: 39px;
-  padding: 4px 7px 7px 8px;
+  padding: var(--space-2) var(--space-4) var(--space-4) var(--space-4);
 }
 
 /* `.cbar-left`: a tight cluster that clips before the right-hand controls. */
 .compose-bar-left {
-  gap: 3px;
+  gap: var(--space-2);
   overflow: hidden;
 }
 
@@ -437,7 +446,7 @@
   height: 24px;
   padding: 0;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -447,7 +456,7 @@
 }
 
 .compose-plus:hover:not(:disabled) {
-  background: var(--surface-2);
+  background: var(--surface-hover);
   color: var(--text);
 }
 
@@ -466,7 +475,7 @@
   display: flex;
   flex: 0 1 auto;
   align-items: center;
-  gap: 3px;
+  gap: var(--space-2);
   min-width: 0;
   padding: 0;
 }
@@ -475,22 +484,22 @@
  * bottom row reads as one line of quiet controls next to the Send button.
  * `.open` is identical to `:hover` in the mock — no accent outline. */
 .compose-bottom .model-switcher-button {
-  gap: 5px;
+  gap: var(--space-3);
   max-width: 230px;
   height: 23px;
-  padding: 0 7px;
+  padding: 0 var(--space-4);
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   font-weight: 500;
 }
 
 .compose-bottom .model-switcher-button:hover,
 .compose-bottom .model-switcher-button[aria-expanded='true'] {
   border-color: var(--line);
-  background: var(--surface-2);
+  background: var(--surface-hover);
   color: var(--text-2);
 }
 
@@ -501,7 +510,7 @@
 .compose-bottom .model-switcher-text {
   flex-direction: row;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-3);
   min-width: 0;
 }
 
@@ -516,7 +525,7 @@
   overflow: hidden;
   color: inherit;
   font-family: var(--font-ui);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -532,11 +541,11 @@
   max-width: none;
 }
 
-/* `.pill-divider`: 1×16 `--line-hair`, `margin:0 3px`, between the two pills. */
+/* `.pill-divider`: 1×16 `--line-soft`, `margin:0 3px`, between the two pills. */
 .compose-bottom .reasoning-selector {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .compose-bottom .reasoning-selector::before {
@@ -544,8 +553,8 @@
   flex: 0 0 auto;
   width: 1px;
   height: 16px;
-  margin: 0 3px;
-  background: var(--line-hair);
+  margin: 0 var(--space-2);
+  background: var(--line-soft);
 }
 
 .composer-spacer {
@@ -562,13 +571,11 @@
   height: 28px;
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   /* The deep accent fill, not `--accent` itself: in light mode the raw accent is
    * an ink (4.4:1 on white) and would fail as a button with light text on it. */
   background: var(--accent-fill);
   color: var(--on-accent);
-  box-shadow: 0 2px 10px rgb(0 0 0 / 25%);
-  font-size: 0;
   transition:
     background-color var(--transition-fast),
     transform var(--transition-fast),
@@ -586,7 +593,7 @@
 .button-send:disabled {
   border-color: transparent;
   background: var(--surface-3);
-  color: var(--faint);
+  color: var(--muted);
   box-shadow: none;
   opacity: 1;
   transform: none;
@@ -605,7 +612,7 @@
   height: 28px;
   padding: 0;
   border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--danger) 10%, transparent);
   color: var(--danger);
 }
@@ -614,8 +621,8 @@
   min-width: 0;
   width: auto;
   height: 28px;
-  padding: 0 9px;
-  font-size: 11px;
+  padding: 0 var(--space-5);
+  font-size: var(--fs-tiny);
   font-weight: 700;
 }
 
@@ -624,11 +631,11 @@
   display: inline-flex;
   align-items: center;
   height: 26px;
-  padding: 0 8px;
-  border-radius: 6px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-sm);
   color: var(--text-body);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   font-weight: 550;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -648,13 +655,13 @@
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
   height: 26px;
-  padding: 0 3px;
-  border-radius: 5px;
-  color: var(--faint);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
+  color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-micro);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -662,7 +669,7 @@
 }
 
 .context-pill:hover {
-  background: var(--surface-2);
+  background: var(--surface-hover);
   color: var(--text-2);
 }
 
@@ -674,14 +681,14 @@
   width: 34px;
   height: 3px;
   overflow: hidden;
-  border-radius: 999px;
-  background: var(--line-hair);
+  border-radius: var(--radius-pill);
+  background: var(--line-soft);
 }
 
 .context-pill-fill {
   display: block;
   height: 100%;
-  border-radius: inherit;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   transition: width var(--transition);
 }
@@ -717,8 +724,8 @@
   left: 16px;
   width: 250px;
   max-width: calc(100vw - 24px);
-  padding: 6px;
-  border: 1px solid var(--line-menu);
+  padding: var(--space-3);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   background: var(--surface-menu);
   box-shadow: var(--shadow-menu);
@@ -730,61 +737,64 @@
 }
 
 .compose-bottom .model-switcher-group + .model-switcher-group {
-  margin-top: 2px;
-  padding-top: 4px;
-  border-top: 1px solid var(--line-hair);
+  margin-top: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--line-soft);
 }
 
 .compose-bottom .model-switcher-group-title {
   margin: 0;
-  padding: 8px 9px 7px;
+  padding: var(--space-4) var(--space-5) var(--space-4);
   color: var(--text-menu-title);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.7px;
 }
 
 .compose-bottom .model-switcher-option {
-  padding: 10px;
-  border-radius: 6px;
+  padding: var(--space-5);
+  border-radius: var(--radius-sm);
   color: var(--text-menu-item);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
 }
 
+/* §5.4: hover is a surface step, selection is the accent tint. Both were
+ * `--row-accent-bg` + `--accent-text`, so the row the keyboard was on and the
+ * row the pointer was over looked identical. */
 .compose-bottom .model-switcher-option:hover,
 .compose-bottom .model-switcher-option:focus-visible {
-  background: var(--row-accent-bg);
-  color: var(--row-accent-ink);
+  background: var(--surface-hover);
+  color: var(--text);
 }
 
 .compose-bottom .model-switcher-option.is-active {
   background: var(--row-accent-bg);
-  color: var(--row-accent-ink);
+  color: var(--accent-text);
 }
 
 .compose-bottom .model-switcher-option-name {
-  font-size: 11px;
+  font-size: var(--fs-tiny);
 }
 
 .compose-bottom .model-switcher-option-id {
-  margin-top: 2px;
-  color: var(--text-menu-meta);
-  font-size: 10px;
+  margin-top: var(--space-1);
+  color: var(--muted);
+  font-size: var(--fs-micro);
 }
 
 .compose-bottom .model-switcher-option-meta {
-  font-size: 10px;
+  font-size: var(--fs-micro);
 }
 
 .compose-bottom .model-switcher-footer {
-  margin-top: 4px;
-  padding: 6px 9px 4px;
-  border-top: 1px solid var(--line-hair);
+  margin-top: var(--space-2);
+  padding: var(--space-3) var(--space-5) var(--space-2);
+  border-top: 1px solid var(--line-soft);
 }
 
 .compose-bottom .model-switcher-empty {
-  padding: 6px 9px 8px;
-  color: var(--text-menu-meta);
+  padding: var(--space-3) var(--space-5) var(--space-4);
+  color: var(--muted);
 }
 
 /* ---------- footnote: status + hints, approvals ---------- */
@@ -796,14 +806,14 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 6px 10px;
+  gap: var(--space-3) var(--space-5);
   width: 100%;
   max-width: var(--content-max);
-  margin: 6px auto 0;
-  padding: 6px 4px 0;
-  color: var(--faint);
+  margin: var(--space-3) auto 0;
+  padding: var(--space-3) var(--space-2) 0;
+  color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-micro);
   line-height: 1.5;
   /* Floating chrome: clickable, but the row itself must not swallow a wheel or
    * drag over the transcript behind it. */
@@ -817,7 +827,7 @@
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 14px;
+  gap: var(--space-2) var(--space-7);
   min-width: 0;
 }
 
@@ -825,11 +835,11 @@
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-3);
   min-height: 15px;
   min-width: 0;
-  color: var(--faint);
-  font-size: 9.5px;
+  color: var(--muted);
+  font-size: var(--fs-micro);
   text-align: left;
 }
 
@@ -838,7 +848,7 @@
 .composer-status.status-streaming,
 .composer-status.status-thinking,
 .composer-status.status-approval {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .composer-status.status-error {
@@ -847,34 +857,34 @@
 
 .composer-status .link-button {
   padding: 0;
-  font-size: 10px;
-  color: var(--accent);
+  font-size: var(--fs-micro);
+  color: var(--accent-text);
 }
 
 /* Plain text, no keycaps: the mock's foot reads `<strong>Ctrl Enter</strong> to
  * send · <strong>@</strong> mention files`. */
 .composer-hint {
-  color: var(--faint);
-  font-size: 9.5px;
+  color: var(--muted);
+  font-size: var(--fs-micro);
   white-space: normal;
 }
 
 /* The mock: `.composer-foot code { color: var(--muted) }`. */
 .composer-hint strong {
   color: var(--muted);
-  font-weight: 540;
+  font-weight: 550;
 }
 
 .composer-hint-sep {
-  margin: 0 7px;
+  margin: 0 var(--space-4);
 }
 
 .compose-approvals {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  color: var(--faint);
-  font-size: 9.5px;
+  gap: var(--space-3);
+  color: var(--muted);
+  font-size: var(--fs-micro);
   white-space: nowrap;
 }
 
@@ -887,7 +897,7 @@
   display: grid;
   place-items: center;
   border: 1px dashed var(--focus-input);
-  border-radius: inherit;
+  border-radius: var(--radius);
   background: color-mix(in srgb, var(--row-accent-bg) 78%, transparent);
   backdrop-filter: blur(2px);
   pointer-events: none;
@@ -896,9 +906,9 @@
 .composer-drop-inner {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  color: var(--row-accent-ink);
-  font-size: 11px;
+  gap: var(--space-4);
+  color: var(--accent-text);
+  font-size: var(--fs-tiny);
   font-weight: 550;
 }
 
@@ -924,7 +934,7 @@
   flex-direction: column;
   max-height: min(340px, 48dvh);
   overflow: hidden;
-  border: 1px solid var(--line-menu);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   background: var(--surface-menu);
   box-shadow: var(--shadow-menu);
@@ -947,10 +957,10 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 8px 9px 7px;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5) var(--space-4);
   color: var(--text-menu-title);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.7px;
   text-transform: uppercase;
@@ -958,9 +968,9 @@
 
 .mention-query {
   overflow: hidden;
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   text-overflow: ellipsis;
   text-transform: none;
   white-space: nowrap;
@@ -968,7 +978,7 @@
 
 .mention-note {
   margin: 0;
-  padding: 9px 10px;
+  padding: var(--space-5) var(--space-5);
   color: var(--muted);
   font-size: var(--fs-small);
   line-height: 1.5;
@@ -981,7 +991,7 @@
 .mention-list {
   min-height: 0;
   margin: 0;
-  padding: 0 6px 6px;
+  padding: 0 var(--space-3) var(--space-3);
   overflow-y: auto;
   list-style: none;
 }
@@ -989,24 +999,31 @@
 .mention-item {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 8px 10px;
-  border-radius: 6px;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-sm);
   color: var(--text-menu-item);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--fs-tiny);
+}
+
+/* The list is driven by `activeIndex`, which no pointer event moves, so without
+ * this the pointer got no feedback anywhere in the popover. Declared before
+ * `.is-active` so the selection tint still wins when both apply. */
+.mention-item:hover {
+  background: var(--surface-hover);
 }
 
 .mention-item.is-active {
   background: var(--row-accent-bg);
-  color: var(--row-accent-ink);
+  color: var(--accent-text);
 }
 
 .mention-icon {
   display: grid;
   flex: 0 0 auto;
   place-items: center;
-  color: var(--text-menu-meta);
+  color: var(--muted);
 }
 
 .mention-item.is-active .mention-icon {
@@ -1017,13 +1034,13 @@
   min-width: 0;
   overflow: hidden;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .mention-dir {
-  color: var(--text-menu-meta);
+  color: var(--muted);
 }
 
 .mention-item.is-active .mention-dir {
@@ -1037,9 +1054,9 @@
 
 .mention-kind {
   margin-left: auto;
-  padding-left: 8px;
-  color: var(--text-menu-meta);
-  font-size: 10px;
+  padding-left: var(--space-4);
+  color: var(--muted);
+  font-size: var(--fs-micro);
   letter-spacing: 0.04em;
 }
 
@@ -1051,11 +1068,11 @@
 .mention-foot {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
-  padding: 7px 10px 6px;
-  border-top: 1px solid var(--line-hair);
-  color: var(--foot-ink);
-  font-size: 10px;
+  gap: var(--space-2) var(--space-6);
+  padding: var(--space-4) var(--space-5) var(--space-3);
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: var(--fs-micro);
 }
 
 /* ---------- responsive ---------- */
@@ -1065,12 +1082,12 @@
 @media (max-width: 800px) {
   .compose-bottom {
     flex-wrap: wrap;
-    gap: 4px 5px;
+    gap: var(--space-2) var(--space-3);
   }
 
   .compose-bottom .composer-controls {
     flex-wrap: wrap;
-    gap: 4px 5px;
+    gap: var(--space-2) var(--space-3);
   }
 
   /* The mock swaps the divider for the row gap on narrow screens. */
@@ -1140,9 +1157,8 @@
     order: 2;
   }
 
-  .compose-foot {
-    font-size: 9px;
-  }
+  /* The footnote used to drop to 9px here to fit. It takes `--fs-micro` from
+   * the base rule instead: shrinking prose below the floor is the bug. */
 }
 
 /* Phones: below 16px iOS zooms the whole page on focus, so the mock's 12px is
@@ -1150,7 +1166,9 @@
  * wins over the shared `.composer-input` guard there. */
 @media (max-width: 640px) {
   .composer-input {
-    font-size: 16px;
+    /* 16px is the floor that stops iOS zooming the page on focus; it is the
+     * scale's `--fs-title`. */
+    font-size: var(--fs-title);
     /* The on-screen keyboard takes roughly half the viewport, and a 150px draft
      * then leaves the conversation a sliver. `max-height` beats the inline
      * `height` Composer.tsx sets, so lowering the cap here is enough — no
@@ -1168,10 +1186,6 @@
     display: none;
   }
 
-  .compose-foot {
-    font-size: 9.5px;
-  }
-
   /* Squeeze the pills before the row wraps: the pill is `padding + chevron +
    * label`, so the label cap alone is not enough. */
   .compose-bottom .model-switcher-button {
@@ -1186,14 +1200,16 @@
     max-width: 60px;
   }
 
+  /* 11px type in the same 44px cap truncated the label to "R…": the type has a
+   * floor, so the cap gets the room instead (§3.3). */
   .compose-bottom .reasoning-selector .model-switcher-model {
-    max-width: 44px;
+    max-width: 54px;
   }
 
   /* The meter is the first thing to go on a phone: the number still says
    * everything, and the row has to stay one line (see the pill caps above). */
   .context-pill {
-    padding: 0 4px;
+    padding: 0 var(--space-2);
   }
 
   .context-pill-meter {
@@ -1219,7 +1235,7 @@
   }
 
   .compose-bottom .reasoning-selector {
-    max-width: 78px;
+    max-width: 86px;
   }
 
   /* `flex-shrink: 0` on the buttons: the 28px send square must never be squeezed. */

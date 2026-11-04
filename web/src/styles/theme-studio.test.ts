@@ -33,8 +33,10 @@ describe('theme studio stylesheet fidelity', () => {
     // base.css tightens headings to 1.3; drawer headings stay on 1.5.
     expect(cssSource).toMatch(/\.theme-studio :is\(h1, h2, h3, h4\) \{\s*line-height: 1\.5;/);
     // The scrim dims the app (mock: #0007) instead of tinting it with --theme-bg.
-    expect(cssDeclarations('.theme-shade')['background']).toBe('var(--scrim)');
-    expect(cssDeclarations('.theme-shade')['backdrop-filter']).toBe('blur(3px)');
+    // One scrim and one blur for the whole overlay family, defined once in
+    // overlays.css and mode-derived there (DESIGN-AUDIT overlays B2).
+    expect(cssDeclarations('.theme-shade')['background']).toBe('var(--overlay-scrim)');
+    expect(cssDeclarations('.theme-shade')['backdrop-filter']).toBe('var(--overlay-blur)');
   });
 
   it('renders secondary copy with the muted role', () => {
@@ -57,91 +59,111 @@ describe('theme studio stylesheet fidelity', () => {
 
   it('matches the mock header and scroll geometry', () => {
     expect(cssDeclarations('.theme-studio')['width']).toBe('min(580px, calc(100% - 58px))');
-    expect(cssDeclarations('.theme-studio-top')['padding']).toBe('25px 28px 23px');
-    expect(cssDeclarations('.theme-studio-top')['gap']).toBe('14px');
-    expect(cssDeclarations('.theme-studio-title')['font-size']).toBe('24px');
-    expect(cssDeclarations('.theme-studio-title')['margin']).toBe('8px 0 3px');
-    expect(cssDeclarations('.theme-studio-subtitle')['font-size']).toBe('11.5px');
+    expect(cssDeclarations('.theme-studio-top')['padding']).toBe(
+      'var(--space-9) var(--space-10) var(--space-9)',
+    );
+    expect(cssDeclarations('.theme-studio-top')['gap']).toBe('var(--space-7)');
+    expect(cssDeclarations('.theme-studio-title')['font-size']).toBe('var(--fs-hero)');
+    expect(cssDeclarations('.theme-studio-title')['margin']).toBe('var(--space-4) 0 var(--space-2)');
+    expect(cssDeclarations('.theme-studio-subtitle')['font-size']).toBe('var(--fs-small)');
     expect(cssDeclarations('.theme-close')['width']).toBe('31px');
     expect(cssDeclarations('.theme-close')['height']).toBe('31px');
 
-    expect(cssDeclarations('.theme-studio-scroll')['padding']).toBe('0 28px 27px');
-    expect(cssDeclarations('.theme-section')['padding']).toBe('23px 0 24px');
-    expect(cssDeclarations('.theme-section-title')['margin-bottom']).toBe('6px');
-    expect(cssDeclarations('.theme-description')['margin']).toBe('0 0 15px');
-    expect(cssDeclarations('.theme-description')['font-size']).toBe('11px');
+    expect(cssDeclarations('.theme-studio-scroll')['padding']).toBe(
+      '0 var(--space-10) var(--space-9)',
+    );
+    expect(cssDeclarations('.theme-section')['padding']).toBe(
+      'var(--space-9) 0 var(--space-9)',
+    );
+    expect(cssDeclarations('.theme-section-title')['margin-bottom']).toBe('var(--space-3)');
+    expect(cssDeclarations('.theme-description')['margin']).toBe('0 0 var(--space-7)');
+    expect(cssDeclarations('.theme-description')['font-size']).toBe('var(--fs-tiny)');
   });
 
   it('matches the mock gallery geometry', () => {
     expect(cssDeclarations('.theme-gallery')['grid-template-columns']).toBe(
       'repeat(2, minmax(0, 1fr))',
     );
-    expect(cssDeclarations('.theme-gallery')['gap']).toBe('10px');
-    expect(cssDeclarations('.theme-preset')['padding']).toBe('9px');
-    expect(cssDeclarations('.theme-preset')['border-radius']).toBe('11px');
+    expect(cssDeclarations('.theme-gallery')['gap']).toBe('var(--space-5)');
+    expect(cssDeclarations('.theme-preset')['padding']).toBe('var(--space-5)');
+    expect(cssDeclarations('.theme-preset')['border-radius']).toBe('var(--radius)');
     expect(cssDeclarations('.theme-preset-demo')['height']).toBe('62px');
     expect(cssDeclarations('.theme-mini-rail')['width']).toBe('12%');
     expect(cssDeclarations('.theme-mini-sidebar')['width']).toBe('24%');
     expect(cssDeclarations('.theme-mini-accent')['left']).toBe('43%');
     expect(cssDeclarations('.theme-mini-accent')['height']).toBe('7px');
-    expect(cssDeclarations('.theme-preset-meta')['padding']).toBe('9px 2px 2px');
-    expect(cssDeclarations('.theme-preset-name')['font-size']).toBe('11.5px');
+    expect(cssDeclarations('.theme-preset-meta')['padding']).toBe(
+      'var(--space-5) var(--space-1) var(--space-1)',
+    );
+    expect(cssDeclarations('.theme-preset-name')['font-size']).toBe('var(--fs-small)');
   });
 
   it('matches the mock colour-cell geometry', () => {
     expect(cssDeclarations('.theme-colors')['grid-template-columns']).toBe(
       'repeat(2, minmax(0, 1fr))',
     );
-    expect(cssDeclarations('.theme-colors')['gap']).toBe('10px');
-    expect(cssDeclarations('.theme-color-cell')['padding']).toBe('9px 10px');
-    expect(cssDeclarations('.theme-color-cell')['gap']).toBe('10px');
+    expect(cssDeclarations('.theme-colors')['gap']).toBe('var(--space-5)');
+    expect(cssDeclarations('.theme-color-cell')['padding']).toBe(
+      'var(--space-5) var(--space-5)',
+    );
+    expect(cssDeclarations('.theme-color-cell')['gap']).toBe('var(--space-5)');
     expect(cssDeclarations('.theme-color-swatch')['width']).toBe('31px');
     expect(cssDeclarations('.theme-color-swatch')['height']).toBe('31px');
-    expect(cssDeclarations('.theme-color-name')['font-size']).toBe('10px');
+    expect(cssDeclarations('.theme-color-name')['font-size']).toBe('var(--fs-tiny)');
     // The label stays inline (mock), which keeps the two-line 59px cell.
     expect(cssDeclarations('.theme-color-name')['display']).toBeUndefined();
     expect(cssDeclarations('.theme-color-info')['overflow']).toBe('hidden');
     // The mock uses the `font` shorthand for the hex field.
-    expect(cssDeclarations('.theme-color-hex')['font']).toBe('10px var(--font-mono)');
+    expect(cssDeclarations('.theme-color-hex')['font']).toBe('var(--fs-tiny) var(--font-mono)');
   });
 
   it('matches the mock interface (typography controls) geometry', () => {
     expect(cssDeclarations('.theme-setting-grid')['grid-template-columns']).toBe(
       'repeat(2, minmax(0, 1fr))',
     );
-    expect(cssDeclarations('.theme-setting-grid')['gap']).toBe('12px');
-    expect(cssDeclarations('.theme-field-label')['font-size']).toBe('10.5px');
-    expect(cssDeclarations('.theme-field-label')['margin-bottom']).toBe('8px');
-    expect(cssSource).toMatch(/\.theme-studio select,\s*\.theme-name-input \{[^}]*padding: 10px;/);
-    expect(cssSource).toMatch(/\.theme-studio select,\s*\.theme-name-input \{[^}]*font-size: 11px;/);
-    expect(cssSource).toMatch(/\.theme-studio select,\s*\.theme-name-input \{[^}]*border-radius: 8px;/);
-    expect(cssDeclarations('.theme-segments')['padding']).toBe('3px');
-    expect(cssDeclarations('.theme-segment')['padding']).toBe('7px');
-    expect(cssDeclarations('.theme-range-row')['margin-top']).toBe('15px');
-    expect(cssDeclarations('.theme-range-row')['gap']).toBe('13px');
+    expect(cssDeclarations('.theme-setting-grid')['gap']).toBe('var(--space-6)');
+    expect(cssDeclarations('.theme-field-label')['font-size']).toBe('var(--fs-tiny)');
+    expect(cssDeclarations('.theme-field-label')['margin-bottom']).toBe('var(--space-4)');
+    expect(cssSource).toMatch(
+      /\.theme-studio select,\s*\.theme-name-input \{[^}]*padding: var\(--space-5\);/,
+    );
+    expect(cssSource).toMatch(
+      /\.theme-studio select,\s*\.theme-name-input \{[^}]*font-size: var\(--fs-tiny\);/,
+    );
+    expect(cssSource).toMatch(
+      /\.theme-studio select,\s*\.theme-name-input \{[^}]*border-radius: var\(--radius-md\);/,
+    );
+    expect(cssDeclarations('.theme-segments')['padding']).toBe('var(--space-2)');
+    expect(cssDeclarations('.theme-segment')['padding']).toBe('var(--space-4)');
+    expect(cssDeclarations('.theme-range-row')['margin-top']).toBe('var(--space-7)');
+    expect(cssDeclarations('.theme-range-row')['gap']).toBe('var(--space-6)');
     expect(cssDeclarations('.theme-range-label')['width']).toBe('90px');
     expect(cssDeclarations('.theme-range-value')['min-width']).toBe('31px');
   });
 
   it('matches the mock advanced-customization geometry', () => {
-    expect(cssDeclarations('.theme-advanced')['border-radius']).toBe('9px');
-    expect(cssDeclarations('.theme-advanced summary')['padding']).toBe('13px');
+    expect(cssDeclarations('.theme-advanced')['border-radius']).toBe('var(--radius)');
+    expect(cssDeclarations('.theme-advanced summary')['padding']).toBe('var(--space-6)');
     expect(cssDeclarations('.theme-advanced summary svg')['color']).toBe('var(--muted)');
-    expect(cssDeclarations('.theme-advanced-content')['padding']).toBe('14px');
+    expect(cssDeclarations('.theme-advanced-content')['padding']).toBe('var(--space-7)');
     expect(cssDeclarations('.theme-code-editor')['min-height']).toBe('120px');
     expect(cssDeclarations('.theme-code-editor')['max-height']).toBe('250px');
-    expect(cssDeclarations('.theme-advanced-actions')['margin-top']).toBe('10px');
+    expect(cssDeclarations('.theme-advanced-actions')['margin-top']).toBe('var(--space-5)');
   });
 
   it('matches the mock footer geometry and button set', () => {
-    expect(cssDeclarations('.theme-studio-foot')['padding']).toBe('15px 28px 19px');
-    expect(cssDeclarations('.theme-studio-foot-top')['margin-bottom']).toBe('11px');
-    expect(cssDeclarations('.theme-autosave')['font-size']).toBe('10.5px');
+    expect(cssDeclarations('.theme-studio-foot')['padding']).toBe(
+      'var(--space-7) var(--space-10) var(--space-8)',
+    );
+    expect(cssDeclarations('.theme-studio-foot-top')['margin-bottom']).toBe('var(--space-6)');
+    expect(cssDeclarations('.theme-autosave')['font-size']).toBe('var(--fs-tiny)');
     expect(cssDeclarations('.theme-autosave .theme-dot')['width']).toBe('6px');
-    expect(cssDeclarations('.theme-foot-buttons')['gap']).toBe('8px');
-    expect(cssDeclarations('.theme-btn')['padding']).toBe('10px 12px');
-    expect(cssDeclarations('.theme-btn')['border-radius']).toBe('8px');
-    expect(cssDeclarations('.theme-btn')['font-size']).toBe('11px');
+    expect(cssDeclarations('.theme-foot-buttons')['gap']).toBe('var(--space-4)');
+    expect(cssDeclarations('.theme-btn')['padding']).toBe(
+      'var(--space-5) var(--space-6)',
+    );
+    expect(cssDeclarations('.theme-btn')['border-radius']).toBe('var(--radius-md)');
+    expect(cssDeclarations('.theme-btn')['font-size']).toBe('var(--fs-tiny)');
     expect(cssDeclarations('.theme-foot-buttons .spacer')['margin-left']).toBe('auto');
     // No square icon-button variant: the mock's delete action is a normal button.
     expect(cssSource).not.toContain('.theme-btn.icon-only');

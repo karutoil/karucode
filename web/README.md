@@ -52,13 +52,14 @@ src/
   api/        typed client, endpoint functions, fetch-based SSE stream, API types
   state/      signals store, pure event reducer, session→transcript seeding, actions
   components/ rail, sidebar, transcript, cards, inspector tabs, composer,
-              Theme Studio, settings, dialogs, states
+              Theme Studio, settings, dialogs, states; git/ is the source-control
+              manager
   theme/      theme engine, built-in palettes, colour maths, storage/import/export
   lib/        markdown+DOMPurify, highlight.js registry, diff parser, format, focus,
               @-mention index and ranking, attachment classification/formatting,
               dock-height measuring for the floating composer
-  styles/     tokens, base, layout, rail, chat, composer, inspector, overlays,
-              settings, theme-studio
+  styles/     tokens, base, layout, rail, chat, composer, inspector, git,
+              overlays, settings, theme-studio
   test/       jsdom setup, fixtures, smoke render
 ```
 
@@ -111,6 +112,65 @@ uploaded to `.karucode/attachments/<session>/` with
 owns the limits (8 MiB, single path segment, no overwrite) and the UI mirrors
 them before making a request.
 
+## Chat artifacts
+
+A fenced block in a reply can be drawn as **live content** instead of code: an
+HTML mock, an SVG, a Mermaid diagram, a rendered Markdown document, pretty-printed
+JSON, a CSV/TSV table, or an image. The user-facing convention (and what an agent
+should write) is the `artifacts` topic in `karucode_docs`; this section is how the
+renderer is put together.
+
+```
+lib/artifacts.ts             pure parser: fence info string + `---` header block -> ArtifactSpec
+lib/markdown.ts              renderMarkdownDocument(): the same markdown-it+DOMPurify
+                             pipeline, but a recognised fence becomes an empty
+                             `<div class="artifact-slot" data-artifact-index=N>`
+components/Markdown.tsx      fills those slots with a card (preact `render()` into each
+                             element - see below)
+components/ArtifactCard.tsx  the card: head (kind, title, Preview/Source, copy,
+                             download, expand) plus one renderer per kind
+lib/artifactPreview.ts       POST the source once per (source, theme); remember the id
+lib/mermaid.ts               the only runtime dependency added: a dynamic `import()`
+```
+
+**Why the cards are mounted, not rendered.** The prose and the fences arrive as one
+HTML string (that is what markdown-it produces), so the renderer leaves a
+placeholder per artifact and `Markdown` calls Preact's `render()` into each
+placeholder once the DOM exists. Preact ignores the children of a
+`dangerouslySetInnerHTML` element, which is what makes the string and the component
+tree safe to mix this way; re-tokenising the Markdown to interleave components
+would mean rendering every message twice.
+
+**Each kind is drawn at the isolation it deserves.**
+
+| Kind | How | Why |
+| --- | --- | --- |
+| HTML | a real document at `/api/artifacts/<id>` in `<iframe sandbox="allow-scripts">` | `srcdoc` inherits this app's CSP (`default-src 'self'`) *and* runs in an opaque origin where `'self'` matches nothing, so its inline `<style>`, `<script>` and relative assets are all refused - measured in Chromium, the preview came up nearly blank |
+| SVG | sanitised by DOMPurify, drawn inline in a **shadow root** | an SVG can carry a `<style>` whose selectors apply to the whole document; the shadow root keeps its CSS to itself in both directions |
+| Mermaid | rendered by mermaid (`securityLevel: 'strict'`, `htmlLabels: false`), then sanitised again | `htmlLabels: true` wraps labels in `foreignObject`, which the sanitiser removes - the diagram then renders as empty boxes |
+| Markdown | the chat's own renderer | one sanitiser, one look |
+| JSON, CSV/TSV, image | first-party components over parsed data | a table is DOM nodes, not markup |
+
+**Streaming.** `ChatTranscript` passes `artifacts={!item.streaming}`. markdown-it
+closes a fence at the end of its input, so without that a half-written mock would
+paint a frame, reload it and relayout the transcript on every token; cards appear
+when the message settles.
+
+**Sizing.** The served document carries one injected script that posts its own
+content height to the parent; the card clamps it (80-720px) and sizes the frame.
+Without it a small mock sat in a fixed 420px letterbox. A complete document keeps
+its own CSS - the reporter is the only thing added to it.
+
+**Cost.** The main bundle grows by ~5.5 KB gzipped (parser, card, previews).
+Mermaid is *not* in it: `lib/mermaid.ts` is the only module that imports it, by
+`import()`, so it arrives as its own chunk on the first diagram in a transcript -
+about 153 KB gzipped for the core plus ~20 KB per diagram type - and a chat with no
+diagram never downloads it.
+
+`scripts/verify_artifacts.py` is the proof that none of this is only in theory: it
+drives a real Chromium against a real server and measures the frame, the served
+policy, the SVG, the diagram, the table, both themes and a 390px viewport.
+
 The API client is the only place that knows about headers/JSON/errors. The event
 stream is a standalone function so reconnect/dedupe can be tested with a fake
 `fetch`. The reducer (`state/eventReducer.ts`) is pure and ignores unknown event
@@ -138,12 +198,23 @@ Agents tab).
 - Themes: eight built-in palettes, live editing of 18 colours, dark/light mode,
   three densities, interface/code fonts, corner radius, custom CSS, contrast
   readout, save/delete/import/export and per-browser persistence.
-- Workspace tabs: Conversation, and Changes rendered full width from the same
-  git data as the inspector (no terminal view — the server has no shell API).
+- Workspace tabs: Conversation, Source control (the git manager, full width) and
+  Terminal when the server enables it.
 - Sessions: client-side session search (`/`), sessions grouped by day, running
   and failure state.
-- Inspector: Files / Changes / Session / Agents tabs, lazy file tree, and the
-  file viewer (below), git status/diff with a branch footer, a Session tab with
+- Source control: the git manager in two shapes — the full-width workspace tab
+  (change list beside the patch, history below it) and the inspector's Git tab
+  (one column, patch inline). Files are grouped into Merge changes / Staged /
+  Changes / Untracked, each row and each group stages, unstages and discards, the
+  commit box commits or amends (`Ctrl/Cmd+Enter`, `stage_all` when nothing is
+  staged), the branch chip opens a filter/create/switch/delete dialog, and the
+  history shows commits with their files and patch. Progress and errors are real:
+  every mutation returns the fresh status, destructive actions ask first, and
+  fetch/pull/push stay in the terminal. `components/git/` holds the pieces
+  (`GitManager`, `GitChanges`, `GitCommitBox`, `GitHistory`, `GitDiffPane`,
+  `GitBranchDialog`, `useGitRepo`, pure `gitModel`), styled by `styles/git.css`.
+- Inspector: Files / Git / Session / Agents tabs, lazy file tree, and the
+  file viewer (below), a Session tab with
   the session's counts and token totals (context fill, input/output/cached with
   a cache hit rate, prompts vs turns vs model calls vs tool calls, runs and
   working time, per-subagent usage, recent runs), and an Agents console

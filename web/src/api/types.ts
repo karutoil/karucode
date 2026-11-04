@@ -998,22 +998,141 @@ export interface WorkspaceFileWrite {
   language: string | null;
 }
 
+/**
+ * One entry of `GET /api/git/status`.
+ *
+ * `index`/`worktree` are the two porcelain columns: a file can be staged *and*
+ * modified at once (`MM`), which is why both flags are reported instead of a
+ * single `staged` bit. `status` keeps the older trimmed form (`M`, `MM`, `??`)
+ * for anything that only wants one label.
+ */
 export interface GitFile {
   path: string;
+  /** Source path of a rename/copy, when git reports one. */
+  orig_path?: string | null;
+  /** Index column: `M`, `A`, `D`, `R`, `C`, `?`, or a space. */
+  index: string;
+  /** Worktree column, same alphabet. */
+  worktree: string;
   status: string;
+  /** There is something in the index for this path. */
   staged: boolean;
+  /** The working tree differs from the index (or the file is untracked). */
+  unstaged?: boolean;
+  untracked?: boolean;
+  /** An unresolved merge conflict. */
+  conflict?: boolean;
 }
 
 export interface GitStatus {
   is_repo: boolean;
   branch: string | null;
+  /** A detached HEAD has no branch name. */
+  detached?: boolean;
+  /** `origin/main` when the branch tracks an upstream. */
+  upstream?: string | null;
+  ahead?: number;
+  behind?: number;
   error: string | null;
   files: GitFile[];
+  /** The server cut the listing at its output limit. */
+  truncated?: boolean;
 }
 
 export interface GitDiff {
   diff: string;
   truncated: boolean;
+}
+
+/** One local branch from `GET /api/git/branches`. */
+export interface GitBranch {
+  name: string;
+  current: boolean;
+  commit: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  /** Committer date, seconds since the epoch. */
+  timestamp: number;
+  subject: string;
+}
+
+export interface GitBranchList {
+  is_repo: boolean;
+  branch: string | null;
+  detached: boolean;
+  branches: GitBranch[];
+  truncated: boolean;
+}
+
+/** One commit from `GET /api/git/log`. */
+export interface GitCommit {
+  id: string;
+  short_id: string;
+  author: string;
+  email: string;
+  /** Author date, seconds since the epoch. */
+  timestamp: number;
+  parents: string[];
+  /** `HEAD -> main, origin/main` as git decorates it. */
+  refs: string;
+  subject: string;
+}
+
+export interface GitCommitList {
+  is_repo: boolean;
+  commits: GitCommit[];
+  truncated?: boolean;
+}
+
+/** One entry of a commit's file list (`--numstat`). */
+export interface GitCommitFile {
+  path: string;
+  /** `null` for a binary file, where git prints `-`. */
+  additions: number | null;
+  deletions: number | null;
+  binary: boolean;
+}
+
+export interface GitCommitDetail {
+  id: string;
+  short_id: string;
+  author: string;
+  email: string;
+  timestamp: number;
+  parents: string[];
+  refs: string;
+  subject: string;
+  body: string;
+  files: GitCommitFile[];
+  diff: string;
+  truncated: boolean;
+}
+
+export interface GitStash {
+  ref: string;
+  index: number;
+  commit: string;
+  timestamp: number;
+  subject: string;
+}
+
+export interface GitStashList {
+  is_repo: boolean;
+  stashes: GitStash[];
+  truncated?: boolean;
+}
+
+/**
+ * Every mutating git route answers with the same envelope: the action's own
+ * message, a freshly read status (so the panel never shows a stale tree) and,
+ * for `POST /api/git/commit`, the new revision.
+ */
+export interface GitMutationResult {
+  ok: boolean;
+  message: string | null;
+  status: GitStatus;
+  commit: { id: string; short_id: string; subject: string } | null;
 }
 
 export interface PluginToolSpec {
@@ -1358,3 +1477,30 @@ export type TerminalControlFrame =
   | { type: 'detached' }
   | { type: 'error'; message: string }
   | { type: 'pong' };
+
+/**
+ * `POST /api/artifacts` — publish one chat artifact's source.
+ *
+ * `html` is the artifact body with its fence metadata already stripped; a
+ * fragment is wrapped into a document server-side. `theme` only picks which way
+ * the wrapper's own background/foreground defaults go (`light` when omitted).
+ */
+export interface ArtifactCreateRequest {
+  html: string;
+  theme?: 'light' | 'dark';
+}
+
+/**
+ * `201` response of `POST /api/artifacts`.
+ *
+ * `id` is the content hash the document is stored under, and `url` is what an
+ * `<iframe>` loads. Both are stable for the same source and theme, so a client
+ * can post freely without tracking what it has already published.
+ */
+export interface ArtifactCreateResponse {
+  id: string;
+  url: string;
+  /** Bytes of the wrapped document that will be served. */
+  bytes: number;
+  theme: 'light' | 'dark';
+}

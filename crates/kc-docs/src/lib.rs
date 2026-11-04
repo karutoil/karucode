@@ -111,6 +111,7 @@ include!(concat!(env!("OUT_DIR"), "/generated_docs.rs"));
 /// instead of silently dropping a capability's documentation.
 pub const REQUIRED_SLUGS: &[&str] = &[
     "approvals",
+    "artifacts",
     "builtin-tools",
     "central-control",
     "configuration",

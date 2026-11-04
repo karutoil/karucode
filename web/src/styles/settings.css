@@ -30,8 +30,8 @@
 .settings-loading {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 22px 23px;
+  gap: var(--space-6);
+  padding: var(--space-9) var(--space-9);
 }
 
 .skeleton-setting-row {
@@ -53,8 +53,8 @@
 .settings-tabs {
   display: flex;
   flex: 0 0 auto;
-  gap: 2px;
-  padding: 0 15px;
+  gap: var(--space-1);
+  padding: 0 var(--space-7);
   border-bottom: 1px solid var(--line);
   overflow-x: auto;
   overflow-y: hidden;
@@ -68,13 +68,13 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: var(--space-3);
   /* Grow to share the row, but never shrink below the label: on a narrow sheet
    * the strip scrolls instead of overlapping its labels. */
   flex: 1 0 max-content;
   min-width: 0;
   height: 40px;
-  padding: 0 10px;
+  padding: 0 var(--space-5);
   border: 0;
   background: transparent;
   color: var(--muted);
@@ -104,13 +104,13 @@
   bottom: 0;
   left: 8px;
   height: 2px;
-  border-radius: 3px 3px 0 0;
+  border-radius: var(--radius-xs) var(--radius-xs) 0 0;
   background: var(--accent);
 }
 
 .settings-tab:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -3px;
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-offset));
   border-radius: var(--radius-sm);
 }
 
@@ -125,7 +125,7 @@
 .settings-panels > .tab-panel {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 0 23px;
+  padding: 0 var(--space-9);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -139,13 +139,23 @@
 }
 
 
+/* The panel is `tabindex="0"` so a keyboard user can scroll it, and it runs flush
+ * to the sheet's right edge inside an `overflow: hidden` shell — a 2px ring with
+ * a 2px offset was clipped there. Draw it inside instead. */
+.settings-panels > .tab-panel:focus-visible {
+  outline-offset: calc(-1 * var(--focus-ring-offset));
+}
+
 /* ---------- sections --------------------------------------------------- */
 
 .settings-section {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 20px 0 22px;
+  gap: var(--space-7);
+  /* One vertical rhythm for the whole sheet: --space-9 above a section, --space-8
+   * below it (44px between two sections). The disclosure bodies used to run their
+   * own 29px/36px rhythms, so the same job had three answers (M3). */
+  padding: var(--space-9) 0 var(--space-8);
   border-bottom: 1px solid var(--line);
 }
 
@@ -157,13 +167,13 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-5);
   flex-wrap: wrap;
 }
 
 .settings-section-head h3 {
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--fs-lead);
   font-weight: 700;
   letter-spacing: -0.15px;
   line-height: 1.35;
@@ -172,7 +182,7 @@
 
 .settings-section-note {
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   line-height: 1.55;
 }
 
@@ -180,7 +190,7 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px 12px;
+  gap: var(--space-4) var(--space-6);
 }
 
 /* A single "name + hint on the left, control on the right" row, as in the mock. */
@@ -188,9 +198,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 15px;
-  padding: 15px 0;
-  border-top: 1px solid var(--line-card);
+  gap: var(--space-7);
+  padding: var(--space-7) 0;
+  border-top: 1px solid var(--line);
 }
 
 /*
@@ -201,15 +211,15 @@
 .setting-row-stack {
   align-items: stretch;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-5);
 }
 
 .toggle-group {
   display: grid;
-  gap: 9px;
-  padding: 2px 0 2px 2px;
-  border-left: 2px solid var(--line-card);
-  padding-left: 12px;
+  gap: var(--space-5);
+  padding: var(--space-1) 0 var(--space-1) var(--space-1);
+  border-left: 2px solid var(--line);
+  padding-left: var(--space-6);
 }
 
 /* A sub-heading inside one settings section (server routing vs this browser). */
@@ -217,15 +227,15 @@
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: 4px 10px;
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid var(--line-card);
+  gap: var(--space-2) var(--space-5);
+  /* The same 24px step the sections use; the rule is gone with the extra
+   * padding that used to make a third rhythm (M3). */
+  margin-top: var(--space-9);
 }
 
 .settings-subhead h4 {
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-weight: 700;
   line-height: 1.4;
 }
@@ -246,31 +256,31 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .cue-buttons .panel-action-btn {
-  padding: 7px 10px;
-  font-size: 10.5px;
+  padding: var(--space-4) var(--space-5);
+  font-size: var(--fs-tiny);
 }
 
 .setting-copy {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
   min-width: 0;
 }
 
 .setting-name {
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-weight: 600;
   line-height: 1.4;
 }
 
 .setting-hint {
   color: var(--meta-text);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
@@ -279,14 +289,17 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: var(--space-4);
   flex: 0 0 auto;
-  padding: 9px 12px;
+  /* One control height: 32px, the same as `.input`. It measured 37px against the
+   * input's 32 and `.button`'s 30, so no two controls in a row lined up (M3). */
+  height: var(--space-10);
+  padding: 0 var(--space-6);
   border: 1px solid var(--btn-accent-line);
   border-radius: var(--radius);
   background: var(--accent-bg);
   color: var(--accent-text-soft);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   white-space: nowrap;
   transition:
     background-color var(--transition-fast),
@@ -308,18 +321,18 @@
 .field-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 13px 16px;
+  gap: var(--space-6) var(--space-7);
 }
 
 .field-grid-compact {
-  gap: 11px 16px;
+  gap: var(--space-6) var(--space-7);
 }
 
 .field,
 .list-editor {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-3);
   min-width: 0;
 }
 
@@ -335,28 +348,28 @@
 
 .field-label {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   font-weight: 600;
   line-height: 1.4;
 }
 
 .field-hint {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
 
 .field-error {
   color: var(--danger);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.5;
 }
 
 .api-key-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .api-key-row .input {
@@ -372,7 +385,7 @@
   flex-direction: row;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .clear-key-row .field-hint {
@@ -383,20 +396,20 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: var(--space-5);
 }
 
 .test-result {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  padding: 9px 11px;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface-raised);
   color: var(--text-secondary);
-  font-size: 11.5px;
+  font-size: var(--fs-small);
 }
 
 .test-result strong {
@@ -425,7 +438,7 @@
   flex-basis: 100%;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
@@ -433,27 +446,27 @@
 .test-error {
   flex-basis: 100%;
   color: var(--danger);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   overflow-wrap: anywhere;
 }
 
 /* ---------- list editor ------------------------------------------------ */
 
 .list-editor {
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .chip-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: var(--space-3);
   list-style: none;
 }
 
 .chip-removable {
-  gap: 3px;
+  gap: var(--space-2);
   height: 22px;
-  padding: 0 3px 0 6px;
+  padding: 0 var(--space-2) 0 var(--space-3);
 }
 
 .chip-remove {
@@ -462,10 +475,10 @@
   width: 16px;
   height: 16px;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--fs-body);
   line-height: 1;
 }
 
@@ -476,7 +489,7 @@
 
 .list-editor-add {
   display: flex;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .list-editor-add .input {
@@ -490,7 +503,7 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-6);
   width: 100%;
 }
 
@@ -500,11 +513,16 @@
   order: 2;
   width: 36px;
   height: 21px;
-  margin-top: 1px;
+  margin-top: var(--space-1);
   padding: 0;
-  border: 1px solid transparent;
+  /* Was a transparent border and a 1.4:1 track: the off state had no boundary.
+   * `--line-strong` fixed the tint but not the boundary — measured, it is
+   * 1.27:1 against Daybreak's sheet and 1.37:1 in Ember, so the off switch still
+   * had no edge. `--muted` is the quietest tone that clears 3:1 in both modes
+   * (5.0 light / 5.8 dark) and the fill stays on `--line-strong`. */
+  border: 1px solid var(--muted);
   border-radius: var(--radius-pill);
-  background: var(--toggle-track);
+  background: var(--line-strong);
   cursor: pointer;
   transition:
     background-color var(--transition-fast),
@@ -518,18 +536,24 @@
   width: 15px;
   height: 15px;
   border-radius: 50%;
-  background: var(--toggle-knob);
+  background: var(--muted);
   transition:
     transform var(--transition-fast),
     background-color var(--transition-fast);
 }
 
+/* The on state is an accent fill, so it borrows the accent's own edge rather
+ * than keeping the neutral outline around an amber pill. */
 .toggle.is-on {
+  border-color: var(--toggle-on-track);
   background: var(--toggle-on-track);
 }
 
+/* The knob sits *on* an accent fill, so it takes the documented ink for that
+ * fill. `--toggle-on-knob` is accent-hi on accent: measured 1.12:1 in Ember, so
+ * the thumb dissolved into the track and "on" read as a plain amber pill. */
 .toggle.is-on .toggle-knob {
-  background: var(--toggle-on-knob);
+  background: var(--on-accent);
   transform: translateX(15px);
 }
 
@@ -541,19 +565,19 @@
 .toggle-label {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-2);
   order: 1;
   flex: 1 1 auto;
   min-width: 0;
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-weight: 600;
   line-height: 1.4;
 }
 
 .toggle-description {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   font-weight: 400;
   line-height: 1.55;
 }
@@ -563,16 +587,16 @@
 .providers-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-6);
 }
 
 .provider-card {
   display: flex;
   flex-direction: column;
-  gap: 11px;
+  gap: var(--space-6);
   min-width: 0;
-  padding: 13px 14px;
-  border: 1px solid var(--line-card);
+  padding: var(--space-6) var(--space-7);
+  border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface-raised);
 }
@@ -584,7 +608,7 @@
 .provider-card-head {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: var(--space-4);
   min-width: 0;
 }
 
@@ -592,32 +616,32 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 7px;
+  gap: var(--space-4);
   min-width: 0;
 }
 
 .provider-name {
   color: var(--text);
   font-family: var(--font-ui);
-  font-size: 12.5px;
-  font-weight: 650;
+  font-size: var(--fs-message);
+  font-weight: 660;
   overflow-wrap: anywhere;
 }
 
 .provider-id {
-  padding: 1px 5px;
+  padding: var(--space-1) var(--space-3);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--surface);
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   overflow-wrap: anywhere;
 }
 
 .provider-badge {
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: var(--tracking-kicker);
 }
 
 .provider-card-title .chip svg {
@@ -628,9 +652,9 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 7px;
+  gap: var(--space-4);
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   min-width: 0;
 }
 
@@ -639,28 +663,28 @@
   max-width: 100%;
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .provider-count {
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   white-space: nowrap;
 }
 
 .provider-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .provider-key-editor {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 10px 11px;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-6);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface);
@@ -669,7 +693,7 @@
 .provider-key-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .provider-key-row .input {
@@ -682,7 +706,7 @@
 .model-library {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: var(--space-4);
   min-width: 0;
 }
 
@@ -690,13 +714,13 @@
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: 6px 10px;
+  gap: var(--space-3) var(--space-5);
 }
 
 .model-list {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-3);
   list-style: none;
 }
 
@@ -704,8 +728,8 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 5px 10px;
-  padding: 7px 9px;
+  gap: var(--space-3) var(--space-5);
+  padding: var(--space-4) var(--space-5);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface);
@@ -715,20 +739,20 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-3);
   min-width: 0;
 }
 
 .model-name {
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-label);
   overflow-wrap: anywhere;
 }
 
 .model-id {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   overflow-wrap: anywhere;
 }
 
@@ -737,28 +761,28 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: var(--space-3);
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
 .model-actions {
   display: flex;
-  gap: 5px;
+  gap: var(--space-3);
   justify-self: end;
 }
 
 .model-add {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-3);
 }
 
 .model-add-row {
   display: flex;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .model-add-row .input {
@@ -771,9 +795,9 @@
 .provider-add {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-top: 4px;
-  padding: 13px 14px;
+  gap: var(--space-6);
+  margin-top: var(--space-2);
+  padding: var(--space-6) var(--space-7);
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius);
   background: var(--surface-raised);
@@ -781,16 +805,16 @@
 
 .provider-add-title {
   color: var(--muted);
-  font-size: 10px;
-  font-weight: 710;
-  letter-spacing: 0.9px;
+  font-size: var(--fs-micro);
+  font-weight: var(--weight-kicker);
+  letter-spacing: var(--tracking-kicker);
   text-transform: uppercase;
 }
 
 .provider-add-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 /* ---------- models.dev picker ----------------------------------------- */
@@ -801,18 +825,18 @@
 
 .dialog-model-edit > .field-hint {
   margin: 0;
-  padding: 14px 22px 0;
+  padding: var(--space-7) var(--space-9) 0;
 }
 
 .dialog-model-edit > .field-grid {
   min-height: 0;
-  padding: 14px 22px 0;
+  padding: var(--space-7) var(--space-9) 0;
   overflow-y: auto;
 }
 
 .dialog-model-edit > .dialog-actions {
   margin: 0;
-  padding: 16px 22px 18px;
+  padding: var(--space-7) var(--space-9) var(--space-8);
 }
 
 .dialog-catalog {
@@ -823,9 +847,9 @@
 .catalog-body {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-5);
   min-height: 0;
-  padding: 14px 16px 0;
+  padding: var(--space-7) var(--space-7) 0;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -833,7 +857,7 @@
 .catalog-stage {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: var(--space-5);
   min-height: 0;
 }
 
@@ -841,27 +865,27 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .catalog-models-head {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .catalog-models-provider {
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   overflow-wrap: anywhere;
 }
 
 .catalog-provider-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
   list-style: none;
 }
 
@@ -869,9 +893,9 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-4);
   width: 100%;
-  padding: 9px 10px;
+  padding: var(--space-5) var(--space-5);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface-raised);
@@ -888,28 +912,28 @@
 }
 
 .catalog-provider-name {
-  font-size: 12px;
+  font-size: var(--fs-label);
   overflow-wrap: anywhere;
 }
 
 .catalog-provider-id {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   overflow-wrap: anywhere;
 }
 
 .catalog-count {
   margin-left: auto;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   white-space: nowrap;
 }
 
 .catalog-model-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
   list-style: none;
 }
 
@@ -927,8 +951,8 @@
   display: flex;
   align-items: flex-start;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
   cursor: pointer;
 }
 
@@ -936,7 +960,7 @@
   flex: 0 0 auto;
   width: 14px;
   height: 14px;
-  margin: 2px 0 0;
+  margin: var(--space-1) 0 0;
   accent-color: var(--accent);
 }
 
@@ -947,34 +971,34 @@
 .catalog-model-text {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: var(--space-1);
   min-width: 0;
   flex: 1 1 180px;
 }
 
 .catalog-model-name {
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-label);
   overflow-wrap: anywhere;
 }
 
 .catalog-model-id {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   overflow-wrap: anywhere;
 }
 
 .catalog-model-meta {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
 .catalog-notice {
   color: var(--warn);
-  font-size: 10.5px;
+  font-size: var(--fs-tiny);
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
@@ -982,7 +1006,7 @@
 .catalog-skeletons {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
 }
 
 .catalog-skeleton {
@@ -996,15 +1020,15 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 10px 0 12px;
+  gap: var(--space-4);
+  padding: var(--space-5) 0 var(--space-6);
   border-top: 1px solid var(--line);
   background: var(--surface);
 }
 
 .catalog-footer-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--space-4);
   margin-left: auto;
 }
 
@@ -1013,20 +1037,20 @@
 .diagnostics-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  gap: var(--space-7);
 }
 
 .diagnostics-block {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-3);
   min-width: 0;
 }
 
 .diagnostics-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
   list-style: none;
 }
 
@@ -1034,8 +1058,8 @@
   display: grid;
   grid-template-columns: 8px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
-  padding: 7px 9px;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface-raised);
@@ -1045,29 +1069,30 @@
   overflow: hidden;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .diagnostics-status {
   color: var(--muted);
-  font-size: 9.5px;
-  letter-spacing: 0.04em;
+  font-size: var(--fs-micro);
+  font-weight: var(--weight-kicker);
+  letter-spacing: var(--tracking-kicker);
   text-transform: uppercase;
 }
 
 .diagnostics-meta {
   grid-column: 2 / -1;
   color: var(--muted);
-  font-size: 9.5px;
+  font-size: var(--fs-tiny);
   line-height: 1.5;
 }
 
 .diagnostics-error {
   grid-column: 2 / -1;
   color: var(--danger);
-  font-size: 10px;
+  font-size: var(--fs-tiny);
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -1078,15 +1103,15 @@
   display: flex;
   grid-column: 2 / -1;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-3);
   justify-content: flex-end;
 }
 
 /* ---------- security note --------------------------------------------- */
 
 .security-note {
-  margin: 20px 0 0;
-  padding: 13px 14px;
+  margin: var(--space-8) 0 0;
+  padding: var(--space-6) var(--space-7);
   border: 1px solid color-mix(in srgb, var(--danger) 26%, transparent);
   border-left: 2px solid var(--danger);
   border-radius: var(--radius-sm);
@@ -1096,29 +1121,29 @@
 .security-note h3 {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 7px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
   color: var(--danger);
-  font-size: 11px;
-  font-weight: 620;
-  letter-spacing: 0.07em;
+  font-size: var(--fs-micro);
+  font-weight: var(--weight-kicker);
+  letter-spacing: var(--tracking-kicker);
   text-transform: uppercase;
 }
 
 .security-note p {
   color: var(--text-secondary);
-  font-size: 11.5px;
+  font-size: var(--fs-small);
   line-height: 1.65;
 }
 
 .security-note p + p {
-  margin-top: 7px;
+  margin-top: var(--space-4);
 }
 
 .security-note code {
-  padding: 1px 4px;
+  padding: var(--space-1) var(--space-2);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--surface);
   font-size: 0.9em;
 }
@@ -1129,7 +1154,12 @@
  * tabs is that the common settings fit without scrolling, and a timeouts block
  * would refill that screen for everyone to spare a click for a few. */
 .settings-advanced {
-  margin: 20px 0 0;
+  /* The disclosure bleeds out by exactly the inset its body carries, so the
+   * controls *inside* it share the panel's gutter and line up with the controls
+   * outside it. Before this, two selects in the same column ended 13px apart
+   * (1427 vs 1413 in the audit) because the box was inset 24px by the panel and
+   * then 12px again by its own body (M3). */
+  margin: var(--space-8) calc(-1 * var(--space-6)) 0;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -1140,8 +1170,8 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px 10px;
-  padding: 11px 13px;
+  gap: var(--space-2) var(--space-5);
+  padding: var(--space-6) var(--space-6);
   cursor: pointer;
   list-style: none;
   transition: background-color var(--transition-fast);
@@ -1156,17 +1186,17 @@
 }
 
 .settings-advanced summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
 .settings-advanced-label {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
   color: var(--text);
   font-size: var(--fs-small);
-  font-weight: 650;
+  font-weight: 660;
 }
 
 .settings-advanced-label svg {
@@ -1181,7 +1211,7 @@
 
 .settings-advanced-note {
   color: var(--muted);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   line-height: 1.5;
 }
 
@@ -1191,29 +1221,32 @@
 
 /* Inset to the summary's own gutter, because the contents are full settings
  * sections: they bring their own vertical rhythm but no horizontal padding, so
- * without this their labels sit flush against the disclosure's border. */
+ * without this their labels sit flush against the disclosure's border. The
+ * gutter is the value the block above bleeds out by. */
 .settings-advanced-body {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 0 13px 6px;
+  gap: var(--space-1);
+  padding: 0 var(--space-6) var(--space-3);
 }
 
 /* Inside a disclosure the section is the only thing on screen, so the divider
  * that separates sections elsewhere has nothing to separate. */
+/* Sections in the fold keep the sheet's own rhythm: one answer to "how far apart
+ * are two sections", whether or not a disclosure is open (M3). */
 .settings-advanced-body > .settings-section {
-  padding-bottom: 14px;
+  padding-bottom: var(--space-8);
 }
 
 .settings-advanced-body > .settings-section:first-child {
-  padding-top: 14px;
+  padding-top: var(--space-9);
 }
 
 .settings-advanced-help {
   margin: 0;
-  padding: 0 0 4px;
+  padding: 0 0 var(--space-2);
   color: var(--muted);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   line-height: 1.55;
 }
 
@@ -1231,10 +1264,10 @@
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 8px 12px;
-  padding: 13px 23px;
+  gap: var(--space-4) var(--space-6);
+  padding: var(--space-6) var(--space-9);
   border-top: 1px solid var(--line);
-  background: var(--sidebar);
+  background: transparent;
 }
 
 /* The error summary takes the row when it is there, so the buttons stay put
@@ -1243,10 +1276,10 @@
   display: flex;
   align-items: center;
   flex: 1 1 auto;
-  gap: 6px;
+  gap: var(--space-3);
   min-width: 0;
   color: var(--danger);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   line-height: 1.5;
 }
 
@@ -1257,11 +1290,15 @@
 .settings-footer-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
   margin-left: auto;
 }
 
+/* One control height in the sheet: every field, panel action and footer button
+ * is 32px. The footer pair were `.button`'s 30px, so the two things the user
+ * commits with sat 2px shorter than the controls they just edited. */
 .settings-footer .button {
+  height: var(--space-10);
   min-width: 96px;
 }
 
@@ -1269,17 +1306,18 @@
 
 @media (max-width: 600px) {
   .settings-tabs {
-    padding: 0 10px;
+    padding: 0 var(--space-5);
   }
 
   .settings-tab {
+    /* Geometry, not rhythm: the phone strip keeps its own compact height. */
     height: 38px;
-    padding: 0 8px;
-    font-size: var(--fs-micro);
+    padding: 0 var(--space-4);
+    font-size: var(--fs-tiny);
   }
 
   .settings-panels > .tab-panel {
-    padding: 0 16px;
+    padding: 0 var(--space-7);
   }
 
   .field-grid {
@@ -1296,8 +1334,8 @@
 
   .settings-footer {
     padding-bottom: calc(13px + env(safe-area-inset-bottom, 0px));
-    padding-right: 16px;
-    padding-left: 16px;
+    padding-right: var(--space-7);
+    padding-left: var(--space-7);
   }
 
   .settings-error-summary {
@@ -1350,6 +1388,7 @@
 @media (prefers-reduced-motion: reduce) {
   .toggle,
   .toggle-knob,
+  .settings-advanced-label svg,
   .panel-action-btn {
     transition: none;
   }

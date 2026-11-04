@@ -265,7 +265,14 @@
 // The full operator guide — reverse proxy, backups, container deployment, the
 // hardening rationale — is `packaging/README.md`.
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    kc_server::run().await
+fn main() -> anyhow::Result<()> {
+    // Before the runtime, and therefore before any worker thread exists: a glibc
+    // arena is created on a thread's first allocation, so capping the count after
+    // the workers have started would leave the arenas they already made. See
+    // `kc_server::memory` for what this buys and how it was measured.
+    kc_server::memory::tune_allocator();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(kc_server::run())
 }

@@ -5,6 +5,7 @@ import { Terminal as XTerm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import type { Terminal } from '../api/types';
 import { toErrorMessage } from '../api/client';
+import { contrastRatio, mix, normalizeHex } from '../theme';
 import * as terminalsState from '../state/terminals';
 import { TerminalSocket, type TerminalSocketStatus } from '../state/terminalSocket';
 import { RefreshIcon } from './icons';
@@ -66,7 +67,8 @@ function getInstance(id: string): { term: XTerm; fit: FitAddon } {
     convertEol: false,
     fontFamily:
       'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
-    fontSize: 13,
+    // Read from the type scale so a density change moves the shell too.
+    fontSize: terminalFontSize(),
     lineHeight: 1.25,
     theme: terminalTheme(),
     allowProposedApi: true,
@@ -83,6 +85,20 @@ function getInstance(id: string): { term: XTerm; fit: FitAddon } {
  * are resolved once per surface. A theme change while the tab is open repaints
  * on the next mount; a live theme switch does not need to retint a shell.
  */
+/**
+ * The cell size, from the type scale rather than a magic number.
+ *
+ * xterm measures glyphs in CSS pixels, so a density change has to reach it
+ * explicitly. `--fs-body` is the 13px step the shell uses for prose, which keeps
+ * a shell's text the same size as the app's.
+ */
+function terminalFontSize(): number {
+  if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return 13;
+  const value = window.getComputedStyle(document.documentElement).getPropertyValue('--fs-body').trim();
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 13;
+}
+
 function terminalTheme(): Record<string, string> {
   const read = (name: string, fallback: string): string => {
     if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') {
@@ -94,22 +110,63 @@ function terminalTheme(): Record<string, string> {
       .trim();
     return value || fallback;
   };
-  const background = read('--surface-sunken', read('--bg', '#16181d'));
+  // The canvas xterm paints on is `.terminal-surface`'s `--bg-sunken`. Reading a
+  // different token (`--surface-sunken`, which is a *line* tone) left the emulator
+  // believing its background was one colour while the CSS painted another, so
+  // selection, erase and the contrast maths inside xterm all used the wrong one.
+  const background = read('--bg-sunken', read('--bg', '#16181d'));
   const foreground = read('--text', '#d7dbe3');
+  // The ANSI ramp is *derived from this theme*, never written by hand. It used to
+  // map `blue` to `--accent`, so in Ember an amber accent painted `ls` in amber —
+  // colour 4 was not blue. `magenta` and `cyan` were the Tokyo Night hexes from
+  // an unrelated palette, and `black` read `--ink-secondary`, which does not
+  // exist, so every program that used colour 0 was invisible.
+  const danger = read('--danger', '#f7768e');
+  const success = read('--success', '#9ece6a');
+  const warn = read('--warn', '#e0af68');
+  const info = read('--info', '#7aa2f7');
+  const muted = read('--muted', '#8b92a1');
+  const lighten = (colour: string, amount = 0.28): string => mix(colour, foreground, amount);
+  // Colour 0 is a *foreground*, so "readable" is a property of the theme rather
+  // than a constant blend. 22% of the ink over Ember's near-black canvas is a mid
+  // grey at 4.4:1 (fine); the same 22% over Daybreak's near-white canvas is a pale
+  // grey at 1.74:1 (invisible) - which is the same defect the fixed blend was
+  // introduced to fix, just in the other mode. Walk the blend up until it clears
+  // the §4 4.5:1 floor, so one formula is right in every theme.
+  const readable = (ink: string, floor = 4.5): string => {
+    if (!normalizeHex(background) || !normalizeHex(ink)) return mix(background, ink, 0.22);
+    for (let amount = 0.2; amount < 0.95; amount += 0.05) {
+      const candidate = mix(background, ink, amount);
+      if (contrastRatio(candidate, background) >= floor) return candidate;
+    }
+    return mix(background, ink, 0.95);
+  };
   return {
     background,
     foreground,
     cursor: read('--accent', '#7aa2f7'),
     cursorAccent: background,
     selectionBackground: read('--surface-hover', 'rgba(122,162,247,0.25)'),
-    black: read('--ink-secondary', '#414868'),
-    red: read('--danger', '#f7768e'),
-    green: read('--success', '#9ece6a'),
-    yellow: read('--warning', '#e0af68'),
-    blue: read('--accent', '#7aa2f7'),
-    magenta: '#bb9af7',
-    cyan: '#7dcfff',
+    // Colour 0 is a foreground, so it must clear the background: a true black
+    // measured 2.08:1 on a dark canvas, and a fixed blend measured 1.74:1 on a
+    // light one. `readable()` is the only version that is right in both.
+    black: readable(foreground),
+    red: danger,
+    green: success,
+    yellow: warn,
+    // Colour 4 is blue. `--info` is the palette's blue; the accent is not.
+    blue: info,
+    magenta: mix(danger, info, 0.5),
+    cyan: mix(info, success, 0.5),
     white: foreground,
+    brightBlack: muted,
+    brightRed: lighten(danger),
+    brightGreen: lighten(success),
+    brightYellow: lighten(warn),
+    brightBlue: lighten(info),
+    brightMagenta: lighten(mix(danger, info, 0.5)),
+    brightCyan: lighten(mix(info, success, 0.5)),
+    brightWhite: lighten(foreground, 0.5),
   };
 }
 

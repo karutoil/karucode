@@ -6,6 +6,8 @@ import type {
   AgentSummary,
   ApprovalDecision,
   ApprovalRecord,
+  ArtifactCreateRequest,
+  ArtifactCreateResponse,
   AttachmentUploadRequest,
   AttachmentUploadResponse,
   CatalogLookupResponse,
@@ -13,6 +15,11 @@ import type {
   Config,
   ConfigPatch,
   GitDiff,
+  GitBranchList,
+  GitCommitDetail,
+  GitCommitList,
+  GitMutationResult,
+  GitStashList,
   GitStatus,
   Health,
   McpServer,
@@ -538,6 +545,44 @@ export function workspacePreviewUrl(path: string, project?: string | null): stri
   return `/api/workspace/preview/${encoded}${query}`;
 }
 
+/**
+ * Publish one chat artifact and get back the URL that renders it.
+ *
+ * `POST /api/artifacts` takes the artifact's source (HTML or a fragment of it,
+ * already stripped of any fence metadata) and answers the id and URL of a stored
+ * document. It is content-addressed, so posting the same artifact again - every
+ * page load, every re-render - is one entry, and the id is stable.
+ *
+ * The `theme` decides which way the wrapper's own defaults go for a *fragment*:
+ * the card passes the app's mode so a dark transcript does not get a white
+ * rectangle. A complete document (one with its own `<html>`) is served verbatim
+ * and ignores it.
+ */
+export function createArtifact(
+  body: ArtifactCreateRequest,
+  options: CallOptions = {},
+): Promise<ArtifactCreateResponse> {
+  return apiRequest<ArtifactCreateResponse>('/api/artifacts', {
+    ...options,
+    method: 'POST',
+    body,
+  });
+}
+
+/**
+ * URL an `<iframe>` loads for a stored artifact (`GET /api/artifacts/<id>`).
+ *
+ * The token rides in the query string for the same reason the SSE stream's does:
+ * an `<iframe src>` is a browser navigation that cannot carry an `Authorization`
+ * header, so a token-protected deployment would otherwise render an empty frame.
+ * The id is a content hash of markup the caller has already published, so the
+ * URL grants nothing new.
+ */
+export function artifactFrameUrl(id: string, token?: string | null): string {
+  const query = token ? `?${new URLSearchParams({ token }).toString()}` : '';
+  return `/api/artifacts/${encodeURIComponent(id)}${query}`;
+}
+
 /** Scope for an upload: the session owns the directory, the project the root. */
 export interface UploadAttachmentParams {
   session: string;
@@ -599,6 +644,166 @@ export function getGitDiff(
       project: project ?? undefined,
     }),
     options,
+  );
+}
+
+/** Local branches, newest commit first, with their upstream tracking counts. */
+export function getGitBranches(
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<GitBranchList> {
+  return apiRequest<GitBranchList>(
+    withQuery('/api/git/branches', { project: project ?? undefined }),
+    options,
+  );
+}
+
+/**
+ * Commit history, newest first. `path` narrows it to one file's history and
+ * `limit` is clamped by the server (1-100, default 30).
+ */
+export function getGitLog(
+  project?: string | null,
+  options: CallOptions & { path?: string; limit?: number } = {},
+): Promise<GitCommitList> {
+  return apiRequest<GitCommitList>(
+    withQuery('/api/git/log', {
+      project: project ?? undefined,
+      path: options.path,
+      limit: options.limit,
+    }),
+    options,
+  );
+}
+
+/** One commit: metadata, its file stat and its patch. `sha` may be abbreviated. */
+export function getGitCommit(
+  sha: string,
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<GitCommitDetail> {
+  return apiRequest<GitCommitDetail>(
+    withQuery(`/api/git/commits/${encodeURIComponent(sha)}`, {
+      project: project ?? undefined,
+    }),
+    options,
+  );
+}
+
+export function getGitStashes(
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<GitStashList> {
+  return apiRequest<GitStashList>(
+    withQuery('/api/git/stash', { project: project ?? undefined }),
+    options,
+  );
+}
+
+/**
+ * Stage paths (or the whole workspace with `all`).
+ *
+ * Every mutation below returns the same envelope: a message, the fresh status and
+ * - for a commit - the new revision, so the panel can update from one response.
+ */
+export function stageGitPaths(
+  body: { paths?: string[]; all?: boolean },
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<GitMutationResult> {
+  return apiRequest<GitMutationResult>(
+    withQuery('/api/git/stage', { project: project ?? undefined }),
+    { ...options, method: 'POST', body },
+  );
+}
+
+export function unstageGitPaths(
+  body: { paths?: string[]; all?: boolean },
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<GitMutationResult> {
+  return apiRequest<GitMutationResult>(
+    withQuery('/api/git/unstage', { project: project ?? undefined }),
+    { ...options, method: 'POST', body },
+  );
+}
+
+/**
+ * Throw away changes. `confirm: true` is required by the server: discarding
+ * overwrites the working tree and deletes an untracked file, and neither can be
+ * undone here.
+ */
+export function discardGitPaths(
+  body: { paths?: string[]; all?: boolean; staged?: boolean; confirm: true },
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<GitMutationResult> {
+  return apiRequest<GitMutationResult>(
+    withQuery('/api/git/discard', { project: project ?? undefined }),
+    { ...options, method: 'POST', body },
+  );
+}
+
+export function commitGitChanges(
+  body: { message: string; amend?: boolean; stage_all?: boolean },
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<GitMutationResult> {
+  return apiRequest<GitMutationResult>(
+    withQuery('/api/git/commit', { project: project ?? undefined }),
+    { ...options, method: 'POST', body },
+  );
+}
+
+export function createGitBranch(
+  body: { name: string; start?: string; checkout?: boolean },
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<GitMutationResult> {
+  return apiRequest<GitMutationResult>(
+    withQuery('/api/git/branches', { project: project ?? undefined }),
+    { ...options, method: 'POST', body },
+  );
+}
+
+export function checkoutGitBranch(
+  name: string,
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<GitMutationResult> {
+  return apiRequest<GitMutationResult>(
+    withQuery('/api/git/checkout', { project: project ?? undefined }),
+    { ...options, method: 'POST', body: { name } },
+  );
+}
+
+export function deleteGitBranch(
+  body: { name: string; force?: boolean; confirm?: boolean },
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<GitMutationResult> {
+  return apiRequest<GitMutationResult>(
+    withQuery('/api/git/branches/delete', { project: project ?? undefined }),
+    { ...options, method: 'POST', body },
+  );
+}
+
+export type GitStashAction = 'push' | 'pop' | 'apply' | 'drop';
+
+export function runGitStash(
+  body: {
+    action: GitStashAction;
+    index?: number;
+    message?: string;
+    include_untracked?: boolean;
+    confirm?: boolean;
+  },
+  project?: string | null,
+  options: CallOptions = {},
+): Promise<GitMutationResult> {
+  return apiRequest<GitMutationResult>(
+    withQuery('/api/git/stash', { project: project ?? undefined }),
+    { ...options, method: 'POST', body },
   );
 }
 

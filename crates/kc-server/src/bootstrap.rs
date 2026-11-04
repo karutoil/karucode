@@ -679,6 +679,29 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         });
     }
 
+    // Hand freed heap back to the kernel, so a burst of plugin JSON, a long
+    // transcript or a wide diff does not stay resident for the life of the
+    // process. The walk runs off the async workers, and a trim that releases
+    // nothing is a no-op - `KARUCODE_MALLOC_TRIM_SECS=0` turns it off. See
+    // `memory.rs` for the measurements behind both knobs.
+    if let Some(every) = crate::memory::trim_interval() {
+        let token = state.shutdown_token();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => return,
+                    _ = tokio::time::sleep(every) => {}
+                }
+                let released = tokio::task::spawn_blocking(crate::memory::trim_now)
+                    .await
+                    .unwrap_or(false);
+                if released {
+                    tracing::debug!("returned free heap to the kernel");
+                }
+            }
+        });
+    }
+
     // Bind after the wiring so the startup summary can report real tool/plugin
     // counts, but stop any child processes if the port is taken.
     let listener = match bind(&config).await {

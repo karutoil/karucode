@@ -1,0 +1,1223 @@
+/* Source control — the git manager.
+ *
+ * Two variants share one language:
+ *   `.gitm-page`   the full-width workspace view: a change list beside the patch,
+ *                  each region scrolling on its own (VS Code's SCM + editor);
+ *   `.gitm-panel`  the inspector tab: one column, patch inline below the list.
+ *
+ * Visual contract, carried over from the v3 mock's inspector:
+ *   - rows are separated by hairlines, not packed into cards;
+ *   - the only raised surfaces are the commit box, the selected row and the
+ *     badge fills;
+ *   - a file's status is a letter *and* a word, never colour alone.
+ *
+ * Every colour is a token so the Theme Studio repaints this file too; no raw hex
+ * values live here. Sizing follows the --fs- and --space- scales where it fits.
+ * (Never write a slash-star inside a comment here: the pair closes it early.)
+ */
+
+.gitm {
+  --gitm-side-w: 306px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  color: var(--text);
+}
+
+/* ---------- page shell ------------------------------------------------- */
+
+/* The workspace tabpanel stops being the scroll host for this view: the manager
+ * has two regions and each owns its own scrollbar. */
+.git-workspace {
+  overflow: hidden;
+}
+
+.gitm-page {
+  height: 100%;
+  min-height: 0;
+}
+
+.gitm-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-7);
+  padding: var(--space-7) 20px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.gitm-head-titles {
+  min-width: 0;
+}
+
+.gitm-kicker {
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.gitm-head-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  min-width: 0;
+  margin-top: var(--space-2);
+}
+
+.gitm-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-title);
+  font-weight: 620;
+  letter-spacing: -0.01em;
+}
+
+.gitm-desc {
+  margin: var(--space-2) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+}
+
+.gitm-head-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-5);
+}
+
+.gitm-chips {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.gitm-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.gitm-chip.is-staged {
+  border-color: color-mix(in srgb, var(--success) 38%, transparent);
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.gitm-chip.is-changes {
+  border-color: color-mix(in srgb, var(--warn) 32%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--warn);
+}
+
+.gitm-chip.is-conflict {
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.gitm-chip.is-clean {
+  border-color: color-mix(in srgb, var(--success) 32%, transparent);
+  color: var(--success);
+}
+
+.gitm-chip.is-untracked {
+  border-color: color-mix(in srgb, var(--info) 32%, transparent);
+  background: color-mix(in srgb, var(--info) 10%, transparent);
+  color: var(--info);
+}
+
+/* ---------- body ------------------------------------------------------- */
+
+.gitm-body {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(268px, var(--gitm-side-w)) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.gitm-side {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--line-soft);
+}
+
+.gitm-side-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-bottom: var(--space-4);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.gitm-main {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+/* ---------- branch chip ------------------------------------------------ */
+
+.gitm-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: 100%;
+  height: 28px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    border-color var(--transition-fast),
+    background var(--transition-fast);
+}
+
+.gitm-branch:hover {
+  border-color: var(--accent-line);
+  background: var(--surface-raised);
+}
+
+.gitm-branch:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.gitm-branch-glyph {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--accent);
+}
+
+.gitm-branch-label {
+  overflow: hidden;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gitm-branch-track {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.gitm-branch-chevron {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--faint);
+}
+
+/* ---------- commit box ------------------------------------------------- */
+
+.gitm-commit {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-6) var(--space-6) var(--space-5);
+  border-bottom: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+
+.gitm-message {
+  width: 100%;
+  min-height: 60px;
+  max-height: 38vh;
+  padding: var(--space-4) var(--space-5);
+  resize: vertical;
+  border: 1px solid var(--line-input);
+  border-radius: var(--radius-sm);
+  background: var(--surface-input);
+  color: var(--input-ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+}
+
+.gitm-message::placeholder {
+  color: var(--input-placeholder);
+}
+
+.gitm-message:focus-visible {
+  border-color: var(--focus-input);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.gitm-commit-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.gitm-amend {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.gitm-amend input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.gitm-commit-btn {
+  flex: 1 1 auto;
+  height: 31px;
+  margin-left: auto;
+  padding: 0 var(--space-6);
+  border: 1px solid var(--accent-fill);
+  border-radius: var(--radius-sm);
+  background: var(--accent-fill);
+  color: var(--on-accent);
+  font-family: inherit;
+  font-size: var(--fs-small);
+  font-weight: 660;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.gitm-commit-btn:hover:not(:disabled) {
+  border-color: var(--accent-hi);
+  background: var(--accent-hi);
+}
+
+.gitm-commit-btn:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.gitm-commit-btn:disabled {
+  border-color: var(--line-strong);
+  background: var(--surface-raised);
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+.gitm-commit-hint {
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+  line-height: 1.45;
+}
+
+/* ---------- groups ----------------------------------------------------- */
+
+.gitm-changes {
+  display: flex;
+  flex-direction: column;
+}
+
+.gitm-group {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.gitm-group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 33px;
+  padding: 0 var(--space-3) 0 var(--space-2);
+}
+
+.gitm-group-toggle {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  height: 100%;
+  padding: 0 var(--space-2);
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--fs-micro);
+  font-weight: 640;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.gitm-group-toggle:hover {
+  color: var(--text);
+}
+
+.gitm-group-toggle:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
+}
+
+.gitm-group-chevron {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 14px;
+  color: var(--faint);
+}
+
+.gitm-group-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gitm-group-count {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  min-width: 17px;
+  height: 16px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-size: var(--fs-tiny);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+.gitm-group-note {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.gitm-group-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: var(--space-1);
+  opacity: 0.5;
+  transition: opacity var(--transition-fast);
+}
+
+.gitm-group:hover .gitm-group-actions,
+.gitm-group:focus-within .gitm-group-actions {
+  opacity: 1;
+}
+
+/* ---------- rows ------------------------------------------------------- */
+
+.gitm-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0 var(--space-3) var(--space-3);
+  list-style: none;
+}
+
+.gitm-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  border-radius: var(--radius-sm);
+}
+
+.gitm-row:hover {
+  background: var(--surface);
+}
+
+.gitm-row.is-active {
+  background: var(--surface-raised);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.gitm-row-main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--space-2) 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gitm-row-main:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.gitm-row-main.as-static {
+  cursor: default;
+}
+
+.gitm-badge {
+  display: inline-grid;
+  flex: 0 0 17px;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-xs);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.gitm-badge.is-ok {
+  border-color: color-mix(in srgb, var(--success) 42%, transparent);
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.gitm-badge.is-warn {
+  border-color: color-mix(in srgb, var(--warn) 38%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--warn);
+}
+
+.gitm-badge.is-danger {
+  border-color: color-mix(in srgb, var(--danger) 42%, transparent);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.gitm-badge.is-info {
+  border-color: color-mix(in srgb, var(--info) 38%, transparent);
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  color: var(--info);
+}
+
+.gitm-name {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.gitm-file {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gitm-dir {
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The word next to the letter. The inspector column has no room for it; the
+ * full-width list does, and it is what makes the badge unambiguous. */
+.gitm-row-label {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+}
+
+.gitm-changes-panel .gitm-row-label {
+  display: none;
+}
+
+.gitm-row-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 0;
+  padding-right: var(--space-1);
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.gitm-row:hover .gitm-row-actions,
+.gitm-row:focus-within .gitm-row-actions,
+.gitm-row.is-active .gitm-row-actions {
+  opacity: 1;
+}
+
+/* A touch screen has no hover, so hiding the only way to stage a file behind one
+ * would make the panel unusable on a phone. */
+@media (hover: none) {
+  .gitm-row-actions,
+  .gitm-group-actions {
+    opacity: 1;
+  }
+}
+
+.gitm-act {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.gitm-act:hover:not(:disabled) {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.gitm-act:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.gitm-act.is-danger:hover:not(:disabled) {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.gitm-act:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---------- history & stashes ------------------------------------------ */
+
+.gitm-commit-row .gitm-row-main {
+  align-items: flex-start;
+}
+
+.gitm-commit-meta {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  max-width: 45%;
+}
+
+.gitm-ref {
+  padding: 0 var(--space-2);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-pill);
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-size: var(--fs-tiny);
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.gitm-sha,
+.gitm-commit-meta code {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+}
+
+/* ---------- detail region --------------------------------------------- */
+
+.gitm-detail {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.gitm-detail-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-6);
+  padding: var(--space-6) 16px var(--space-5);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.gitm-detail-titles {
+  min-width: 0;
+}
+
+.gitm-detail-title {
+  overflow: hidden;
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gitm-detail-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+}
+
+.gitm-detail-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* The patch runs edge to edge inside the detail region: the panel supplies the
+ * frame, so the diff's own card chrome (margin + rounding) is not repeated. */
+.gitm-detail .diff-preview {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.gitm-detail .diff-lines {
+  padding-bottom: var(--space-4);
+  /* The diff is the widest thing in the panel, and the reason it exists is to be
+   * read. A long line has to scroll, not be clipped: `overflow: hidden` on the card
+   * combined with a flex child that could not shrink meant a 1241px line rendered
+   * inside a 238px box with no way to reach the other 1003px. `min-width: 0` is
+   * what lets a flex item actually be narrower than its content; without it the
+   * child grows and its own `overflow-x` never engages. */
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+/* The scroller can only scroll what its children let it.
+ *
+ * `.diff-lines` above did get `overflow-x: auto`, and it still did not scroll:
+ * the shared `.diff-text` in chat.css is `overflow: hidden` + ellipsis, so the
+ * text clipped itself and the scroller measured scrollWidth == clientWidth ==
+ * 293px while the line inside was 1875px. 87% of every long line stayed
+ * unreachable - the same defect, one element further in.
+ *
+ * `min-width: max-content` on the row is what makes the scroller *have* a
+ * scrollable width, and it keeps the add/delete tint spanning the whole line
+ * instead of stopping at the panel edge. Scoped to the git surfaces so the
+ * transcript diff keeps its own ellipsis. */
+.gitm-detail .diff-line,
+.gitm-panel-detail .diff-line {
+  min-width: max-content;
+}
+
+.gitm-detail .diff-text,
+.gitm-panel-detail .diff-text {
+  min-width: max-content;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.gitm-detail-empty,
+.gitm-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-9) 20px;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+}
+
+.gitm-detail-empty {
+  min-height: 220px;
+  justify-content: center;
+  text-align: center;
+}
+
+.gitm-empty {
+  padding: 16px var(--space-6);
+}
+
+.gitm-empty-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-message);
+  font-weight: 600;
+}
+
+.gitm-empty-text {
+  margin: 0;
+  color: var(--faint);
+  line-height: 1.55;
+}
+
+.gitm-note {
+  margin: 0;
+  padding: 10px var(--space-6);
+  color: var(--faint);
+  font-size: var(--fs-small);
+}
+
+.gitm-commit-body {
+  margin: 0;
+  padding: var(--space-5) var(--space-7);
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.gitm-commit-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin: 0;
+  padding: var(--space-5) var(--space-7);
+  border-bottom: 1px solid var(--line-soft);
+  list-style: none;
+}
+
+.gitm-commit-file {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: 100%;
+  padding: var(--space-1) 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  font-size: var(--fs-micro);
+}
+
+.gitm-commit-file-path {
+  overflow: hidden;
+  max-width: 320px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gitm-commit-file-stat {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.gitm-commit-file-stat .is-add {
+  color: var(--success);
+}
+
+.gitm-commit-file-stat .is-del {
+  color: var(--danger);
+}
+
+.gitm-commit-file-stat em {
+  color: var(--faint);
+  font-style: normal;
+}
+
+/* ---------- loading & messages ----------------------------------------- */
+
+.gitm-loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6);
+}
+
+.gitm-skeleton-row {
+  height: 30px;
+}
+
+.gitm-diff-loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6) 16px;
+}
+
+.gitm-diff-skeleton {
+  height: 13px;
+  max-width: 72%;
+}
+
+.gitm-diff-skeleton.is-wide {
+  max-width: 96%;
+}
+
+.gitm-action-error {
+  margin: var(--space-5) var(--space-6);
+}
+
+.gitm-side-scroll > .inline-warning {
+  margin: var(--space-5) var(--space-6);
+}
+
+.gitm-kicker-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.gitm-busy {
+  overflow: hidden;
+  max-width: 140px;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- inspector panel variant ------------------------------------ */
+
+.gitm-panel {
+  gap: var(--space-5);
+}
+
+.gitm-panel-branch {
+  display: flex;
+  min-width: 0;
+}
+
+.gitm-panel-branch .gitm-branch {
+  width: 100%;
+}
+
+.gitm-panel-detail {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.gitm-panel-detail .gitm-detail-head {
+  padding: 10px var(--space-5) var(--space-4);
+  /* 293px of header, three buttons and a filename cannot share one row: the
+   * actions took 171.5px and left the title 89.5px - about eleven mono
+   * characters plus a sub-line wrapped to four. In the panel the title gets the
+   * full width and the actions drop to their own row, which shortens nothing. */
+  flex-wrap: wrap;
+  row-gap: var(--space-3);
+}
+
+.gitm-panel-detail .gitm-detail-titles {
+  flex: 1 1 100%;
+}
+
+.gitm-panel-detail .gitm-detail-actions {
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.gitm-panel-detail .gitm-detail-actions .button {
+  height: 24px;
+  padding: 0 var(--space-3);
+  font-size: var(--fs-micro);
+}
+
+.gitm-panel-detail .diff-lines {
+  max-height: 46vh;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* ---------- branch dialog & confirm ------------------------------------ */
+
+.gitm-branch-dialog {
+  width: min(560px, calc(100vw - 24px));
+}
+
+.gitm-branch-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: 2px var(--space-7) 16px;
+}
+
+.gitm-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--space-5);
+  border: 1px solid var(--line-input);
+  border-radius: var(--radius-sm);
+  background: var(--surface-input);
+  color: var(--input-ink);
+  font-family: inherit;
+  font-size: var(--fs-small);
+}
+
+.gitm-input::placeholder {
+  color: var(--input-placeholder);
+}
+
+.gitm-input:focus-visible {
+  border-color: var(--focus-input);
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.gitm-branch-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-height: min(46vh, 360px);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.gitm-branch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  border-radius: var(--radius-sm);
+}
+
+.gitm-branch-row:hover {
+  background: var(--surface);
+}
+
+.gitm-branch-row.is-current {
+  background: var(--accent-bg);
+}
+
+.gitm-branch-switch {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--space-3) 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gitm-branch-switch:disabled {
+  cursor: default;
+}
+
+.gitm-branch-icon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--accent);
+}
+
+.gitm-branch-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.gitm-branch-name {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gitm-branch-meta {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gitm-branch-create {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line-soft);
+}
+
+.gitm-label {
+  color: var(--text-secondary);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.gitm-branch-create-row {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.gitm-hint {
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+}
+
+.gitm-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: 2px var(--space-7) 16px;
+}
+
+.gitm-confirm-note {
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+}
+
+.gitm-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-4);
+  margin-top: var(--space-1);
+}
+
+.gitm-confirm-dialog {
+  width: min(460px, calc(100vw - 24px));
+}
+
+/* ---------- responsive ------------------------------------------------- */
+
+/* A narrower desktop: the change list keeps its column, the diff takes the rest. */
+@media (max-width: 1180px) {
+  .gitm {
+    --gitm-side-w: 272px;
+  }
+}
+
+/* Tablet and below: one column. The change list and the patch stop sharing the
+ * row, and the whole body scrolls as one document instead of two panes. */
+@media (max-width: 900px) {
+  .gitm-body {
+    display: block;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .gitm-side {
+    border-right: 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .gitm-side-scroll {
+    overflow: visible;
+  }
+
+  .gitm-main {
+    overflow: visible;
+  }
+
+  .gitm-detail {
+    min-height: 0;
+  }
+
+  .gitm-head {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-5);
+    padding: 12px var(--space-6) 10px;
+  }
+
+  .gitm-chips {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .gitm-title {
+    font-size: var(--fs-lead);
+  }
+
+  .gitm-head-line {
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+
+  .gitm-desc {
+    font-size: var(--fs-micro);
+  }
+
+  .gitm-commit {
+    padding: var(--space-5) 12px 10px;
+  }
+
+  .gitm-row-actions {
+    opacity: 1;
+  }
+
+  .gitm-commit-meta {
+    max-width: 100%;
+    justify-content: flex-start;
+  }
+
+  .gitm-branch-dialog,
+  .gitm-confirm-dialog {
+    width: calc(100vw - 16px);
+  }
+
+  .gitm-branch-body,
+  .gitm-confirm {
+    padding: 2px 12px var(--space-6);
+  }
+}
+/* The explanation a non-repository (or unreachable git) workspace gets, in place
+ * of the two regions. */
+.gitm-empty-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--space-3) 0;
+  overflow-y: auto;
+}

@@ -102,8 +102,10 @@ describe('composer dock: the box stays compact', () => {
     // second magic number in the component; the default is the mock's 170px.
     expect(input['--compose-input-max']).toBe('170px');
     expect(input['max-height']).toBe('var(--compose-input-max)');
-    expect(input['padding']).toBe('12px 13px 3px');
-    expect(input['font-size']).toBe('13px');
+    // Tokens, not literals: 12/12/2 on the spacing scale and the body step on
+    // the type scale (§3.2, §3.3).
+    expect(input['padding']).toBe('var(--space-6) var(--space-6) var(--space-2)');
+    expect(input['font-size']).toBe('var(--fs-body)');
   });
 
   it('does not force the bottom row onto a second line', () => {
@@ -114,12 +116,16 @@ describe('composer dock: the box stays compact', () => {
   });
 
   it('matches the mock bar, attach and send geometry', () => {
-    expect(declarations(composerCss, '.compose-bottom')['padding']).toBe('4px 7px 7px 8px');
+    expect(declarations(composerCss, '.compose-bottom')['padding']).toBe(
+      'var(--space-2) var(--space-4) var(--space-4) var(--space-4)',
+    );
     expect(declarations(composerCss, '.compose-bottom')['min-height']).toBe('39px');
     expect(declarations(composerCss, '.compose-plus')['width']).toBe('24px');
     expect(declarations(composerCss, '.button-send')['width']).toBe('28px');
     expect(declarations(composerCss, '.button-send')['height']).toBe('28px');
-    expect(declarations(composerCss, '.composer')['--radius-composer']).toBe('15px');
+    // The dock is the card radius, held locally so a rounding override cannot
+    // reshape it (§3.4).
+    expect(declarations(composerCss, '.composer')['--radius-composer']).toBe('var(--radius)');
   });
 
   it('keeps one row on a phone', () => {
@@ -147,7 +153,11 @@ describe('composer dock: see-through while scrolled', () => {
   it('paints from a token, never a raw colour', () => {
     // Theme Studio repaints every surface; a literal hex here would stay dark in
     // a light theme.
-    expect(composer['background']).toContain('var(--surface-input)');
+    // The dock floats over the transcript, so its fill is the rung that is
+    // nearer than the canvas in both modes: `--surface` (Ember 8.8 points off
+    // the canvas, Daybreak #ffffff on #f6f4f1). `--surface-input` is 1.4 points
+    // off a Daybreak canvas, which read as part of the page.
+    expect(composer['background']).toContain('var(--surface)');
     expect(composer['background']).toContain('--dock-opacity');
     expect(composer['background']).not.toMatch(/#[0-9a-f]{3,8}\b/i);
   });
@@ -218,7 +228,8 @@ describe('context window pill', () => {
 
   it('paints from tokens so every theme repaints it', () => {
     expect(fill['background']).toContain('var(--accent)');
-    expect(pill['color']).toContain('var(--faint)');
+    // `--faint` is decoration only (§4); the pill's number is text a reader uses.
+    expect(pill['color']).toContain('var(--muted)');
     expect(composerCss).not.toMatch(/\.context-pill[^{]*(?<!var\()[^)]*\{[^}]*#[0-9a-f]{3,8}\b/i);
   });
 

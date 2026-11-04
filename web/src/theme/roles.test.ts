@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { BUILTIN_THEMES, DEFAULT_THEME, buildTokenMap, resolveTheme } from './index';
 import { contrastRatio } from './color';
@@ -21,7 +22,10 @@ describe('fidelity roles', () => {
     // The accent is now the mock's sand-gold (#dfb680) instead of the old coral.
     // Roles anchored on the accent follow the mock palette.
     expect(roles['--gold-send']).toBe('#dfb680');
-    expect(roles['--gold-send-hover']).toBe('#f1c691');
+    // The hover pair is the palette's own accentHi, which is the accent stepped
+    // toward the (now warmer, brighter) primary ink — assert the relationship,
+    // not a hex that only belonged to the old palette.
+    expect(roles['--gold-send-hover']).toBe(ember.palette.accentHi);
     // Roles anchored on surfaces must still maintain proper depth relationships.
     const surface = ember.palette.surface;
     expect(contrastRatio(roles['--surface-input']!, surface), 'input is raised off the card')
@@ -38,12 +42,19 @@ describe('fidelity roles', () => {
     // palette change. With the new Ember palette, some roles derived differently
     // than the old one, but they remain distinguishable and maintain hierarchy.
     const roles = resolveRoles(ember);
-    const channels = (hex: string): number[] => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+    const channels = (hex: string): [number, number, number] => [
+      parseInt(hex.slice(1, 3), 16),
+      parseInt(hex.slice(3, 5), 16),
+      parseInt(hex.slice(5, 7), 16),
+    ];
     const luminance = (hex: string): number => {
-      const [r, g, b] = channels(hex).map(v => {
-        v /= 255;
-        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      const linear = channels(hex).map((v) => {
+        const channel = v / 255;
+        return channel <= 0.03928 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
       });
+      // Destructuring a tuple, not an array, so the three channels are typed as
+      // numbers rather than `number | undefined`.
+      const [r, g, b] = linear as [number, number, number];
       return 0.2126 * r + 0.7152 * g + 0.0722 * b;
     };
     
@@ -106,5 +117,26 @@ describe('fidelity roles', () => {
     }
     expect(tokens['--fs-message']).toBe('12.5px');
     expect(tokens['--lh-message']).toBe('1.72');
+  });
+
+  it('keeps the first-paint block in tokens.css identical to the resolver', () => {
+    /* The stylesheet paints one frame before the engine runs, so its role values
+     * have to be the ones `resolveRoles()` would compute — otherwise the UI
+     * visibly shifts colour on load, and a hand-edited literal can quietly
+     * reintroduce a value the derivation would never produce (which is exactly how
+     * the blue `--surface-card: #13181f` survived inside a warm theme for so long).
+     *
+     * This is the guard: change `roles.ts`, and this test tells you to regenerate.
+     */
+    const css = readFileSync('src/styles/tokens.css', 'utf8');
+    const declared: Record<string, string> = {};
+    for (const match of css.matchAll(/^\s*(--[a-z-]+):\s*(#[0-9a-f]{6});/gm)) {
+      declared[match[1]!] = match[2]!;
+    }
+    const resolved = resolveRoles(ember);
+    const drifted = Object.entries(resolved)
+      .filter(([property, value]) => /^#[0-9a-f]{6}$/i.test(value) && declared[property] !== value)
+      .map(([property, value]) => `${property}: tokens.css=${declared[property] ?? 'missing'} resolver=${value}`);
+    expect(drifted, 'tokens.css first-paint block is out of date').toEqual([]);
   });
 });

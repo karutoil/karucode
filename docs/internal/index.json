@@ -1,5 +1,5 @@
 {
-  "count": 22,
+  "count": 23,
   "generated_by": "cargo run -p kc-docs -- --write",
   "topics": [
     {
@@ -30,6 +30,35 @@
         "mode"
       ],
       "title": "Control what the agent may do without asking"
+    },
+    {
+      "applies_to": [
+        "route:POST /api/artifacts",
+        "route:GET /api/artifacts/:id",
+        "fence:artifact",
+        "fence:html",
+        "fence:mermaid",
+        "file:web/src/lib/artifacts.ts",
+        "file:web/src/components/ArtifactCard.tsx",
+        "concept:chat artifact",
+        "concept:ArtifactCard"
+      ],
+      "path": "artifacts.md",
+      "slug": "artifacts",
+      "source": "web/src/lib/artifacts.ts:4",
+      "summary": "An agent can put a diagram, an HTML mock, a table or a document in its reply, and the web UI draws it as a card with a live Preview and the Source it came from.",
+      "tags": [
+        "artifacts",
+        "web-ui",
+        "html",
+        "mermaid",
+        "diagram",
+        "svg",
+        "mock",
+        "preview",
+        "chat"
+      ],
+      "title": "Render rich artifacts in the chat transcript"
     },
     {
       "applies_to": [
@@ -106,6 +135,8 @@
     },
     {
       "applies_to": [
+        "env:KARUCODE_MALLOC_ARENA_MAX",
+        "env:KARUCODE_MALLOC_TRIM_SECS",
         "file:~/.config/karucode/config.toml",
         "env:KARUCODE_CONFIG",
         "env:KARUCODE_ALLOW_TEMP_DIR",
@@ -293,8 +324,22 @@
         "route:GET /api/workspace/raw",
         "route:GET /api/workspace/preview/*rest",
         "route:POST /api/workspace/upload",
+        "route:POST /api/artifacts",
+        "route:GET /api/artifacts/:id",
         "route:GET /api/git/status",
         "route:GET /api/git/diff",
+        "route:GET /api/git/branches",
+        "route:POST /api/git/branches",
+        "route:POST /api/git/branches/delete",
+        "route:POST /api/git/checkout",
+        "route:GET /api/git/log",
+        "route:GET /api/git/commits/:sha",
+        "route:POST /api/git/stage",
+        "route:POST /api/git/unstage",
+        "route:POST /api/git/discard",
+        "route:POST /api/git/commit",
+        "route:GET /api/git/stash",
+        "route:POST /api/git/stash",
         "route:GET /api/plugins",
         "route:POST /api/plugins/reload",
         "route:POST /api/plugins/:name/reload",
@@ -908,7 +953,28 @@
         "cmd:npm run dev",
         "cmd:npm run build",
         "file:web/dist",
-        "env:KARUCODE_WEB_DIR"
+        "env:KARUCODE_WEB_DIR",
+        "ui:GitManager",
+        "ui:GitChanges",
+        "ui:GitCommitBox",
+        "ui:GitBranchDialog",
+        "ui:GitHistory",
+        "route:GET /api/git/status",
+        "route:GET /api/git/diff",
+        "route:GET /api/git/branches",
+        "route:POST /api/git/branches",
+        "route:POST /api/git/branches/delete",
+        "route:POST /api/git/checkout",
+        "route:GET /api/git/log",
+        "route:GET /api/git/commits/:sha",
+        "route:POST /api/git/stage",
+        "route:POST /api/git/unstage",
+        "route:POST /api/git/discard",
+        "route:POST /api/git/commit",
+        "route:GET /api/git/stash",
+        "route:POST /api/git/stash",
+        "file:web/src/components/git/GitManager.tsx",
+        "file:web/src/styles/git.css"
       ],
       "path": "web-ui.md",
       "slug": "web-ui",

@@ -186,7 +186,14 @@ export function FileTree({
             class={`tree-row${isDir ? ' is-dir' : ' is-file'}${isOpen ? ' is-open' : ''}${
               selected ? ' is-selected' : ''
             }`}
-            style={{ paddingLeft: `${node.depth * 18 + 8}px` }}
+            /* Indent per level, but capped.
+             *
+             * `depth * 18 + 8` is unbounded, and `MAX_TREE_DEPTH` is 32: a deeply
+             * nested file reached 584px of left padding inside a ~293px inspector,
+             * so its name was pushed off the row entirely and the row could not be
+             * hit. Past a few levels the cue stops being useful anyway — the eye
+             * reads depth from the disclosure twigs, not from a wider gutter. */
+            style={{ paddingLeft: `${Math.min(node.depth, 8) * 12 + 8}px` }}
             title={node.entry.path}
             onClick={() => {
               setFocusedPath(node.entry.path);

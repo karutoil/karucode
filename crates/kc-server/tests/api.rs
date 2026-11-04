@@ -2760,6 +2760,421 @@ async fn git_endpoints_report_status_and_diff() {
     assert_eq!(staged_flag.status, StatusCode::BAD_REQUEST);
 }
 
+/// The source-control manager end to end: every route the git panel calls, in the
+/// order a person uses them, against a real repository.
+#[cfg(unix)]
+#[tokio::test]
+async fn git_manager_stages_commits_branches_and_history() {
+    let git_available = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+    if !git_available {
+        return;
+    }
+
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let ws = h.workspace_path().to_path_buf();
+    let run = |args: &[&str]| {
+        let out = git_in(&ws, args);
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run(&["init", "-q", "-b", "main"]);
+    // `git commit` needs an identity; the server deliberately does not invent one
+    // (it inherits whatever the operator configured).
+    run(&["config", "user.name", "Test"]);
+    run(&["config", "user.email", "test@example.com"]);
+    std::fs::write(ws.join("a.txt"), "one\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-q", "-m", "init"]);
+
+    // ---- status is the richer shape the manager groups by ----
+    let status = h.get("/api/git/status").await.json();
+    assert_eq!(status["is_repo"], true);
+    assert_eq!(status["branch"], "main");
+    assert_eq!(status["detached"], false);
+    assert_eq!(status["upstream"], Value::Null);
+    assert_eq!(status["ahead"], 0);
+    assert_eq!(status["truncated"], false);
+    assert!(status["files"].as_array().unwrap().is_empty());
+
+    // ---- branches ----
+    let branches = h.get("/api/git/branches").await.json();
+    assert_eq!(branches["is_repo"], true);
+    let list = branches["branches"].as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["name"], "main");
+    assert_eq!(list[0]["current"], true);
+    assert_eq!(list[0]["upstream"], Value::Null);
+    assert!(!list[0]["commit"].as_str().unwrap().is_empty());
+    assert_eq!(list[0]["subject"], "init");
+
+    // ---- history ----
+    let log = h.get("/api/git/log").await.json();
+    let commits = log["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0]["subject"], "init");
+    assert!(commits[0]["parents"].as_array().unwrap().is_empty());
+    let short = commits[0]["short_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        h.get("/api/git/log?limit=abc").await.status,
+        StatusCode::BAD_REQUEST
+    );
+
+    // ---- one commit, with its file stat and patch ----
+    let detail = h.get(&format!("/api/git/commits/{short}")).await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.text());
+    let detail = detail.json();
+    assert_eq!(detail["subject"], "init");
+    assert_eq!(detail["files"][0]["path"], "a.txt");
+    assert_eq!(detail["files"][0]["additions"], 1);
+    assert_eq!(detail["files"][0]["deletions"], 0);
+    assert!(detail["diff"].as_str().unwrap().contains("+one"));
+    assert_eq!(detail["truncated"], false);
+    // A non-hex path parameter is the caller's mistake; an unknown object is 404.
+    assert_eq!(
+        h.get("/api/git/commits/HEAD").await.status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.get("/api/git/commits/abcdef").await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    // ---- stage / unstage ----
+    std::fs::write(ws.join("a.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(ws.join("b.txt"), "new\n").unwrap();
+    // An untracked file still has a readable patch: there is no index entry to
+    // compare, so the endpoint renders it against the empty file.
+    let untracked_diff = h.get("/api/git/diff?path=b.txt").await;
+    assert_eq!(
+        untracked_diff.status,
+        StatusCode::OK,
+        "{}",
+        untracked_diff.text()
+    );
+    assert!(
+        untracked_diff.json()["diff"].as_str().unwrap().contains("+new"),
+        "an untracked file's content is shown as added"
+    );
+    let staged = h
+        .post("/api/git/stage", json!({ "paths": ["a.txt", "b.txt"] }))
+        .await;
+    assert_eq!(staged.status, StatusCode::OK, "{}", staged.text());
+    let staged = staged.json();
+    assert_eq!(staged["ok"], true);
+    let files = staged["status"]["files"].as_array().unwrap();
+    let a = files.iter().find(|f| f["path"] == "a.txt").unwrap();
+    assert_eq!(a["staged"], true);
+    assert_eq!(a["index"], "M");
+    let b = files.iter().find(|f| f["path"] == "b.txt").unwrap();
+    assert_eq!(b["staged"], true);
+    assert_eq!(b["index"], "A");
+    // The staged side of the diff is what the manager shows for that group.
+    let staged_diff = h.get("/api/git/diff?staged=true&path=a.txt").await.json();
+    assert!(staged_diff["diff"].as_str().unwrap().contains("+two"));
+
+    let unstaged = h
+        .post("/api/git/unstage", json!({ "paths": ["a.txt", "b.txt"] }))
+        .await;
+    assert_eq!(unstaged.status, StatusCode::OK, "{}", unstaged.text());
+    let files = unstaged.json()["status"]["files"].clone();
+    let a = files
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "a.txt")
+        .unwrap()
+        .clone();
+    assert_eq!(a["staged"], false);
+    assert_eq!(a["unstaged"], true);
+    // b.txt is untracked again (not deleted): unstage only touches the index.
+    assert!(ws.join("b.txt").exists());
+    assert_eq!(
+        unstaged.json()["status"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == "b.txt")
+            .unwrap()["untracked"],
+        true
+    );
+
+    // ---- commit ----
+    let empty_message = h
+        .post("/api/git/commit", json!({ "message": "   " }))
+        .await;
+    assert_eq!(empty_message.status, StatusCode::BAD_REQUEST);
+    let nothing_staged = h
+        .post("/api/git/commit", json!({ "message": "nope" }))
+        .await;
+    assert_eq!(nothing_staged.status, StatusCode::BAD_REQUEST);
+    assert!(nothing_staged.error_message().contains("git commit failed"));
+
+    let commit = h
+        .post(
+            "/api/git/commit",
+            json!({ "message": "feat: two\n\nbody line", "stage_all": true }),
+        )
+        .await;
+    assert_eq!(commit.status, StatusCode::OK, "{}", commit.text());
+    let commit = commit.json();
+    assert_eq!(commit["commit"]["subject"], "feat: two");
+    assert!(!commit["commit"]["short_id"].as_str().unwrap().is_empty());
+    assert!(commit["status"]["files"].as_array().unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+
+    let history = h.get("/api/git/log?limit=5").await.json();
+    let commits = history["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 2);
+    assert_eq!(commits[0]["subject"], "feat: two");
+    assert_eq!(commits[0]["parents"].as_array().unwrap().len(), 1);
+    // The full body survives, which is what the commit detail panel renders.
+    let head = commits[0]["id"].as_str().unwrap().to_string();
+    let detail = h.get(&format!("/api/git/commits/{head}")).await.json();
+    assert_eq!(detail["body"], "body line");
+    assert_eq!(detail["files"].as_array().unwrap().len(), 2);
+
+    // Per-file history: the log can be narrowed to one path.
+    let file_log = h.get("/api/git/log?path=a.txt&limit=5").await.json();
+    assert_eq!(file_log["commits"].as_array().unwrap().len(), 2);
+    let other_log = h.get("/api/git/log?path=does-not-exist.rs").await.json();
+    assert!(other_log["commits"].as_array().unwrap().is_empty());
+
+    // ---- branches: create, switch, delete ----
+    let created = h
+        .post(
+            "/api/git/branches",
+            json!({ "name": "feat/x", "checkout": true }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.text());
+    assert_eq!(created.json()["status"]["branch"], "feat/x");
+    let list = h.get("/api/git/branches").await.json()["branches"].clone();
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    assert!(list
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|branch| branch["name"] == "feat/x" && branch["current"] == true));
+
+    let switched = h
+        .post("/api/git/checkout", json!({ "name": "main" }))
+        .await;
+    assert_eq!(switched.status, StatusCode::OK, "{}", switched.text());
+    assert_eq!(switched.json()["status"]["branch"], "main");
+
+    // An existing name is refused by git, and the refusal is passed through.
+    assert_eq!(
+        h.post("/api/git/branches", json!({ "name": "main" }))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    // Options are never accepted as a name.
+    assert_eq!(
+        h.post("/api/git/checkout", json!({ "name": "-x" }))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    // Deleting the checked-out branch is refused by git.
+    assert_eq!(
+        h.post("/api/git/branches/delete", json!({ "name": "main" }))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    // A forced delete needs the explicit confirmation.
+    assert_eq!(
+        h.post(
+            "/api/git/branches/delete",
+            json!({ "name": "feat/x", "force": true }),
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+    let deleted = h
+        .post("/api/git/branches/delete", json!({ "name": "feat/x" }))
+        .await;
+    assert_eq!(deleted.status, StatusCode::OK, "{}", deleted.text());
+    assert_eq!(
+        h.get("/api/git/branches").await.json()["branches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // ---- discard: the destructive verb, gated by `confirm` ----
+    std::fs::write(ws.join("a.txt"), "scribble\n").unwrap();
+    let unconfirmed = h.post("/api/git/discard", json!({ "paths": ["a.txt"] })).await;
+    assert_eq!(unconfirmed.status, StatusCode::BAD_REQUEST);
+    assert!(unconfirmed.error_message().contains("confirm"));
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.txt")).unwrap(),
+        "scribble\n",
+        "an unconfirmed discard must not touch the file"
+    );
+    let discarded = h
+        .post(
+            "/api/git/discard",
+            json!({ "paths": ["a.txt"], "confirm": true }),
+        )
+        .await;
+    assert_eq!(discarded.status, StatusCode::OK, "{}", discarded.text());
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+
+    // An untracked file has no blob to restore, so discard deletes it.
+    std::fs::write(ws.join("scratch.txt"), "x\n").unwrap();
+    let removed = h
+        .post(
+            "/api/git/discard",
+            json!({ "paths": ["scratch.txt"], "confirm": true }),
+        )
+        .await;
+    assert_eq!(removed.status, StatusCode::OK, "{}", removed.text());
+    assert!(!ws.join("scratch.txt").exists());
+    assert!(removed.json()["message"]
+        .as_str()
+        .unwrap()
+        .contains("untracked"));
+
+    // The staged side is discarded back to HEAD, index included.
+    std::fs::write(ws.join("a.txt"), "three\n").unwrap();
+    h.post("/api/git/stage", json!({ "paths": ["a.txt"] })).await;
+    let back_to_head = h
+        .post(
+            "/api/git/discard",
+            json!({ "paths": ["a.txt"], "staged": true, "confirm": true }),
+        )
+        .await;
+    assert_eq!(back_to_head.status, StatusCode::OK, "{}", back_to_head.text());
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+    assert!(back_to_head.json()["status"]["files"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // ---- stash ----
+    std::fs::write(ws.join("a.txt"), "stashed\n").unwrap();
+    let push = h
+        .post(
+            "/api/git/stash",
+            json!({ "action": "push", "message": "wip" }),
+        )
+        .await;
+    assert_eq!(push.status, StatusCode::OK, "{}", push.text());
+    assert!(push.json()["status"]["files"].as_array().unwrap().is_empty());
+    let stash_list = h.get("/api/git/stash").await.json();
+    let stashes = stash_list["stashes"].as_array().unwrap();
+    assert_eq!(stashes.len(), 1);
+    assert_eq!(stashes[0]["index"], 0);
+    assert!(stashes[0]["subject"].as_str().unwrap().contains("wip"));
+
+    // Dropping is destructive, so it needs `confirm` too.
+    assert_eq!(
+        h.post("/api/git/stash", json!({ "action": "drop" }))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    let popped = h.post("/api/git/stash", json!({ "action": "pop" })).await;
+    assert_eq!(popped.status, StatusCode::OK, "{}", popped.text());
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.txt")).unwrap(),
+        "stashed\n"
+    );
+    assert!(h.get("/api/git/stash").await.json()["stashes"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    h.post("/api/git/stash", json!({ "action": "push" })).await;
+    let dropped = h
+        .post("/api/git/stash", json!({ "action": "drop", "confirm": true }))
+        .await;
+    assert_eq!(dropped.status, StatusCode::OK, "{}", dropped.text());
+    assert!(h.get("/api/git/stash").await.json()["stashes"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    // Only the four documented verbs exist.
+    assert_eq!(
+        h.post("/api/git/stash", json!({ "action": "explode" }))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+
+    // ---- every path is resolved inside the workspace ----
+    assert_eq!(
+        h.post("/api/git/stage", json!({ "paths": ["../escape.txt"] }))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.post("/api/git/stage", json!({ "paths": ["/etc/passwd"] }))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    // A wildcard is a *path*, never a glob: `GIT_LITERAL_PATHSPECS=1` makes git
+    // look for a file called `*.txt`, so a client cannot stage (or discard) more
+    // than it named.
+    assert_eq!(
+        h.post("/api/git/stage", json!({ "paths": ["*.txt"] }))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST,
+        "a glob must not expand to the working tree"
+    );
+    assert_eq!(
+        h.post("/api/git/stage", json!({})).await.status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.post("/api/git/stage", json!({ "paths": ["."] }))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    // `deny_unknown_fields`: a typo is reported instead of ignored.
+    assert_eq!(
+        h.post("/api/git/stage", json!({ "path": ["a.txt"] }))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+
+    // ---- a non-repository workspace is an ordinary state, not an error ----
+    std::fs::remove_dir_all(ws.join(".git")).unwrap();
+    let status = h.get("/api/git/status").await;
+    assert_eq!(status.status, StatusCode::OK);
+    let status = status.json();
+    assert_eq!(status["is_repo"], false);
+    assert_eq!(status["error"], Value::Null);
+    assert_eq!(h.get("/api/git/branches").await.json()["is_repo"], false);
+    assert_eq!(h.get("/api/git/log").await.json()["is_repo"], false);
+    assert_eq!(h.get("/api/git/stash").await.json()["is_repo"], false);
+}
+
 #[tokio::test]
 async fn invalid_json_and_bad_bodies_are_clear() {
     let h = HarnessBuilder::new(Vec::new()).build().await;
@@ -5636,4 +6051,163 @@ async fn control_dispatch_rejects_unrelated_chat_and_read_only() {
             .unwrap()
             .is_empty());
     }
+}
+
+/// A chat artifact: published, stored once, and served as an isolated page.
+///
+/// The web client draws an artifact by pointing an `<iframe>` at the URL this
+/// route answers, so the checks that matter are the document's *policy* (opaque
+/// origin, no network, frameable by this app and nothing else) and the fact that
+/// publishing is idempotent: a transcript re-renders and re-posts on every load.
+#[tokio::test]
+async fn chat_artifacts_are_published_once_and_served_as_an_isolated_page() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let source = "<!doctype html><html><body><h1>Mock</h1></body></html>";
+
+    let first = h
+        .post("/api/artifacts", json!({ "html": source, "theme": "dark" }))
+        .await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.text());
+    let body = first.json();
+    let id = body["id"].as_str().expect("an id").to_string();
+    assert_eq!(id.len(), 32, "128 bits of hash, hex: {id}");
+    assert!(id
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert_eq!(body["url"], json!(format!("/api/artifacts/{id}")));
+    assert_eq!(body["theme"], "dark");
+
+    let again = h
+        .post("/api/artifacts", json!({ "html": source, "theme": "dark" }))
+        .await;
+    assert_eq!(again.json()["id"], json!(id), "content-addressed");
+
+    // `theme` only decides the wrapper's own colours, and a complete document has
+    // no wrapper - so the same page in either theme is one document.
+    let light = h
+        .post("/api/artifacts", json!({ "html": source, "theme": "light" }))
+        .await;
+    assert_eq!(
+        light.json()["id"],
+        json!(id),
+        "a complete document ignores the theme"
+    );
+    // A fragment is wrapped, so its two themes really are two documents.
+    let fragment_dark = h
+        .post("/api/artifacts", json!({ "html": "<div>frag</div>", "theme": "dark" }))
+        .await;
+    let fragment_light = h
+        .post("/api/artifacts", json!({ "html": "<div>frag</div>", "theme": "light" }))
+        .await;
+    assert_ne!(fragment_dark.json()["id"], fragment_light.json()["id"]);
+
+    let document = h.get(&format!("/api/artifacts/{id}")).await;
+    assert_eq!(document.status, StatusCode::OK);
+    assert_eq!(document.headers["content-type"], "text/html; charset=utf-8");
+    assert_eq!(document.headers["x-content-type-options"], "nosniff");
+    assert_eq!(document.headers["cache-control"], "no-store");
+    assert_eq!(
+        document.headers["cross-origin-resource-policy"],
+        "cross-origin"
+    );
+    assert!(
+        document.headers.get("x-frame-options").is_none(),
+        "the transcript's own frame has to be able to embed this"
+    );
+    let csp = document.headers["content-security-policy"].to_str().unwrap();
+    assert!(csp.starts_with("sandbox allow-scripts"), "{csp}");
+    assert!(!csp.contains("allow-same-origin"), "that would share the app's origin");
+    assert!(csp.contains("connect-src 'none'"), "{csp}");
+    assert!(!csp.contains("*"), "a prompt-injected mock must not be able to beacon out");
+    let html = document.text();
+    assert!(html.contains("<h1>Mock</h1>"), "{html}");
+    assert!(
+        html.contains("karucode-artifact"),
+        "the document reports its own height"
+    );
+
+    // Anything the client cannot render is a 404 it answers by re-posting.
+    let unknown = h.get(&format!("/api/artifacts/{}", "0".repeat(32))).await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown.error_code(), "not_found");
+    assert_eq!(
+        h.get("/api/artifacts/not-an-id").await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        h.get(&format!("/api/artifacts/{}", "0".repeat(31)))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+
+    // ...and the body is validated before anything is stored.
+    let empty = h.post("/api/artifacts", json!({ "html": "   " })).await;
+    assert_eq!(empty.status, StatusCode::BAD_REQUEST);
+    assert!(empty.text().contains("`html`"), "{}", empty.text());
+    let missing = h.post("/api/artifacts", json!({})).await;
+    assert_eq!(missing.status, StatusCode::BAD_REQUEST);
+}
+
+/// An artifact frame is a browser navigation: it cannot carry a bearer header.
+#[tokio::test]
+async fn artifact_frames_take_the_query_token_an_iframe_cannot_send() {
+    let token = "0123456789abcdef0123456789abcdef";
+    let h = HarnessBuilder::new(Vec::new())
+        .auth_token(token)
+        .build()
+        .await;
+    let source = "<div>token-protected mock</div>";
+    let bearer = format!("Bearer {token}");
+
+    let created = h
+        .send_with(
+            Method::POST,
+            "/api/artifacts",
+            Some(json!({ "html": source })),
+            &[("authorization", &bearer)],
+            true,
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.text());
+    let id = created.json()["id"].as_str().unwrap().to_string();
+    let frame = format!("/api/artifacts/{id}");
+
+    assert_eq!(
+        h.get(&frame).await.status,
+        StatusCode::UNAUTHORIZED,
+        "the document is still behind auth"
+    );
+    assert_eq!(
+        h.get(&format!("{frame}?token={token}")).await.status,
+        StatusCode::OK,
+        "an iframe cannot set a header, so this one path takes the token in the URL"
+    );
+    assert_eq!(
+        h.get(&format!("{frame}?token=wrong")).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    // Narrow on purpose: the exemption is a well-formed artifact path, nothing else.
+    assert_eq!(
+        h.get(&format!("/api/artifacts/not-an-id?token={token}"))
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        h.get(&format!("/api/health?token={token}")).await.status,
+        StatusCode::UNAUTHORIZED,
+        "the query token did not become a general exemption"
+    );
+    // Publishing is a JSON POST with a header, so it keeps the header rule.
+    let posted = h
+        .send_with(
+            Method::POST,
+            &format!("/api/artifacts?token={token}"),
+            Some(json!({ "html": source })),
+            &[],
+            true,
+        )
+        .await;
+    assert_eq!(posted.status, StatusCode::UNAUTHORIZED);
 }

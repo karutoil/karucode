@@ -102,7 +102,12 @@ describe('settings sheet: the Advanced disclosure', () => {
     // disclosure's border — visible in a browser, invisible to jsdom, hence the
     // measured check in scripts/verify_settings_tabs.py as well.
     const body = declarations('.settings-advanced-body');
-    expect(body['padding']).toMatch(/^0 13px/);
+    // The block bleeds out by exactly this inset, so controls inside the fold
+    // share the panel's gutter with the controls outside it (DESIGN-AUDIT M3).
+    expect(body['padding']).toMatch(/^0 var\(--space-6\) /);
+    expect(declarations('.settings-advanced')['margin']).toMatch(
+      /calc\(-1 \* var\(--space-6\)\)/,
+    );
     expect(body['display']).toBe('flex');
     expect(body['flex-direction']).toBe('column');
   });

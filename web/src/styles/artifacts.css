@@ -1,0 +1,400 @@
+/* ---------- artifacts: a fenced block that is content, not code ---------- */
+
+/*
+ * The card is the transcript's second surface after a code block, and it is
+ * built from the same parts: a micro-type head on the inset surface, a hairline
+ * border, the panel below. What differs is the body, which is a preview (a frame,
+ * an SVG, a table) rather than text.
+ *
+ * Every length here comes from the token layer - radii from `--radius*`, spacing
+ * from `--space-*`, type from `--fs-*`, colours from the surface/line aliases -
+ * because `styles/scale.test.ts` holds the whole sheet to the scale and this file
+ * is no exception.
+ *
+ * Sizing rule: `<html>` owns the height of a page (an iframe has no intrinsic
+ * one), and everything else sizes to its content inside `--artifact-max-h`.
+ */
+
+.artifact {
+  --artifact-max-h: 520px;
+  margin: 0 0 var(--space-6);
+  border: 1px solid var(--line-inset);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface-raised);
+}
+
+/* The head is one row: kind, title, the view switch, then the tools. It never
+ * wraps; the title is the only thing that gives way, with an ellipsis. */
+.artifact-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 34px;
+  padding: 0 var(--space-3) 0 var(--space-5);
+  border-bottom: 1px solid var(--line-inset);
+  background: var(--surface-inset);
+}
+
+.artifact-kind {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.artifact-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The switch sits to the right of the title and is pushed there by `auto`. */
+.artifact-views {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-1);
+  margin-left: auto;
+  padding: var(--space-1);
+  border: 1px solid var(--line-inset);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.artifact-view {
+  height: 22px;
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.02em;
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast);
+}
+
+.artifact-view:hover,
+.artifact-view:focus-visible {
+  color: var(--text);
+}
+
+.artifact-view[aria-pressed='true'] {
+  background: var(--surface-hover);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.artifact-tools {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.artifact-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-secondary);
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.artifact-tool:hover,
+.artifact-tool:focus-visible {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.artifact-tool-text {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+}
+
+/* The body is where a preview or the source lives. It is one step above the
+ * card, so the head reads as chrome and the content as content. */
+.artifact-body {
+  min-width: 0;
+  background: var(--surface);
+}
+
+/* A frame's background comes from the document itself, so the card must not
+ * paint one behind it: a mock with its own page background would otherwise show
+ * a themed band of a different colour around it. */
+.artifact-preview:has(.artifact-frame) {
+  background: transparent;
+}
+
+.artifact-frame {
+  display: block;
+  width: 100%;
+  min-height: 120px;
+  border: 0;
+  background: transparent;
+}
+
+.artifact-source .code-block,
+.artifact-json .code-block {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.artifact-source .code-block-pre,
+.artifact-json .code-block-pre {
+  max-height: var(--artifact-max-h);
+}
+
+/* ---------- svg and diagrams ---------- */
+
+.artifact-svg,
+.artifact-diagram {
+  /* The drawing is inside a shadow root, where a light-DOM selector cannot reach
+   * it: the cap is handed over as a custom property (they inherit) and the
+   * shadow's own `svg` rule applies it. */
+  --artifact-svg-max-h: calc(var(--artifact-max-h) - var(--space-10));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-height: var(--artifact-max-h);
+  padding: var(--space-6);
+  overflow: auto;
+}
+
+/* ---------- markdown ---------- */
+
+.artifact-markdown {
+  max-height: var(--artifact-max-h);
+  padding: var(--space-5) var(--space-7);
+  overflow: auto;
+}
+
+/* ---------- tables ---------- */
+
+.artifact-table-wrap {
+  max-height: var(--artifact-max-h);
+  overflow: auto;
+}
+
+.artifact-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-label);
+}
+
+.artifact-table th,
+.artifact-table td {
+  max-width: 320px;
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--line-inset);
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-inset);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.artifact-table tbody tr:hover td {
+  background: var(--surface-hover);
+}
+
+/* A column of numbers reads as a column when the figures line up. */
+.artifact-table .is-numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.artifact-caption {
+  padding: var(--space-4) var(--space-6) var(--space-5);
+  color: var(--faint);
+  font-size: var(--fs-tiny);
+}
+
+/* ---------- images ---------- */
+
+.artifact-image {
+  display: block;
+  max-width: 100%;
+  max-height: var(--artifact-max-h);
+  margin: 0 auto;
+  padding: var(--space-6);
+}
+
+/* ---------- states ---------- */
+
+.artifact-note,
+.artifact-loading,
+.artifact-notice {
+  margin: 0;
+  padding: var(--space-5) var(--space-6);
+  border-top: 1px solid var(--line-inset);
+  color: var(--faint);
+  font-size: var(--fs-tiny);
+  line-height: 1.5;
+}
+
+.artifact-loading {
+  padding: var(--space-7) var(--space-6);
+  color: var(--muted);
+}
+
+.artifact-notice code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+}
+
+.artifact-failure {
+  padding: var(--space-6);
+  border-left: 2px solid var(--danger);
+  background: var(--danger-bg);
+  color: var(--text-secondary);
+  font-size: var(--fs-label);
+}
+
+.artifact-failure-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-2);
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.artifact-failure-message {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.artifact-failure-actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.artifact-button {
+  height: 24px;
+  padding: 0 var(--space-5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-xs);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: var(--fs-tiny);
+}
+
+.artifact-button:hover,
+.artifact-button:focus-visible {
+  background: var(--surface-hover);
+}
+
+/* ---------- full screen ---------- */
+
+.dialog-artifact {
+  width: min(1200px, 94vw);
+  max-height: 92vh;
+}
+
+.artifact-expanded {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--space-6);
+  overflow: auto;
+}
+
+.artifact-expanded .artifact-frame {
+  flex: 1;
+  min-height: 60vh;
+  border: 1px solid var(--line-inset);
+  border-radius: var(--radius-sm);
+}
+
+.artifact-expanded .artifact-svg,
+.artifact-expanded .artifact-diagram,
+.artifact-expanded .artifact-table-wrap,
+.artifact-expanded .artifact-markdown {
+  max-height: none;
+}
+
+/* Full screen is the one place a drawing may be taller than a card. */
+.artifact-expanded .artifact-svg,
+.artifact-expanded .artifact-diagram {
+  --artifact-svg-max-h: 72vh;
+}
+
+/* ---------- narrow viewports ---------- */
+
+@media (max-width: 640px) {
+  /* The head keeps one row when it can: the kind chip and the title share the
+   * space that is left, and the title truncates rather than pushing the switch
+   * and the tools onto a line of their own. When there really is no room, the
+   * switch and the tools wrap together and hug the right edge. */
+  .artifact-head {
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-3) var(--space-3) var(--space-5);
+  }
+
+  .artifact-title {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .artifact-views {
+    margin-left: 0;
+  }
+
+  .artifact-tools {
+    margin-left: auto;
+  }
+
+  .artifact {
+    --artifact-max-h: 380px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .artifact-view,
+  .artifact-tool {
+    transition: none;
+  }
+}

@@ -27,9 +27,9 @@
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 12px;
+  gap: var(--space-6);
   min-height: 34px;
-  padding: 5px 12px;
+  padding: var(--space-2) 12px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
 }
@@ -38,7 +38,7 @@
   display: flex;
   align-items: center;
   flex: 1 1 auto;
-  gap: 6px;
+  gap: var(--space-3);
   min-width: 0;
   overflow-x: auto;
   /* The strip scrolls once there are more tabs than fit; a hidden bar keeps the
@@ -82,9 +82,9 @@
 .terminal-chip-select {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
   min-width: 0;
-  padding: 5px 4px 5px 8px;
+  padding: var(--space-2) 4px var(--space-2) 8px;
   color: inherit;
   font: inherit;
   text-align: left;
@@ -112,7 +112,7 @@
 
 .terminal-chip[data-status='connecting'] .terminal-dot,
 .terminal-chip[data-status='reconnecting'] .terminal-dot {
-  background: var(--warning, var(--accent));
+  background: var(--warn);
   animation: terminal-pulse 1.4s ease-in-out infinite;
 }
 
@@ -133,11 +133,11 @@
 
 .terminal-chip-badge {
   flex: 0 0 auto;
-  padding: 1px 4px;
+  padding: var(--space-1) 4px;
   border: 1px solid var(--line-keycap);
   border-radius: calc(var(--radius) - 8px);
   color: var(--text-subtle);
-  font-size: 9px;
+  font-size: var(--fs-micro);
   letter-spacing: 0.02em;
   text-transform: uppercase;
 }
@@ -149,7 +149,7 @@
   flex: 0 0 auto;
   width: 20px;
   height: 20px;
-  margin-right: 2px;
+  margin-right: var(--space-1);
   border-radius: calc(var(--radius) - 7px);
   color: var(--text-subtle);
 }
@@ -171,21 +171,29 @@
 
 .terminal-rename-input {
   width: 150px;
-  padding: 5px 8px;
+  padding: var(--space-2) 8px;
   border: 0;
   background: transparent;
   color: var(--text);
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
+  /* §5.6: this used to be `outline: none` with nothing put back, so renaming a
+   * terminal was the one control in the app with no visible focus at all. A field
+   * you can type into without seeing where you are typing is not usable. */
   outline: none;
+}
+
+.terminal-rename-input:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .terminal-new {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 4px;
-  padding: 5px 9px;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius-sm);
   color: var(--text-subtle);
@@ -227,8 +235,8 @@
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 10px;
-  padding: 6px 12px;
+  gap: var(--space-5);
+  padding: var(--space-3) var(--space-6);
   border-bottom: 1px solid var(--line-divider, var(--line));
   color: var(--text-subtle);
   font-family: var(--font-mono);
@@ -239,7 +247,7 @@
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-2);
   text-transform: lowercase;
 }
 
@@ -257,7 +265,7 @@
 
 .terminal-state.status-connecting,
 .terminal-state.status-reconnecting {
-  color: var(--warning, var(--accent));
+  color: var(--warn);
 }
 
 .terminal-state.status-failed,
@@ -279,14 +287,14 @@
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-2);
 }
 
 .terminal-action {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 7px;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
   border-radius: calc(var(--radius) - 7px);
   color: var(--text-subtle);
   font: inherit;
@@ -302,8 +310,8 @@
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 12px;
-  padding: 8px 12px;
+  gap: var(--space-6);
+  padding: var(--space-4) var(--space-6);
   border-bottom: 1px solid var(--line-divider, var(--line));
   background: var(--danger-bg, color-mix(in srgb, var(--danger) 12%, transparent));
   color: var(--text);
@@ -320,7 +328,7 @@
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
-  padding: 6px 4px 4px 10px;
+  padding: var(--space-3) var(--space-2) var(--space-2) var(--space-5);
   overflow: hidden;
 }
 
@@ -346,14 +354,14 @@
   justify-content: center;
   flex: 1 1 auto;
   min-height: 0;
-  padding: 32px 24px;
+  padding: var(--space-10) var(--space-9);
 }
 
 .terminal-empty-inner {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-5);
   max-width: 420px;
   color: var(--text-subtle);
   font-size: var(--fs-small, 13px);
@@ -368,7 +376,7 @@
 .terminal-empty-title {
   margin: 0;
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--fs-lead);
   font-weight: 600;
 }
 
@@ -377,7 +385,7 @@
 }
 
 .terminal-empty-inner code {
-  padding: 1px 4px;
+  padding: var(--space-1) 4px;
   border-radius: calc(var(--radius) - 8px);
   background: var(--surface-inset);
   color: var(--text-secondary);
@@ -394,16 +402,16 @@
    shell keeps as many columns as possible. */
 @media (max-width: 1023px) {
   .terminal-strip {
-    padding: 4px 8px;
-    gap: 8px;
+    padding: var(--space-2) var(--space-4);
+    gap: var(--space-4);
   }
 
   .terminal-meta {
-    padding: 5px 8px;
+    padding: var(--space-2) 8px;
   }
 
   .terminal-host {
-    padding: 4px 2px 2px 6px;
+    padding: var(--space-2) var(--space-1) var(--space-1) var(--space-3);
   }
 
   .terminal-count {

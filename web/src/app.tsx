@@ -2,7 +2,7 @@
 // @kc-title: Use the browser workspace
 // @kc-summary: Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary.
 // @kc-tags: ui, web, frontend, panels, shortcuts, preact
-// @kc-applies-to: ui:ProjectRail, ui:project-switcher, ui:mobile-sheet, ui:mobile-layout, route:GET /api/projects/:id/favicon, ui:SessionsRail, ui:RailPeek, ui:ChatView, ui:Composer, ui:TpsBadge, ui:ContextPill, ui:Inspector, ui:SessionInfoTab, route:GET /api/sessions/:id/info, file:web/src/components/SessionInfoTab.tsx, file:web/src/lib/sessionInfo.ts, ui:SettingsSheet, ui:NotificationsSection, ui:ToastRegion, ui:NotificationCenter, ui:notification-bell, ui:CommandPalette, ui:FileViewer, ui:FilePreview, ui:RewindDialog, ui:plugin-panel, route:GET /api/workspace/tree, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, file:web/src/components/Dialog.tsx, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, event:session_rewound, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, config:providers.models.context_window, config:[notifications], event:usage, event:notification, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, event:queued_messages, event:steer_applied, ui:AgentsTab, route:GET /api/agents, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, event:agent_spawned, event:agent_paused, event:agent_note, event:agent_message, event:agent_finished, tool:spawn_agent, tool:report_status, file:web/src/components/AgentsTab.tsx, file:web/src/state/agentConsole.ts, file:web/src/components/pluginPanels.ts, file:web/src/state/queues.test.ts, file:web/src/styles/composer.css, file:scripts/verify_queues.py, file:web/src/components/PluginPanelView.tsx, file:web/src/components/RewindDialog.tsx, file:web/src/components/TpsBadge.tsx, file:web/src/components/NotificationsSettings.tsx, file:web/src/styles/mobile.test.ts, file:web/src/state/notifier.ts, file:web/src/state/railPeek.ts, file:web/src/state/notifications.test.ts, file:web/src/components/NotificationCenter.tsx, file:web/src/components/SessionsRail.tsx, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts, file:web/src/lib/tps.ts, file:web/src/state/promptTokens.ts, file:web/src/lib/dockHeight.ts, fn:registerPluginPanelRenderer, event:tool_call_finished, tool:read_file, config:model.supports_images, cmd:npm run dev, cmd:npm run build, file:web/dist, env:KARUCODE_WEB_DIR
+// @kc-applies-to: ui:ProjectRail, ui:project-switcher, ui:mobile-sheet, ui:mobile-layout, route:GET /api/projects/:id/favicon, ui:SessionsRail, ui:RailPeek, ui:ChatView, ui:Composer, ui:TpsBadge, ui:ContextPill, ui:Inspector, ui:SessionInfoTab, route:GET /api/sessions/:id/info, file:web/src/components/SessionInfoTab.tsx, file:web/src/lib/sessionInfo.ts, ui:SettingsSheet, ui:NotificationsSection, ui:ToastRegion, ui:NotificationCenter, ui:notification-bell, ui:CommandPalette, ui:FileViewer, ui:FilePreview, ui:RewindDialog, ui:plugin-panel, route:GET /api/workspace/tree, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, file:web/src/components/Dialog.tsx, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, event:session_rewound, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, config:providers.models.context_window, config:[notifications], event:usage, event:notification, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, event:queued_messages, event:steer_applied, ui:AgentsTab, route:GET /api/agents, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, event:agent_spawned, event:agent_paused, event:agent_note, event:agent_message, event:agent_finished, tool:spawn_agent, tool:report_status, file:web/src/components/AgentsTab.tsx, file:web/src/state/agentConsole.ts, file:web/src/components/pluginPanels.ts, file:web/src/state/queues.test.ts, file:web/src/styles/composer.css, file:scripts/verify_queues.py, file:web/src/components/PluginPanelView.tsx, file:web/src/components/RewindDialog.tsx, file:web/src/components/TpsBadge.tsx, file:web/src/components/NotificationsSettings.tsx, file:web/src/styles/mobile.test.ts, file:web/src/state/notifier.ts, file:web/src/state/railPeek.ts, file:web/src/state/notifications.test.ts, file:web/src/components/NotificationCenter.tsx, file:web/src/components/SessionsRail.tsx, file:web/src/lib/notifySound.ts, file:web/src/lib/notifyDesktop.ts, file:web/src/lib/tps.ts, file:web/src/state/promptTokens.ts, file:web/src/lib/dockHeight.ts, fn:registerPluginPanelRenderer, event:tool_call_finished, tool:read_file, config:model.supports_images, cmd:npm run dev, cmd:npm run build, file:web/dist, env:KARUCODE_WEB_DIR, ui:GitManager, ui:GitChanges, ui:GitCommitBox, ui:GitBranchDialog, ui:GitHistory, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, file:web/src/components/git/GitManager.tsx, file:web/src/styles/git.css
 //
 // # Layout
 //
@@ -97,12 +97,31 @@
 //   viewport and treats a gap no wider than the content that has arrived since
 //   then as its own to close. Any movement of the scroll position is yours, and
 //   is never overridden.
-// * **Workspace tabs** (above the transcript): *Conversation* and *Changes*.
-//   *Changes* reuses the inspector's git diff list; the composer only shows on
-//   *Conversation*.
-// * **Inspector** (right): tabs for agents, changes (git diff), the session's
-//   own numbers and workspace files, plus one tab per **plugin panel** (see
-//   below). Click a file to open the viewer.
+// * **Workspace tabs** (above the transcript): *Conversation*, *Source control*
+//   and *Terminal* (when the server enables terminals). *Source control* is the
+//   git manager below; the composer only shows on *Conversation*.
+// * **Inspector** (right): tabs for files, **Git** (the same source-control
+//   manager, in one column), the session's own numbers and agents, plus one tab
+//   per **plugin panel** (see below). Click a file to open the viewer.
+// * **Source control** (workspace tab and inspector tab): a git manager, not a
+//   read-only diff list. Changed files are grouped into **Merge changes**,
+//   **Staged**, **Changes** and **Untracked** - a path with both a staged and a
+//   working-tree side appears in both groups, which is git's own model - and
+//   each row stages, unstages or discards one file, each group does the same for
+//   all of its files, and the badge letter is repeated as a word so colour is
+//   never the only signal. The commit box takes a message (`Ctrl/Cmd+Enter`
+//   commits) with an **Amend** toggle; with nothing staged, **Commit** stages
+//   every change first and says so under the box. The branch chip opens a dialog
+//   that filters, switches, creates (optionally switching) and deletes local
+//   branches. The workspace tab shows the selected file's patch beside the list
+//   and the commit history below it, with one commit's files and patch on click;
+//   the inspector tab puts the patch inline under the list and loads the history
+//   only when that section is opened. Only **local** operations are offered -
+//   staging, commits, branches, stashes; fetch/pull/push need credentials and a
+//   prompt, so they stay in the Terminal tab. Discarding changes, deleting an
+//   unmerged branch and dropping a stash ask for confirmation first: discarding
+//   overwrites the working tree and deletes an untracked file, and none of the
+//   three can be undone from the UI.
 // * **Agents tab** (inspector): every subagent in the project, live first. A
 //   running or paused agent has **Pause**/**Resume** and **Stop** buttons that
 //   call `POST /api/agents/:id/{pause,resume,cancel}`; a paused one is still

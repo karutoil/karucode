@@ -12,6 +12,7 @@
  */
 
 import type { JSX } from 'preact';
+import { createPortal } from 'preact/compat';
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import { useFocusTrap } from '../lib/dom';
 import * as actions from '../state/actions';
@@ -392,7 +393,7 @@ export function ThemeStudio(): JSX.Element | null {
     });
   };
 
-  return (
+  const layer = (
     <div class="theme-studio-layer">
       <div class="theme-shade" aria-hidden="true" onClick={actions.closeThemeStudio} />
       <aside
@@ -865,4 +866,13 @@ export function ThemeStudio(): JSX.Element | null {
       </aside>
     </div>
   );
+
+  // Portal into <body> like `Dialog` does. `.app-root` is a stacking context
+  // (`isolation: isolate`), so `z-index: 110` on the layer was confined inside
+  // it and never beat a portalled dialog at 100 — Settings → Theme studio →
+  // Ctrl+K left two `aria-modal="true"` surfaces alive, the older one buried
+  // under the newer dialog's scrim (DESIGN-AUDIT overlays B6). `document` is
+  // absent in a server render and the node-environment suites.
+  if (typeof document === 'undefined') return layer;
+  return createPortal(layer, document.body);
 }

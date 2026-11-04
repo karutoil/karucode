@@ -3,8 +3,10 @@
 @import './layout.css';
 @import './rail.css';
 @import './chat.css';
+@import './artifacts.css';
 @import './composer.css';
 @import './inspector.css';
+@import './git.css';
 @import './terminal.css';
 @import './todo.css';
 @import './goals.css';

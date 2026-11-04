@@ -287,6 +287,35 @@ export function TrashIcon(props: IconProps): JSX.Element {
   );
 }
 
+/** "Unstage": the mirror of [`PlusIcon`], used on the staged group. */
+export function MinusIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+/** "Discard changes": an arrow turning back on itself. */
+export function UndoIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M9 14 4 9l5-5" />
+      <path d="M4 9h9a7 7 0 0 1 0 14h-3" />
+    </svg>
+  );
+}
+
+/** The history list's own glyph: a commit on a line. */
+export function CommitIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <circle cx="12" cy="12" r="3.5" />
+      <path d="M12 2v6.5M12 15.5V22" />
+    </svg>
+  );
+}
+
 export function SparkIcon(props: IconProps): JSX.Element {
   return (
     <svg {...svgProps(props)}>
@@ -408,6 +437,35 @@ export function LayersIcon(props: IconProps): JSX.Element {
       <path d="m12 3 9 5-9 5-9-5 9-5Z" />
       <path d="m3 12 9 5 9-5" />
       <path d="m3 16 9 5 9-5" />
+    </svg>
+  );
+}
+
+/** Full screen: the corner arrows an artifact card opens into. */
+export function ExpandIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M15 4h5v5M20 4l-6 6M9 20H4v-5M4 20l6-6" />
+    </svg>
+  );
+}
+
+/** The inverse of {@link ExpandIcon}: back into the transcript. */
+export function CollapseIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M20 9h-5V4M14 10l6-6M4 15h5v5M10 14l-6 6" />
+    </svg>
+  );
+}
+
+/** A spark in a frame: this block is content, not code. */
+export function ArtifactIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <rect x="3" y="4" width="18" height="16" rx="2.5" />
+      <path d="M3 9h18" />
+      <path d="m9 15 2 2 4-4" />
     </svg>
   );
 }

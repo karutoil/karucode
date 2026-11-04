@@ -168,7 +168,8 @@ describe('phone shell: the project rail moves into the sheet', () => {
     const menu = declarations(railCss, '.project-switcher-menu');
     expect(menu['position']).toBe('absolute');
     expect(menu['right']).toBe('0');
-    expect(menu['max-width']).toContain('calc(100vw - 24px)');
+    // The gutter is the 24px spacing step, not a literal (§3.2).
+    expect(menu['max-width']).toContain('calc(100vw - var(--space-9))');
   });
 });
 

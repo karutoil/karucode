@@ -65,7 +65,7 @@ describe('sanitizeTheme', () => {
     expect(theme?.colors.accent).toBe('#aabbcc');
     expect((theme?.colors as unknown as Record<string, string>).bogus).toBeUndefined();
     // Missing colours are completed from the light defaults.
-    expect(theme?.colors.bg).toBe('#f4f2ee');
+    expect(theme?.colors.bg).toBe('#f6f4f1');
   });
 
   it('accepts the transcript view options', () => {

@@ -57,13 +57,13 @@ describe('built-in themes', () => {
     expect(DEFAULT_THEME.id).toBe('ember');
     // `styles/tokens.css` paints the first frame before the engine runs, so the
     // canvas and text it hardcodes must match the built-in exactly.
-    expect(DEFAULT_THEME.colors.bg).toBe('#111213');
-    expect(DEFAULT_THEME.colors.text).toBe('#eae9e5');
+    expect(DEFAULT_THEME.colors.bg).toBe('#0f0e0d');
+    expect(DEFAULT_THEME.colors.text).toBe('#f2f0ee');
     expect(DEFAULT_THEME.colors.accent).toBe('#dfb680');
     expect(DEFAULT_THEME.colors.syntaxString).toBe('#88baa0');
     // Surfaces are asserted against the stylesheet itself below, so the two
     // cannot drift apart.
-    expect(DEFAULT_THEME.colors.surface).toBe('#1c1d1f');
+    expect(DEFAULT_THEME.colors.surface).toBe('#23211f');
   });
 
   it('keeps every Ember surface in sync with the first-paint stylesheet', () => {
@@ -109,8 +109,8 @@ describe('completeColors', () => {
   it('falls back to the mode defaults for missing surfaces', () => {
     const dark = completeColors({}, 'dark');
     const light = completeColors({}, 'light');
-    expect(dark.bg).toBe('#111213');
-    expect(light.bg).toBe('#f4f2ee');
+    expect(dark.bg).toBe('#0f0e0d');
+    expect(light.bg).toBe('#f6f4f1');
     expect(light.text).toBe('#1c1a17');
   });
 });
@@ -178,7 +178,8 @@ describe('token resolution', () => {
     const tokens = buildTokenMap({ ...DEFAULT_THEME, rounding: 0 });
     expect(tokens['--radius']).toBe('0px');
     expect(tokens['--radius-sm']).toBe('0px');
-    expect(tokens['--radius-lg']).toBe('2px');
+    // six radii off one knob: lg = rounding + 4 (DESIGN-SYSTEM.md §3.4)
+    expect(tokens['--radius-lg']).toBe('4px');
   });
 
   it('applies fonts and density', () => {

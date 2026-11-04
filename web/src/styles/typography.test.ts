@@ -1,289 +1,122 @@
-/**
- * Typography tests — verify base.css and tokens.css match karucode-v3-themes.html exactly.
+// @vitest-environment node
+/* The type contract: a scale with a floor, and components that use it.
  *
- * The v3 mock specifies 13px/1.5 base, Inter font stack, and specific font-sizes
- * and weights for different roles (eyebrow 10px 720 weight; breadcrumb 11px;
- * main-title 14px 660 weight; etc). This test suite verifies every typographic
- * primitive matches those specs.
+ * This file used to assert that `base.css` and `layout.css` reproduced the v3
+ * mock's font sizes exactly — 13px body, 11px breadcrumb, 14px main title,
+ * `.button-small` at 11.5px, `.badge` at 10px, `.chip` at 10.5px. Individually
+ * each looked reasonable. Collectively they were the problem: 25 distinct sizes
+ * in the stylesheet, 220 declarations below 11px, and 30 of 85 text nodes below
+ * WCAG AA on the default screen — a `Ctrl N` shortcut at 9.5px and 3.14:1, session
+ * metadata at 9px and 3.41:1.
+ *
+ * Individual pixel assertions cannot catch that, because each one passes. So this
+ * file asserts the *scale* instead: the steps exist, the floor is real, the
+ * kicker has one definition, and the weights come from a small closed set.
+ * `scale.test.ts` enforces that components use the tokens.
  */
-import { readFileSync } from 'fs';
+
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 
-const tokensCSS = readFileSync('src/styles/tokens.css', 'utf-8');
-const baseCSS = readFileSync('src/styles/base.css', 'utf-8');
-const layoutCSS = readFileSync('src/styles/layout.css', 'utf-8');
+// `import.meta.url`, not `__dirname`: this suite is ESM, and the whole point of
+// these files is to read the stylesheet they are next to.
+const DIR = new URL('.', import.meta.url).pathname;
+const read = (name: string): string => readFileSync(DIR + name, 'utf8');
 
-describe('Typography tokens in tokens.css', () => {
-  it('defines 13px base font size', () => {
-    expect(tokensCSS).toMatch(/--fs-body:\s*13px/);
+const tokens = read('tokens.css');
+const base = read('base.css');
+const layout = read('layout.css');
+
+const rule = (css: string, selector: string): string => {
+  const start = css.indexOf(`\n${selector} {`);
+  expect(start, `${selector} is defined`).toBeGreaterThan(-1);
+  return css.slice(start, css.indexOf('\n}', start));
+};
+
+describe('the scale exists and has a floor (§3.3)', () => {
+  it.each([
+    ['--fs-micro', '10px'],
+    ['--fs-tiny', '11px'],
+    ['--fs-small', '11.5px'],
+    ['--fs-label', '12px'],
+    ['--fs-message', '12.5px'],
+    ['--fs-body', '13px'],
+    ['--fs-lead', '14px'],
+    ['--fs-title', '16px'],
+    ['--fs-heading', '18px'],
+    ['--fs-display', '20px'],
+    ['--fs-hero', '24px'],
+  ])('%s is %s', (property, value) => {
+    expect(tokens).toMatch(new RegExp(`${property}:\\s*${value.replace('.', '\\.')}`));
   });
 
-  it('defines 1.5 base line height', () => {
-    expect(tokensCSS).toMatch(/--lh-body:\s*1\.5/);
+  it('declares nothing below the 10px floor', () => {
+    // The whole point of the scale: no 9px, no 9.5px, anywhere in the token layer.
+    const sizes = [...tokens.matchAll(/--fs-[a-z]+:\s*([\d.]+)px/g)].map((m) => Number(m[1]));
+    expect(sizes.length).toBeGreaterThan(8);
+    for (const size of sizes) expect(size).toBeGreaterThanOrEqual(10);
   });
 
-  it('defines 11.5px small font size', () => {
-    expect(tokensCSS).toMatch(/--fs-small:\s*11\.5px/);
-  });
-
-  it('defines 10px micro font size (for eyebrows, badges)', () => {
-    expect(tokensCSS).toMatch(/--fs-micro:\s*10px/);
-  });
-
-  it('defines 12.5px message font size', () => {
-    expect(tokensCSS).toMatch(/--fs-message:\s*12\.5px/);
-  });
-
-  it('defines 1.72 message line height', () => {
-    expect(tokensCSS).toMatch(/--lh-message:\s*1\.72/);
-  });
-
-  it('defines Inter font stack for UI', () => {
-    expect(tokensCSS).toMatch(/--font-ui:/);
-    expect(tokensCSS).toMatch(/Inter/);
-    expect(tokensCSS).toMatch(/ui-sans-serif/);
-  });
-
-  it('defines monospace font stack with SFMono-Regular and Consolas', () => {
-    expect(tokensCSS).toMatch(/--font-mono:/);
-    expect(tokensCSS).toMatch(/SFMono-Regular/);
-    expect(tokensCSS).toMatch(/Consolas/);
-  });
-});
-
-describe('body element typography in base.css', () => {
-  it('uses --fs-body for font-size', () => {
-    const bodyRule = baseCSS.match(/body\s*{[^}]+}/s);
-    expect(bodyRule).toBeTruthy();
-    expect(bodyRule![0]).toMatch(/font-size:\s*var\(--fs-body\)/);
-  });
-
-  it('uses --lh-body for line-height', () => {
-    const bodyRule = baseCSS.match(/body\s*{[^}]+}/s);
-    expect(bodyRule).toBeTruthy();
-    expect(bodyRule![0]).toMatch(/line-height:\s*var\(--lh-body\)/);
-  });
-
-  it('uses --font-ui for font-family', () => {
-    const bodyRule = baseCSS.match(/body\s*{[^}]+}/s);
-    expect(bodyRule).toBeTruthy();
-    expect(bodyRule![0]).toMatch(/font-family:\s*var\(--font-ui\)/);
+  it('has one uppercase-kicker definition', () => {
+    expect(tokens).toMatch(/--fs-kicker:\s*10px/);
+    expect(tokens).toMatch(/--weight-kicker:\s*720/);
+    expect(tokens).toMatch(/--tracking-kicker:\s*0\.125em/);
+    const eyebrow = rule(base, '.eyebrow');
+    expect(eyebrow).toMatch(/font-weight:\s*720/);
+    expect(eyebrow).toMatch(/text-transform:\s*uppercase/);
+    expect(eyebrow).toMatch(/letter-spacing:\s*0\.125em/);
   });
 });
 
-describe('Eyebrow typography in base.css', () => {
-  it('uses --fs-micro (10px) for font-size', () => {
-    const eyebrowRule = baseCSS.match(/\.eyebrow\s*{[^}]+}/s);
-    expect(eyebrowRule).toBeTruthy();
-    expect(eyebrowRule![0]).toMatch(/font-size:\s*var\(--fs-micro\)/);
+describe('the base layer uses the scale', () => {
+  it('body copy takes size, leading and family from tokens', () => {
+    const body = base.match(/\nbody\s*{[^}]+}/s)?.[0] ?? '';
+    expect(body).toMatch(/font-size:\s*var\(--fs-body\)/);
+    expect(body).toMatch(/line-height:\s*var\(--lh-body\)/);
+    expect(body).toMatch(/font-family:\s*var\(--font-ui\)/);
   });
 
-  it('uses 720 font-weight', () => {
-    const eyebrowRule = baseCSS.match(/\.eyebrow\s*{[^}]+}/s);
-    expect(eyebrowRule).toBeTruthy();
-    expect(eyebrowRule![0]).toMatch(/font-weight:\s*720/);
+  it('ships the Inter stack and a mono stack with real fallbacks', () => {
+    expect(tokens).toMatch(/--font-ui:/);
+    expect(tokens).toMatch(/Inter/);
+    expect(tokens).toMatch(/ui-sans-serif/);
+    expect(tokens).toMatch(/--font-mono:/);
+    expect(tokens).toMatch(/SFMono-Regular/);
+    expect(tokens).toMatch(/Consolas/);
   });
 
-  it('uses uppercase transform', () => {
-    const eyebrowRule = baseCSS.match(/\.eyebrow\s*{[^}]+}/s);
-    expect(eyebrowRule).toBeTruthy();
-    expect(eyebrowRule![0]).toMatch(/text-transform:\s*uppercase/);
+  it('headings are a single closed definition', () => {
+    const headings = base.match(/\nh1,\s*h2,\s*h3,\s*h4\s*{[^}]+}/s)?.[0] ?? '';
+    expect(headings).toMatch(/font-weight:\s*660/);
+    expect(headings).toMatch(/line-height:\s*1\.3/);
+    expect(headings).toMatch(/letter-spacing:\s*-0\.02em/);
   });
 
-  it('uses 0.125em letter-spacing', () => {
-    const eyebrowRule = baseCSS.match(/\.eyebrow\s*{[^}]+}/s);
-    expect(eyebrowRule).toBeTruthy();
-    expect(eyebrowRule![0]).toMatch(/letter-spacing:\s*0\.125em/);
-  });
-});
-
-describe('Breadcrumb typography in layout.css', () => {
-  it('uses 12px font-size', () => {
-    const breadcrumbRule = layoutCSS.match(/\.breadcrumb\s*{[^}]+}/s);
-    expect(breadcrumbRule).toBeTruthy();
-    expect(breadcrumbRule![0]).toMatch(/font-size:\s*12px/);
+  it('code, kbd and pre share the mono family', () => {
+    const mono = base.match(/\ncode,\s*kbd,\s*pre,\s*samp\s*{[^}]+}/s)?.[0] ?? '';
+    expect(mono).toMatch(/font-family:\s*var\(--font-mono\)/);
   });
 });
 
-describe('Main title typography in layout.css', () => {
-  it('uses 14px font-size', () => {
-    const mainTitleRule = layoutCSS.match(/\.main-title\s*{[^}]+}/s);
-    expect(mainTitleRule).toBeTruthy();
-    expect(mainTitleRule![0]).toMatch(/font-size:\s*14px/);
-  });
+describe('weights are a closed set, not one-offs', () => {
+  // DESIGN-SYSTEM.md §3.3: {400, 500, 550, 600, 660, 700, 720, 800}. The shell
+  // had drifted into 540, 560, 620, 650, 670, 680, 690, 710 and 740 as well —
+  // nine one-offs that read as rounding errors rather than a hierarchy.
+  const ALLOWED = new Set(['400', '500', '550', '600', '660', '700', '720', '800', 'bold', 'normal', 'bolder', 'lighter']);
 
-  it('uses 500 font-weight', () => {
-    const mainTitleRule = layoutCSS.match(/\.main-title\s*{[^}]+}/s);
-    expect(mainTitleRule).toBeTruthy();
-    expect(mainTitleRule![0]).toMatch(/font-weight:\s*500/);
-  });
-
-  it('uses 1.5 line-height', () => {
-    const mainTitleRule = layoutCSS.match(/\.main-title\s*{[^}]+}/s);
-    expect(mainTitleRule).toBeTruthy();
-    expect(mainTitleRule![0]).toMatch(/line-height:\s*1\.5/);
-  });
+  it.each(['base.css', 'layout.css', 'chat.css', 'composer.css', 'rail.css', 'inspector.css'])(
+    '%s uses only scale weights',
+    (file) => {
+      const css = read(file);
+      const weights = [...css.matchAll(/font-weight:\s*([a-z\d]+)/g)].map((m) => m[1]!);
+      const offenders = [...new Set(weights)].filter((w) => !ALLOWED.has(w));
+      expect(offenders, `${file} off-scale weights`).toEqual([]);
+    },
+  );
 });
 
-describe('Button typography in base.css', () => {
-  it('uses --fs-small (11.5px)', () => {
-    const buttonRule = baseCSS.match(/\.button\s*{[^}]+}/s);
-    expect(buttonRule).toBeTruthy();
-    expect(buttonRule![0]).toMatch(/font-size:\s*var\(--fs-small\)/);
-  });
-
-  it('primary buttons use 660 font-weight', () => {
-    const primaryRule = baseCSS.match(/\.button-primary\s*{[^}]+}/s);
-    expect(primaryRule).toBeTruthy();
-    expect(primaryRule![0]).toMatch(/font-weight:\s*660/);
-  });
-
-  it('danger buttons use 660 font-weight', () => {
-    const dangerRule = baseCSS.match(/\.button-danger\s*{[^}]+}/s);
-    expect(dangerRule).toBeTruthy();
-    expect(dangerRule![0]).toMatch(/font-weight:\s*660/);
-  });
-
-  it('small buttons use 11.5px directly', () => {
-    const smallRule = baseCSS.match(/\.button-small\s*{[^}]+}/s);
-    expect(smallRule).toBeTruthy();
-    expect(smallRule![0]).toMatch(/font-size:\s*11\.5px/);
+describe('the shell titles use the scale', () => {
+  it('.main-title is a step, not a literal', () => {
+    expect(rule(layout, '.main-title')).toMatch(/font-size:\s*var\(--fs-/);
   });
 });
-
-describe('Input typography in base.css', () => {
-  it('uses --fs-small (11.5px)', () => {
-    const inputRule = baseCSS.match(/\.input\s*{[^}]+}/s);
-    expect(inputRule).toBeTruthy();
-    expect(inputRule![0]).toMatch(/font-size:\s*var\(--fs-small\)/);
-  });
-
-  it('mono inputs use 12.5px and --font-mono', () => {
-    const monoRule = baseCSS.match(/\.input\.mono,\s*input\.mono\s*{[^}]+}/s);
-    expect(monoRule).toBeTruthy();
-    expect(monoRule![0]).toMatch(/font-family:\s*var\(--font-mono\)/);
-    expect(monoRule![0]).toMatch(/font-size:\s*12\.5px/);
-  });
-});
-
-describe('Code and monospace elements in base.css', () => {
-  it('code, kbd, pre, samp use --font-mono', () => {
-    const monoRule = baseCSS.match(/code,\s*kbd,\s*pre,\s*samp\s*{[^}]+}/s);
-    expect(monoRule).toBeTruthy();
-    expect(monoRule![0]).toMatch(/font-family:\s*var\(--font-mono\)/);
-  });
-
-  it('code uses 0.92em font-size', () => {
-    const codeRule = baseCSS.match(/\ncode\s*{[^}]+}/s);
-    expect(codeRule).toBeTruthy();
-    expect(codeRule![0]).toMatch(/font-size:\s*0\.92em/);
-  });
-
-  it('kbd uses --fs-micro (10px) and --font-mono', () => {
-    const kbdRule = baseCSS.match(/kbd,\s*\.keycap\s*{[^}]+}/s);
-    expect(kbdRule).toBeTruthy();
-    expect(kbdRule![0]).toMatch(/font-family:\s*var\(--font-mono\)/);
-    expect(kbdRule![0]).toMatch(/font-size:\s*var\(--fs-micro\)/);
-    expect(kbdRule![0]).toMatch(/line-height:\s*1\.1/);
-  });
-});
-
-describe('Headings typography in base.css', () => {
-  it('h1-h4 use 660 font-weight', () => {
-    const headingRule = baseCSS.match(/h1,\s*h2,\s*h3,\s*h4\s*{[^}]+}/s);
-    expect(headingRule).toBeTruthy();
-    expect(headingRule![0]).toMatch(/font-weight:\s*660/);
-  });
-
-  it('h1-h4 use 1.3 line-height', () => {
-    const headingRule = baseCSS.match(/h1,\s*h2,\s*h3,\s*h4\s*{[^}]+}/s);
-    expect(headingRule).toBeTruthy();
-    expect(headingRule![0]).toMatch(/line-height:\s*1\.3/);
-  });
-
-  it('h1-h4 use -0.02em letter-spacing', () => {
-    const headingRule = baseCSS.match(/h1,\s*h2,\s*h3,\s*h4\s*{[^}]+}/s);
-    expect(headingRule).toBeTruthy();
-    expect(headingRule![0]).toMatch(/letter-spacing:\s*-0\.02em/);
-  });
-});
-
-describe('Badge typography in base.css', () => {
-  it('uses --fs-micro (10px)', () => {
-    const badgeRule = baseCSS.match(/\.badge\s*{[^}]+}/s);
-    expect(badgeRule).toBeTruthy();
-    expect(badgeRule![0]).toMatch(/font-size:\s*var\(--fs-micro\)/);
-  });
-
-  it('uses --font-mono', () => {
-    const badgeRule = baseCSS.match(/\.badge\s*{[^}]+}/s);
-    expect(badgeRule).toBeTruthy();
-    expect(badgeRule![0]).toMatch(/font-family:\s*var\(--font-mono\)/);
-  });
-
-  it('uses 0.02em letter-spacing', () => {
-    const badgeRule = baseCSS.match(/\.badge\s*{[^}]+}/s);
-    expect(badgeRule).toBeTruthy();
-    expect(badgeRule![0]).toMatch(/letter-spacing:\s*0\.02em/);
-  });
-});
-
-describe('Chip typography in base.css', () => {
-  it('uses 10.5px font-size', () => {
-    const chipRule = baseCSS.match(/\.chip\s*{[^}]+}/s);
-    expect(chipRule).toBeTruthy();
-    expect(chipRule![0]).toMatch(/font-size:\s*10\.5px/);
-  });
-
-  it('chip code uses 10.5px', () => {
-    const chipCodeRule = baseCSS.match(/\.chip\s+code\s*{[^}]+}/s);
-    expect(chipCodeRule).toBeTruthy();
-    expect(chipCodeRule![0]).toMatch(/font-size:\s*10\.5px/);
-  });
-});
-
-describe('Crash card typography in base.css', () => {
-  it('crash-kicker uses --fs-micro and 720 weight', () => {
-    const kickerRule = baseCSS.match(/\.crash-kicker\s*{[^}]+}/s);
-    expect(kickerRule).toBeTruthy();
-    expect(kickerRule![0]).toMatch(/font-size:\s*var\(--fs-micro\)/);
-    expect(kickerRule![0]).toMatch(/font-weight:\s*720/);
-  });
-
-  it('crash-title uses --fs-body and 660 weight', () => {
-    const titleRule = baseCSS.match(/\.crash-title\s*{[^}]+}/s);
-    expect(titleRule).toBeTruthy();
-    expect(titleRule![0]).toMatch(/font-size:\s*var\(--fs-body\)/);
-    expect(titleRule![0]).toMatch(/font-weight:\s*660/);
-  });
-
-  it('crash-message uses --font-mono and --fs-small', () => {
-    const messageRule = baseCSS.match(/\.crash-message\s*{[^}]+}/s);
-    expect(messageRule).toBeTruthy();
-    expect(messageRule![0]).toMatch(/font-family:\s*var\(--font-mono\)/);
-    expect(messageRule![0]).toMatch(/font-size:\s*var\(--fs-small\)/);
-  });
-});
-
-describe('Utility classes in base.css', () => {
-  it('.small uses --fs-small', () => {
-    const smallRule = baseCSS.match(/\.small\s*{[^}]+}/s);
-    expect(smallRule).toBeTruthy();
-    expect(smallRule![0]).toMatch(/font-size:\s*var\(--fs-small\)/);
-  });
-
-  it('.mono uses --font-mono', () => {
-    const monoRule = baseCSS.match(/\.mono\s*{[^}]+}/s);
-    expect(monoRule).toBeTruthy();
-    expect(monoRule![0]).toMatch(/font-family:\s*var\(--font-mono\)/);
-  });
-});
-
-describe('Link buttons in base.css', () => {
-  it('uses 11.5px font-size', () => {
-    const linkButtonRule = baseCSS.match(/\.link-button\s*{[^}]+}/s);
-    expect(linkButtonRule).toBeTruthy();
-    expect(linkButtonRule![0]).toMatch(/font-size:\s*11\.5px/);
-  });
-});
-

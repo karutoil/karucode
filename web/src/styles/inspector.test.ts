@@ -71,8 +71,15 @@ describe('inspector tab strip stylesheet', () => {
 describe('changes panel stylesheet', () => {
   it('keeps compact metric tiles and keyboard-visible file selection', () => {
     expect(cssDeclarations('.metric')['min-height']).toBe('64px');
-    expect(cssDeclarations('.change-row')['padding']).toBe('12px 4px');
-    expect(cssSource).toMatch(/\.change-row:focus-visible\s*\{[^}]*outline: 2px solid var\(--accent\)/);
+    // Assert the tokens, not the pixels: these are `--space-6`/`--space-2`, and a
+    // literal 12px/4px would stop following the density setting.
+    expect(cssDeclarations('.change-row')['padding']).toBe('var(--space-6) var(--space-2)');
+    // The ring is the token pair from DESIGN-SYSTEM.md §5.6, not a raw accent at a
+    // hardcoded 2px. `--accent` is the decoration colour; `--focus-ring` is the
+    // AA-safe one, and the width/offset are tokens so every ring in the app matches.
+    expect(cssSource).toMatch(
+      /\.change-row:focus-visible\s*\{[^}]*outline: var\(--focus-ring-width\) solid var\(--focus-ring\)/,
+    );
   });
 
   it('uses the mock\'s separated, directory-aware file row layout', () => {

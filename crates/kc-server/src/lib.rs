@@ -22,13 +22,15 @@
 // @kc-title: Call the HTTP API
 // @kc-summary: Authenticate, send the CSRF header, and find the endpoint for sessions, config, approvals, files, git, plugins, MCP and the event stream.
 // @kc-tags: api, http, rest, sse, curl, endpoints
-// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, config:plugin_panels, route:GET /api/events, event:notification, event:queued_messages, event:session_rewound, config:[notifications], header:X-Karucode-Client, env:KARUCODE_AUTH_TOKEN, doc:docs/API.md
+// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, route:POST /api/artifacts, route:GET /api/artifacts/:id, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, config:plugin_panels, route:GET /api/events, event:notification, event:queued_messages, event:session_rewound, config:[notifications], header:X-Karucode-Client, env:KARUCODE_AUTH_TOKEN, doc:docs/API.md
 //
 // The API is same-origin only; there is no CORS surface. Two rules matter:
 //
 // 1. **Auth** - with `KARUCODE_AUTH_TOKEN` set, every request needs
-//    `Authorization: Bearer <token>`. `GET /api/events` also accepts
-//    `?token=` because a `ReadableStream` fetch cannot always set headers.
+//    `Authorization: Bearer <token>`. Three paths also accept `?token=`, because
+//    a browser cannot attach a header to what they load: `GET /api/events`
+//    (a stream fetch), `GET /api/terminals/:id/socket` (a websocket handshake) and
+//    `GET /api/artifacts/:id` (an `<iframe src>`).
 // 2. **CSRF** - every `POST`/`PATCH`/`PUT`/`DELETE` must send
 //    `X-Karucode-Client: web`, and a present `Origin` must match `Host`.
 //
@@ -63,13 +65,53 @@
 // | `GET /api/workspace/tree`, `/api/workspace/file` | workspace explorer, confined to the project |
 // | `PUT /api/workspace/file`, `GET /api/workspace/raw` | save a file from the editor, and serve its raw bytes for image/PDF previews |
 // | `POST /api/workspace/upload` | attach a file for the composer |
-// | `GET /api/git/status`, `/api/git/diff` | repository state |
+// | `POST /api/artifacts`, `GET /api/artifacts/:id` | publish a chat artifact (an HTML mock from the transcript) and serve it as an isolated page |
+// | `GET /api/git/status`, `/api/git/diff` | working-tree state and one file's patch |
+// | `GET /api/git/branches`, `POST /api/git/checkout` | local branches, and switching to one |
+// | `POST /api/git/branches`, `POST /api/git/branches/delete` | create (and optionally switch to) a branch, delete one |
+// | `GET /api/git/log`, `GET /api/git/commits/:sha` | commit history (optionally for one path), and one commit's files plus patch |
+// | `POST /api/git/stage`, `/unstage`, `/discard` | the three per-file verbs, singly or by path list or whole workspace |
+// | `POST /api/git/commit` | commit (or amend), optionally staging everything first |
+// | `GET`/`POST /api/git/stash` | the stash stack, and push/pop/apply/drop |
 // | `GET /api/plugins`, `POST /api/plugins/:name/enable` | plugin status, enable/disable |
 // | `POST /api/plugins/reload` | rescan every plugin source: start new plugins, drop removed ones, replace changed ones (no server restart) |
 // | `POST /api/plugins/:name/reload` | replace one plugin's process (after a rebuild or a manifest edit) |
 // | `GET /api/plugins/:name/panels/:panel` | one plugin panel's payload for the inspector |
 // | `GET /api/mcp` | MCP server status and discovered tools |
 // | `GET /api/events` | the SSE event stream for the open session |
+//
+// # Chat artifacts
+//
+// A reply can carry a fenced block the web UI draws as live content - an HTML
+// mock, a diagram, a table. That is a *rendering* of the reply, so the two routes
+// exist only to give an `<iframe>` something to load:
+//
+// ```bash
+// curl -s -X POST localhost:8787/api/artifacts \
+//   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+//   -d '{"html":"<button>Buy</button>","theme":"dark"}'
+// # → 201 {"id":"9f2c…","url":"/api/artifacts/9f2c…","bytes":374,"theme":"dark"}
+// ```
+//
+// The body is `{html, theme?}` (1 MiB; `413` above it, `400` when empty), the id
+// is a SHA-256 of the bytes actually served, and the store is **in memory only**
+// with a bounded size: the same artifact posted twice is one entry and one id, an
+// evicted or forgotten one is a `404` the client answers by posting again, and a
+// restart simply empties it. A fragment is wrapped in a small document whose
+// background follows `theme`; a complete document keeps its own CSS and gets one
+// injected script that reports its height to the parent, so the card is not a
+// fixed letterbox.
+//
+// `GET /api/artifacts/:id` serves that document with a route-local policy that is
+// stricter than the workspace preview's: an **opaque origin** (`sandbox
+// allow-scripts`, never `allow-same-origin`), inline script and style allowed so a
+// mock is a mock, and **no network at all** (`connect-src 'none'`, no wildcard
+// source) so a prompt-injected `<img src="https://…">` cannot beacon out.
+// `frame-ancestors 'self'` plus a route-local `Cross-Origin-Resource-Policy:
+// cross-origin` are what let this app - and only this app - frame it.
+//
+// How an agent writes one, and what does and does not render, is the `artifacts`
+// topic.
 //
 // # Probing a provider
 //
@@ -508,6 +550,93 @@
 // the subagent's `agent_id`. One SSE connection therefore feeds every agent in
 // every session; no per-agent stream exists.
 //
+// # Managing the working tree
+//
+// The git routes are the source-control manager's whole backend. They are
+// **local only**: staging, commits, branches, stashes and history. There is no
+// fetch/pull/push route on purpose - those need credentials and can block on a
+// prompt, so they stay in the terminal, where the operator already is.
+//
+// Reads:
+//
+// ```json
+// GET /api/git/status
+// { "is_repo": true, "branch": "main", "detached": false,
+//   "upstream": "origin/main", "ahead": 1, "behind": 0, "error": null,
+//   "truncated": false,
+//   "files": [ { "path": "src/x.rs", "orig_path": null,
+//                "index": "M", "worktree": " ", "status": "M",
+//                "staged": true, "unstaged": false,
+//                "untracked": false, "conflict": false } ] }
+// ```
+// `index`/`worktree` are the two porcelain columns, so a path that is both
+// staged and modified (`MM`) appears in both lists of the UI; `status` keeps the
+// older trimmed form. `detached` means `branch` is `null`.
+//
+// Every mutation answers the same envelope, with a *fresh* status so a client
+// never races a second `GET` against a command it just ran:
+//
+// ```json
+// { "ok": true, "message": "staged 2 files", "status": { … }, "commit": null }
+// ```
+//
+// ```bash
+// curl -s -X POST localhost:8787/api/git/stage -H 'X-Karucode-Client: web' \
+//   -H 'Content-Type: application/json' -d '{"paths":["src/x.rs"]}'
+// curl -s -X POST localhost:8787/api/git/commit -H 'X-Karucode-Client: web' \
+//   -H 'Content-Type: application/json' -d '{"message":"fix: x","stage_all":true}'
+// curl -s -X POST localhost:8787/api/git/branches -H 'X-Karucode-Client: web' \
+//   -H 'Content-Type: application/json' -d '{"name":"feat/y","checkout":true}'
+// ```
+//
+// What each body takes:
+//
+// * `stage` / `unstage`: `{"paths":[…]}` or `{"all":true}`.
+// * `discard`: the same, plus `"staged": true` to restore the index *and* the
+//   working tree to `HEAD` instead of the working tree to the index, and
+//   `"confirm": true` - **required**, because an untracked path is deleted from
+//   disk and nothing here can undo it.
+// * `commit`: `{"message":"…","amend":bool,"stage_all":bool}`. An empty message
+//   that amends keeps the previous one (`--no-edit`).
+// * `branches`: `{"name":"…","start":"…","checkout":bool}`;
+//   `branches/delete`: `{"name":"…","force":bool,"confirm":bool}` (`force` needs
+//   `confirm`); `checkout`: `{"name":"…"}`.
+// * `stash`: `{"action":"push|pop|apply|drop","index":0,"message":"…",
+//   "include_untracked":bool,"confirm":bool}`. `drop` needs `confirm`.
+//
+// A refused command is `400 bad_request` carrying git's own message (nothing to
+// commit, a dirty tree that would be overwritten, an unmerged branch, an unknown
+// ref), so the caller can show it verbatim. `GET /api/git/commits/:sha` answers
+// `404` for a well-formed id that is not in this repository.
+//
+// Safety rules the routes keep, and that any new git route must keep too:
+//
+// * `git` is spawned with an argv array, never a shell, with the workspace root
+//   as `current_dir`; an inherited `GIT_DIR`/`GIT_WORK_TREE` is dropped;
+// * every path is resolved through the workspace first, so `..`, an absolute
+//   path outside it and a symlink escape are refused before git runs; the
+//   pathspec is passed after `--` with `GIT_LITERAL_PATHSPECS=1`, so a file
+//   named `a[1].txt` (or a `*.rs` glob) can never match more than it names;
+// * refs and branch names are validated against the shared `kc_tools::git`
+//   grammar before they sit in a flag position, and a commit id must be hex;
+// * repository config may not execute anything on a *read*: `core.fsmonitor`,
+//   `diff.external`, the pager and attribute-selected diff drivers are pinned by
+//   `kc_tools::git::SAFE_CONFIG`, and `diff` neutralises every
+//   `filter.<driver>.*` the repository configures. Mutations do **not**
+//   neutralise hooks or filters: `git add`/`commit` run `pre-commit` and LFS
+//   exactly like a terminal command, which is what the person clicking expects;
+// * nothing waits forever: reads are bounded at 10 s, mutations at 60 s (a hook
+//   or a commit-signing program is the slow part), and each spawn is
+//   `kill_on_drop`.
+//
+// Commits need a git identity. karucode never invents one: set `user.name` and
+// `user.email` in the repository or in the service account's `~/.gitconfig`, or
+// the commit is refused with git's "please tell me who you are" message.
+//
+// An untracked path still gets a readable patch: `GET /api/git/diff?path=…`
+// compares it against the empty file, so "new file" reads as added lines instead
+// of "no diff".
+//
 // # The event stream
 //
 // `GET /api/events?session=<id>` is `text/event-stream`: message deltas, tool calls
@@ -552,6 +681,7 @@
 // Full reference: `docs/API.md` (request and response shapes for every route).
 
 pub mod app;
+pub mod artifacts;
 pub mod bootstrap;
 pub mod catalog;
 pub mod error;
@@ -601,3 +731,4 @@ pub async fn run() -> anyhow::Result<()> {
 
 pub mod control;
 pub mod control_sessions;
+pub mod memory;

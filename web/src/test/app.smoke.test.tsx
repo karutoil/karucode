@@ -97,11 +97,12 @@ describe('App smoke render', () => {
     const inspector = screen.getByRole('complementary', { name: 'Workspace inspector' });
     const workspace = screen.getByRole('main', { name: 'Workspace' });
     expect(within(workspace).getByRole('tab', { name: 'Conversation' })).not.toBeNull();
-    // The Changes tab may carry a changed-file count pill, hence the prefix match.
-    expect(within(workspace).getByRole('tab', { name: /^Changes/ })).not.toBeNull();
+    // The source-control tab may carry a changed-file count pill, hence the
+    // prefix match.
+    expect(within(workspace).getByRole('tab', { name: /^Source control/ })).not.toBeNull();
     expect(within(workspace).queryByRole('tab', { name: /terminal/i })).toBeNull();
     expect(within(inspector).getByRole('tab', { name: 'Files' })).not.toBeNull();
-    expect(within(inspector).getByRole('tab', { name: 'Changes' })).not.toBeNull();
+    expect(within(inspector).getByRole('tab', { name: 'Git' })).not.toBeNull();
     expect(within(inspector).getByRole('tab', { name: /^Session/ })).not.toBeNull();
     expect(within(inspector).getByRole('tab', { name: /^Agents/ })).not.toBeNull();
     expect(screen.getByLabelText('Message karucode')).not.toBeNull();

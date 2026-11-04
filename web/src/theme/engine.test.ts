@@ -54,11 +54,13 @@ describe('initTheme', () => {
     expect(root().dataset.theme).toBe('ember');
     expect(root().dataset.mode).toBe('dark');
     expect(root().dataset.density).toBe('comfortable');
-    expect(token('--theme-bg')).toBe('#111213');
+    // Compare against the theme's own palette rather than a copy of it: the whole
+    // point of this test is that the engine and the palette cannot drift apart.
+    expect(token('--theme-bg')).toBe(DEFAULT_THEME.colors.bg);
     expect(token('--theme-accent')).toBe('#dfb680');
     expect(root().style.colorScheme).toBe('dark');
     expect(document.querySelector('meta[name="theme-color"]')?.getAttribute('content')).toBe(
-      '#111213',
+      DEFAULT_THEME.colors.bg,
     );
   });
 
@@ -96,7 +98,7 @@ describe('selecting a built-in', () => {
     expect(root().dataset.theme).toBe('daybreak');
     expect(root().dataset.mode).toBe('light');
     expect(root().style.colorScheme).toBe('light');
-    expect(token('--theme-bg')).toBe('#f4f2ee');
+    expect(token('--theme-bg')).toBe('#f6f4f1');
     expect(token('--theme-text')).toBe('#1c1a17');
     expect(draftEdited.value).toBe(false);
     expect(persisted()?.selected).toBe('daybreak');
@@ -139,7 +141,10 @@ describe('editing a draft', () => {
     expect(root().dataset.density).toBe('compact');
     expect(token('--fs-body')).toBe('12px');
     expect(token('--radius')).toBe('4px');
-    expect(token('--radius-sm')).toBe('1px');
+    // rounding 4 => sm = max(0, 4-4) = 0, md = 2, lg = 8 (DESIGN-SYSTEM.md §3.4)
+    expect(token('--radius-sm')).toBe('0px');
+    expect(token('--radius-md')).toBe('2px');
+    expect(token('--radius-lg')).toBe('8px');
     expect(token('--font-ui')).toContain('Trebuchet');
     expect(token('--font-mono')).toContain('Courier New');
     expect(document.getElementById('kc-theme-custom-css')?.textContent).toContain('blur(6px)');

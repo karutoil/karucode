@@ -955,22 +955,146 @@ is rejected the same way.
 the project, the upload is `400 path_escape`. On Unix the session directory is
 created `0700` and the file `0600`.
 
+## Chat artifacts
+
+A reply can carry a fenced block the web UI draws as live content: an HTML mock, a
+diagram, a table. The transcript renders it in a card with a Preview/Source
+switch, and an HTML one is a **real document** in an `<iframe>`. These two routes
+exist only to give that frame something to load; what an agent writes in the
+fence (and what renders) is the `artifacts` topic in `karucode_docs`.
+
+`POST /api/artifacts` → `201`:
+
+```bash
+curl -s -X POST localhost:8787/api/artifacts \
+  -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+  -d '{"html":"<button>Buy</button>","theme":"dark"}'
+```
+```json
+{ "id": "9f2c6d1b8a4e0f3c5d7b9a1e2c4f6d80",
+  "url": "/api/artifacts/9f2c6d1b8a4e0f3c5d7b9a1e2c4f6d80",
+  "bytes": 374, "theme": "dark" }
+```
+
+* `html` is the artifact source, at most **1 MiB** (`413 payload_too_large` above
+  it; an empty or whitespace-only body is `400 bad_request`).
+* `theme` is `light` (default) or `dark` and only decides the wrapper's own
+  background and text colour, for a **fragment**. A complete document (`<!doctype
+  html>` / `<html>`) keeps its own CSS and ignores `theme` — which is why the same
+  page in either theme is one id.
+* The id is the first 128 bits of the SHA-256 of the bytes actually served, so
+  publishing the same artifact again is the same entry and the same id. The store
+  is **in memory only**, bounded (128 entries / 16 MiB, oldest evicted first) and
+  dropped when the process exits: a `404` simply means "post it again".
+
+`GET /api/artifacts/<id>` → `200 text/html; charset=utf-8`:
+
+* The document is served with a route-local policy: **sandboxed** into an opaque
+  origin (`sandbox allow-scripts`, never `allow-same-origin`), inline `<script>`
+  and `<style>` allowed, and **no network** (`connect-src 'none'`, `img-src data:
+  blob:`, `font-src data:`, no wildcard source). A prompt-injected
+  `<img src="https://…">` cannot load, so it cannot beacon out.
+* `frame-ancestors 'self'` and `Cross-Origin-Resource-Policy: cross-origin` on this
+  route only let this app embed it (and let the document's own inline assets load);
+  `X-Frame-Options` is deliberately absent, because `DENY` would block the frame.
+* `Cache-Control: no-store`. A malformed or unknown id is `404 not_found`, never a
+  `5xx`.
+* With `KARUCODE_AUTH_TOKEN` set this path also accepts `?token=<token>`: an
+  `<iframe src>` is a browser navigation and cannot send `Authorization`. The
+  token in the URL grants nothing the header did not - it is the same trade the
+  event stream and the terminal socket already make.
+
 ## Git
+
+The git routes are the source-control manager's backend. They are **local only**:
+staging, commits, branches, history and stashes. There is deliberately no
+fetch/pull/push route - those need credentials and can block on a prompt, so they
+stay in the terminal.
 
 `GET /api/git/status[?project=<id>]` →
 ```json
-{ "is_repo": true, "branch": "main", "error": null,
-  "files": [ { "path": "src/x.rs", "status": "M", "staged": false } ] }
+{ "is_repo": true, "branch": "main", "detached": false,
+  "upstream": "origin/main", "ahead": 1, "behind": 0, "error": null,
+  "truncated": false,
+  "files": [ { "path": "src/x.rs", "orig_path": null,
+               "index": "M", "worktree": " ", "status": "M",
+               "staged": true, "unstaged": false,
+               "untracked": false, "conflict": false } ] }
 ```
+`index`/`worktree` are the two porcelain columns, so a path staged *and* modified
+(`MM`) belongs to both the staged and the working-tree list; `status` is the
+trimmed form older clients read. `detached: true` means `branch` is `null`.
+`truncated: true` means the listing hit the server's output cap.
+
 `GET /api/git/diff?path=&staged=false&base=[&project=<id>]` →
 ```json
 { "diff": "diff --git ...", "truncated": false }
 ```
-Both take the project-scoped query parameter described above; `git` is run with
-`current_dir` set to that project's directory. `status` reports failures in the
-payload (`200` with `is_repo: false` and `error` set) including a missing `git`
-binary; `diff` answers `400 bad_request` when the directory is not a git
-repository and `500 internal` when `git` cannot be spawned.
+An untracked path still renders: it is compared against the empty file, so a new
+file reads as added lines instead of an empty patch.
+
+Reads for the manager:
+
+* `GET /api/git/branches` → `{ is_repo, branch, detached, truncated, branches: [{
+  name, current, commit, upstream, ahead, behind, timestamp, subject }] }`
+* `GET /api/git/log[?limit=30&path=src/x.rs]` → `{ is_repo, truncated, commits: [{
+  id, short_id, author, email, timestamp, parents, refs, subject }] }` (`limit` is
+  clamped to 1-100; `path` narrows the log to one file's history)
+* `GET /api/git/commits/:sha` → the commit with `body`, a `files` stat
+  (`{path, additions, deletions, binary}`) and its `diff`; `404 not_found` for a
+  well-formed id that is not in the repository, `400` for a non-hex one
+* `GET /api/git/stash` → `{ is_repo, truncated, stashes: [{ ref, index, commit,
+  timestamp, subject }] }`
+
+Every mutation answers the same envelope, with a **fresh** status so a client
+never races a second `GET` against a command it just ran:
+
+```json
+{ "ok": true, "message": "switched to main", "status": { … }, "commit": null }
+```
+
+`commit` carries `{id, short_id, subject}` after `POST /api/git/commit` and is
+`null` everywhere else.
+
+| Route | Body |
+| --- | --- |
+| `POST /api/git/stage`, `/unstage` | `{ "paths": ["src/x.rs"] }` or `{ "all": true }` |
+| `POST /api/git/discard` | the same plus `"staged": bool` and **required** `"confirm": true` |
+| `POST /api/git/commit` | `{ "message": "fix: x", "amend": false, "stage_all": false }` |
+| `POST /api/git/branches` | `{ "name": "feat/y", "start": "main", "checkout": true }` |
+| `POST /api/git/branches/delete` | `{ "name": "feat/y", "force": false, "confirm": false }` |
+| `POST /api/git/checkout` | `{ "name": "main" }` |
+| `POST /api/git/stash` | `{ "action": "push\|pop\|apply\|drop", "index": 0, "message": "…", "include_untracked": false, "confirm": false }` |
+
+Rules:
+
+* `discard` deletes an untracked path from disk, and `stash drop` deletes the
+  stash entry; both require `confirm: true`, as does a forced branch delete
+  (`force` + `confirm`). None of the three can be undone from the UI.
+* `discard` with `staged: true` restores the index *and* the working tree to
+  `HEAD`; without it, the working tree is restored from the index.
+* `commit` with an empty message and `amend: true` keeps the previous message
+  (`--no-edit`). An empty message without `amend` is `400 bad_request`.
+* Every path is resolved inside the workspace before git sees it (`..`, an
+  absolute path outside it and a symlink escape are refused), and the pathspec is
+  passed after `--` with `GIT_LITERAL_PATHSPECS=1`, so a glob cannot match more
+  than the caller named. Branch names and refs are validated by
+  `kc_tools::git::validate_branch_name`/`validate_revision_arg`; a commit id must
+  be hex.
+* A refused command is `400 bad_request` carrying git's own message (nothing to
+  commit, a dirty checkout, an unmerged branch), so it can be shown verbatim.
+* Reads are bounded at 10 s and mutations at 60 s; `git` runs with the shared
+  `SAFE_CONFIG` and environment, so repository config cannot execute anything on
+  a read. Mutations do run the repository's own hooks and clean/smudge filters,
+  exactly like a terminal `git` command.
+* A commit needs a git identity (`user.name`/`user.email` in the repository or the
+  service account's `~/.gitconfig`); karucode never invents one.
+
+Both `status` and `diff` take the project-scoped query parameter described above;
+`git` is run with `current_dir` set to that project's directory. `status` reports
+failures in the payload (`200` with `is_repo: false` and `error` set) including a
+missing `git` binary; `diff` answers `400 bad_request` when the directory is not a
+git repository and `500 internal` when `git` cannot be spawned.
 
 ## Plugins and MCP
 

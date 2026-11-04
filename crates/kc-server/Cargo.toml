@@ -33,6 +33,7 @@ reqwest.workspace = true
 rust-embed = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tower.workspace = true

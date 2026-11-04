@@ -10,6 +10,57 @@ under **Changed**.
 
 ### Added
 
+- **Chat artifacts: a reply can show instead of describe.** A fenced block
+  labelled `artifact` — or one whose language is already content (`html`, `svg`,
+  `mermaid`, `markdown`, `json`, `csv`/`tsv`, an image) — is drawn in the
+  transcript as a card with the thing itself, a **Preview / Source** switch, copy,
+  download and a full-screen view. Metadata (`title`, `type`, `height`) rides in
+  the info string or a `---`-closed header block. Each kind is drawn at the
+  isolation it needs: an HTML mock is a real document in a sandboxed frame with an
+  opaque origin (its own inline script and style run, the network does not), an
+  SVG is sanitised and drawn inline inside a shadow root so its CSS cannot touch
+  the app, Mermaid diagrams are rendered on demand from the app's own palette,
+  Markdown reuses the chat's renderer, and JSON/CSV/images are first-party
+  components over parsed data. Cards appear when a message settles — a fence that
+  is still streaming stays code — and a served document reports its own height so
+  a small mock is not a fixed 420px letterbox. Behind it: `POST /api/artifacts`
+  (content-addressed, in-memory, 1 MiB) and `GET /api/artifacts/<id>` (route-local
+  CSP: `sandbox allow-scripts`, `connect-src 'none'`, no wildcard source). Mermaid
+  is the one new runtime dependency and it is a dynamic `import()`: the main
+  bundle grows ~5.5 KB gzipped and a chat with no diagram never downloads it. The
+  agent is told the convention in its system prompt and in the new `artifacts` doc
+  topic, and `scripts/verify_artifacts.py` drives a real Chromium against a real
+  server to prove the frame, the policy, the diagram, the table, both themes and a
+  390px viewport.
+- **A full source-control manager replaces the read-only Changes tab**, in the
+  chat area (workspace tab **Source control**) and in the inspector (tab **Git**).
+  Changed files are grouped into **Merge changes**, **Staged**, **Changes** and
+  **Untracked** — a path with both a staged and a working-tree side appears in
+  both, which is git's own model — and every row and every group stages,
+  unstages or discards what it holds. The badge letter is repeated as a word, so
+  colour is never the only signal. The commit box takes a multi-line message
+  (`Ctrl/Cmd+Enter` commits) with an **Amend** toggle, and stages everything
+  first when nothing is staged rather than doing nothing. The branch chip opens a
+  dialog that filters, switches, creates (and switches to) and deletes local
+  branches. The full-width view shows the selected file's patch beside the change
+  list with the commit history below it and one commit's files plus patch on
+  click; the inspector tab puts the patch inline and loads the history only when
+  that section is opened, so opening the app still costs one `git status`. Both
+  re-read the tree when they come back into view, and the branch footer now
+  reports the same numbers. An untracked file renders a real patch (added lines)
+  instead of "no diff". Discarding, deleting an unmerged branch and dropping a
+  stash ask for confirmation first, because nothing in the panel can undo them.
+- **Git mutations over HTTP**: `POST /api/git/{stage,unstage,discard,commit}`,
+  `POST /api/git/{branches,branches/delete,checkout,stash}`, and
+  `GET /api/git/{branches,log,commits/:sha,stash}`, each answering with a freshly
+  read status so a client never races a second probe against the command it just
+  ran. They are local-only (fetch/pull/push stay in the terminal) and keep the
+  hardening the read routes already had: argv arrays with no shell, paths
+  resolved inside the workspace and passed after `--` with
+  `GIT_LITERAL_PATHSPECS=1`, refs and branch names validated against the shared
+  `kc_tools::git` grammar, and no repository config able to execute anything on a
+  read.
+
 - **Hovering a project with the session list collapsed peeks at that project's
   sessions.** `Ctrl/Cmd+B` gives the rail zero width, which is right for a wide
   conversation and a dead end when all you wanted was to open a session: the only
@@ -281,6 +332,22 @@ under **Changed**.
   the tab strip would read as a count of something.
 
 ### Fixed
+
+- **The resident set no longer ratchets with use.** A server that had served a
+  few long runs and six plugins sat at roughly twice the memory it does when it
+  starts, and kept climbing (`105 MB → 153 MB` over an afternoon on the machine
+  this was measured on) while holding almost nothing: of 87 MiB of anonymous
+  pages, most were glibc's per-thread arenas — up to `8 * nproc` separate heaps,
+  one per thread that ever allocated — holding *freed* memory that glibc does not
+  hand back to the kernel. The binary now caps the arena count
+  (`KARUCODE_MALLOC_ARENA_MAX`, default 2) before the runtime starts, and returns
+  free heap to the kernel while idle (`KARUCODE_MALLOC_TRIM_SECS`, default 60).
+  Measured with `scripts/measure_steady_memory.py`, six real plugins and twelve
+  concurrent runs, two rounds each: idle 46.3 MiB → 31.4 MiB (anonymous pages
+  30.9 MiB → 15.7 MiB); on a production-shaped workload (a 350 MB database and
+  eight turns that each return a 900 KB tool result) the old build stayed at
+  41 MiB after the run and the new one settled back to 22 MiB. Plugin processes
+  are unaffected — their own RSS is their own.
 
 - **The session list's rows are laid out as one line again.** The Session panel
   named its definition list `.session-meta`, which is the sessions rail's own

@@ -16,6 +16,7 @@ cargo run -p kc-docs -- --check   # what CI runs
 | Topic | What it covers | Source |
 | --- | --- | --- |
 | [`approvals`](approvals.md) | The four approval modes, the allowlists behind them, and how a pending approval is answered or times out. | `crates/kc-core/src/approval.rs:1` |
+| [`artifacts`](artifacts.md) | An agent can put a diagram, an HTML mock, a table or a document in its reply, and the web UI draws it as a card with a live Preview and the Source it came from. | `web/src/lib/artifacts.ts:4` |
 | [`builtin-tools`](builtin-tools.md) | What each first-party tool does, how it is gated, and the limits and gotchas that shape its output. | `crates/kc-tools/src/lib.rs:7` |
 | [`central-control`](central-control.md) | Open as many control-plane chats as you need; each audits, steers and starts sessions under normal approvals, outside every project. | `crates/kc-server/src/control.rs:3` |
 | [`configuration`](configuration.md) | The four config layers, which settings apply live, and how secrets and invalid values are handled. | `crates/kc-server/src/settings.rs:14` |
@@ -38,4 +39,4 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`tool-call-errors`](tool-call-errors.md) | A call that fails because of how it was written comes back with a working version of itself, so the next attempt is correct instead of another guess. | `crates/kc-core/src/tool.rs:1` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-22 topic(s).
+23 topic(s).

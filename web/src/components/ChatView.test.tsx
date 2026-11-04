@@ -390,9 +390,9 @@ describe('ChatView workspace tabs', () => {
     renderChat();
 
     expect(tab(/^Conversation/).getAttribute('aria-selected')).toBe('true');
-    expect(tab(/^Changes/).getAttribute('aria-selected')).toBe('false');
+    expect(tab(/^Source control/).getAttribute('aria-selected')).toBe('false');
     expect(document.getElementById('workspace-panel-chat')?.hidden).toBe(false);
-    // Lazy: a git probe only runs once the user asks for the changes view.
+    // Lazy: a git probe only runs once the user asks for the source-control view.
     expect(document.getElementById('workspace-panel-changes')).toBeNull();
     expect(screen.getByLabelText('Message karucode')).not.toBeNull();
   });
@@ -405,24 +405,27 @@ describe('ChatView workspace tabs', () => {
     // Command output lives in the transcript itself.
     expect(screen.getAllByRole('tab').map((element) => element.textContent?.trim())).toEqual([
       'Conversation',
-      'Changes',
+      'Source control',
     ]);
   });
 
-  it('mounts the changes pane on first visit and keeps it afterwards', async () => {
+  it('mounts the source-control manager on first visit and keeps it afterwards', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response(JSON.stringify({ error: { code: 'not_found', message: 'no git' } }), { status: 404 })),
     );
     renderChat();
-    fireEvent.click(tab(/^Changes/));
+    fireEvent.click(tab(/^Source control/));
 
     const panel = document.getElementById('workspace-panel-changes');
     expect(panel).not.toBeNull();
     expect(panel?.hidden).toBe(false);
-    // The page variant owns the mock's `.secondary-panel` chrome.
-    expect(panel?.querySelector('.panel-kicker')?.textContent).toBe('Source control');
-    expect(panel?.querySelector('.panel-title')?.textContent).toBe('Review changes');
+    // The page variant is the full manager: header, commit box and diff region.
+    expect(panel?.querySelector('.gitm-page')).not.toBeNull();
+    expect(panel?.querySelector('.gitm-kicker')?.textContent).toBe('Source control');
+    expect(panel?.querySelector('.gitm-title')?.textContent).toBe('Working tree');
+    // A failed probe is reported with a retry, not an empty tree.
+    await waitFor(() => expect(panel?.querySelector('.inline-error')).not.toBeNull());
 
     fireEvent.click(tab(/^Conversation/));
     expect(document.getElementById('workspace-panel-changes')?.hidden).toBe(true);
@@ -434,17 +437,17 @@ describe('ChatView workspace tabs', () => {
     const conversation = tab(/^Conversation/);
     conversation.focus();
     fireEvent.keyDown(conversation, { key: 'ArrowRight' });
-    expect(tab(/^Changes/).getAttribute('aria-selected')).toBe('true');
-    expect(document.activeElement).toBe(tab(/^Changes/));
+    expect(tab(/^Source control/).getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(tab(/^Source control/));
 
-    // Two tabs: the ends are Conversation and Changes, and it wraps.
-    fireEvent.keyDown(tab(/^Changes/), { key: 'ArrowRight' });
+    // Two tabs: the ends are Conversation and Source control, and it wraps.
+    fireEvent.keyDown(tab(/^Source control/), { key: 'ArrowRight' });
     expect(tab(/^Conversation/).getAttribute('aria-selected')).toBe('true');
 
     fireEvent.keyDown(tab(/^Conversation/), { key: 'End' });
-    expect(tab(/^Changes/).getAttribute('aria-selected')).toBe('true');
+    expect(tab(/^Source control/).getAttribute('aria-selected')).toBe('true');
 
-    fireEvent.keyDown(tab(/^Changes/), { key: 'Home' });
+    fireEvent.keyDown(tab(/^Source control/), { key: 'Home' });
     expect(tab(/^Conversation/).getAttribute('aria-selected')).toBe('true');
   });
 
@@ -525,13 +528,15 @@ describe('ChatView workspace tabs', () => {
     );
     renderChat();
 
-    for (const name of [/^Conversation/, /^Changes/]) {
+    for (const name of [/^Conversation/, /^Source control/]) {
       const icon = tab(name).querySelector('.tab-icon svg');
       expect(icon?.getAttribute('width')).toBe('15');
     }
 
     // The count pill is real data (git status), not the mock's demo `3`.
-    await waitFor(() => expect(tab(/^Changes/).querySelector('.tab-count')?.textContent).toBe('2'));
+    await waitFor(() =>
+      expect(tab(/^Source control/).querySelector('.tab-count')?.textContent).toBe('2'),
+    );
   });
 
   it('marks an idle run with the mock\'s circle-check instead of a faint dot', () => {

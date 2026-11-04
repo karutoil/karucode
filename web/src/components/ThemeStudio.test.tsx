@@ -6,6 +6,8 @@ import * as store from '../state/store';
 import {
   DEFAULT_THEME,
   THEME_STORAGE_KEY,
+  findBuiltin,
+  resolvePalette,
   customThemes,
   deleteCustomTheme,
   draftEdited,
@@ -117,7 +119,9 @@ describe('applying a built-in theme', () => {
     const root = document.documentElement;
     expect(root.dataset.theme).toBe('nocturne');
     expect(root.dataset.mode).toBe('dark');
-    expect(root.style.getPropertyValue('--theme-bg')).toBe('#0c1221');
+    expect(root.style.getPropertyValue('--theme-bg')).toBe(
+      resolvePalette(findBuiltin('nocturne')!).bg,
+    );
     expect(persisted().selected).toBe('nocturne');
     expect(screen.getByTestId('theme-preset-nocturne').getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByTestId('theme-current-name').textContent).toBe('Nocturne');
@@ -129,7 +133,9 @@ describe('applying a built-in theme', () => {
 
     expect(document.documentElement.dataset.mode).toBe('light');
     expect(document.documentElement.style.colorScheme).toBe('light');
-    expect(document.documentElement.style.getPropertyValue('--theme-text')).toBe('#302b26');
+    expect(document.documentElement.style.getPropertyValue('--theme-text')).toBe(
+      resolvePalette(findBuiltin('paper')!).text,
+    );
   });
 });
 
@@ -153,7 +159,9 @@ describe('colour editing', () => {
 
     fireEvent.input(input, { target: { value: '#12' } });
     expect(input.getAttribute('aria-invalid')).toBe('true');
-    expect(document.documentElement.style.getPropertyValue('--theme-bg')).toBe('#111213');
+    expect(document.documentElement.style.getPropertyValue('--theme-bg')).toBe(
+      resolvePalette(DEFAULT_THEME).bg,
+    );
     expect(draftEdited.value).toBe(false);
 
     fireEvent.focusOut(input);

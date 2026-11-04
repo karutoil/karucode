@@ -417,7 +417,9 @@ Read [docs/SECURITY.md](docs/SECURITY.md) before exposing the server.
 * Child processes get a credential-free environment allowlist, so a
   prompt-injected `curl` cannot exfiltrate the harness token or the provider key.
 * Secrets are never returned to the browser or written to logs.
-* Markdown is rendered with raw HTML disabled and then sanitised.
+* Markdown is rendered with raw HTML disabled and then sanitised. A chat artifact
+  (an HTML mock from a reply) is a **separate document** in a sandboxed frame with
+  an opaque origin, inline script and style only, and no network at all.
 * **Shell commands are not sandboxed** — approvals are the gate, not isolation.
 * Plugins and MCP servers are trusted code; subagents share the workspace, and
   `owned_paths` is advisory, not locking.

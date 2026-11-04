@@ -18,37 +18,37 @@
   color-scheme: dark;
 
   /* ---- surfaces -------------------------------------------------------- */
-  --theme-bg: #111213; /* app canvas */
-  --theme-rail: #141516; /* project rail */
-  --theme-sidebar: #18191a; /* session sidebar */
-  --theme-inspector: #171819; /* right inspector */
-  --theme-surface: #1c1d1f; /* cards, panels, inputs */
-  --theme-raised: #222326; /* elevated surface */
-  --theme-hover: #27292b; /* hover surface */
+  --theme-bg: #0f0e0d; /* app canvas */
+  --theme-rail: #141312; /* project rail */
+  --theme-sidebar: #1a1918; /* session sidebar */
+  --theme-inspector: #181716; /* right inspector */
+  --theme-surface: #23211f; /* cards, panels, inputs */
+  --theme-raised: #2c2a28; /* elevated surface */
+  --theme-hover: #363330; /* hover surface */
 
   /* ---- lines ----------------------------------------------------------- */
-  --theme-line: #2a2c2f;
-  --theme-line-soft: #242628;
-  --theme-line-strong: #343638;
+  --theme-line: #363430;
+  --theme-line-soft: #2e2b29;
+  --theme-line-strong: #423f3b;
 
   /* ---- text ------------------------------------------------------------ */
-  --theme-text: #eae9e5;
-  --theme-text-secondary: #b4b3ae;
-  --theme-muted: #8b8d8c;
-  --theme-faint: #676b6b;
+  --theme-text: #f2f0ee;
+  --theme-text-secondary: #d6d2cc;
+  --theme-muted: #ada49a;
+  --theme-faint: #8d867e;
 
   /* ---- accents & status ------------------------------------------------ */
   --theme-accent: #dfb680;
-  --theme-accent-hi: #f1c691;
-  --theme-accent-bg: #32291e;
-  --theme-accent-line: #58452e;
+  --theme-accent-hi: #e3c398;
+  --theme-accent-bg: #42331f;
+  --theme-accent-line: #89755a;
   --theme-accent-text: #dfb680; /* accent as ink */
-  --theme-on-accent: #1c0f06; /* ink on an accent fill */
+  --theme-on-accent: #0b0d0f; /* ink on an accent fill */
   --theme-success: #88baa0;
-  --theme-success-bg: #1b3029;
+  --theme-success-bg: #293830;
   --theme-warn: #f1c691;
   --theme-danger: #e49e91;
-  --theme-danger-bg: #2c1b1a;
+  --theme-danger-bg: #42241f;
   --theme-info: #92b3d8;
 
   /* ---- code ------------------------------------------------------------ */
@@ -58,128 +58,124 @@
   --theme-shadow: rgba(0, 0, 0, 0.48);
 
   /* ---- fidelity roles --------------------------------------------------
-     Each of these is a real role the v3 mock uses (input box, inset card,
-     menu, diff row, rail glyph, …). Values are the mock's own literals for
-     Ember; `src/theme/roles.ts` recomputes them for every other theme and
-     for light mode, so components never hardcode a shade. */
---surface-input: #1b212a;
-  --line-input: #333c48;
-  --focus-input: #8a6242;
-  --input-ink: #eae9e5;
-  --input-placeholder: #6d7683;
-  --surface-plus-hover: #252c37;
-  --surface-hover-strong: #222933;
-  --line-hair: #252c37;
+   * Generated — do not hand-edit. Run:
+   *   EMIT_FIRST_PAINT=1 npx vitest run src/theme/first-paint.emit.test.ts
+   * `roles.test.ts` fails if this block drifts from the resolver. */
+  --surface-input: #272422;
+  --line-input: #4d4337;
+  --focus-input: #89755a;
+  --input-ink: #cbc1b7;
+  --input-placeholder: #9b9287;
+  --surface-plus-hover: #393532;
+  --surface-hover-strong: #363330;
+  --line-hair: #363430;
   --gold-send: #dfb680;
-  --gold-send-hover: #f5bd93;
-  --on-gold: #1c0f06;
-  --foot-ink: #6d7683;
-  --foot-strong: #9aa3b2;
+  --gold-send-hover: #e3c398;
+  --on-gold: #0f0e0d;
+  --foot-ink: #9b9287;
+  --foot-strong: #c5bdb3;
   --ring-fill: #dfb680;
-  --ring-track: #2c333d;
-  --chip-surface: #1d232c;
-  --chip-line: #2c333d;
-  --chip-ink: #b7bdc8;
-  --surface-menu: #20262f;
-  --line-menu: #333b46;
-  --text-menu-title: #8b92a1;
-  --text-menu-item: #b7bdc8;
-  --text-menu-meta: #9aa3b2;
-  --row-accent-bg: #2a2119;
+  --ring-track: #3f3c38;
+  --chip-surface: #2b2928;
+  --chip-line: #3f3c38;
+  --chip-ink: #c8c2b7;
+  --surface-menu: #2f2c2a;
+  --line-menu: #4b4237;
+  --text-menu-title: #b2aaa0;
+  --text-menu-item: #c8c2b7;
+  --text-menu-meta: #c5bdb3;
+  --row-accent-bg: #42331f;
   --row-accent-ink: #dfb680;
-  --surface-inset: #1f2630;
-  --line-inset: #252c37;
-  --line-card: #2b333e;
-  --line-divider: #222831;
-  --line-keycap: #2c333d;
-  --line-overlay: #333b46;
-  --text-caption: #b7bdc8;
-  --text-subtle: #6d7683;
-  --text-kicker: #8b92a1;
-  --text-kicker-panel: #9aa3b2;
-  --tab-active-text: #eae9e5;
-  --tab-hover: #b7bdc8;
-  --row-selected-bg: #2a2119;
+  --surface-inset: #2b2926;
+  --line-inset: #363430;
+  --line-card: #433b30;
+  --line-divider: #342f26;
+  --line-keycap: #433b31;
+  --line-overlay: #4b4237;
+  --text-caption: #c8c2b7;
+  --text-subtle: #9b9287;
+  --text-kicker: #b2aaa0;
+  --text-kicker-panel: #c5bdb3;
+  --tab-active-text: #c9c1b9;
+  --tab-hover: #c7c2b9;
+  --row-selected-bg: #42331f;
   --row-selected-text: #dfb680;
-  --surface-preview: #1b212a;
-  --line-preview: #2c333d;
-  --icon-folder: #c79a6b;
-  --icon-rust: #d8a178;
-  --icon-file: #8b92a1;
-  --icon-md: #8fb3f7;
-  --icon-path: #a08a72;
-  --icon-quiet: #6d7683;
-  --icon-pill-down: #6d7683;
-  --btn-accent-bg: #2a2119;
-  --btn-accent-bg-hover: #3a2b1d;
-  --btn-accent-line: #6b4a33;
+  --surface-preview: #272422;
+  --line-preview: #433b31;
+  --icon-folder: #aea18f;
+  --icon-rust: #b7ab9b;
+  --icon-file: #b2aaa0;
+  --icon-md: #a9b4c0;
+  --icon-path: #9c8b76;
+  --icon-quiet: #9b9287;
+  --icon-pill-down: #9b9287;
+  --btn-accent-bg: #42331f;
+  --btn-accent-bg-hover: #463621;
+  --btn-accent-line: #89755a;
   --btn-accent-text: #dfb680;
-  --toggle-track: #2c333d;
-  --toggle-knob: #6d7683;
+  --toggle-track: #3f3c38;
+  --toggle-knob: #99938b;
   --toggle-on-track: #dfb680;
-  --toggle-on-knob: #f5bd93;
-  --surface-card: #13181f;
-  --line-card-strong: #2b333e;
-  --surface-command: #13181f;
-  --line-command: #2b333e;
-  --surface-command-hover: #171c23;
-  --surface-command-output: #0a0d11;
-  --text-command: #b7bdc8;
-  --text-command-output: #8fdcb7;
-  --surface-symbol: #212831;
-  --line-symbol: #232a33;
-  --text-symbol: #b7bdc8;
-  --text-output: #9aa3b2;
-  --text-output-num: #6d7683;
-  --text-expand: #9aa3b2;
-  --text-body: #b7bdc8;
-  --text-date: #6d7683;
-  --text-user: #b7bdc8;
-  --surface-user: #101318;
-  --surface-avatar: #252c37;
-  --line-avatar: #2c333d;
-  --text-avatar: #b7bdc8;
-  --surface-avatar-agent: #2a2119;
-  --line-avatar-agent: #6b4a33;
-  --surface-diff: #0a0d11;
-  --line-diff: #232a33;
-  --line-diff-head: #222831;
-  --surface-diff-add: #0f2a20;
-  --surface-diff-del: #2e1a1a;
-  --surface-diff-ctx: #0d1014;
+  --toggle-on-knob: #e3c398;
+  --surface-card: #1e1c1b;
+  --line-card-strong: #433b30;
+  --surface-command: #1e1c1b;
+  --line-command: #433b30;
+  --surface-command-hover: #2a2725;
+  --surface-command-output: #131110;
+  --text-command: #c8c2b7;
+  --text-command-output: #b2c8bd;
+  --surface-symbol: #302e2c;
+  --line-symbol: #373127;
+  --text-symbol: #c8c2b7;
+  --text-output: #c5bdb3;
+  --text-output-num: #9b9287;
+  --text-expand: #c5bdb3;
+  --text-body: #c8c2b7;
+  --text-date: #9b9287;
+  --text-user: #c8c2b7;
+  --surface-user: #1a1817;
+  --surface-avatar: #34312f;
+  --line-avatar: #433b31;
+  --text-avatar: #c8c2b7;
+  --surface-avatar-agent: #42331f;
+  --line-avatar-agent: #89755a;
+  --surface-diff: #151312;
+  --line-diff: #39332a;
+  --line-diff-head: #342f26;
+  --surface-diff-add: #172920;
+  --surface-diff-del: #38150e;
+  --surface-diff-ctx: #171514;
   --text-review: #dfb680;
-  --surface-review: #2a2119;
-  --surface-review-hi: #3a2b1d;
-  --text-empty-title: #eae9e5;
-  --text-empty-copy: #9aa3b2;
+  --surface-review: #42331f;
+  --surface-review-hi: #42331f;
+  --text-empty-title: #cbc1b7;
+  --text-empty-copy: #c5bdb3;
   --text-empty-symbol: #dfb680;
-  --surface-toast: #252c37;
-  --line-toast: #3a4350;
-  --text-toast: #eae9e5;
-  --rail-glyph-text: #8b92a1;
-  --rail-add-line: #2c333d;
-  --rail-add-line-hover: #6b4a33;
-  --rail-avatar-bg: #252c37;
-  --rail-avatar-line: #2c333d;
-  --rail-avatar-text: #b7bdc8;
-  --accent-faint: #6b4a33;
-  --accent-surface: #2a2119;
-  --accent-text-soft: #f5bd93;
-  --accent-hint: #c08c62;
-  --field-focus-line: #8a6242;
-  --item-active-to: #2a2119;
-  --meta-text: #8b92a1;
-  --rail-glyph-line: rgb(255 255 255 / 8%); /* light: rgb(0 0 0 / 10%) */
-  --inset-hairline: rgb(255 255 255 / 3%); /* light: rgb(255 255 255 / 60%) */
+  --surface-toast: #34312f;
+  --line-toast: #544b3d;
+  --text-toast: #cbc1b7;
+  --rail-glyph-text: #b2aaa0;
+  --rail-add-line: #3f3c38;
+  --rail-add-line-hover: #89755a;
+  --rail-avatar-bg: #34312f;
+  --rail-avatar-line: #3f3c38;
+  --rail-avatar-text: #c7c2b9;
+  --accent-faint: #89755a;
+  --accent-surface: #42331f;
+  --accent-text-soft: #e3c398;
+  --accent-hint: #cb8933;
+  --field-focus-line: #89755a;
+  --item-active-to: #42331f;
+  --meta-text: #b2aaa0;
+  --rail-glyph-line: rgb(255 255 255 / 8%);
+  --inset-hairline: rgb(255 255 255 / 3%);
   --scrim: rgb(3 4 6 / 60%);
   --scrim-soft: rgb(0 0 0 / 13%);
   --shadow-composer: 0 12px 34px rgb(0 0 0 / 10%);
-  /* A floating dock needs a lift the old attached band did not: a tight
-   * contact shadow plus a wide, soft one, so the box reads as *above* the
-   * transcript rather than painted onto it. */
   --shadow-dock: inset 0 1px 0 rgb(255 255 255 / 3%), 0 16px 40px -18px rgb(0 0 0 / 85%);
-  --shadow-menu: 0 24px 60px -20px rgb(0 0 0 / 85%); /* light: 0 20px 60px rgb(15 23 42 / 14%) */
-  --shadow-overlay: 0 30px 90px -24px rgb(0 0 0 / 85%); /* light: 0 30px 90px rgb(15 23 42 / 18%) */
+  --shadow-menu: 0 24px 60px -20px rgb(0 0 0 / 85%);
+  --shadow-overlay: 0 30px 90px -24px rgb(0 0 0 / 85%);
 
   /* ===================================================================== */
   /* Public aliases — use these in component CSS.                          */
@@ -213,6 +209,12 @@
   /* The accent as a *fill* and the ink that is legible on it. `--accent` itself
    * is tuned to be readable as text on the canvas, which in light mode makes it
    * too dark to carry light text; these two are the button pair. */
+  /* `--accent-text` is the accent used as *ink* (a label, a badge, a small mono
+   * pill). `chat.css` already reads it on `.model-pill`, and it was never
+   * defined — so that pill inherited whatever the cascade gave it. It resolves to
+   * the same AA-safe colour as the fill, which is the point: one accent value,
+   * two roles. */
+  --accent-text: var(--theme-accent-text);
   --accent-fill: var(--theme-accent-text);
   --on-accent: var(--theme-on-accent);
   --success: var(--theme-success);
@@ -229,6 +231,14 @@
   --code-bg: var(--theme-inspector);
 
   --shadow-lg: var(--theme-shadow);
+
+  /* Focus visibility, required by DESIGN-SYSTEM.md §5.6. It is derived from the
+   * accent (which already passes 3:1 against every surface as a glyph colour), so
+   * every theme gets a ring that belongs to it. Components that write
+   * `outline: none` must replace it with this, not with nothing. */
+  --focus-ring: var(--theme-accent-text);
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
 
   /* ---- legacy aliases -------------------------------------------------- */
   /* Kept so untouched CSS keeps rendering during the restyle. New code must
@@ -249,31 +259,73 @@
     Arial, 'Noto Sans', sans-serif;
   --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, ui-monospace, monospace;
 
-  --fs-body: 13px;
-  --fs-small: 11.5px;
+  /* An eleven-step scale with a floor. There used to be twenty-five sizes and
+   * 220 declarations below 11px, which is what "washed out" was: the quiet text
+   * was not quiet, it was unreadable. See DESIGN-SYSTEM.md §3.3.
+   *   micro  — uppercase kickers and badges only, and only at >= 4.5:1
+   *   tiny   — dense metadata
+   *   small  — labels, buttons, inputs
+   *   label  — section labels, tab text
+   *   message— message body
+   *   body   — UI body
+   *   lead   — dialog and card titles
+   *   title  — page titles
+   *   heading— section headings
+   *   display— empty-state titles
+   *   hero   — the one hero number
+   */
   --fs-micro: 10px;
-  --lh-body: 1.5;
-  /* message copy is denser than UI copy in the mock */
+  --fs-tiny: 11px;
+  --fs-small: 11.5px;
+  --fs-label: 12px;
   --fs-message: 12.5px;
+  --fs-body: 13px;
+  --fs-lead: 14px;
+  --fs-title: 16px;
+  --fs-heading: 18px;
+  --fs-display: 20px;
+  --fs-hero: 24px;
+  --lh-body: 1.5;
+  /* message copy is denser than UI copy */
   --lh-message: 1.72;
+  /* one uppercase-kicker definition, used by .eyebrow and every status pill */
+  --fs-kicker: 10px;
+  --weight-kicker: 720;
+  --tracking-kicker: 0.125em;
 
   /* ---- shape & motion -------------------------------------------------- */
+  /* Six radii, all derived from the Theme Studio's rounding knob so the whole
+   * workspace squares off together. There used to be twenty values in play
+   * (2,3,4,5,6,7,8,9,10,11,13,14,15,17 …) which is why nothing looked related.
+   * 50% is for circles only. See DESIGN-SYSTEM.md §3.4.
+   */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
   --radius: 10px;
-  --radius-sm: 7px;
-  --radius-lg: 12px;
+  --radius-lg: 14px;
   --radius-pill: 999px;
-  /* geometry the mock fixes regardless of the theme's rounding */
-  --radius-input: 12px;
-  --radius-prompt: 9px;
+  /* aliases, not new values: a field and a prompt are the base radius */
+  --radius-input: var(--radius);
+  --radius-prompt: var(--radius);
 
-  /* spacing scale used by the restyled shell/cards */
-  --space-1: 4px;
-  --space-2: 7px;
-  --space-3: 10px;
-  --space-4: 14px;
-  --space-5: 18px;
-  --space-6: 24px;
-  --space-7: 30px;
+  /* Spacing: ten steps on a 4px rhythm. The components used 285 distinct values
+   * against these seven, so nothing lined up with anything. Snap a literal to the
+   * nearest step; the maximum movement is 2px, so no layout may reflow.
+   * See DESIGN-SYSTEM.md §3.2.
+   */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 10px;
+  --space-6: 12px;
+  --space-7: 16px;
+  --space-8: 20px;
+  --space-9: 24px;
+  --space-10: 32px;
+  /* a hairline is not a step; it gets its own name so nobody writes 1px */
+  --hairline: 1px;
 
   --transition: 160ms ease-out;
   --transition-fast: 120ms ease-out;
@@ -287,15 +339,25 @@
   --header-h: 66px; /* .main-head{height:66px;min-height:66px} */
   --tabs-h: 44px; /* .workspace-tabs{height:44px;min-height:44px} */
   --content-max: 820px; /* .thread-inner{max-width:820px} */
-  /* ---- mock surface aliases -------------------------------------------- *
-   * The mock's three-pane language names its fills directly: `--panel-2` is the
-   * chrome column, `--surface-2`/`--surface-3` are the two raised card fills, and
-   * `--text-2` is the "second voice" the meta lines use. They are aliases over
-   * the theme tokens, not new colours, so a theme still owns everything. */
+  /* ---- legacy alias names ---------------------------------------------- *
+   * Components reach for these names, so they are kept as aliases over the real
+   * tokens. They used to point at custom properties that did not exist —
+   * `--surface-2: var(--raised)` and `--surface-3: var(--hover)`, where the real
+   * names are `--surface-raised` and `--surface-hover`. An undefined `var()` makes
+   * the whole declaration invalid at computed-value time, so seven fills across
+   * the transcript (avatar, status chip, tool-group header, disabled Send, four
+   * hover states) silently painted nothing. Every alias below resolves. */
   --panel-2: var(--rail);
-  --surface-2: var(--raised);
-  --surface-3: var(--hover);
+  --surface-2: var(--surface-raised);
+  --surface-3: var(--surface-hover);
   --text-2: var(--text-secondary);
+  /* one step *below* a card, for a code block or console inside it, so an inset
+   * is always a recess rather than a second card */
+  --surface-sunken: var(--theme-line-soft);
+  /* `--warning` was read twice and never defined */
+  --warning: var(--warn);
+  /* a mono family alias, also read but never defined */
+  --mono: var(--font-mono);
 
   /* The mock's canvas glow: two very faint radial tints (warm top-left, cool
    * top-right) laid over `--bg`. Derived from the accent/info roles so every

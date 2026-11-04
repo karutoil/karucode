@@ -116,6 +116,7 @@
 // Full reference: `docs/ARCHITECTURE.md` (Workspace per run), `docs/API.md`
 // (projects).
 
+use crate::artifacts::ArtifactStore;
 use crate::catalog::CatalogCache;
 use crate::host::HostAllowlist;
 use crate::settings::SettingsHandle;
@@ -386,6 +387,10 @@ pub struct AppStateInner {
     /// processes are gone and a fresh shell starts on the next attach. The
     /// durable half is the `terminals` table.
     pub terminals: Arc<TerminalRegistry>,
+    /// Chat artifact documents, keyed by the SHA-256 of their bytes. An in-memory
+    /// cache with no persistence: the client re-posts what it is about to draw,
+    /// so losing the store costs one round trip, not a message.
+    pub artifacts: Arc<ArtifactStore>,
     pub started: Instant,
     /// Cancelled on SIGINT/SIGTERM so SSE streams end and the server can stop.
     pub shutdown: CancellationToken,
@@ -416,6 +421,7 @@ impl AppState {
                 projects: deps.projects,
                 host_allowlist: HostAllowlist::new(&deps.bind_host, deps.allowed_hosts.as_deref()),
                 terminals: Arc::new(TerminalRegistry::new()),
+                artifacts: Arc::new(ArtifactStore::new()),
                 started: Instant::now(),
                 shutdown: CancellationToken::new(),
                 mission_schedulers: std::sync::Mutex::new(HashMap::new()),
@@ -493,6 +499,11 @@ impl AppState {
     /// The live shells. See [`TerminalRegistry`].
     pub fn terminals(&self) -> &Arc<TerminalRegistry> {
         &self.inner.terminals
+    }
+
+    /// The chat artifact documents. See [`ArtifactStore`].
+    pub fn artifacts(&self) -> &Arc<ArtifactStore> {
+        &self.inner.artifacts
     }
 
     pub fn db_path(&self) -> &Path {

@@ -54,6 +54,13 @@ the whole security story on a laptop.
   can be hotlinked by `<img src>` or an iframe but cannot execute in the app's
   origin, cannot read its storage and cannot call `/api`. The shell keeps the
   app CSP; only the raw route is narrowed.
+* **Chat artifacts** - an HTML mock from a reply is a document of its own at
+  `GET /api/artifacts/<id>`, served with `sandbox allow-scripts` (an opaque
+  origin: its scripts run, but it cannot read this app's storage, call `/api`
+  or frame the app) and `connect-src 'none'` with no wildcard source, so a
+  prompt-injected `<img src="https://…">` cannot beacon out. An SVG artifact is
+  sanitised and drawn in a shadow root; nothing from an artifact is ever
+  inserted into the app's own DOM as markup. See the `artifacts` topic.
 * **Plugin panels** - a plugin contributes *data*, never markup. The inspector
   draws the payload with a first-party component (or a read-only JSON view),
   so a plugin cannot execute code in the app's origin; the CSP and

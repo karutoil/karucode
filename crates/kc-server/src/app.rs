@@ -61,6 +61,13 @@
 //   can be hotlinked by `<img src>` or an iframe but cannot execute in the app's
 //   origin, cannot read its storage and cannot call `/api`. The shell keeps the
 //   app CSP; only the raw route is narrowed.
+// * **Chat artifacts** - an HTML mock from a reply is a document of its own at
+//   `GET /api/artifacts/<id>`, served with `sandbox allow-scripts` (an opaque
+//   origin: its scripts run, but it cannot read this app's storage, call `/api`
+//   or frame the app) and `connect-src 'none'` with no wildcard source, so a
+//   prompt-injected `<img src="https://…">` cannot beacon out. An SVG artifact is
+//   sanitised and drawn in a shadow root; nothing from an artifact is ever
+//   inserted into the app's own DOM as markup. See the `artifacts` topic.
 // * **Plugin panels** - a plugin contributes *data*, never markup. The inspector
 //   draws the payload with a first-party component (or a read-only JSON view),
 //   so a plugin cannot execute code in the app's origin; the CSP and
@@ -287,15 +294,27 @@ fn authorized(request: &Request<Body>, expected: &str) -> bool {
             return true;
         }
     }
-    // Two endpoints accept `?token=`: the SSE stream (a `ReadableStream` fetch
-    // cannot always set headers) and the terminal websocket (a browser never can
-    // on a handshake). Both are same-origin only, and the websocket additionally
-    // checks `Origin` against `Host`.
+    // Three endpoints accept `?token=`: the SSE stream (a `ReadableStream` fetch
+    // cannot always set headers), the terminal websocket (a browser never can on
+    // a handshake), and an artifact document (an `<iframe src>` is a browser
+    // navigation with no headers either). All are same-origin only; the
+    // websocket additionally checks `Origin` against `Host`, and an artifact id is
+    // a content hash the caller has just published, so the URL grants nothing
+    // that the bearer token did not already grant.
     let path = request.uri().path();
     if path == "/api/events" || (path.starts_with("/api/terminals/") && path.ends_with("/socket")) {
         if let Some(token) = query_param(request.uri().query(), "token") {
             if constant_time_eq(token.as_bytes(), expected.as_bytes()) {
                 return true;
+            }
+        }
+    }
+    if let Some(id) = path.strip_prefix("/api/artifacts/") {
+        if !id.contains('/') && crate::artifacts::valid_id(id) {
+            if let Some(token) = query_param(request.uri().query(), "token") {
+                if constant_time_eq(token.as_bytes(), expected.as_bytes()) {
+                    return true;
+                }
             }
         }
     }

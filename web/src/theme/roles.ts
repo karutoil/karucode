@@ -226,13 +226,11 @@ const EMBER_PALETTE: Record<Anchor, string> = {
 /** Properties the stylesheet may reference, in declaration order. */
 export const ROLE_PROPERTIES: readonly string[] = ROLES.map((role) => role.property);
 
-/** Ember itself: the mock's own values, unchanged. */
-function emberValue(spec: RoleSpec, mode: ThemeMode): string {
-  if (spec.kind === 'alpha') {
-    return mode === 'light' ? (spec.emberLight ?? spec.ember) : spec.ember;
-  }
-  return spec.ember;
-}
+/** Role property -> the palette colour it is cut from. Used by the tests that
+ *  police "no role may be far more chromatic than its anchor". */
+export const ROLE_ANCHORS: Readonly<Record<string, Anchor>> = Object.fromEntries(
+  ROLES.map((role) => [role.property, role.anchor]),
+);
 
 /**
  * Any other theme: reproduce the mock's *contrast relationship* to the anchor,
@@ -258,6 +256,12 @@ function derivedValue(spec: RoleSpec, palette: ResolvedPalette, mode: ThemeMode)
   // The mock's relationship, as a signed distance in log(X) — the space where a
   // contrast ratio is a constant offset. Positive means "lighter than anchor".
   const delta = Math.log(mockLum + 0.05) - Math.log(emberLum + 0.05);
+
+  // A role that sits exactly on its anchor *is* the anchor. Skipping the HSL
+  // round-trip matters: it is lossy at 8 bits, so `--gold-send` came back as
+  // #dfb67f when the accent is #dfb680. The Send button must be the brand colour,
+  // not a rounding of it.
+  if (Math.abs(delta) < 0.004) return anchor;
 
   // A role that sits LIGHTER than a near-white surface has nowhere to go, so
   // express the same distance as a slight darkening instead — which is how every
@@ -298,15 +302,22 @@ function derivedValue(spec: RoleSpec, palette: ResolvedPalette, mode: ThemeMode)
 /**
  * How saturated a role's fill should be.
  *
- * Surfaces continue the anchor's tint. Text and icon roles keep the mock's own
- * chroma (they are deliberately near-neutral warm/cool greys), so they stay
- * legible instead of picking up the theme hue. Either way the value is capped so
- * a vivid surface cannot turn a card into a coloured slab.
+ * Surfaces continue the anchor's tint; text and icon roles keep the mock's own
+ * chroma (they are deliberately near-neutral warm/cool greys) so they stay
+ * legible instead of picking up the theme hue.
+ *
+ * Everything else inherits the anchor's saturation *unchanged*. It used to be
+ * capped at 0.4 here, which quietly desaturated the accent family: `--gold-send`
+ * came out `#d2b997` instead of the brand amber `#dfb680`, because Ember's accent
+ * sits at ~60% chroma and the cap clamped it to 40%. A role that is *cut from the
+ * accent* has to carry the accent's chroma, or the Send button is not the brand
+ * colour. The "coloured slab" risk the old cap guarded against does not apply:
+ * the value is already the anchor's own saturation, not an invented one.
  */
 function resolveSaturation(spec: RoleSpec, mockLiteral: string, anchorSaturation: number): number {
   const isText = /^--(text|icon|line|input|foot|chip-ink|meta)/.test(spec.property);
   if (isText) return Math.min(0.16, rgbToHsl(mockLiteral).s);
-  return Math.min(anchorSaturation, 0.4);
+  return anchorSaturation;
 }
 
 /**
@@ -334,19 +345,25 @@ function lightnessForLuminance(hue: number, saturation: number, target: number):
 /**
  * Resolve every role for one theme.
  *
- * Ember uses its literals verbatim (they ARE the mock, kept in step with its
- * palette); every other theme derives them from the same relationships. Keeping
- * Ember on the literal path means it must be rebased whenever its palette moves,
- * which is why roles.test.ts asserts the relationships rather than raw hexes.
+ * **Every** theme goes through `derivedValue()`, Ember included.
+ *
+ * It used to be the other way round: `id === 'ember'` returned the mock's
+ * literals verbatim. That is what made the default UI clash with itself — the
+ * literals are blue-slate neutrals (`#1b212a`, `#13181f`, `#1f2630`, `#252c37`)
+ * while Ember's own palette is a warm graphite, so the cards and inputs sat in a
+ * second design system at four times the chroma of the chrome around them. The
+ * literals are still load-bearing, but only as the *offset* each role keeps from
+ * its anchor: `ember` is read as "this far from the anchor in log-luminance",
+ * then re-expressed in the anchor's own hue and saturation.
+ *
+ * Keeping Ember on the derived path is what makes `roles.test.ts` assert
+ * relationships rather than raw hexes, and it means retuning a palette can never
+ * leave a stale blue card behind.
  */
 export function resolveRoles(theme: ResolvedTheme): Record<string, string> {
-  const mode = theme.mode;
-  const isEmber = theme.id === 'ember';
   const out: Record<string, string> = {};
   for (const spec of ROLES) {
-    out[spec.property] = isEmber
-      ? emberValue(spec, mode)
-      : derivedValue(spec, theme.palette, mode);
+    out[spec.property] = derivedValue(spec, theme.palette, theme.mode);
   }
   return out;
 }

@@ -9,7 +9,8 @@ import type { InspectorTab } from '../state/store';
 import * as store from '../state/store';
 import { TabPanel, Tabs, type TabItem } from './Tabs';
 import { WorkspaceTab } from './WorkspaceTab';
-import { ChangesTab } from './ChangesTab';
+import { GitManager } from './git/GitManager';
+import { changeCounts } from './git/gitModel';
 import { SessionInfoTab, sessionInfoTooltip } from './SessionInfoTab';
 import { AgentsTab } from './AgentsTab';
 import { PluginPanelView } from './PluginPanelView';
@@ -26,10 +27,16 @@ function isPluginTab(id: InspectorTab): boolean {
 /**
  * Bottom git strip. It only renders when the server reports a real repository
  * and branch, so a non-git workspace never shows fabricated state.
+ *
+ * The counts come from the same `changeCounts` the manager uses, so the two
+ * cannot disagree about what "staged" or "untracked" means, and the strip
+ * re-probes when the window regains focus - the agent writes files while this
+ * strip is showing the previous numbers.
  */
 function BranchFooter(): JSX.Element | null {
   const projectId = store.currentProjectId.value;
   const [status, setStatus] = useState<GitStatus | null>(null);
+  const [probe, setProbe] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -39,16 +46,29 @@ function BranchFooter(): JSX.Element | null {
         if (!controller.signal.aborted) setStatus(result);
       })
       .catch(() => {
-        // No footer when git is unavailable; ChangesTab owns the loud error.
+        // No footer when git is unavailable; the Git tab owns the loud error.
       });
     return () => controller.abort();
-  }, [projectId]);
+  }, [projectId, probe]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onFocus = (): void => {
+      if (document.visibilityState === 'visible') setProbe((count) => count + 1);
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
 
   if (!status || !status.is_repo || !status.branch) return null;
 
-  const changed = status.files.length;
-  const staged = status.files.filter((file) => file.staged).length;
-  const unstaged = changed - staged;
+  const counts = changeCounts(status.files);
+  const parts = [
+    counts.staged > 0 ? `${counts.staged} staged` : null,
+    counts.changes > 0 ? `${counts.changes} modified` : null,
+    counts.untracked > 0 ? `${counts.untracked} untracked` : null,
+    counts.conflicts > 0 ? `${counts.conflicts} conflicted` : null,
+  ].filter((part): part is string => part !== null);
 
   return (
     <div class="side-bottom-panel">
@@ -61,13 +81,9 @@ function BranchFooter(): JSX.Element | null {
       <div class="branch-status">
         <span>
           <CircleCheckIcon size={11} />
-          {changed === 0 ? 'Working tree clean' : pluralise(changed, 'modified file')}
+          {counts.total === 0 ? 'Working tree clean' : pluralise(counts.total, 'changed file')}
         </span>
-        {changed > 0 ? (
-          <span>
-            {staged} staged · {unstaged} unstaged
-          </span>
-        ) : null}
+        {parts.length > 0 ? <span>{parts.join(' · ')}</span> : null}
       </div>
     </div>
   );
@@ -82,7 +98,7 @@ export function Inspector(): JSX.Element {
   const pluginTabs = store.pluginPanelTabs.value;
   const items: TabItem<InspectorTab>[] = [
     { id: 'workspace', label: 'Files' },
-    { id: 'changes', label: 'Changes' },
+    { id: 'changes', label: 'Git', title: 'Source control — stage, commit, branches, history' },
     // The session's own numbers, not a second place to read commands: the
     // transcript already renders every command card inline, with its output.
     { id: 'session', label: 'Session', title: sessionInfoTooltip(store.sessionInfo.value) },
@@ -143,7 +159,7 @@ export function Inspector(): JSX.Element {
           <WorkspaceTab />
         </TabPanel>
         <TabPanel idPrefix="inspector" id="changes" active={active === 'changes'}>
-          <ChangesTab />
+          <GitManager variant="panel" />
         </TabPanel>
         <TabPanel idPrefix="inspector" id="session" active={active === 'session'}>
           <SessionInfoTab />

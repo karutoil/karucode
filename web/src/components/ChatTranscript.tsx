@@ -167,7 +167,10 @@ function MessageBodyImpl({ item, options }: { item: MessageItem; options: ViewOp
           mode={options.thinking}
         />
       ) : null}
-      {item.content ? <Markdown text={item.content} /> : null}
+      {/* A streaming message renders no artifact cards: a fence is content only
+          once it is closed, and markdown-it closes one at the end of its input,
+          so every token of a half-written mock would paint and relayout a frame. */}
+      {item.content ? <Markdown text={item.content} artifacts={!item.streaming} /> : null}
       {item.streaming && item.content !== '' ? (
         <span class="stream-caret" aria-hidden="true" />
       ) : null}
