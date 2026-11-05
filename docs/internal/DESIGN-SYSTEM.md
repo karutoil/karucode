@@ -115,6 +115,21 @@ the theme's accent. No component may introduce a second hue.
 Ember's identity is **warm amber accent on warm-neutral graphite**. Its greys
 must lean warm (hue ≈ 30–40, `S ≈ 4–5%`), not blue (hue 210+).
 
+### 2.1 An achromatic anchor lends the canvas tint
+
+Every role inherits the hue and saturation of the palette colour it is cut from.
+The exception is an anchor that has no tint to give: every light built-in's
+`surface` is pure `#ffffff`, so a card cut from it once came out a *neutral grey*
+(`#f6f6f6`, `h=0 s=0`) on a warm canvas (`#f8f5ef`, `h≈40`) — a second, colourless
+design system in the same screen, which is the light-mode half of "the designs
+clash".
+
+`tintFor()` in `roles.ts` therefore falls back to the theme's own chromatic
+surface (canvas first) when the anchor's saturation is below 6%. `contrast.test.ts`
+measures each role against *that* colour, so the guard now covers the roles it
+used to skip and a near-grey role is judged by its RGB channel spread (HSL
+saturation is numerically meaningless at the ends of the ramp).
+
 ---
 
 ## 3. Tokens
@@ -134,6 +149,15 @@ Each step must be at least **3 L points** from its neighbour so it survives an
 | `--theme-surface` | `#1d1a18`  | 11% | cards, inputs, panels                |
 | `--theme-raised`  | `#262220`  | 14% | menus, elevated cards                |
 | `--theme-hover`   | `#302b28`  | 17% | hovered rows, pressed controls       |
+
+**Light themes invert this.** The palette's `surface` is pure white and the canvas
+is off-white, so the ramp *above* the canvas is at most 1.05:1 wide and a mirrored
+offset lands a card in the dead centre — measured `#f6f6f6` on a `#f8f5ef` canvas,
+1.02:1, lighter than the ground it sits on. `liftOffCanvas()` in `roles.ts` snaps a
+fill that lands above the canvas but within 1.03:1 of it up to its anchor's own rung
+(now `#fcfcfb`, 1.07:1 in Daybreak). A *well* — console, code block, diff body —
+lands below the canvas in light mode and is left there: a recess must not be lifted
+into a second card.
 
 ### 3.2 Spacing — 10 steps, 4px rhythm
 
@@ -203,6 +227,22 @@ never authored by hand, and a component never gets a fourth line tone.
 `--faint` may only be used for non-essential decoration (a divider glyph, a
 drag handle). Never for text a user must read.
 
+### 4.1 Every ink role is floored against every surface
+
+A role named `--text-*`, `--input-ink`, `--input-placeholder`, `--foot-*`,
+`--chip-ink`, `--meta-*` — plus the accent-named inks `--tab-active-text`,
+`--tab-hover`, `--row-selected-text`, `--row-accent-ink`, `--rail-glyph-text`,
+`--rail-avatar-text` and `--toggle-knob` — is bounded at **4.5:1 against the
+surface nearest to it**: the lightest surface in a dark theme, the darkest in a
+light one (`applyInkFloor()` in `roles.ts`). Roles cut from `faint` were the ones
+that suffered: `faint` is decorative (3:1), so `--text-subtle` inherited "quiet"
+down to 2.95:1 on Daybreak's raised surface — text a user must read, in the least
+readable state the app has.
+
+Icon roles are deliberately *not* floored: brightening a drag handle is noise, not
+legibility. The floor outranks the hierarchy guard that keeps secondary text under
+primary text, because an unreadable rung is not a hierarchy.
+
 Every built-in theme, in its own mode, must satisfy these. A theme that fails is
 a bug in `roles.ts` or in the palette, not a reason to lower the floor.
 
@@ -221,6 +261,16 @@ a bug in `roles.ts` or in the palette, not a reason to lower the floor.
    `--focus-ring` at ≥ 3:1 against its surface.
 7. Motion uses `--transition` / `--transition-fast`, and must be wrapped in
    `@media (prefers-reduced-motion: reduce)` when it is longer than a fade.
+8. Accent ink on an accent tint is `--accent-on-tint`, never `--accent`,
+   `--accent-fill` or `--accent-text`: those are tuned against the canvas, and a
+   tint lifts the ground under them (measured 3.62:1 in Daybreak). `accent.test.ts`
+   fails on any rule that paints one of the accent tints and then inks it with a
+   canvas-tuned accent.
+9. A control row that can be narrower than its contents must let its flex items
+   shrink (`min-width: 0`) and ellipsise; `overflow: hidden` on the parent is not
+   permission to lose a control. `.compose-bar-left` clipped the reasoning pill at
+   1024px until `.model-switcher-button` gained `min-width: 0` and
+   `max-width: min(230px, 100%)`.
 
 ---
 

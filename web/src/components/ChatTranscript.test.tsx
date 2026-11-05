@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen } from '@testing-library/preact';
 import { ChatTranscript } from './ChatTranscript';
 import type { ApprovalView, ChatItem, CommandItem, MessageItem, ToolItem } from '../state/chat';
 import { approvalFixture, NOW } from '../test/fixtures';
-import { resetTheme, updateTheme } from '../theme';
+import { resetTheme, THEME_GROUPINGS, THEME_THINKING_MODES, THEME_TOOL_STYLES, updateTheme } from '../theme';
 import * as store from '../state/store';
 
 /* `turnRows` is the per-turn layout pass. It is imported by `ChatTranscript`
@@ -431,6 +431,225 @@ describe('ChatTranscript view options', () => {
     setOptions({ thinking: 'expanded' });
     renderTranscript([user(), assistantWithReasoning()]);
     expect(document.querySelector('.thinking')?.hasAttribute('open')).toBe(true);
+  });
+});
+
+describe('ChatTranscript option matrix', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    resetTheme();
+  });
+
+  afterEach(() => {
+    resetTheme();
+  });
+
+  function setOptions(patch: {
+    toolStyle?: 'cards' | 'rows';
+    grouping?: 'none' | 'tools' | 'turns';
+    thinking?: 'collapsed' | 'preview' | 'expanded';
+  }) {
+    act(() => {
+      updateTheme(patch);
+    });
+  }
+
+  /** Every toolStyle × grouping × thinking combination: 2 × 3 × 3 = 18. */
+  const combinations = THEME_TOOL_STYLES.flatMap((toolStyle) =>
+    THEME_GROUPINGS.flatMap((grouping) =>
+      THEME_THINKING_MODES.map((thinking) => ({ toolStyle, grouping, thinking })),
+    ),
+  );
+
+  /**
+   * One turn that exercises every part the options touch: narration, reasoning,
+   * two tools, a shell command and a final answer. `turnItems()` rebuilds it so a
+   * test can hand a changed array to a re-render.
+   */
+  function turnItems(): ChatItem[] {
+    return [
+      user(),
+      message({
+        id: 'a1',
+        content: 'Let me check the config.',
+        reasoning: 'The config is in settings.rs.',
+      }),
+      tool({ id: 't1', name: 'read_file' }),
+      tool({ id: 't2', callId: 'call_2', name: 'grep' }),
+      command({ id: 'c1', callId: 'call_3' }),
+      message({ id: 'fin', content: 'The pool size is 16.' }),
+    ];
+  }
+
+  it('has all eighteen combinations to cover', () => {
+    expect(combinations).toHaveLength(18);
+    const keys = combinations.map(({ toolStyle, grouping, thinking }) => `${toolStyle}/${grouping}/${thinking}`);
+    expect(new Set(keys).size).toBe(18);
+  });
+
+  it.each(combinations)(
+    '$toolStyle calls · $grouping grouping · $thinking reasoning',
+    ({ toolStyle, grouping, thinking }) => {
+      setOptions({ toolStyle, grouping, thinking });
+      renderTranscript(turnItems());
+
+      // ---- the answer is never lost ------------------------------------
+      expect(screen.getByText('The pool size is 16.')).not.toBeNull();
+
+      // ---- only `turns` folds, and it never folds the answer away -------
+      const fold = document.querySelector<HTMLButtonElement>('.process-fold');
+      if (grouping === 'turns') {
+        expect(fold, 'a finished turn folds its working steps').not.toBeNull();
+        // The narration is part of the working, so it is behind the summary.
+        expect(screen.queryByText('Let me check the config.')).toBeNull();
+        expect(fold?.textContent).toContain('Show the working');
+        fireEvent.click(fold as HTMLButtonElement);
+      } else {
+        expect(fold).toBeNull();
+      }
+
+      // ---- the reasoning is available in the mode the theme asked for ---
+      const reasoning = document.querySelector('.thinking');
+      expect(reasoning?.getAttribute('data-mode')).toBe(thinking);
+      if (thinking === 'expanded') {
+        expect(reasoning?.hasAttribute('open')).toBe(true);
+        expect(reasoning?.querySelector('.thinking-body')?.textContent).toContain(
+          'The config is in settings.rs.',
+        );
+      } else if (thinking === 'preview') {
+        expect(reasoning?.hasAttribute('open')).toBe(false);
+        expect(reasoning?.querySelector('.thinking-preview')?.textContent).toBe(
+          'The config is in settings.rs.',
+        );
+      } else {
+        expect(reasoning?.hasAttribute('open')).toBe(false);
+        expect(reasoning?.querySelector('.thinking-hint')?.textContent).toBe('Show reasoning');
+      }
+
+      // ---- once the working is on screen, the style decides its shape ----
+      if (grouping === 'none') {
+        expect(document.querySelector('.tool-group')).toBeNull();
+      } else {
+        const group = document.querySelector('.tool-group');
+        expect(group, 'a run of calls folds into one group').not.toBeNull();
+        // The summary names what ran, so folding does not hide *what* happened.
+        expect(group?.querySelector('.tool-group-summary')?.textContent).toContain('read_file');
+        expect(group?.querySelector('.tool-group-summary')?.textContent).toContain('run_command');
+        fireEvent.click(group?.querySelector('.tool-group-head') as HTMLElement);
+      }
+
+      const rows = toolStyle === 'rows';
+      expect(document.querySelectorAll('.tool-row')).toHaveLength(rows ? 2 : 0);
+      expect(document.querySelectorAll('.tool-card')).toHaveLength(rows ? 0 : 2);
+      // A shell command follows the same style in every grouping: rows are not
+      // just for tool calls.
+      expect(document.querySelectorAll('.command-row')).toHaveLength(rows ? 1 : 0);
+      expect(document.querySelectorAll('.command-card')).toHaveLength(rows ? 0 : 1);
+
+      // Narration reads as a quiet note wherever it is not folded away.
+      expect(document.querySelector('.narration')?.textContent).toContain('Let me check the config.');
+    },
+  );
+
+  describe('running, error and pending-approval transitions', () => {
+    function view(items: ChatItem[]) {
+      const onApprovalDecision = vi.fn();
+      return render(
+        <ChatTranscript items={items} resolvingApprovals={{}} onApprovalDecision={onApprovalDecision} />,
+      );
+    }
+
+    it('opens a collapsed tool group when a member starts running', () => {
+      setOptions({ grouping: 'tools' });
+      const items = turnItems();
+      const rendered = view(items);
+      const head = () => document.querySelector('.tool-group-head') as HTMLButtonElement;
+      expect(head().getAttribute('aria-expanded')).toBe('false');
+
+      const next = items.map((item) =>
+        item.kind === 'tool' && item.id === 't2' ? { ...item, status: 'running' as const, durationMs: null } : item,
+      );
+      rendered.rerender(
+        <ChatTranscript items={next} resolvingApprovals={{}} onApprovalDecision={vi.fn()} />,
+      );
+
+      expect(head().getAttribute('aria-expanded')).toBe('true');
+      expect(screen.getByText('1 running')).not.toBeNull();
+      // The live call is rendered, not merely counted: two tools and a command.
+      expect(document.querySelectorAll('.tool-card, .command-card')).toHaveLength(3);
+    });
+
+    it('opens a collapsed tool group when a member fails, output and all', () => {
+      setOptions({ grouping: 'tools' });
+      const items = turnItems();
+      const rendered = view(items);
+      expect(
+        (document.querySelector('.tool-group-head') as HTMLButtonElement).getAttribute('aria-expanded'),
+      ).toBe('false');
+
+      const next = items.map((item) =>
+        item.kind === 'tool' && item.id === 't2'
+          ? { ...item, status: 'error' as const, output: 'permission denied' }
+          : item,
+      );
+      rendered.rerender(
+        <ChatTranscript items={next} resolvingApprovals={{}} onApprovalDecision={vi.fn()} />,
+      );
+
+      expect(screen.getByText('1 failed')).not.toBeNull();
+      expect(document.querySelector('.tool-group')?.getAttribute('data-tone')).toBe('is-error');
+      // The card style shows the failure's output in the expanded group.
+      expect(document.querySelector('.msg-assistant .msg-body')?.textContent).toContain(
+        'permission denied',
+      );
+    });
+
+    it('never folds a failed turn and keeps the error as an alert', () => {
+      setOptions({ grouping: 'turns' });
+      renderTranscript([
+        user(),
+        message({ id: 'a1', content: 'Trying the build.' }),
+        tool(),
+        {
+          kind: 'error',
+          id: 'e1',
+          at: NOW,
+          message: 'provider exploded',
+          errorKind: 'stream',
+          runId: 'r_x',
+        },
+      ]);
+
+      expect(document.querySelector('.process-fold')).toBeNull();
+      expect(screen.getByRole('alert').textContent).toContain('provider exploded');
+      expect(document.querySelector('.msg-assistant .tag')?.textContent).toContain('Failed');
+    });
+
+    it('keeps a pending approval out of the fold and actionable', () => {
+      setOptions({ grouping: 'turns' });
+      renderTranscript([
+        user(),
+        tool(),
+        message({ id: 'fin', content: 'I need permission to continue.' }),
+        { kind: 'approval', id: 'ap', at: NOW, approval: approvalView() },
+      ]);
+
+      // A pending approval is work, so the turn stays open...
+      expect(document.querySelector('.process-fold')).toBeNull();
+      // ...and the decision is one click away.
+      expect(screen.getByRole('button', { name: 'Allow once' })).not.toBeNull();
+      expect(document.querySelector('.msg-assistant .tag')?.textContent).toContain('Working');
+    });
+
+    it.each(THEME_TOOL_STYLES)('keeps a running shell command open in %s', (toolStyle) => {
+      setOptions({ toolStyle });
+      renderTranscript([user(), command({ status: 'running', exitCode: null, durationMs: null })]);
+
+      const surface = document.querySelector(toolStyle === 'rows' ? '.command-row' : '.command-card');
+      expect(surface?.getAttribute('data-open')).toBe('true');
+      // Its output is on screen while it runs: that is the point of opening it.
+      expect(document.querySelector('.cmd-output')?.textContent).toContain('ok');
+    });
   });
 });
 

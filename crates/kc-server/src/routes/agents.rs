@@ -66,17 +66,10 @@ pub async fn list_agents(
     let project = query_str(&query, "project");
     let session = query_str(&query, "session");
     let statuses = parse_status_filter(&query)?;
-    let mut agents = state.store().list_agents_all(project).await?;
-    if let Some(session) = session {
-        agents.retain(|summary| summary.agent.session_id == session);
-    }
-    if !statuses.is_empty() {
-        agents.retain(|summary| {
-            statuses
-                .iter()
-                .any(|status| status == &summary.agent.status)
-        });
-    }
+    let agents = state
+        .store()
+        .list_agents_filtered(project, session, &statuses)
+        .await?;
     // `running` is "alive and spending", which includes paused: a paused agent
     // still holds a subagent slot, so a caller that used this count to decide
     // whether it had capacity would be wrong if paused were excluded. The exact

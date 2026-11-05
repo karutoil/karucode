@@ -238,3 +238,188 @@ describe('transcript row cost: off-screen rows skip layout and paint', () => {
     expect(chatCss).not.toMatch(/\.date-marker \{[^}]*content-visibility/);
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Density and the phone frame
+ *
+ * The frame used to be asserted by grepping the phone media block for
+ * `--header-h: 52px`. That passes while the browser computes something else:
+ * the density rules in `tokens.css` are `:root[data-density='…']` and outranked
+ * the bare `:root` in that block, so "compact" actually produced 54px (taller
+ * than the 52 it exists to shrink) and "spacious" produced 76 + 51 = 127px. A
+ * grep cannot see that, so this resolves the properties with the cascade the
+ * browser uses: selector specificity across `tokens.css` and `layout.css`, in
+ * `index.css` import order, counting only the media queries that apply.
+ * ------------------------------------------------------------------ */
+
+/** The breakpoint the phone numbers are measured at (iPhone 16 Pro Max). */
+const PHONE_WIDTH = 440;
+
+/** Index of the `}` that closes the `{` at `open`. */
+function matchingBrace(css: string, open: number): number {
+  let depth = 0;
+  for (let index = open; index < css.length; index += 1) {
+    if (css[index] === '{') depth += 1;
+    else if (css[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return css.length;
+}
+
+interface Frame {
+  header: number;
+  tabs: number;
+}
+
+/**
+ * Resolve `--header-h` / `--tabs-h` for `<html data-density="…">` at `width`.
+ *
+ * Comments are stripped first (they contain examples like
+ * `.main-head{height:66px}`), then rules are read with their media context. A
+ * selector only participates if it can match the root element at the requested
+ * density; specificity is `:root` (0,1,0) plus one class-level unit per
+ * `[data-density]`, and source order breaks ties. Files are visited in the order
+ * `index.css` imports them.
+ */
+function frameAt(density: 'compact' | 'comfortable' | 'spacious', width: number): Frame {
+  const winner = new Map<string, { value: number; specificity: number; order: number }>();
+  let order = 0;
+
+  const visit = (css: string, applies: boolean): void => {
+    const source = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    let index = 0;
+    while (index < source.length) {
+      const open = source.indexOf('{', index);
+      if (open === -1) return;
+      const selectorText = source.slice(index, open).trim();
+      if (selectorText.startsWith('@')) {
+        const close = matchingBrace(source, open);
+        const max = /max-width:\s*(\d+)px/.exec(selectorText);
+        const min = /min-width:\s*(\d+)px/.exec(selectorText);
+        const nested =
+          applies &&
+          (max === null || width <= Number(max[1])) &&
+          (min === null || width >= Number(min[1]));
+        visit(source.slice(open + 1, close), nested);
+        index = close + 1;
+        continue;
+      }
+      const close = source.indexOf('}', open);
+      if (close === -1) return;
+      const body = source.slice(open + 1, close);
+      index = close + 1;
+      if (applies) {
+        for (const part of selectorText.split(',')) {
+          const candidate = part.trim();
+          const densities = [...candidate.matchAll(/\[data-density=['"]?([a-z]+)['"]?\]/g)].map(
+            (match) => match[1],
+          );
+          const rest = candidate
+            .replace(/:root/g, '')
+            .replace(/\[data-density=['"]?[a-z]+['"]?\]/g, '')
+            .trim();
+          if (rest !== '') continue;
+          if (densities.some((value) => value !== density)) continue;
+          const specificity = 1 + densities.length;
+          for (const declaration of body.split(';')) {
+            const match = /^\s*(--header-h|--tabs-h):\s*(\d+)px\s*$/.exec(declaration);
+            if (!match?.[1] || !match[2]) continue;
+            const current = winner.get(match[1]);
+            if (
+              current === undefined ||
+              specificity > current.specificity ||
+              (specificity === current.specificity && order > current.order)
+            ) {
+              winner.set(match[1], { value: Number(match[2]), specificity, order });
+            }
+          }
+        }
+      }
+      order += 1;
+    }
+  };
+
+  // `index.css` imports tokens.css, base.css, layout.css … in that order.
+  visit(tokensCss, true);
+  visit(layoutCss, true);
+  const header = winner.get('--header-h');
+  const tabs = winner.get('--tabs-h');
+  expect(header, '--header-h resolves').toBeDefined();
+  expect(tabs, '--tabs-h resolves').toBeDefined();
+  return { header: header!.value, tabs: tabs!.value };
+}
+
+describe('the phone frame is resolved per density, not by accident', () => {
+  it('keeps the comfortable frame at 52 + 38', () => {
+    expect(frameAt('comfortable', PHONE_WIDTH)).toEqual({ header: 52, tabs: 38 });
+  });
+
+  it('makes compact shorter than comfortable, never taller', () => {
+    const comfortable = frameAt('comfortable', PHONE_WIDTH);
+    const compact = frameAt('compact', PHONE_WIDTH);
+
+    // Before the tier restated the density, `:root[data-density='compact']` won
+    // on specificity with 54 + 36: a "compact" header 2px taller than the
+    // comfortable one it exists to shrink.
+    expect(compact.header).toBeLessThan(comfortable.header);
+    expect(compact.tabs).toBeLessThan(comfortable.tabs);
+    expect(compact.header + compact.tabs).toBeLessThan(comfortable.header + comfortable.tabs);
+  });
+
+  it('gives spacious no extra chrome on a phone', () => {
+    const comfortable = frameAt('comfortable', PHONE_WIDTH);
+    const spacious = frameAt('spacious', PHONE_WIDTH);
+
+    // The accidental frame was 76 + 51 = 127px, 13% of a 956px screen. Spacious
+    // still opens the transcript up through the spacing scale; the chrome stays
+    // in the phone's budget.
+    expect(spacious.header + spacious.tabs).toBeLessThanOrEqual(
+      comfortable.header + comfortable.tabs,
+    );
+    expect(spacious.header + spacious.tabs).not.toBe(127);
+  });
+
+  it('still lets density size the frame on a desktop', () => {
+    // The tier fix must not flatten the token layer: the same cascade at 1280px
+    // resolves the published 66 / 54 / 76 header scale.
+    expect(frameAt('comfortable', 1280)).toEqual({ header: 66, tabs: 44 });
+    expect(frameAt('compact', 1280)).toEqual({ header: 54, tabs: 36 });
+    expect(frameAt('spacious', 1280)).toEqual({ header: 76, tabs: 51 });
+  });
+});
+
+describe('the branch chip keeps a long repository name in its box', () => {
+  it('truncates the name instead of letting it push the header', () => {
+    const chip = declarations(layoutCss, '.head-btn.branch-chip');
+    expect(chip['min-width']).toBe('0');
+
+    const name = declarations(layoutCss, '.branch-chip-name');
+    expect(name['min-width']).toBe('0');
+    expect(name['overflow']).toBe('hidden');
+    expect(name['text-overflow']).toBe('ellipsis');
+    expect(name['white-space']).toBe('nowrap');
+  });
+
+  it('becomes a 30px icon-only control at 1100px and keeps its accessible name', () => {
+    // A 1024px desktop still shows the rail and inspector, so it has less header
+    // room than a phone. Reuse the phone chip there instead of letting a long
+    // branch shrink the session title to zero. Read the whole tier: `tier()` stops
+    // at the first nested rule's line-anchored close.
+    const start = layoutCss.indexOf('@media (max-width: 1100px) {');
+    const end = layoutCss.indexOf('\n}\n', start);
+    const body = layoutCss.slice(start, end);
+
+    expect(body).toMatch(/\.head-btn\.branch-chip \{[^}]*flex: 0 0 30px/);
+    expect(body).toMatch(/\.head-btn\.branch-chip \{[^}]*width: 30px/);
+    expect(body).toMatch(/\.head-btn\.branch-chip \{[^}]*padding: 0/);
+    expect(body).toMatch(/\.branch-chip-name \{\s*\n\s*display: none/);
+
+    // Hiding the text is only safe because the button carries the full branch in
+    // its accessible name and tooltip at every width.
+    const source = readFileSync(new URL('../components/ChatView.tsx', import.meta.url), 'utf8');
+    expect(source).toContain('aria-label={`Branch ${branch} — open Changes`}');
+    expect(source).toContain('title={`On branch ${branch} — open Changes`}');
+  });
+});

@@ -5,6 +5,42 @@
  * shell. Radii come from `--radius*` for the same reason.
  */
 
+/* Ship the brand type with the app. Relying on a system fallback made the
+ * workspace change width and texture between machines, especially in dense
+ * session lists and tool output.
+ *
+ * These three files are *static* instances (Inter's Regular and Bold, JetBrains
+ * Mono's Regular: no `fvar` table, one `usWeightClass` each), so every descriptor
+ * names exactly one weight. The previous `font-weight: 400 600` / `700 800`
+ * claimed variable ranges the files cannot satisfy: the browser then picked
+ * weight 600 out of a 400-only face, synthesised it by smearing the outlines,
+ * and none of the shipped glyphs was ever the weight the CSS asked for. Where a
+ * weight outside these two is used, the browser's synthesis is honest — it is
+ * declared here rather than papered over. */
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter-Regular.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter-Bold.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/JetBrainsMono-Regular.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
 *,
 *::before,
 *::after {

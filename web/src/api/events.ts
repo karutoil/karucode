@@ -27,7 +27,7 @@ export interface EventStreamOptions {
   /**
    * Called when the stream jumps forward in `seq`, i.e. frames were dropped
    * (server-side lag, a stalled proxy hop, a half-open reconnect). The listener
-   * is expected to refetch the session, because the stream never replays.
+   * is expected to refetch the session when replay cannot repair the hole.
    * Only meaningful for an unfiltered stream: a `?session=` filter makes holes
    * normal.
    */
@@ -159,35 +159,57 @@ export function parseEventPayload(payload: string): RawEvent | null {
   return parsed as RawEvent;
 }
 
+export interface SseFrame {
+  /** The SSE `id:` line, which is the resume cursor (not a JSON data field). */
+  id: string | null;
+  event: RawEvent;
+}
+
 /**
- * Extracts complete SSE blocks from `buffer`. Returns the parsed events and the
- * unconsumed remainder. Keepalive comments are ignored.
+ * Extract complete SSE blocks, preserving each frame's `id:` alongside its JSON
+ * payload. Both CRLF and LF framing are accepted, including a CRLF split between
+ * network chunks. Keepalive comments and field names such as `event:` are ignored.
  */
-export function consumeSseBuffer(buffer: string): { events: RawEvent[]; rest: string } {
-  const events: RawEvent[] = [];
-  let rest = buffer.replace(/\r\n/g, '\n');
+export function consumeSseFrames(buffer: string): { frames: SseFrame[]; rest: string } {
+  const frames: SseFrame[] = [];
+  let rest = buffer;
   for (;;) {
-    const boundary = rest.indexOf('\n\n');
-    if (boundary === -1) break;
-    const block = rest.slice(0, boundary);
-    rest = rest.slice(boundary + 2);
-    const data = block
-      .split('\n')
-      .filter((line) => line.startsWith('data:'))
-      .map((line) => line.slice(5).replace(/^ /, ''))
-      .join('\n');
-    if (data === '') continue;
-    const event = parseEventPayload(data);
-    if (event) events.push(event);
+    // Looking for the boundary in the original buffer (rather than normalising
+    // each network chunk) also handles the chunks ending in CR / starting in LF.
+    const boundary = /\r?\n\r?\n/.exec(rest);
+    if (!boundary) break;
+    const block = rest.slice(0, boundary.index);
+    rest = rest.slice(boundary.index + boundary[0].length);
+    const data: string[] = [];
+    let id: string | null = null;
+    for (const line of block.split(/\r?\n/)) {
+      if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+      if (line.startsWith('id:')) {
+        const value = line.slice(3).replace(/^ /, '');
+        // The SSE algorithm ignores id values containing NUL. Decimal validation
+        // happens where the value is used as the server's sequence cursor.
+        if (!value.includes('\0')) id = value;
+      }
+    }
+    if (data.length === 0) continue;
+    const event = parseEventPayload(data.join('\n'));
+    if (event) frames.push({ id, event });
   }
-  return { events, rest };
+  return { frames, rest };
+}
+
+/** Extract just event payloads for data-only consumers (the original helper). */
+export function consumeSseBuffer(buffer: string): { events: RawEvent[]; rest: string } {
+  const consumed = consumeSseFrames(buffer);
+  return { events: consumed.frames.map((frame) => frame.event), rest: consumed.rest };
 }
 
 /**
  * One fetch-based SSE stream (so the Authorization header travels) with
- * exponential backoff plus jitter. Sequence numbers are deduplicated per
- * connection: the server may restart its counter between connections, and the
- * caller refetches the open session after every reconnect.
+ * exponential backoff plus jitter. The newest delivered SSE id survives every
+ * reconnect and is sent as `Last-Event-ID`; replayed frames are deduplicated
+ * against that same persistent watermark rather than being accepted afresh on
+ * each connection.
  */
 export function startEventStream(options: EventStreamOptions): EventStreamHandle {
   const minDelayMs = options.minDelayMs ?? 500;
@@ -204,6 +226,9 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
   const controller = new AbortController();
   let stopped = false;
   let state: ConnectionState = 'idle';
+  // Null means a fresh connection. Once an event arrives this persists for the
+  // lifetime of the stream handle, including a session-filtered URL.
+  let lastEventId: number | null = null;
 
   const setState = (next: ConnectionState, detail?: EventStreamStatusDetail): void => {
     state = next;
@@ -224,6 +249,7 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
   const connect = async (): Promise<Response> => {
     const headers: Record<string, string> = { Accept: 'text/event-stream' };
     if (options.token) headers.Authorization = `Bearer ${options.token}`;
+    if (lastEventId !== null) headers['Last-Event-ID'] = String(lastEventId);
     const init: RequestInit = {
       headers,
       signal: controller.signal,
@@ -264,6 +290,18 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
 
   const run = async (): Promise<void> => {
     let attempt = 0;
+    // Persistent across connections: replay may include the cursor frame again
+    // when delivery and disconnect race. Id-less servers fall back to `seq`.
+    let lastSeq = Number.NEGATIVE_INFINITY;
+    const sequenceFor = (frame: SseFrame): number => {
+      const parsedId = frame.id !== null && /^\d+$/.test(frame.id) ? Number(frame.id) : Number.NaN;
+      return Number.isSafeInteger(parsedId) && parsedId >= 0 ? parsedId : frame.event.seq;
+    };
+    const advanceCursor = (sequence: number): void => {
+      if (!Number.isFinite(sequence)) return;
+      lastSeq = Math.max(lastSeq, sequence);
+      lastEventId = Math.max(lastEventId ?? 0, sequence);
+    };
     while (!stopped && !controller.signal.aborted) {
       setState(attempt === 0 ? 'connecting' : 'reconnecting', { attempt });
       try {
@@ -290,21 +328,20 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
         setState('open', { attempt });
         safely(() => options.onOpen?.());
 
-        // Dedupe scope is this connection only.
-        let lastSeq = Number.NEGATIVE_INFINITY;
         const watermark = (): number => (lastSeq === Number.NEGATIVE_INFINITY ? 0 : lastSeq);
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
         let closed = false;
 
-        const deliver = (events: RawEvent[]): void => {
-          for (const event of events) {
+        const deliver = (frames: SseFrame[]): void => {
+          for (const frame of frames) {
+            const event = frame.event;
             // Resync is a transport control frame, not a replayable event. Its
             // watermark can equal an already seen sequence, including on filtered
             // streams, but it must still trigger recovery.
             if (event.type === 'resync') {
-              lastSeq = Math.max(lastSeq, event.seq);
+              advanceCursor(sequenceFor(frame));
               attempt = 0;
               safely(() => options.onResync?.());
               continue;
@@ -317,22 +354,23 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
               // The marker is stamped with the last *dropped* seq, so it can become
               // the watermark: the next live frame is `seq + 1` and the hole is
               // reported once, here, instead of again on that frame.
-              lastSeq = Math.max(lastSeq, event.seq);
+              advanceCursor(sequenceFor(frame));
               if (!filtered) {
                 safely(() => options.onGap?.({ after, seq: event.seq, missed: skipped }));
               }
               safely(() => options.onEvent(event));
               continue;
             }
-            if (event.seq <= lastSeq) continue;
-            const missed = lastSeq === Number.NEGATIVE_INFINITY ? 0 : event.seq - lastSeq - 1;
+            const sequence = sequenceFor(frame);
+            if (sequence <= lastSeq) continue;
+            const missed = lastSeq === Number.NEGATIVE_INFINITY ? 0 : sequence - lastSeq - 1;
             const after = watermark();
-            lastSeq = event.seq;
+            advanceCursor(sequence);
             // A frame arrived, so this connection works: forget earlier failures
             // instead of backing off forever, but only once it has proven itself.
             attempt = 0;
             if (missed > 0 && !filtered) {
-              safely(() => options.onGap?.({ after, seq: event.seq, missed }));
+              safely(() => options.onGap?.({ after, seq: sequence, missed }));
             }
             safely(() => options.onEvent(event));
           }
@@ -353,14 +391,14 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
               break;
             }
             buffer += decoder.decode(read.value, { stream: true });
-            const consumed = consumeSseBuffer(buffer);
+            const consumed = consumeSseFrames(buffer);
             buffer = consumed.rest;
-            deliver(consumed.events);
+            deliver(consumed.frames);
           }
           if (!stopped) {
             buffer += decoder.decode();
-            const tail = consumeSseBuffer(buffer + '\n\n');
-            deliver(tail.events);
+            const tail = consumeSseFrames(buffer + '\n\n');
+            deliver(tail.frames);
           }
         } finally {
           if (!closed) await cancelReader(reader);

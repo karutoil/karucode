@@ -97,10 +97,7 @@ struct CreateControlSession {
 
 /// Create one more control-plane session. There is no singleton: the caller may
 /// open as many as it wants, and each owns its own directory.
-pub async fn create_session(
-    State(state): State<AppState>,
-    body: Bytes,
-) -> ApiResult<Json<Value>> {
+pub async fn create_session(State(state): State<AppState>, body: Bytes) -> ApiResult<Json<Value>> {
     let input: CreateControlSession = if body.is_empty() {
         CreateControlSession { title: None }
     } else {

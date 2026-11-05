@@ -202,4 +202,26 @@ describe('token resolution', () => {
     expect(bright).not.toBe(dark);
     expect(bright).toContain('rgba(15, 23, 42');
   });
+
+  it('ships the same font stacks at first paint and at runtime', () => {
+    /* `tokens.css` paints one frame before `initTheme()` writes the resolved
+     * map, so its `--font-ui` / `--font-mono` are a hand-kept copy of
+     * `FONT_STACKS.system` / `MONO_STACKS.default`. They drifted: the stylesheet
+     * led with the bundled 'JetBrains Mono' while the runtime stack led with
+     * `SFMono-Regular`, so every code surface re-flowed one frame after load and
+     * the bundled face was never used. This is the guard.
+     *
+     * The stacks are compared after collapsing whitespace because the stylesheet
+     * wraps its `--font-ui` value over two lines. */
+    const css = readFileSync('src/styles/tokens.css', 'utf8');
+    const declared = (property: string): string => {
+      const match = new RegExp(`${property}:\\s*([^;]+);`).exec(css);
+      return (match?.[1] ?? '').replace(/\s+/g, ' ').trim();
+    };
+    const tokens = buildTokenMap(DEFAULT_THEME);
+    expect(declared('--font-ui')).toBe(tokens['--font-ui']);
+    expect(declared('--font-mono')).toBe(tokens['--font-mono']);
+    // And the default mono stack really does start with the font the app ships.
+    expect(tokens['--font-mono']).toMatch(/^'JetBrains Mono',/);
+  });
 });

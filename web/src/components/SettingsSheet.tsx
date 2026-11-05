@@ -2268,6 +2268,7 @@ export function SettingsSheet(): JSX.Element | null {
                       <select
                         id="settings-theme"
                         class="input"
+                        aria-describedby="settings-theme-hint"
                         value={THEME.activeThemeId.value}
                         onChange={(event) => THEME.selectTheme(event.currentTarget.value)}
                       >
@@ -2285,6 +2286,7 @@ export function SettingsSheet(): JSX.Element | null {
                       <select
                         id="settings-density"
                         class="input"
+                        aria-describedby="settings-density-hint"
                         value={THEME.activeTheme.value.density}
                         onChange={(event) =>
                           THEME.setDensity(event.currentTarget.value as ThemeDensity)
@@ -2301,6 +2303,7 @@ export function SettingsSheet(): JSX.Element | null {
                       <select
                         id="settings-mode"
                         class="input"
+                        aria-describedby="settings-mode-hint"
                         value={THEME.activeTheme.value.mode}
                         onChange={(event) => THEME.setThemeMode(event.currentTarget.value as ThemeMode)}
                       >

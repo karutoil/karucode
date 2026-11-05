@@ -13,13 +13,16 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:8787',
         changeOrigin: false,
+        // The terminal attaches at /api/terminals/:id/socket. HTTP-only proxying
+        // passes the tests but leaves a real terminal blank in dev/preview.
+        ws: true,
       },
     },
   },
   preview: {
     port: 4173,
     proxy: {
-      '/api': { target: 'http://127.0.0.1:8787', changeOrigin: false },
+      '/api': { target: 'http://127.0.0.1:8787', changeOrigin: false, ws: true },
     },
   },
   build: {

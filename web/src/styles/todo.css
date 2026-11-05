@@ -99,8 +99,13 @@
   place-items: center;
   flex: 0 0 auto;
   align-self: center;
-  width: 14px;
-  height: 14px;
+  /* A disclosure arrow is a control, not a glyph: 14px was a hit target smaller
+   * than the cursor. 24px is the smallest square a pointer can reliably land on
+   * without moving the row's rhythm; coarse pointers get a bigger one below. */
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
   padding: 0;
   border: 0;
   border-radius: var(--radius-xs);
@@ -109,13 +114,22 @@
   cursor: pointer;
 }
 
-.todo-item-toggle:hover:not(:disabled) {
+.todo-item-toggle:hover:not(:disabled):not(.is-static) {
   background: var(--surface-raised);
   color: var(--text);
 }
 
-.todo-item-toggle:disabled {
+.todo-item-toggle:disabled,
+.todo-item-toggle.is-static {
   cursor: default;
+}
+
+/* A touch screen has no hover and a 24px arrow is a miss waiting to happen. */
+@media (pointer: coarse) {
+  .todo-item-toggle {
+    width: 32px;
+    height: 32px;
+  }
 }
 
 /* The leaf marker: reserves the chevron's width so titles line up either way. */
@@ -144,10 +158,12 @@
 
 .todo-id {
   flex: 0 0 auto;
+  /* The id is the task's handle - it is quoted in the audit, in carry-over and
+   * by the agent - so it is content, not decoration. `opacity: 0.75` on an
+   * already-muted role dropped it below AA in Daybreak. */
   color: var(--text-subtle);
   font-family: var(--font-mono);
   font-size: var(--fs-tiny);
-  opacity: 0.75;
 }
 
 .todo-title {
@@ -171,7 +187,10 @@
 .todo-tone-active {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
+  /* §5.8: the tint lifts the ground under the label, where the canvas-tuned
+   * `--accent` measured 3.62:1 in Daybreak. `--accent-on-tint` is the ink
+   * defined for exactly this pairing. */
+  color: var(--accent-on-tint);
 }
 
 .todo-tone-open {

@@ -155,3 +155,32 @@ python3 scripts/design_verify.py --base <live-server>    # real Chromium, both m
 - **The verification covers six screens in two modes at three widths.** Terminal,
   git diff, todo and goals were reviewed by their owners in a browser but are not
   in the automated matrix yet.
+
+---
+
+## 5. Second pass (measured, after the loop above)
+
+The loop in §3 landed the shell, transcript, overlay and panel corrections. A
+later pass closed the three things that pass left as debt, each at the layer that
+causes it rather than in the component that shows it.
+
+| Defect | Where it was | Fix | Measured after |
+| --- | --- | --- | --- |
+| `--text-subtle` (and five siblings cut from `faint`) at **2.95:1** on Daybreak's raised surface | every `.branch-status` label in the git panel — the row that says how many files changed | `applyInkFloor()` bounds **every** ink role at 4.5:1 against the nearest surface, for all eight themes | **0 of 1830** text nodes below AA in Daybreak, **0 of 1845** in Ember |
+| Cards, consoles and diff bodies were **neutral grey** (`#f6f6f6`, `h=0 s=0`) on a warm canvas (`#f8f5ef`, `h≈40`) | all light themes: every fill cut from a pure-white `surface` | `tintFor()` lends an achromatic anchor the canvas tint | one hue family per screen: `--surface-card` `#f7f5f3` `h=30` on `h=36` canvas |
+| The transcript card sat **1.02:1** from the canvas, *lighter* than the ground under it | light-mode ladder | `liftOffCanvas()` snaps a fill that lands between the canvas and a white anchor up to the panel rung; wells below the canvas are untouched | card `#fcfcfb` **1.07:1**, console 1.04:1, diff 1.08:1 |
+| Accent ink on an accent tint at **3.62:1** (the header's Copy chip, active agent filters, selected palette rows, 19 rules) | components painting `--accent`/`--accent-fill` over `--accent-bg` | one token, `--accent-on-tint`, plus a test that fails on any recurrence | chip and filters clear 4.5:1 in both modes |
+| The reasoning pill was **clipped out of existence at 1024px** (`overflow: hidden` on the composer row) | `.compose-bar-left` | `min-width: 0` + `max-width: min(230px, 100%)` on the pills and their wrappers | pills ellipsise; no control lost at 1024, 900 or 390 |
+| The UI declared Inter and JetBrains Mono but **shipped neither**, so Chrome rendered the document in Times and the UI in a system stack | `web/public/`, `styles/base.css` | the two families ship in `web/public/fonts/` with `@font-face`; `--font-mono` leads with JetBrains Mono | `document.fonts` reports both loaded; measured glyph widths differ from the fallback |
+| Command palette became **edge-to-edge** on a phone, hiding the workspace behind it | `overlays.css` mobile block | compact centred surface with a 14px gutter, border and radius | 362×476 in a 390×844 viewport, workspace visible around it |
+
+Remaining and deliberate:
+
+- **The light-mode ladder is now coherent but still compressed.** Above the canvas
+  there are only ~1.07:1 of room, so cards depend on their border and shadow for
+  separation. A palette that authored its panels *darker* than its canvas would
+  have more room; that is a palette decision, not a role one.
+- **`artifacts.css` is still on the exemption list** (see above).
+- **Terminal, git diff, todo and goals are still outside the automated browser
+  matrix**; they are measured by hand in both modes in this pass (0 failures in
+  the inspector and git panels) but not gated.

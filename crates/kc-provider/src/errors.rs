@@ -56,6 +56,11 @@ pub(crate) fn http_status_of(message: &str) -> Option<u16> {
 /// Deliberately a substring test over the lowercased text: providers word this
 /// differently and a gateway may wrap the upstream message in its own prose.
 pub fn is_context_overflow(message: &str) -> bool {
+    // A retryable HTTP status is authoritative even after retries are exhausted;
+    // otherwise the quoted upstream wording could relabel the final failure.
+    if http_status_of(message).is_some_and(|status| crate::retry::status_retryable(status, false)) {
+        return false;
+    }
     if message.contains(CONTEXT_OVERFLOW_TAG) {
         return true;
     }
@@ -145,10 +150,13 @@ pub(crate) async fn http_status_error(
             format!("{head} (response body: {excerpt})")
         }
     };
-    // A prompt that does not fit the window is a 400/413/422 on every provider,
-    // and the body is the only place that says so. Tag it before the status
-    // mapping so the runtime can compact-and-retry instead of failing the turn.
-    let overflow = is_context_overflow(&excerpt);
+    // Transient failures stay transient even when a gateway wraps them in
+    // context-overflow wording. Only a non-transient HTTP response whose body
+    // actually describes the request's size earns the compact-and-retry tag.
+    let transient = status == StatusCode::TOO_MANY_REQUESTS
+        || matches!(status.as_u16(), 408 | 409 | 425)
+        || status.is_server_error();
+    let overflow = !transient && is_context_overflow(&excerpt);
     let text = match status {
         StatusCode::UNAUTHORIZED => with_body(format!(
             "provider authentication failed (401 Unauthorized) at {url}: the configured API key was rejected; \
@@ -381,6 +389,20 @@ mod tests {
         for body in bodies {
             assert!(!is_context_overflow(body), "false positive: {body}");
         }
+    }
+
+    #[test]
+    fn transient_status_is_not_reclassified_by_context_wording() {
+        for status in [408, 409, 425, 429, 500, 503, 599] {
+            let message = format!("upstream busy: too many tokens, context length [http {status}]");
+            assert!(!is_context_overflow(&message), "misclassified {status}");
+        }
+        assert!(is_context_overflow(
+            "provider rejected: too many tokens [http 400]"
+        ));
+        assert!(is_context_overflow(
+            "provider rejected: context_length_exceeded [http 413]"
+        ));
     }
 
     #[test]

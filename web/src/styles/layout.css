@@ -177,7 +177,9 @@
   overflow: hidden;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: var(--fs-micro);
+  /* Metadata a reader scans, not a kicker: `--fs-micro` is reserved for
+   * uppercase kickers and badges (see `tokens.css` §3.3). */
+  font-size: var(--fs-tiny);
   line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -358,7 +360,7 @@
 .filter-chip.is-on {
   border-color: var(--accent-line);
   background: var(--accent-bg);
-  color: var(--accent-fill);
+  color: var(--accent-on-tint);
 }
 
 .filter-chip-count {
@@ -836,7 +838,7 @@
   justify-content: space-between;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   line-height: 1.2;
 }
 
@@ -884,7 +886,7 @@
 .settings-row .provider {
   overflow: hidden;
   color: var(--muted);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1132,6 +1134,21 @@
   height: 13px;
 }
 
+/* A branch name is repository-controlled and can be arbitrarily long
+   (`fix/header-cascade-on-a-phone`). `.head-btn` caps the *box* at 190px but the
+   text inside had no truncation, so it spilled over its neighbours. Let the flex
+   item shrink and ellipsise; the full name stays in the title and the label. */
+.head-btn.branch-chip {
+  min-width: 0;
+}
+
+.branch-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* The mock's `.icon-btn`: a square, fill-less button for the palette and the
    inspector toggle. */
 .head-btn.head-icon {
@@ -1151,7 +1168,7 @@
 .head-btn.accent-head {
   border-color: var(--accent-line);
   background: var(--accent-bg);
-  color: var(--accent-fill);
+  color: var(--accent-on-tint);
   font-family: var(--font-ui);
 }
 
@@ -1329,7 +1346,7 @@
 
 .workspace-tab.is-active .tab-count {
   background: var(--accent-bg);
-  color: var(--accent-fill);
+  color: var(--accent-on-tint);
 }
 
 /* The mock's `.c-tabs-meta`: what the model is doing, right-aligned in mono. */
@@ -1341,7 +1358,7 @@
   margin: 0 0 0 auto;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   line-height: 1.3;
   white-space: nowrap;
 }
@@ -1514,7 +1531,7 @@
   border-top: 1px solid var(--line-soft);
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1606,12 +1623,21 @@
     display: none;
   }
 
-  /* At 1024px the header has 406px of content and the buttons take half of it:
-   * measured `.breadcrumb` 187px against 219px of content, so the session title
-   * — the bar's primary label — clipped to "Design review s…". The theme name is
-   * the one button label that is decoration (the button keeps its aria-label and
-   * its accent glyph), so it is the one that goes. */
+  /* At 1024px the rail and inspector leave too little header for secondary
+   * button labels. Keep the theme and branch glyphs, with their full accessible
+   * names and tooltips, so the session title never collapses to zero width. */
   .head-btn.theme-header-btn .theme-header-name {
+    display: none;
+  }
+
+  /* Reuse the phone's icon-only branch chip at the narrow desktop tier too. */
+  .head-btn.branch-chip {
+    flex: 0 0 30px;
+    width: 30px;
+    padding: 0;
+  }
+
+  .branch-chip-name {
     display: none;
   }
 }
@@ -1771,7 +1797,29 @@
  * is now one line, so the title remains the header's primary label on every
  * viewport. */
 @media (max-width: 640px) {
-  :root {
+  /* The phone frame is a space budget, not a density knob.
+   *
+   * The density rules in `tokens.css` are `:root[data-density='…']` (0,2,0), so
+   * the bare `:root` here (0,1,0) lost to them and the tier inherited whatever
+   * density said: `compact` produced a 54 + 36 = 90px frame — 2px *taller* than
+   * the 52 + 38 comfortable frame it exists to shrink — and `spacious` produced
+   * 76 + 51 = 127px, 13% of a 956px screen spent on chrome before a message.
+   * Restating the tier per density makes it a decision. `layout.css` loads after
+   * `tokens.css` (see `index.css`), so at equal specificity this rule wins; the
+   * phone frame shrinks for compact and stays put for spacious, which still gets
+   * its extra room inside the conversation from the spacing scale. */
+  :root,
+  :root[data-density='comfortable'] {
+    --header-h: 52px;
+    --tabs-h: 38px;
+  }
+
+  :root[data-density='compact'] {
+    --header-h: 50px;
+    --tabs-h: 34px;
+  }
+
+  :root[data-density='spacious'] {
     --header-h: 52px;
     --tabs-h: 38px;
   }

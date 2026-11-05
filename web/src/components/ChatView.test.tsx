@@ -547,6 +547,33 @@ describe('ChatView workspace tabs', () => {
     expect(note?.querySelector('.status-dot')).toBeNull();
   });
 
+  it('gives a long branch chip a label and a title that survive truncation', async () => {
+    // The branch name comes from the repository and can be arbitrarily long; on
+    // a phone the visible text is the icon alone, so the accessible name cannot
+    // depend on it.
+    const branch = 'feature/header-cascade-and-branch-truncation-on-a-phone';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ is_repo: true, branch, error: null, files: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
+    renderChat();
+
+    const chip = await screen.findByRole('button', {
+      name: `Branch ${branch} — open Changes`,
+    });
+    expect(chip.classList.contains('branch-chip')).toBe(true);
+    const name = chip.querySelector('.branch-chip-name');
+    expect(name?.textContent).toBe(branch);
+    expect(chip.getAttribute('title')).toBe(`On branch ${branch} — open Changes`);
+    // The visible text is truncated by CSS; the title keeps the full value.
+    expect(name?.getAttribute('title')).toBe(branch);
+  });
+
   it('only offers the session-list button while the rail is collapsed', () => {
     renderChat();
     const toggle = (): HTMLElement => screen.getByRole('button', { name: 'Toggle session list' });

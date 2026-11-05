@@ -56,4 +56,45 @@ describe('Markdown copy buttons', () => {
     });
     expect(button.textContent).toBe('Copy failed');
   });
+
+  /* The button's accessible name is its `aria-label`, so changing the visible
+   * text announces nothing. The status is also written to a live region, which is
+   * the only way a screen reader hears the outcome. */
+  it('announces a successful copy through a live region', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined);
+    render(<Markdown text={SOURCE} />);
+    const status = screen.getByTestId('markdown-copy-status');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    expect(status.textContent).toBe('');
+
+    fireEvent.click(copyButtons()[0] as HTMLButtonElement);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(status.textContent).toContain('copied to the clipboard');
+
+    // The region clears with the label, so the next copy is a new announcement.
+    await act(async () => {
+      vi.advanceTimersByTime(1500);
+    });
+    expect(status.textContent).toBe('');
+  });
+
+  it('announces a rejected copy, with what to do instead', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValue(new Error('denied'));
+    render(<Markdown text={SOURCE} />);
+    const status = screen.getByTestId('markdown-copy-status');
+
+    fireEvent.click(copyButtons()[0] as HTMLButtonElement);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(status.textContent).toContain('Copy failed');
+    expect(status.textContent).toContain('copy it manually');
+    // The state is also on the button, so a passing glance sees it.
+    expect(copyButtons()[0]?.dataset.copyState).toBe('failed');
+  });
 });

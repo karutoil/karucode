@@ -34,9 +34,9 @@ read-only for settings and `PATCH /api/config` answers `403`. This is how you
 run karucode where the operator, not the browser, owns the model and keys.
 
 Every boolean in this file and in the environment takes the same spellings:
-`1/0`, `true/false`, `yes/no`, `on/off`, case-insensitive. Anything else is
-ignored with the previous value kept, so `KARUCODE_LOCK_SETTINGS=1` and
-`KARUCODE_LOCK_SETTINGS=true` are the same switch.
+`1/0`, `true/false`, `yes/no`, `on/off`, case-insensitive. Any other value
+aborts configuration loading with an error naming the variable, rather than
+silently retaining a potentially permissive default.
 
 ## Which settings apply without a restart
 

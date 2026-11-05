@@ -24,6 +24,8 @@ the whole security story on a laptop.
   `/metrics` require `Authorization: Bearer <token>`; `?token=` is accepted
   only for the SSE stream and the terminal websocket (a browser can set
   neither a header on a top-level navigation nor on a websocket handshake).
+  Artifact frames instead receive a random per-artifact `?capability=` from the
+  authenticated publishing POST; the master bearer never enters their URL.
   The **SPA shell and its static assets are served unauthenticated**: `GET /`,
   `/index.html`, `/assets/*`, `/favicon*`, `/brand/*` and any client-side deep
   link return the built frontend (or the "UI not built" placeholder) with
@@ -58,7 +60,9 @@ the whole security story on a laptop.
   `GET /api/artifacts/<id>`, served with `sandbox allow-scripts` (an opaque
   origin: its scripts run, but it cannot read this app's storage, call `/api`
   or frame the app) and `connect-src 'none'` with no wildcard source, so a
-  prompt-injected `<img src="https://…">` cannot beacon out. An SVG artifact is
+  prompt-injected `<img src="https://…">` cannot beacon out. Its URL carries
+  only that artifact's random read capability, so even its own inline script
+  cannot learn the master bearer from `location.search`. An SVG artifact is
   sanitised and drawn in a shadow root; nothing from an artifact is ever
   inserted into the app's own DOM as markup. See the `artifacts` topic.
 * **Plugin panels** - a plugin contributes *data*, never markup. The inspector

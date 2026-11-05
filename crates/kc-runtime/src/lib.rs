@@ -25,7 +25,7 @@ use kc_core::settings::Settings;
 use kc_core::store::{AgentStatus, Store};
 use kc_core::tool::ToolRegistry;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -229,6 +229,10 @@ pub(crate) struct RuntimeInner {
     /// In-flight runs, keyed by run id for top-level runs and by agent id for
     /// subagent loops.
     pub runs: Mutex<HashMap<String, Arc<RunState>>>,
+    /// One fair async lock per session for operations that need a quiescent
+    /// transcript: submit, rewind, and the indivisible rewind-and-retry pair.
+    /// The map is locked only long enough to clone the session's lock.
+    pub session_lifecycle: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub approvals: approvals::ApprovalRegistry,
     pub subagents: Arc<subagent::SubagentLimiter>,
     /// The live half of subagents: pause gates, mailboxes and a registry of the
@@ -236,6 +240,9 @@ pub(crate) struct RuntimeInner {
     pub hub: Arc<hub::AgentHub>,
     /// Serializes sequence allocation with broadcast publication.
     pub seq: Mutex<u64>,
+    /// Serializes queue snapshot construction with its publication. Without it,
+    /// an older snapshot can be built, paused, and emitted after a newer one.
+    pub queue_publication: Mutex<()>,
     pub events_emitted: AtomicU64,
     /// `allow_session` approvals, keyed by session + kind + target.
     pub session_allow: Mutex<HashSet<String>>,
@@ -390,6 +397,19 @@ pub(crate) struct RunState {
     /// True for a user-submitted run (one per session at a time), false for a
     /// subagent loop.
     pub top_level: bool,
+    /// False as soon as teardown begins. Queue admission checks this under the
+    /// run-registry lock so no new steer can arrive after the final conversion
+    /// of accepted-but-undrained steers into follow-ups.
+    pub accepting_input: AtomicBool,
+    /// Bitset of independently idempotent top-level finalization stages. The
+    /// outer panic handler may resume finalization without repeating events or
+    /// notifications that were already published.
+    pub finalization: AtomicU8,
+    /// The loop outcome is retained before finalization so an unexpected panic
+    /// in a hook or notification cannot replace an already-recorded success
+    /// with a contradictory status when the outer guard resumes the remaining
+    /// stages.
+    pub final_outcome: Mutex<Option<agent::LoopOutcome>>,
     /// Set when the human asked for this run to stop.
     ///
     /// `run_top_level` reads it to decide whether a `Cancelled` outcome is worth a
@@ -415,6 +435,9 @@ impl RunState {
             started_at: events::now_ms(),
             iterations: AtomicU32::new(0),
             top_level,
+            accepting_input: AtomicBool::new(true),
+            finalization: AtomicU8::new(0),
+            final_outcome: Mutex::new(None),
             cancelled_by_user: AtomicBool::new(false),
         }
     }
@@ -422,6 +445,12 @@ impl RunState {
     /// Whether the human was the one who stopped this run.
     pub(crate) fn was_cancelled_by_user(&self) -> bool {
         self.cancelled_by_user.load(Ordering::Relaxed)
+    }
+
+    /// Claim one idempotent finalization stage. A panic-safe second pass skips
+    /// stages this bit already names.
+    pub(crate) fn claim_finalization(&self, stage: u8) -> bool {
+        self.finalization.fetch_or(stage, Ordering::AcqRel) & stage == 0
     }
 
     pub(crate) fn key(&self) -> String {
@@ -438,10 +467,12 @@ impl Runtime {
             events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
             tools: RwLock::new(Arc::new(ToolRegistry::new())),
             runs: Mutex::new(HashMap::new()),
+            session_lifecycle: Mutex::new(HashMap::new()),
             approvals: approvals::ApprovalRegistry::new(),
             subagents: Arc::new(subagent::SubagentLimiter::new(Default::default())),
             hub: Arc::new(hub::AgentHub::new()),
             seq: Mutex::new(0),
+            queue_publication: Mutex::new(()),
             events_emitted: AtomicU64::new(0),
             session_allow: Mutex::new(HashSet::new()),
             steers: Mutex::new(HashMap::new()),
@@ -724,13 +755,19 @@ impl Runtime {
                 "a retry or a note needs the prompt to send after the rewind".into(),
             ));
         }
-        let outcome = self.rewind(session_id, message_id, revert, false).await?;
-        // `rewind` already refused a session with a run in flight, so this cannot
-        // race an existing loop; the run row is written before this returns.
-        let handle = self.submit(session_id, next_prompt).await?;
+        // One owned guard spans both halves. Calling the public `rewind` and
+        // `submit` separately would drop the guard between them, allowing an
+        // unrelated submission to start against the half-rewound transcript.
+        let lifecycle = self.inner.lock_session_lifecycle(session_id).await;
+        let (point, preview, outcomes) =
+            rewind::rewind_quiescent(self, session_id, message_id, revert, false).await?;
+        let handle =
+            agent::start_run_with_lifecycle(self, session_id, next_prompt, lifecycle).await?;
         Ok(RewindOutcome {
+            point,
+            preview,
+            outcomes,
             run_id: Some(handle.run_id),
-            ..outcome
         })
     }
 
@@ -785,9 +822,10 @@ impl Runtime {
     /// meaning - the caller should `submit` instead) or when the queue is full.
     ///
     /// The message is *not* persisted here. It becomes a stored `user` message
-    /// when the loop drains it, which is what keeps the transcript in the order
-    /// the model actually saw it, and what makes a steer that never lands (the run
-    /// finished first) simply absent rather than a dangling turn.
+    /// when the loop drains it, which keeps the transcript in the order the model
+    /// saw it. If it arrives on the final no-tool response, teardown closes
+    /// admission and converts it to a follow-up with the same id, so accepted input
+    /// is either applied by this run or deliberately answered by the next one.
     ///
     /// Every queue mutation publishes [`Event::QueuedMessages`] with the whole
     /// queue, so a second tab (or the same tab after a reconnect) never shows a
@@ -866,10 +904,12 @@ impl Runtime {
             // leaving an accepted follow-up stranded indefinitely. Lock order is
             // runs then queue; release both before publishing events.
             let runs = self.inner.runs.lock().expect("runs lock");
-            if !runs
-                .values()
-                .any(|s| s.top_level && s.session_id.0 == session_id && !s.cancel.is_cancelled())
-            {
+            if !runs.values().any(|s| {
+                s.top_level
+                    && s.session_id.0 == session_id
+                    && !s.cancel.is_cancelled()
+                    && s.accepting_input.load(Ordering::Acquire)
+            }) {
                 return Err(kc_core::Error::BadRequest(format!(
                     "session {session_id} has no run in flight; send a normal message instead"
                 )));
@@ -1022,6 +1062,48 @@ impl Runtime {
             .any(|s| s.top_level && s.session_id.0 == session_id)
     }
 
+    /// Close queue admission, convert any final-turn steers into follow-ups and
+    /// remove the run as one registry critical section. Queue admission takes
+    /// the same registry lock, so an accepted message cannot be stranded between
+    /// the conversion and deregistration.
+    pub(crate) fn deregister_top_level(&self, key: &str, state: &Arc<RunState>) -> usize {
+        let session_id = state.session_id.0.clone();
+        let converted = {
+            let mut runs = self.inner.runs.lock().expect("runs lock");
+            state.accepting_input.store(false, Ordering::Release);
+            let mut steers = self.inner.steers.lock().expect("steers lock");
+            let pending = steers.remove(&session_id).unwrap_or_default();
+            let converted = pending.len();
+            if converted > 0 {
+                let mut follow_ups = self.inner.follow_ups.lock().expect("follow ups lock");
+                let queue = follow_ups.entry(session_id.clone()).or_default();
+                // Preserve the ids clients were given, and put these older
+                // requests ahead of already queued follow-ups.
+                for mut steer in pending.into_iter().rev() {
+                    steer.kind = QueuedKind::FollowUp;
+                    queue.push_front(steer);
+                }
+            }
+            runs.remove(key);
+            converted
+        };
+        if converted > 0 {
+            self.publish_queues(&session_id);
+            self.emit(
+                Some(&session_id),
+                None,
+                None,
+                kc_core::events::Event::Notice {
+                    level: "info".into(),
+                    message: format!(
+                        "The run ended before {converted} steering message(s) could be applied; they will run as follow-ups."
+                    ),
+                },
+            );
+        }
+        converted
+    }
+
     /// Drop every follow-up queued for a session (it was deleted).
     pub fn clear_follow_ups(&self, session_id: &str) {
         let removed = self
@@ -1042,6 +1124,14 @@ impl Runtime {
     /// the frames are small (a queue holds tens of short strings) and a client
     /// that lost one then resynchronises on the next instead of drifting.
     fn publish_queues(&self, session_id: &str) {
+        // Keep the read and event construction in one publication critical
+        // section. The event emitter separately serializes sequence numbers;
+        // that alone would not stop an older queue snapshot following a newer.
+        let _publication = self
+            .inner
+            .queue_publication
+            .lock()
+            .expect("queue publication lock");
         let snapshot = self.queued_all(session_id);
         self.emit(
             Some(session_id),
@@ -1101,6 +1191,14 @@ impl Runtime {
             .any(|s| s.session_id.0 == session_id && !s.cancel.is_cancelled())
     }
 
+    /// True until every loop has actually deregistered. Unlike `is_running`,
+    /// this deliberately includes a cancelled-but-unwinding loop: rewind must
+    /// wait for its final tool results and terminal writes to finish.
+    pub(crate) fn has_registered_runs(&self, session_id: &str) -> bool {
+        let runs = self.inner.runs.lock().expect("runs lock");
+        runs.values().any(|s| s.session_id.0 == session_id)
+    }
+
     /// Resolve a pending approval. Unknown, already resolved or expired ids are
     /// a 404-style [`Error::NotFound`].
     pub async fn resolve_approval(
@@ -1150,6 +1248,45 @@ impl Runtime {
                 AgentStatus::Cancelled
             }
         };
+        if !matches!(action, AgentAction::Cancel) {
+            let expected = match action {
+                AgentAction::Pause => AgentStatus::Running.as_str(),
+                AgentAction::Resume => AgentStatus::Paused.as_str(),
+                AgentAction::Cancel => unreachable!(),
+            };
+            match self
+                .inner
+                .deps
+                .store
+                .transition_agent_status(agent_id, &[expected], status.as_str(), events::now_ms())
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    // A terminal full-row write won while the live flag was
+                    // being changed. Report the state that actually persists;
+                    // never publish a pause/resume success that did not land.
+                    let summary = self.inner.deps.store.get_agent(agent_id).await?;
+                    let Some(summary) = summary else {
+                        return Err(Error::NotFound(format!(
+                            "agent {agent_id} disappeared while it was being controlled"
+                        )));
+                    };
+                    return AgentStatus::parse(&summary.agent.status).ok_or_else(|| {
+                        Error::Store(format!(
+                            "agent {agent_id} has unknown status {:?}",
+                            summary.agent.status
+                        ))
+                    });
+                }
+                Err(e) => {
+                    // Preserve the existing live-control contract on a store
+                    // outage: the pause flag is set and the caller gets the
+                    // actual live state, with the persistence failure logged.
+                    tracing::warn!(agent = %agent_id, error = %e, "could not persist an agent status");
+                }
+            }
+        }
         self.inner.emit(
             Some(&session_id),
             None,
@@ -1160,18 +1297,6 @@ impl Runtime {
                 by: "user".to_string(),
             },
         );
-        // Persist the visible half so a reload agrees with the live roster. A
-        // store failure must not fail the control action: the flag is already set.
-        if !matches!(action, AgentAction::Cancel) {
-            if let Ok(Some(summary)) = self.inner.deps.store.get_agent(agent_id).await {
-                let mut record = summary.agent;
-                record.status = status.as_str().to_string();
-                record.updated_at = events::now_ms();
-                if let Err(e) = self.inner.deps.store.upsert_agent(&record).await {
-                    tracing::warn!(agent = %agent_id, error = %e, "could not persist an agent status");
-                }
-            }
-        }
         Ok(status)
     }
 
@@ -1231,6 +1356,24 @@ impl Runtime {
 }
 
 impl RuntimeInner {
+    pub(crate) async fn lock_session_lifecycle(
+        &self,
+        session_id: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .session_lifecycle
+                .lock()
+                .expect("session lifecycle lock");
+            Arc::clone(
+                locks
+                    .entry(session_id.to_string())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        lock.lock_owned().await
+    }
+
     pub(crate) fn tool_view(&self) -> Arc<ToolRegistry> {
         self.tools.read().expect("tools lock").clone()
     }
@@ -1253,6 +1396,10 @@ impl RuntimeInner {
             drained
         };
         if !drained.is_empty() {
+            let _publication = self
+                .queue_publication
+                .lock()
+                .expect("queue publication lock");
             let follow_ups = self
                 .follow_ups
                 .lock()

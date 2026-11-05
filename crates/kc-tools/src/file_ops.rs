@@ -9,6 +9,7 @@
 use kc_core::message::ImageAttachment;
 use kc_core::paths::Workspace;
 use kc_core::{Error, Result};
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -624,6 +625,8 @@ fn next_seq() -> u64 {
 pub struct EditPlan {
     pub abs: PathBuf,
     pub rel: String,
+    /// SHA-256 of the exact source bytes this plan and approval describe.
+    pub fingerprint: [u8; 32],
     pub new_content: String,
     pub occurrences: usize,
     /// 1-based line numbers (in the original file) that changed.
@@ -682,6 +685,7 @@ pub fn plan_edit(
         ))
     })?;
 
+    let fingerprint = Sha256::digest(content.as_bytes()).into();
     let indices: Vec<usize> = content.match_indices(old).map(|(i, _)| i).collect();
     if indices.is_empty() {
         return Err(Error::Tool(format!(
@@ -700,7 +704,7 @@ pub fn plan_edit(
         let shown = indices.len().min(MAX_REPORTED_LINES);
         // Only scan up to the last match whose line number is reported: the
         // matches are ordered, so the newlines before it are all that is needed.
-        let line_numbers = line_numbers_within(&content, &indices[..shown], indices[shown - 1]);
+        let line_numbers = line_numbers_within(&content, &indices[..shown]);
         let listed: Vec<String> = line_numbers.iter().map(|n| n.to_string()).collect();
         return Err(Error::Tool(format!(
             "old_string matches {} places in `{rel}` (lines {}). Add surrounding context to make it unique, \
@@ -728,7 +732,7 @@ pub fn plan_edit(
                 MAX_EDIT_BYTES / (1024 * 1024)
             ))
         })?;
-    let line_numbers = line_numbers_within(&content, &indices, content.len());
+    let line_numbers = line_numbers_within(&content, &indices);
 
     let mut new_content = String::with_capacity(result_len);
     let mut last = 0usize;
@@ -746,6 +750,7 @@ pub fn plan_edit(
     Ok(EditPlan {
         abs,
         rel,
+        fingerprint,
         new_content,
         occurrences: indices.len(),
         line_numbers,
@@ -753,24 +758,23 @@ pub fn plan_edit(
     })
 }
 
-/// 1-based line numbers of `indices` (ascending byte offsets into `content`),
-/// computed in **one** forward pass.
+/// 1-based line numbers of ascending byte `indices` into `content`.
 ///
-/// The newline offsets are collected once and then binary-searched per match, so
-/// the cost is O(bytes + matches × log(lines)) instead of the O(bytes × matches)
-/// of rescanning `content[..i]` per match. `limit` bounds the scan: nothing at or
-/// after it can affect a returned number, so the ambiguity path only pays for the
-/// matches it is about to report.
-fn line_numbers_within(content: &str, indices: &[usize], limit: usize) -> Vec<usize> {
-    let limit = limit.min(content.len());
-    let newlines: Vec<usize> = content.as_bytes()[..limit]
-        .iter()
-        .enumerate()
-        .filter_map(|(i, b)| (*b == b'\n').then_some(i))
-        .collect();
+/// One cursor moves forward through the source. There is deliberately no table
+/// of every newline: an 8 MiB file of dense one-character lines would otherwise
+/// allocate another ~64 MiB before it could even start the edit.
+fn line_numbers_within(content: &str, indices: &[usize]) -> Vec<usize> {
+    let bytes = content.as_bytes();
+    let mut cursor = 0usize;
+    let mut line = 1usize;
     indices
         .iter()
-        .map(|i| newlines.partition_point(|offset| *offset < *i) + 1)
+        .map(|idx| {
+            debug_assert!(*idx >= cursor && *idx <= bytes.len());
+            line += bytes[cursor..*idx].iter().filter(|b| **b == b'\n').count();
+            cursor = *idx;
+            line
+        })
         .collect()
 }
 
@@ -817,6 +821,15 @@ pub fn render_diff(old: &[&str], new: &[&str], max_lines: usize) -> String {
     let mid_new = &new[prefix..new.len() - suffix];
     if mid_old.is_empty() && mid_new.is_empty() {
         return String::from("[no textual change]");
+    }
+
+    // A dense replace_all commonly changes every line. Rendering that as a block
+    // needs only the 80 lines we actually return; constructing millions of diff
+    // ops/positions first can dwarf the source and new content. Empty sides are
+    // included here as well: their mathematical n*m product is zero, which used
+    // to smuggle an arbitrarily wide, useless LCS allocation past the cell cap.
+    if !use_lcs(mid_old.len(), mid_new.len()) {
+        return render_block_diff(mid_old, mid_new, prefix, max_lines);
     }
 
     let ops = diff_ops(mid_old, mid_new);
@@ -892,17 +905,64 @@ pub fn render_diff(old: &[&str], new: &[&str], max_lines: usize) -> String {
     out
 }
 
+/// LCS is useful only for two non-empty, modest changed regions. The empty-side
+/// check must precede the cell product: zero times a huge side is not permission
+/// to allocate a giant table for a pure insertion/deletion preview.
+fn use_lcs(n: usize, m: usize) -> bool {
+    n > 0 && m > 0 && lcs_table_cells(n, m) <= DIFF_MAX_CELLS
+}
+
+/// Number of cells including the sentinel row and column.
+fn lcs_table_cells(n: usize, m: usize) -> usize {
+    n.saturating_add(1)
+        .max(m.saturating_add(1))
+        .saturating_mul(n.saturating_add(1).min(m.saturating_add(1)))
+}
+
+/// Render a whole changed region without constructing an operation vector.
+fn render_block_diff(old: &[&str], new: &[&str], prefix: usize, max_lines: usize) -> String {
+    let mut out = format!(
+        "@@ -{},{} +{},{} @@",
+        prefix + 1,
+        old.len(),
+        prefix + 1,
+        new.len()
+    );
+    let mut emitted = 1usize;
+    let mut truncated = false;
+    for (sigil, lines) in [('-', old), ('+', new)] {
+        for line in lines {
+            if emitted >= max_lines {
+                truncated = true;
+                break;
+            }
+            out.push('\n');
+            out.push(sigil);
+            out.push_str(line);
+            emitted += 1;
+        }
+        if truncated {
+            break;
+        }
+    }
+    if truncated {
+        out.push_str(&format!(
+            "\n[... diff preview truncated at {max_lines} lines]"
+        ));
+    }
+    out
+}
+
 fn diff_ops<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<(DiffOp, &'a str)> {
     let (n, m) = (old.len(), new.len());
-    if n.saturating_mul(m) > DIFF_MAX_CELLS {
-        // Too large for a table: emit a block replacement.
+    if !use_lcs(n, m) {
         let mut ops = Vec::with_capacity(n + m);
         ops.extend(old.iter().map(|l| (DiffOp::Del, *l)));
         ops.extend(new.iter().map(|l| (DiffOp::Ins, *l)));
         return ops;
     }
     let width = m + 1;
-    let mut table = vec![0u32; (n + 1) * width];
+    let mut table = vec![0u32; lcs_table_cells(n, m)];
     for i in (0..n).rev() {
         for j in (0..m).rev() {
             table[i * width + j] = if old[i] == new[j] {
@@ -1330,5 +1390,34 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("max_image_read_bytes"), "{message}");
         assert!(message.contains("shot.png"), "{message}");
+    }
+
+    #[test]
+    fn dense_replace_all_uses_a_capped_block_preview_not_lcs_state() {
+        let tmp = TempWs::new("dense-diff");
+        let body = "x\n".repeat(2500);
+        tmp.write("dense.txt", &body);
+        let plan = plan_edit(&tmp.ws(), "dense.txt", "x", "y", true).unwrap();
+        assert_eq!(plan.occurrences, 2500);
+        assert_eq!(plan.new_content, "y\n".repeat(2500));
+        assert!(
+            plan.diff.contains("diff preview truncated"),
+            "{}",
+            plan.diff
+        );
+        assert!(
+            plan.diff.lines().count() <= DIFF_MAX_LINES + 1,
+            "unbounded diff preview: {} lines",
+            plan.diff.lines().count()
+        );
+        // A pure insertion/deletion must never enter the table path, regardless
+        // of the other side's length (n*m is zero and used to bypass the guard).
+        assert!(!use_lcs(0, usize::MAX));
+        assert!(!use_lcs(usize::MAX, 0));
+        assert!(!use_lcs(2500, 2500));
+        assert!(use_lcs(10, 10));
+        let additions = render_diff(&[], &["first", "second"], 80);
+        assert!(additions.contains("+first") && additions.contains("+second"));
+        assert!(additions.contains("-1,0") && additions.contains("+1,2"));
     }
 }

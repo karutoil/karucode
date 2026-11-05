@@ -274,7 +274,10 @@ async fn crash_mid_call_fails_the_request_and_marks_the_plugin_failed() {
     let diags = host.diagnostics();
     assert_eq!(diags[0].status, PluginStatus::Failed);
     let error = diags[0].error.clone().unwrap_or_default();
-    assert!(error.contains("exit code 3"), "{error}");
+    assert!(
+        error.contains("exit code 3") || error.contains("closed its stdout"),
+        "{error}"
+    );
     // Failed plugins expose no tools.
     assert!(host.tools().is_empty());
 
@@ -2260,6 +2263,112 @@ for line in sys.stdin:
         1,
         "{names:?}"
     );
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An idle plugin closes only stdout after one successful arming call, then stays
+/// blocked on stdin. The host must not wait for process exit to notice.
+const IDLE_STDOUT_EOF_PLUGIN: &str = r#"
+import json, os, sys, threading, time
+
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def close_stdout_soon():
+    time.sleep(0.05)
+    # Close the descriptor itself. TextIOWrapper shutdown from a secondary
+    # Python thread can otherwise leave the pipe reader waiting.
+    os.close(1)
+
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "name": "idle-eof", "version": "1", "protocol": "1",
+            "capabilities": ["tools"]}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [
+            {"name": "arm_eof", "description": "Close stdout while idle.",
+             "parameters": {"type": "object"}},
+            {"name": "echo", "description": "Still works after restart.",
+             "parameters": {"type": "object"}}]}})
+    elif method == "tools/call":
+        name = req.get("params", {}).get("name")
+        if name == "arm_eof":
+            threading.Thread(target=close_stdout_soon, daemon=True).start()
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"ok": True, "content": "armed" if name == "arm_eof" else "restarted"}})
+"#;
+
+#[tokio::test]
+async fn unexpected_idle_stdout_eof_fails_reaps_and_restarts_the_plugin() {
+    let dir = temp_dir("idle-stdout-eof");
+    let script = dir.join("idle_eof.py");
+    std::fs::write(&script, IDLE_STDOUT_EOF_PLUGIN).unwrap();
+    let config = PluginConfig {
+        name: "idle-eof".into(),
+        enabled: true,
+        command: vec!["python3".into(), script.to_string_lossy().into_owned()],
+        env: BTreeMap::new(),
+        permissions: Vec::new(),
+        settings: BTreeMap::new(),
+    };
+    let mut host = PluginHost::discover(&[config], &dir);
+    host.start_all().await;
+    assert_eq!(host.diagnostics()[0].status, PluginStatus::Ready);
+    let tools = host.tools();
+    let echo = find(&tools, "plugin__idle-eof__echo").clone();
+    let first_pid = host.diagnostics()[0].pid;
+    let armed = call(
+        find(&tools, "plugin__idle-eof__arm_eof"),
+        &dir,
+        serde_json::json!({}),
+    )
+    .await;
+    assert!(armed.ok, "{}", armed.content);
+
+    // No request is pending when EOF arrives. Readiness must be revoked
+    // immediately, ahead of the supervisor's existing graceful-kill budget.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while host.diagnostics()[0].status != PluginStatus::Failed {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("idle EOF must fail promptly: {:?}", host.diagnostics()[0]));
+    let diag = &host.diagnostics()[0];
+    assert!(diag.error.as_deref().unwrap_or_default().contains("stdout"));
+    assert!(host.tools().is_empty());
+    // Waiting for pid=None proves the supervisor actually killed/reaped the
+    // process that merely closed a pipe rather than exiting on its own.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.diagnostics()[0].pid.is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("idle EOF was not reaped: {:?}", host.diagnostics()[0]));
+
+    // The tool object predates the crash, exactly like a registry consumer's
+    // long-lived handle. It must transparently take the normal restart path.
+    let out = call(&echo, &dir, serde_json::json!({})).await;
+    assert!(
+        out.ok,
+        "the old handle did not restart the plugin: {}",
+        out.content
+    );
+    assert_eq!(out.content, "restarted");
+    let diag = &host.diagnostics()[0];
+    assert_eq!(diag.status, PluginStatus::Ready, "{:?}", diag.error);
+    assert_eq!(diag.restart_count, 1);
+    assert_ne!(diag.pid, first_pid);
 
     host.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();

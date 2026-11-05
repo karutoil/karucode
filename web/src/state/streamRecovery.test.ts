@@ -7,8 +7,8 @@ import { recallPromptTokens } from './promptTokens';
 import * as store from './store';
 
 /**
- * Recovery paths that only exist because the SSE stream never replays: a hole in
- * the sequence, or an explicit `stream_lagged` marker, has to repair the open
+ * Recovery paths for loss Last-Event-ID replay cannot repair: a hole in the
+ * sequence or an explicit `stream_lagged` marker has to repair the open
  * session without destroying what is already on screen.
  */
 

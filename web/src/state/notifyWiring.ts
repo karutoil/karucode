@@ -59,8 +59,8 @@ export function notifierInstance(): Notifier {
       // event was subscribed must still notify when the run ends.
       isVisible: () =>
         typeof document === 'undefined' ? true : document.visibilityState === 'visible',
-      focusSession: (sessionId) => {
-        actions.focusSession(sessionId);
+      focusSession: (sessionId, projectId) => {
+        actions.focusSession(sessionId, projectId);
       },
       toast: (message, tone, sessionId) => {
         store.pushToast(message, tone, 9000, sessionId);

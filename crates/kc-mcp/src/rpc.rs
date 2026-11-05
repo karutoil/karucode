@@ -5,7 +5,7 @@
 //! over a child process stdin/stdout vs. HTTP POST with a JSON or SSE body).
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -30,6 +30,30 @@ pub enum McpError {
 }
 
 impl McpError {
+    /// Remove every configured HTTP header value from an error before it can be
+    /// logged, returned in server status, or handed to the model.
+    ///
+    /// Servers can reflect credentials in a non-2xx body, a JSON-RPC error, or even
+    /// a transport diagnostic. Redacting at the transport boundary keeps all of
+    /// those surfaces covered instead of relying on every message constructor to
+    /// remember which strings came from a remote peer.
+    pub(crate) fn redacted(self, headers: &BTreeMap<String, String>) -> Self {
+        match self {
+            Self::Transport(message) => Self::Transport(redact_headers(&message, headers)),
+            Self::Http { status, body } => Self::Http {
+                status,
+                body: redact_headers(&body, headers),
+            },
+            Self::Remote { code, message } => Self::Remote {
+                code,
+                message: redact_headers(&message, headers),
+            },
+            Self::Protocol(message) => Self::Protocol(redact_headers(&message, headers)),
+            Self::Timeout(timeout) => Self::Timeout(timeout),
+            Self::Cancelled => Self::Cancelled,
+        }
+    }
+
     /// One-line description for status reporting and logs.
     pub fn describe(&self) -> String {
         match self {
@@ -82,6 +106,86 @@ impl McpError {
             ),
         }
     }
+}
+
+/// Scrub configured header values, including a Bearer credential echoed without
+/// its original scheme or capitalization. Header *names* are not secrets and stay
+/// visible so diagnostics remain actionable.
+pub(crate) fn redact_headers(text: &str, headers: &BTreeMap<String, String>) -> String {
+    let mut out = text.to_string();
+    for value in headers.values() {
+        let secret = value.trim();
+        if secret.is_empty() {
+            continue;
+        }
+        // Remove the complete configured value first. The credential-only and
+        // case/whitespace-insensitive Bearer passes cover a peer rewriting it.
+        out = out.replace(secret, "[redacted]");
+        if let Some(credential) = bearer_credential(secret) {
+            out = replace_bearer_credentials(&out, credential);
+            if !credential.is_empty() {
+                out = out.replace(credential, "[redacted]");
+            }
+        }
+    }
+    out
+}
+
+fn bearer_credential(secret: &str) -> Option<&str> {
+    let scheme = secret.get(..6)?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let rest = &secret[6..];
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(rest.trim())
+}
+
+/// Replace `Bearer <credential>` regardless of scheme case or whitespace. The
+/// credential comparison remains case-sensitive: credentials are opaque bytes,
+/// and case-folding them could erase an unrelated word from a diagnostic.
+fn replace_bearer_credentials(text: &str, credential: &str) -> String {
+    if credential.is_empty() || text.is_empty() {
+        return text.to_string();
+    }
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut search = 0;
+    while let Some(relative) = lower[search..].find("bearer") {
+        let at = search + relative;
+        let scheme_end = at + "bearer".len();
+        let after = &text[scheme_end..];
+        let whitespace = after.len() - after.trim_start_matches(char::is_whitespace).len();
+        if whitespace == 0 {
+            search = scheme_end;
+            continue;
+        }
+        let credential_at = scheme_end + whitespace;
+        if !text[credential_at..].starts_with(credential) {
+            search = scheme_end;
+            continue;
+        }
+        // Do not treat the middle of a longer alphanumeric token as a header.
+        if at > 0 {
+            let before = text[..at].chars().next_back();
+            if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                search = scheme_end;
+                continue;
+            }
+        }
+        out.push_str(&text[copied..at]);
+        out.push_str("[redacted]");
+        copied = credential_at + credential.len();
+        search = copied;
+    }
+    if copied == 0 {
+        return text.to_string();
+    }
+    out.push_str(&text[copied..]);
+    out
 }
 
 fn fmt_secs(d: Duration) -> String {
@@ -254,6 +358,58 @@ pub(crate) fn pick_response(body: Value, id: u64) -> Result<Value, McpError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn configured_credentials_are_redacted_in_every_bearer_form() {
+        let headers = BTreeMap::from([
+            (
+                "Authorization".to_string(),
+                "Bearer sk-live-Secret".to_string(),
+            ),
+            ("X-Api-Key".to_string(), "second-secret".to_string()),
+        ]);
+        let reflected = concat!(
+            "raw sk-live-Secret; configured=Bearer sk-live-Secret; ",
+            "mixed=bEaReR   sk-live-Secret; token=second-secret; ",
+            "decoy=BEARER sk-live-other"
+        );
+        let out = redact_headers(reflected, &headers);
+        for secret in ["sk-live-Secret", "second-secret"] {
+            assert!(!out.contains(secret), "{secret} survived in {out}");
+        }
+        assert!(!out.contains("bEaReR   "), "{out}");
+        // Credentials are opaque and case-sensitive; redaction must not eat a
+        // different token that merely shares a prefix.
+        assert!(out.contains("BEARER sk-live-other"), "{out}");
+        assert!(out.matches("[redacted]").count() >= 4, "{out}");
+    }
+
+    #[test]
+    fn every_remote_error_variant_is_scrubbed() {
+        let headers =
+            BTreeMap::from([("Authorization".to_string(), "bearer top-secret".to_string())]);
+        let errors = vec![
+            McpError::Transport("echo TOP-SECRET top-secret".into()),
+            McpError::Http {
+                status: 500,
+                body: "BEARER   top-secret".into(),
+            },
+            McpError::Remote {
+                code: -1,
+                message: "top-secret".into(),
+            },
+            McpError::Protocol("bearer top-secret".into()),
+        ];
+        for error in errors {
+            let error = error.redacted(&headers);
+            let text = format!(
+                "{} / {}",
+                error.describe(),
+                error.tool_message("s", "t", Duration::from_secs(1))
+            );
+            assert!(!text.contains("top-secret"), "{text}");
+        }
+    }
 
     #[test]
     fn responses_match_their_id() {

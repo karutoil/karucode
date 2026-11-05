@@ -215,13 +215,23 @@ pub fn retryable(err: &Error) -> bool {
 pub fn retryable_with(err: &Error, aggregator: bool) -> bool {
     match err {
         Error::Cancelled | Error::Config(_) => false,
-        // A prompt that does not fit the window is not fixed by re-sending it;
-        // the runtime has to compact first.
-        Error::Provider(message) if errors::is_context_overflow(message) => false,
+        // Status takes precedence over free-text wording: a 429/5xx proxy or
+        // overloaded upstream can mention context limits without saying that
+        // this request is permanently too large.
+        Error::Provider(message)
+            if errors::http_status_of(message)
+                .is_some_and(|status| status_retryable(status, aggregator)) =>
+        {
+            true
+        }
         // The provider tagged this as "another attempt cannot help" (a 200
         // carrying a buffered error body or nothing at all, a rejected request).
         // The status table cannot see those, because the status is 200.
         Error::Provider(message) if errors::is_permanent(message) => false,
+        // With no transient status to override it, context-overflow wording is
+        // terminal until the runtime compacts the conversation. This guard also
+        // covers remote errors that carry no HTTP status tag.
+        Error::Provider(message) if errors::is_context_overflow(message) => false,
         Error::Provider(message) => match errors::http_status_of(message) {
             Some(status) => status_retryable(status, aggregator),
             // No status: a transport/decode failure, a splash page, a stream

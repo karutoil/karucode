@@ -58,7 +58,7 @@
 # Node is a build-time dependency only. `web/.npmrc` sets `include=dev` and vite
 # is a devDependency, so the full dependency tree is required - do not prune.
 # -----------------------------------------------------------------------------
-FROM node:20-bookworm-slim AS web
+FROM node:22.12-bookworm-slim AS web
 
 WORKDIR /src/web
 
@@ -77,9 +77,9 @@ RUN npm run build && test -f dist/index.html
 # directory over `web/dist` before embedding, so the bundle from stage 1 is what
 # ends up inside the binary - no Node and no web/dist at run time.
 #
-# The toolchain is pinned to 1.96 to match the version the project is built and
-# tested with (README "Prerequisites"); rust-toolchain.toml says `stable`, which
-# would make this image drift. Bump both together.
+# The image compiler is pinned to 1.96 so its builds do not drift with `stable`.
+# The separately supported minimum is rust-version = "1.89" in Cargo.toml; CI's
+# msrv job tests that floor, while this image deliberately uses a newer compiler.
 # -----------------------------------------------------------------------------
 FROM rust:1.96-bookworm AS build
 
@@ -154,7 +154,7 @@ WORKDIR /workspace
 # Podman note: the OCI image format has no HEALTHCHECK field, so podman drops this
 # with a warning. Build with `podman build --format docker` if you want it kept.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["sh", "-c", "set -- ${KARUCODE_AUTH_TOKEN:+-H \"Authorization: Bearer $KARUCODE_AUTH_TOKEN\"}; curl -fsS -o /dev/null --max-time 4 \"$@\" http://127.0.0.1:8787/api/health"]
+    CMD ["sh", "-c", "if [ -n \"${KARUCODE_AUTH_TOKEN:-}\" ]; then set -- -H \"Authorization: Bearer ${KARUCODE_AUTH_TOKEN}\"; else set --; fi; curl -fsS -o /dev/null --max-time 4 \"$@\" http://127.0.0.1:8787/api/health"]
 
 # SIGTERM is the default; the server drains gracefully (bounded at 10s) and
 # checkpoints SQLite, so give it a moment before SIGKILL.

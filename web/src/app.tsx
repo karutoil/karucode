@@ -71,7 +71,9 @@
 //   the turn ran a tool (`run_command`, a plugin, MCP) whose effects cannot be
 //   undone. The list comes from `GET /api/sessions/:id/rewind`, the same preview
 //   the server replays, so the dialog describes what will happen rather than an
-//   estimate of it. The button is hidden while a run is in flight (the server
+//   estimate of it. If that preview cannot be loaded, Rewind stays disabled and
+//   says the file consequences are unknown rather than claiming none changed.
+//   The button is hidden while a run is in flight (the server
 //   refuses a rewind of a live session) and for items with no stored row
 //   (optimistic sends, live placeholders). The `http-api` topic documents the
 //   request shapes.
@@ -99,7 +101,10 @@
 //   is never overridden.
 // * **Workspace tabs** (above the transcript): *Conversation*, *Source control*
 //   and *Terminal* (when the server enables terminals). *Source control* is the
-//   git manager below; the composer only shows on *Conversation*.
+//   git manager below; the composer only shows on *Conversation*. In a strip of
+//   terminal tabs, **Left/Right** switch with wraparound, **Home/End** jump to the
+//   first/last tab, and the selected tab scrolls into view. Changing the theme,
+//   density or code font updates the existing terminal without losing its buffer.
 // * **Inspector** (right): tabs for files, **Git** (the same source-control
 //   manager, in one column), the session's own numbers and agents, plus one tab
 //   per **plugin panel** (see below). Click a file to open the viewer.
@@ -127,8 +132,9 @@
 //   call `POST /api/agents/:id/{pause,resume,cancel}`; a paused one is still
 //   live (it holds a subagent slot) and says so in the status chip. Each row
 //   shows what the agent last reported about itself (`report_status`) with a
-//   progress bar, and a `background` badge when the spawn detached. Clicking one
-//   opens its live transcript.
+//   progress bar, and a `background` badge when the spawn detached. Its **Open
+//   details** button opens the live transcript without overloading the row's
+//   independent Pause/Stop controls.
 // * **Session tab** (inspector): what this session *is* and what it *cost*,
 //   read from `GET /api/sessions/:id/info` rather than folded from the
 //   transcript on screen, because the transcript is a bounded window and the
@@ -173,8 +179,10 @@
 //   in-place lightbox was laid out *inside its message row*, measuring 691x575 in
 //   a 1440x817 viewport instead of covering the screen. Portalling fixes that for
 //   every modal and survives any future `filter`/`transform`/`contain` ancestor.
-//   The focus trap, Escape-to-close, scroll lock and focus restore are unchanged,
-//   and dialogs stay mounted only while open.
+//   Dialogs keep focus inside, close on Escape, lock scroll and restore focus;
+//   invisible controls are skipped, and a sheet's search, rename field or menu
+//   can handle its own Escape before the sheet closes. Dialogs mount only while
+//   open.
 // * **Theme studio** (right drawer, `Ctrl/Cmd+Shift+T`): built-in themes,
 //   per-token colours, density and custom CSS, persisted in the browser. The
 //   `themes` topic covers the storage key and the shareable export format.
@@ -427,15 +435,23 @@
 // ```
 //
 // Run the backend separately (`cargo run -p kc-server`) while `npm run dev` proxies
-// to it. To serve your build without rebuilding the binary, start the server with
+// HTTP, SSE and the terminal WebSocket to it (the preview proxy does the same). To
+// serve your build without rebuilding the binary, start the server with
 // `KARUCODE_WEB_DIR=web/dist`.
+//
+// The UI ships its own type: `web/public/fonts/` carries Inter regular/bold and
+// JetBrains Mono, declared with `@font-face` in `styles/base.css` and pointed at
+// by `--font-ui` / `--font-mono`. Nothing is fetched from a CDN, so the workspace
+// renders identically offline; replacing a file there is the whole procedure for
+// changing the UI typeface.
 //
 // # State and events
 //
 // The UI is Preact + signals. It bootstraps from `/api/health` and `/api/config`,
 // then follows one SSE stream (`/api/events`) and reduces events into the store
-// (`src/state/eventReducer.ts`). There is no websocket and no polling loop except
-// a 20 s health check.
+// (`src/state/eventReducer.ts`). Session events do not use a general WebSocket;
+// the only WebSocket is the terminal's attach socket. Polling is the 20 s health
+// check plus the explicitly configured plugin-panel refresh intervals.
 //
 // The stream watches itself so live updates never need a page reload: 45 s without
 // a byte (keepalives included) means the connection is dead and it reconnects with

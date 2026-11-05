@@ -238,6 +238,7 @@ export const THEME_COLOR_GROUPS: readonly ThemeColorGroup[] = [
       { key: 'success', label: 'Success', hint: 'Passed checks and completions' },
       { key: 'danger', label: 'Error', hint: 'Failures and destructive actions' },
       { key: 'info', label: 'Info', hint: 'Links and informational states' },
+      { key: 'warn', label: 'Warning', hint: 'Caveats, partial results and limits' },
     ],
   },
   {
@@ -261,7 +262,7 @@ export const THEME_FONT_LABELS: Record<ThemeFont, string> = {
 };
 
 export const THEME_MONO_LABELS: Record<ThemeMono, string> = {
-  default: 'SF Mono / Consolas',
+  default: 'JetBrains Mono / SF Mono',
   system: 'System mono',
   classic: 'Courier New',
 };

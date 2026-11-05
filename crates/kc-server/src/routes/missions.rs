@@ -10,6 +10,9 @@
 // including sessions in other registered projects. Create one with
 // `POST /api/missions` and JSON `{"project_id":"p_...","title":"Upgrade","description":"Optional"}`.
 // List with `GET /api/missions?project=p_...` and inspect with `GET /api/missions/:id`.
+// Listing is newest-first and bounded to 50 detailed missions by default; use
+// `offset=0&limit=50` (limit 1-100), follow the returned `next_offset` while
+// `has_more` is true, and inspect an individual mission for its current full detail.
 // Start an explicitly authorized session with `POST /api/missions/:id/sessions`
 // and JSON `{"request_id":"unique-client-key","project_id":"p_...","title":"Review","prompt":"Review the code"}`.
 // `project_id` is optional and defaults to the mission home project; it selects the
@@ -109,7 +112,7 @@
 // Deleting a mission removes the grouping, not its sessions or files.
 
 use crate::error::{ApiError, ApiResult};
-use crate::routes::{parse_required, query_str, QueryMap};
+use crate::routes::{parse_required, query_str, query_usize, QueryMap};
 use crate::state::AppState;
 use axum::{
     body::Bytes,
@@ -156,6 +159,9 @@ fn required(value: &str, name: &str, max: usize) -> ApiResult<()> {
     }
     Ok(())
 }
+
+const DEFAULT_MISSION_PAGE_LIMIT: usize = 50;
+const MAX_MISSION_PAGE_LIMIT: usize = 100;
 
 fn mission_id_for_detail(value: &Value) -> &str {
     value["id"].as_str().unwrap_or_default()
@@ -217,16 +223,37 @@ pub async fn list(
 ) -> ApiResult<Json<Value>> {
     let project =
         query_str(&query, "project").ok_or_else(|| ApiError::bad_request("project is required"))?;
+    let offset = query_usize(&query, "offset")?.unwrap_or(0);
+    let limit = query_usize(&query, "limit")?.unwrap_or(DEFAULT_MISSION_PAGE_LIMIT);
+    if limit == 0 || limit > MAX_MISSION_PAGE_LIMIT {
+        return Err(ApiError::bad_request(format!(
+            "limit must be between 1 and {MAX_MISSION_PAGE_LIMIT}"
+        )));
+    }
     if state.store().get_project(project).await?.is_none() {
         return Err(ApiError::not_found(format!(
             "no project with id `{project}`"
         )));
     }
-    let mut missions = Vec::new();
-    for mission in state.store().list_missions(project).await? {
+    // Each entry retains the full existing detail shape, but SQL bounds how many
+    // mission fan-outs (sessions/runs/tasks/budgets) one request can trigger.
+    // The next page is explicit; no call silently materialises the whole project.
+    let (page, has_more) = state
+        .store()
+        .list_mission_page(project, offset, limit)
+        .await?;
+    let mut missions = Vec::with_capacity(page.len());
+    for mission in page {
         missions.push(detail(&state, mission).await?);
     }
-    Ok(Json(json!({"missions":missions})))
+    let next_offset = has_more.then_some(offset.saturating_add(missions.len()));
+    Ok(Json(json!({
+        "missions": missions,
+        "offset": offset,
+        "limit": limit,
+        "has_more": has_more,
+        "next_offset": next_offset,
+    })))
 }
 
 pub async fn create(State(state): State<AppState>, body: Bytes) -> ApiResult<Json<Value>> {

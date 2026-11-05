@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -342,6 +342,12 @@ const MIGRATION_20: &str = r#"
 UPDATE sessions SET control = 1 WHERE id IN (SELECT session_id FROM control_chat);
 DROP TABLE IF EXISTS control_chat;
 CREATE INDEX IF NOT EXISTS idx_sessions_control ON sessions(control);
+"#;
+
+/// Schema v21: orphan-blob sweeps look up checkpoints by their shared blob.
+/// Without this index each spill sweep correlated a full checkpoint scan.
+const MIGRATION_21: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_checkpoints_content_id ON checkpoints(content_id);
 "#;
 
 const MIGRATION_12: &str = r#"
@@ -1253,6 +1259,7 @@ impl SqliteStore {
                     18 => MIGRATION_18,
                     19 => MIGRATION_19,
                     20 => MIGRATION_20,
+                    21 => MIGRATION_21,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -1881,6 +1888,24 @@ impl Store for SqliteStore {
         }).await
     }
 
+    async fn list_mission_page(
+        &self,
+        project_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<Mission>, bool)> {
+        let project_id = project_id.to_owned();
+        self.read(move |conn| {
+            let query_limit = limit_i64(limit).saturating_add(1);
+            let mut stmt = conn.prepare("SELECT id, project_id, title, description, created_at, updated_at FROM missions WHERE project_id = ?1 ORDER BY updated_at DESC, id DESC LIMIT ?2 OFFSET ?3").map_err(|e| db_err("list mission page", e))?;
+            let mut missions = stmt.query_map(params![project_id, query_limit, limit_i64(offset)], map_mission).map_err(|e| db_err("list mission page", e))?
+                .collect::<std::result::Result<Vec<_>, _>>().map_err(|e| db_err("list mission page", e))?;
+            let has_more = missions.len() > limit;
+            missions.truncate(limit);
+            Ok((missions, has_more))
+        }).await
+    }
+
     async fn get_mission(&self, id: &str) -> Result<Option<Mission>> {
         let id = id.to_owned();
         self.read(move |conn| conn.query_row("SELECT id, project_id, title, description, created_at, updated_at FROM missions WHERE id = ?1", params![id], map_mission).optional().map_err(|e| db_err("get mission", e))).await
@@ -2081,7 +2106,7 @@ impl Store for SqliteStore {
             let mut stmt = conn.prepare(
                 "SELECT id FROM (SELECT s.id, s.updated_at,
                     (EXISTS(SELECT 1 FROM runs r WHERE r.session_id = s.id AND r.status = 'running')
-                     OR (?3 AND EXISTS(SELECT 1 FROM agents a WHERE a.session_id = s.id AND a.status = 'running'))) AS interrupted
+                     OR (?3 AND EXISTS(SELECT 1 FROM agents a WHERE a.session_id = s.id AND a.status IN ('running', 'paused')))) AS interrupted
                  FROM sessions s)
                  WHERE interrupted OR updated_at >= ?1
                  ORDER BY interrupted DESC, updated_at DESC, id DESC LIMIT ?2"
@@ -2097,7 +2122,7 @@ impl Store for SqliteStore {
     async fn running_agent_ids(&self) -> Result<Vec<(String, String)>> {
         self.read(|conn| {
             let mut stmt = conn
-                .prepare("SELECT session_id, id FROM agents WHERE status = 'running'")
+                .prepare("SELECT session_id, id FROM agents WHERE status IN ('running', 'paused') ORDER BY session_id, id")
                 .map_err(|e| db_err("running agents prepare", e))?;
             let rows = stmt
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -2109,7 +2134,8 @@ impl Store for SqliteStore {
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
-        self.read(|conn| summarize_sessions(conn, SessionScope::All)).await
+        self.read(|conn| summarize_sessions(conn, SessionScope::All))
+            .await
     }
 
     async fn list_sessions_for_project(&self, project_id: &str) -> Result<Vec<SessionSummary>> {
@@ -2148,6 +2174,22 @@ impl Store for SqliteStore {
                 return Err(Error::NotFound(format!("session {id}")));
             }
             Ok(())
+        })
+        .await
+    }
+
+    async fn rename_session_if_title(&self, id: &str, expected: &str, title: &str) -> Result<bool> {
+        let id = id.to_string();
+        let expected = expected.to_string();
+        let title = title.to_string();
+        self.with(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE sessions SET title = ?3, updated_at = ?4 WHERE id = ?1 AND title = ?2",
+                    params![id, expected, title, now_ms()],
+                )
+                .map_err(|e| db_err("rename_session_if_title", e))?;
+            Ok(updated == 1)
         })
         .await
     }
@@ -2874,7 +2916,7 @@ impl Store for SqliteStore {
                             CAST(b.data AS TEXT) AS content
                        FROM checkpoints c
                        LEFT JOIN checkpoint_blobs b ON b.id = c.content_id
-                      WHERE c.session_id = ?1 AND (c.message_id = 0 OR c.message_id > ?2)
+                      WHERE c.session_id = ?1 AND c.message_id > ?2
                       ORDER BY c.id ASC",
                 )
                 .map_err(|e| db_err("list_checkpoints prepare", e))?;
@@ -2913,7 +2955,7 @@ impl Store for SqliteStore {
                 .prepare(
                     "SELECT id, session_id, run_id, agent_id, call_id, tool, path, existed,
                         capture_failed, message_id, created_at FROM checkpoints
-                 WHERE session_id = ?1 AND (message_id = 0 OR message_id > ?2) ORDER BY id ASC",
+                 WHERE session_id = ?1 AND message_id > ?2 ORDER BY id ASC",
                 )
                 .map_err(|e| db_err("list_checkpoint_metadata prepare", e))?;
             let rows = stmt
@@ -3001,11 +3043,45 @@ impl Store for SqliteStore {
     async fn set_checkpoint_message_id(&self, id: i64, message_id: i64) -> Result<()> {
         self.with(move |conn| {
             conn.execute(
-                "UPDATE checkpoints SET message_id = ?2 WHERE id = ?1",
+                "UPDATE checkpoints SET message_id = ?2 WHERE id = ?1 AND message_id = 0",
                 params![id, message_id],
             )
             .map_err(|e| db_err("set_checkpoint_message_id", e))?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn bind_checkpoints(&self, ids: &[i64], message_id: i64) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        if message_id <= 0 {
+            return Err(Error::BadRequest(
+                "a checkpoint must bind to a positive message id".into(),
+            ));
+        }
+        let ids = ids.to_vec();
+        self.with(move |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("bind_checkpoints begin", e))?;
+            let placeholders = (2..=ids.len() + 1)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE checkpoints SET message_id = ?1 WHERE message_id = 0 AND id IN ({placeholders})"
+            );
+            let mut values = Vec::with_capacity(ids.len() + 1);
+            values.push(message_id);
+            values.extend(ids);
+            let bound = tx
+                .execute(&sql, rusqlite::params_from_iter(values))
+                .map_err(|e| db_err("bind_checkpoints", e))?;
+            tx.commit()
+                .map_err(|e| db_err("bind_checkpoints commit", e))?;
+            Ok(bound)
         })
         .await
     }
@@ -3095,6 +3171,40 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn transition_agent_status(
+        &self,
+        id: &str,
+        expected: &[&str],
+        next: &str,
+        updated_at: i64,
+    ) -> Result<bool> {
+        if expected.is_empty() {
+            return Ok(false);
+        }
+        let id = id.to_string();
+        let expected = expected
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect::<Vec<_>>();
+        let next = next.to_string();
+        self.with(move |conn| {
+            let placeholders = (4..=expected.len() + 3)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE agents SET status = ?2, updated_at = ?3 WHERE id = ?1 AND status IN ({placeholders})"
+            );
+            let mut values: Vec<&dyn rusqlite::ToSql> = vec![&id, &next, &updated_at];
+            values.extend(expected.iter().map(|status| status as &dyn rusqlite::ToSql));
+            let updated = conn
+                .execute(&sql, values.as_slice())
+                .map_err(|e| db_err("transition_agent_status", e))?;
+            Ok(updated == 1)
+        })
+        .await
+    }
+
     async fn list_agents(&self, session_id: &str) -> Result<Vec<AgentRecord>> {
         let session_id = session_id.to_string();
         self.read(move |conn| {
@@ -3137,6 +3247,69 @@ impl Store for SqliteStore {
                 .map_err(|e| db_err("list_agents_all query", e))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|e| db_err("list_agents_all rows", e))
+        })
+        .await
+    }
+
+    async fn list_agents_filtered(
+        &self,
+        project_id: Option<&str>,
+        session_id: Option<&str>,
+        statuses: &[String],
+    ) -> Result<Vec<AgentSummary>> {
+        let project_id = project_id.map(str::to_string);
+        let session_id = session_id.map(str::to_string);
+        let statuses = statuses.to_vec();
+        self.read(move |conn| {
+            let mut values = Vec::<String>::new();
+            let mut predicates = Vec::<String>::new();
+            if let Some(project_id) = project_id {
+                values.push(project_id);
+                predicates.push(format!("s.project_id = ?{}", values.len()));
+            }
+            if let Some(session_id) = session_id {
+                values.push(session_id);
+                predicates.push(format!("a.session_id = ?{}", values.len()));
+            }
+            if !statuses.is_empty() {
+                let placeholders = statuses
+                    .iter()
+                    .map(|status| {
+                        values.push(status.clone());
+                        format!("?{}", values.len())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                predicates.push(format!("a.status IN ({placeholders})"));
+            }
+            let predicate = if predicates.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", predicates.join(" AND "))
+            };
+            let sql = format!(
+                "SELECT a.id, a.session_id, a.parent_run_id, a.parent_agent_id, a.name,
+                        a.role, a.task, a.status, a.model, a.iterations, a.summary, a.error,
+                        a.owned_paths, a.created_at, a.updated_at, a.finished_at,
+                        a.background, a.note, a.progress,
+                        s.title AS session_title, s.workspace AS workspace,
+                        s.project_id AS project_id
+                   FROM agents a JOIN sessions s ON s.id = a.session_id
+                   {predicate}
+                  ORDER BY a.created_at DESC, a.id DESC"
+            );
+            let params = values
+                .iter()
+                .map(|value| value as &dyn rusqlite::ToSql)
+                .collect::<Vec<_>>();
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| db_err("list_agents_filtered prepare", e))?;
+            let rows = stmt
+                .query_map(params.as_slice(), map_agent_summary)
+                .map_err(|e| db_err("list_agents_filtered query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("list_agents_filtered rows", e))
         })
         .await
     }
@@ -3206,7 +3379,7 @@ impl Store for SqliteStore {
             let n = conn
                 .execute(
                     "UPDATE agents SET status = ?1, updated_at = ?2, finished_at = ?2
-                      WHERE status = 'running' AND instance_id != ?3",
+                      WHERE status IN ('running', 'paused') AND instance_id != ?3",
                     params![AgentStatus::Interrupted.as_str(), now, instance_id],
                 )
                 .map_err(|e| db_err("mark_interrupted_agents", e))?;
@@ -3632,6 +3805,31 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn set_settings(&self, settings: &[(String, String)]) -> Result<()> {
+        if settings.is_empty() {
+            return Ok(());
+        }
+        let settings = settings.to_vec();
+        self.with(move |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("set_settings begin", e))?;
+            let now = now_ms();
+            for (key, value) in &settings {
+                tx.execute(
+                    "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                    params![key, value, now],
+                )
+                .map_err(|e| db_err("set_settings", e))?;
+            }
+            tx.commit()
+                .map_err(|e| db_err("set_settings commit", e))?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn all_settings(&self) -> Result<Vec<(String, String)>> {
         self.read(|conn| {
             let mut stmt = conn
@@ -3924,7 +4122,7 @@ impl Store for SqliteStore {
             let agents = tx
                 .execute(
                     "DELETE FROM agents
-                      WHERE status <> 'running'
+                      WHERE status NOT IN ('running', 'paused')
                         AND created_at < ?1
                         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.agent_id = agents.id)",
                     params![cutoff],
@@ -3959,16 +4157,16 @@ impl Store for SqliteStore {
             // Sweeping here (rather than only when a rewind is undone) is what
             // keeps `checkpoints` from outliving the transcript it describes.
             //
-            // `message_id > 0` is load-bearing: the runtime writes a journal row
-            // the moment a mutating tool starts and binds it to the assistant
-            // message *afterwards*, so `message_id = 0` means "in flight, the
-            // before-image of the write happening right now". `EXISTS(... id =
-            // 0)` is false for it, so without the guard this pass deleted the
-            // one row a concurrent undo needed.
+            // An unbound row is preserved only while its run is still running.
+            // Once its writer is gone there is no safe transcript position to
+            // replay it at, so it is stale private state rather than an undo row.
             tx.execute(
                 "DELETE FROM checkpoints
-                  WHERE message_id > 0
-                    AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = checkpoints.message_id)",
+                  WHERE (message_id > 0
+                    AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = checkpoints.message_id))
+                    OR (message_id = 0
+                    AND NOT EXISTS (SELECT 1 FROM runs r
+                                    WHERE r.id = checkpoints.run_id AND r.status = 'running'))",
                 [],
             )
             .map_err(|e| db_err("prune checkpoints", e))?;
@@ -4195,6 +4393,7 @@ mod tests {
                 18 => MIGRATION_18,
                 19 => MIGRATION_19,
                 20 => MIGRATION_20,
+                21 => MIGRATION_21,
                 other => panic!("no batch for v{other}"),
             };
             for (_, table, column, decl) in ADDED_COLUMNS
@@ -4302,7 +4501,10 @@ mod tests {
             })
             .await
             .unwrap();
-        store.detach_control_session("b", "/control/moved").await.unwrap();
+        store
+            .detach_control_session("b", "/control/moved")
+            .await
+            .unwrap();
         let detached = store.get_session("b").await.unwrap().unwrap();
         assert_eq!(detached.project_id, None);
         assert_eq!(detached.workspace, "/control/moved");
@@ -5272,6 +5474,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mission_pages_have_stable_project_scoped_order_and_bounds() {
+        let db = TempDb::new("mission-pages");
+        let store = db.open().await;
+        store.create_project("p", "P", "/p").await.unwrap();
+        store
+            .create_project("other", "Other", "/other")
+            .await
+            .unwrap();
+        for id in ["a", "b", "c"] {
+            store.create_mission(id, "p", id, "", None).await.unwrap();
+        }
+        store
+            .create_mission("foreign", "other", "Foreign", "", None)
+            .await
+            .unwrap();
+        store
+            .with(|conn| {
+                conn.execute(
+                    "UPDATE missions SET updated_at = CASE id WHEN 'a' THEN 10 WHEN 'b' THEN 30 WHEN 'c' THEN 20 ELSE 1 END",
+                    [],
+                )
+                .map_err(|e| db_err("order missions", e))
+            })
+            .await
+            .unwrap();
+        let (first, has_more) = store.list_mission_page("p", 0, 2).await.unwrap();
+        assert!(has_more);
+        assert_eq!(
+            first.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["b", "c"]
+        );
+        let (second, has_more) = store.list_mission_page("p", 2, 2).await.unwrap();
+        assert!(!has_more);
+        assert_eq!(
+            second.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        assert_eq!(
+            store
+                .list_mission_page("other", 0, 2)
+                .await
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        let (empty, has_more) = store.list_mission_page("p", 0, 0).await.unwrap();
+        assert!(empty.is_empty());
+        assert!(has_more);
+        assert!(store
+            .list_mission_page("p", 3, 2)
+            .await
+            .unwrap()
+            .0
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn create_get_rename_and_delete_session() {
         let db = TempDb::new("session-crud");
         let store = db.open().await;
@@ -5324,10 +5584,22 @@ mod tests {
             .updated_at;
         assert!(after > before, "append_message must touch the session");
 
-        store
-            .rename_session("s_1", "Renamed")
+        assert!(!store
+            .rename_session_if_title("s_1", "Stale", "Must not land")
             .await
-            .expect("rename");
+            .expect("stale rename loses"));
+        assert_eq!(
+            store.get_session("s_1").await.unwrap().unwrap().title,
+            "First"
+        );
+        assert!(store
+            .rename_session_if_title("s_1", "First", "Renamed")
+            .await
+            .expect("current rename wins"));
+        assert!(!store
+            .rename_session_if_title("missing", "First", "Renamed")
+            .await
+            .expect("missing rename loses"));
         let renamed = store.get_session("s_1").await.expect("get").expect("some");
         assert_eq!(renamed.title, "Renamed");
         assert!(renamed.updated_at >= renamed.created_at);
@@ -6104,6 +6376,70 @@ mod tests {
         assert_eq!(count(&store, "SELECT COUNT(*) FROM settings").await, 2);
     }
 
+    #[tokio::test]
+    async fn settings_batches_roll_back_an_injected_later_write() {
+        let db = TempDb::new("settings-batch-atomic");
+        let store = db.open().await;
+        store
+            .set_settings(&[
+                ("first".into(), "old-first".into()),
+                ("second".into(), "old-second".into()),
+            ])
+            .await
+            .expect("seed");
+        store
+            .with(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_second_setting
+                     BEFORE UPDATE OF value ON settings
+                     WHEN NEW.key = 'second' AND NEW.value = 'new-second'
+                     BEGIN SELECT RAISE(ABORT, 'injected settings failure'); END;",
+                )
+                .map_err(|e| db_err("install settings trigger", e))
+            })
+            .await
+            .expect("trigger");
+        let values = vec![
+            ("first".to_string(), "new-first".to_string()),
+            ("second".to_string(), "new-second".to_string()),
+        ];
+        assert!(store.set_settings(&values).await.is_err());
+        assert_eq!(
+            store.get_setting("first").await.expect("first").as_deref(),
+            Some("old-first"),
+            "the earlier successful statement was rolled back"
+        );
+        assert_eq!(
+            store
+                .get_setting("second")
+                .await
+                .expect("second")
+                .as_deref(),
+            Some("old-second")
+        );
+        store
+            .with(|conn| {
+                conn.execute_batch("DROP TRIGGER reject_second_setting")
+                    .map_err(|e| db_err("drop settings trigger", e))
+            })
+            .await
+            .expect("drop trigger");
+        store.set_settings(&values).await.expect("retry");
+        assert_eq!(
+            store.get_setting("first").await.expect("first").as_deref(),
+            Some("new-first")
+        );
+        assert_eq!(
+            store
+                .get_setting("second")
+                .await
+                .expect("second")
+                .as_deref(),
+            Some("new-second")
+        );
+        store.set_settings(&[]).await.expect("empty batch");
+    }
+
     fn new_terminal(id: &str, cwd: &str, position: i64) -> TerminalSession {
         TerminalSession {
             id: id.to_string(),
@@ -6431,6 +6767,239 @@ mod tests {
             .expect("a_2 present");
         assert_eq!(got.session_title, "Beta");
         assert!(store.get_agent("a_missing").await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn conditional_agent_transitions_preserve_terminal_results() {
+        let db = TempDb::new("agent-transition-cas");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .upsert_agent(&agent("a_1", "s_1", "running"))
+            .await
+            .expect("insert");
+        assert!(store
+            .transition_agent_status("a_1", &["running"], "paused", 111)
+            .await
+            .expect("pause"));
+        let paused = store.list_agents("s_1").await.expect("paused").remove(0);
+        assert_eq!(paused.status, "paused");
+        assert_eq!(paused.updated_at, 111);
+        assert_eq!(paused.task, "review the diff");
+        assert_eq!(paused.owned_paths, vec!["crates/foo/**"]);
+
+        let mut terminal = paused.clone();
+        terminal.status = "completed".into();
+        terminal.iterations = 9;
+        terminal.summary = "finished with the answer".into();
+        terminal.error = Some("late warning".into());
+        terminal.finished_at = Some(222);
+        terminal.note = "terminal note".into();
+        terminal.progress = Some(1.0);
+        store.upsert_agent(&terminal).await.expect("terminal write");
+        assert!(!store
+            .transition_agent_status("a_1", &["paused"], "running", 333)
+            .await
+            .expect("late resume loses"));
+        assert!(!store
+            .transition_agent_status("a_1", &["running", "paused"], "paused", 334)
+            .await
+            .expect("late pause loses"));
+        assert!(!store
+            .transition_agent_status("missing", &["running"], "paused", 335)
+            .await
+            .expect("missing"));
+        let after = store.get_agent("a_1").await.expect("get").unwrap().agent;
+        assert_eq!(after.status, "completed");
+        assert_eq!(after.summary, "finished with the answer");
+        assert_eq!(after.error.as_deref(), Some("late warning"));
+        assert_eq!(after.iterations, 9);
+        assert_eq!(after.finished_at, Some(222));
+        assert_eq!(after.updated_at, terminal.updated_at);
+        assert_eq!(after.note, "terminal note");
+    }
+
+    #[tokio::test]
+    async fn paused_agents_are_recovered_and_their_claims_are_released() {
+        let db = TempDb::new("agents-paused-recovery");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .create_session("s_2", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .upsert_agent(&agent("a_running", "s_1", "running"))
+            .await
+            .expect("running");
+        store
+            .upsert_agent(&agent("a_paused", "s_2", "paused"))
+            .await
+            .expect("paused");
+        store
+            .upsert_agent(&agent("a_done", "s_2", "completed"))
+            .await
+            .expect("done");
+        store
+            .with(|conn| {
+                conn.execute("UPDATE agents SET instance_id = 'dead-process'", [])
+                    .map_err(|e| db_err("stamp dead agents", e))
+            })
+            .await
+            .expect("stamp");
+        let live = store.running_agent_ids().await.expect("live");
+        assert_eq!(
+            live,
+            vec![
+                ("s_1".to_string(), "a_running".to_string()),
+                ("s_2".to_string(), "a_paused".to_string()),
+            ]
+        );
+        store
+            .claim_paths("s_2", "a_paused", &["src/lib.rs".into()], "write")
+            .await
+            .expect("claim");
+        assert_eq!(store.list_claims("s_2").await.expect("claims").len(), 1);
+        assert_eq!(
+            store
+                .recovery_sessions(0, 10, true)
+                .await
+                .expect("candidates")
+                .1,
+            vec!["s_2".to_string(), "s_1".to_string()]
+        );
+        assert_eq!(store.mark_interrupted_agents().await.expect("interrupt"), 2);
+        for (_, id) in live {
+            store.release_claims(&id).await.expect("release");
+        }
+        assert!(store.list_claims("s_2").await.expect("claims").is_empty());
+        assert_eq!(
+            store
+                .get_agent("a_paused")
+                .await
+                .expect("get")
+                .unwrap()
+                .agent
+                .status,
+            "interrupted"
+        );
+        assert_eq!(
+            store
+                .get_agent("a_done")
+                .await
+                .expect("get")
+                .unwrap()
+                .agent
+                .status,
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_preserves_a_paused_agent_and_its_claim() {
+        let db = TempDb::new("retention-paused-agent");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .upsert_agent(&agent("a_paused", "s_1", "paused"))
+            .await
+            .expect("paused");
+        store
+            .claim_paths("s_1", "a_paused", &["src/lib.rs".into()], "write")
+            .await
+            .expect("claim");
+        store
+            .with(|conn| {
+                conn.execute("UPDATE agents SET created_at = 1 WHERE id = 'a_paused'", [])
+                    .map_err(|e| db_err("age paused agent", e))
+            })
+            .await
+            .expect("age");
+        store.prune_messages_older_than(30).await.expect("prune");
+        assert_eq!(
+            store
+                .get_agent("a_paused")
+                .await
+                .expect("get")
+                .expect("paused survives")
+                .agent
+                .status,
+            "paused"
+        );
+        assert_eq!(store.list_claims("s_1").await.expect("claims").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn agent_filters_do_not_truncate_matching_public_results() {
+        let db = TempDb::new("agents-filter-sql");
+        let store = db.open().await;
+        store.create_project("p1", "One", "/1").await.expect("p1");
+        store.create_project("p2", "Two", "/2").await.expect("p2");
+        store
+            .create_session("s_1", "one", "/1", Some("p1"))
+            .await
+            .expect("s1");
+        store
+            .create_session("s_2", "two", "/2", Some("p2"))
+            .await
+            .expect("s2");
+        store
+            .with(|conn| {
+                let tx = conn.transaction().map_err(|e| db_err("seed agents", e))?;
+                for i in 0..150 {
+                    tx.execute(
+                        "INSERT INTO agents (id, session_id, parent_run_id, name, role, task, status, owned_paths, created_at, updated_at, instance_id, background, note)
+                         VALUES (?1, 's_1', 'r', 'n', 'r', 't', 'paused', '[]', ?2, ?2, 'i', 0, '')",
+                        params![format!("paused_{i:03}"), 150 - i],
+                    ).map_err(|e| db_err("seed paused agent", e))?;
+                }
+                tx.execute(
+                    "INSERT INTO agents (id, session_id, parent_run_id, name, role, task, status, owned_paths, created_at, updated_at, instance_id, background, note)
+                     VALUES ('running_1', 's_2', 'r', 'n', 'r', 't', 'running', '[]', 200, 200, 'i', 0, '')", [],
+                ).map_err(|e| db_err("seed running agent", e))?;
+                tx.commit().map_err(|e| db_err("commit agents", e))
+            })
+            .await
+            .expect("seed");
+        let paused = vec!["paused".to_string()];
+        let filtered = store
+            .list_agents_filtered(Some("p1"), Some("s_1"), &paused)
+            .await
+            .expect("filtered");
+        assert_eq!(filtered.len(), 150, "no hidden page cap");
+        assert_eq!(filtered[0].agent.id, "paused_000");
+        assert_eq!(filtered[149].agent.id, "paused_149");
+        assert!(store
+            .list_agents_filtered(Some("p2"), Some("s_1"), &paused)
+            .await
+            .expect("mismatched filters")
+            .is_empty());
+        let statuses = vec!["paused".to_string(), "running".to_string()];
+        assert_eq!(
+            store
+                .list_agents_filtered(None, Some("s_2"), &statuses)
+                .await
+                .expect("session filter")
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_agents_filtered(None, None, &statuses)
+                .await
+                .expect("global filter")
+                .len(),
+            151
+        );
     }
 
     #[tokio::test]
@@ -7321,6 +7890,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn orphan_blob_sweeps_use_the_checkpoint_content_index() {
+        let db = TempDb::new("plan-checkpoint-content-id");
+        let store = db.open().await;
+        let indexes = index_names(&store, "checkpoints").await;
+        assert!(indexes
+            .iter()
+            .any(|name| name == "idx_checkpoints_content_id"));
+        let plan = store
+            .with(|conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "EXPLAIN QUERY PLAN DELETE FROM checkpoint_blobs
+                         WHERE NOT EXISTS (SELECT 1 FROM checkpoints c WHERE c.content_id = checkpoint_blobs.id)",
+                    )
+                    .map_err(|e| db_err("blob plan", e))?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(3))
+                    .map_err(|e| db_err("blob plan rows", e))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(|e| db_err("blob plan collect", e))
+            })
+            .await
+            .expect("plan")
+            .join("
+");
+        assert!(
+            plan.contains("idx_checkpoints_content_id"),
+            "blob cleanup must search checkpoints by content_id:
+{plan}"
+        );
+    }
+
+    #[tokio::test]
     async fn db_size_bytes_returns_a_plausible_value() {
         let db = TempDb::new("db-size");
         let store = db.open().await;
@@ -8016,7 +8618,7 @@ mod tests {
             .record_checkpoint(&checkpoint("s_1", "empty", "", 12))
             .await
             .unwrap();
-        let mut failed = checkpoint("s_1", "failed", "", 0);
+        let mut failed = checkpoint("s_1", "failed", "", 13);
         failed.capture_failed = true;
         let failed_id = store.record_checkpoint(&failed).await.unwrap();
         let rows = store.list_checkpoint_metadata("s_1", 10).await.unwrap();
@@ -8251,11 +8853,9 @@ mod tests {
         );
     }
 
-    /// A journal row with `message_id = 0` is a write that is happening *right
-    /// now*: the runtime records the before-image the moment the tool starts and
-    /// binds it to the assistant message afterwards. The old predicate
-    /// (`NOT EXISTS (... m.id = checkpoints.message_id)`) was false for such a
-    /// row and deleted the before-image a concurrent undo needed.
+    /// Retention keeps an unbound row only while its run is running. Unbound
+    /// rows are never selected by rewind: after a dead writer there is no safe
+    /// transcript position at which to replay the before-image.
     #[tokio::test]
     async fn retention_keeps_an_in_flight_checkpoint_that_is_not_bound_yet() {
         let db = TempDb::new("checkpoint-in-flight");
@@ -8264,6 +8864,18 @@ mod tests {
             .create_session("s_1", "t", "/w", None)
             .await
             .expect("session");
+        store
+            .create_run("r_1", "s_1", "m", "p")
+            .await
+            .expect("active run");
+        store
+            .create_run("r_stale", "s_1", "m", "p")
+            .await
+            .expect("stale run");
+        store
+            .finish_run("r_stale", RunStatus::Interrupted, None)
+            .await
+            .expect("stale run finished");
         let keep = store.retention_keep_messages();
         for i in 0..(keep + 10) {
             store
@@ -8275,20 +8887,47 @@ mod tests {
             .record_checkpoint(&checkpoint("s_1", "working.rs", "before", 0))
             .await
             .expect("in-flight checkpoint");
+        let mut stale = checkpoint("s_1", "stale.rs", "crash residue", 0);
+        stale.run_id = "r_stale".to_string();
+        let stale = store
+            .record_checkpoint(&stale)
+            .await
+            .expect("stale checkpoint");
+        assert!(
+            store
+                .list_checkpoint_metadata("s_1", 0)
+                .await
+                .expect("rewind metadata")
+                .is_empty(),
+            "unbound metadata cannot be placed on the transcript timeline"
+        );
+        assert!(
+            store
+                .list_checkpoints("s_1", 0)
+                .await
+                .expect("rewind rows")
+                .is_empty(),
+            "stale before-images must never reach rewind replay"
+        );
         age_messages(&store, "s_1", 30).await;
 
         store.prune_messages_older_than(30).await.expect("prune");
 
-        let rows = store.list_checkpoints("s_1", 0).await.expect("list");
         assert_eq!(
-            rows.iter().map(|c| c.id).collect::<Vec<_>>(),
-            vec![in_flight],
-            "the unbound row is the write in progress, not an orphan"
+            store
+                .checkpoint_content(in_flight)
+                .await
+                .expect("active content"),
+            Some("before".to_string()),
+            "the active run's payload survives with it"
         );
         assert_eq!(
-            store.list_checkpoints("s_1", 0).await.expect("list")[0].content,
-            "before",
-            "its payload survives with it"
+            store
+                .checkpoint_content(stale)
+                .await
+                .expect("stale content"),
+            None,
+            "a dead writer's unbound checkpoint is swept"
         );
 
         // Once the runtime binds it to a kept message it is a normal journal row
@@ -8310,6 +8949,87 @@ mod tests {
             1,
             "a bound row whose message survives is kept"
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_binding_is_atomic_and_retries_only_unbound_rows() {
+        let db = TempDb::new("checkpoint-bind-atomic");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        let first = store
+            .record_checkpoint(&checkpoint("s_1", "first", "one", 0))
+            .await
+            .expect("first");
+        let second = store
+            .record_checkpoint(&checkpoint("s_1", "second", "two", 0))
+            .await
+            .expect("second");
+        store
+            .with(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_checkpoint_bind
+                     BEFORE UPDATE OF message_id ON checkpoints
+                     WHEN NEW.path = 'second' AND NEW.message_id = 42
+                     BEGIN SELECT RAISE(ABORT, 'injected checkpoint bind failure'); END;",
+                )
+                .map_err(|e| db_err("install checkpoint trigger", e))
+            })
+            .await
+            .expect("trigger");
+        let error = store.bind_checkpoints(&[first, second], 42).await;
+        assert!(error.is_err(), "the injected second-row write must fail");
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM checkpoints WHERE message_id = 0",
+            )
+            .await,
+            2,
+            "the first row rolled back with the failing second row"
+        );
+
+        store
+            .with(|conn| {
+                conn.execute_batch("DROP TRIGGER reject_checkpoint_bind")
+                    .map_err(|e| db_err("drop checkpoint trigger", e))
+            })
+            .await
+            .expect("drop trigger");
+        assert_eq!(
+            store
+                .bind_checkpoints(&[first, second], 42)
+                .await
+                .expect("retry"),
+            2
+        );
+        let third = store
+            .record_checkpoint(&checkpoint("s_1", "third", "three", 0))
+            .await
+            .expect("third");
+        assert_eq!(
+            store
+                .bind_checkpoints(&[first, third], 43)
+                .await
+                .expect("partially old retry"),
+            1
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM checkpoints WHERE message_id = 42",
+            )
+            .await,
+            2,
+            "a retry must not rebind completed rows to a later message"
+        );
+        let listed = store.list_checkpoints("s_1", 42).await.expect("listed");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, third);
+        assert!(store.bind_checkpoints(&[], 0).await.expect("empty") == 0);
+        assert!(store.bind_checkpoints(&[third], 0).await.is_err());
     }
 
     #[tokio::test]
@@ -8666,6 +9386,67 @@ mod tests {
     /// schema with version 0. Migrations replay from v1 over tables that already
     /// have every column, and used to die with "duplicate column name" -- a
     /// restored database that could never be opened again.
+    #[tokio::test]
+    async fn a_v20_database_gains_the_checkpoint_blob_index_without_losing_rows() {
+        let db = TempDb::new("migrate-v20-checkpoint-index");
+        std::fs::create_dir_all(&db.dir).expect("dir");
+        {
+            let conn = rusqlite::Connection::open(&db.path).expect("raw open");
+            write_schema_to(&conn, 20);
+            conn.pragma_update(None, "user_version", 20)
+                .expect("version");
+            conn.execute(
+                "INSERT INTO sessions (id,title,workspace,created_at,updated_at,control) VALUES ('s','S','/w',1,1,0)",
+                [],
+            )
+            .expect("session");
+            conn.execute(
+                "INSERT INTO checkpoint_blobs (id,sha,data) VALUES (7,'sha',x'61')",
+                [],
+            )
+            .expect("blob");
+            conn.execute(
+                "INSERT INTO checkpoints (id,session_id,run_id,path,existed,content_id,capture_failed,message_id,created_at)
+                 VALUES (9,'s','r','old',1,7,0,5,1)",
+                [],
+            )
+            .expect("checkpoint");
+            let index: Option<String> = conn
+                .query_row(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_checkpoints_content_id'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .expect("index before");
+            assert!(index.is_none());
+        }
+        let store = db.open().await;
+        assert_eq!(version_of(&store).await, SCHEMA_VERSION);
+        assert!(index_names(&store, "checkpoints")
+            .await
+            .contains(&"idx_checkpoints_content_id".to_string()));
+        let checkpoint = store.checkpoint_content(9).await.expect("content");
+        assert_eq!(checkpoint.as_deref(), Some("a"));
+
+        drop(store);
+        let conn = rusqlite::Connection::open(&db.path).expect("replay open");
+        conn.pragma_update(None, "user_version", 0)
+            .expect("simulate dump restore");
+        drop(conn);
+        let replayed = db.open().await;
+        assert_eq!(version_of(&replayed).await, SCHEMA_VERSION);
+        assert_eq!(
+            replayed
+                .checkpoint_content(9)
+                .await
+                .expect("content")
+                .as_deref(),
+            Some("a"),
+            "the idempotent index migration preserves checkpoint payloads"
+        );
+    }
+
     #[tokio::test]
     async fn a_restored_dump_with_a_stale_version_opens_and_keeps_its_rows() {
         let db = TempDb::new("restore-dump");

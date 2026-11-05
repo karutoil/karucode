@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useId, useState } from 'preact/hooks';
+import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import { formatDuration } from '../lib/format';
 import type { CommandItem, ToolItem } from '../state/chat';
 import { callTotals, callsSummary, type CallItem } from '../state/transcriptLayout';
@@ -35,14 +35,39 @@ function GroupGlyph({ totals }: { totals: ReturnType<typeof callTotals> }): JSX.
  * and opens to the individual calls, each with its own output disclosure. It
  * opens itself while a member is still running or after a failure: those are the
  * two states a reader must not have to click to discover.
+ *
+ * The run is live - calls arrive, start and fail after this group is mounted - so
+ * the initial state is not enough. The effect below watches the *shape* of the
+ * trouble (how many are running, how many failed) and opens on any change into a
+ * troubled shape. It never closes the group again: a run that failed and then
+ * settled leaves its output open, because that output is the evidence the reader
+ * opened it for. Nothing runs on a shape the reader collapsed by hand while the
+ * same call is still in flight - only a *new* running/failed member does.
  */
 export function ToolGroup({ calls, variant }: ToolGroupProps): JSX.Element {
   const totals = callTotals(calls);
-  const [open, setOpen] = useState(totals.running > 0 || totals.failed > 0);
+  const urgent = totals.running > 0 || totals.failed > 0;
+  const [open, setOpen] = useState(urgent);
+  const previousStatuses = useRef(
+    new Map(calls.map((call) => [call.id, call.status] as const)),
+  );
   const bodyId = useId();
   const tone = groupTone(totals);
   const duration = formatDuration(totals.durationMs);
   const summary = callsSummary(totals);
+
+  // Counts alone are not a transition: one running call can finish as another
+  // starts, and a reader can deliberately collapse the remaining work. Compare
+  // the status of each call by id so only new work or an actual failure reopens
+  // the group; a mere decrease in running count leaves the reader's choice alone.
+  useEffect(() => {
+    const newlyUrgent = calls.some((call) => {
+      if (call.status !== 'running' && call.status !== 'error') return false;
+      return previousStatuses.current.get(call.id) !== call.status;
+    });
+    previousStatuses.current = new Map(calls.map((call) => [call.id, call.status] as const));
+    if (newlyUrgent) setOpen(true);
+  }, [calls]);
 
   return (
     <section class="tool-group" data-tone={tone} data-open={open ? 'true' : 'false'} aria-label="Tool calls">
@@ -84,6 +109,7 @@ export function ToolGroup({ calls, variant }: ToolGroupProps): JSX.Element {
                   key={call.id}
                   item={call as CommandItem}
                   defaultOpen={call.status === 'running'}
+                  variant={variant}
                 />
               ) : (
                 <ToolCard key={call.id} item={call as ToolItem} variant={variant} />

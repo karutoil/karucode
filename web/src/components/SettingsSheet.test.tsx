@@ -12,6 +12,25 @@ import type {
 } from '../api/types';
 import { configFixture, jsonResponse, resetAppState } from '../test/fixtures';
 import * as store from '../state/store';
+import * as THEME from '../theme';
+import {
+  BUILTIN_THEMES,
+  DENSITY_SCALES,
+  FONT_STACKS,
+  MAX_ROUNDING,
+  MIN_ROUNDING,
+  MONO_STACKS,
+  THEME_DENSITIES,
+  THEME_FONTS,
+  THEME_GROUPING_CHOICES,
+  THEME_MODES,
+  THEME_MONO_FONTS,
+  THEME_STORAGE_KEY,
+  THEME_THINKING_CHOICES,
+  THEME_TOOL_STYLE_CHOICES,
+  isDarkColor,
+  resolvePalette,
+} from '../theme';
 
 /* ------------------------------------------------------------------ *
  * Fixtures: two provider profiles, one of them active and keyed.
@@ -932,6 +951,25 @@ describe('SettingsSheet appearance', () => {
     expect(patches).toHaveLength(0);
   });
 
+  it('links Theme, Density, and Colour mode to their existing Field hints', async () => {
+    installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+
+    await openTab('General');
+    const appearance = await screen.findByRole('region', { name: 'Appearance' });
+    const controls = [
+      ['Theme', 'settings-theme-hint', 'Applies immediately. Saving this sheet is not required.'],
+      ['Density', 'settings-density-hint', 'Moves type size and spacing together.'],
+      ['Colour mode', 'settings-mode-hint', 'Re-bases the surfaces, keeping your accent.'],
+    ] as const;
+
+    for (const [label, hintId, hintText] of controls) {
+      const control = within(appearance).getByLabelText(label);
+      expect(control.getAttribute('aria-describedby')).toBe(hintId);
+      expect(document.getElementById(hintId)?.textContent).toBe(hintText);
+    }
+  });
+
   it('renders the Notifications section inside the sheet', async () => {
     installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
@@ -943,6 +981,232 @@ describe('SettingsSheet appearance', () => {
     // a browser switch must never be side by side without that boundary.
     const device = await screen.findByRole('region', { name: 'This browser' });
     expect(within(device).getByRole('switch', { name: 'Play a sound' })).toBeTruthy();
+  });
+});
+
+describe('SettingsSheet appearance controls', () => {
+  /* The General tab is the second front door to the theme engine: it exposes the
+   * same options as the Theme Studio but writes them straight into the sheet, so
+   * every one of them has to apply to <html>, persist in the browser and — the
+   * part that is easy to get wrong — never travel to the server as a config
+   * patch. Appearance is stored per browser profile, so a PATCH here would either
+   * be rejected by the server or silently rewrite someone's config.
+   *
+   * Table-driven on purpose: the failure mode is a single option wired to the
+   * wrong mutator (Code font setting the UI font, Radius writing density), which
+   * one example per control would not catch across the whole matrix. */
+
+  const THEME_KEY = THEME_STORAGE_KEY;
+
+  function persistedDraft(): Record<string, unknown> | null {
+    const raw = localStorage.getItem(THEME_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { draft?: Record<string, unknown> | null };
+    return parsed.draft ?? null;
+  }
+
+  function htmlToken(property: string): string {
+    return document.documentElement.style.getPropertyValue(property);
+  }
+
+  beforeEach(() => {
+    resetAppState();
+    localStorage.clear();
+    THEME.resetTheme();
+  });
+
+  afterEach(() => {
+    resetAppState();
+    localStorage.clear();
+    THEME.resetTheme();
+    vi.unstubAllGlobals();
+  });
+
+  it('offers all eight built-in themes and applies any of them locally', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+    const select = (await settleOnTab('General', 'Theme', twoProfileConfig())) as unknown as HTMLSelectElement;
+    const options = Array.from(select.options)
+      .map((option) => option.value)
+      .filter((value) => value !== 'draft');
+    expect(options).toEqual(BUILTIN_THEMES.map((theme) => theme.id));
+
+    for (const theme of BUILTIN_THEMES) {
+      fireEvent.change(select, { target: { value: theme.id } });
+      expect(document.documentElement.dataset.theme, theme.id).toBe(theme.id);
+      expect(document.documentElement.dataset.mode, theme.id).toBe(theme.mode);
+      expect(htmlToken('--theme-bg'), theme.id).toBe(resolvePalette(theme).bg);
+      expect(htmlToken('--theme-text'), theme.id).toBe(resolvePalette(theme).text);
+      const stored = JSON.parse(localStorage.getItem(THEME_KEY) ?? '{}') as { selected?: string };
+      expect(stored.selected, theme.id).toBe(theme.id);
+      expect(patches, theme.id).toHaveLength(0);
+    }
+  });
+
+  it('applies both colour modes, re-basing the palette for the chosen one', async () => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+    await settleOnTab('General', 'Theme', twoProfileConfig());
+    const mode = screen.getByLabelText('Colour mode');
+
+    // The default theme is dark, so the light flip comes first: it is the one that
+    // re-bases Ember's near-black surfaces, and flipping straight back has to
+    // restore a dark canvas rather than keep them.
+    for (const value of ['light', 'dark'] as const) {
+      fireEvent.change(mode, { target: { value } });
+      expect(document.documentElement.dataset.mode, value).toBe(value);
+      expect(document.documentElement.style.colorScheme, value).toBe(value);
+      expect(isDarkColor(THEME.activeTheme.value.colors.bg), value).toBe(value === 'dark');
+      expect(THEME.activeTheme.value.colors.accent, value).toBe(THEME.DEFAULT_THEME.colors.accent);
+      expect(persistedDraft()?.mode, value).toBe(value);
+      expect(patches, value).toHaveLength(0);
+    }
+
+    THEME.initTheme();
+    expect(document.documentElement.dataset.mode).toBe('dark');
+  });
+
+  it.each(THEME_DENSITIES.map((value) => [value] as const))(
+    'applies the %s density to the scale, not only to an attribute',
+    async (value) => {
+      const { patches } = installFetch(twoProfileConfig());
+      renderSheet(twoProfileConfig());
+      await settleOnTab('General', 'Theme', twoProfileConfig());
+
+      fireEvent.change(screen.getByLabelText('Density'), { target: { value } });
+
+      const scale = DENSITY_SCALES[value];
+      expect(document.documentElement.dataset.density).toBe(value);
+      expect(htmlToken('--fs-body')).toBe(`${scale.body}px`);
+      expect(htmlToken('--fs-small')).toBe(`${scale.small}px`);
+      expect(htmlToken('--lh-body')).toBe(String(scale.lineHeight));
+      expect(htmlToken('--theme-density')).toBe(String(scale.scale));
+      // Spacing moves with the type step (that is what "density" means here).
+      expect(htmlToken('--space-4')).toBe(`${Math.round(8 * scale.space * 100) / 100}px`);
+      expect(persistedDraft()?.density).toBe(value);
+      expect(patches).toHaveLength(0);
+
+      // A reload re-applies it: persistence, not just live state.
+      THEME.initTheme();
+      expect(document.documentElement.dataset.density).toBe(value);
+      expect(htmlToken('--fs-body')).toBe(`${scale.body}px`);
+    },
+  );
+
+  it.each(
+    THEME_TOOL_STYLE_CHOICES.flatMap((toolStyle) =>
+      THEME_GROUPING_CHOICES.flatMap((grouping) =>
+        THEME_THINKING_CHOICES.map((thinking) => [
+          `${toolStyle.value}/${grouping.value}/${thinking.value}`,
+          toolStyle.value,
+          grouping.value,
+          thinking.value,
+        ] as const),
+      ),
+    ),
+  )(
+    'applies the %s transcript combination',
+    async (_label, toolStyle, grouping, thinking) => {
+      const { patches } = installFetch(twoProfileConfig());
+      renderSheet(twoProfileConfig());
+      await settleOnTab('General', 'Theme', twoProfileConfig());
+
+      fireEvent.change(screen.getByLabelText('Tool calls'), { target: { value: toolStyle } });
+      fireEvent.change(screen.getByLabelText('Grouping'), { target: { value: grouping } });
+      fireEvent.change(screen.getByLabelText('Reasoning blocks'), { target: { value: thinking } });
+
+      expect(document.documentElement.dataset.toolStyle).toBe(toolStyle);
+      expect(document.documentElement.dataset.grouping).toBe(grouping);
+      expect(document.documentElement.dataset.thinking).toBe(thinking);
+      expect(persistedDraft()).toMatchObject({ toolStyle, grouping, thinking });
+      expect(patches).toHaveLength(0);
+
+      THEME.initTheme();
+      expect(document.documentElement.dataset.toolStyle).toBe(toolStyle);
+      expect(document.documentElement.dataset.grouping).toBe(grouping);
+      expect(document.documentElement.dataset.thinking).toBe(thinking);
+    },
+  );
+
+  it('names the transcript options the way the Theme Studio does', async () => {
+    installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+    await settleOnTab('General', 'Theme', twoProfileConfig());
+
+    const valuesOf = (label: string): string[] =>
+      Array.from((screen.getByLabelText(label) as HTMLSelectElement).options).map(
+        (option) => option.value,
+      );
+    expect(valuesOf('Tool calls')).toEqual(THEME_TOOL_STYLE_CHOICES.map((c) => c.value));
+    expect(valuesOf('Grouping')).toEqual(THEME_GROUPING_CHOICES.map((c) => c.value));
+    expect(valuesOf('Reasoning blocks')).toEqual(THEME_THINKING_CHOICES.map((c) => c.value));
+    expect(valuesOf('Density')).toEqual([...THEME_DENSITIES]);
+    expect(valuesOf('Colour mode')).toEqual([...THEME_MODES]);
+  });
+
+  it.each([
+    ...THEME_FONTS.map((value) => ['Interface font', value, FONT_STACKS[value]] as const),
+    ...THEME_MONO_FONTS.map((value) => ['Code font', value, MONO_STACKS[value]] as const),
+  ])('applies the %s option "%s"', async (label, value, stack) => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+    await settleOnTab('General', 'Theme', twoProfileConfig());
+    await openAdvanced();
+
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+
+    const property = label === 'Code font' ? '--font-mono' : '--font-ui';
+    expect(htmlToken(property)).toBe(stack);
+    const draft = persistedDraft() as { font?: string; mono?: string } | null;
+    expect(draft?.[label === 'Code font' ? 'mono' : 'font']).toBe(value);
+    expect(patches).toHaveLength(0);
+
+    THEME.initTheme();
+    expect(htmlToken(property)).toBe(stack);
+  });
+
+  it.each([MIN_ROUNDING, MAX_ROUNDING])('applies the %i px corner radius endpoint', async (value) => {
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+    await settleOnTab('General', 'Theme', twoProfileConfig());
+    await openAdvanced();
+
+    fireEvent.input(screen.getByLabelText('Corner rounding (px)'), { target: { value: String(value) } });
+
+    expect(htmlToken('--radius')).toBe(`${value}px`);
+    expect(htmlToken('--radius-sm')).toBe(`${Math.max(0, value - 4)}px`);
+    expect(htmlToken('--radius-md')).toBe(`${Math.max(0, value - 2)}px`);
+    expect(htmlToken('--radius-xs')).toBe(`${Math.max(0, value - 6)}px`);
+    expect(htmlToken('--radius-lg')).toBe(`${value + 4}px`);
+    expect(persistedDraft()?.rounding).toBe(value);
+    expect(patches).toHaveLength(0);
+  });
+
+  it('never sends an appearance change to the server, even after Save', async () => {
+    /* Belt and braces on the whole block: the Appearance section is the one part
+     * of this sheet that is not config, so a save after touching every control
+     * must still produce at most the untouched-config patch — no theme keys, and
+     * nothing at all when nothing else changed. */
+    const { patches } = installFetch(twoProfileConfig());
+    renderSheet(twoProfileConfig());
+    await settleOnTab('General', 'Theme', twoProfileConfig());
+    await openAdvanced();
+
+    fireEvent.change(screen.getByLabelText('Density'), { target: { value: 'compact' } });
+    fireEvent.change(screen.getByLabelText('Colour mode'), { target: { value: 'light' } });
+    fireEvent.change(screen.getByLabelText('Code font'), { target: { value: 'classic' } });
+    fireEvent.change(screen.getByLabelText('Theme'), { target: { value: 'forest' } });
+    expect(patches).toHaveLength(0);
+
+    const save = screen.getByRole('button', { name: 'Save changes' });
+    fireEvent.click(save);
+    await waitFor(() => expect(patches.length).toBeLessThanOrEqual(1));
+    for (const patch of patches) {
+      const keys = Object.keys(patch as Record<string, unknown>);
+      for (const themeKey of ['theme', 'density', 'mode', 'font', 'mono', 'rounding']) {
+        expect(keys, `config patch leaked ${themeKey}`).not.toContain(themeKey);
+      }
+    }
   });
 });
 

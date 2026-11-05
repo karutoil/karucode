@@ -44,6 +44,11 @@ import * as store from './store';
 let stream: EventStreamHandle | null = null;
 let bootstrapPromise: Promise<void> | null = null;
 let sessionGeneration = 0;
+let projectGeneration = 0;
+// Independent read generations handle overlapping reads even within one project;
+// projectGeneration handles the more dangerous A -> B -> A stale-response case.
+let sessionListReadGeneration = 0;
+let agentListReadGeneration = 0;
 let agentDetailGeneration = 0;
 let refreshingSessionId: string | null = null;
 let refreshQueue: KarucodeEvent[] = [];
@@ -60,18 +65,46 @@ let sendInFlight = false;
 /** Queued ids with a recall request in flight; module-scoped so a remount cannot double-fire. */
 const recallingQueued = new Set<string>();
 let handoffToken = 0;
+let rewindGeneration = 0;
 
 function nextHandoffToken(): number {
   handoffToken += 1;
   return handoffToken;
 }
 
+type ReplaceableOverlay =
+  | 'settings'
+  | 'palette'
+  | 'themeStudio'
+  | 'notificationCenter'
+  | 'fileViewer'
+  | 'rewind';
+
+/**
+ * Replace the application's modal/drawer surface in one place.
+ *
+ * Keeping this exhaustive prevents newer surfaces (the notification centre and
+ * rewind dialog) from being accidentally stackable with Ctrl/Cmd+K, Settings or
+ * Theme Studio. Closing rewind also invalidates its in-flight preview/apply read,
+ * which must not clear a later target or navigate back to an old session.
+ */
+function replaceOverlay(next: ReplaceableOverlay | null): void {
+  store.settingsOpen.value = next === 'settings';
+  store.paletteOpen.value = next === 'palette';
+  store.themeStudioOpen.value = next === 'themeStudio';
+  store.notificationCenterOpen.value = next === 'notificationCenter';
+  store.fileViewerPath.value = null;
+  store.projectSheetOpen.value = false;
+  if (next !== 'rewind' && store.rewindTarget.value !== null) rewindGeneration += 1;
+  if (next !== 'rewind') store.rewindTarget.value = null;
+  store.mobileSheet.value = null;
+  // The rail's fly-out is a hover affordance, not a modal surface.
+  railPeek.closePeek();
+}
+
 function enterAuthState(): void {
   store.boot.value = 'auth';
-  store.settingsOpen.value = false;
-  store.paletteOpen.value = false;
-  store.fileViewerPath.value = null;
-  store.mobileSheet.value = null;
+  replaceOverlay(null);
 }
 
 function isUnauthorized(error: unknown): boolean {
@@ -95,6 +128,7 @@ function summaryFromSession(session: Session): SessionSummary {
 }
 
 function clearSelection(): void {
+  if (store.currentSessionId.value !== null) resetPluginPanelData();
   store.currentSessionId.value = null;
   store.chat.value = emptyChatState(null);
   store.chatLoading.value = false;
@@ -105,6 +139,7 @@ function clearSelection(): void {
   store.sessionInfo.value = null;
   store.sessionInfoFor.value = null;
   store.sessionInfoError.value = null;
+  store.sessionInfoLoading.value = false;
   store.writeLastSessionId(null);
 }
 
@@ -121,8 +156,8 @@ export function startStream(): void {
   stream = startEventStream({
     token: getAuthToken(),
     onEvent: handleRawEvent,
-    // The stream never replays: a `seq` hole means frames are gone, so refetch
-    // the transcript instead of leaving a stale answer on screen.
+    // Normal reconnects resume from Last-Event-ID. A remaining seq hole, an
+    // explicit lag marker or a resync control still requires an authoritative read.
     onGap: () => scheduleGapResync(),
     onResync: () => scheduleGapResync(),
     onStatus: (state, detail) => {
@@ -288,12 +323,17 @@ function handleRawEvent(raw: RawEvent): void {
   handleAgentEvent(event);
 
   const wasKnown = store.sessions.value.some((session) => session.id === event.session_id);
+  if (event.type === 'session_created' && !wasKnown) {
+    // This event is global and carries no project_id. The scoped list refresh is
+    // the only safe way to learn whether it belongs here; inventing a null-project
+    // row both leaks foreign work into the rail and used to auto-open it on an
+    // empty workspace. A session created by this tab already has a local summary.
+    scheduleSessionsRefresh();
+    return;
+  }
   store.sessions.value = applyEventToSessions(store.sessions.value, event);
 
   if (event.type === 'session_created') {
-    if (!wasKnown && !store.currentSessionId.value) {
-      void openSession(event.session_id);
-    }
     scheduleSessionsRefresh();
     return;
   }
@@ -456,8 +496,16 @@ function drainRefreshQueue(settled = false): void {
 }
 
 async function doRefreshSessions(): Promise<void> {
+  const projectId = store.currentProjectId.value;
+  const projectRead = projectGeneration;
+  const read = ++sessionListReadGeneration;
+  const isCurrent = () =>
+    projectId === store.currentProjectId.value &&
+    projectRead === projectGeneration &&
+    read === sessionListReadGeneration;
   try {
-    const list = await api.listSessions(store.currentProjectId.value);
+    const list = await api.listSessions(projectId);
+    if (!isCurrent()) return;
     store.sessions.value = list;
     store.sessionsLoading.value = false;
     // Agents belong to sessions: a deleted or renamed session changes both the
@@ -476,12 +524,14 @@ async function doRefreshSessions(): Promise<void> {
         // Offline: keep the current session rather than closing it on a guess.
         projectless = true;
       }
+      if (!isCurrent()) return;
       if (projectless) return;
       const next = list[0] ?? null;
       if (next) void openSession(next.id);
       else clearSelection();
     }
   } catch (error) {
+    if (!isCurrent()) return;
     store.sessionsLoading.value = false;
     if (isUnauthorized(error)) {
       enterAuthState();
@@ -514,10 +564,7 @@ export async function bootstrap(force = false): Promise<void> {
     store.boot.value = 'loading';
     store.bootError.value = null;
     store.sessionsLoading.value = true;
-    store.settingsOpen.value = false;
-    store.paletteOpen.value = false;
-    store.fileViewerPath.value = null;
-    store.mobileSheet.value = null;
+    replaceOverlay(null);
     try {
       const [health, config, projectList] = await Promise.all([
         api.getHealth(),
@@ -597,7 +644,7 @@ export interface OpenSessionOptions {
  * The click handler of a desktop notification: a notification you can click that
  * does nothing is worse than one that cannot be clicked.
  */
-export function focusSession(sessionId: string): void {
+export function focusSession(sessionId: string, projectId?: string | null): void {
   try {
     // `window.focus` is best-effort: a browser may refuse it when the click did not
     // come from a real gesture, and there is nothing to do about that.
@@ -607,8 +654,15 @@ export function focusSession(sessionId: string): void {
   } catch {
     // Ignore: the navigation below is the part that matters.
   }
-  if (sessionId && sessionId !== store.currentSessionId.value) {
-    void openSession(sessionId);
+  if (sessionId) {
+    // ToastRegion's existing Open button supplies only the session. Resolve that
+    // against the persisted notification record; desktop notifications pass the
+    // payload's project directly. Both paths go through the project-aware action.
+    const resolvedProject = projectId === undefined
+      ? store.notifications.value.find((entry) => entry.sessionId === sessionId)?.projectId ?? null
+      : projectId;
+    store.clearUnread(sessionId);
+    void openSessionInProject(resolvedProject, sessionId);
   }
 }
 
@@ -617,9 +671,11 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
   if (id === store.currentSessionId.value && !silent && !options.force) return false;
 
   const generation = (sessionGeneration += 1);
+  const sessionChanged = store.currentSessionId.value !== id;
   if (store.sessionHistory.value?.id !== id) store.sessionHistory.value = null;
   else if (store.sessionHistory.value.loading) store.sessionHistory.value = { ...store.sessionHistory.value, loading: false };
   store.currentSessionId.value = id;
+  if (sessionChanged) resetPluginPanelData();
   store.writeLastSessionId(id);
   // Opening a session is what "reads" its notifications: the badge clears here
   // rather than on a timer, so it reflects what you have actually looked at.
@@ -760,6 +816,8 @@ export async function deleteSessionById(id: string): Promise<boolean> {
 
 export async function sendChatMessage(content: string): Promise<boolean> {
   const sessionId = store.currentSessionId.value;
+  const generation = sessionGeneration;
+  const projectRead = projectGeneration;
   const trimmed = content.trim();
   if (!sessionId || trimmed === '') return false;
   if (store.chat.value.running || sendInFlight) return false;
@@ -818,7 +876,13 @@ export async function sendChatMessage(content: string): Promise<boolean> {
     } else {
       store.pushToast(toErrorMessage(error));
     }
-    void openSession(sessionId, { silent: true });
+    if (
+      generation === sessionGeneration &&
+      projectRead === projectGeneration &&
+      store.currentSessionId.value === sessionId
+    ) {
+      void openSession(sessionId, { silent: true });
+    }
     return false;
   } finally {
     sendInFlight = false;
@@ -855,6 +919,14 @@ export async function queueChatMessage(
   message: { content: string; draft?: string; attachments?: QueuedAttachment[] },
 ): Promise<boolean> {
   const sessionId = store.currentSessionId.value;
+  const generation = sessionGeneration;
+  const projectRead = projectGeneration;
+  const stillCurrent = () =>
+    generation === sessionGeneration &&
+    projectRead === projectGeneration &&
+    store.currentSessionId.value === sessionId;
+  const sameSession = () =>
+    projectRead === projectGeneration && store.currentSessionId.value === sessionId;
   if (!sessionId || message.content.trim() === '') return false;
   if (!store.chat.value.running) return false;
   try {
@@ -862,16 +934,18 @@ export async function queueChatMessage(
     // The acceptance carries the entry, so the pending panel is correct even
     // before the `queued_messages` frame arrives (and stays correct if it never
     // does, because a reconnect refetches the snapshot).
-    if (store.currentSessionId.value === sessionId && result.queued_message) {
+    if (sameSession() && result.queued_message) {
       const current = store.chat.value;
       // Normalised on the way in: the acceptance body is the raw struct too, so
       // `draft` may be absent (`normalizeQueuedMessage`).
       const entry = normalizeQueuedMessage(result.queued_message);
       store.chat.value = {
         ...current,
-        queued: current.queued.some((queued) => queued.id === entry.id)
-          ? current.queued
-          : [...current.queued, entry],
+        queued:
+          current.queued.some((queued) => queued.id === entry.id) ||
+          current.retiredQueuedIds.includes(entry.id)
+            ? current.queued
+            : [...current.queued, entry],
       };
     }
     return true;
@@ -887,7 +961,9 @@ export async function queueChatMessage(
       );
       // Resynchronise: the queue this browser shows is now wrong, and so is the
       // `running` flag it decided from.
-      void openSession(sessionId, { silent: true, force: true, preserveLive: true });
+      if (stillCurrent()) {
+        void openSession(sessionId, { silent: true, force: true, preserveLive: true });
+      }
     } else {
       store.pushToast(toErrorMessage(error));
     }
@@ -904,6 +980,14 @@ export async function queueChatMessage(
  */
 export async function recallQueuedMessage(queuedId: string): Promise<boolean> {
   const sessionId = store.currentSessionId.value;
+  const generation = sessionGeneration;
+  const projectRead = projectGeneration;
+  const stillCurrent = () =>
+    generation === sessionGeneration &&
+    projectRead === projectGeneration &&
+    store.currentSessionId.value === sessionId;
+  const sameSession = () =>
+    projectRead === projectGeneration && store.currentSessionId.value === sessionId;
   if (!sessionId || queuedId === '') return false;
   if (recallingQueued.has(queuedId)) return false;
   recallingQueued.add(queuedId);
@@ -911,11 +995,12 @@ export async function recallQueuedMessage(queuedId: string): Promise<boolean> {
   try {
     const result = await api.recallQueued(sessionId, queuedId);
     const entry = result.recalled;
-    if (store.currentSessionId.value === sessionId) {
+    if (sameSession()) {
       const current = store.chat.value;
       store.chat.value = {
         ...current,
         queued: current.queued.filter((queued) => queued.id !== queuedId),
+        retiredQueuedIds: [...new Set([...current.retiredQueuedIds, queuedId])].slice(-100),
       };
       // The composer consumes the hand-off and appends to whatever the user has
       // typed since, so a recall never silently replaces a fresh draft. The
@@ -937,7 +1022,9 @@ export async function recallQueuedMessage(queuedId: string): Promise<boolean> {
       // It landed while the click was in flight. The queue on screen is stale, so
       // refresh instead of resurrecting a message the model already saw.
       store.pushToast('That message was already applied to the run.', 'info');
-      void openSession(sessionId, { silent: true, force: true, preserveLive: true });
+      if (stillCurrent()) {
+        void openSession(sessionId, { silent: true, force: true, preserveLive: true });
+      }
     } else {
       store.pushToast(toErrorMessage(error));
     }
@@ -1250,7 +1337,8 @@ export async function switchProject(id: string): Promise<void> {
     store.projectSheetOpen.value = false;
     return;
   }
-  // Invalidate any in-flight chat/session read from the previous project.
+  // Invalidate in-flight chat/session/agent reads before changing the project.
+  const generation = ++projectGeneration;
   sessionGeneration += 1;
   store.currentProjectId.value = id;
   store.writeLastProjectId(id);
@@ -1274,6 +1362,7 @@ export async function switchProject(id: string): Promise<void> {
   store.fileViewerPath.value = null;
   clearSelection();
   await refreshSessions();
+  if (generation !== projectGeneration || store.currentProjectId.value !== id) return;
   const next = pickSession();
   if (next) await openSession(next.id);
 }
@@ -1341,13 +1430,20 @@ export async function deleteProjectById(id: string, force = false): Promise<bool
 
 export async function refreshSessionAgents(): Promise<void> {
   const sessionId = store.currentSessionId.value;
+  const generation = sessionGeneration;
+  const projectRead = projectGeneration;
   if (!sessionId) return;
+  const current = () =>
+    generation === sessionGeneration &&
+    projectRead === projectGeneration &&
+    store.currentSessionId.value === sessionId;
   try {
     const detail = await api.getSession(sessionId);
-    if (store.currentSessionId.value === sessionId) {
+    if (current()) {
       store.chat.value = { ...store.chat.value, agents: detail.agents.map(sessionAgentFromRecord) };
     }
   } catch (error) {
+    if (!current()) return;
     if (isUnauthorized(error)) enterAuthState();
     else store.pushToast(toErrorMessage(error));
   }
@@ -1361,21 +1457,30 @@ export async function refreshSessionAgents(): Promise<void> {
  * transcript already on screen.
  */
 export async function refreshAgents(): Promise<void> {
+  const projectId = store.currentProjectId.value;
+  const projectRead = projectGeneration;
+  const read = ++agentListReadGeneration;
+  const current = () =>
+    projectId === store.currentProjectId.value &&
+    projectRead === projectGeneration &&
+    read === agentListReadGeneration;
   store.agentsLoading.value = true;
   try {
-    const list = await api.listAgents({ project: store.currentProjectId.value });
+    const list = await api.listAgents({ project: projectId });
+    if (!current()) return;
     // The server omits `note`, `progress` and `owned_paths` when empty; normalise
     // here so every row in the store is fully populated.
     store.agentsAll.value = list.map(sessionAgentFromRecord);
     store.agentsError.value = null;
   } catch (error) {
+    if (!current()) return;
     if (isUnauthorized(error)) {
       enterAuthState();
       return;
     }
     store.agentsError.value = toErrorMessage(error);
   } finally {
-    store.agentsLoading.value = false;
+    if (current()) store.agentsLoading.value = false;
   }
 }
 
@@ -1534,17 +1639,13 @@ export async function openAgentSession(agent: AgentSummary): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * One read in flight **per session**.
+ * One read in flight **per session-generation/project-generation**.
  *
- * Keyed, not a single flag: a read for session B used to be answered by A's
- * in-flight promise, which resolves against A's URL and writes A's numbers. The
- * guard below (`currentSessionId !== sessionId`) then dropped the result, so B
- * simply never loaded - and A's `finally` cleared the flag and the loading signal
- * that B was relying on, so B's own caller saw `sessionInfoLoading === false`
- * while nothing had been read for it.
+ * Keyed, not a single flag: session B must never join A's URL or in-flight promise,
+ * and revisiting the same session id after switching projects must not join its
+ * old generation either. Owners keep one read's `finally` from clearing another's.
  */
 const sessionInfoInFlight = new Map<string, Promise<void>>();
-/** Who currently owns each session's in-flight read, so `finally` cannot clear another's. */
 const sessionInfoOwners = new Map<string, object>();
 let sessionInfoCoalesce: number | null = null;
 
@@ -1568,7 +1669,14 @@ export async function refreshSessionInfo(): Promise<void> {
     store.sessionInfoLoading.value = false;
     return;
   }
-  const existing = sessionInfoInFlight.get(sessionId);
+  const generation = sessionGeneration;
+  const projectRead = projectGeneration;
+  const readKey = `${sessionId}\0${generation}\0${projectRead}`;
+  const current = () =>
+    generation === sessionGeneration &&
+    projectRead === projectGeneration &&
+    store.currentSessionId.value === sessionId;
+  const existing = sessionInfoInFlight.get(readKey);
   if (existing) return existing;
   store.sessionInfoLoading.value = true;
   // `finally` compares against an owner token created *before* the async body can
@@ -1576,16 +1684,16 @@ export async function refreshSessionInfo(): Promise<void> {
   // synchronously, so a throw before the first `await` unwinds through `finally`
   // while that const is still in its temporal dead zone.
   const owner = {};
-  sessionInfoOwners.set(sessionId, owner);
+  sessionInfoOwners.set(readKey, owner);
   const read = (async () => {
     try {
       const info = await api.getSessionInfo(sessionId);
-      if (store.currentSessionId.value !== sessionId) return;
+      if (!current()) return;
       store.sessionInfo.value = info;
       store.sessionInfoFor.value = sessionId;
       store.sessionInfoError.value = null;
     } catch (error) {
-      if (store.currentSessionId.value !== sessionId) return;
+      if (!current()) return;
       if (isUnauthorized(error)) {
         enterAuthState();
         return;
@@ -1596,16 +1704,16 @@ export async function refreshSessionInfo(): Promise<void> {
       // session joined this promise and relies on the same flag, and a read that
       // has already been superseded must not report "not loading" for one that
       // has not.
-      if (sessionInfoOwners.get(sessionId) === owner) {
-        sessionInfoOwners.delete(sessionId);
-        sessionInfoInFlight.delete(sessionId);
-        if (store.currentSessionId.value === sessionId) store.sessionInfoLoading.value = false;
+      if (sessionInfoOwners.get(readKey) === owner) {
+        sessionInfoOwners.delete(readKey);
+        sessionInfoInFlight.delete(readKey);
+        if (current()) store.sessionInfoLoading.value = false;
       }
     }
   })();
   // Only publish the promise if it is still running: a read that already settled
   // synchronously must not be joinable.
-  if (sessionInfoOwners.get(sessionId) === owner) sessionInfoInFlight.set(sessionId, read);
+  if (sessionInfoOwners.get(readKey) === owner) sessionInfoInFlight.set(readKey, read);
   return read;
 }
 
@@ -1672,74 +1780,125 @@ export function selectInspectorTab(tab: store.InspectorTab): void {
  * a workspace-scoped plugin is asked about the project the user is looking at
  * rather than about whichever project last ran a prompt.
  *
- * Concurrent calls for the same panel are coalesced: a poll interval and a
- * manual refresh can easily overlap, and a plugin should not be asked twice.
+ * Concurrent calls for the same panel in the same context are coalesced: a poll
+ * interval and a manual refresh can overlap without asking the plugin twice.
+ * A changed project/session is a different read and gets its own in-flight entry.
  */
-const pluginPanelInFlight = new Map<string, Promise<void>>();
+interface PluginPanelContext {
+  projectId: string | null;
+  sessionId: string | null;
+}
+
+interface PluginPanelRequest {
+  run: Promise<void>;
+  owner: object;
+  epoch: number;
+}
+
+// The signal retains its hosted-id view for the mounted component. This backing
+// cache and the in-flight table use the complete read scope, so two contexts can
+// coexist without a slow A response becoming B's payload, error or loading state.
+const pluginPanelCache = new Map<string, store.PluginPanelState>();
+const pluginPanelInFlight = new Map<string, PluginPanelRequest>();
+let pluginPanelEpoch = 0;
+
+function pluginPanelKey(panel: store.PluginPanelTab, context: PluginPanelContext): string {
+  // JSON tuple encoding avoids delimiter collisions in arbitrary project/session ids.
+  return JSON.stringify([panel.hosted_id, context.projectId, context.sessionId]);
+}
+
+function publishPluginPanel(
+  panel: store.PluginPanelTab,
+  context: PluginPanelContext,
+  key: string,
+  state: store.PluginPanelState,
+): void {
+  pluginPanelCache.set(key, state);
+  if (
+    context.projectId !== store.currentProjectId.value ||
+    context.sessionId !== store.currentSessionId.value
+  ) {
+    return;
+  }
+  store.pluginPanelData.value = {
+    ...store.pluginPanelData.value,
+    [panel.hosted_id]: state,
+  };
+}
 
 export function refreshPluginPanel(panel: store.PluginPanelTab): Promise<void> {
-  const existing = pluginPanelInFlight.get(panel.hosted_id);
-  if (existing) return existing;
+  const context = {
+    projectId: store.currentProjectId.value,
+    sessionId: store.currentSessionId.value,
+  };
+  const key = pluginPanelKey(panel, context);
+  const epoch = pluginPanelEpoch;
+  const existing = pluginPanelInFlight.get(key);
+  if (existing && existing.epoch === epoch) return existing.run;
+
+  const cached = pluginPanelCache.get(key);
+  let running = true;
+  const owner = {};
   const run = (async () => {
-    const current = store.pluginPanelData.value[panel.hosted_id];
-    store.pluginPanelData.value = {
-      ...store.pluginPanelData.value,
-      [panel.hosted_id]: {
-        loading: true,
-        // Keep the last payload visible while refreshing: a plugin that is slow
-        // or briefly down must not blank the tab the user is reading.
-        data: current?.data ?? null,
-        title: current?.title ?? null,
-        fetchedAt: current?.fetchedAt ?? null,
-        error: null,
-      },
-    };
+    publishPluginPanel(panel, context, key, {
+      loading: true,
+      // Keep this context's last payload visible while refreshing. Crucially, do
+      // not read the hosted-id signal: it may describe another project/session.
+      data: cached?.data ?? null,
+      title: cached?.title ?? null,
+      fetchedAt: cached?.fetchedAt ?? null,
+      error: null,
+    });
     try {
       const result = await api.getPluginPanel(panel.plugin, panel.id, {
-        project: store.currentProjectId.value,
-        session: store.currentSessionId.value,
+        project: context.projectId,
+        session: context.sessionId,
       });
-      store.pluginPanelData.value = {
-        ...store.pluginPanelData.value,
-        [panel.hosted_id]: {
-          loading: false,
-          data: result.data,
-          title: result.title || panel.title,
-          fetchedAt: result.fetched_ms || Date.now(),
-          error: null,
-        },
-      };
+      if (epoch !== pluginPanelEpoch) return;
+      publishPluginPanel(panel, context, key, {
+        loading: false,
+        data: result.data,
+        title: result.title || panel.title,
+        fetchedAt: result.fetched_ms || Date.now(),
+        error: null,
+      });
     } catch (error) {
-      store.pluginPanelData.value = {
-        ...store.pluginPanelData.value,
-        [panel.hosted_id]: {
-          loading: false,
-          data: current?.data ?? null,
-          title: current?.title ?? null,
-          fetchedAt: current?.fetchedAt ?? null,
-          error: toErrorMessage(error),
-        },
-      };
+      if (epoch !== pluginPanelEpoch) return;
+      publishPluginPanel(panel, context, key, {
+        loading: false,
+        data: cached?.data ?? null,
+        title: cached?.title ?? null,
+        fetchedAt: cached?.fetchedAt ?? null,
+        error: toErrorMessage(error),
+      });
     } finally {
-      pluginPanelInFlight.delete(panel.hosted_id);
+      running = false;
+      const active = pluginPanelInFlight.get(key);
+      if (active?.owner === owner) pluginPanelInFlight.delete(key);
     }
   })();
-  pluginPanelInFlight.set(panel.hosted_id, run);
+  // A synchronously failed request has already cleaned up and must not leave a
+  // resolved promise joinable by a future refresh.
+  if (running && epoch === pluginPanelEpoch) {
+    pluginPanelInFlight.set(key, { run, owner, epoch });
+  }
   return run;
 }
 
-/** Drop every cached panel payload (a project or session change invalidates them). */
+/**
+ * Drop cached payloads and invalidate every read, including requests restarted
+ * afterwards in the same context. Owner checks prevent their old `finally` blocks
+ * from deleting those replacement requests.
+ */
 export function resetPluginPanelData(): void {
+  pluginPanelEpoch += 1;
+  pluginPanelCache.clear();
+  pluginPanelInFlight.clear();
   store.pluginPanelData.value = {};
 }
 
 export function openSettings(): void {
-  store.fileViewerPath.value = null;
-  store.paletteOpen.value = false;
-  store.mobileSheet.value = null;
-  // The rail's fly-out is a hover affordance, not a place: a modal owns the screen.
-  railPeek.closePeek();
-  store.settingsOpen.value = true;
+  replaceOverlay('settings');
 }
 
 export function closeSettings(): void {
@@ -1751,11 +1910,7 @@ export function togglePalette(): void {
     store.paletteOpen.value = false;
     return;
   }
-  store.settingsOpen.value = false;
-  store.fileViewerPath.value = null;
-  store.mobileSheet.value = null;
-  railPeek.closePeek();
-  store.paletteOpen.value = true;
+  replaceOverlay('palette');
 }
 
 export function closePalette(): void {
@@ -1764,12 +1919,7 @@ export function closePalette(): void {
 
 /** Open the Theme Studio drawer, closing any other overlay first. */
 export function openThemeStudio(): void {
-  store.settingsOpen.value = false;
-  store.paletteOpen.value = false;
-  store.fileViewerPath.value = null;
-  store.mobileSheet.value = null;
-  railPeek.closePeek();
-  store.themeStudioOpen.value = true;
+  replaceOverlay('themeStudio');
 }
 
 export function closeThemeStudio(): void {
@@ -1789,13 +1939,7 @@ export function toggleThemeStudio(): void {
  * the thing you open to leave the thing you were doing.
  */
 export function openNotificationCenter(): void {
-  store.settingsOpen.value = false;
-  store.paletteOpen.value = false;
-  store.themeStudioOpen.value = false;
-  store.fileViewerPath.value = null;
-  store.mobileSheet.value = null;
-  railPeek.closePeek();
-  store.notificationCenterOpen.value = true;
+  replaceOverlay('notificationCenter');
 }
 
 export function closeNotificationCenter(): void {
@@ -1832,7 +1976,7 @@ export function fillComposer(text: string): void {
 }
 
 export function openFileViewer(path: string): void {
-  store.mobileSheet.value = null;
+  replaceOverlay('fileViewer');
   store.fileViewerPath.value = path;
 }
 
@@ -1870,6 +2014,8 @@ export async function openSessionInProject(
   if (projectId !== null && projectId !== store.currentProjectId.value) {
     if (controlPlaneOpen.value) controlPlaneOpen.value = false;
     await switchProject(projectId);
+    // A later navigation may have won while this switch was awaiting its list.
+    if (store.currentProjectId.value !== projectId) return false;
   }
   store.mobileSheet.value = null;
   store.paletteOpen.value = false;
@@ -1890,10 +2036,13 @@ export function openRewind(target: store.RewindTarget): void {
     return;
   }
   if (store.currentSessionId.value === null) return;
+  replaceOverlay('rewind');
+  rewindGeneration += 1;
   store.rewindTarget.value = target;
 }
 
 export function closeRewind(): void {
+  if (store.rewindTarget.value !== null) rewindGeneration += 1;
   store.rewindTarget.value = null;
 }
 
@@ -1902,10 +2051,20 @@ export async function loadRewindPreview(): Promise<RewindPreview | null> {
   const sessionId = store.currentSessionId.value;
   const target = store.rewindTarget.value;
   if (!sessionId || !target) return null;
+  const generation = rewindGeneration;
+  const sessionRead = sessionGeneration;
+  const projectRead = projectGeneration;
+  const current = () =>
+    generation === rewindGeneration &&
+    sessionRead === sessionGeneration &&
+    projectRead === projectGeneration &&
+    store.currentSessionId.value === sessionId &&
+    store.rewindTarget.value === target;
   try {
     const response = await api.previewRewind(sessionId, target.messageId);
-    return response.preview;
+    return current() ? response.preview : null;
   } catch (error) {
+    if (!current()) return null;
     if (isUnauthorized(error)) enterAuthState();
     else store.pushToast(toErrorMessage(error));
     return null;
@@ -1928,6 +2087,15 @@ export async function applyRewind(options: {
   const sessionId = store.currentSessionId.value;
   const target = store.rewindTarget.value;
   if (!sessionId || !target) return false;
+  const generation = rewindGeneration;
+  const sessionRead = sessionGeneration;
+  const projectRead = projectGeneration;
+  const current = () =>
+    generation === rewindGeneration &&
+    sessionRead === sessionGeneration &&
+    projectRead === projectGeneration &&
+    store.currentSessionId.value === sessionId &&
+    store.rewindTarget.value === target;
   const note = options.note?.trim() ?? '';
   if (options.mode === 'note' && note === '') {
     store.pushToast('Write the note you want the agent to act on.', 'info');
@@ -1941,9 +2109,12 @@ export async function applyRewind(options: {
       mode: options.mode,
       ...(note !== '' ? { note } : {}),
     });
+    if (!current()) return true;
+    rewindGeneration += 1;
     store.rewindTarget.value = null;
     // The reload is what makes the hidden tail disappear; the server owns both
-    // the cut and the normalisation.
+    // the cut and the normalisation. It runs only while this completion still
+    // owns its target; an old apply must not navigate away from a later session.
     await openSession(sessionId, { force: true, silent: true });
     scheduleSessionsRefresh();
     // The files the revert could not put back are the interesting part of a
@@ -1966,6 +2137,7 @@ export async function applyRewind(options: {
     }
     return true;
   } catch (error) {
+    if (!current()) return false;
     if (isUnauthorized(error)) {
       enterAuthState();
     } else if (error instanceof ApiError && error.status === 409) {
@@ -1990,14 +2162,22 @@ export function registerAuthHandler(): () => void {
 export function resetRuntimeForTests(): void {
   stopStream();
   bootstrapPromise = null;
-  sessionGeneration = 0;
+  replaceOverlay(null);
+  // Invalidate, rather than reset to zero, so a deferred response from before a
+  // test teardown cannot become current again in the next test.
+  sessionGeneration += 1;
+  projectGeneration += 1;
+  agentDetailGeneration += 1;
+  rewindGeneration += 1;
+  sessionListReadGeneration += 1;
+  agentListReadGeneration += 1;
   sendInFlight = false;
   refreshingSessionId = null;
   refreshQueue = [];
   resyncInFlight = false;
   resyncAgain = false;
   resyncFailures = 0;
-  pluginPanelInFlight.clear();
+  resetPluginPanelData();
   sessionInfoInFlight.clear();
   sessionInfoOwners.clear();
   if (sessionInfoCoalesce !== null) {

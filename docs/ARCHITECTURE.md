@@ -65,12 +65,11 @@ directories without a mutable "current workspace":
 * `kc_runtime::RuntimeDeps` holds a `WorkspaceProvider`. `start_run` resolves the
   workspace from the session's `project_id` *before* it writes the run row, so a
   run cannot start in the wrong directory.
-* Subagents use git worktrees (when available) to isolate work from the parent
-  and sibling agents. A worktree is created when a subagent is spawned in a git
-  repository and cleaned up when it completes (`worktree.rs`). If the workspace
-  is not a git repository or worktree creation fails, subagents transparently
-  fall back to using the shared workspace. `owned_paths` provides guidance but
-  is advisory.
+* Subagents share the parent's live workspace (`worktree.rs` retains only the
+  shared guard). They see dirty and untracked parent files, and completed edits
+  remain in place. There is no automatic checkout or destructive cleanup to hand
+  work back. `owned_paths` provides advisory conflict reporting, not isolation or
+  locking, so callers should assign disjoint paths.
 * `kc-server` implements the trait with `state::ProjectRegistry`: the default
   workspace plus a map of project id → already-canonicalised `Workspace`. The
   registry is process memory, not a query, because every file tool, workspace

@@ -28,8 +28,17 @@ export const FONT_STACKS: Record<ThemeFont, string> = {
   classic: 'Arial, Helvetica, sans-serif',
 };
 
+/**
+ * Code stacks. The first family in `default` is the one the app *ships*
+ * (`/fonts/JetBrainsMono-Regular.ttf`, declared in `styles/base.css`), so code
+ * looks the same on every machine instead of falling through to whatever
+ * `SFMono-Regular` happens to mean there. The rest of each stack stays as real
+ * fallbacks: nothing here is downloaded, and an install with the font blocked
+ * still gets a monospace face.
+ */
 export const MONO_STACKS: Record<ThemeMono, string> = {
-  default: "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, ui-monospace, monospace",
+  default:
+    "'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, ui-monospace, monospace",
   system: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
   classic: "'Courier New', Courier, monospace",
 };

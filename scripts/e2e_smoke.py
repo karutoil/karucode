@@ -759,13 +759,11 @@ def main():
             f"{len(names)} agent(s)",
         )[-1])
 
-        rid = run_prompt("[tool:background] detach", timeout=90)
-        time.sleep(0.3)
-        run_prompt("[tool:wait] collect", timeout=90)
+        rid = run_prompt("[tool:background] detach and collect", timeout=90)
         time.sleep(0.3)
         detail = client.ok("GET", f"/api/sessions/{sid}")
         bg = next((a for a in detail["agents"] if a["name"] == "e2e-background"), None)
-        check("a background spawn detaches and is collected by a wait", lambda: (
+        check("a background spawn and wait in one run collect the child", lambda: (
             _assert(bg is not None, [a["name"] for a in detail["agents"]]),
             _assert(bg.get("background") is True, bg),
             _assert(bg["status"] == "completed", bg["status"]),

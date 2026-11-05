@@ -6,8 +6,7 @@ import { renderMermaid } from '../lib/mermaid';
 import { resetArtifactCache } from '../lib/artifactPreview';
 
 vi.mock('../lib/artifactPreview', () => ({
-  publishArtifact: vi.fn(async () => 'abc123'),
-  artifactUrl: (id: string) => `/api/artifacts/${id}`,
+  publishArtifact: vi.fn(async () => '/api/artifacts/abc123?capability=scoped-artifact-read'),
   resetArtifactCache: vi.fn(),
 }));
 
@@ -31,7 +30,7 @@ function card(container: Element): HTMLElement {
 }
 
 beforeEach(() => {
-  vi.mocked(publishArtifact).mockResolvedValue('abc123');
+  vi.mocked(publishArtifact).mockResolvedValue('/api/artifacts/abc123?capability=scoped-artifact-read');
   vi.mocked(renderMermaid).mockResolvedValue('<svg id="diagram"><g><rect /></g></svg>');
 });
 
@@ -79,7 +78,7 @@ describe('an HTML artifact', () => {
     await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull());
     expect(publishArtifact).toHaveBeenCalledTimes(1);
     const frame = container.querySelector('iframe')!;
-    expect(frame.getAttribute('src')).toBe('/api/artifacts/abc123');
+    expect(frame.getAttribute('src')).toBe('/api/artifacts/abc123?capability=scoped-artifact-read');
     expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
     expect(frame.getAttribute('sandbox')).not.toContain('allow-same-origin');
     expect(frame.getAttribute('title')).toContain('rendered as an isolated page');
@@ -272,6 +271,40 @@ describe('the card chrome', () => {
     expect(dialog.textContent).toContain('Signup form');
     await waitFor(() => expect(dialog.querySelector('iframe')).not.toBeNull());
     expect(dialog.querySelector('iframe')?.getAttribute('sandbox')).toBe('allow-scripts');
+  });
+
+  it('renders and announces a rejected copy instead of failing silently', async () => {
+    // Both paths fail: the Clipboard API rejects, and the legacy textarea+execCommand
+    // fallback is unavailable in jsdom, so `copyText` resolves `false`.
+    vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValue(new Error('denied'));
+    const { container } = render(<Markdown text={fence('artifact html', HTML_MOCK)} />);
+
+    const copy = screen.getByRole('button', { name: "Copy this artifact's source" });
+    fireEvent.click(copy);
+
+    // The rejection is visible on the control itself...
+    await waitFor(() =>
+      expect(container.querySelector('[data-copy-state="failed"]')?.textContent).toContain('Copy failed'),
+    );
+    expect(copy.getAttribute('title')).toContain('Download');
+    // ...renamed for assistive technology...
+    expect(copy.getAttribute('aria-label')).toContain('Copy failed');
+    // ...and announced through the card's live region.
+    const announcement = container.querySelector('[data-testid="artifact-announcement"]');
+    expect(announcement?.getAttribute('aria-live')).toBe('polite');
+    expect(announcement?.textContent).toContain('Copy failed');
+    expect(announcement?.textContent).toContain('Download');
+  });
+
+  it('announces a successful copy and shows Copied on the control', async () => {
+    vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined);
+    const { container } = render(<Markdown text={fence('artifact html', HTML_MOCK)} />);
+
+    fireEvent.click(screen.getByRole('button', { name: "Copy this artifact's source" }));
+
+    const announcement = container.querySelector('[data-testid="artifact-announcement"]');
+    await waitFor(() => expect(announcement?.textContent).toContain('copied to the clipboard'));
+    expect(container.querySelector('[data-copy-state="done"]')?.textContent).toContain('Copied');
   });
 
   it('marks which half is showing for assistive technology', () => {

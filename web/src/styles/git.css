@@ -13,6 +13,10 @@
  *
  * Every colour is a token so the Theme Studio repaints this file too; no raw hex
  * values live here. Sizing follows the --fs- and --space- scales where it fits.
+ * Text a user has to read never takes `--faint` - that role is decoration only
+ * (§4) - and `--fs-micro` is reserved for uppercase kickers, so mixed-case
+ * metadata (a branch's track, a file's directory, a sha) is `--fs-tiny` or
+ * larger. The only `--faint` left below is the two chevron glyphs.
  * (Never write a slash-star inside a comment here: the pair closes it early.)
  */
 
@@ -53,7 +57,9 @@
 
 .gitm-kicker {
   margin: 0;
-  color: var(--faint);
+  /* An uppercase kicker is still a label the user reads, so it takes the
+   * readable metadata role, not the decorative one (§4). */
+  color: var(--muted);
   font-size: var(--fs-micro);
   font-weight: 600;
   letter-spacing: 0.09em;
@@ -103,7 +109,7 @@
   border-radius: var(--radius-pill);
   background: var(--surface);
   color: var(--text-secondary);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -219,8 +225,8 @@
 
 .gitm-branch-track {
   flex: 0 0 auto;
-  color: var(--faint);
-  font-size: var(--fs-micro);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
 }
@@ -324,14 +330,14 @@
 .gitm-commit-btn:disabled {
   border-color: var(--line-strong);
   background: var(--surface-raised);
-  color: var(--faint);
+  color: var(--muted);
   cursor: not-allowed;
 }
 
 .gitm-commit-hint {
   margin: 0;
-  color: var(--faint);
-  font-size: var(--fs-micro);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
   line-height: 1.45;
 }
 
@@ -414,8 +420,8 @@
 
 .gitm-group-note {
   overflow: hidden;
-  color: var(--faint);
-  font-size: var(--fs-micro);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
   font-weight: 500;
   letter-spacing: 0;
   text-overflow: ellipsis;
@@ -546,7 +552,7 @@
 
 .gitm-dir {
   overflow: hidden;
-  color: var(--faint);
+  color: var(--muted);
   font-family: var(--font-mono);
   font-size: var(--fs-tiny);
   text-overflow: ellipsis;
@@ -557,8 +563,8 @@
  * full-width list does, and it is what makes the badge unambiguous. */
 .gitm-row-label {
   flex: 0 0 auto;
-  color: var(--faint);
-  font-size: var(--fs-micro);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
 }
 
 .gitm-changes-panel .gitm-row-label {
@@ -645,7 +651,7 @@
   border: 1px solid var(--accent-line);
   border-radius: var(--radius-pill);
   background: var(--accent-bg);
-  color: var(--accent);
+  color: var(--accent-on-tint);
   font-size: var(--fs-tiny);
   line-height: 14px;
   white-space: nowrap;
@@ -653,7 +659,8 @@
 
 .gitm-sha,
 .gitm-commit-meta code {
-  color: var(--faint);
+  /* A commit sha is how a user identifies a revision, not decoration. */
+  color: var(--muted);
   font-family: var(--font-mono);
   font-size: var(--fs-tiny);
 }
@@ -697,8 +704,8 @@
   align-items: center;
   gap: var(--space-2);
   margin: var(--space-2) 0 0;
-  color: var(--faint);
-  font-size: var(--fs-micro);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
 }
 
 .gitm-detail-actions {
@@ -783,14 +790,14 @@
 
 .gitm-empty-text {
   margin: 0;
-  color: var(--faint);
+  color: var(--muted);
   line-height: 1.55;
 }
 
 .gitm-note {
   margin: 0;
   padding: 10px var(--space-6);
-  color: var(--faint);
+  color: var(--muted);
   font-size: var(--fs-small);
 }
 
@@ -824,7 +831,7 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-pill);
   background: var(--surface);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
 }
 
 .gitm-commit-file-path {
@@ -851,7 +858,7 @@
 }
 
 .gitm-commit-file-stat em {
-  color: var(--faint);
+  color: var(--muted);
   font-style: normal;
 }
 
@@ -901,8 +908,8 @@
 .gitm-busy {
   overflow: hidden;
   max-width: 140px;
-  color: var(--faint);
-  font-size: var(--fs-micro);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -954,7 +961,7 @@
 .gitm-panel-detail .gitm-detail-actions .button {
   height: 24px;
   padding: 0 var(--space-3);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
 }
 
 .gitm-panel-detail .diff-lines {
@@ -1071,8 +1078,8 @@
 
 .gitm-branch-meta {
   overflow: hidden;
-  color: var(--faint);
-  font-size: var(--fs-micro);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1100,8 +1107,8 @@
 
 .gitm-hint {
   margin: 0;
-  color: var(--faint);
-  font-size: var(--fs-micro);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
 }
 
 .gitm-confirm {
@@ -1113,8 +1120,8 @@
 
 .gitm-confirm-note {
   margin: 0;
-  color: var(--faint);
-  font-size: var(--fs-micro);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
   line-height: 1.5;
 }
 
@@ -1187,7 +1194,7 @@
   }
 
   .gitm-desc {
-    font-size: var(--fs-micro);
+    font-size: var(--fs-tiny);
   }
 
   .gitm-commit {

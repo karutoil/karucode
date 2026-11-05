@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
 import { useState } from 'preact/hooks';
+import { truncate } from '../lib/format';
 import type { PluginPanelRenderProps, PluginPanelRenderer } from './pluginPanels';
 import {
   AlertIcon,
@@ -279,28 +280,33 @@ function ItemRow({ item, isSubtask }: { item: PanelItem; isSubtask: boolean }): 
   const note = noteFor(item);
   const expandable = Boolean(item.detail) || Boolean(note);
   const tone = toneFor(item.status);
+  const bodyId = `todo-details-${item.id}`;
+  // A list of ten "Show details" buttons tells a screen-reader user nothing
+  // about which task each one belongs to. The id is the stable handle; the title
+  // is what the reader recognises, so both go in the name.
+  const task = item.title ? `${item.id}: ${truncate(item.title, 60)}` : item.id;
 
   return (
     <li class={`todo-item todo-tone-${tone}${isSubtask ? ' is-subtask' : ''}`}>
       <div class="todo-item-head">
-        <button
-          type="button"
-          class="todo-item-toggle"
-          onClick={() => setOpen((value) => !value)}
-          aria-expanded={expandable ? open : undefined}
-          disabled={!expandable}
-          aria-label={expandable ? (open ? 'Hide details' : 'Show details') : undefined}
-        >
-          {expandable ? (
-            open ? (
-              <ChevronDownIcon size={11} />
-            ) : (
-              <ChevronRightIcon size={11} />
-            )
-          ) : (
-            <span class="todo-item-dot" aria-hidden="true" />
-          )}
-        </button>
+        {expandable ? (
+          <button
+            type="button"
+            class="todo-item-toggle"
+            onClick={() => setOpen((value) => !value)}
+            aria-expanded={open}
+            // The body is always in the DOM and merely hidden, so the reference
+            // is valid in both states instead of pointing at nothing when closed.
+            aria-controls={bodyId}
+            aria-label={`${open ? 'Hide' : 'Show'} details for ${task}`}
+          >
+            {open ? <ChevronDownIcon size={11} /> : <ChevronRightIcon size={11} />}
+          </button>
+        ) : (
+          <span class="todo-item-toggle is-static" aria-hidden="true">
+            <span class="todo-item-dot" />
+          </span>
+        )}
 
         <span class={`todo-status todo-tone-${tone}`}>
           {item.status === 'done' ? <CheckIcon size={11} /> : null}
@@ -312,17 +318,15 @@ function ItemRow({ item, isSubtask }: { item: PanelItem; isSubtask: boolean }): 
         <span class="todo-title">{item.title}</span>
       </div>
 
-      {open && expandable ? (
-        <div class="todo-item-body">
-          {item.detail ? <p class="todo-detail">{item.detail}</p> : null}
-          {note ? (
-            <p class="todo-note">
-              <span class="todo-note-kind">{note.kind}</span>
-              {note.text}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
+      <div class="todo-item-body" id={bodyId} hidden={!open}>
+        {item.detail ? <p class="todo-detail">{item.detail}</p> : null}
+        {note ? (
+          <p class="todo-note">
+            <span class="todo-note-kind">{note.kind}</span>
+            {note.text}
+          </p>
+        ) : null}
+      </div>
     </li>
   );
 }

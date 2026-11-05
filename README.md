@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-dfb680.svg" alt="MIT license"></a>
-  <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.82%2B-dfb680.svg" alt="Rust 1.82+"></a>
+  <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.89%2B-dfb680.svg" alt="Rust 1.89+"></a>
   <a href="docs/API.md"><img src="https://img.shields.io/badge/API-v1-dfb680.svg" alt="API v1"></a>
 </p>
 
@@ -87,8 +87,9 @@ workspace built for a long session, not for a dashboard demo.
 
 ## Quick start
 
-Prerequisites: Linux (primary target; other Unixes should work) and Rust 1.82+
-for the backend. Node.js 20+ is needed **only** to build the frontend — it is
+Prerequisites: Linux (primary target; other Unixes should work) and Rust 1.89+
+for the backend (matching the workspace's `rust-version`). Node.js 22.12+ is needed
+**only** to build the frontend — it is
 embedded into the binary and not needed at runtime. Optional: `ripgrep` (a
 pure-Rust fallback is built in) and `git`.
 
@@ -418,8 +419,10 @@ Read [docs/SECURITY.md](docs/SECURITY.md) before exposing the server.
   prompt-injected `curl` cannot exfiltrate the harness token or the provider key.
 * Secrets are never returned to the browser or written to logs.
 * Markdown is rendered with raw HTML disabled and then sanitised. A chat artifact
-  (an HTML mock from a reply) is a **separate document** in a sandboxed frame with
-  an opaque origin, inline script and style only, and no network at all.
+  (an HTML mock from a reply) is a **separate document** in a sandboxed opaque-origin
+  frame with a random per-artifact capability, never the master token. Script network,
+  remote subresources and forms are blocked; directly opened top-level content can
+  still self-navigate, as [docs/SECURITY.md](docs/SECURITY.md) explains.
 * **Shell commands are not sandboxed** — approvals are the gate, not isolation.
 * Plugins and MCP servers are trusted code; subagents share the workspace, and
   `owned_paths` is advisory, not locking.
@@ -514,9 +517,9 @@ Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). HTTP contract:
 
 * **No shell sandbox.** Commands run as the server user. Use a container or VM
   for untrusted code or unattended `auto` mode.
-* **Git worktrees isolate subagent work** when the workspace is a git repository.
-  For non-git workspaces, subagents reuse the shared workspace and `owned_paths`
-  provides advisory conflict reporting.
+* **Subagents share the parent's live workspace**, including dirty and untracked
+  files. Their completed edits survive completion; `owned_paths` provides
+  advisory conflict reporting, not file locking or worktree isolation.
 * **Sequential tool execution** within a turn (deterministic approvals and
   events): parallel calls from the model are executed in order.
 * **MCP** supports stdio and streamable HTTP; the legacy SSE-only transport is

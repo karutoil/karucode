@@ -15,10 +15,11 @@
 The API is same-origin only; there is no CORS surface. Two rules matter:
 
 1. **Auth** - with `KARUCODE_AUTH_TOKEN` set, every request needs
-   `Authorization: Bearer <token>`. Three paths also accept `?token=`, because
-   a browser cannot attach a header to what they load: `GET /api/events`
-   (a stream fetch), `GET /api/terminals/:id/socket` (a websocket handshake) and
-   `GET /api/artifacts/:id` (an `<iframe src>`).
+   `Authorization: Bearer <token>`. Two paths also accept master `?token=`,
+   because a browser cannot attach a header to what they load: `GET /api/events`
+   (a stream fetch) and `GET /api/terminals/:id/socket` (a websocket handshake).
+   Artifact iframes instead use the random per-artifact `?capability=` returned
+   by their publishing POST; the master bearer is never put in those URLs.
 2. **CSRF** - every `POST`/`PATCH`/`PUT`/`DELETE` must send
    `X-Karucode-Client: web`, and a present `Origin` must match `Host`.
 
@@ -78,7 +79,7 @@ exist only to give an `<iframe>` something to load:
 curl -s -X POST localhost:8787/api/artifacts \
   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
   -d '{"html":"<button>Buy</button>","theme":"dark"}'
-# → 201 {"id":"9f2c…","url":"/api/artifacts/9f2c…","bytes":374,"theme":"dark"}
+# → 201 {"id":"9f2c…","url":"/api/artifacts/9f2c…?capability=<random>","bytes":374,"theme":"dark"}
 ```
 
 The body is `{html, theme?}` (1 MiB; `413` above it, `400` when empty), the id
@@ -90,13 +91,19 @@ background follows `theme`; a complete document keeps its own CSS and gets one
 injected script that reports its height to the parent, so the card is not a
 fixed letterbox.
 
-`GET /api/artifacts/:id` serves that document with a route-local policy that is
-stricter than the workspace preview's: an **opaque origin** (`sandbox
+`GET /api/artifacts/:id?capability=<random>` serves that document only when the
+capability matches this artifact. The authenticated POST response's `url` is the
+value to load; an id alone or a master `?token=` is `401`, and reposting the same
+stored document returns its existing grant. The GET has a route-local policy that
+is stricter than the workspace preview's: an **opaque origin** (`sandbox
 allow-scripts`, never `allow-same-origin`), inline script and style allowed so a
-mock is a mock, and **no network at all** (`connect-src 'none'`, no wildcard
-source) so a prompt-injected `<img src="https://…">` cannot beacon out.
-`frame-ancestors 'self'` plus a route-local `Cross-Origin-Resource-Policy:
-cross-origin` are what let this app - and only this app - frame it.
+mock is a mock, while fetch/XHR/WebSocket, remote subresources and forms are
+disabled (`connect-src 'none'`, `form-action 'none'`, no wildcard source).
+The frame's sandbox does not prevent a directly opened top-level artifact from
+navigating itself; Chromium confirms that residual can disclose the viewing event
+and this one URL capability, but never the master bearer. `no-referrer` keeps the
+capability out of Referer headers. `frame-ancestors 'self'` plus route-local
+`Cross-Origin-Resource-Policy: cross-origin` let only this app frame it.
 
 How an agent writes one, and what does and does not render, is the `artifacts`
 topic.

@@ -109,13 +109,16 @@ What a systemd install does, in order:
 7. `daemon-reload`, `enable` (so it starts on boot), then `start` — or `restart`
    if the service was already running, so an upgrade does not leave the old
    binary serving;
-8. waits for the unit to stay active and for `/api/health` to answer, and only
-   then reports success.
+8. waits for the unit to stay active and for `/api/health` to return HTTP `200`,
+   or the expected `401` when authentication protects the route. No answer and
+   every other status (including `403`) are failures.
 
-If step 5–7 fails, the previous unit and drop-in are restored. Exit codes:
-`0` installed and running, `1` nothing installed (or rolled back), `2` installed
-but the service did not come up — the script then prints the four things worth
-checking.
+If changing the unit, starting the service, or checking health fails, the previous
+unit, drop-in, and binary are restored before exit. The binary replacement and
+restoration use a same-directory temporary file followed by `mv`, never a copy
+over a running executable. Exit codes: `0` installed and healthy (or deliberately
+not started), `1` nothing installed (or rolled back), `2` start/health failed and rollback was
+attempted. Startup failures also print the things worth checking.
 
 **Everything except the binary has a default**, so `sudo sh install.sh` is the
 whole install. There is no default workspace: the server starts with no project
@@ -274,7 +277,7 @@ aarch64, build from source (`cargo build --release -p kc-server`) and either pas
 ### From source
 
 ```bash
-cargo build --release -p kc-server        # embeds web/dist; needs Node 20+ once
+cargo build --release -p kc-server        # embeds web/dist; needs Node 22.12+ once
 sudo install -m 0755 target/release/karucode /usr/local/bin/karucode
 # then the same unit + drop-in steps as above
 ```
@@ -505,17 +508,24 @@ sudo sh packaging/update.sh --dry-run  # print the whole plan; build nothing
    guess.
 3. **It snapshots the database first.** `VACUUM INTO <data-dir>/backups/pre-update-<stamp>.db`
    runs before anything restarts, because there is no automatic pre-migration
-   snapshot. It works while the server is running and the result is a single file
-   with no `-wal`/`-shm` sidecars.
-4. **It refuses to ship what you did not commit.** A tree with modified tracked
-   files is rejected (`--allow-dirty` overrides), so what lands in `/usr/local/bin`
-   is the revision you think it is.
+   snapshot. `sqlite3` is mandatory when a database exists; the update stops if it
+   is missing unless you explicitly pass `--no-backup`. The backup directory is
+   enforced and verified as `0700`, and the snapshot as `0600`. `VACUUM INTO`
+   works while the server is running and the result is one file with no
+   `-wal`/`-shm` sidecars.
+4. **It refuses to ship what you did not commit.** Modified tracked files are
+   rejected (`--allow-dirty` overrides those only). Non-ignored untracked build
+   inputs are always rejected; ignored build output such as `target/` and
+   `web/dist/` is allowed. What lands in `/usr/local/bin` is therefore the
+   revision you think it is.
 5. **It stages before it switches, and survives losing the terminal.** See below.
 
 Every systemd step is still `install.sh`'s: keeps `karucode.old`, rewrites the
 unit and the drop-in, clears a stale `StartLimitBurst`, restarts a running
-service onto the new binary, and only reports success once `/api/health` answers.
-There is deliberately no second copy of that logic to drift.
+service onto the new binary, and only reports success for an intentional health
+status: HTTP `200`, or `401` when auth protects the route. Any other response, or
+no response, triggers rollback. There is deliberately no second copy of that
+logic to drift.
 
 #### Staged, then switched
 
@@ -595,26 +605,27 @@ so once and continues rather than refusing to run.
 | `--ref <REF>` | Build a tag/commit instead of the current branch (detached HEAD) |
 | `--build-only` | Compile and stop; the service is not touched |
 | `--skip-build` | Install the binary already in `target/release` |
-| `--allow-dirty` | Permit modified tracked files, and ship them |
-| `--no-backup` | Skip the pre-update snapshot |
+| `--allow-dirty` | Permit modified tracked files; non-ignored untracked inputs are still refused |
+| `--no-backup` | Explicitly skip the snapshot (the only way to proceed without `sqlite3` when a database exists) |
 | `--backup-dir <DIR>` | Write the snapshot somewhere other than `<data-dir>/backups` |
 | `--force` | Reinstall even when the binary and the unit are unchanged |
 | `--workspace`, `--data-dir`, `--service-user`, `--host`, `--port`, `--prefix` | Override what the unit says |
 
-Exit codes: `0` updated and serving, `1` nothing changed (dirty tree, build
-failure, no unit, refused install), `2` installed but the service did not come
-back — the same rollback hint as `install.sh`, `3` `--check` found commits you do
-not have.
+Exit codes: `0` updated and healthy, `1` nothing changed (untracked/dirty tree,
+build or backup failure, no unit, refused install), `2` start/health failed and
+`install.sh` restored the previous unit and binary, `3` `--check` found commits
+you do not have. A detached run with a missing or malformed status file exits `1`:
+absence of a status is never interpreted as success.
 
 Two things it will not do for you:
 
 * **It does not run from inside the service.** The unit sets
   `NoNewPrivileges=yes`, so `sudo` cannot escalate from an agent session; the
   script detects that and says so. Use a normal login shell on the host.
-* **It does not fix a dirty upgrade.** If the *build* compiles but the service
-  still will not start, `karucode.old` is the previous binary and
-  `pre-update-*.db` the previous database — that pair is the rollback, and
-  `update.sh` prints both commands when it exits `2`.
+* **It does not turn a failed upgrade into success.** If the *build* compiles but
+  the service will not start or fails health, `install.sh` restores the previous
+  binary and unit before `update.sh` exits `2`. `karucode.old` and
+  `pre-update-*.db` remain available for inspection or manual recovery.
 
 What survives an upgrade, and what does not:
 
@@ -627,17 +638,23 @@ What survives an upgrade, and what does not:
   flow had.
 * **Kept for rollback:** `/usr/local/bin/karucode.old`.
 
-If the service does not come back, the installer exits `2` and prints the
-checklist; nothing is silently left broken. In-flight runs are cancelled on
+If the service does not come back healthy, the installer exits `2` and attempts
+to restore the previous binary and unit. Startup failures print the checklist.
+In-flight runs are cancelled on
 `SIGTERM`; on the next start, leftover `running` runs are marked `interrupted`
 and pending approvals `expired` — nothing is silently retried.
 
 Roll back a bad release:
 
 ```bash
-sudo cp -p /usr/local/bin/karucode.old /usr/local/bin/karucode
-sudo systemctl restart karucode
+sudo systemctl stop karucode
+sudo install -m 0755 /usr/local/bin/karucode.old /usr/local/bin/karucode.rollback
+sudo mv -f /usr/local/bin/karucode.rollback /usr/local/bin/karucode
+sudo systemctl start karucode
 ```
+
+The temporary file and atomic rename avoid truncating or writing over an
+executable that is still mapped by a running process.
 
 ## Uninstall / start over
 

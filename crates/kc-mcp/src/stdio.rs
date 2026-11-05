@@ -118,10 +118,11 @@ impl Inner {
         debug!(server = %self.name, "MCP stdio server finished: {detail}");
     }
 
-    /// The server broke the framing contract (e.g. an over-long line). Fail
-    /// everything in flight with that protocol error and stop the child: a
-    /// server that cannot frame JSON-RPC is not usable.
-    fn fail_protocol(&self, message: String) {
+    /// EOF or a framing/read failure makes the protocol peer unusable even if
+    /// the process itself stays alive. Close the write side, fail every waiter,
+    /// and signal the supervisor to kill/reap the now-unreadable child.
+    fn fail_connection(&self, message: String) {
+        self.alive.store(false, Ordering::SeqCst);
         let kill = {
             let mut st = self.lock();
             st.out = None;
@@ -331,20 +332,21 @@ impl Transport for StdioTransport {
                     inner.handle_line(line)
                 })
                 .await;
-                if let Err(e) = result {
-                    let message = if e.kind() == std::io::ErrorKind::InvalidData {
-                        format!(
-                            "MCP server `{}` sent a protocol line larger than the {} byte limit; \
-                             the connection was closed because the server is not speaking the \
-                             protocol",
-                            inner.name, MAX_PROTOCOL_LINE
-                        )
-                    } else {
-                        format!("reading MCP server `{}` stdout failed: {e}", inner.name)
-                    };
-                    warn!(server = %inner.name, "{message}");
-                    inner.fail_protocol(message);
-                }
+                let message = match result {
+                    Ok(_) => format!("MCP server `{}` closed its stdout", inner.name),
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => format!(
+                        "MCP server `{}` sent a protocol line larger than the {} byte limit; \
+                         the connection was closed because the server is not speaking the \
+                         protocol",
+                        inner.name, MAX_PROTOCOL_LINE
+                    ),
+                    Err(e) => format!("reading MCP server `{}` stdout failed: {e}", inner.name),
+                };
+                warn!(server = %inner.name, "{message}");
+                // A clean EOF is just as final as a read error. In particular, a
+                // broken server can close stdout and then hang forever; waiting for
+                // child.wait() would leave pending calls and status stuck.
+                inner.fail_connection(message);
             });
         }
 

@@ -214,7 +214,11 @@ export const pluginPanelTabs = computed<PluginPanelTab[]>(() => {
   }
   return tabs;
 });
-/** The payload of each panel that has been read, keyed by hosted id. */
+/**
+ * Payloads for the currently mounted panel context, keyed by hosted id.
+ * `actions.refreshPluginPanel` owns the backing cache, whose keys also include
+ * project and session so another context's response cannot populate this view.
+ */
 export const pluginPanelData = signal<Record<string, PluginPanelState>>({});
 export const settingsOpen = signal(false);
 export const paletteOpen = signal(false);

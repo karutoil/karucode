@@ -22,6 +22,7 @@ import {
   MAX_IMPORT_BYTES,
   MAX_ROUNDING,
   MIN_ROUNDING,
+  ROLE_PROPERTIES,
   THEME_COLOR_GROUPS,
   THEME_DENSITIES,
   THEME_FONTS,
@@ -30,10 +31,12 @@ import {
   THEME_MONO_FONTS,
   THEME_MONO_LABELS,
   THEME_THINKING_CHOICES,
+  THEME_TOKEN_ENTRIES,
   THEME_TOOL_STYLE_CHOICES,
   ThemeFileError,
   activeTheme,
   autosaveError,
+  buildTokenMap,
   customThemes,
   deleteCustomTheme,
   draftEdited,
@@ -68,6 +71,7 @@ import {
   type ThemeToolStyle,
 } from '../theme';
 import {
+  AlertIcon,
   CheckIcon,
   ChevronDownIcon,
   CloseIcon,
@@ -115,7 +119,13 @@ function TranscriptChoice<T extends string>({
       <span class="theme-field-label" id={labelId}>
         {label}
       </span>
-      <div class="theme-segments" role="group" aria-labelledby={labelId} data-testid={testId}>
+      <div
+        class="theme-segments"
+        role="group"
+        aria-labelledby={labelId}
+        aria-describedby={describedBy}
+        data-testid={testId}
+      >
         {choices.map((choice) => (
           <button
             type="button"
@@ -243,6 +253,8 @@ export function ThemeStudio(): JSX.Element | null {
   const nameLabelId = useId();
   const deleteLabelId = useId();
   const radiusId = useId();
+  const interfaceDescId = useId();
+  const modeHintId = useId();
 
   useFocusTrap(panelRef, open, actions.closeThemeStudio);
 
@@ -367,10 +379,23 @@ export function ThemeStudio(): JSX.Element | null {
   };
 
   const copyVariables = async (): Promise<void> => {
-    const variables = Object.entries(theme.colors)
-      .map(([key, value]) => `  --kc-${key}: ${value};`)
+    // Emit the properties the app actually reads, with the values it actually
+    // paints. The old block invented a `--kc-<colour>` name per palette entry,
+    // and nothing in the stylesheet consumes a `--kc-*` property: pasting it
+    // changed nothing. These are the real `--theme-*` tokens plus the fidelity
+    // roles derived from them (`resolveRoles`), i.e. exactly what `applyTheme`
+    // writes on <html>.
+    const tokens = buildTokenMap(theme);
+    const variables = [
+      ...THEME_TOKEN_ENTRIES.map(([, property]) => property),
+      ...ROLE_PROPERTIES,
+    ]
+      .filter((property) => tokens[property] !== undefined)
+      // applyTheme writes these properties inline on <html>; a normal :root
+      // declaration loses that cascade contest even though the editor is later.
+      .map((property) => `  ${property}: ${tokens[property]} !important;`)
       .join('\n');
-    const code = `:root {\n${variables}\n}\n${theme.customCSS}`;
+    const code = `/* !important lets Custom CSS replace the engine's inline token values. */\n/* ${theme.name} — ${theme.mode} */\n:root {\n${variables}\n}\n${theme.customCSS}`;
     try {
       await navigator.clipboard.writeText(code);
       store.pushToast('Theme variables copied.', 'success');
@@ -591,7 +616,7 @@ export function ThemeStudio(): JSX.Element | null {
             <div class="theme-section-title">
               <h3 id={`${titleId}-interface`}>Interface</h3>
             </div>
-            <p class="theme-description">
+            <p class="theme-description" id={interfaceDescId}>
               Control the mood, spacing and typography across the entire workspace.
             </p>
             <div class="theme-setting-grid">
@@ -599,7 +624,12 @@ export function ThemeStudio(): JSX.Element | null {
                 <span class="theme-field-label" id={`${titleId}-mode`}>
                   Appearance
                 </span>
-                <div class="theme-segments" role="group" aria-labelledby={`${titleId}-mode`}>
+                <div
+                  class="theme-segments"
+                  role="group"
+                  aria-labelledby={`${titleId}-mode`}
+                  aria-describedby={modeHintId}
+                >
                   {(['dark', 'light'] as const).map((mode) => (
                     <button
                       type="button"
@@ -613,12 +643,19 @@ export function ThemeStudio(): JSX.Element | null {
                     </button>
                   ))}
                 </div>
+                {/* Says what the flip does *before* it happens: the palette is
+                    re-based to the new mode and the accent survives, which is the
+                    contract `setThemeMode` and `resetColors` share. */}
+                <p class="theme-field-hint" id={modeHintId}>
+                  Re-bases the surfaces to that mode and keeps your accent.
+                </p>
               </div>
 
               <label class="theme-field">
                 <span class="theme-field-label">Density</span>
                 <select
                   value={theme.density}
+                  aria-describedby={interfaceDescId}
                   data-testid="theme-density"
                   onChange={(event) => setDensity(event.currentTarget.value as ThemeDensity)}
                 >
@@ -634,6 +671,7 @@ export function ThemeStudio(): JSX.Element | null {
                 <span class="theme-field-label">Interface font</span>
                 <select
                   value={theme.font}
+                  aria-describedby={interfaceDescId}
                   data-testid="theme-font"
                   onChange={(event) => setFont(event.currentTarget.value as ThemeFont)}
                 >
@@ -649,6 +687,7 @@ export function ThemeStudio(): JSX.Element | null {
                 <span class="theme-field-label">Code font</span>
                 <select
                   value={theme.mono}
+                  aria-describedby={interfaceDescId}
                   data-testid="theme-mono"
                   onChange={(event) => setMono(event.currentTarget.value as ThemeMono)}
                 >
@@ -745,15 +784,35 @@ export function ThemeStudio(): JSX.Element | null {
                 </label>
                 <p class="theme-advanced-help" id={`${titleId}-css-help`}>
                   Applied live after the application stylesheet. Use{' '}
-                  <code>:root {'{ --theme-accent: #eaa06d; }'}</code> to adjust tokens, or target any
-                  class.
+                  <code>:root {'{ --theme-accent: #eaa06d !important; }'}</code> to adjust inline theme
+                  tokens, or target any class.
+                </p>
+                {/* Trust boundary, said where the CSS is typed. Custom CSS is
+                    injected verbatim into this document (no sanitiser beyond the
+                    size cap), and an imported theme file carries its own CSS with
+                    it, so the file — not just the colours — is something the user
+                    is trusting. Saying "cannot load remote resources" would be a
+                    lie: `url()` and `@import` both work. */}
+                <p
+                  class="theme-trust-note"
+                  id={`${titleId}-css-trust-note`}
+                  role="note"
+                  data-testid="theme-css-trust"
+                >
+                  <AlertIcon size={13} />
+                  <span>
+                    Only paste CSS you trust. It runs inside this page with the app’s own
+                    permissions: it can load remote fonts, images and beacons, and it can hide
+                    parts of the interface — including this drawer. An imported theme carries its
+                    CSS with it.
+                  </span>
                 </p>
                 <textarea
                   id={`${titleId}-css`}
                   class="theme-code-editor"
                   spellcheck={false}
                   maxLength={MAX_CUSTOM_CSS}
-                  aria-describedby={`${titleId}-css-help`}
+                  aria-describedby={`${titleId}-css-help ${titleId}-css-trust-note`}
                   placeholder={'/* Add any custom CSS here */\n.project-rail { backdrop-filter: blur(12px); }'}
                   value={theme.customCSS}
                   data-testid="theme-custom-css"

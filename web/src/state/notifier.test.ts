@@ -19,6 +19,7 @@ const basePayload: NotifyPayload = {
   body: 'All 3 files updated.',
   session_id: 's_1',
   session_title: 'Fix the login redirect',
+  project_id: 'p_project',
   source: 'runtime',
   sticky: false,
 };
@@ -416,6 +417,6 @@ describe('clicking the desktop notification', () => {
     await notifier.handle(basePayload);
     expect(shown).toHaveLength(1);
     shown[0]?.onclick?.(new Event('click'));
-    expect(onClick).toHaveBeenCalledWith('s_1');
+    expect(onClick).toHaveBeenCalledWith('s_1', 'p_project');
   });
 });

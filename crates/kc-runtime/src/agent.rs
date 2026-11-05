@@ -114,6 +114,7 @@ impl LoopSpec {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct LoopOutcome {
     pub status: RunStatus,
     pub error: Option<String>,
@@ -158,6 +159,18 @@ pub(crate) async fn start_run(
     session_id: &str,
     prompt: String,
 ) -> Result<RunHandle> {
+    let lifecycle = runtime.shared().lock_session_lifecycle(session_id).await;
+    start_run_with_lifecycle(runtime, session_id, prompt, lifecycle).await
+}
+
+/// Submit with an already-owned session lifecycle guard. Used by retry so the
+/// rewind and replacement submission cannot be interleaved with another run.
+pub(crate) async fn start_run_with_lifecycle(
+    runtime: &Arc<Runtime>,
+    session_id: &str,
+    prompt: String,
+    _lifecycle: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<RunHandle> {
     if prompt.trim().is_empty() {
         return Err(Error::BadRequest("message content may not be empty".into()));
     }
@@ -170,11 +183,10 @@ pub(crate) async fn start_run(
         .ok_or_else(|| Error::NotFound(format!("session {session_id} not found")))?;
     // The project decides the workspace before anything is written, so a run can
     // never start in the wrong directory.
-    let workspace =
-        inner
-            .deps
-            .workspaces
-            .workspace_for_session(session.project_id.as_deref(), &session.workspace)?;
+    let workspace = inner
+        .deps
+        .workspaces
+        .workspace_for_session(session.project_id.as_deref(), &session.workspace)?;
 
     // The session's own selection (or the install-wide default) decides the
     // model, so several sessions can run different models concurrently.
@@ -279,14 +291,6 @@ pub(crate) async fn start_run(
             Err(payload) => {
                 let message = format!("the run panicked: {}", panic_message(payload.as_ref()));
                 tracing::error!(run = %spawned_state.run_id.0, message = %message, "run panicked");
-                if let Err(e) = spawned_inner
-                    .deps
-                    .store
-                    .finish_run(&spawned_state.run_id.0, RunStatus::Failed, Some(&message))
-                    .await
-                {
-                    tracing::warn!(run = %spawned_state.run_id.0, error = %e, "could not record the panicked run");
-                }
                 spawned_inner.emit(
                     Some(&spawned_state.session_id.0),
                     Some(&spawned_state.run_id.0),
@@ -296,23 +300,38 @@ pub(crate) async fn start_run(
                         kind: Some("internal".into()),
                     },
                 );
-                spawned_inner.emit(
-                    Some(&spawned_state.session_id.0),
-                    Some(&spawned_state.run_id.0),
-                    None,
-                    Event::RunFinished {
-                        run_id: spawned_state.run_id.0.clone(),
-                        status: RunStatus::Failed.as_str().to_string(),
-                        error: Some(message),
-                    },
-                );
+                // A panic can occur before the loop returns or inside one of
+                // the finalization stages. Use the saved logical outcome when
+                // one exists, and independently claimed stages to resume only
+                // the work that has not already been published.
+                let outcome = spawned_state
+                    .final_outcome
+                    .lock()
+                    .expect("final outcome lock")
+                    .clone()
+                    .unwrap_or_else(|| {
+                        LoopOutcome::new(
+                            RunStatus::Failed,
+                            Some(message),
+                            String::new(),
+                            spawned_state.iterations.load(Ordering::Relaxed),
+                        )
+                    });
+                if let Err(e) = finalize_top_level(
+                    &spawned_inner,
+                    &spawned_state,
+                    outcome,
+                    // An outer panic has no live loop deadline left. Keep even
+                    // emergency hooks bounded rather than recreating the stall.
+                    Instant::now() + HOOK_BUDGET,
+                )
+                .await
+                {
+                    tracing::warn!(run = %spawned_state.run_id.0, error = %e, "could not finish finalizing the panicked run");
+                }
             }
         }
-        spawned_inner
-            .runs
-            .lock()
-            .expect("runs lock")
-            .remove(&spawned_key);
+        runtime_for_follow_up.deregister_top_level(&spawned_key, &spawned_state);
 
         // The run is over and its state is gone, so `is_running` is false and a new
         // `submit` is legal. Start the next follow-up, if the user queued one while
@@ -345,10 +364,9 @@ pub(crate) async fn start_run(
 /// that starts the next, so a run is never started while another is registered,
 /// the user's order is preserved, and no separate supervisor task is needed.
 ///
-/// A failure does not cost the queue: the entry goes back at the front (the
-/// client already has its `follow_up_id`), and the next run to finish picks it
-/// up. Only a session with no run left and a queue that cannot start would leave
-/// entries behind, which is why the notice names them.
+/// A failed start explicitly fails the queue. Re-queueing here without a
+/// scheduler would strand accepted input forever: this was the last run, so no
+/// later run-end callback is guaranteed to try the entry again.
 async fn continue_with_follow_up(runtime: Arc<Runtime>, session_id: String) {
     // A cancelled-but-unwinding run still blocks `start_run`, so wait for the
     // registration to actually go. Bounded: a run that never deregisters must not
@@ -395,12 +413,11 @@ async fn continue_with_follow_up(runtime: Arc<Runtime>, session_id: String) {
                 error = %e,
                 "could not start a queued follow-up"
             );
-            // Back where it came from, not gone: the client was told 202 and
-            // holds this id, so it must still be recallable and must still run
-            // the next time the session is free. Dropping the whole queue here
-            // (the old behaviour) lost up to `MAX_QUEUED_FOLLOW_UPS - 1` accepted
-            // messages in one go.
-            runtime.requeue_follow_up(&session_id, next);
+            // `next` is already taken. Drain the remaining accepted entries as
+            // well and publish that removal: none has a scheduler once this
+            // final run goes away. The explicit warning makes the failure
+            // visible and tells the user how to retry deliberately.
+            runtime.clear_follow_ups(&session_id);
             runtime.emit(
                 Some(&session_id),
                 None,
@@ -408,7 +425,7 @@ async fn continue_with_follow_up(runtime: Arc<Runtime>, session_id: String) {
                 Event::Notice {
                     level: "warn".into(),
                     message: format!(
-                        "A queued follow-up could not be started: {e}. It stays queued; send it again if the session does not pick it up."
+                        "Queued follow-up {next_id} could not be started: {e}. It and any later queued follow-ups were removed; send them again when the session is ready."
                     ),
                 },
             );
@@ -525,96 +542,135 @@ pub(crate) async fn run_top_level(
         hub_entry: None,
     };
 
+    let deadline = spec.deadline;
     let outcome = run_loop(Arc::clone(&inner), spec).await;
-    // The run is over, so nothing it started may keep working: a `background:
-    // true` child outlives the *turn* that spawned it but not the run (see the
-    // `subagent` module doc). Done here, before the terminal state is persisted
-    // and announced, so a client that reacts to `RunFinished` by refetching the
-    // roster already sees the children settled.
-    crate::subagent::cancel_run_children(&inner, &state.run_id.0).await;
-    // Nothing may be left addressed to this run: a child that finished a moment
-    // ago can still have posted to it, and a message that outlived its run would
-    // otherwise be delivered into the next one, as if the old child were talking
-    // about work nobody remembers.
+    *state.final_outcome.lock().expect("final outcome lock") = Some(outcome.clone());
+    finalize_top_level(&inner, &state, outcome, deadline).await
+}
+
+const FINALIZE_STORE: u8 = 1 << 0;
+const FINALIZE_HOOK: u8 = 1 << 1;
+const FINALIZE_EVENTS: u8 = 1 << 2;
+const FINALIZE_NOTIFY: u8 = 1 << 3;
+const FINALIZE_METRIC: u8 = 1 << 4;
+
+/// Cancel/reap children and settle exactly one top-level run. Cleanup itself is
+/// safe to repeat; the stage bits keep storage hooks, events and notifications
+/// idempotent when the outer panic guard has to finish a partially completed
+/// finalization.
+async fn finalize_top_level(
+    inner: &Arc<RuntimeInner>,
+    state: &Arc<RunState>,
+    outcome: LoopOutcome,
+    deadline: Instant,
+) -> Result<()> {
+    let ctx = EmitCtx::new(
+        Arc::clone(inner),
+        state.session_id.0.clone(),
+        state.run_id.0.clone(),
+        None,
+    );
+
+    // Nothing a run started may survive its final response, including when the
+    // provider panicked. The store row and terminal frame are intentionally
+    // later: a client reacting to RunFinished sees the settled child roster.
+    crate::subagent::cancel_run_children(inner, &state.run_id.0).await;
+    // Late mail addressed to a finished run must not leak into its successor.
     inner.hub.clear_run_mail(&state.session_id.0);
-    kc_core::metrics::record_run_finished();
-
-    let mut finish_error: Option<Error> = None;
-    if let Err(e) = inner
-        .deps
-        .store
-        .finish_run(&state.run_id.0, outcome.status, outcome.error.as_deref())
-        .await
-    {
-        ctx.error(
-            "store",
-            format!("could not record the final run status: {e}"),
-        );
-        finish_error = Some(e);
+    if state.claim_finalization(FINALIZE_METRIC) {
+        kc_core::metrics::record_run_finished();
     }
-    inner
-        .deps
-        .hooks
-        .on_run_end(
-            &state.session_id.0,
-            &state.run_id.0,
-            outcome.status.as_str(),
-        )
-        .await;
 
-    if outcome.status == RunStatus::Cancelled {
-        ctx.emit(Event::RunCancelled {
+    let mut finish_error = None;
+    if state.claim_finalization(FINALIZE_STORE) {
+        if let Err(e) = inner
+            .deps
+            .store
+            .finish_run(&state.run_id.0, outcome.status, outcome.error.as_deref())
+            .await
+        {
+            ctx.error(
+                "store",
+                format!("could not record the final run status: {e}"),
+            );
+            finish_error = Some(e);
+        }
+    }
+
+    if state.claim_finalization(FINALIZE_HOOK) {
+        // Hooks are a public arbitrary-code boundary. Their return value is
+        // ignored, so neither cancellation nor the run deadline should be held
+        // hostage by one that never answers.
+        let hook_deadline = deadline.min(Instant::now() + HOOK_BUDGET);
+        tokio::select! {
+            biased;
+            _ = state.cancel.cancelled() => {}
+            result = tokio::time::timeout_at(
+                hook_deadline,
+                inner.deps.hooks.on_run_end(
+                    &state.session_id.0,
+                    &state.run_id.0,
+                    outcome.status.as_str(),
+                ),
+            ) => {
+                if result.is_err() {
+                    ctx.notice(
+                        "warn",
+                        format!("a plugin run-end hook did not answer within {}s; continuing teardown", HOOK_BUDGET.as_secs()),
+                    );
+                }
+            }
+        }
+    }
+
+    if state.claim_finalization(FINALIZE_EVENTS) {
+        if outcome.status == RunStatus::Cancelled {
+            ctx.emit(Event::RunCancelled {
+                run_id: state.run_id.0.clone(),
+            });
+        }
+        ctx.emit(Event::RunFinished {
             run_id: state.run_id.0.clone(),
+            status: outcome.status.as_str().to_string(),
+            error: outcome.error.clone(),
         });
     }
-    ctx.emit(Event::RunFinished {
-        run_id: state.run_id.0.clone(),
-        status: outcome.status.as_str().to_string(),
-        error: outcome.error.clone(),
-    });
 
-    // Last, and only after the run's terminal state is persisted and announced:
-    // a notification describes state, so a client that reacts to it by refetching
-    // must already find the truth on the server.
-    //
-    // The title is read *here* rather than before the loop: it is only needed for the
-    // notification, and a store round-trip on the run's critical path delayed
-    // `RunStarted` (which the UI and the API both key "is it running" off) for no
-    // benefit. The project comes from the same row, so attributing the notification
-    // to a project costs no second read.
-    let session = inner
-        .deps
-        .store
-        .get_session(&state.session_id.0)
-        .await
-        .ok()
-        .flatten();
-    let session_title = session
-        .as_ref()
-        .map(|session| session.title.clone())
-        .unwrap_or_default();
-    let session_project = session
-        .as_ref()
-        .and_then(|session| session.project_id.clone())
-        .unwrap_or_default();
-    crate::notify::run_finished(
-        &inner,
-        &ctx,
-        &session_title,
-        crate::notify::RunFinished {
-            run_id: &state.run_id.0,
-            status: outcome.status,
-            error: outcome.error.as_deref(),
-            answer: &outcome.text,
-            project_id: &session_project,
-            started_at_ms: state.started_at,
-            finished_at_ms: crate::events::now_ms(),
-            // Read here, not at the top of the run: the flag is set by `cancel()`
-            // while the loop is in flight.
-            cancelled_by_user: state.was_cancelled_by_user(),
-        },
-    )
-    .await;
+    if state.claim_finalization(FINALIZE_NOTIFY) {
+        // Read the current title/project only after terminal publication: a
+        // notification describes state a refetch must already be able to find.
+        let session = inner
+            .deps
+            .store
+            .get_session(&state.session_id.0)
+            .await
+            .ok()
+            .flatten();
+        let session_title = session
+            .as_ref()
+            .map(|session| session.title.clone())
+            .unwrap_or_default();
+        let session_project = session
+            .as_ref()
+            .and_then(|session| session.project_id.clone())
+            .unwrap_or_default();
+        crate::notify::run_finished(
+            inner,
+            &ctx,
+            &session_title,
+            crate::notify::RunFinished {
+                run_id: &state.run_id.0,
+                status: outcome.status,
+                error: outcome.error.as_deref(),
+                answer: &outcome.text,
+                project_id: &session_project,
+                started_at_ms: state.started_at,
+                finished_at_ms: crate::events::now_ms(),
+                cancelled_by_user: state.was_cancelled_by_user(),
+            },
+        )
+        .await;
+    }
 
     match finish_error {
         Some(e) => Err(e),
@@ -629,8 +685,27 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, spec: LoopSpec) -> LoopOu
     let session_id = spec.session_id.0.clone();
     let run_id = spec.run_id.0.clone();
     let run_wide = spec.agent_id.is_none();
+    let iterations = spec
+        .run_state
+        .as_ref()
+        .map(|state| state.iterations.load(Ordering::Relaxed))
+        .unwrap_or(0);
+    let ctx = spec.emit_ctx(&inner);
 
-    let outcome = run_loop_inner(Arc::clone(&inner), spec).await;
+    let outcome = match std::panic::AssertUnwindSafe(run_loop_inner(Arc::clone(&inner), spec))
+        .catch_unwind()
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let message = format!(
+                "the agent loop panicked: {}",
+                panic_message(payload.as_ref())
+            );
+            ctx.error("internal", message.clone());
+            LoopOutcome::new(RunStatus::Failed, Some(message), String::new(), iterations)
+        }
+    };
 
     // Whatever ended the loop, no approval it requested may stay pending: the
     // waiter is gone, and a stale card would block later runs. Because the scope
@@ -1829,11 +1904,28 @@ async fn run_one_tool(
         // without a second round-trip to the transcript endpoint.
         images: outcome.images.clone(),
     });
-    inner
-        .deps
-        .hooks
-        .on_tool_result(&spec.session_id.0, &call.name, outcome.ok)
-        .await;
+    let hook_deadline = spec.deadline.min(Instant::now() + HOOK_BUDGET);
+    tokio::select! {
+        biased;
+        _ = spec.cancel.cancelled() => {}
+        result = tokio::time::timeout_at(
+            hook_deadline,
+            inner
+                .deps
+                .hooks
+                .on_tool_result(&spec.session_id.0, &call.name, outcome.ok),
+        ) => {
+            if result.is_err() {
+                ctx.notice(
+                    "warn",
+                    format!(
+                        "a plugin tool-result hook did not answer within {}s; continuing without it",
+                        HOOK_BUDGET.as_secs()
+                    ),
+                );
+            }
+        }
+    }
 
     let message = Message::tool_result(call.id.clone(), call.name.clone(), output)
         // Pixels travel beside the text: the store keeps them and `kc-provider`

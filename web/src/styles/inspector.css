@@ -99,6 +99,8 @@
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
+  scroll-padding-inline: var(--space-6);
+  /* Keyboard users can reach overflowed tabs; keep focused tabs in view. */
   /* base.css sets `scrollbar-width: thin` on `html`; leaving it in force here
    * draws the platform's 16px bar with arrow buttons, which is far too heavy
    * under a 44px strip. These two lines hand the bar back to the app's own 8px
@@ -135,6 +137,7 @@
   text-transform: none;
   white-space: nowrap;
   transition: color var(--transition-fast);
+  scroll-margin-inline: var(--space-6);
 }
 
 /* The label is the only thing allowed to shrink (into an ellipsis); the count
@@ -390,7 +393,7 @@
 
 .tree-row[aria-selected='true'] {
   background: var(--row-selected-bg);
-  color: var(--row-selected-text);
+  color: var(--accent-on-tint);
 }
 
 .tree-row:focus-visible {
@@ -818,7 +821,7 @@
 }
 
 .change-row.is-active .change-name {
-  color: var(--row-selected-text);
+  color: var(--accent-on-tint);
 }
 
 .file-logo {
@@ -1053,7 +1056,7 @@
 .agent-filter.is-active {
   border-color: var(--accent);
   background: var(--accent-bg);
-  color: var(--accent);
+  color: var(--accent-on-tint);
 }
 
 .agent-filter-count {
@@ -1083,17 +1086,11 @@
   /* Pane -> card (§3.1). `--surface-command` was 1.05:1 from the panel and the
    * same fill as the event rows inside it, so nesting had no direction. */
   background: var(--surface);
-  cursor: pointer;
   transition: border-color var(--transition), background var(--transition);
 }
 
 .agent-card:hover {
   border-color: var(--line-keycap);
-}
-
-.agent-card:focus-visible {
-  outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: 2px;
 }
 
 .agent-card[data-status='running'] {
@@ -1188,7 +1185,7 @@
 
 .agent-card[data-status='running'] .agent-live {
   background: var(--accent-bg);
-  color: var(--accent);
+  color: var(--accent-on-tint);
 }
 
 .agent-card[data-status='paused'] .agent-live,
@@ -1287,13 +1284,32 @@
 }
 
 .agent-card-open {
-  display: inline-grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
   color: var(--muted);
+  font-size: var(--fs-tiny);
+  text-transform: none;
 }
 
-.agent-card:hover .agent-card-open {
+.agent-card-open:hover {
+  background: var(--surface-hover);
   color: var(--accent);
+}
+
+.agent-card-open:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.agent-card-open-label {
+  /* The word is the point: an arrow alone is a shape, not an action. */
+  letter-spacing: 0;
 }
 
 /* ---------- agent detail (drill-in) ---------------------------------- */

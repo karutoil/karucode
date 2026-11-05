@@ -17,21 +17,106 @@ use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, Appr
 use kc_core::config::{ApprovalMode, ApprovalPolicy, Limits, ModelConfig, SubagentConfig};
 use kc_core::error::Error;
 use kc_core::events::{Event, EventEnvelope};
-use kc_core::hooks::NoHooks;
+use kc_core::hooks::{Hooks, NoHooks};
 use kc_core::ids::{AgentId, RunId, SessionId};
 use kc_core::message::{Role, ToolCall};
 use kc_core::paths::Workspace;
 use kc_core::provider::ProviderChunk;
 use kc_core::store::{AgentRecord, ApprovalRecord, RunStatus, Store};
 use kc_core::tool::{ApprovalGate, ToolClass, ToolOrigin, ToolOutcome, ToolRegistry};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Arbitrary hook futures that deliberately never return. Tests observe their
+/// entry counter, then prove cancellation/deadlines still let the run settle.
+#[derive(Default)]
+struct BlockingHooks {
+    tool_results: AtomicUsize,
+    run_ends: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Hooks for BlockingHooks {
+    async fn on_tool_result(&self, _session_id: &str, _tool: &str, _ok: bool) {
+        self.tool_results.fetch_add(1, Ordering::SeqCst);
+        futures_util::future::pending::<()>().await;
+    }
+
+    async fn on_run_end(&self, _session_id: &str, _run_id: &str, _status: &str) {
+        self.run_ends.fetch_add(1, Ordering::SeqCst);
+        futures_util::future::pending::<()>().await;
+    }
+}
+
+/// Queues from `before_prompt`, which is after that iteration's normal drain
+/// and immediately before a no-tool final response. This deterministically
+/// exercises the final-response arrival window without racing a worker thread.
+#[derive(Default)]
+struct FinalResponseSteerHooks {
+    runtime: Mutex<Weak<Runtime>>,
+    sent: AtomicBool,
+}
+
+impl FinalResponseSteerHooks {
+    fn arm(&self, runtime: &Arc<Runtime>) {
+        *self.runtime.lock().expect("steer hook lock") = Arc::downgrade(runtime);
+    }
+}
+
+#[async_trait::async_trait]
+impl Hooks for FinalResponseSteerHooks {
+    async fn before_prompt(&self, session_id: &str, _workspace: &str) -> Vec<String> {
+        self.queue_once(session_id).await;
+        Vec::new()
+    }
+}
+
+impl FinalResponseSteerHooks {
+    async fn queue_once(&self, session_id: &str) {
+        if self.sent.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let runtime = self
+            .runtime
+            .lock()
+            .expect("steer hook lock")
+            .upgrade()
+            .expect("runtime armed before submit");
+        runtime
+            .steer(session_id, "apply the final-turn correction")
+            .expect("the final-response iteration still accepts a steer");
+    }
+}
+
+struct PanicParentToolHook;
+
+#[async_trait::async_trait]
+impl Hooks for PanicParentToolHook {
+    async fn on_tool_result(&self, _session_id: &str, tool: &str, _ok: bool) {
+        if tool == "parent_gate" {
+            panic!("parent panics after the loop's mail drain");
+        }
+    }
+}
+
+#[derive(Default)]
+struct PanicRunEndHooks {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Hooks for PanicRunEndHooks {
+    async fn on_run_end(&self, _session_id: &str, _run_id: &str, _status: &str) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        panic!("run-end hook broke after status persistence");
+    }
+}
 
 fn event_kind(event: &Event) -> &'static str {
     match event {
@@ -1437,6 +1522,105 @@ async fn approval_allow_once_lets_the_tool_run() {
 }
 
 #[tokio::test]
+async fn an_allow_is_not_delivered_when_its_store_write_fails() {
+    let policy = ApprovalPolicy {
+        mode: ApprovalMode::Ask,
+        timeout_secs: 30,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "run", "{}")]),
+        Script::text("persisted answer"),
+    ])
+    .tool(ApprovalTool::shell("run", "cargo test"))
+    .settings(FakeSettings::default().with_policy(policy))
+    .build()
+    .await;
+
+    h.submit("approve carefully").await;
+    let (event, mut seen) = wait_for_kind(&mut h, "approval_requested").await;
+    let approval = approval_from(&event);
+    h.store.fail_approval_resolutions(true);
+    let error = h
+        .runtime
+        .resolve_approval(&approval.id, ApprovalDecision::AllowOnce)
+        .await
+        .expect_err("the durable decision failed");
+    assert!(matches!(error, Error::Store(_)), "{error:?}");
+
+    // Give a wrongly woken tool every opportunity to execute. The decision,
+    // registry waiter and transcript must all remain pending/pristine.
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(h.runtime.shared().approvals.pending_count(), 1);
+    assert_eq!(h.store.approvals()[0].status, "pending");
+    assert!(!h.session_messages().await.iter().any(|m| m.role == "tool"));
+
+    h.store.fail_approval_resolutions(false);
+    h.runtime
+        .resolve_approval(&approval.id, ApprovalDecision::AllowOnce)
+        .await
+        .expect("retry after the store recovers");
+    seen.extend(h.collect_until_finished().await);
+    assert_eq!(finished_status(&seen), "completed");
+    assert_eq!(
+        h.store.approvals()[0].decision.as_deref(),
+        Some("allow_once")
+    );
+    assert!(h
+        .session_messages()
+        .await
+        .iter()
+        .any(|m| m.role == "tool" && m.content.contains("allowed:allow_once")));
+}
+
+#[tokio::test]
+async fn cancellation_during_decision_persistence_expires_without_waking_the_tool() {
+    let policy = ApprovalPolicy {
+        mode: ApprovalMode::Ask,
+        timeout_secs: 30,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "run", "{}")]),
+        Script::text("unused"),
+    ])
+    .tool(ApprovalTool::shell("run", "cargo test"))
+    .settings(FakeSettings::default().with_policy(policy))
+    .build()
+    .await;
+    h.submit("cancel a resolving approval").await;
+    let (event, _seen) = wait_for_kind(&mut h, "approval_requested").await;
+    let approval = approval_from(&event);
+
+    let store_gate = h.store.gate_next("resolve_approval");
+    let runtime = Arc::clone(&h.runtime);
+    let id = approval.id.clone();
+    let resolving = tokio::spawn(async move {
+        runtime
+            .resolve_approval(&id, ApprovalDecision::AllowOnce)
+            .await
+    });
+    store_gate.wait_entered().await;
+    assert!(h.runtime.cancel(h.session()));
+    store_gate.release();
+    let result = tokio::time::timeout(Duration::from_secs(5), resolving)
+        .await
+        .expect("resolution joins")
+        .expect("resolution task did not panic");
+    assert!(matches!(result, Err(Error::NotFound(_))), "{result:?}");
+
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "cancelled");
+    assert_eq!(h.store.approvals()[0].status, "expired");
+    assert!(!h
+        .session_messages()
+        .await
+        .iter()
+        .any(|m| m.role == "tool" && m.content.starts_with("allowed:")));
+    assert_eq!(h.runtime.shared().approvals.pending_count(), 0);
+}
+
+#[tokio::test]
 async fn approval_deny_blocks_the_tool_and_the_run_continues() {
     let policy = ApprovalPolicy {
         mode: ApprovalMode::Ask,
@@ -2526,6 +2710,153 @@ async fn a_panicking_provider_fails_the_run_without_wedging_the_session() {
 
     let second = h.run_to_finish("try again").await;
     assert_eq!(finished_status(&second), "completed");
+}
+
+#[tokio::test]
+async fn a_parent_panic_reaps_children_and_clears_their_late_mail() {
+    let (child_gate, child_handle) = GateTool::pair("gate");
+    let (parent_gate, parent_handle) = GateTool::pair("parent_gate");
+    let mut h = HarnessBuilder::new(vec![
+        spawn_args(serde_json::json!({
+            "task": "child of a panic", "name": "panic-child", "background": true
+        })),
+        Script::call(&[("c_parent", "parent_gate", "{}")]),
+        Script::text("clean next answer"),
+    ])
+    .tool(Arc::new(child_gate))
+    .tool(Arc::new(parent_gate))
+    .hooks(Arc::new(PanicParentToolHook))
+    .settings(FakeSettings::default().with_subagents(fan_out_settings()))
+    .build()
+    .await;
+    h.factory.key(
+        "child of a panic",
+        vec![Script::call(&[
+            (
+                "c_mail",
+                crate::subagent::SEND_MESSAGE_TOOL,
+                "{\"message\":\"stale panic mail\"}",
+            ),
+            ("c_gate", "gate", "{}"),
+        ])],
+    );
+
+    h.submit("delegate before panic").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while child_handle.arrived() == 0 || parent_handle.arrived() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both gates must be reached"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    parent_handle.release();
+    let first = h.collect_until_finished().await;
+    assert_eq!(finished_status(&first), "failed");
+    assert_eq!(count(&first, "run_finished"), 1);
+    assert!(
+        h.wait_idle().await.is_empty(),
+        "parent and child both deregister"
+    );
+    assert_eq!(h.runtime.live_agent_count(h.session()), 0);
+    assert_eq!(h.store.agents()[0].status, "cancelled");
+
+    let second = h.run_to_finish("a fresh run after panic").await;
+    assert_eq!(finished_status(&second), "completed");
+    let messages = h.session_messages().await;
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.content.contains("stale panic mail")),
+        "mail belonging to the panicked run leaked into its successor"
+    );
+    assert!(h.wait_idle().await.is_empty());
+}
+
+#[tokio::test]
+async fn finalization_resumes_after_a_hook_panic_without_duplicate_terminal_events() {
+    let hooks = Arc::new(PanicRunEndHooks::default());
+    let mut h = HarnessBuilder::new(vec![Script::text("work completed")])
+        .hooks(hooks.clone())
+        .build()
+        .await;
+    let mut events = h.run_to_finish("finish with a broken hook").await;
+    // Include the outer recovery's post-hook frames as well.
+    events.extend(h.collect_until_quiet().await);
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(count(&events, "run_finished"), 1, "{:?}", kinds(&events));
+    assert_eq!(hooks.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(h.store.runs()[0].status, "completed");
+    assert!(h.wait_idle().await.is_empty());
+}
+
+#[tokio::test]
+async fn tool_result_and_run_end_hooks_are_cancellable() {
+    let hooks = Arc::new(BlockingHooks::default());
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("c_echo", "echo", "{}")]),
+        Script::text("unreachable"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .hooks(hooks.clone())
+    .build()
+    .await;
+    h.submit("cancel inside hook").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while hooks.tool_results.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "tool hook not entered"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    h.runtime.cancel(h.session());
+    let events = tokio::time::timeout(Duration::from_secs(2), h.collect_until_finished())
+        .await
+        .expect("cancelling a blocked hook must finish promptly");
+    assert_eq!(finished_status(&events), "cancelled");
+    assert!(h.wait_idle().await.is_empty());
+
+    let hooks = Arc::new(BlockingHooks::default());
+    let mut h = HarnessBuilder::new(vec![Script::text("final response")])
+        .hooks(hooks.clone())
+        .build()
+        .await;
+    h.submit("cancel run-end hook").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while hooks.run_ends.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "run-end hook not entered"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    h.runtime.cancel(h.session());
+    let events = tokio::time::timeout(Duration::from_secs(2), h.collect_until_finished())
+        .await
+        .expect("cancelling run-end hook must finish promptly");
+    assert_eq!(finished_status(&events), "completed");
+    assert!(h.wait_idle().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_blocked_hook_still_stops_at_the_run_deadline() {
+    let hooks = Arc::new(BlockingHooks::default());
+    let limits = Limits {
+        max_run_secs: 1,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![Script::text("done")])
+        .settings(FakeSettings::default().with_limits(limits))
+        .hooks(hooks.clone())
+        .build()
+        .await;
+    let started = tokio::time::Instant::now();
+    let events = h.run_to_finish("deadline a broken run-end hook").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(hooks.run_ends.load(Ordering::SeqCst), 1);
+    assert!(count(&events, "notice") >= 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -4026,6 +4357,59 @@ async fn a_steer_sent_mid_run_joins_the_conversation() {
     }
 }
 
+#[tokio::test]
+async fn a_final_response_steer_becomes_an_ordered_follow_up() {
+    let hooks = Arc::new(FinalResponseSteerHooks::default());
+    let mut h = HarnessBuilder::new(vec![
+        Script::text("answer before the correction"),
+        Script::text("answer with the correction"),
+    ])
+    .hooks(hooks.clone())
+    .build()
+    .await;
+    hooks.arm(&h.runtime);
+
+    h.submit("answer, but expect a late steer").await;
+    let first = h.collect_until_finished().await;
+    assert_eq!(finished_status(&first), "completed");
+    assert_eq!(count(&first, "steer_applied"), 0);
+
+    // Conversion happens during deregistration, after RunFinished. The same
+    // finishing task schedules the converted message as the very next run.
+    let second = h.collect_until_finished().await;
+    assert_eq!(finished_status(&second), "completed");
+    assert!(
+        second.iter().any(|event| matches!(
+            &event.event,
+            Event::Notice { message, .. } if message.contains("will run as follow-ups")
+        )),
+        "{:?}",
+        kinds(&second)
+    );
+
+    let users: Vec<String> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content)
+        .collect();
+    assert_eq!(
+        users,
+        vec![
+            "answer, but expect a late steer",
+            "apply the final-turn correction"
+        ]
+    );
+    let requests = h.factory.requests();
+    assert!(requests[1].messages.iter().any(|message| {
+        message.role == Role::User && message.content == "apply the final-turn correction"
+    }));
+    assert!(h.runtime.queued_steers(h.session()).is_empty());
+    assert!(h.runtime.queued_follow_ups(h.session()).is_empty());
+    assert!(h.wait_idle().await.is_empty());
+}
+
 /// A steer is *not* a trailing note: nothing may be appended after the
 /// conversation, because that makes a reasoning model deliberate instead of act.
 /// The steer must sit where a user turn belongs.
@@ -4374,6 +4758,79 @@ async fn every_queued_follow_up_runs_in_order() {
     );
 }
 
+#[tokio::test]
+async fn a_follow_up_start_failure_is_explicit_and_leaves_no_schedulerless_entry() {
+    let (parent_gate, parent_handle) = GateTool::pair("parent_gate");
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("c_queue", "queue_next", "{}")]),
+        Script::call(&[("c_parent", "parent_gate", "{}")]),
+        Script::text("unused"),
+        Script::text("manual retry recovered"),
+    ])
+    .build()
+    .await;
+    let queue_tool = FollowUpTool::boxed_many(
+        "queue_next",
+        Arc::clone(&h.runtime),
+        h.session(),
+        vec!["queued one".into(), "queued two".into()],
+    );
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(parent_gate));
+    registry.register(queue_tool);
+    h.runtime.set_tools(Arc::new(registry));
+
+    h.submit("queue before an append outage").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while parent_handle.arrived() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "parent gate not reached"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(h.runtime.queued_follow_ups(h.session()).len(), 2);
+
+    // The current run's tool-result write fails, then the scheduled run's user
+    // message write also fails. No later run remains to poll a re-queued entry.
+    h.store.fail_appends(true);
+    parent_handle.release();
+    let first = h.collect_until_finished().await;
+    assert_eq!(finished_status(&first), "failed");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if !h.runtime.has_active_run(h.session())
+            && h.runtime.queued_follow_ups(h.session()).is_empty()
+            && h.store.runs().len() == 2
+        {
+            h.store.fail_appends(false);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "failed follow-up was left pending: {:?}",
+            h.runtime.queued_follow_ups(h.session())
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let mut saw_explicit_failure = false;
+    while let Ok(event) = h.events.try_recv() {
+        if let Event::Notice { level, message } = event.event {
+            if level == "warn" && message.contains("were removed") {
+                saw_explicit_failure = true;
+            }
+        }
+    }
+    assert!(
+        saw_explicit_failure,
+        "the dropped accepted input needs a visible failure"
+    );
+    assert!(h.wait_idle().await.is_empty());
+
+    let recovered = h.run_to_finish("manual retry").await;
+    assert_eq!(finished_status(&recovered), "completed");
+}
+
 /// Queue insertion must hold the run registration lock until the entry is in
 /// the queue; otherwise teardown can drain an empty queue and strand a 202.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4651,6 +5108,126 @@ async fn every_queue_mutation_publishes_the_whole_queue() {
         other => panic!("expected queued_messages, got {other:?}"),
     }
     h.runtime.cancel(h.session());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_older_queue_snapshot_cannot_overtake_a_newer_mutation() {
+    // No provider task: a real loop could legitimately drain the new item before
+    // its delayed publisher runs, which tests consumption rather than publication.
+    // A registered run admits queue entries without any concurrent consumer.
+    let mut h = HarnessBuilder::new(vec![]).build().await;
+    let synthetic = Arc::new(crate::RunState::new(
+        RunId::new(),
+        SessionId::from_string(h.session()),
+        None,
+        CancellationToken::new(),
+        true,
+    ));
+    let synthetic_key = synthetic.key();
+    h.runtime
+        .inner
+        .runs
+        .lock()
+        .expect("runs lock")
+        .insert(synthetic_key.clone(), synthetic);
+    let old = h.steer("old");
+    loop {
+        let event = h.next_event().await;
+        if matches!(&event.event, Event::QueuedMessages { steers, .. } if steers.iter().any(|m| m.id == old.id))
+        {
+            break;
+        }
+    }
+
+    let inner = Arc::clone(h.runtime.shared());
+    // Blocking sequence publication holds the first publisher *after* it has
+    // constructed the empty snapshot. While that publisher waits, a newer
+    // accepted steer becomes visible in the actual map.
+    let sequence = inner.seq.lock().expect("sequence lock");
+    let runtime = Arc::clone(&h.runtime);
+    let session = h.session().to_string();
+    let old_id = old.id.clone();
+    let recall = std::thread::spawn(move || runtime.recall_queued(&session, &old_id));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if inner.queue_publication.try_lock().is_err() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first publisher did not enter"
+        );
+        std::thread::yield_now();
+    }
+    let runtime = Arc::clone(&h.runtime);
+    let session = h.session().to_string();
+    let newer = std::thread::spawn(move || runtime.steer(&session, "new"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if h.runtime
+            .queued_steers(h.session())
+            .iter()
+            .any(|m| m.content == "new")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "newer mutation was not admitted"
+        );
+        std::thread::yield_now();
+    }
+    // The newer mutation must be waiting behind the older snapshot, not
+    // constructing/publishing independently out of order.
+    assert!(!newer.is_finished());
+    drop(sequence);
+    recall.join().unwrap().expect("recall old message");
+    let new_message = newer.join().unwrap().expect("admit new message");
+    let steers_after_join = h.runtime.queued_steers(h.session());
+    let follow_ups_after_join = h.runtime.queued_follow_ups(h.session());
+
+    // Both OS-thread joins guarantee their events are already buffered. Read by
+    // sequence rather than assuming they are the only queue frames: an ordinary
+    // loop drain may publish an additional empty frame around them.
+    let mut empty_snapshot_seq = None;
+    let mut new_snapshot_seq = None;
+    let mut observed = Vec::new();
+    while let Ok(event) = h.events.try_recv() {
+        if let Event::QueuedMessages { steers, .. } = event.event {
+            let contents: Vec<String> = steers.iter().map(|m| m.content.clone()).collect();
+            if contents.is_empty() && empty_snapshot_seq.is_none() {
+                empty_snapshot_seq = Some(event.seq);
+            }
+            if contents.iter().any(|content| content == "new") {
+                new_snapshot_seq = Some(event.seq);
+            }
+            observed.push((event.seq, contents));
+        } else {
+            observed.push((event.seq, vec![format!("OTHER {:?}", event.event)]));
+        }
+    }
+    let empty_snapshot_seq = empty_snapshot_seq.expect("recall's old empty snapshot");
+    let new_snapshot_seq = new_snapshot_seq.unwrap_or_else(|| {
+        panic!(
+            "the newer queue-content snapshot; observed={observed:?}; steers={steers_after_join:?}; follow_ups={follow_ups_after_join:?}"
+        )
+    });
+    assert!(
+        empty_snapshot_seq < new_snapshot_seq,
+        "old state followed the newer state: {observed:?}"
+    );
+
+    h.runtime
+        .recall_queued(h.session(), &new_message.id)
+        .expect("remove the synthetic queued entry");
+    h.runtime
+        .inner
+        .runs
+        .lock()
+        .expect("runs lock")
+        .remove(&synthetic_key);
+    assert!(h.runtime.queued_steers(h.session()).is_empty());
+    assert!(h.runtime.queued_follow_ups(h.session()).is_empty());
 }
 
 /// A queued message may not carry an unbounded chip list: the queue is memory
@@ -5139,6 +5716,109 @@ async fn a_rewind_refuses_while_a_run_is_in_flight() {
     assert!(err.to_string().contains("run in flight"), "{err}");
     h.runtime.cancel(h.session());
     h.wait_idle().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rewind_and_retry_exclude_a_competing_submit_across_the_store_barrier() {
+    let mut h = HarnessBuilder::new(vec![Script::text("original answer"), Script::Hang(vec![])])
+        .build()
+        .await;
+    let initial = h.run_to_finish("original question").await;
+    assert_eq!(finished_status(&initial), "completed");
+    let prompt_id = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "user" && m.content == "original question")
+        .expect("original prompt")
+        .id;
+
+    let rewind_gate = h.store.gate_next("rewind");
+    let runtime = Arc::clone(&h.runtime);
+    let session = h.session().to_string();
+    let retry = tokio::spawn(async move {
+        runtime
+            .rewind_and_run(&session, prompt_id, false, "replacement question".into())
+            .await
+    });
+    rewind_gate.wait_entered().await;
+
+    let runtime = Arc::clone(&h.runtime);
+    let session = h.session().to_string();
+    let competing =
+        tokio::spawn(async move { runtime.submit(&session, "interloper question".into()).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !competing.is_finished(),
+        "competing submit crossed the held rewind barrier"
+    );
+    assert_eq!(
+        h.store.runs().len(),
+        1,
+        "no replacement/interloper row exists yet"
+    );
+    assert!(!h
+        .session_messages()
+        .await
+        .iter()
+        .any(|m| m.content == "interloper question"));
+
+    rewind_gate.release();
+    let retry = tokio::time::timeout(Duration::from_secs(5), retry)
+        .await
+        .expect("retry joins")
+        .expect("retry task did not panic")
+        .expect("retry and replacement run succeed together");
+    assert!(retry.run_id.is_some());
+    let competing = tokio::time::timeout(Duration::from_secs(5), competing)
+        .await
+        .expect("competing submit joins")
+        .expect("competing task did not panic");
+    assert!(
+        matches!(competing, Err(Error::BadRequest(ref message)) if message.contains("already active")),
+        "the replacement must already be registered when the other submit enters: {competing:?}"
+    );
+    assert!(!h
+        .session_messages()
+        .await
+        .iter()
+        .any(|m| m.content == "interloper question"));
+
+    h.runtime.cancel(h.session());
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "cancelled");
+    assert!(h.wait_idle().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_cancelled_but_unwinding_run_still_blocks_rewind() {
+    let mut h = HarnessBuilder::new(vec![Script::Hang(vec![])])
+        .build()
+        .await;
+    h.submit("cancel, then try to rewind").await;
+    let prompt_id = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|m| m.role == "user")
+        .expect("prompt")
+        .id;
+    let finish_gate = h.store.gate_next("finish_run");
+    assert!(h.runtime.cancel(h.session()));
+    finish_gate.wait_entered().await;
+    assert!(!h.runtime.is_running(h.session()));
+    assert!(h.runtime.has_active_run(h.session()) || !h.runtime.active_runs().is_empty());
+
+    let error = h
+        .runtime
+        .rewind(h.session(), prompt_id, false, true)
+        .await
+        .expect_err("cancelled is not quiescent until terminal storage finishes");
+    assert!(error.to_string().contains("unwinding"), "{error}");
+    finish_gate.release();
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "cancelled");
+    assert!(h.wait_idle().await.is_empty());
 }
 
 #[tokio::test]

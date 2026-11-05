@@ -76,7 +76,15 @@ pub(crate) struct StoreJournal {
 #[derive(Default)]
 struct PendingRows {
     /// Ids of rows written since the last `bind_message`.
-    unbound: Vec<i64>,
+    unbound: Vec<PendingBinding>,
+}
+
+struct PendingBinding {
+    id: i64,
+    /// Set by the first bind attempt and preserved across retries. Reassigning
+    /// a failed row to a later tool result would move the write forward on the
+    /// transcript timeline and could exclude it from an intermediate rewind.
+    message_id: Option<i64>,
 }
 
 impl StoreJournal {
@@ -104,33 +112,52 @@ impl StoreJournal {
     /// file in one turn produce two rows, and both belong to the same result;
     /// that is correct, because undoing the result undoes both.
     pub(crate) async fn bind_message(&self, message_id: i64) {
-        let ids = {
+        let batches = {
             let mut pending = self.pending.lock().expect("journal lock");
-            std::mem::take(&mut pending.unbound)
+            for row in &mut pending.unbound {
+                if row.message_id.is_none() {
+                    row.message_id = Some(message_id);
+                }
+            }
+            let mut batches: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for row in &pending.unbound {
+                if let Some(target) = row.message_id {
+                    batches.entry(target).or_default().push(row.id);
+                }
+            }
+            batches
         };
-        if ids.is_empty() {
+
+        // Do not remove an id until the store confirms its whole batch. A
+        // failure leaves it pending with its original target so the next result
+        // retries it rather than silently losing or moving the checkpoint.
+        for (target, ids) in batches {
+            let failure = match self.store.bind_checkpoints(&ids, target).await {
+                Ok(bound) if bound == ids.len() => {
+                    self.pending
+                        .lock()
+                        .expect("journal lock")
+                        .unbound
+                        .retain(|row| !ids.contains(&row.id));
+                    continue;
+                }
+                Ok(bound) => format!("store bound {bound} of {} checkpoints", ids.len()),
+                Err(e) => e.to_string(),
+            };
+            tracing::warn!(
+                checkpoints = ?ids,
+                message_id = target,
+                error = %failure,
+                "could not place journal rows on the transcript timeline; they remain pending and unbound rows are included in the rewound region"
+            );
             return;
         }
-        // The runtime's `Store` trait has no "update a checkpoint" verb: a journal
-        // row is written once. So the row is rewritten rather than patched, which
-        // is the same cost as the insert and keeps the trait surface small.
-        for id in ids {
-            if let Err(e) = self.store.set_checkpoint_message_id(id, message_id).await {
-                tracing::warn!(
-                    checkpoint = id,
-                    message_id,
-                    error = %e,
-                    "could not place a journal row on the transcript timeline; \
-                     it will be treated as part of the rewound region"
-                );
-            }
-        }
     }
-}
 
-#[async_trait::async_trait]
-impl JournalHandle for StoreJournal {
-    async fn record(&self, rel: &str, tool: &str) {
+    /// Capture and persist one before-image, returning whether a rewind can
+    /// actually restore it. Persisting a `capture_failed` marker is valuable for
+    /// visibility, but is not a successful restorable capture.
+    async fn capture(&self, rel: &str, tool: &str) -> bool {
         let captured = match self.workspace.resolve_existing(rel) {
             Ok(abs) => capture_file(&abs),
             // A file the tool is about to create does not resolve as "existing",
@@ -138,6 +165,7 @@ impl JournalHandle for StoreJournal {
             // what undoing the create needs.
             Err(_) => capture_file(&self.workspace.root().join(rel)),
         };
+        let restorable = !captured.failed;
         let row = FileCheckpoint {
             id: 0,
             session_id: self.session_id.0.clone(),
@@ -155,19 +183,49 @@ impl JournalHandle for StoreJournal {
             created_at: 0,
         };
         match self.store.record_checkpoint(&row).await {
-            Ok(id) => self.pending.lock().expect("journal lock").unbound.push(id),
-            Err(e) => tracing::warn!(
-                path = rel,
-                tool,
-                error = %e,
-                "could not journal a file change; a rewind will report it as unrestorable"
-            ),
+            Ok(id) => {
+                self.pending
+                    .lock()
+                    .expect("journal lock")
+                    .unbound
+                    .push(PendingBinding {
+                        id,
+                        message_id: None,
+                    });
+                if !restorable {
+                    tracing::warn!(
+                        path = rel,
+                        tool,
+                        checkpoint = id,
+                        "before-image is not capturable; recorded that this path is unrestorable"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = rel,
+                    tool,
+                    error = %e,
+                    "could not persist a file before-image; this change cannot be restored by rewind"
+                );
+                return false;
+            }
         }
+        restorable
+    }
+}
+
+#[async_trait::async_trait]
+impl JournalHandle for StoreJournal {
+    async fn record(&self, rel: &str, tool: &str) {
+        // Recording is deliberately best-effort for ordinary file tools. The
+        // error log is honest about the missing row; callers that must refuse an
+        // unrestorable write use `capture_path` and observe the same false result.
+        let _ = self.capture(rel, tool).await;
     }
 
     async fn capture_path(&self, rel: &str, tool: &str) -> bool {
-        self.record(rel, tool).await;
-        true
+        self.capture(rel, tool).await
     }
 }
 
@@ -441,10 +499,25 @@ pub(crate) async fn rewind(
     revert: bool,
     keep_prompt: bool,
 ) -> Result<(RewindPoint, RewindPreview, Vec<UndoOutcome>)> {
+    let _lifecycle = runtime.shared().lock_session_lifecycle(session_id).await;
+    rewind_quiescent(runtime, session_id, message_id, revert, keep_prompt).await
+}
+
+/// Rewind while the caller owns this session's lifecycle guard. The guard makes
+/// this registered-run check and all mutations indivisible with respect to a
+/// concurrent submit. Cancelled loops count until they have deregistered: their
+/// last tool results and terminal status can still be in flight.
+pub(crate) async fn rewind_quiescent(
+    runtime: &Arc<Runtime>,
+    session_id: &str,
+    message_id: i64,
+    revert: bool,
+    keep_prompt: bool,
+) -> Result<(RewindPoint, RewindPreview, Vec<UndoOutcome>)> {
     let inner = runtime.shared();
-    if runtime.is_running(session_id) {
+    if runtime.has_registered_runs(session_id) {
         return Err(Error::BadRequest(format!(
-            "session {session_id} has a run in flight; cancel it before rewinding"
+            "session {session_id} has a run in flight or still unwinding; wait for it to finish before rewinding"
         )));
     }
 
@@ -492,4 +565,130 @@ pub(crate) async fn rewind(
     inner.deps.store.touch_session(session_id).await?;
 
     Ok((point, preview, outcomes))
+}
+
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+    use crate::tests_support::FakeStore;
+    use std::path::{Path, PathBuf};
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("kc-journal-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).expect("create journal temp dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn journal(root: &Path) -> (Arc<StoreJournal>, Arc<FakeStore>) {
+        let store = Arc::new(FakeStore::new());
+        let workspace = Arc::new(Workspace::new(root).expect("journal workspace"));
+        let journal = StoreJournal::new(
+            store.clone(),
+            SessionId::from_string("s_journal"),
+            RunId::from_string("r_journal"),
+            None,
+            workspace,
+        );
+        (journal, store)
+    }
+
+    #[tokio::test]
+    async fn capture_path_reports_a_failed_checkpoint_insert() {
+        let tmp = TempDir::new();
+        std::fs::write(tmp.path.join("file.txt"), "before\n").unwrap();
+        let (journal, store) = journal(&tmp.path);
+        store.fail_checkpoints(true);
+
+        assert!(
+            !journal.capture_path("file.txt", "write_file").await,
+            "a failed DB insert is not a landed capture"
+        );
+        assert!(store
+            .list_checkpoints("s_journal", 0)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            journal.pending.lock().unwrap().unbound.is_empty(),
+            "there is no row id to bind after a failed insert"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_path_refuses_an_uncapturable_write_but_leaves_visible_evidence() {
+        let tmp = TempDir::new();
+        std::fs::write(tmp.path.join("binary.bin"), [0xff, 0xfe]).unwrap();
+        let (journal, store) = journal(&tmp.path);
+
+        assert!(
+            !journal.capture_path("binary.bin", "write_file").await,
+            "persisting an unrestorable marker is not a restorable capture"
+        );
+        let rows = store.list_checkpoints("s_journal", 0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].capture_failed);
+        let point = RewindPoint {
+            session_id: "s_journal".into(),
+            user_message_id: 1,
+            prompt: "write binary".into(),
+            keep_through: 0,
+            before_prompt: 0,
+            messages_removed: 1,
+        };
+        let preview = summarize("s_journal", &point, &rows, Vec::new());
+        assert!(preview.incomplete);
+        assert!(preview.files[0].incomplete);
+
+        let rewinder = Rewinder::new(
+            store.clone(),
+            Arc::new(Workspace::new(&tmp.path).expect("workspace")),
+        );
+        assert_eq!(rewinder.revert(&rows).await, vec![UndoOutcome::NotCaptured]);
+        assert_eq!(
+            store.list_checkpoints("s_journal", 0).await.unwrap().len(),
+            1,
+            "an unrestorable row is retained and remains visible to the next preview"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_checkpoint_binding_retains_ids_and_their_original_message() {
+        let tmp = TempDir::new();
+        std::fs::write(tmp.path.join("first.txt"), "before\n").unwrap();
+        std::fs::write(tmp.path.join("second.txt"), "before\n").unwrap();
+        let (journal, store) = journal(&tmp.path);
+        assert!(journal.capture_path("first.txt", "write_file").await);
+        store.fail_checkpoint_binds(true);
+
+        journal.bind_message(10).await;
+        assert_eq!(
+            store.list_checkpoints("s_journal", 0).await.unwrap()[0].message_id,
+            0
+        );
+        assert_eq!(journal.pending.lock().unwrap().unbound.len(), 1);
+
+        store.fail_checkpoint_binds(false);
+        assert!(journal.capture_path("second.txt", "write_file").await);
+        journal.bind_message(11).await;
+        let mut rows = store.list_checkpoints("s_journal", 0).await.unwrap();
+        rows.sort_by_key(|row| row.id);
+        assert_eq!(
+            rows.iter().map(|r| r.message_id).collect::<Vec<_>>(),
+            [10, 11]
+        );
+        assert!(journal.pending.lock().unwrap().unbound.is_empty());
+    }
 }

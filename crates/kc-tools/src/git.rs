@@ -3,7 +3,7 @@
 
 use kc_core::paths::Workspace;
 use kc_core::{Error, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const GIT_STDOUT_LIMIT: usize = 1024 * 1024;
 const GIT_STDERR_LIMIT: usize = 64 * 1024;
@@ -430,12 +430,23 @@ pub fn literal_pathspec_env() -> [(String, String); 1] {
     [("GIT_LITERAL_PATHSPECS".to_string(), "1".to_string())]
 }
 
+/// Resolve a git pathspec without requiring the selected path still to exist.
+///
+/// `resolve_existing` rejects precisely the deleted tracked file a narrowed
+/// status/diff most needs to show. `resolve_for_write` supplies the required
+/// lexical root check and canonicalises the deepest existing ancestor, including
+/// symlink confinement; it does not create anything, so it is safe for these
+/// read-only commands too.
+fn resolve_git_target(ws: &Workspace, path: Option<&str>) -> Result<PathBuf> {
+    ws.resolve_for_write(path.unwrap_or("."))
+}
+
 /// Where the workspace sits inside its repository.
 ///
 /// `Ok(None)` is "not a git repository" - the caller reports `is_repo: false`
 /// exactly as before, so the answer for a non-repository workspace is unchanged.
 async fn repo_scope(ws: &Workspace, path: Option<&str>) -> Result<Option<Scope>> {
-    let target = ws.resolve_existing(path.unwrap_or("."))?;
+    let target = resolve_git_target(ws, path)?;
     // A file argument selects the file; a directory (or the default `.`) selects
     // the subtree, so the pathspec is the argument itself either way.
     let target_rel = ws.relative(&target);
@@ -492,7 +503,7 @@ pub async fn status(ws: &Workspace, path: Option<&str>) -> Result<StatusReport> 
             text: format!(
                 "is_repo: false — `{}` is not inside a git repository (or git is not initialised). \
                  No branch or changes are available.",
-                ws.relative(&ws.resolve_existing(path.unwrap_or("."))?)
+                ws.relative(&resolve_git_target(ws, path)?)
             ),
         });
     };
@@ -658,7 +669,7 @@ pub async fn diff(
     };
 
     let Some(scope) = repo_scope(ws, path).await? else {
-        let rel = ws.relative(&ws.resolve_existing(path.unwrap_or("."))?);
+        let rel = ws.relative(&resolve_git_target(ws, path)?);
         return Ok(DiffReport {
             text: format!(
                 "is_repo: false — `{rel}` is not inside a git repository (or git is not initialised)."

@@ -15,6 +15,8 @@ const TerminalSurfaceLazy = lazy(() =>
   import('./TerminalSurface').then((module) => ({ default: module.TerminalSurface })),
 );
 
+type TerminalActivationOrigin = 'keyboard' | 'pointer';
+
 /**
  * The terminal tab: a real shell in a real PTY, drawn by xterm.js.
  *
@@ -31,6 +33,18 @@ export function TerminalTab(): JSX.Element {
   const error = terminalsState.terminalsError.value;
   const atBudget = terminalsState.atTerminalBudget.value;
   const budget = terminalsState.terminalBudget.value;
+  // The keyed surface must know why it mounted. Pointer activation moves into
+  // the shell; APG automatic keyboard activation must leave focus on the tab so
+  // the next Arrow key still belongs to the tablist.
+  const [activation, setActivation] = useState<{
+    id: string;
+    origin: TerminalActivationOrigin;
+  } | null>(null);
+
+  const select = useCallback((id: string, origin: TerminalActivationOrigin): void => {
+    setActivation({ id, origin });
+    terminalsState.selectTerminal(id);
+  }, []);
 
   // One fetch on mount. The list is server-owned, so there is no polling: a
   // second browser's create shows up on the next mount or the next mutation.
@@ -96,18 +110,34 @@ export function TerminalTab(): JSX.Element {
         activeId={active?.id ?? null}
         atBudget={atBudget}
         budget={budget}
+        onSelect={select}
       />
       {active ? (
         <Suspense
           fallback={
-            <div class="terminal-empty" aria-busy="true" aria-label="Loading the terminal">
+            // The selected tab's `aria-controls` must resolve even while the
+            // lazily-loaded emulator chunk is still arriving, so the fallback
+            // carries the same panel id and label the surface will take over.
+            <div
+              class="terminal-empty"
+              id={`terminal-panel-${active.id}`}
+              role="tabpanel"
+              aria-labelledby={`terminal-tab-${active.id}`}
+              aria-busy="true"
+              aria-label="Loading the terminal"
+              tabIndex={-1}
+            >
               <div class="terminal-empty-inner">
                 <div class="skeleton skeleton-turn" />
               </div>
             </div>
           }
         >
-          <TerminalSurfaceLazy key={active.id} terminal={active} />
+          <TerminalSurfaceLazy
+            key={active.id}
+            terminal={active}
+            autoFocus={activation?.id !== active.id || activation.origin !== 'keyboard'}
+          />
         </Suspense>
       ) : (
         <div class="terminal-empty">
@@ -141,15 +171,18 @@ function TerminalStrip({
   activeId,
   atBudget,
   budget,
+  onSelect,
 }: {
   list: Terminal[];
   activeId: string | null;
   atBudget: boolean;
   budget: number;
+  onSelect: (id: string, origin: TerminalActivationOrigin) => void;
 }): JSX.Element {
   const statuses = terminalsState.terminalStatus.value;
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const chipsRef = useRef<HTMLDivElement>(null);
 
   const create = async (): Promise<void> => {
     setCreating(true);
@@ -160,25 +193,70 @@ function TerminalStrip({
     }
   };
 
+  // Measured by hand rather than with `scrollIntoView`, which would also scroll
+  // the workspace around the strip. A chip that already fits leaves `scrollLeft`
+  // alone, so selecting a visible tab never nudges the strip; jsdom reports zero
+  // rects, which makes this a no-op there.
+  const revealTab = (id: string | null): void => {
+    const strip = chipsRef.current;
+    if (!strip || id === null) return;
+    const tab = document.getElementById(`terminal-tab-${id}`);
+    if (!tab || !strip.contains(tab)) return;
+    const stripBox = strip.getBoundingClientRect();
+    const tabBox = tab.getBoundingClientRect();
+    if (tabBox.left < stripBox.left) strip.scrollLeft -= stripBox.left - tabBox.left;
+    else if (tabBox.right > stripBox.right) strip.scrollLeft += tabBox.right - stripBox.right;
+  };
+
+  // A terminal can become selected without a pointer - an arrow key, a keyboard
+  // focus, a tab created elsewhere - and a selection off-screen is a selection
+  // the user cannot see. The strip scrolls (terminal.css) rather than wrapping,
+  // so this is what keeps the active chip reachable.
+  useEffect(() => {
+    revealTab(activeId);
+  }, [activeId, list.length, renamingId]);
+
+  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
+    // Only the tabs own the arrow keys: the rename field and the chip actions
+    // live inside this tablist too, and Home/End in a text field must move the
+    // caret, not the selection.
+    const target = event.target as HTMLElement | null;
+    if (!target || target.getAttribute('role') !== 'tab') return;
+    const index = list.findIndex((terminal) => terminal.id === activeId);
+    if (index === -1 || list.length === 0) return;
+    let next = index;
+    if (event.key === 'ArrowRight') next = (index + 1) % list.length;
+    else if (event.key === 'ArrowLeft') next = (index - 1 + list.length) % list.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = list.length - 1;
+    else return;
+    event.preventDefault();
+    const targetTerminal = list[next];
+    if (!targetTerminal) return;
+    onSelect(targetTerminal.id, 'keyboard');
+    // Automatic activation moves focus with the selection, so the next arrow key
+    // is handled by the newly selected tab.
+    document.getElementById(`terminal-tab-${targetTerminal.id}`)?.focus();
+  };
+
   return (
     <div class="terminal-strip">
-      <div class="terminal-chips" role="tablist" aria-label="Terminals">
+      <div
+        ref={chipsRef}
+        class="terminal-chips"
+        role="tablist"
+        aria-label="Terminals"
+        aria-orientation="horizontal"
+        onKeyDown={onKeyDown}
+      >
         {list.map((terminal) => {
           const selected = terminal.id === activeId;
           const status = statuses[terminal.id];
-          if (renamingId === terminal.id) {
-            return (
-              <TerminalRenameInput
-                key={terminal.id}
-                terminal={terminal}
-                onDone={() => setRenamingId(null)}
-              />
-            );
-          }
+          const renaming = renamingId === terminal.id;
           return (
             <div
               key={terminal.id}
-              class={`terminal-chip${selected ? ' is-active' : ''}`}
+              class={`terminal-chip${selected ? ' is-active' : ''}${renaming ? ' is-renaming' : ''}`}
               data-status={status ?? 'idle'}
             >
               <button
@@ -186,11 +264,15 @@ function TerminalStrip({
                 role="tab"
                 id={`terminal-tab-${terminal.id}`}
                 aria-selected={selected}
-                aria-controls={`terminal-panel-${terminal.id}`}
+                // Only the selected terminal has a mounted panel; pointing the
+                // other tabs at an id that does not exist makes the tablist
+                // describe controls the document never renders.
+                aria-controls={selected ? `terminal-panel-${terminal.id}` : undefined}
                 tabIndex={selected ? 0 : -1}
                 class="terminal-chip-select"
                 title={`${terminal.title} — ${terminal.cwd}`}
-                onClick={() => terminalsState.selectTerminal(terminal.id)}
+                onClick={() => onSelect(terminal.id, 'pointer')}
+                onFocus={() => revealTab(terminal.id)}
                 onDblClick={() => setRenamingId(terminal.id)}
               >
                 <span class="terminal-dot" aria-hidden="true" />
@@ -201,24 +283,33 @@ function TerminalStrip({
                   </span>
                 )}
               </button>
-              <button
-                type="button"
-                class="terminal-chip-action"
-                aria-label={`Rename ${terminal.title}`}
-                title="Rename"
-                onClick={() => setRenamingId(terminal.id)}
-              >
-                <EditIcon size={11} />
-              </button>
-              <button
-                type="button"
-                class="terminal-chip-action"
-                aria-label={`Close ${terminal.title}`}
-                title="Close (ends the shell)"
-                onClick={() => void terminalsState.closeTerminal(terminal.id)}
-              >
-                <CloseIcon size={11} />
-              </button>
+              {renaming ? (
+                <TerminalRenameInput
+                  terminal={terminal}
+                  onDone={() => setRenamingId(null)}
+                />
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    class="terminal-chip-action"
+                    aria-label={`Rename ${terminal.title}`}
+                    title="Rename"
+                    onClick={() => setRenamingId(terminal.id)}
+                  >
+                    <EditIcon size={11} />
+                  </button>
+                  <button
+                    type="button"
+                    class="terminal-chip-action"
+                    aria-label={`Close ${terminal.title}`}
+                    title="Close (ends the shell)"
+                    onClick={() => void terminalsState.closeTerminal(terminal.id)}
+                  >
+                    <CloseIcon size={11} />
+                  </button>
+                </>
+              )}
             </div>
           );
         })}
@@ -267,27 +358,25 @@ function TerminalRenameInput({
   };
 
   return (
-    <div class="terminal-chip is-renaming">
-      <input
-        ref={inputRef}
-        class="terminal-rename-input"
-        value={value}
-        aria-label={`Rename ${terminal.title}`}
-        maxLength={80}
-        onInput={(event) => setValue((event.target as HTMLInputElement).value)}
-        onBlur={commit}
-        onKeyDown={(event) => {
-          // The app-wide Escape handler stops a run; this field owns it first.
-          event.stopPropagation();
-          if (event.key === 'Enter') {
-            event.preventDefault();
-            commit();
-          } else if (event.key === 'Escape') {
-            event.preventDefault();
-            onDone();
-          }
-        }}
-      />
-    </div>
+    <input
+      ref={inputRef}
+      class="terminal-rename-input"
+      value={value}
+      aria-label={`Rename ${terminal.title}`}
+      maxLength={80}
+      onInput={(event) => setValue((event.target as HTMLInputElement).value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        // The app-wide Escape handler stops a run; this field owns it first.
+        event.stopPropagation();
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          commit();
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          onDone();
+        }
+      }}
+    />
   );
 }

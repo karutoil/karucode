@@ -45,8 +45,8 @@
 #   0  installed, and (when systemd was requested) the service is running
 #   1  usage, download, verification or install failure - the unit, the drop-in
 #      and the binary are rolled back to what was there before this run
-#   2  the binary and unit are installed but the service did not stay up; see
-#      the checklist printed at the end
+#   2  the service did not stay active or return an expected health status; the
+#      previous binary and unit are restored before this run exits
 
 set -eu
 
@@ -221,8 +221,11 @@ BIN_DIR=""
 UNIT_BAK=""
 DROPIN_BAK=""
 BIN_BAK=""
+BIN_PENDING=""
 BIN_INSTALLED=0
 ROLLBACK=""
+DID_START=0
+was_active="inactive"
 
 # --- output -----------------------------------------------------------------
 
@@ -614,16 +617,45 @@ restore_unit() {
     ROLLBACK=""
 }
 
+restore_binary() {
+    [ "$BIN_INSTALLED" -eq 1 ] || return 0
+    _target="${BIN_DIR}/karucode"
+    if [ -n "$BIN_BAK" ] && [ -f "$BIN_BAK" ]; then
+        # Build the restoration beside the target, then rename it. Neither cp nor
+        # install writes over the running executable: the old inode stays valid
+        # until systemd stops it, and readers see either complete binary.
+        _pending="$(mktemp "${BIN_DIR}/.karucode.restore.XXXXXX" 2>/dev/null)" || _pending=""
+        if [ -n "$_pending" ] && install -m 0755 "$BIN_BAK" "$_pending" \
+            && mv -f "$_pending" "$_target"; then
+            warn "restored the previous binary at ${_target}"
+        else
+            [ -z "$_pending" ] || rm -f "$_pending"
+            warn "could not restore ${_target}; the previous binary is at ${BIN_BAK}"
+            warn "stop the service, install that copy to a temporary file in ${BIN_DIR}, then mv it onto karucode"
+        fi
+    else
+        rm -f "$_target" && warn "removed the binary installed by this failed run"
+    fi
+    BIN_INSTALLED=0
+}
+
 finish() {
     _rc=$?
     trap - EXIT INT TERM HUP
     if [ "$_rc" -ne 0 ]; then
         restore_unit
-        if [ -n "$BIN_BAK" ] && [ -f "$BIN_BAK" ]; then
-            warn "the previous binary is kept at ${BIN_BAK}"
-            warn "roll back with: cp -p ${BIN_BAK} ${BIN_DIR}/karucode"
+        restore_binary
+        # A failed start or health check may still have the new executable mapped.
+        # Put the old process back too; a restored pathname alone does not do that.
+        if [ "${USE_SYSTEMD:-0}" -eq 1 ] && [ "${DID_START:-0}" -eq 1 ]; then
+            if [ "${was_active:-inactive}" = "active" ]; then
+                systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+            else
+                systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+            fi
         fi
     fi
+    [ -z "$BIN_PENDING" ] || rm -f "$BIN_PENDING"
     if [ -n "$TMPDIR_" ] && [ -d "$TMPDIR_" ]; then
         rm -rf "$TMPDIR_"
     fi
@@ -787,7 +819,7 @@ if [ -z "$WORKSPACE" ]; then
 fi
 
 if [ "$DATA_DIR_EXPLICIT" -eq 0 ] && [ -n "$PREV_DATA_DIR" ] \
-    && [ -z "$PREV_USER" -o "$SERVICE_USER" = "$PREV_USER" ]; then
+    && { [ -z "$PREV_USER" ] || [ "$SERVICE_USER" = "$PREV_USER" ]; }; then
     DATA_DIR="$PREV_DATA_DIR"
     # Signals "carried over" to the data-dir resolution below, which must not
     # recompute it from the account's home.
@@ -1126,7 +1158,13 @@ fi
 
 if [ -f "${BIN_DIR}/karucode" ] && [ "$DRY_RUN" -eq 0 ]; then
     BIN_BAK="${BIN_DIR}/karucode.old"
-    cp -p "${BIN_DIR}/karucode" "$BIN_BAK" || warn "could not keep a copy of the previous binary"
+    _backup_pending="$(mktemp "${BIN_DIR}/.karucode.old.XXXXXX" 2>/dev/null)" \
+        || die "could not create a backup beside ${BIN_DIR}/karucode; leaving it untouched"
+    if ! cp -p "${BIN_DIR}/karucode" "$_backup_pending" \
+        || ! mv -f "$_backup_pending" "$BIN_BAK"; then
+        rm -f "$_backup_pending"
+        die "could not preserve the previous binary; leaving it untouched"
+    fi
 fi
 if same_file "$NEW_BINARY" "${BIN_DIR}/karucode"; then
     info "${BIN_DIR}/karucode is already this file; leaving it in place"
@@ -1135,14 +1173,21 @@ else
         info "would install ${BIN_DIR}/karucode"
     else
         info "installing ${BIN_DIR}/karucode"
+        # Rename a complete file over the destination. Writing directly to a
+        # running ELF can fail with ETXTBSY or leave a partial executable behind.
+        BIN_PENDING="$(mktemp "${BIN_DIR}/.karucode.new.XXXXXX" 2>/dev/null)" \
+            || die "could not stage the new binary beside ${BIN_DIR}/karucode"
+        install -m 0755 "$NEW_BINARY" "$BIN_PENDING" \
+            || die "could not stage the binary to ${BIN_DIR}"
+        mv -f "$BIN_PENDING" "${BIN_DIR}/karucode" \
+            || die "could not move the new binary into place"
+        BIN_PENDING=""
+        BIN_INSTALLED=1
     fi
-    run install -m 0755 "$NEW_BINARY" "${BIN_DIR}/karucode" \
-        || die "could not install the binary to ${BIN_DIR}"
 fi
 
 # --- systemd: user, directories, env file, unit, drop-in --------------------
 
-was_active="inactive"
 if [ "$USE_SYSTEMD" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
     was_active="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
     if [ -z "$was_active" ]; then
@@ -1330,7 +1375,6 @@ fi
 
 # --- start / restart --------------------------------------------------------
 
-DID_START=0
 STARTED=0
 ENABLED_STATE=""
 if [ "$USE_SYSTEMD" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
@@ -1382,13 +1426,16 @@ fi
 # --- health probe -----------------------------------------------------------
 
 health_line=""
+HEALTH_OK=0
 if [ "$USE_SYSTEMD" -eq 1 ] && [ "$DRY_RUN" -eq 0 ] && [ "$STARTED" -eq 1 ]; then
     probe_host="${HOST_ARG:-127.0.0.1}"
     case "$probe_host" in
         0.0.0.0|'*'|'::'|'[::]') probe_host="127.0.0.1" ;;
     esac
     probe_port="${PORT_ARG:-8787}"
-    if command -v curl >/dev/null 2>&1; then
+    if ! command -v curl >/dev/null 2>&1; then
+        health_line="curl is required to verify /api/health"
+    else
         # `systemctl start` returns as soon as the process is spawned
         # (Type=simple) and binding the port happens a moment later, so poll
         # instead of probing once and reporting a race as a failure.
@@ -1397,22 +1444,45 @@ if [ "$USE_SYSTEMD" -eq 1 ] && [ "$DRY_RUN" -eq 0 ] && [ "$STARTED" -eq 1 ]; the
         while [ "$_tries" -lt 15 ]; do
             code="$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://${probe_host}:${probe_port}/api/health" 2>/dev/null)" || code=""
             case "$code" in
-                200|401|403) break ;;
+                200|401) break ;;
             esac
             _tries=$((_tries + 1))
             sleep 1
         done
         case "$code" in
-            200) health_line="ok (HTTP 200 on http://${probe_host}:${probe_port}/api/health)" ;;
-            401) health_line="ok (HTTP 401: up, and /api/health wants a token)" ;;
-            403) health_line="up, but the Host header was refused (HTTP 403); see KARUCODE_ALLOWED_HOSTS" ;;
+            200)
+                HEALTH_OK=1
+                health_line="ok (HTTP 200 on http://${probe_host}:${probe_port}/api/health)"
+                ;;
+            401)
+                # Auth is in front of the health route. This one status is an
+                # intentional success when a token-protected install cannot probe
+                # with its secret; every other non-200 response is a failure.
+                HEALTH_OK=1
+                health_line="reachable (HTTP 401: /api/health requires a token)"
+                ;;
+            403) health_line="HTTP 403: the Host header was refused; see KARUCODE_ALLOWED_HOSTS" ;;
             '')  health_line="no answer on http://${probe_host}:${probe_port}/api/health" ;;
             *)   health_line="unexpected HTTP ${code} on http://${probe_host}:${probe_port}/api/health" ;;
         esac
     fi
 fi
 
-ROLLBACK=""
+if [ "$STARTED" -eq 1 ] && [ "$HEALTH_OK" -ne 1 ]; then
+    printf '\nService: active, but the HTTP health check failed: %s.\n' \
+        "${health_line:-health was not checked}" >&2
+    printf 'Restoring the previous binary and unit; see journalctl -u %s for the startup error.\n' \
+        "$SERVICE_NAME" >&2
+    exit 2
+fi
+
+# Nothing after this point starts or reconfigures the service. An explicitly
+# requested --no-start/--no-restart install may succeed without a health probe;
+# an install that attempted a start keeps rollback armed until both the active
+# streak and the HTTP allowlist have succeeded.
+if [ "$DID_START" -eq 0 ] || { [ "$STARTED" -eq 1 ] && [ "$HEALTH_OK" -eq 1 ]; }; then
+    ROLLBACK=""
+fi
 
 # --- summary ----------------------------------------------------------------
 
@@ -1500,8 +1570,12 @@ Configure the model before the first real turn:
   sudo systemctl restart ${SERVICE_NAME}
 
 Upgrading later: re-run this script. The drop-in keeps your paths, and a running
-service is restarted onto the new binary. Roll back with:
-  sudo cp -p ${BIN_DIR}/karucode.old ${BIN_DIR}/karucode && sudo systemctl restart ${SERVICE_NAME}
+service is restarted onto the new binary. To roll back without overwriting a
+running executable:
+  sudo systemctl stop ${SERVICE_NAME}
+  sudo install -m 0755 ${BIN_DIR}/karucode.old ${BIN_DIR}/karucode.rollback
+  sudo mv -f ${BIN_DIR}/karucode.rollback ${BIN_DIR}/karucode
+  sudo systemctl start ${SERVICE_NAME}
 EOF
     exit 0
 fi

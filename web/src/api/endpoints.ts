@@ -569,19 +569,9 @@ export function createArtifact(
   });
 }
 
-/**
- * URL an `<iframe>` loads for a stored artifact (`GET /api/artifacts/<id>`).
- *
- * The token rides in the query string for the same reason the SSE stream's does:
- * an `<iframe src>` is a browser navigation that cannot carry an `Authorization`
- * header, so a token-protected deployment would otherwise render an empty frame.
- * The id is a content hash of markup the caller has already published, so the
- * URL grants nothing new.
- */
-export function artifactFrameUrl(id: string, token?: string | null): string {
-  const query = token ? `?${new URLSearchParams({ token }).toString()}` : '';
-  return `/api/artifacts/${encodeURIComponent(id)}${query}`;
-}
+// Artifact frame URLs come directly from `createArtifact(...).url`. They carry
+// a random per-artifact read capability; never put the master bearer in a URL
+// whose document executes untrusted inline JavaScript.
 
 /** Scope for an upload: the session owns the directory, the project the root. */
 export interface UploadAttachmentParams {

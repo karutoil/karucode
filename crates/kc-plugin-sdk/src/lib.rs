@@ -354,6 +354,7 @@ pub use kc_core::plugin::*;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// One `tools/call` invocation handed to a tool handler.
 pub struct ToolRequest {
@@ -467,6 +468,28 @@ impl PluginToolResultExt for PluginToolResult {
 type ToolHandler = Box<dyn Fn(ToolRequest) -> PluginToolResult + Send + Sync>;
 type HookHandler = Box<dyn Fn(Value) -> Value + Send + Sync>;
 type PanelHandler = Box<dyn Fn(PanelRequest) -> Value + Send + Sync>;
+
+const INTERNAL_ERROR: i32 = -32603;
+
+/// Isolate one user-authored callback. Plugin handlers are `dyn Fn`, so their
+/// unwind safety cannot be inferred; `AssertUnwindSafe` applies only to this one
+/// callback and never to the host. A panic is an ordinary RPC internal error, not
+/// a reason to lose every tool and panel in the plugin process.
+fn user_handler<T>(kind: &str, name: &str, call: impl FnOnce() -> T) -> Result<T, PluginError> {
+    catch_unwind(AssertUnwindSafe(call)).map_err(|payload| {
+        let detail = if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else {
+            "non-string panic payload".to_string()
+        };
+        PluginError::new(
+            INTERNAL_ERROR,
+            format!("{kind} `{name}` panicked: {detail}; the plugin process is still running"),
+        )
+    })
+}
 
 /// Why a human is being interrupted, from a plugin's point of view.
 ///
@@ -654,14 +677,18 @@ impl Plugin {
                     .and_then(|value| serde_json::from_value(value).ok());
                 match self.tools.get(&name) {
                     Some(entry) => {
-                        let result = (entry.handler)(ToolRequest {
-                            name: name.clone(),
-                            arguments,
-                            context,
-                        });
-                        Ok(serde_json::to_value(result).unwrap_or_else(
-                            |_| json!({"ok": false, "content": "serialisation error"}),
-                        ))
+                        match user_handler("tool", &name, || {
+                            (entry.handler)(ToolRequest {
+                                name: name.clone(),
+                                arguments,
+                                context,
+                            })
+                        }) {
+                            Ok(result) => Ok(serde_json::to_value(result).unwrap_or_else(
+                                |_| json!({"ok": false, "content": "serialisation error"}),
+                            )),
+                            Err(error) => Err(error),
+                        }
                     }
                     None => Err(PluginError::new(-32601, format!("unknown tool `{name}`"))),
                 }
@@ -690,9 +717,8 @@ impl Plugin {
                         .to_string(),
                 };
                 match self.panels.get(&panel) {
-                    Some(handler) => {
-                        let data = handler(request);
-                        Ok(json!({
+                    Some(handler) => match user_handler("panel", &panel, || handler(request)) {
+                        Ok(data) => Ok(json!({
                             "title": self
                                 .manifest
                                 .panels
@@ -700,8 +726,9 @@ impl Plugin {
                                 .find(|p| p.id == panel)
                                 .map(|p| p.title.clone()),
                             "data": data,
-                        }))
-                    }
+                        })),
+                        Err(error) => Err(error),
+                    },
                     // An unknown panel is caller error: `-32602` is the
                     // documented "invalid params" answer.
                     None => Err(PluginError::new(
@@ -718,7 +745,10 @@ impl Plugin {
                     .to_string();
                 let payload = params.get("payload").cloned().unwrap_or(Value::Null);
                 match self.hooks.get(&hook) {
-                    Some(handler) => Ok(json!({ "output": handler(payload) })),
+                    Some(handler) => match user_handler("hook", &hook, || handler(payload)) {
+                        Ok(output) => Ok(json!({ "output": output })),
+                        Err(error) => Err(error),
+                    },
                     None => Ok(json!({ "output": null })),
                 }
             }
@@ -1114,6 +1144,73 @@ mod tests {
                                    "params": {"hook": "on_run_end", "payload": {}}}))
             .unwrap();
         assert!(unknown["result"]["output"].is_null());
+    }
+
+    #[test]
+    fn tool_panel_and_hook_panics_are_rpc_errors_and_the_plugin_survives() {
+        let mut plugin = PluginBuilder::new("panic-demo", "1")
+            .tool("bad_tool", "Panics.", json!({}), |_req| {
+                std::panic::panic_any(42_u8)
+            })
+            .tool("good_tool", "Works.", json!({}), |_req| {
+                PluginToolResult::ok("tool survived")
+            })
+            .panel("bad_panel", "Bad panel", |_req| panic!("panel exploded"))
+            .panel("good_panel", "Good panel", |_req| json!({"ok": true}))
+            .hook("bad_hook", |_payload| panic!("hook exploded"))
+            .hook("good_hook", |_payload| json!("hook survived"))
+            .build();
+
+        for (method, params, expected) in [
+            ("tools/call", json!({"name": "bad_tool"}), "bad_tool"),
+            ("panels/read", json!({"panel": "bad_panel"}), "bad_panel"),
+            (
+                "hooks/run",
+                json!({"hook": "bad_hook", "payload": {}}),
+                "bad_hook",
+            ),
+        ] {
+            let response = plugin
+                .handle_request(json!({"jsonrpc": "2.0", "id": 100,
+                                       "method": method, "params": params}))
+                .expect("a panic must produce a response");
+            assert_eq!(response["error"]["code"], json!(-32603), "{response}");
+            assert!(response["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(expected));
+            assert!(response["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("still running"));
+        }
+
+        // A non-string panic payload also has a safe, useful diagnostic.
+        let tool_error = plugin
+            .handle_request(json!({"jsonrpc": "2.0", "id": 101,
+            "method": "tools/call", "params": {"name": "bad_tool"}}))
+            .unwrap();
+        assert!(tool_error["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("non-string panic payload"));
+
+        // The same process still serves every kind of callback after the panic.
+        let tool = plugin
+            .handle_request(json!({"jsonrpc": "2.0", "id": 102,
+            "method": "tools/call", "params": {"name": "good_tool"}}))
+            .unwrap();
+        assert_eq!(tool["result"]["content"], json!("tool survived"));
+        let panel = plugin
+            .handle_request(json!({"jsonrpc": "2.0", "id": 103,
+            "method": "panels/read", "params": {"panel": "good_panel"}}))
+            .unwrap();
+        assert_eq!(panel["result"]["data"], json!({"ok": true}));
+        let hook = plugin
+            .handle_request(json!({"jsonrpc": "2.0", "id": 104,
+            "method": "hooks/run", "params": {"hook": "good_hook", "payload": {}}}))
+            .unwrap();
+        assert_eq!(hook["result"]["output"], json!("hook survived"));
     }
 
     #[test]

@@ -184,6 +184,11 @@ fn file_blocking(workspace: &Workspace, path: &str, limit: usize) -> Result<Valu
             "`{path}` is a directory; use /api/workspace/tree"
         )));
     }
+    if !meta.is_file() {
+        return Err(Error::BadRequest(format!(
+            "`{path}` is not a regular file; FIFOs, sockets and devices cannot be read"
+        )));
+    }
     let size = meta.len();
     let mut file = std::fs::File::open(&abs).map_err(|e| Error::io(abs.clone(), e))?;
     let mut bytes = Vec::new();
@@ -401,21 +406,33 @@ fn preview_blocking(
     let mut abs = workspace.resolve_existing(&path)?;
     if abs.is_dir() {
         let index = abs.join("index.html");
-        if !index.is_file() {
+        if std::fs::symlink_metadata(&index).is_err() {
             return Err(ApiError::bad_request(format!(
                 "`{path}` is a directory with no index.html to render"
             )));
         }
-        abs = index;
+        // Resolve the index through Workspace too: a symlink at this second,
+        // appended candidate must not bypass the canonical confinement check.
+        abs = workspace.resolve_existing(&workspace.relative(&index))?;
     }
     let meta = std::fs::metadata(&abs).map_err(|e| ApiError::from(Error::io(&abs, e)))?;
+    if !meta.is_file() {
+        return Err(ApiError::bad_request(format!(
+            "`{path}` is not a regular file; FIFOs, sockets and devices cannot be previewed"
+        )));
+    }
     if meta.len() > limit {
         return Err(ApiError::payload_too_large(
             limit as usize,
             Some("this file is too large to render as a preview"),
         ));
     }
-    let bytes = std::fs::read(&abs).map_err(|e| ApiError::from(Error::io(&abs, e)))?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(&abs)
+        .map_err(|e| ApiError::from(Error::io(&abs, e)))?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ApiError::from(Error::io(&abs, e)))?;
     if bytes.len() as u64 > limit {
         return Err(ApiError::payload_too_large(
             limit as usize,
@@ -514,6 +531,11 @@ fn raw_blocking(
     if meta.is_dir() {
         return Err(ApiError::bad_request(format!(
             "`{path}` is a directory; use /api/workspace/tree"
+        )));
+    }
+    if !meta.is_file() {
+        return Err(ApiError::bad_request(format!(
+            "`{path}` is not a regular file; FIFOs, sockets and devices cannot be served"
         )));
     }
     if meta.len() > limit {
@@ -1162,6 +1184,30 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn workspace_read_routes_refuse_fifos_before_opening_them() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let (dir, ws) = workspace();
+        let fifo = dir.join("pipeline.html");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+
+        // All three would block opening this FIFO if metadata accepted it as a
+        // readable non-directory. They must return immediately instead.
+        let text = file_blocking(&ws, "pipeline.html", 1024).unwrap_err();
+        assert!(text.to_string().contains("regular file"), "{text}");
+        for result in [
+            preview_blocking(&ws, "pipeline.html", 4096).map(|_| ()),
+            raw_blocking(&ws, "pipeline.html", 4096).map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            assert!(error.message.contains("regular file"), "{error:?}");
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn traversal_is_refused() {
         let (dir, ws) = workspace();
@@ -1203,6 +1249,21 @@ mod tests {
         let (bytes, content_type) = preview_blocking(&ws, "site/", 4096).unwrap();
         assert_eq!(content_type, "text/html");
         assert!(String::from_utf8(bytes).unwrap().contains("index"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_directory_index_is_canonicalised_and_confined() {
+        let (dir, ws) = workspace();
+        let outside = dir.with_extension("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(dir.join("site")).unwrap();
+        std::fs::write(outside.join("secret.html"), "outside secret").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.html"), dir.join("site/index.html"))
+            .unwrap();
+        assert!(preview_blocking(&ws, "site", 4096).is_err());
+        std::fs::remove_dir_all(outside).ok();
         std::fs::remove_dir_all(dir).ok();
     }
 

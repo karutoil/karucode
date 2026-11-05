@@ -39,6 +39,14 @@ export function Markdown({ text, class: className, artifacts = true }: MarkdownP
     [text, artifacts],
   );
   const hostRef = useRef<HTMLDivElement>(null);
+  // The copy buttons live inside the sanitised HTML string, so their own text is
+  // the only thing this component can change about them. A live region beside the
+  // prose is what a screen reader hears: the button keeps its aria-label, and
+  // swapping its visible text alone would announce nothing.
+  const statusRef = useRef<HTMLParagraphElement>(null);
+  const announce = (message: string): void => {
+    if (statusRef.current) statusRef.current.textContent = message;
+  };
   // One object per HTML string: Preact compares `dangerouslySetInnerHTML` by
   // identity as well as by content, and a fresh object every render is a wasted
   // innerHTML rewrite - which would also unmount every artifact card.
@@ -78,20 +86,43 @@ export function Markdown({ text, class: className, artifacts = true }: MarkdownP
     const code = block?.querySelector('code');
     if (!code) return;
     const previous = button.textContent;
+    const label = button.getAttribute('aria-label') ?? 'Code';
     void copyText(code.textContent ?? '').then((ok) => {
       button.textContent = ok ? 'Copied' : 'Copy failed';
+      button.dataset.copyState = ok ? 'done' : 'failed';
+      announce(
+        ok
+          ? `${label.replace(/^Copy /, '')} copied to the clipboard.`
+          : 'Copy failed: the clipboard is unavailable here. Select the code and copy it manually.',
+      );
       window.setTimeout(() => {
         button.textContent = previous;
+        delete button.dataset.copyState;
+        announce('');
       }, 1400);
     });
   };
 
   return (
-    <div
-      class={`markdown${className ? ` ${className}` : ''}`}
-      ref={hostRef}
-      onClick={onClick}
-      dangerouslySetInnerHTML={markup}
-    />
+    <>
+      <div
+        class={`markdown${className ? ` ${className}` : ''}`}
+        ref={hostRef}
+        onClick={onClick}
+        dangerouslySetInnerHTML={markup}
+      />
+      {/* Always mounted, so the announcement is a change to a live region rather
+          than a region that appears with its text (which some readers miss).
+          `aria-live` rather than `role="status"`: the transcript already has
+          status regions for notices, and a second landmark-role would make every
+          "the status" query ambiguous. */}
+      <p
+        class="sr-only"
+        aria-live="polite"
+        aria-atomic="true"
+        ref={statusRef}
+        data-testid="markdown-copy-status"
+      />
+    </>
   );
 }

@@ -9,11 +9,28 @@ a workspace/git/session/subagent inspector, and a settings sheet. Built against
 - Vite 6 + Preact 10 + TypeScript (strict, no `any` in public interfaces)
 - `@preact/signals` for small, colocated state
 - `markdown-it` (raw HTML disabled) + DOMPurify + selected highlight.js languages
-- Hand-written CSS with design tokens; no UI/CSS framework and no downloaded webfonts
+- Hand-written CSS with design tokens; no UI/CSS framework and no third-party webfonts
+  (Inter and JetBrains Mono are self-hosted from `public/fonts/`, see below)
 - Vitest + @testing-library/preact + jsdom for tests
 
 `@types/markdown-it` is a types-only dev dependency. `.npmrc` sets `include=dev` so the
 toolchain installs on machines where npm defaults to `--omit=dev`.
+
+### Fonts, and the network requests this app does not make
+
+The interface ships its own typefaces. `public/fonts/` holds three files —
+`Inter-Regular.ttf` (400), `Inter-Bold.ttf` (700) and `JetBrainsMono-Regular.ttf`
+(400) — and `src/styles/base.css` declares one `@font-face` per file, each with a
+single static weight (none of the files is a variable font, so a range descriptor
+would be a lie the browser papers over by synthesising). `--font-ui` and
+`--font-mono` (in `src/styles/tokens.css`, and regenerated at runtime by
+`src/theme/tokens.ts`) start with those families and fall back to the system
+stacks when a file is blocked.
+
+Consequently the workspace makes **no third-party requests**: no font CDN, no
+analytics, no remote stylesheet, and `index.html` loads only local assets. The one
+way to introduce a remote request is to type one — see the trust note on custom
+CSS below.
 
 ## Commands
 
@@ -81,6 +98,14 @@ the unsigned draft persist in `localStorage` under `karucode.theme-studio.v3`; a
 theme exports as `karucode-theme` version 1 JSON and imports back through a
 validating parser (150 KB cap, hex/mode/density/font checks). See the `themes`
 topic in the `karucode_docs` tool for the user-facing version.
+
+Custom CSS is injected verbatim into the document, so it is **trusted input**: it
+can load remote fonts/images/beacons and it can hide parts of the UI (including
+the Studio itself). The drawer says so next to the editor, and an imported theme
+file carries its CSS with it — import theme files you trust. A mode flip re-bases
+the palette onto that mode and keeps the accent, and `Reset colours` restores the
+base theme's palette *for the current mode*, so a dark palette is never left
+behind under `data-mode="light"`.
 
 ### Transcript view options
 

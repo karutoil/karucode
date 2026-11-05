@@ -4,6 +4,7 @@ import type { AgentSummary, StoredMessage } from '../api/types';
 import { AgentsTab } from './AgentsTab';
 import { Inspector } from './Inspector';
 import { emptyChatState, type AgentView } from '../state/chat';
+import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { jsonResponse, resetAppState } from '../test/fixtures';
 
@@ -85,6 +86,7 @@ describe('AgentsTab', () => {
   afterEach(() => {
     resetAppState();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it('lists every agent in the project with status counts', async () => {
@@ -187,7 +189,9 @@ describe('AgentsTab', () => {
     });
     const { container } = render(<AgentsTab />);
 
-    fireEvent.click(container.querySelector('.agent-card')!);
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Open details for a_runner' }),
+    );
 
     await waitFor(() => expect(container.querySelector('.agent-detail')).not.toBeNull());
     await waitFor(() => expect(screen.getByText('looks fine')).not.toBeNull());
@@ -200,6 +204,71 @@ describe('AgentsTab', () => {
     // Back returns to the list without losing the agents.
     fireEvent.click(screen.getByRole('button', { name: /Back to all agents/ }));
     expect(container.querySelectorAll('.agent-card')).toHaveLength(1);
+  });
+
+  it('does not open the detail when Enter or Space is pressed on Pause or Stop', async () => {
+    // The card used to be the button (`role="button"` on the article), so a
+    // bubbled Enter/Space from a control inside it ran the card's own handler as
+    // well: pausing an agent also drilled into it. The controls are siblings of
+    // a separate Details button now, and Enter on them must only pause or stop.
+    const control = vi.spyOn(actions, 'controlAgent').mockResolvedValue(undefined);
+    store.agentsAll.value = [agent('a_live', { status: 'running', finished_at: null })];
+    const { container } = render(<AgentsTab />);
+
+    const pause = screen.getByRole('button', { name: 'Pause a_live' });
+    pause.focus();
+    fireEvent.keyDown(pause, { key: 'Enter' });
+    fireEvent.keyUp(pause, { key: 'Enter' });
+    fireEvent.click(pause);
+    expect(control).toHaveBeenLastCalledWith('a_live', 'pause');
+    expect(container.querySelector('.agent-detail')).toBeNull();
+
+    const stop = screen.getByRole('button', { name: 'Stop a_live' });
+    stop.focus();
+    fireEvent.keyDown(stop, { key: ' ' });
+    fireEvent.click(stop);
+    expect(control).toHaveBeenLastCalledWith('a_live', 'cancel');
+    expect(container.querySelector('.agent-detail')).toBeNull();
+  });
+
+  it('exposes opening the detail as a named, native button on the card', () => {
+    // `role="button"` on the article made the whole card a control wrapping the
+    // Pause/Stop buttons - nested interactive semantics no screen reader can
+    // present. The card is a plain article; one real button owns the action.
+    store.agentsAll.value = [agent('a_plain')];
+    const { container } = render(<AgentsTab />);
+
+    const card = container.querySelector<HTMLElement>('.agent-card');
+    expect(card).not.toBeNull();
+    expect(card!.getAttribute('role')).toBeNull();
+    expect(card!.getAttribute('tabindex')).toBeNull();
+    const open = screen.getByRole('button', { name: 'Open details for a_plain' });
+    expect(open.tagName).toBe('BUTTON');
+    expect(open.getAttribute('title')).toBe('Open details for a_plain');
+  });
+
+  it('gives the progress bar a name and its value', () => {
+    // A bar is a picture of a number: without a role and values, the only place
+    // the claim appeared was a `title` tooltip.
+    store.agentsAll.value = [
+      agent('a_progress', {
+        status: 'running',
+        finished_at: null,
+        note: 'working',
+        progress: 0.5,
+      }),
+    ];
+    const { container } = render(<AgentsTab />);
+
+    const bar = screen.getByRole('progressbar', { name: 'Progress for a_progress' });
+    expect(bar.getAttribute('aria-valuenow')).toBe('50');
+    expect(bar.getAttribute('aria-valuemin')).toBe('0');
+    expect(bar.getAttribute('aria-valuemax')).toBe('100');
+    expect(bar.getAttribute('aria-valuetext')).toBe('50% complete');
+    // The fill is still drawn, so the visual claim and the announced one agree.
+    expect(container.querySelector('.agent-progress-fill')?.getAttribute('style')).toContain(
+      'width: 50%',
+    );
   });
 
   it('explains the empty state', () => {
@@ -271,7 +340,7 @@ describe('agent history pagination', () => {
       return jsonResponse({ agents: [row], running: 0 });
     }));
     render(<AgentsTab />);
-    fireEvent.click(await screen.findByRole('button', { name: /Open a_runner/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Open details for a_runner/ }));
     fireEvent.click(await screen.findByRole('button', { name: 'Load older history' }));
     expect(await screen.findByText('older output')).toBeTruthy();
     expect(screen.getByText('newer output')).toBeTruthy();

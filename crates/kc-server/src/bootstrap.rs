@@ -751,7 +751,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         interrupted_runs = recovery.interrupted_runs,
         interrupted_agents = recovery.interrupted_agents,
         expired_approvals = recovery.expired_approvals,
-        web = %web_source(&config.web_dir),
+        web = %web_source(&config.web_dir).await,
         "karucode server listening"
     );
 
@@ -888,12 +888,12 @@ async fn bind(config: &Config) -> anyhow::Result<tokio::net::TcpListener> {
     }
 }
 
-fn web_source(web_dir: &Option<PathBuf>) -> String {
+async fn web_source(web_dir: &Option<PathBuf>) -> String {
     match web_dir {
         Some(dir) => format!("disk:{}", dir.display()),
         None => {
             let assets = WebAssets::new(None);
-            if assets.has_index() {
+            if assets.has_index().await {
                 "embedded:web/dist".to_string()
             } else {
                 "placeholder (run `npm run build` in web/)".to_string()
@@ -991,7 +991,9 @@ async fn detach_control_sessions(
     let base = std::fs::canonicalize(&base)?;
     for session in store.list_control_sessions().await? {
         let recorded = std::fs::canonicalize(&session.workspace).ok();
-        let inside = recorded.as_ref().is_some_and(|path| path.starts_with(&base));
+        let inside = recorded
+            .as_ref()
+            .is_some_and(|path| path.starts_with(&base));
         if session.project_id.is_none() && inside {
             continue;
         }

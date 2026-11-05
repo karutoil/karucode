@@ -16,6 +16,7 @@
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { cssDeclarations } from '../../scripts/css-declarations.mjs';
 
 const DIR = new URL('.', import.meta.url).pathname;
 const TOKEN_FILE = 'tokens.css';
@@ -26,11 +27,12 @@ const TOKEN_FILE = 'tokens.css';
  * exception is visible in the test output and cannot quietly grow:
  * `the token layer is complete` asserts this set stays small.
  *
- * `artifacts.css` — the chat-artifact renderer (diagrams, HTML mocks, inline
- * previews). A parallel session owns that sheet; editing it from here would
- * conflict. It was measured at 54 violations when this exception was added.
+ * `artifacts.css` used to be listed here. It is now clean against every rule
+ * below, so its exemption was a stale debt that hid any regression in the
+ * artifact card's chrome; the map is empty and the size assertion keeps it that
+ * way unless a real reason is written down.
  */
-const OWNED_ELSEWHERE = new Map([['artifacts.css', 'parallel session: artifact rendering']]);
+const OWNED_ELSEWHERE = new Map<string, string>();
 
 /** Spacing steps the token layer publishes (§3.2). */
 const SPACE = new Set(['2px', '4px', '6px', '8px', '10px', '12px', '16px', '20px', '24px', '32px']);
@@ -53,18 +55,27 @@ function sheets(): string[] {
     .sort();
 }
 
-/** Comments blanked so a value quoted in prose is not read as a declaration. */
-function declarations(file: string): Array<{ at: string; property: string; value: string }> {
-  const css = readFileSync(DIR + file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, (m) =>
-    m.replace(/[^\n]/g, ' '),
-  );
-  const out: Array<{ at: string; property: string; value: string }> = [];
-  css.split('\n').forEach((line, index) => {
-    const match = /^\s*([a-z-]+)\s*:\s*(.+?);?\s*$/.exec(line);
-    if (!match) return;
-    out.push({ at: `${file}:${index + 1}`, property: match[1]!, value: match[2]!.trim() });
-  });
-  return out;
+interface Declaration {
+  at: string;
+  property: string;
+  value: string;
+}
+
+/**
+ * Declarations from complete rule bodies: own line, after `{`, or after `;`.
+ * The shared parser blanks comments/strings, preserves source line numbers and
+ * joins multi-line values for the same readable diagnostics as the old reader.
+ */
+function parseDeclarations(file: string, source: string): Declaration[] {
+  return cssDeclarations(source).map((declaration) => ({
+    at: `${file}:${declaration.line}`,
+    property: declaration.property,
+    value: declaration.value.replace(/\s+/g, ' ').trim(),
+  }));
+}
+
+function declarations(file: string): Declaration[] {
+  return parseDeclarations(file, readFileSync(DIR + file, 'utf8'));
 }
 
 function scan(check: (declaration: { at: string; property: string; value: string }) => boolean): Violation[] {
@@ -82,11 +93,119 @@ function scan(check: (declaration: { at: string; property: string; value: string
 const describe_ = (violations: Violation[]): string =>
   violations.map((v) => `${v.at}  ${v.property}: ${v.value}`).join('\n');
 
+/** A hand-picked colour: hex, `rgb()`/`rgba()` or `hsl()`/`hsla()`. */
+const RAW_COLOUR = /#[0-9a-fA-F]{3,8}\b|\b(rgba?|hsla?)\(/;
+
+describe('the declaration scanner', () => {
+  it('joins a value that spans lines, so a raw colour cannot hide', () => {
+    const source = [
+      '.sheen {',
+      '  background:',
+      '    radial-gradient(120% 120% at 22% 12%, rgb(255 255 255 / 55%), transparent 42%),',
+      '    linear-gradient(145deg, var(--accent), var(--danger));',
+      '}',
+    ].join('\n');
+
+    const found = parseDeclarations('probe.css', source);
+
+    expect(found).toHaveLength(1);
+    expect(found[0]?.at).toBe('probe.css:2');
+    expect(found[0]?.property).toBe('background');
+    expect(found[0]?.value).toBe(
+      'radial-gradient(120% 120% at 22% 12%, rgb(255 255 255 / 55%), transparent 42%), ' +
+        'linear-gradient(145deg, var(--accent), var(--danger))',
+    );
+    // Which is the point: the colour rule now sees the literal on the next line.
+    expect(found[0]?.value).toMatch(RAW_COLOUR);
+  });
+
+  it('reports the line the property is on, not the line the literal is on', () => {
+    const found = parseDeclarations('probe.css', '.a {\n  box-shadow:\n    0 1px 0 #fff;\n}\n');
+    expect(found[0]?.at).toBe('probe.css:2');
+  });
+
+  it('keeps one-line declarations as they were, without their terminator', () => {
+    const found = parseDeclarations('probe.css', '.a {\n  color: var(--text);\n  padding: 0;\n}\n');
+    expect(found).toEqual([
+      { at: 'probe.css:2', property: 'color', value: 'var(--text)' },
+      { at: 'probe.css:3', property: 'padding', value: '0' },
+    ]);
+  });
+
+  it('ignores a value quoted in a comment, including a multi-line one', () => {
+    const found = parseDeclarations(
+      'probe.css',
+      '/* the mock used\n   background: #ffffff; here */\n.a {\n  color: var(--text);\n}\n',
+    );
+    expect(found).toEqual([{ at: 'probe.css:4', property: 'color', value: 'var(--text)' }]);
+  });
+
+  it('reads a declaration closed by the end of its block', () => {
+    const found = parseDeclarations('probe.css', '.a {\n  color: var(--text) }\n');
+    expect(found).toEqual([{ at: 'probe.css:2', property: 'color', value: 'var(--text)' }]);
+  });
+});
+
+describe('inline and inline-multiline declarations', () => {
+  it('reads complete rule bodies and preserves declaration start lines', () => {
+    const css = [
+      '/* .comment { color: #abcdef; } */',
+      '.inline { color: #123456; padding: 3px; }',
+      '.inline-multiline { font-size:',
+      '  9px; margin: 7px; }',
+      '.strings::before { content: ".fake { color: #fedcba; }"; }',
+      '/* a second comment',
+      '   with { padding: 13px; } */',
+      '.after { border-radius: 5px; }',
+    ].join('\n');
+
+    expect(cssDeclarations(css)).toEqual([
+      { property: 'color', value: '#123456', line: 2 },
+      { property: 'padding', value: '3px', line: 2 },
+      { property: 'font-size', value: '9px', line: 3 },
+      { property: 'margin', value: '7px', line: 4 },
+      { property: 'content', value: '', line: 5 },
+      { property: 'border-radius', value: '5px', line: 8 },
+    ]);
+  });
+});
+
+describe('the avatar sheen is themed, not a literal', () => {
+  it('reads the multi-line gradient as one declaration with no raw colour', () => {
+    // The exact defect this scanner gained multi-line support for: `background:`
+    // on one line and `rgb(255 255 255 / 55%)` on the next was invisible to the
+    // audit and to this test, so the literal survived several passes.
+    const sheen = declarations('chat.css').find(
+      (declaration) => declaration.property === 'background' && declaration.value.includes('radial-gradient'),
+    );
+    expect(sheen, 'the avatar gradient is read as one declaration').toBeDefined();
+    expect(sheen?.value).not.toMatch(RAW_COLOUR);
+    expect(sheen?.value).toContain('color-mix(');
+  });
+});
+
+describe('which sheets the rules cover', () => {
+  it('scans artifacts.css rather than exempting it', () => {
+    // The exemption was stale: the sheet passes the rules, and an exception is a
+    // hiding place for the next raw value someone adds there.
+    expect(sheets()).toContain('artifacts.css');
+    expect(OWNED_ELSEWHERE.has('artifacts.css')).toBe(false);
+  });
+
+  it('scans every sheet except the token layer and named exemptions', () => {
+    const all = readdirSync(DIR).filter((name) => name.endsWith('.css'));
+    const unscanned = all.filter((name) => !sheets().includes(name));
+    expect(unscanned.sort()).toEqual(
+      all.filter((name) => name === TOKEN_FILE || OWNED_ELSEWHERE.has(name)).sort(),
+    );
+  });
+});
+
 describe('no raw colour outside the token layer (§5.1)', () => {
   it('declares no hex, rgb() or hsl() literal', () => {
     const violations = scan(({ property, value }) => {
       if (property.startsWith('--')) return false; // custom properties are the token surface
-      return /#[0-9a-fA-F]{3,8}\b|\b(rgba?|hsla?)\(/.test(value);
+      return RAW_COLOUR.test(value);
     });
     expect(violations, `raw colours:\n${describe_(violations)}`).toEqual([]);
   });

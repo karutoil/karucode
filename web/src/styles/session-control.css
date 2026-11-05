@@ -230,7 +230,10 @@
   background: color-mix(in srgb, var(--info) 14%, var(--theme-surface));
 }
 .cp-glyph[data-tone='3'] {
-  color: var(--accent);
+  /* Project initials are text. `--accent` is tuned against the canvas, so on the
+   * accent tint it measured 3.61:1 in Daybreak; `--accent-on-tint` is the AA role
+   * for accent ink on an accent tint (§4.8). */
+  color: var(--accent-on-tint);
   border-color: var(--accent-line);
   background: var(--accent-bg);
 }
@@ -265,8 +268,15 @@
   white-space: nowrap;
 }
 .cp-state i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-/* A quiet state is a dot, not a label: the row is about the session. */
-.cp-state.good, .cp-state.idle { gap: 0; font-size: 0; }
+/* Every state keeps its word. "Finished", "Cancelled" and "No runs" are three
+ * different answers, and a bare dot told them apart only by colour - which also
+ * erased the quiet ones for a screen reader's neighbours and for anyone who
+ * cannot separate the hues. The dot stays as the colour cue; the word says what
+ * happened. Only the phone-width session header (below) is too narrow for both. */
+.cp-state.good,
+.cp-state.idle {
+  color: var(--muted);
+}
 .cp-state.live { color: var(--theme-success); }
 .cp-state.bad { color: var(--theme-danger); }
 .cp-state.warn { color: var(--theme-warn); }
@@ -730,7 +740,7 @@
   padding: var(--space-4) var(--space-8);
   border-bottom: 1px solid var(--theme-accent-line);
   background: var(--theme-accent-bg);
-  color: var(--accent-fill);
+  color: var(--accent-on-tint);
   font-size: var(--fs-tiny);
   line-height: 1.5;
 }
@@ -791,8 +801,12 @@
 }
 
 @media (max-width: 520px) {
-  .cp-session-actions .cp-state { font-size: 0; gap: 0; }
-  .cp-session-actions .cp-secondary { font-size: 0; padding: var(--space-3) var(--space-4); }
+  /* A Finished/Cancelled/No runs word is meaningful content, even in the phone
+     header. The flexible, ellipsized session title yields instead. */
+  .cp-session-actions .cp-state { font-size: var(--fs-tiny); gap: var(--space-2); }
+  /* The accessible action name stays; only the duplicate words are visually
+     replaced by the arrow glyph below. */
+  .cp-session-actions .cp-secondary { font-size: var(--fs-hidden); padding: var(--space-3) var(--space-4); }
   .cp-session-actions .cp-secondary::after { content: '↗'; font-size: var(--fs-body); }
   .cp-recent-main small { font-size: var(--fs-micro); }
 }

@@ -198,8 +198,9 @@ def decide(messages):
             ],
         )
     if "[tool:background]" in last_user:
-        # A detached spawn followed by a wait, in the same turn sequence: this is
-        # the pair of calls the background path exists for.
+        # Spawn and collect in the SAME run. A background child outlives its
+        # parent's tool call, not its parent's run: a later run would observe
+        # only the run-end reaping, so it cannot collect a successful result.
         return (
             "tools",
             [
@@ -212,7 +213,8 @@ def decide(messages):
                         "role": "tester",
                         "background": True,
                     },
-                )
+                ),
+                call("call_wait_1", "wait_for_agents", {"timeout_secs": 20}),
             ],
         )
     if "[tool:wait]" in last_user:

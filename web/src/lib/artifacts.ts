@@ -88,16 +88,20 @@
 // curl -s -X POST localhost:8787/api/artifacts \
 //   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
 //   -d '{"html":"<button>Buy</button>","theme":"dark"}'
-// # → 201 {"id":"9f2c…","url":"/api/artifacts/9f2c…","bytes":374,"theme":"dark"}
+// # → 201 {"id":"9f2c…","url":"/api/artifacts/9f2c…?capability=<random>","bytes":374,"theme":"dark"}
 // ```
 //
-// `GET /api/artifacts/<id>` serves that document with its own policy: an **opaque
-// origin** (`sandbox allow-scripts`, never `allow-same-origin`), inline script and
-// style allowed, **no network at all**, and `frame-ancestors 'self'` so only this
-// app may embed it. Everything is in memory, keyed by a SHA-256 of the bytes, and
-// dropped when the process exits: posting the same artifact again is the same id,
-// and a 404 simply means "post it again". With `KARUCODE_AUTH_TOKEN` set, this one
-// path also accepts `?token=` because an `<iframe src>` cannot send a header.
+// `GET /api/artifacts/<id>?capability=<random>` serves that document with its own
+// policy: an **opaque origin** (`sandbox allow-scripts`, never `allow-same-origin`)
+// and `frame-ancestors 'self'` so only this app may embed it. Inline script/style
+// run, but fetch/XHR/WebSocket, remote subresources and forms are blocked. A
+// directly opened top-level artifact can still navigate itself: Chromium verifies
+// this residual can disclose the viewing event and this one artifact's capability,
+// never the master bearer, and `no-referrer` keeps the capability out of Referer
+// headers. Everything is in memory, keyed by a SHA-256 of the bytes, and dropped
+// when the process exits: posting the same artifact again is the same id, and a 404
+// simply means "post it again". The authenticated POST returns the random, scoped
+// capability; GET never accepts the deployment's master `?token=`.
 //
 // Full reference: `docs/API.md` (Chat artifacts) and `web/README.md` (how the
 // renderer is put together).
@@ -578,7 +582,8 @@ export interface ArtifactTable {
 export function buildTable(spec: ArtifactSpec, delimiter?: string): ArtifactTable {
   const rows = parseTable(spec.source, delimiter ?? tableDelimiter(spec.kind, spec.source));
   const [first = [], ...rest] = rows;
-  const columns = Math.max(first.length, ...rest.map((row) => row.length), 0);
+  let columns = first.length;
+  for (const row of rest) columns = Math.max(columns, row.length);
   return {
     header: first.slice(0, MAX_TABLE_COLUMNS),
     rows: rest.slice(0, MAX_TABLE_ROWS).map((row) => row.slice(0, MAX_TABLE_COLUMNS)),

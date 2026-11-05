@@ -32,15 +32,22 @@ impl SseParser {
             self.buffer.drain(..'\u{FEFF}'.len_utf8());
         }
         let mut out = Vec::new();
-        while let Some(end) = find_event_end(&self.buffer) {
+        // Parse by offset and move the remaining bytes once at the end. Draining
+        // each event from the front made a chunk containing N events move the
+        // remainder N times (quadratic in the chunk size).
+        let mut consumed = 0;
+        while let Some(end) = find_event_end(&self.buffer, consumed) {
             if end > max_bytes {
                 self.buffer.clear();
                 return (out, true);
             }
-            let block: String = self.buffer.drain(..end).collect();
-            if let Some(event) = parse_block(&block) {
+            if let Some(event) = parse_block(&self.buffer[consumed..end]) {
                 out.push(event);
             }
+            consumed = end;
+        }
+        if consumed > 0 {
+            self.buffer.drain(..consumed);
         }
         let oversized = self.buffer.len() > max_bytes;
         if oversized {
@@ -67,17 +74,20 @@ impl SseParser {
     }
 }
 
-/// Length of the buffer up to and including the first event terminator. Both
-/// `\n\n` and `\r\n\r\n` are accepted; the latter contains no `\n\n`.
-fn find_event_end(buffer: &str) -> Option<usize> {
-    let lf = buffer.find("\n\n").map(|idx| idx + 2);
-    let crlf = buffer.find("\r\n\r\n").map(|idx| idx + 4);
-    match (lf, crlf) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
+/// Length of the buffer up to and including the first event terminator at or
+/// after `from`. Keep the original LF and CRLF delimiter contract; the offset is
+/// what avoids rescanning already-consumed events and front-draining each block.
+fn find_event_end(buffer: &str, from: usize) -> Option<usize> {
+    let bytes = buffer.as_bytes();
+    for at in from..bytes.len() {
+        if bytes[at..].starts_with(b"\n\n") {
+            return Some(at + 2);
+        }
+        if bytes[at..].starts_with(b"\r\n\r\n") {
+            return Some(at + 4);
+        }
     }
+    None
 }
 
 fn parse_block(block: &str) -> Option<SseEvent> {
@@ -133,6 +143,31 @@ mod tests {
         assert!(p.push_limited(": oversized comment\n\n", 8).1);
         let mut p = SseParser::new();
         assert!(p.push_limited("data: unfinished", 8).1);
+    }
+
+    #[test]
+    fn many_events_in_one_chunk_drain_linearly() {
+        const EVENTS: usize = 20_000;
+        let payload = "x".repeat(128);
+        let mut input = String::with_capacity(EVENTS * (payload.len() + 8));
+        for _ in 0..EVENTS {
+            input.push_str("data: ");
+            input.push_str(&payload);
+            input.push_str("\n\n");
+        }
+        let started = std::time::Instant::now();
+        let mut parser = SseParser::new();
+        let events = parser.push(&input);
+        assert_eq!(events.len(), EVENTS);
+        assert_eq!(parser.buffered_len(), 0);
+        assert!(events.iter().all(|event| event.data == payload));
+        // 20k events used to front-drain a multi-megabyte buffer 20k times. This
+        // is a regression guard, not a benchmark with a machine-tight threshold.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "parsing {EVENTS} events took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

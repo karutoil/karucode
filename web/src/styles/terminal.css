@@ -169,8 +169,16 @@
   background: var(--surface-input);
 }
 
+/* The tab stays in the strip while its name is edited (the panel is labelled by
+   it), so the label gives the field room instead of being replaced. */
+.terminal-chip.is-renaming .terminal-chip-label {
+  max-width: 72px;
+}
+
 .terminal-rename-input {
-  width: 150px;
+  flex: 0 1 auto;
+  min-width: 0;
+  width: 108px;
   padding: var(--space-2) 8px;
   border: 0;
   background: transparent;

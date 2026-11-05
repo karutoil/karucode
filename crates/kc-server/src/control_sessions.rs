@@ -62,7 +62,10 @@ async fn gate(
             title
         ))),
         kc_core::config::ApprovalMode::Ask | kc_core::config::ApprovalMode::AskCommands => {
-            let decision = ctx.approvals.ask(ApprovalKind::Other, title, detail, payload).await;
+            let decision = ctx
+                .approvals
+                .ask(ApprovalKind::Other, title, detail, payload)
+                .await;
             if decision.is_allowed() {
                 None
             } else {
@@ -229,7 +232,12 @@ impl Tool for ReadSession {
             Err(e) => return ToolOutcome::err(e.to_string()),
         };
         let truncated = messages.len() > limit as usize;
-        let messages: Vec<StoredMessage> = messages.into_iter().rev().take(limit as usize).rev().collect();
+        let messages: Vec<StoredMessage> = messages
+            .into_iter()
+            .rev()
+            .take(limit as usize)
+            .rev()
+            .collect();
         let runs = self
             .0
             .store()
@@ -242,7 +250,11 @@ impl Tool for ReadSession {
             if budget == 0 {
                 break;
             }
-            let mut content: String = message.content.chars().take(MESSAGE_PREVIEW_CHARS).collect();
+            let mut content: String = message
+                .content
+                .chars()
+                .take(MESSAGE_PREVIEW_CHARS)
+                .collect();
             if content.chars().count() < message.content.chars().count() {
                 content.push_str("\n… [truncated]");
             }
@@ -445,7 +457,10 @@ impl Tool for CancelRun {
         if let Err(e) = check_text(&args.session_id, "session_id", 128) {
             return ToolOutcome::err(e);
         }
-        if !matches!(self.0.store().get_session(&args.session_id).await, Ok(Some(_))) {
+        if !matches!(
+            self.0.store().get_session(&args.session_id).await,
+            Ok(Some(_))
+        ) {
             return ToolOutcome::err("no such session");
         }
         if let Some(err) = gate(
@@ -505,7 +520,10 @@ impl Tool for RenameSession {
         if let Err(e) = check_text(&args.title, "title", 200) {
             return ToolOutcome::err(e);
         }
-        if !matches!(self.0.store().get_session(&args.session_id).await, Ok(Some(_))) {
+        if !matches!(
+            self.0.store().get_session(&args.session_id).await,
+            Ok(Some(_))
+        ) {
             return ToolOutcome::err("no such session");
         }
         if let Some(err) = gate(

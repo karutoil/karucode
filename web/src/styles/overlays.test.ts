@@ -70,4 +70,43 @@ describe('file viewer preview surface', () => {
     expect(pane['min-height']).toBe('0');
     expect(declarations('.file-viewer')['min-height']).toBe('0');
   });
+
+  it('keeps palette overlays compact on narrow viewports', () => {
+    expect(css).toContain('.dialog.dialog-palette {');
+    expect(css).toMatch(/\.dialog\.dialog-palette\s*\{[\s\S]*?width:\s*calc\(100vw - 28px\)/);
+    expect(css).toMatch(/\.dialog\.dialog-palette\s*\{[\s\S]*?border-radius:\s*var\(--radius\)/);
+  });
+});
+
+describe('rewind dialog scroll bounds', () => {
+  /* `.dialog` is `max-height: calc(100dvh - 48px)` (the whole `100dvh` on a
+   * phone) with `overflow: hidden`, and `.rewind-body` carries a quote, a count,
+   * three mode cards, an optional note field and a file list. Nothing scrolled:
+   * the body grew past the dialog, the footer was clipped, and a rewind could not
+   * be confirmed on a short screen. The body is the scroller and the actions stay
+   * out of it, which is the shape `.dialog-model-edit` already uses. */
+  it('bounds the rewind body so the footer is always reachable', () => {
+    const body = declarations('.rewind-body');
+    expect(body['flex']).toBe('1 1 auto');
+    // Without this the flex item refuses to shrink below its content height and
+    // still overflows the dialog.
+    expect(body['min-height']).toBe('0');
+    expect(body['overflow-y']).toBe('auto');
+    expect(body['overscroll-behavior']).toBe('contain');
+  });
+
+  it('keeps the rewind actions out of the scrolling body', () => {
+    expect(declarations('.dialog-rewind > .dialog-actions')['flex']).toBe('0 0 auto');
+    const source = readFileSync(new URL('../components/RewindDialog.tsx', import.meta.url), 'utf8');
+    // The fieldsets and the copy live inside `.rewind-body`; the footer is a
+    // sibling of it, so a scrolling body can never carry the buttons away.
+    expect(source).toMatch(/<\/div>\s*<footer class="dialog-actions">/);
+  });
+
+  it('still caps the file list inside the scroller', () => {
+    // A nested cap keeps a 200-file revert from becoming one long strip even on a
+    // tall screen (the outer scroller only matters on short ones).
+    expect(declarations('.rewind-files')['max-height']).toBe('220px');
+    expect(declarations('.rewind-files')['overflow-y']).toBe('auto');
+  });
 });

@@ -223,7 +223,13 @@ function TurnPart({
     case 'tool':
       return <ToolCard item={item as ToolItem} variant={options.toolStyle === 'rows' ? 'row' : 'card'} />;
     case 'command':
-      return <CommandCard item={item as CommandItem} defaultOpen={item.status === 'running'} />;
+      return (
+        <CommandCard
+          item={item as CommandItem}
+          defaultOpen={item.status === 'running'}
+          variant={options.toolStyle === 'rows' ? 'row' : 'card'}
+        />
+      );
     case 'approval': {
       const approval: ApprovalView = (item as ApprovalItem).approval;
       return (

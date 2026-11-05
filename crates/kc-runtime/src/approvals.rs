@@ -54,6 +54,19 @@ impl ApprovalRegistry {
         rx
     }
 
+    /// Whether a gate is still parked on this approval.
+    ///
+    /// Resolution checks this before writing the durable decision. It is only
+    /// a preflight: cancellation may still win while the store write is in
+    /// flight, and the final `resolve` remains the authority that wakes (or
+    /// declines to wake) the receiver.
+    pub fn contains(&self, id: &str) -> bool {
+        self.pending
+            .lock()
+            .expect("approvals lock")
+            .contains_key(id)
+    }
+
     /// Deliver a decision. Returns false when nobody was waiting any more
     /// (timeout, cancellation or a duplicate resolve).
     pub fn resolve(&self, id: &str, decision: ApprovalDecision) -> bool {
@@ -535,19 +548,33 @@ pub(crate) async fn resolve(
             ))
         })?;
 
-    if !inner.approvals.resolve(approval_id, decision) {
-        // The row was pending but nobody is waiting: the gate already timed out
-        // or the run is gone. Report it instead of pretending it worked.
+    // Do not durably accept work for a gate that has already expired or been
+    // cancelled. The second check, after the write, handles a cancellation that
+    // races this preflight.
+    if !inner.approvals.contains(approval_id) {
         return Err(Error::NotFound(format!(
             "approval {approval_id} is no longer waiting for a decision"
         )));
     }
 
+    // Persist *before* waking the gate. An allow delivered first would let the
+    // tool execute even if this write subsequently failed, leaving no durable
+    // record of the human's decision. On error the registry entry is untouched,
+    // so timeout/cancellation still expires it and the caller may retry.
     inner
         .deps
         .store
         .resolve_approval(approval_id, decision.as_str())
         .await?;
+
+    if !inner.approvals.resolve(approval_id, decision) {
+        // The store has the decision, but the waiter disappeared while it was
+        // being written. Never claim that this woke a live gate; in particular,
+        // no tool may run on the strength of a decision that arrived too late.
+        return Err(Error::NotFound(format!(
+            "approval {approval_id} expired while its decision was being stored"
+        )));
+    }
 
     inner.emit(
         Some(&record.session_id),

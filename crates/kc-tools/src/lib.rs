@@ -16,8 +16,8 @@
 // | `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries; the walk stops at the cap and a truncated listing reports the total as a lower bound (`500+`) |
 // | `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`. The result cap is global across files, and long matching lines keep their first 300 characters in both engines |
 // | `write_file` | mutating | policy | create/overwrite atomically, max 2 MiB per call; journals the previous bytes for a rewind |
-// | `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff; journals the previous bytes |
-// | `run_command` | shell | policy | `/bin/sh -c` in the workspace, streamed output, timeout, own process group. On timeout or cancellation the whole group gets SIGTERM, then SIGKILL after a grace period, so a child that ignores SIGTERM cannot survive |
+// | `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff; revalidates the file after approval and journals the previous bytes |
+// | `run_command` | shell | policy | `/bin/sh -c` in the workspace, incrementally UTF-8-decoded streamed output, timeout, own process group. On timeout or cancellation the whole group gets SIGTERM, then SIGKILL after a grace period, so a child that ignores SIGTERM cannot survive |
 // | `git_status` | read_only | none | branch + porcelain status for the workspace or a subdirectory, **confined to the workspace** |
 // | `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref, **confined to the workspace** (paths are workspace-relative) |
 // | `karucode_docs` | read_only | none | search and read karucode's own documentation (this system) |
@@ -44,32 +44,41 @@
 // # Output limits
 //
 // Tool output kept for the model is bounded by `limits.max_tool_output_bytes`
-// (default 24000). A truncated result says so explicitly and tells the model to
-// narrow the request; it is never silently cut. `run_command` keeps head and tail
-// of a long stream within `max_command_output_bytes`.
+// (default 24000), **including the truncation marker**. A cut retains head+tail so
+// a final runtime-budget reduction does not discard a trailing error; unusually
+// tiny budgets that cannot fit the explanatory marker retain a UTF-8-safe prefix.
+// `run_command` retains raw stdout head+tail and trailing stderr within that final
+// budget rather than front-truncating an already-rendered marker. Capture is first
+// bounded per stream by `max_command_output_bytes`; long command lines in the
+// result header are previewed at 512 characters (metadata still has the command).
 //
 // # Gotchas
 //
 // * `edit_file` is exact-match and ambiguity-safe: it refuses when the old string
-//   appears twice (pass `replace_all`) or not at all. Read the region first.
+//   appears twice (pass `replace_all`) or not at all. Read the region first. After
+//   approval it re-reads and re-plans with a SHA-256 fingerprint; if the file
+//   changed during the wait, it refuses without writing so the fresh diff can be
+//   reviewed. Dense `replace_all` diffs use an 80-line capped block preview rather
+//   than allocating LCS/operation state for every changed line.
 // * File tools are confined to the run's project directory **plus the system
 //   temporary directory**: `..`, any other absolute path and symlink escapes are
 //   refused, for reads and writes alike. See "Scratch space" below.
 // * `run_command` is **not** sandboxed. It runs as the server user, in a process
 //   group that is killed on timeout or cancellation; an approved command can do
 //   anything that user can do.
-// * `write_file` and `edit_file` record the file's previous bytes in the rewind
-//   journal immediately before they write, so `POST /api/sessions/:id/rewind`
-//   with `revert` can put the file back. The journal is worth knowing about for
-//   two reasons: an edit is undoable only if the before-image fit the 4 MiB cap
-//   and was valid UTF-8 (otherwise the rewind reports that path as incomplete
-//   instead of half-restoring it), and a tool that changes files without
-//   recording cannot be undone at all - `run_command` is the big one, and the
-//   preview lists it under `opaque_tools`.
+// * `write_file` and `edit_file` must capture the file's previous bytes in the
+//   rewind journal immediately before they write; if an attached journal cannot
+//   persist a complete before-image, the tool refuses and leaves the file
+//   unchanged. `POST /api/sessions/:id/rewind` with `revert` can then put the file
+//   back. Direct tool calls with no journal keep their non-journaled behaviour.
+//   A tool that changes files without recording cannot be undone - `run_command`
+//   is the big one, and the preview lists it under `opaque_tools`.
 // * `run_command` returns `ok: false` for a non-zero exit, with the exit code in
 //   the header - a failing test run is a failed tool call, not a silent success.
 // * `search_files` honours `.gitignore`. Searching ignored/build output needs a
-//   pattern under an explicitly named path, not a glob trick.
+//   pattern under an explicitly named path, not a glob trick. The pure-Rust
+//   fallback walks lazily, observes cancellation during walking/reads, and skips
+//   files over 4 MiB; bounded reads cannot grow past that cap during the scan.
 // * `search_files` caps results globally, not per file, and both engines agree on
 //   the cap. A match on a very long line keeps its first 300 **characters** rather
 //   than being replaced by a placeholder; the cap is counted in characters, not
@@ -81,6 +90,11 @@
 //   child running in the background (`build & exit 0`) instead of waiting for that
 //   child to close the output pipes. The result says the output may be incomplete
 //   and `background_output` is set in the metadata.
+// * On Unix, backslashes in filenames are literal characters, including in tool
+//   metadata and rewind checkpoint keys; they are not rewritten as `/` separators.
+// * A narrowed `git_status`/`git_diff` path also accepts a deleted tracked file
+//   (or one whose parent directory was deleted). The path is checked lexically and
+//   through its deepest existing ancestor, so symlink escapes are still refused.
 // * `read_file` reports the file's real line count in its header even when the
 //   byte cap truncated the content; when the byte cap (not the line window) ended
 //   the read, there is no "continue with offset" hint, because those lines cannot
@@ -184,6 +198,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 mod bounded_pipe;
 pub mod command;
@@ -212,11 +227,27 @@ fn spec(name: &str, description: &str, parameters: serde_json::Value) -> ToolSpe
 /// its whole duration (an 8 MiB `edit_file` is seconds). `spawn_blocking` is the
 /// same tool `search::search_fallback` already uses for its walker, and the join
 /// error is surfaced rather than swallowed so a panic is not reported as success.
-async fn blocking<T, F>(what: &str, work: F) -> std::result::Result<kc_core::Result<T>, ToolOutcome>
+async fn blocking<T, F>(
+    what: &str,
+    cancel: &CancellationToken,
+    work: F,
+) -> std::result::Result<kc_core::Result<T>, ToolOutcome>
 where
     F: FnOnce() -> kc_core::Result<T> + Send + 'static,
     T: Send + 'static,
 {
+    if cancel.is_cancelled() {
+        return Ok(Err(kc_core::Error::Cancelled));
+    }
+    let closure_cancel = cancel.clone();
+    // Check again inside the closure. spawn_blocking can sit in a queue after a
+    // run is cancelled; a mutating closure must not begin its side effects then.
+    let work = move || {
+        if closure_cancel.is_cancelled() {
+            return Err(kc_core::Error::Cancelled);
+        }
+        work()
+    };
     match tokio::task::spawn_blocking(work).await {
         Ok(result) => Ok(result),
         Err(e) => Err(ToolOutcome::err(format!("{what} task failed: {e}"))),
@@ -375,7 +406,7 @@ impl Tool for ReadFile {
 
         // The file is read and (when the byte cap cut it) scanned to count lines:
         // blocking work that must not run on a runtime worker.
-        let rendered = match blocking("read_file", {
+        let rendered = match blocking("read_file", &ctx.cancel, {
             let ws = ctx.workspace.clone();
             let path = path.to_string();
             let max_bytes = limits.max_file_read_bytes;
@@ -421,7 +452,7 @@ impl Tool for ListDir {
         let limits = ctx.limits().await;
         // The walk stats every entry it visits; on a runtime worker that stalls
         // every other task on the thread for as long as the directory takes.
-        let rendered = match blocking("list_dir", {
+        let rendered = match blocking("list_dir", &ctx.cancel, {
             let ws = ctx.workspace.clone();
             let path = path.to_string();
             move || file_ops::list_dir(&ws, &path, depth, file_ops::MAX_LIST_ENTRIES)
@@ -593,14 +624,28 @@ impl Tool for WriteFile {
             return refusal;
         }
 
+        // Approval can wait indefinitely. A cancellation that arrived while the
+        // prompt (or checkpoint write) was pending must not turn into a file write.
+        if ctx.cancelled() {
+            return ToolOutcome::err("write_file cancelled before the file was changed");
+        }
+
         // Before-image, immediately before the write it describes. Recording
         // after the write would journal the new bytes, and a rewind that
         // "restores" them is a no-op that looks like a successful revert.
-        ctx.record_checkpoint(&rel, "write_file").await;
+        let captured = ctx.capture_checkpoint(&rel, "write_file").await;
+        if !captured {
+            return ToolOutcome::err(format!(
+                "refusing to write `{rel}` because its rewind checkpoint could not be captured; the file is unchanged. Retry after checkpoint storage is available."
+            ));
+        }
+        if ctx.cancelled() {
+            return ToolOutcome::err("write_file cancelled before the file was changed");
+        }
 
         // The write is a create + `sync_all` + rename on a worker thread: fsync can
         // block for a long time on a busy disk.
-        let written = blocking("write_file", {
+        let written = blocking("write_file", &ctx.cancel, {
             let abs = abs.clone();
             let content = content.to_string();
             move || file_ops::write_atomic(&abs, content.as_bytes())
@@ -667,7 +712,7 @@ impl Tool for EditFile {
         // `MAX_EDIT_BYTES` is 8 MiB, so a large file would otherwise stall every
         // other task on this thread for the duration. Approval still happens
         // after this plan and before the write, so its semantics are unchanged.
-        let plan = match blocking("edit_file planning", {
+        let plan = match blocking("edit_file planning", &ctx.cancel, {
             let ws = ctx.workspace.clone();
             let path = path.to_string();
             let old = old.to_string();
@@ -715,13 +760,55 @@ impl Tool for EditFile {
             return refusal;
         }
 
-        // Before-image, immediately before the write it describes. A journal that
-        // could not be written leaves this edit unrestorable, which the rewind
-        // reports rather than papering over.
-        ctx.record_checkpoint(&plan.rel, "edit_file").await;
+        if ctx.cancelled() {
+            return ToolOutcome::err("edit_file cancelled before the file was changed");
+        }
 
-        // Write the planned bytes off the runtime worker, same as write_file.
-        let written = blocking("edit_file", {
+        // The approved preview is a snapshot, not a lock. Re-read and re-plan after
+        // the approval wait so an intervening edit is never overwritten by stale
+        // bytes. A changed fingerprint needs a new approval: even when old_string
+        // still matches, its line numbers and surrounding diff are no longer what
+        // the user approved. The conservative refusal also covers ambiguous or
+        // missing matches in the fresh plan (returned directly by plan_edit).
+        let approved_fingerprint = plan.fingerprint;
+        let approved_rel = plan.rel.clone();
+        let plan = match blocking("edit_file revalidation", &ctx.cancel, {
+            let ws = ctx.workspace.clone();
+            let path = path.to_string();
+            let old = old.to_string();
+            let new = new.to_string();
+            move || file_ops::plan_edit(&ws, &path, &old, &new, replace_all)
+        })
+        .await
+        {
+            Err(refusal) => return refusal,
+            Ok(Err(e)) => return ToolOutcome::err(e.to_string()),
+            Ok(Ok(plan)) => plan,
+        };
+        if plan.fingerprint != approved_fingerprint {
+            return ToolOutcome::err(format!(
+                "`{approved_rel}` changed while edit_file was waiting for approval. The file was not modified; re-read it and issue edit_file again so the fresh replacement and diff can be reviewed."
+            ));
+        }
+        if ctx.cancelled() {
+            return ToolOutcome::err("edit_file cancelled before the file was changed");
+        }
+
+        // Before-image, immediately before the write it describes. A managed
+        // journal must acknowledge a complete capture or the edit is refused.
+        let captured = ctx.capture_checkpoint(&plan.rel, "edit_file").await;
+        if !captured {
+            return ToolOutcome::err(format!(
+                "refusing to edit `{}` because its rewind checkpoint could not be captured; the file is unchanged. Retry after checkpoint storage is available.",
+                plan.rel
+            ));
+        }
+        if ctx.cancelled() {
+            return ToolOutcome::err("edit_file cancelled before the file was changed");
+        }
+
+        // Write the revalidated bytes off the runtime worker, same as write_file.
+        let written = blocking("edit_file", &ctx.cancel, {
             let abs = plan.abs.clone();
             let new_content = plan.new_content.clone();
             move || file_ops::write_atomic(&abs, new_content.as_bytes())
@@ -846,8 +933,10 @@ impl Tool for RunCommand {
             Err(e) => return ToolOutcome::err(e.to_string()),
         };
 
+        let command_display = file_ops::preview(command.trim(), 512);
+        let command_was_clipped = command_display != command.trim();
         let mut text = format!(
-            "$ {command}\ncwd: {cwd_label}\nexit code: {}\nduration: {:.2}s",
+            "$ {command_display}\ncwd: {cwd_label}\nexit code: {}\nduration: {:.2}s",
             outcome
                 .exit_code
                 .map(|c| c.to_string())
@@ -877,53 +966,12 @@ impl Tool for RunCommand {
                     .unwrap_or_else(|| "without a status".to_string())
             ));
         }
-        // Each stream gets its own budget so neither can evict the other: keeping
-        // them in one buffer meant a long stdout pushed a short stderr off the end
-        // of the result entirely (31 KB of stdout + 50 stderr lines lost every
-        // stderr line). The two headers are cheap and always kept, so a truncated
-        // stream still says how much it produced.
-        let header = std::mem::take(&mut text);
-        let (stdout_text, stdout_cut) = truncate_output(
-            &outcome.stdout.text,
-            stdout_budget(limits.max_tool_output_bytes),
-        );
-        let (stderr_text, stderr_cut) = truncate_output(
-            &outcome.stderr.text,
-            stderr_budget(limits.max_tool_output_bytes),
-        );
-        let cut = stdout_cut || stderr_cut;
-        let mut text = header;
-        text.push_str(&format!(
-            "\n\n--- stdout ({} bytes{}) ---\n{}",
-            outcome.stdout.total_bytes,
-            if outcome.stdout.truncated {
-                ", truncated"
-            } else {
-                ""
-            },
-            if stdout_text.is_empty() {
-                "(empty)"
-            } else {
-                stdout_text.trim_end_matches('\n')
-            }
-        ));
-        if !outcome.stderr.text.is_empty() {
-            text.push_str(&format!(
-                "\n\n--- stderr ({} bytes{}) ---\n{}",
-                outcome.stderr.total_bytes,
-                if outcome.stderr.truncated {
-                    ", truncated"
-                } else {
-                    ""
-                },
-                stderr_text.trim_end_matches('\n')
-            ));
-        }
-
+        let (text, output_cut) =
+            render_command_output(text, &outcome, limits.max_tool_output_bytes);
         ToolOutcome {
             ok: outcome.ok(),
             content: text,
-            truncated: cut || outcome.truncated(),
+            truncated: output_cut || command_was_clipped || outcome.truncated(),
             meta: Some(json!({
                 "command": command,
                 "cwd": cwd_label,
@@ -941,20 +989,98 @@ impl Tool for RunCommand {
     }
 }
 
-/// Share of the tool-output budget `run_command` gives stdout.
-///
-/// stderr is never allowed to be crowded out: a build that prints 30 KB of
-/// progress to stdout and one `error: ...` line to stderr is the case this
-/// carving exists for, so stderr always keeps a quarter of the budget (and all of
-/// it when that is enough).
-fn stdout_budget(total: usize) -> usize {
-    // The headers above the two bodies are trivially small; reserving nothing for
-    // them keeps this predictable.
-    (total / 4) * 3
+fn command_stream_heading(label: &str, stream: &command::FinishedStream) -> String {
+    format!(
+        "\n\n--- {label} ({} bytes{}) ---\n",
+        stream.total_bytes,
+        if stream.truncated { ", truncated" } else { "" }
+    )
 }
 
-fn stderr_budget(total: usize) -> usize {
-    total - stdout_budget(total)
+/// Assemble a command result whose marker and section headers are included in
+/// the real final byte budget. Stream bodies are re-rendered from raw retained
+/// head/tail bytes, so the code never truncates an already rendered marker and
+/// never gives a long stdout permission to evict a short trailing stderr.
+fn render_command_output(
+    header: String,
+    outcome: &command::CommandOutcome,
+    max_bytes: usize,
+) -> (String, bool) {
+    let stdout_heading = command_stream_heading("stdout", &outcome.stdout);
+    let has_stderr = !outcome.stderr.text.is_empty();
+    let stderr_heading = if has_stderr {
+        command_stream_heading("stderr", &outcome.stderr)
+    } else {
+        String::new()
+    };
+    let stdout_empty = outcome.stdout.text.is_empty();
+    let empty_marker_len = if stdout_empty { "(empty)".len() } else { 0 };
+    let fixed = header.len() + stdout_heading.len() + stderr_heading.len() + empty_marker_len;
+
+    // Tiny configured/remaining budgets cannot fit both headings. Use the shared
+    // final head+tail limiter, which still retains a trailing error where space
+    // permits, and always respects the actual cap.
+    if fixed >= max_bytes {
+        let mut full = header;
+        full.push_str(&stdout_heading);
+        full.push_str(if stdout_empty {
+            "(empty)"
+        } else {
+            &outcome.stdout.text
+        });
+        if has_stderr {
+            full.push_str(&stderr_heading);
+            full.push_str(&outcome.stderr.text);
+        }
+        return truncate_output(&full, max_bytes);
+    }
+
+    let available = max_bytes - fixed;
+    let (stdout_budget, stderr_budget) = if !has_stderr || stdout_empty {
+        (0, available)
+    } else {
+        let mut stdout = available / 4 * 3;
+        let mut stderr = available - stdout;
+        // Do not reserve thousands of bytes for an error stream that only needs
+        // one line; stdout gets the spare. The symmetric branch helps when stdout
+        // is short but stderr is long. Previously cut streams can always use their
+        // allocation to retain more raw data, so only uncut streams donate.
+        if !outcome.stderr.truncated && outcome.stderr.text.len() < stderr {
+            stdout += stderr - outcome.stderr.text.len();
+            stderr = outcome.stderr.text.len();
+        }
+        if !outcome.stdout.truncated && outcome.stdout.text.len() < stdout {
+            stderr += stdout - outcome.stdout.text.len();
+            stdout = outcome.stdout.text.len();
+        }
+        (stdout, stderr)
+    };
+
+    let stdout_text = if stdout_empty {
+        "(empty)".to_string()
+    } else if has_stderr {
+        outcome.stdout.render_with_budget(stdout_budget)
+    } else {
+        outcome.stdout.render_with_budget(available)
+    };
+    let stderr_text = if has_stderr {
+        outcome.stderr.render_with_budget(stderr_budget)
+    } else {
+        String::new()
+    };
+    let stdout_cut = !stdout_empty
+        && outcome.stdout.text.len() > if has_stderr { stdout_budget } else { available };
+    let stderr_cut = has_stderr && outcome.stderr.text.len() > stderr_budget;
+
+    let mut text = header;
+    text.push_str(&stdout_heading);
+    text.push_str(&stdout_text);
+    if has_stderr {
+        text.push_str(&stderr_heading);
+        text.push_str(&stderr_text);
+    }
+    debug_assert!(text.len() <= max_bytes, "{} > {max_bytes}", text.len());
+    (text, stdout_cut || stderr_cut)
 }
 
 pub struct GitStatus;

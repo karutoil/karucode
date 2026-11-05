@@ -21,9 +21,27 @@
 import { describe, expect, it } from 'vitest';
 import { BUILTIN_THEMES, DEFAULT_THEME } from './builtins';
 import { contrastRatio, rgbToHsl } from './color';
-import { ROLE_ANCHORS, resolveRoles } from './roles';
+import { ROLE_ANCHORS, resolveRoles, tintFor } from './roles';
 import { resolveTheme } from './tokens';
 import type { ResolvedTheme } from './types';
+
+/**
+ * RGB channel spread, 0-255.
+ *
+ * HSL saturation is numerically meaningless at the ends of the ramp: `#fcfcfb`
+ * has a two-unit channel spread and reads as `s=50%`, because the denominator
+ * `1 - |2L - 1|` is ~0.02 there. Judging "is this fill more chromatic than its
+ * anchor" by HSL therefore calls a near-white card a saturated slab and misses a
+ * genuinely clashing mid-tone. The spread is the same question asked in the space
+ * the screen actually has.
+ */
+function channelSpread(hex: string): number {
+  const channels = [1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16));
+  return Math.max(...channels) - Math.min(...channels);
+}
+
+/** Below this many 8-bit units a colour is a neutral with a rounding error. */
+const NEUTRAL_SPREAD = 4;
 
 /** Every surface a piece of text can legitimately sit on. */
 function surfaces(theme: ResolvedTheme): Array<[string, string]> {
@@ -188,9 +206,14 @@ describe('one hue family per theme (§2)', () => {
         const value = roles[property];
         if (!value || !/^#[0-9a-f]{6}$/i.test(value)) continue;
         const role = rgbToHsl(value);
-        const source = rgbToHsl(theme.palette[anchor as keyof typeof theme.palette]);
-        // A near-grey has no meaningful hue and cannot clash with anything.
-        if (role.s < 0.06) continue;
+        // Measure against the colour the role actually follows. For a chromatic
+        // anchor that is the anchor itself; for an achromatic one (a light theme's
+        // white `surface`) `roles.ts` deliberately inherits the theme's canvas
+        // tint, so comparing to pure white would call every warm card a clash and
+        // comparing to nothing at all — the old `role.s < 0.06` skip — is how the
+        // neutral-grey-card-on-warm-canvas defect survived this guard.
+        const source = tintFor(theme.palette, anchor);
+        if (channelSpread(value) <= NEUTRAL_SPREAD) continue;
         const drift = Math.min(
           Math.abs(role.h - source.h),
           360 - Math.abs(role.h - source.h),
@@ -217,7 +240,11 @@ describe('one hue family per theme (§2)', () => {
         const value = roles[property];
         if (!value || !/^#[0-9a-f]{6}$/i.test(value)) continue;
         const role = rgbToHsl(value);
-        const source = rgbToHsl(theme.palette[anchor as keyof typeof theme.palette]);
+        // Same source as the hue guard: an achromatic anchor lends the canvas tint,
+        // so its own 0% saturation is not the ceiling for the role it cuts.
+        const source = tintFor(theme.palette, anchor);
+        // A near-neutral has no meaningful chroma to compare (see channelSpread).
+        if (channelSpread(value) <= NEUTRAL_SPREAD) continue;
         if (role.s > source.s + CHROMA_TOLERANCE) {
           offenders.push(
             `${property}=${value} (s=${Math.round(role.s * 100)}%) vs ${anchor} (s=${Math.round(source.s * 100)}%)`,

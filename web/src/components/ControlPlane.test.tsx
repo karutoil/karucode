@@ -106,6 +106,59 @@ describe('session control plane', () => {
     expect(vi.mocked(actions.fillComposer).mock.calls[0]?.[0]).toContain('(project_id: p1)');
   });
 
+  it('retains the launch prompt when opening the control chat fails', async () => {
+    let finish: ((ok: boolean) => void) | undefined;
+    vi.mocked(actions.openSession).mockImplementation(
+      () => new Promise<boolean>((resolve) => { finish = resolve; }),
+    );
+    render(<ControlPlane />);
+    const input = await screen.findByLabelText('Start something with control chat') as HTMLInputElement;
+    fireEvent.input(input, { target: { value: 'Retry this prompt' } });
+    fireEvent.click(screen.getByRole('button', { name: /Continue/ }));
+    await waitFor(() => expect(actions.openSession).toHaveBeenCalled());
+    await act(async () => {
+      finish?.(false);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Could not open session.'));
+    fireEvent.click(screen.getByRole('button', { name: 'Back to overview' }));
+    expect((await screen.findByLabelText('Start something with control chat') as HTMLInputElement).value).toBe(
+      'Retry this prompt',
+    );
+    expect(actions.fillComposer).not.toHaveBeenCalled();
+  });
+
+  it('does not overwrite edits made while a successful launch is pending', async () => {
+    let finish: ((ok: boolean) => void) | undefined;
+    vi.mocked(actions.openSession).mockImplementation(
+      () => new Promise<boolean>((resolve) => { finish = resolve; }),
+    );
+    render(<ControlPlane />);
+    const input = await screen.findByLabelText('Start something with control chat') as HTMLInputElement;
+    fireEvent.input(input, { target: { value: 'submitted prompt' } });
+    fireEvent.click(screen.getByRole('button', { name: /Continue/ }));
+    await waitFor(() => expect(actions.openSession).toHaveBeenCalled());
+    fireEvent.input(input, { target: { value: 'edited while pending' } });
+    const opened = vi.mocked(actions.openSession).mock.calls[0]?.[0];
+    await act(async () => {
+      store.currentSessionId.value = opened ?? null;
+      finish?.(true);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(actions.fillComposer).toHaveBeenCalledWith(
+      expect.stringContaining('submitted prompt'),
+    ));
+    // The input is unmounted as soon as c1 opens, so the prompt was accepted.
+    expect(screen.queryByLabelText('Start something with control chat')).toBeNull();
+    // Re-open the overview to inspect the preserved value without remounting state.
+    fireEvent.click(screen.getByRole('button', { name: 'Back to overview' }));
+    expect((await screen.findByLabelText('Start something with control chat') as HTMLInputElement).value).toBe(
+      'edited while pending',
+    );
+  });
+
   it('offers project mentions to the control chat', async () => {
     render(<ControlPlane />);
     const controlGroup = await screen.findByLabelText('Control chats');
@@ -120,6 +173,29 @@ describe('session control plane', () => {
     fireEvent.click(within(filters).getByRole('button', { name: /Running/ }));
     expect(within(browser).getByText('First')).toBeTruthy();
     expect(within(browser).queryByText('Second')).toBeNull();
+  });
+
+  it('keeps a distinct word on every state, not just a coloured dot', async () => {
+    // `.cp-state.good, .cp-state.idle` used to be `font-size: 0`, so "Finished",
+    // "Cancelled" and "No runs" all rendered as the same grey dot. The word is
+    // now always in the row, including the ≤520px session header.
+    const quiet = [
+      { ...sessions[1]!, id: 's_done', title: 'Done one', last_run_status: 'completed' as const },
+      { ...sessions[1]!, id: 's_cancelled', title: 'Cancelled one', last_run_status: 'cancelled' as const },
+      { ...sessions[1]!, id: 's_never', title: 'Never ran', last_run_status: undefined },
+    ];
+    vi.mocked(listSessions).mockResolvedValue([...quiet, ...sessions, ...controlSessions] as never);
+    render(<ControlPlane />);
+
+    const browser = await screen.findByLabelText('Sessions across projects');
+    const row = (title: string): HTMLElement =>
+      within(browser).getByRole('button', { name: new RegExp(`^${title}`) });
+
+    expect(within(row('Done one')).getByText('Finished')).toBeTruthy();
+    expect(within(row('Cancelled one')).getByText('Cancelled')).toBeTruthy();
+    expect(within(row('Never ran')).getByText('No runs')).toBeTruthy();
+    // The tooltip repeats the state for a reader who sees only the colour cue.
+    expect(within(row('Done one')).getByTitle('Latest state: Finished')).toBeTruthy();
   });
 
   it('keeps navigation errors visible after a successful list refresh', async () => {

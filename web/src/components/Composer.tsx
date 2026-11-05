@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { Activity } from '../state/selectors';
 import * as store from '../state/store';
 import * as api from '../api/endpoints';
@@ -93,6 +93,22 @@ export interface UploadContext {
   project: string | null;
 }
 
+interface ComposerFormState {
+  draft: string;
+  attachments: Attachment[];
+  caret: number;
+  sending: boolean;
+  announcement: string;
+}
+
+interface ScopedComposerForm {
+  value: ComposerFormState;
+  /** Present only while this session/project is the visible composer. */
+  render?: () => void;
+}
+
+type FieldUpdate<T> = T | ((current: T) => T);
+
 /** One-line label for each queue kind, used by the toggle and the rows. */
 const QUEUE_LABEL: Record<QueuedKind, string> = {
   steer: 'Steer',
@@ -114,6 +130,14 @@ const QUEUE_TITLE: Record<QueuedKind, string> = {
  * genuinely different - a steer changes the turn in progress, a follow-up begins
  * the next one - so the toggle says which one is armed rather than hiding the
  * choice behind a modifier key.
+ *
+ * Keyboard behaviour is the ARIA radio-group contract, which a row of plain
+ * buttons does not give you: exactly one option is in the tab order (the checked
+ * one), Left/Up and Right/Down move *and* select the neighbour, Home/End jump to
+ * the ends, and Space/Enter activate the focused option natively. Without the
+ * roving tabindex a keyboard user had to tab through both options, and the arrow
+ * keys did nothing, so the control announced itself as a radiogroup and then
+ * refused to behave like one.
  */
 function QueueModeToggle({
   mode,
@@ -122,18 +146,51 @@ function QueueModeToggle({
   mode: QueuedKind;
   onChange: (next: QueuedKind) => void;
 }): JSX.Element {
+  const kinds = Object.keys(QUEUE_LABEL) as QueuedKind[];
+  const buttons = useRef(new Map<QueuedKind, HTMLButtonElement | null>());
+
+  /** Select an option and move focus to it, like a native radio button. */
+  const choose = (next: QueuedKind): void => {
+    onChange(next);
+    buttons.current.get(next)?.focus();
+  };
+
+  const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLButtonElement>): void => {
+    const index = kinds.indexOf(mode);
+    let next: QueuedKind | undefined;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+      next = kinds[(index + 1) % kinds.length];
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+      next = kinds[(index - 1 + kinds.length) % kinds.length];
+    } else if (event.key === 'Home') {
+      next = kinds[0];
+    } else if (event.key === 'End') {
+      next = kinds[kinds.length - 1];
+    }
+    if (next === undefined) return;
+    // Both keys would scroll the transcript otherwise.
+    event.preventDefault();
+    choose(next);
+  };
+
   return (
     <div class="queue-mode" role="radiogroup" aria-label="What this message does">
-      {(Object.keys(QUEUE_LABEL) as QueuedKind[]).map((kind) => (
+      {kinds.map((kind) => (
         <button
           key={kind}
+          ref={(element) => {
+            buttons.current.set(kind, element);
+          }}
           type="button"
           role="radio"
           aria-checked={mode === kind}
+          // The checked option is the group's one tab stop; arrows move within.
+          tabIndex={mode === kind ? 0 : -1}
           class="queue-mode-option"
           data-active={mode === kind ? 'true' : 'false'}
           title={QUEUE_TITLE[kind]}
           onClick={() => onChange(kind)}
+          onKeyDown={onKeyDown}
         >
           {QUEUE_LABEL[kind]}
         </button>
@@ -331,7 +388,67 @@ export function Composer({
   mentionLabel,
   uploadFile,
 }: ComposerProps): JSX.Element {
-  const [draft, setDraft] = useState('');
+  // One record per project/session: a different session in the same project must
+  // not inherit a draft, just as the same session must not follow a later project.
+  // Async upload/send continuations retain this record, not the next visible one.
+  const sessionId = store.currentSessionId.value;
+  const projectId = store.currentProjectId.value;
+  const scopeKey = JSON.stringify([projectId, sessionId]);
+  const forms = useRef(new Map<string, ScopedComposerForm>());
+  let scopedForm = forms.current.get(scopeKey);
+  if (!scopedForm) {
+    scopedForm = {
+      value: { draft: '', attachments: [], caret: 0, sending: false, announcement: '' },
+    };
+    forms.current.set(scopeKey, scopedForm);
+  }
+  const form = scopedForm;
+  const { draft, attachments, caret, sending, announcement } = form.value;
+  const [, renderForm] = useState(0);
+
+  const updateForm = (update: (current: ComposerFormState) => ComposerFormState): void => {
+    form.value = update(form.value);
+    // When this scope is parked there is deliberately no subscriber to update.
+    form.render?.();
+  };
+  const setDraft = (update: FieldUpdate<string>): void => {
+    updateForm((current) => ({
+      ...current,
+      draft: typeof update === 'function' ? update(current.draft) : update,
+    }));
+  };
+  const setAttachments = (update: FieldUpdate<Attachment[]>): void => {
+    updateForm((current) => ({
+      ...current,
+      attachments: typeof update === 'function' ? update(current.attachments) : update,
+    }));
+  };
+  const setAnnouncement = (update: FieldUpdate<string>): void => {
+    updateForm((current) => ({
+      ...current,
+      announcement: typeof update === 'function' ? update(current.announcement) : update,
+    }));
+  };
+  const setCaret = (update: FieldUpdate<number>): void => {
+    updateForm((current) => ({
+      ...current,
+      caret: typeof update === 'function' ? update(current.caret) : update,
+    }));
+  };
+  const setSending = (update: FieldUpdate<boolean>): void => {
+    updateForm((current) => ({
+      ...current,
+      sending: typeof update === 'function' ? update(current.sending) : update,
+    }));
+  };
+
+  useLayoutEffect(() => {
+    const render = (): void => renderForm((current) => current + 1);
+    form.render = render;
+    return () => {
+      if (form.render === render) form.render = undefined;
+    };
+  }, [form]);
 
   // `store.composerDraft` is how another surface (the empty state's quick
   // prompts) hands text to the composer; it is consumed once and cleared.
@@ -389,10 +506,6 @@ export function Composer({
       element.setSelectionRange(element.value.length, element.value.length);
     });
   }, [handoff]);
-  const [caret, setCaret] = useState(0);
-  const [sending, setSending] = useState(false);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [announcement, setAnnouncement] = useState('');
   const [dragging, setDragging] = useState(false);
   /**
    * Which queue the next message goes into while a run is in flight.
@@ -407,22 +520,6 @@ export function Composer({
   const fileInput = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
 
-  // ---- draft, scoped to the session -------------------------------------
-  // The composer stays mounted across `switchSession`, so a half-written message
-  // for session A must not turn up in session B where it could be sent to the
-  // wrong conversation. Park each session's draft and restore it on return.
-  const sessionId = store.currentSessionId.value;
-  const drafts = useRef(new Map<string, string>());
-  const draftSession = useRef(sessionId);
-  useEffect(() => {
-    if (draftSession.current === sessionId) return;
-    drafts.current.set(draftSession.current ?? '', draft);
-    draftSession.current = sessionId;
-    const restored = drafts.current.get(sessionId ?? '') ?? '';
-    setDraft(restored);
-    setCaret(restored.length);
-  }, [sessionId]);
-
   // ---- @-mentions -------------------------------------------------------
   const [suggestions, setSuggestions] = useState<MentionCandidate[]>([]);
   const [activeOption, setActiveOption] = useState(0);
@@ -430,13 +527,11 @@ export function Composer({
   const [indexLoading, setIndexLoading] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const indexedAt = useRef(0);
-  const loadingIndex = useRef(false);
   const loadTree = loadMentionTree ?? defaultLoadTree;
 
   // The index is per project. The TTL alone would keep the previous project's
   // file list for up to a minute after a switch, and a mention could then name a
   // path the agent cannot open.
-  const projectId = store.currentProjectId.value;
   const indexedProject = useRef(projectId);
   useEffect(() => {
     if (indexedProject.current === projectId) return;
@@ -453,31 +548,36 @@ export function Composer({
 
   useEffect(() => {
     if (!mentionOpen) return;
-    if (loadingIndex.current) return;
     const fresh = indexedAt.current > 0 && Date.now() - indexedAt.current < INDEX_TTL_MS;
-    if (fresh) return;
+    if (fresh) {
+      setIndexLoading(false);
+      return;
+    }
     let cancelled = false;
-    loadingIndex.current = true;
+    const requestedProject = projectId;
     setIndexLoading(true);
     setIndexError(null);
     void (async () => {
       try {
         const tree = await loadTree(MENTION_INDEX_DEPTH);
-        if (cancelled) return;
+        // A response can outlive both this popover and a project switch. Never
+        // let the previous workspace populate the next project's menu.
+        if (cancelled || store.currentProjectId.value !== requestedProject) return;
         setSuggestions(indexFromTree(tree).filter((entry) => entry.kind === 'file'));
         indexedAt.current = Date.now();
       } catch (error) {
-        if (cancelled) return;
+        if (cancelled || store.currentProjectId.value !== requestedProject) return;
         setIndexError(`Could not index the workspace: ${toErrorMessage(error)}`);
       } finally {
-        setIndexLoading(false);
-        loadingIndex.current = false;
+        if (!cancelled && store.currentProjectId.value === requestedProject) {
+          setIndexLoading(false);
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [mentionOpen, loadTree, suggestions.length]);
+  }, [mentionOpen, loadTree, projectId]);
 
   // A new query always starts at the best match.
   useEffect(() => {
@@ -522,17 +622,22 @@ export function Composer({
       return;
     }
     try {
+      // The ids are captured before classification, file reads and the upload.
+      // Reading them after an await can upload A's file into B's session.
       const result = await upload(file, {
-        session: store.currentSessionId.value,
-        project: store.currentProjectId.value,
+        session: sessionId,
+        project: projectId,
       });
       updateAttachment(attachment.id, { status: 'ready', path: result.path });
-      // The uploaded file is now mentionable without waiting for a refetch.
-      setSuggestions((current) =>
-        current.some((entry) => entry.path === result.path)
-          ? current
-          : [...current, { path: result.path, kind: 'file', size: attachment.size }],
-      );
+      // The uploaded file is now mentionable in its own workspace. A completion
+      // that arrives after a project switch must not seed this project's index.
+      if (store.currentProjectId.value === projectId) {
+        setSuggestions((current) =>
+          current.some((entry) => entry.path === result.path)
+            ? current
+            : [...current, { path: result.path, kind: 'file', size: attachment.size }],
+        );
+      }
     } catch (error) {
       updateAttachment(attachment.id, { status: 'error', error: toErrorMessage(error) });
     }
@@ -619,7 +724,19 @@ export function Composer({
   const canQueue = canType && running && !sending && attachmentReady && hasContent && onQueue !== undefined;
   const canSend = canType && !running && !sending && attachmentReady && hasContent;
 
-  const clearComposer = (message: string): void => {
+  const clearComposer = (
+    message: string,
+    submitted?: { draft: string; attachments: Attachment[] },
+  ): void => {
+    // Sending is asynchronous and the textarea stays editable. If the reader
+    // changed this scoped form while the request was pending, preserve that work.
+    if (
+      submitted &&
+      (form.value.draft !== submitted.draft || form.value.attachments !== submitted.attachments)
+    ) {
+      setAnnouncement(message);
+      return;
+    }
     setDraft('');
     setCaret(0);
     setAttachments([]);
@@ -632,6 +749,7 @@ export function Composer({
     // flight, a follow-up starts the next one.
     if (running) {
       if (!canQueue) return;
+      const submitted = { draft, attachments };
       setSending(true);
       try {
         const accepted = await onQueue(queueMode, {
@@ -646,6 +764,7 @@ export function Composer({
             count === 0
               ? `Queued as a ${what}.`
               : `Queued as a ${what} with ${count} ${count === 1 ? 'attachment' : 'attachments'}.`,
+            submitted,
           );
         }
       } finally {
@@ -654,12 +773,16 @@ export function Composer({
       return;
     }
     if (!canSend) return;
+    const submitted = { draft, attachments };
     setSending(true);
     try {
       const accepted = await onSend(composeMessage(draft, attachments));
       if (accepted) {
         const sent = attachments.length;
-        clearComposer(sent === 0 ? '' : `Sent with ${sent} ${sent === 1 ? 'attachment' : 'attachments'}.`);
+        clearComposer(
+          sent === 0 ? '' : `Sent with ${sent} ${sent === 1 ? 'attachment' : 'attachments'}.`,
+          submitted,
+        );
       }
     } finally {
       setSending(false);
@@ -724,15 +847,19 @@ export function Composer({
           void submit();
         }}
         onDragEnter={(event) => {
-          if (!canType || !hasFiles(event)) return;
+          if (!hasFiles(event)) return;
+          // Even a disabled composer must cancel a file drag. Otherwise enabling
+          // the drop later can still fall through to browser navigation.
           event.preventDefault();
+          if (!canType) return;
           dragDepth.current += 1;
           setDragging(true);
         }}
         onDragOver={(event) => {
-          if (!canType || !hasFiles(event)) return;
+          if (!hasFiles(event)) return;
           event.preventDefault();
-          if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+          if (event.dataTransfer) event.dataTransfer.dropEffect = canType ? 'copy' : 'none';
+          if (!canType) return;
         }}
         onDragLeave={() => {
           // Some browsers report empty `types` on dragleave, so the counter — not
@@ -742,11 +869,13 @@ export function Composer({
           if (dragDepth.current === 0) setDragging(false);
         }}
         onDrop={(event) => {
-          if (!canType) return;
-          // Always cancel the default: an unmatched drop would navigate away.
+          if (!hasFiles(event)) return;
+          // Cancel every file drop, including when the composer is disabled:
+          // ignoring it would make the browser open the dropped local file.
           event.preventDefault();
           const files = event.dataTransfer?.files;
           resetDrag();
+          if (!canType) return;
           if (files && files.length > 0) void addFiles(Array.from(files));
         }}
       >

@@ -31,6 +31,8 @@
 //   `/metrics` require `Authorization: Bearer <token>`; `?token=` is accepted
 //   only for the SSE stream and the terminal websocket (a browser can set
 //   neither a header on a top-level navigation nor on a websocket handshake).
+//   Artifact frames instead receive a random per-artifact `?capability=` from the
+//   authenticated publishing POST; the master bearer never enters their URL.
 //   The **SPA shell and its static assets are served unauthenticated**: `GET /`,
 //   `/index.html`, `/assets/*`, `/favicon*`, `/brand/*` and any client-side deep
 //   link return the built frontend (or the "UI not built" placeholder) with
@@ -65,7 +67,9 @@
 //   `GET /api/artifacts/<id>`, served with `sandbox allow-scripts` (an opaque
 //   origin: its scripts run, but it cannot read this app's storage, call `/api`
 //   or frame the app) and `connect-src 'none'` with no wildcard source, so a
-//   prompt-injected `<img src="https://…">` cannot beacon out. An SVG artifact is
+//   prompt-injected `<img src="https://…">` cannot beacon out. Its URL carries
+//   only that artifact's random read capability, so even its own inline script
+//   cannot learn the master bearer from `location.search`. An SVG artifact is
 //   sanitised and drawn in a shadow root; nothing from an artifact is ever
 //   inserted into the app's own DOM as markup. See the `artifacts` topic.
 // * **Plugin panels** - a plugin contributes *data*, never markup. The inspector
@@ -242,7 +246,10 @@ async fn auth_middleware(
     let Some(expected) = state.auth_token() else {
         return next.run(request).await;
     };
-    if !requires_auth(request.uri().path()) || authorized(&request, &expected) {
+    if !requires_auth(request.uri().path())
+        || authorized(&request, &expected)
+        || artifact_capability_authorized(&state, &request)
+    {
         next.run(request).await
     } else {
         ApiError::unauthorized().into_response()
@@ -294,13 +301,11 @@ fn authorized(request: &Request<Body>, expected: &str) -> bool {
             return true;
         }
     }
-    // Three endpoints accept `?token=`: the SSE stream (a `ReadableStream` fetch
-    // cannot always set headers), the terminal websocket (a browser never can on
-    // a handshake), and an artifact document (an `<iframe src>` is a browser
-    // navigation with no headers either). All are same-origin only; the
-    // websocket additionally checks `Origin` against `Host`, and an artifact id is
-    // a content hash the caller has just published, so the URL grants nothing
-    // that the bearer token did not already grant.
+    // Only two endpoints accept the master `?token=`: the SSE stream (a
+    // `ReadableStream` fetch cannot always set headers) and the terminal websocket
+    // (a browser never can on a handshake). An artifact frame never receives this
+    // exemption: its inline JavaScript is untrusted and can read location.search.
+    // Its separately checked per-artifact capability is handled below.
     let path = request.uri().path();
     if path == "/api/events" || (path.starts_with("/api/terminals/") && path.ends_with("/socket")) {
         if let Some(token) = query_param(request.uri().query(), "token") {
@@ -309,16 +314,23 @@ fn authorized(request: &Request<Body>, expected: &str) -> bool {
             }
         }
     }
-    if let Some(id) = path.strip_prefix("/api/artifacts/") {
-        if !id.contains('/') && crate::artifacts::valid_id(id) {
-            if let Some(token) = query_param(request.uri().query(), "token") {
-                if constant_time_eq(token.as_bytes(), expected.as_bytes()) {
-                    return true;
-                }
-            }
-        }
-    }
     false
+}
+
+/// A frame URL carries a random read grant for one artifact, never the master
+/// bearer. The handler repeats this check so the capability remains mandatory
+/// even when the deployment has no master token configured.
+fn artifact_capability_authorized(state: &AppState, request: &Request<Body>) -> bool {
+    let Some(id) = request.uri().path().strip_prefix("/api/artifacts/") else {
+        return false;
+    };
+    if id.contains('/') || !crate::artifacts::valid_id(id) {
+        return false;
+    }
+    let Some(capability) = query_param(request.uri().query(), "capability") else {
+        return false;
+    };
+    state.artifacts().capability_matches(id, &capability)
 }
 
 /// DNS-rebinding guard: when the process is unauthenticated and bound to

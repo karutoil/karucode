@@ -253,7 +253,7 @@ body
  * in Daybreak (DESIGN-AUDIT overlays B4). */
 .palette-item.is-active {
   background: var(--row-selected-bg);
-  color: var(--accent-fill);
+  color: var(--accent-on-tint);
 }
 
 .palette-item-icon {
@@ -461,7 +461,7 @@ body
   border: 1px solid var(--accent-line);
   border-radius: var(--radius-sm);
   background: var(--accent-bg);
-  color: var(--accent-hi);
+  color: var(--accent-on-tint);
   font-size: var(--fs-small);
 }
 
@@ -563,7 +563,7 @@ body
 
 .file-view-tab.is-active {
   background: var(--accent-bg);
-  color: var(--accent);
+  color: var(--accent-on-tint);
 }
 
 .file-view-tab:focus-visible {
@@ -934,11 +934,16 @@ body
     border-radius: 0;
   }
 
-  .dialog-palette {
+  /* Keep command search compact on phones so the current workspace remains
+   * visible around the modal and the list owns the scroll. */
+  .dialog.dialog-palette {
     align-self: center;
-    margin-top: 0;
+    width: calc(100vw - 28px);
     height: auto;
     max-height: 82dvh;
+    margin-top: 0;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
   }
 
   .dialog-palette .dialog-header {
@@ -996,6 +1001,22 @@ body
   display: flex;
   flex-direction: column;
   gap: var(--space-7);
+  /* `.dialog` is `max-height: calc(100dvh - 48px)` with `overflow: hidden`, and
+   * on a phone it is the whole `100dvh`. This body is the tallest thing in the
+   * app's dialogs: a quote, the count, three mode cards, a note field and a file
+   * list. Without a scroller it grew past the dialog, the footer was clipped
+   * away, and the rewind could not be confirmed at all on a short screen — the
+   * same defect `.dialog-model-edit > .field-grid` already fixes this way. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Scrolling body, fixed footer: the buttons must not shrink or scroll away with
+ * the content (mirrors `.dialog-model-edit > .dialog-actions`). */
+.dialog-rewind > .dialog-actions {
+  flex: 0 0 auto;
 }
 
 /* The message being recalled to, quoted so there is no doubt which turn it is. */

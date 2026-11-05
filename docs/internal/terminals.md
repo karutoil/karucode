@@ -68,7 +68,9 @@ JSON control channel:
   message;
 * **text frames** are JSON and carry only control: `{"type":"resize","cols":120,"rows":40}`,
   and, from the server, `{"type":"ready","replay":true,"pid":1234}`,
-  `{"type":"exit","code":0}`, `{"type":"error","message":"..."}`.
+  `{"type":"exit","code":0}`, `{"type":"error","message":"..."}`. Sending
+  `{"type":"ping"}` answers only that socket with text `{"type":"pong"}`;
+  control JSON is never broadcast or disguised as binary PTY output.
 
 On attach the server first sends the tail of the replay buffer (the newest
 `terminals.scrollback_bytes` of output) as one binary frame, then streams live

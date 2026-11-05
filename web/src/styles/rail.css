@@ -147,7 +147,7 @@
   border: 1px solid var(--rail-glyph-line);
   border-radius: var(--radius);
   background: var(--surface-3);
-  color: var(--rail-glyph-text);
+  color: var(--text-secondary);
   font-family: var(--font-ui);
   font-size: var(--fs-micro);
   font-weight: 700;
@@ -220,7 +220,7 @@
 .project-rail-item.is-active .project-rail-avatar {
   border-color: color-mix(in srgb, var(--btn-accent-bg-hover) 47%, var(--gold-send));
   background: var(--btn-accent-bg-hover);
-  color: var(--accent-text-soft);
+  color: var(--accent-on-tint);
   box-shadow:
     0 2px 14px color-mix(in srgb, var(--gold-send-hover) 9%, transparent),
     inset 0 1px var(--rail-glyph-line);
@@ -313,7 +313,7 @@
   padding: var(--space-3) var(--space-3) 0;
   margin: 0;
   color: var(--muted);
-  font-size: var(--fs-micro);
+  font-size: var(--fs-tiny);
   line-height: 1.45;
   text-align: center;
   letter-spacing: 0.01em;
@@ -614,7 +614,7 @@
 .project-switcher-item.is-active {
   border-color: var(--accent-faint);
   background: var(--accent-surface);
-  color: var(--accent-text-soft);
+  color: var(--accent-on-tint);
 }
 
 .project-switcher-item:focus-visible {
@@ -631,7 +631,7 @@
   border: 1px solid var(--rail-glyph-line);
   border-radius: var(--radius-sm);
   background: var(--surface-hover);
-  color: var(--rail-glyph-text);
+  color: var(--text-secondary);
   font-size: var(--fs-micro);
   font-weight: 660;
   letter-spacing: -0.2px;
@@ -641,7 +641,7 @@
 .project-switcher-item.is-active .project-switcher-initials {
   border-color: color-mix(in srgb, var(--btn-accent-bg-hover) 47%, var(--gold-send));
   background: var(--btn-accent-bg-hover);
-  color: var(--accent-text-soft);
+  color: var(--accent-on-tint);
 }
 
 .project-switcher-name {

@@ -104,7 +104,10 @@ mod tests {
         // default path and a value that cannot leak into another test's run.
         // SAFETY: the test binary is single-threaded for this module's tests.
         std::env::remove_var("KARUCODE_MALLOC_TRIM_SECS");
-        assert_eq!(trim_interval(), Some(std::time::Duration::from_secs(DEFAULT_TRIM_SECS)));
+        assert_eq!(
+            trim_interval(),
+            Some(std::time::Duration::from_secs(DEFAULT_TRIM_SECS))
+        );
         std::env::set_var("KARUCODE_MALLOC_TRIM_SECS", "0");
         assert_eq!(trim_interval(), None);
         std::env::set_var("KARUCODE_MALLOC_TRIM_SECS", "5");

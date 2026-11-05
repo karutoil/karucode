@@ -314,79 +314,92 @@ impl StreamState {
 
         self.saw_event = true;
 
-        // `usage` may arrive on the final chunk, on a chunk with no choices, or
-        // not at all.
-        if let Some(usage) = value.get("usage").filter(|v| v.is_object()) {
-            let input = token_count(usage, "prompt_tokens", "input_tokens");
-            let output = token_count(usage, "completion_tokens", "output_tokens");
-            if input.is_some() || output.is_some() {
-                self.queue.push_back(Ok(ProviderChunk::Usage {
+        // Parse final accounting now, but do not enqueue it yet: this same payload
+        // can still carry content, and the DSML scanner may be holding its tail.
+        let usage_chunk = value
+            .get("usage")
+            .filter(|v| v.is_object())
+            .and_then(|usage| {
+                let input = token_count(usage, "prompt_tokens", "input_tokens");
+                let output = token_count(usage, "completion_tokens", "output_tokens");
+                if input.is_none() && output.is_none() {
+                    return None;
+                }
+                Some(ProviderChunk::Usage {
                     input_tokens: input.unwrap_or(0),
                     output_tokens: output.unwrap_or(0),
                     cached_tokens: cached_tokens(usage),
-                }));
-            }
-        }
+                })
+            });
 
         // Keepalive chunks legitimately have `choices: []`.
-        let Some(choice) = value
+        let mut finish_reason = None;
+        if let Some(choice) = value
             .get("choices")
             .and_then(Value::as_array)
             .and_then(|choices| choices.first())
-        else {
-            return;
-        };
-
-        if let Some(delta) = choice.get("delta").filter(|v| v.is_object()) {
-            if let Some(text) = delta_text(delta.get("content")) {
-                if !text.is_empty() {
-                    self.text(text);
-                }
-            }
-            // Some endpoints use `reasoning`, others `reasoning_content`.
-            let reasoning = delta_text(delta.get("reasoning_content"))
-                .or_else(|| delta_text(delta.get("reasoning")));
-            if let Some(text) = reasoning {
-                if !text.is_empty() {
-                    self.queue.push_back(Ok(ProviderChunk::Reasoning(text)));
-                }
-            }
-            if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                for (position, call) in calls.iter().enumerate() {
-                    let index = call
-                        .get("index")
-                        .and_then(Value::as_u64)
-                        .map(|i| i as usize)
-                        .unwrap_or(position);
-                    let id = call.get("id").and_then(Value::as_str).and_then(non_empty);
-                    let function = call.get("function");
-                    let name = function
-                        .and_then(|f| f.get("name"))
-                        .and_then(Value::as_str)
-                        .and_then(non_empty);
-                    let arguments = function
-                        .and_then(|f| f.get("arguments"))
-                        .and_then(argument_text);
-                    if id.is_none() && name.is_none() && arguments.is_none() {
-                        continue;
+        {
+            if let Some(delta) = choice.get("delta").filter(|v| v.is_object()) {
+                if let Some(text) = delta_text(delta.get("content")) {
+                    if !text.is_empty() {
+                        self.text(text);
                     }
-                    self.queue.push_back(Ok(ProviderChunk::ToolCallDelta {
-                        index,
-                        id,
-                        name,
-                        arguments_delta: arguments,
-                    }));
+                }
+                // Some endpoints use `reasoning`, others `reasoning_content`.
+                let reasoning = delta_text(delta.get("reasoning_content"))
+                    .or_else(|| delta_text(delta.get("reasoning")));
+                if let Some(text) = reasoning {
+                    if !text.is_empty() {
+                        self.queue.push_back(Ok(ProviderChunk::Reasoning(text)));
+                    }
+                }
+                if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                    for (position, call) in calls.iter().enumerate() {
+                        let index = call
+                            .get("index")
+                            .and_then(Value::as_u64)
+                            .map(|i| i as usize)
+                            .unwrap_or(position);
+                        let id = call.get("id").and_then(Value::as_str).and_then(non_empty);
+                        let function = call.get("function");
+                        let name = function
+                            .and_then(|f| f.get("name"))
+                            .and_then(Value::as_str)
+                            .and_then(non_empty);
+                        let arguments = function
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(argument_text);
+                        if id.is_none() && name.is_none() && arguments.is_none() {
+                            continue;
+                        }
+                        self.queue.push_back(Ok(ProviderChunk::ToolCallDelta {
+                            index,
+                            id,
+                            name,
+                            arguments_delta: arguments,
+                        }));
+                    }
                 }
             }
+            finish_reason = choice
+                .get("finish_reason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.is_empty())
+                .map(str::to_string);
         }
 
-        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-            if !reason.is_empty() {
-                self.saw_finish = true;
-                self.queue.push_back(Ok(ProviderChunk::Finish {
-                    reason: reason.to_string(),
-                }));
-            }
+        // Finish and Usage are terminal ordering boundaries for kc-runtime. Flush
+        // held text before either one; doing it only on the later [DONE]/EOF queues
+        // that text after the consumer has stopped reading.
+        if usage_chunk.is_some() || finish_reason.is_some() {
+            self.flush_text();
+        }
+        if let Some(usage) = usage_chunk {
+            self.queue.push_back(Ok(usage));
+        }
+        if let Some(reason) = finish_reason {
+            self.saw_finish = true;
+            self.queue.push_back(Ok(ProviderChunk::Finish { reason }));
         }
     }
 

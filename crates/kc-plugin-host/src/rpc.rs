@@ -921,6 +921,14 @@ impl PluginShared {
         // tab that fails every time it is opened.
         let panels = parse_panels(&self.name, &manifest, &tools)?;
         let mut inner = self.lock();
+        // EOF may race the final tools/list response. The reader has already
+        // failed the slot and removed `out`; never overwrite that with Ready.
+        if inner.out.is_none() || inner.status == PluginStatus::Failed {
+            return Err(inner
+                .error
+                .clone()
+                .unwrap_or_else(|| format!("plugin `{}` closed its stdout", self.name)));
+        }
         inner.manifest = Some(PluginManifest {
             panels: panels.clone(),
             ..manifest
@@ -1186,65 +1194,37 @@ impl PluginShared {
         false
     }
 
-    /// stdout closed: the process is exiting (or has already exited). Close the
-    /// write side immediately, then give the supervisor a short grace period to
-    /// reap the child so pending requests can report the real exit status. If the
-    /// process is still alive after the grace period, fail what is left.
-    ///
-    /// `protocol_error` is `Some` when the reader stopped because the plugin
-    /// broke the framing contract (an over-long line, a read error) rather than
-    /// because it exited. Such a plugin is not usable, so the kill sender is
-    /// fired and the supervisor reaps it — mirroring `fail_protocol` in the MCP
-    /// stdio transport. Without this the process would linger forever.
+    /// stdout closed: no future response can arrive, even if the child keeps
+    /// running. Unexpected EOF is therefore fatal immediately, independent of
+    /// whether any request happens to be pending. Kill through the supervisor so
+    /// a child that closed only its stdout is still reaped, and let the next tool
+    /// call take the normal bounded restart path.
     fn on_stdout_closed(self: &Arc<Self>, epoch: u64, protocol_error: Option<String>) {
         if self.epoch.load(Ordering::SeqCst) != epoch {
             return;
         }
-        let kill = {
+        let msg =
+            protocol_error.unwrap_or_else(|| format!("plugin `{}` closed its stdout", self.name));
+        let (kill, pending) = {
             let mut inner = self.lock();
+            if self.epoch.load(Ordering::SeqCst) != epoch || inner.shutting_down {
+                return;
+            }
             inner.out = None;
-            if let Some(message) = &protocol_error {
-                inner.error = Some(message.clone());
-            }
-            // Only a protocol violation kills the child here; a plain EOF means
-            // the process is already on its way out and the supervisor will see
-            // the exit on its own.
-            if protocol_error.is_some() {
-                inner.kill.take()
-            } else {
-                None
-            }
+            inner.status = PluginStatus::Failed;
+            inner.error = Some(msg.clone());
+            inner.tools.clear();
+            inner.panels.clear();
+            inner.manifest = None;
+            (inner.kill.take(), std::mem::take(&mut inner.pending))
         };
+        for (_, tx) in pending {
+            let _ = tx.send(Reply::Transport(msg.clone()));
+        }
         if let Some(tx) = kill {
             let _ = tx.send(());
         }
-        let shared = Arc::clone(self);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            if shared.epoch.load(Ordering::SeqCst) != epoch {
-                return;
-            }
-            let msg = protocol_error
-                .unwrap_or_else(|| format!("plugin `{}` closed its stdout", shared.name));
-            let pending_left = {
-                let mut inner = shared.lock();
-                if inner.shutting_down {
-                    return;
-                }
-                if !inner.pending.is_empty() {
-                    inner.status = PluginStatus::Failed;
-                    inner.error = Some(msg.clone());
-                    inner.tools.clear();
-                    inner.panels.clear();
-                    inner.manifest = None;
-                }
-                inner.pending.is_empty()
-            };
-            if !pending_left {
-                shared.fail_pending(&msg);
-            }
-            debug!(plugin = %shared.name, "plugin stdout closed");
-        });
+        debug!(plugin = %self.name, "plugin stdout closed: {msg}");
     }
 
     fn on_exit(&self, epoch: u64, status: std::io::Result<ExitStatus>) {
@@ -1272,15 +1252,22 @@ impl PluginShared {
                 inner.status = PluginStatus::Failed;
                 // Keep a more specific earlier error (e.g. the protocol
                 // violation that caused the kill) instead of replacing it with
-                // the generic exit message.
-                if inner.error.is_none() {
-                    inner.error = Some(match &status {
-                        Ok(s) => match s.code() {
-                            Some(code) => format!("plugin process exited with exit code {code}"),
-                            None => format!("plugin process was terminated by a signal ({s})"),
-                        },
-                        Err(e) => format!("could not wait for the plugin process: {e}"),
-                    });
+                // the generic exit message. For plain EOF, append the actual
+                // exit result: both the cause and the code/signal are useful.
+                let exit_message = match &status {
+                    Ok(s) => match s.code() {
+                        Some(code) => format!("plugin process exited with exit code {code}"),
+                        None => format!("plugin process was terminated by a signal ({s})"),
+                    },
+                    Err(e) => format!("could not wait for the plugin process: {e}"),
+                };
+                let eof_message = format!("plugin `{}` closed its stdout", self.name);
+                match inner.error.as_deref() {
+                    None => inner.error = Some(exit_message),
+                    Some(previous) if previous == eof_message => {
+                        inner.error = Some(format!("{previous}; {exit_message}"));
+                    }
+                    Some(_) => {}
                 }
             }
             std::mem::take(&mut inner.pending)
@@ -1290,16 +1277,6 @@ impl PluginShared {
             let _ = tx.send(Reply::Transport(msg.clone()));
         }
         debug!(plugin = %self.name, "plugin process finished: {detail}");
-    }
-
-    fn fail_pending(&self, message: &str) {
-        let pending = {
-            let mut inner = self.lock();
-            std::mem::take(&mut inner.pending)
-        };
-        for (_, tx) in pending {
-            let _ = tx.send(Reply::Transport(message.to_string()));
-        }
     }
 }
 
@@ -1963,17 +1940,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_plain_eof_does_not_kill_the_child() {
+    async fn a_plain_idle_eof_fails_and_kills_the_child() {
         let (shared, _rx) = shared_with_queue();
-        let (kill_tx, mut kill_rx) = oneshot::channel::<()>();
+        let (kill_tx, kill_rx) = oneshot::channel::<()>();
         shared.lock().kill = Some(kill_tx);
 
-        // A plain EOF means the process is already on its way out; the
-        // supervisor sees the exit on its own and must not be raced by a kill.
         shared.on_stdout_closed(0, None);
 
-        assert!(kill_rx.try_recv().is_err(), "no kill on a plain EOF");
-        assert!(shared.lock().kill.is_some());
+        tokio::time::timeout(Duration::from_secs(1), kill_rx)
+            .await
+            .expect("an unreadable idle plugin must be killed and reaped")
+            .expect("the kill sender must not be dropped");
+        let inner = shared.lock();
+        assert_eq!(inner.status, PluginStatus::Failed);
+        assert!(inner.out.is_none());
+        assert!(inner.kill.is_none());
+        assert!(inner
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("stdout"));
     }
 }
 

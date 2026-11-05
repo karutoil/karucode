@@ -539,6 +539,17 @@ describe('Composer', () => {
       expect(screen.queryByText('Drop files to attach')).toBeNull();
     });
 
+    it('always cancels disabled file drag/drop without attaching or showing the overlay', () => {
+      const { form } = renderComposer({ disabledReason: 'Composer unavailable' });
+      const dataTransfer = { files: [binaryFile('blocked.bin')], types: ['Files'], dropEffect: 'copy' };
+      expect(fireEvent.dragEnter(form, { dataTransfer })).toBe(false);
+      expect(fireEvent.dragOver(form, { dataTransfer })).toBe(false);
+      expect(fireEvent.drop(form, { dataTransfer })).toBe(false);
+      expect(dataTransfer.dropEffect).toBe('none');
+      expect(screen.queryByText('blocked.bin')).toBeNull();
+      expect(screen.queryByText('Drop files to attach')).toBeNull();
+    });
+
     it('rejects a file past the upload ceiling without calling the server', async () => {
       const uploadFile = vi.fn(async () => ({ path: 'unused' }));
       const { fileInput } = renderComposer({ uploadFile });
@@ -548,6 +559,115 @@ describe('Composer', () => {
 
       expect(await screen.findByText(/Larger than 8.0 MB/)).not.toBeNull();
       expect(uploadFile).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('scoped pending work', () => {
+    it('parks attachments as well as drafts for each session', async () => {
+      store.currentSessionId.value = 's_a';
+      const { textarea, fileInput } = renderComposer({
+        uploadFile: vi.fn(async () => ({ path: '.karucode/attachments/s_a/file.bin' })),
+      });
+      fireEvent.change(fileInput, { target: { files: [binaryFile('file.bin')] } });
+      fireEvent.input(textarea, { target: { value: 'for A' } });
+      await screen.findByText(/Uploaded · 3 B/);
+
+      await act(async () => {
+        store.currentSessionId.value = 's_b';
+      });
+      expect(textarea.value).toBe('');
+      expect(screen.queryByText('file.bin')).toBeNull();
+      fireEvent.input(textarea, { target: { value: 'for B' } });
+
+      await act(async () => {
+        store.currentSessionId.value = 's_a';
+      });
+      expect(textarea.value).toBe('for A');
+      expect(screen.getByText('file.bin')).not.toBeNull();
+      await act(async () => {
+        store.currentSessionId.value = 's_b';
+      });
+      expect(textarea.value).toBe('for B');
+    });
+
+    it('captures upload scope before awaiting and a late result never mutates the next project', async () => {
+      store.currentProjectId.value = 'p_a';
+      store.currentSessionId.value = 's_a';
+      let finish: ((result: { path: string }) => void) | undefined;
+      const uploadFile = vi.fn(
+        (_file: File, _context: { session: string | null; project: string | null }) =>
+          new Promise<{ path: string }>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const { textarea, fileInput } = renderComposer({ uploadFile });
+      fireEvent.change(fileInput, { target: { files: [binaryFile('late.bin')] } });
+      await waitFor(() => expect(uploadFile).toHaveBeenCalledTimes(1));
+      expect(uploadFile.mock.calls[0]?.[1]).toEqual({ session: 's_a', project: 'p_a' });
+
+      await act(async () => {
+        store.currentProjectId.value = 'p_b';
+        store.currentSessionId.value = 's_b';
+      });
+      fireEvent.input(textarea, { target: { value: 'draft B' } });
+      await act(async () => {
+        finish?.({ path: '.karucode/attachments/s_a/late.bin' });
+        await Promise.resolve();
+      });
+      expect(textarea.value).toBe('draft B');
+      expect(screen.queryByText('late.bin')).toBeNull();
+
+      await act(async () => {
+        store.currentProjectId.value = 'p_a';
+        store.currentSessionId.value = 's_a';
+      });
+      expect(screen.getByText('late.bin')).not.toBeNull();
+      expect(screen.getByText(/Uploaded · 3 B/)).not.toBeNull();
+    });
+
+    it('does not let a late send clear or busy the next session', async () => {
+      store.currentSessionId.value = 's_a';
+      let finish: ((accepted: boolean) => void) | undefined;
+      const onSend = vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+      const { props, textarea } = renderComposer({ onSend });
+      fireEvent.input(textarea, { target: { value: 'send A' } });
+      fireEvent.click(screen.getByRole('button', { name: /Send message/ }));
+      expect(props.onSend).toHaveBeenCalledWith('send A');
+
+      await act(async () => {
+        store.currentSessionId.value = 's_b';
+      });
+      fireEvent.input(textarea, { target: { value: 'keep draft B' } });
+      await act(async () => {
+        finish?.(true);
+        await Promise.resolve();
+      });
+      expect(textarea.value).toBe('keep draft B');
+      expect((screen.getByRole('button', { name: /Send message/ }) as HTMLButtonElement).disabled).toBe(false);
+
+      await act(async () => {
+        store.currentSessionId.value = 's_a';
+      });
+      expect(textarea.value).toBe('');
+      await act(async () => {
+        store.currentSessionId.value = 's_b';
+      });
+      expect(textarea.value).toBe('keep draft B');
+    });
+
+    it('preserves text edited in the same scope while its send is pending', async () => {
+      let finish: ((accepted: boolean) => void) | undefined;
+      const { textarea } = renderComposer({
+        onSend: vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; })),
+      });
+      fireEvent.input(textarea, { target: { value: 'submitted' } });
+      fireEvent.click(screen.getByRole('button', { name: /Send message/ }));
+      fireEvent.input(textarea, { target: { value: 'new work while pending' } });
+      await act(async () => {
+        finish?.(true);
+        await Promise.resolve();
+      });
+      expect(textarea.value).toBe('new work while pending');
     });
   });
 
@@ -596,6 +716,39 @@ describe('Composer', () => {
   });
 
   describe('mention index invalidation', () => {
+    it('ignores an old project response that arrives after the new project index', async () => {
+      store.currentProjectId.value = 'p_one';
+      const pending: Array<(tree: WorkspaceTree) => void> = [];
+      const loadMentionTree = vi.fn(() => new Promise<WorkspaceTree>((resolve) => {
+        pending.push(resolve);
+      }));
+      const { textarea } = renderComposer({ loadMentionTree });
+      fireEvent.input(textarea, { target: { value: '@' } });
+      await waitFor(() => expect(pending).toHaveLength(1));
+
+      await act(async () => {
+        store.currentProjectId.value = 'p_two';
+      });
+      fireEvent.input(textarea, { target: { value: '@' } });
+      await waitFor(() => expect(pending).toHaveLength(2));
+      await act(async () => {
+        pending[1]?.({
+          path: '.',
+          entries: [{ name: 'two.ts', path: 'two.ts', kind: 'file', size: 1 }],
+        });
+      });
+      expect(await screen.findByRole('option', { name: /two\.ts/ })).not.toBeNull();
+
+      await act(async () => {
+        pending[0]?.({
+          path: '.',
+          entries: [{ name: 'one.ts', path: 'one.ts', kind: 'file', size: 1 }],
+        });
+      });
+      expect(screen.queryByRole('option', { name: /one\.ts/ })).toBeNull();
+      expect(screen.getByRole('option', { name: /two\.ts/ })).not.toBeNull();
+    });
+
     it('re-indexes the workspace after a project switch', async () => {
       store.currentProjectId.value = 'p_one';
       const loadMentionTree = vi.fn(async () => workspace);
@@ -608,6 +761,8 @@ describe('Composer', () => {
       await act(async () => {
         store.currentProjectId.value = 'p_two';
       });
+      // Mention state is scoped with the draft, so open the new workspace's menu.
+      fireEvent.input(textarea, { target: { value: '@main' } });
 
       await waitFor(() => expect(loadMentionTree).toHaveBeenCalledTimes(2));
     });
@@ -665,6 +820,87 @@ describe('Composer', () => {
       expect(
         (props.onQueue as unknown as { mock: { calls: [string][] } }).mock.calls[0]?.[0],
       ).toBe('follow_up');
+    });
+
+    it('makes the checked queue option the group’s only tab stop', async () => {
+      const { textarea } = renderRunning();
+      fireEvent.input(textarea, { target: { value: 'check the fixtures' } });
+      await waitFor(() =>
+        expect(screen.getByRole('radiogroup', { name: 'What this message does' })).not.toBeNull(),
+      );
+
+      const steer = screen.getByRole('radio', { name: 'Steer' });
+      const followUp = screen.getByRole('radio', { name: 'Follow-up' });
+      // One tab stop, like native radios: the group is entered once.
+      expect(steer.getAttribute('tabindex')).toBe('0');
+      expect(followUp.getAttribute('tabindex')).toBe('-1');
+
+      fireEvent.click(followUp);
+      expect(followUp.getAttribute('aria-checked')).toBe('true');
+      expect(followUp.getAttribute('tabindex')).toBe('0');
+      expect(steer.getAttribute('tabindex')).toBe('-1');
+    });
+
+    it('moves and selects with the arrow keys, wrapping at the ends', async () => {
+      const { props, textarea } = renderRunning();
+      fireEvent.input(textarea, { target: { value: 'then run the tests' } });
+      await waitFor(() =>
+        expect(screen.getByRole('radiogroup', { name: 'What this message does' })).not.toBeNull(),
+      );
+
+      const steer = screen.getByRole('radio', { name: 'Steer' });
+      const followUp = screen.getByRole('radio', { name: 'Follow-up' });
+
+      steer.focus();
+      fireEvent.keyDown(steer, { key: 'ArrowRight' });
+      expect(followUp.getAttribute('aria-checked')).toBe('true');
+      // The selection and the focus move together, which is what makes it a radio
+      // group rather than two independent buttons.
+      expect(document.activeElement).toBe(followUp);
+
+      // Right from the last option wraps to the first.
+      fireEvent.keyDown(followUp, { key: 'ArrowRight' });
+      expect(steer.getAttribute('aria-checked')).toBe('true');
+      expect(document.activeElement).toBe(steer);
+
+      // Left from the first wraps to the last.
+      fireEvent.keyDown(steer, { key: 'ArrowLeft' });
+      expect(followUp.getAttribute('aria-checked')).toBe('true');
+      expect(document.activeElement).toBe(followUp);
+
+      // Home and End are the ends of the group.
+      fireEvent.keyDown(followUp, { key: 'Home' });
+      expect(steer.getAttribute('aria-checked')).toBe('true');
+      expect(document.activeElement).toBe(steer);
+      fireEvent.keyDown(steer, { key: 'End' });
+      expect(followUp.getAttribute('aria-checked')).toBe('true');
+      expect(document.activeElement).toBe(followUp);
+
+      // Down/Up are the same axis as Right/Left.
+      fireEvent.keyDown(followUp, { key: 'ArrowUp' });
+      expect(steer.getAttribute('aria-checked')).toBe('true');
+      fireEvent.keyDown(steer, { key: 'ArrowDown' });
+      expect(followUp.getAttribute('aria-checked')).toBe('true');
+
+      // And the keyboard choice is the one that is sent.
+      fireEvent.click(screen.getByRole('button', { name: /queue this follow-up/i }));
+      await waitFor(() => expect(props.onQueue).toHaveBeenCalledTimes(1));
+      expect(
+        (props.onQueue as unknown as { mock: { calls: [string][] } }).mock.calls[0]?.[0],
+      ).toBe('follow_up');
+    });
+
+    it('leaves the queue mode alone for keys it does not own', async () => {
+      const { textarea } = renderRunning();
+      fireEvent.input(textarea, { target: { value: 'x' } });
+      await waitFor(() =>
+        expect(screen.getByRole('radiogroup', { name: 'What this message does' })).not.toBeNull(),
+      );
+      const steer = screen.getByRole('radio', { name: 'Steer' });
+      fireEvent.keyDown(steer, { key: 'Tab' });
+      fireEvent.keyDown(steer, { key: 'a' });
+      expect(steer.getAttribute('aria-checked')).toBe('true');
+      expect(screen.getByRole('radio', { name: 'Follow-up' }).getAttribute('aria-checked')).toBe('false');
     });
 
     it('keeps the draft when the queue refuses the message', async () => {

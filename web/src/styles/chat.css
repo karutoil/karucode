@@ -136,8 +136,13 @@
 
 .msg-avatar.agent {
   border-color: transparent;
+  /* The sheen is the accent's own lighter step, not a white literal: a raw
+   * `rgb(255 255 255 / 55%)` here was invisible to `styles/scale.test.ts` and
+   * `scripts/design-audit.mjs` for as long as the value stayed on its own line,
+   * and it did not repaint with the theme. Every theme now sheens with its own
+   * accent. */
   background:
-    radial-gradient(120% 120% at 22% 12%, rgb(255 255 255 / 55%), transparent 42%),
+    radial-gradient(120% 120% at 22% 12%, color-mix(in srgb, var(--accent-hi) 55%, transparent), transparent 42%),
     linear-gradient(
       145deg,
       var(--accent-fill),
@@ -372,7 +377,7 @@
   border: 1px solid var(--accent-line);
   border-radius: var(--radius-xs);
   background: var(--accent-bg);
-  color: var(--accent-text);
+  color: var(--accent-on-tint);
   font-family: var(--font-mono);
   font-size: var(--fs-tiny);
   line-height: 15px;
@@ -1335,6 +1340,73 @@
   font-size: var(--fs-micro);
 }
 
+/* ---------- command rows (the compact transcript view) ----------
+ *
+ * A shell command in "Rows" is the card's summary line: the same glyph, command,
+ * working directory, exit status and duration, with stdout/stderr opening
+ * beneath it. Without this the rows view still stacked full command cards beside
+ * its one-line tool calls, and a grouped run mixed the two shapes in one list.
+ * Nothing is dropped for being compact: the outcome is in the line, and the
+ * output is one disclosure away - a running command even opens itself.
+ */
+
+.command-row {
+  margin: 0 0 var(--space-2);
+  border-radius: var(--radius-sm);
+}
+
+.command-row:last-child {
+  margin-bottom: 0;
+}
+
+.command-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  width: 100%;
+  min-height: 26px;
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.command-row-head:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+}
+
+.command-row[data-status='error'] .command-row-head:hover {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line-strong));
+}
+
+.command-row-head[aria-expanded='true'] .disclosure svg {
+  transform: rotate(180deg);
+}
+
+.command-row-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+/* The opened output sits in from the row, under the glyph, exactly like a tool
+   row's: it reads as belonging to the line above it rather than as a new card. */
+.command-row > .cmd-output {
+  margin: var(--space-1) 0 var(--space-3) var(--space-9);
+  max-height: 240px;
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: auto;
+}
+
 /* ---------- tool groups (a folded run of calls) ----------
  *
  * One line stands in for a run of consecutive calls: what ran, how many, how
@@ -1456,7 +1528,8 @@
 
 .tool-group-body > .tool-card:last-child,
 .tool-group-body > .command-card:last-child,
-.tool-group-body > .tool-row:last-child {
+.tool-group-body > .tool-row:last-child,
+.tool-group-body > .command-row:last-child {
   margin-bottom: 0;
 }
 
@@ -2243,7 +2316,7 @@
 .quick-prompt:hover {
   border-color: var(--field-focus-line);
   background: var(--accent-surface);
-  color: var(--accent-text-soft);
+  color: var(--accent-on-tint);
 }
 
 .quick-prompt:hover > svg:last-child,
@@ -2349,7 +2422,8 @@
  */
 
 /* Rows are a list by definition: drop the paragraph gap the card rhythm carries. */
-:root[data-tool-style='rows'] .msg-body > .tool-row {
+:root[data-tool-style='rows'] .msg-body > .tool-row,
+:root[data-tool-style='rows'] .msg-body > .command-row {
   margin-bottom: var(--space-1);
 }
 
@@ -2373,10 +2447,12 @@
     padding-top: var(--space-8);
   }
 
-  :root[data-density='compact'] .msg {
-    padding-top: var(--space-4);
-    padding-bottom: var(--space-4);
-  }
+  /* `.msg` used to add 8px of vertical padding here on top of everything else.
+   * Density already scales the rhythm: `--space-10` (the gap under a turn) and
+   * the whole type scale shrink in compact and grow in spacious, so a second,
+   * hand-written nudge on the row made compact double-tight in one place and
+   * ignored in another. The turn gap *is* the rhythm; nothing extra belongs on
+   * `.msg`. */
 
   :root[data-density='spacious'] .chat-inner {
     padding-top: var(--space-10);
@@ -2468,6 +2544,28 @@
     margin-bottom: var(--space-3);
   }
 
+  /* Assistant metadata is a single fixed-height line at desktop width. A model
+   * id is arbitrary text ("anthropic/claude-sonnet-4-5-20250929") and at 320-390px
+   * it pushed the status chip, the throughput badge and the rewind button off the
+   * row - the three things a reader acts on. The pill now shrinks and ellipsises
+   * with the full id in its tooltip, and the line wraps rather than losing what
+   * does not fit. */
+  .msg-assistant .msg-top {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 22px;
+    row-gap: var(--space-2);
+  }
+
+  .msg-assistant .model-pill {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .user-question {
     padding: var(--space-6) var(--space-7);
   }
@@ -2480,6 +2578,12 @@
   .tool-head,
   .command-summary {
     gap: var(--space-4);
+    /* `height`, not just a floor: the shared rule pins the band at 44px, and a
+     * `min-height` below a fixed `height` loses - so the phone header stayed
+     * desktop-tall and every card cost 6px it could not spare. 38px is the
+     * mock's phone band; `min-height` stays as the documented floor so content
+     * that ever outgrows it grows instead of clipping. */
+    height: 38px;
     min-height: 38px;
     padding: 0 var(--space-5);
   }

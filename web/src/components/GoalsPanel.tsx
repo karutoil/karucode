@@ -3,7 +3,7 @@ import { useState } from 'preact/hooks';
 import { ApiError } from '../api/client';
 import { sendMessage, sendQueuedMessage } from '../api/endpoints';
 import type { PluginPanelRenderProps, PluginPanelRenderer } from './pluginPanels';
-import { AlertIcon, CheckIcon, RefreshIcon } from './icons';
+import { AlertIcon, CheckIcon } from './icons';
 
 /**
  * The renderer for the `kc-goals` plugin's `goals` panel.
@@ -565,6 +565,10 @@ export function GoalsPanel({ data, refresh }: PluginPanelRenderProps): JSX.Eleme
 
   return (
     <div class="goals-tab">
+      {/* No refresh button here: `PluginPanelView` already draws one in the
+          panel header, and two controls for one fetch is exactly the redundancy
+          this removed. `refresh` is still passed down - an action's own message
+          can change the goal, so the card rereads the panel after sending it. */}
       <div class="goals-summary">
         <span class="goals-count">
           <strong>{parsed.open}</strong> open
@@ -576,14 +580,6 @@ export function GoalsPanel({ data, refresh }: PluginPanelRenderProps): JSX.Eleme
         {parsed.engine.verify_commands ? (
           <span class="goals-count goals-count-on">command checks</span>
         ) : null}
-        <button
-          class="goals-refresh"
-          type="button"
-          title="Read the goals again"
-          onClick={() => refresh()}
-        >
-          <RefreshIcon />
-        </button>
       </div>
 
       {parsed.error ? (

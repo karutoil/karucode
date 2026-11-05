@@ -36,6 +36,8 @@ describe('inspector tab strip stylesheet', () => {
     expect(strip['overflow-x']).toBe('auto');
     // A vertical scroller inside the strip would eat the tab underline.
     expect(strip['overflow-y']).toBe('hidden');
+    expect(strip['scroll-padding-inline']).toBe('var(--space-6)');
+    expect(cssDeclarations('.tab')['scroll-margin-inline']).toBe('var(--space-6)');
   });
 
   it('never hides its own scrollbar', () => {

@@ -139,6 +139,26 @@ pub struct FinishedStream {
     pub text: String,
     pub truncated: bool,
     pub total_bytes: usize,
+    // Raw retained segments let the tool refit the stream to the *final* output
+    // budget without truncating our own marker instead of command output.
+    raw_head: Vec<u8>,
+    raw_tail: Vec<u8>,
+}
+
+impl FinishedStream {
+    /// Render one, self-describing head+tail cut within exactly `max_bytes`.
+    pub(crate) fn render_with_budget(&self, max_bytes: usize) -> String {
+        if self.text.len() <= max_bytes {
+            return self.text.clone();
+        }
+        render_raw_stream(
+            &self.raw_head,
+            &self.raw_tail,
+            self.total_bytes,
+            self.truncated,
+            max_bytes,
+        )
+    }
 }
 
 impl CommandOutcome {
@@ -211,6 +231,8 @@ impl BoundedOutput {
                 text: String::from_utf8_lossy(&self.head).into_owned(),
                 truncated: false,
                 total_bytes: self.total,
+                raw_head: self.head.clone(),
+                raw_tail: Vec::new(),
             };
         }
         // The cuts are byte offsets, so they can land inside a multi-byte
@@ -231,6 +253,8 @@ impl BoundedOutput {
             text,
             truncated: true,
             total_bytes: self.total,
+            raw_head: self.head.clone(),
+            raw_tail: self.tail.clone(),
         }
     }
 
@@ -255,6 +279,119 @@ fn ceil_char_boundary(bytes: &[u8], idx: usize) -> usize {
         i += 1;
     }
     i
+}
+
+/// Refit raw retained bytes instead of head-truncating a pre-formatted stream.
+///
+/// The marker has a stable size, so the complete rendered string - including the
+/// marker - fits the requested budget. For a stream that had not previously been
+/// cut, both halves come from its full raw bytes; otherwise they extend the head
+/// and tail that BoundedOutput retained at capture time.
+fn render_raw_stream(
+    raw_head: &[u8],
+    raw_tail: &[u8],
+    total: usize,
+    was_truncated: bool,
+    max_bytes: usize,
+) -> String {
+    let marker = format!(
+        "[... bytes omitted from {total} original bytes; retained the raw head and tail ...]"
+    );
+    if marker.len() + 2 > max_bytes {
+        return clip_text(&marker, max_bytes);
+    }
+    let payload = max_bytes - marker.len() - 2;
+    let head_budget = payload / 2;
+    let tail_budget = payload - head_budget;
+
+    // Before the first cut, `raw_head` is the complete stream and `raw_tail` is
+    // empty. Create a genuine tail from its final bytes rather than duplicating
+    // the prefix or dropping the trailing diagnostic.
+    let tail_source = if was_truncated { raw_tail } else { raw_head };
+    let head_end = floor_char_boundary(raw_head, head_budget.min(raw_head.len()));
+    let tail_start = ceil_char_boundary(tail_source, tail_source.len().saturating_sub(tail_budget));
+    let head = clip_text(&String::from_utf8_lossy(&raw_head[..head_end]), head_budget);
+    let tail = clip_tail(
+        &String::from_utf8_lossy(&tail_source[tail_start..]),
+        tail_budget,
+    );
+    format!("{head}\n{marker}\n{tail}")
+}
+
+fn clip_text(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+fn clip_tail(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut start = text.len() - max_bytes;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
+}
+
+/// Incremental UTF-8 decoding for live output events.
+///
+/// from_utf8_lossy on each independent pipe read turns a character split between
+/// reads into two replacement characters. Keep only an incomplete trailing
+/// sequence; malformed complete sequences are emitted immediately and the buffer
+/// remains bounded to three bytes even for an arbitrary byte stream.
+#[derive(Default)]
+struct LiveUtf8 {
+    pending: Vec<u8>,
+}
+
+impl LiveUtf8 {
+    fn push(&mut self, chunk: &[u8]) -> String {
+        if chunk.is_empty() {
+            return String::new();
+        }
+        self.pending.extend_from_slice(chunk);
+        let mut out = String::new();
+        let mut consumed = 0usize;
+        loop {
+            match std::str::from_utf8(&self.pending[consumed..]) {
+                Ok(valid) => {
+                    out.push_str(valid);
+                    consumed = self.pending.len();
+                    break;
+                }
+                Err(err) => {
+                    let next = consumed + err.valid_up_to();
+                    if let Some(invalid_len) = err.error_len() {
+                        let end = next + invalid_len;
+                        out.push_str(&String::from_utf8_lossy(&self.pending[consumed..end]));
+                        consumed = end;
+                    } else {
+                        out.push_str(&String::from_utf8_lossy(&self.pending[consumed..next]));
+                        consumed = next;
+                        break;
+                    }
+                }
+            }
+        }
+        if consumed > 0 {
+            self.pending.drain(..consumed);
+        }
+        debug_assert!(self.pending.len() <= 3);
+        out
+    }
+
+    fn finish(&mut self) -> String {
+        let out = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending.clear();
+        out
+    }
 }
 
 /// Kills the whole process group if the `run` future is dropped before the
@@ -356,6 +493,8 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
 
     let mut stdout_acc = BoundedOutput::new(request.max_output_bytes);
     let mut stderr_acc = BoundedOutput::new(request.max_output_bytes);
+    let mut live_stdout = LiveUtf8::default();
+    let mut live_stderr = LiveUtf8::default();
     let mut timed_out = false;
     let mut cancelled = false;
 
@@ -403,11 +542,17 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
             }
             chunk = rx.recv(), if streams_open => match chunk {
                 Some((stream, bytes)) => {
-                    ctx.emit(Event::CommandOutput {
-                        call_id: request.call_id.clone(),
-                        stream: stream.label().to_string(),
-                        chunk: String::from_utf8_lossy(&bytes).into_owned(),
-                    });
+                    let text = match stream {
+                        Stream::Stdout => live_stdout.push(&bytes),
+                        Stream::Stderr => live_stderr.push(&bytes),
+                    };
+                    if !text.is_empty() {
+                        ctx.emit(Event::CommandOutput {
+                            call_id: request.call_id.clone(),
+                            stream: stream.label().to_string(),
+                            chunk: text,
+                        });
+                    }
                     match stream {
                         Stream::Stdout => stdout_acc.push(&bytes),
                         Stream::Stderr => stderr_acc.push(&bytes),
@@ -458,6 +603,21 @@ pub async fn run(request: CommandRequest, ctx: &ToolCtx) -> Result<CommandOutcom
     group.disarm_if_empty();
     for pump in pumps {
         pump.abort();
+    }
+
+    // A command may end between the bytes of one character. Emit only one
+    // replacement for genuinely incomplete trailing input, not one per pipe read.
+    for (stream, text) in [
+        (Stream::Stdout, live_stdout.finish()),
+        (Stream::Stderr, live_stderr.finish()),
+    ] {
+        if !text.is_empty() {
+            ctx.emit(Event::CommandOutput {
+                call_id: request.call_id.clone(),
+                stream: stream.label().to_string(),
+                chunk: text,
+            });
+        }
     }
 
     let duration = started.elapsed();
@@ -948,6 +1108,31 @@ mod tests {
             outcome.stdout.text
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn live_utf8_is_decoded_incrementally_without_split_replacements() {
+        let original = "A€中🙂Z";
+        let mut decoder = LiveUtf8::default();
+        let mut rendered = String::new();
+        for byte in original.as_bytes() {
+            rendered.push_str(&decoder.push(std::slice::from_ref(byte)));
+        }
+        rendered.push_str(&decoder.finish());
+        assert_eq!(rendered, original);
+        assert!(decoder.pending.is_empty());
+
+        // Each stream has its own state, and malformed complete bytes are flushed
+        // immediately instead of growing `pending` with an unbounded suffix.
+        let mut stdout = LiveUtf8::default();
+        let mut stderr = LiveUtf8::default();
+        assert_eq!(stdout.push(&[0xE2]), "");
+        assert_eq!(stderr.push(&[b'X', 0xFF]), "X\u{fffd}");
+        assert_eq!(stdout.push(&[0x82, 0xAC]), "€");
+        assert_eq!(stdout.finish(), "");
+        stdout.push(&vec![0x80; 8192]);
+        assert!(stdout.pending.len() <= 3);
+        assert_eq!(stdout.finish(), "");
     }
 
     #[test]

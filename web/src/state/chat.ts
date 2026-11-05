@@ -177,6 +177,12 @@ export interface ChatState {
    * snapshot carries the same pair.
    */
   queued: QueuedMessage[];
+  /**
+   * Queue ids this view has already seen leave the authoritative queue. The
+   * bounded, session-local tombstones stop a slow HTTP 202 from re-adding a steer
+   * or follow-up after its SSE frame says the runtime consumed it.
+   */
+  retiredQueuedIds: string[];
 }
 
 export function emptyChatState(sessionId: string | null = null): ChatState {
@@ -193,6 +199,7 @@ export function emptyChatState(sessionId: string | null = null): ChatState {
     iteration: 0,
     lastSeq: 0,
     queued: [],
+    retiredQueuedIds: [],
   };
 }
 
@@ -568,5 +575,6 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
     // sees. A live queue frame that arrived during the fetch was replayed by
     // `drainRefreshQueue` after this, so it wins only if it is newer.
     queued: queuedFromDetail(detail),
+    retiredQueuedIds: sameSession ? previous.retiredQueuedIds : [],
   };
 }

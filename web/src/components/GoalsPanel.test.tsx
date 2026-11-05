@@ -311,6 +311,35 @@ describe('GoalsPanel', () => {
     expect(screen.getByText(/does not understand its payload/)).toBeTruthy();
   });
 
+  it('leaves refreshing to the panel header instead of adding a second control', async () => {
+    // `PluginPanelView` owns the refresh button for every plugin panel. The
+    // renderer used to draw its own copy in the summary strip, two controls for
+    // one fetch. The `refresh` prop stays because an action still rereads the
+    // panel after it sends its instruction (asserted in the test above).
+    registerPluginPanelRenderer(GOALS_PANEL_ID, goalsPanelRenderer);
+    const store = await import('../state/store');
+    store.pluginPanelData.value = {
+      [GOALS_PANEL_ID]: {
+        loading: false,
+        data: payload(),
+        title: 'Goals',
+        error: null,
+        fetchedAt: Date.now(),
+      },
+    };
+    const { PluginPanelView } = await import('./PluginPanelView');
+    render(<PluginPanelView panel={panelTab()} />);
+
+    expect(await screen.findByText('Ship the widget')).toBeTruthy();
+    // The header's control is the only refresh action on the panel…
+    const refreshes = screen.getAllByRole('button', { name: /Refresh/ });
+    expect(refreshes).toHaveLength(1);
+    expect(refreshes[0]!.getAttribute('aria-label')).toBe('Refresh Goals');
+    // …and the renderer draws none of its own.
+    expect(document.querySelector('.goals-refresh')).toBeNull();
+    expect(screen.queryByTitle('Read the goals again')).toBeNull();
+  });
+
   it('draws through PluginPanelView when the renderer is registered', async () => {
     registerPluginPanelRenderer(GOALS_PANEL_ID, goalsPanelRenderer);
     const store = await import('../state/store');

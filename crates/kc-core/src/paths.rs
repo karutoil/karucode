@@ -254,7 +254,19 @@ impl Workspace {
     pub fn relative(&self, abs: &Path) -> String {
         match abs.strip_prefix(&self.root) {
             Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
-            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+            Ok(rel) => {
+                let text = rel.to_string_lossy();
+                #[cfg(windows)]
+                {
+                    text.replace('\\', "/")
+                }
+                #[cfg(not(windows))]
+                {
+                    // A backslash is an ordinary Unix filename character, not a
+                    // separator. Rewriting it corrupts display and journal keys.
+                    text.into_owned()
+                }
+            }
             Err(_) => abs.to_string_lossy().to_string(),
         }
     }
@@ -310,6 +322,19 @@ mod tests {
         let p = ws.resolve("sub/file.txt").unwrap();
         assert_eq!(p, std::fs::canonicalize(&dir).unwrap().join("sub/file.txt"));
         assert_eq!(ws.relative(&p), "sub/file.txt");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_backslashes_are_literal_path_characters() {
+        let dir = tempdir("unix-backslash");
+        let name = r"sub/literal\name.txt";
+        std::fs::write(dir.join(name), "hello").unwrap();
+        let ws = Workspace::new(&dir).unwrap();
+        let resolved = ws.resolve_existing(name).unwrap();
+        assert_eq!(ws.relative(&resolved), name);
+        assert!(dir.join(name).exists());
         std::fs::remove_dir_all(dir).ok();
     }
 

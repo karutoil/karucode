@@ -749,6 +749,29 @@ pub trait Store: Send + Sync {
     async fn list_missions(&self, _project_id: &str) -> Result<Vec<Mission>> {
         Err(crate::error::Error::Store("missions unsupported".into()))
     }
+    /// A stable newest-first page. The compatibility fallback is intentionally
+    /// in memory; SQLite overrides it with SQL OFFSET/LIMIT.
+    async fn list_mission_page(
+        &self,
+        project_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<Mission>, bool)> {
+        let mut missions = self.list_missions(project_id).await?;
+        missions.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        let mut page = missions
+            .into_iter()
+            .skip(offset)
+            .take(limit.saturating_add(1))
+            .collect::<Vec<_>>();
+        let has_more = page.len() > limit;
+        page.truncate(limit);
+        Ok((page, has_more))
+    }
     async fn get_mission(&self, _id: &str) -> Result<Option<Mission>> {
         Err(crate::error::Error::Store("missions unsupported".into()))
     }
@@ -838,12 +861,24 @@ pub trait Store: Send + Sync {
         limit: usize,
         include_agents: bool,
     ) -> Result<(usize, Vec<String>)>;
-    /// Lightweight snapshot for releasing claims of running agents.
+    /// Lightweight snapshot for releasing claims of running and paused agents.
     async fn running_agent_ids(&self) -> Result<Vec<(String, String)>>;
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>>;
     async fn list_sessions_for_project(&self, project_id: &str) -> Result<Vec<SessionSummary>>;
     async fn get_session(&self, id: &str) -> Result<Option<Session>>;
     async fn rename_session(&self, id: &str, title: &str) -> Result<()>;
+    /// Rename only if the title still matches the version the caller generated
+    /// from. False means the session vanished or another rename won.
+    async fn rename_session_if_title(&self, id: &str, expected: &str, title: &str) -> Result<bool> {
+        let Some(session) = self.get_session(id).await? else {
+            return Ok(false);
+        };
+        if session.title != expected {
+            return Ok(false);
+        }
+        self.rename_session(id, title).await?;
+        Ok(true)
+    }
     /// Set (`Some`) or clear (`None`) a session's per-session model selection.
     /// The next run in the session resolves its model from the new value.
     async fn set_session_model(
@@ -968,15 +1003,16 @@ pub trait Store: Send + Sync {
     /// Record the before-image of one file a mutating tool is about to change.
     async fn record_checkpoint(&self, checkpoint: &FileCheckpoint) -> Result<i64>;
 
-    /// Every journal row for messages newer than `after_id`, in the order the
-    /// tools ran (ascending id).
+    /// Every bound journal row for messages newer than `after_id`, in the order
+    /// the tools ran (ascending id). Unbound rows are omitted because only an
+    /// active writer can bind them safely; rewind admission excludes such runs.
     async fn list_checkpoints(
         &self,
         session_id: &str,
         after_id: i64,
     ) -> Result<Vec<FileCheckpoint>>;
 
-    /// List checkpoint metadata without materializing before-image blobs.
+    /// List bound checkpoint metadata without materializing before-image blobs.
     async fn list_checkpoint_metadata(
         &self,
         session_id: &str,
@@ -1003,10 +1039,41 @@ pub trait Store: Send + Sync {
     /// worth paying: a journal written afterwards holds the new bytes.
     async fn set_checkpoint_message_id(&self, id: i64, message_id: i64) -> Result<()>;
 
+    /// Bind a tool result's checkpoint ids together. SQLite performs the whole
+    /// batch in one transaction; compatibility errors leave ids pending in the
+    /// journal so a later tool result can retry them.
+    async fn bind_checkpoints(&self, ids: &[i64], message_id: i64) -> Result<usize> {
+        for id in ids {
+            self.set_checkpoint_message_id(*id, message_id).await?;
+        }
+        Ok(ids.len())
+    }
+
     /// Timestamp of the newest rewind in a session, for the UI banner.
     async fn last_rewind_at(&self, session_id: &str) -> Result<Option<i64>>;
 
     async fn upsert_agent(&self, agent: &AgentRecord) -> Result<()>;
+    /// Change only status/updated_at while the persisted status is one of the
+    /// expected values. False lets control operations preserve terminal state.
+    async fn transition_agent_status(
+        &self,
+        id: &str,
+        expected: &[&str],
+        next: &str,
+        updated_at: i64,
+    ) -> Result<bool> {
+        let Some(summary) = self.get_agent(id).await? else {
+            return Ok(false);
+        };
+        if !expected.contains(&summary.agent.status.as_str()) {
+            return Ok(false);
+        }
+        let mut agent = summary.agent;
+        agent.status = next.to_string();
+        agent.updated_at = updated_at;
+        self.upsert_agent(&agent).await?;
+        Ok(true)
+    }
     async fn list_agents(&self, session_id: &str) -> Result<Vec<AgentRecord>>;
     /// Every agent across every session, newest first, joined with its session's
     /// title/workspace. `project_id` narrows the result to one project.
@@ -1014,6 +1081,23 @@ pub trait Store: Send + Sync {
     /// This is what the Agents view uses: a subagent in a session the user is not
     /// currently looking at is still worth showing while it runs.
     async fn list_agents_all(&self, project_id: Option<&str>) -> Result<Vec<AgentSummary>>;
+    /// Filter the same complete result set without changing its order or size
+    /// contract. SQLite applies all three predicates before reading row bodies.
+    async fn list_agents_filtered(
+        &self,
+        project_id: Option<&str>,
+        session_id: Option<&str>,
+        statuses: &[String],
+    ) -> Result<Vec<AgentSummary>> {
+        let mut agents = self.list_agents_all(project_id).await?;
+        if let Some(session_id) = session_id {
+            agents.retain(|summary| summary.agent.session_id == session_id);
+        }
+        if !statuses.is_empty() {
+            agents.retain(|summary| statuses.contains(&summary.agent.status));
+        }
+        Ok(agents)
+    }
     /// One agent by id, with its session context. `None` when it does not exist.
     async fn get_agent(&self, id: &str) -> Result<Option<AgentSummary>>;
     /// That agent's own transcript (messages carrying its agent id), oldest
@@ -1092,6 +1176,14 @@ pub trait Store: Send + Sync {
 
     async fn get_setting(&self, key: &str) -> Result<Option<String>>;
     async fn set_setting(&self, key: &str, value: &str) -> Result<()>;
+    /// Persist a patch as one unit. The compatibility fallback supports simple
+    /// test stores; SQLite overrides it with a single transaction.
+    async fn set_settings(&self, settings: &[(String, String)]) -> Result<()> {
+        for (key, value) in settings {
+            self.set_setting(key, value).await?;
+        }
+        Ok(())
+    }
     async fn all_settings(&self) -> Result<Vec<(String, String)>>;
 
     // ---- terminals -------------------------------------------------------

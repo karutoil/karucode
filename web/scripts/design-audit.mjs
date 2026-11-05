@@ -20,6 +20,7 @@
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { cssDeclarations } from './css-declarations.mjs';
 
 const STYLE_DIR = new URL('../src/styles/', import.meta.url).pathname;
 
@@ -66,13 +67,13 @@ function files() {
     .sort();
 }
 
-function lines(css) {
-  return css.split('\n');
-}
-
-/** Strip `/* … *\/` so a hex in a comment is not a violation. */
-function blankComments(css) {
-  return css.replace(/\/\*[\s\S]*?\*\//g, (match) => match.replace(/[^\n]/g, ' '));
+/** Declarations wherever they start in a rule body, with their original lines. */
+function declarations(file, css) {
+  return cssDeclarations(css).map((declaration) => ({
+    at: `${file}:${declaration.line}`,
+    property: declaration.property,
+    value: declaration.value.replace(/\s+/g, ' ').trim(),
+  }));
 }
 
 function collect() {
@@ -80,17 +81,10 @@ function collect() {
 
   for (const file of files()) {
     const raw = readFileSync(join(STYLE_DIR, file), 'utf8');
-    const css = blankComments(raw);
     const isTokenFile = TOKEN_FILES.has(file);
 
-    lines(css).forEach((line, index) => {
-      const at = `${file}:${index + 1}`;
-      const decl = /^\s*([a-z-]+)\s*:\s*(.+?);?\s*$/.exec(line);
-      if (!decl) return;
-      const property = decl[1];
-      const value = decl[2];
-
-      if (isTokenFile) return;
+    for (const { at, property, value } of declarations(file, raw)) {
+      if (isTokenFile) continue;
 
       // ---- raw colours ----
       const colour = /#[0-9a-fA-F]{3,8}\b|\b(rgba?|hsla?)\(/.exec(value);
@@ -116,7 +110,7 @@ function collect() {
           out.spacing.push({ at, property, value: value.trim() });
         }
       }
-    });
+    }
   }
   return out;
 }

@@ -298,7 +298,7 @@
   border: 1px solid var(--btn-accent-line);
   border-radius: var(--radius);
   background: var(--accent-bg);
-  color: var(--accent-text-soft);
+  color: var(--accent-on-tint);
   font-size: var(--fs-tiny);
   white-space: nowrap;
   transition:

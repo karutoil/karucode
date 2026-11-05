@@ -165,7 +165,7 @@ describe('AgentsTab — server-shaped payloads', () => {
     stubFetchAgents([raw]);
 
     const { container } = render(<AgentsTab />);
-    (container.querySelector('.agent-card') as HTMLElement).click();
+    (container.querySelector('.agent-card-open') as HTMLElement).click();
 
     await waitFor(() => expect(container.querySelector('.agent-detail')).not.toBeNull());
     expect(container.querySelector('.agent-paths')).toBeNull();

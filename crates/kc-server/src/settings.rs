@@ -39,9 +39,9 @@
 // run karucode where the operator, not the browser, owns the model and keys.
 //
 // Every boolean in this file and in the environment takes the same spellings:
-// `1/0`, `true/false`, `yes/no`, `on/off`, case-insensitive. Anything else is
-// ignored with the previous value kept, so `KARUCODE_LOCK_SETTINGS=1` and
-// `KARUCODE_LOCK_SETTINGS=true` are the same switch.
+// `1/0`, `true/false`, `yes/no`, `on/off`, case-insensitive. Any other value
+// aborts configuration loading with an error naming the variable, rather than
+// silently retaining a potentially permissive default.
 //
 // # Which settings apply without a restart
 //
@@ -810,26 +810,24 @@ impl SettingsHandle {
             }
         }
 
-        let mut written: Vec<(&'static str, String)> = Vec::new();
-        for (key, previous, value) in &changed {
-            if let Err(e) = self.store.set_setting(key, value).await {
-                // Roll back what we already wrote so the DB keeps matching the
-                // still-live config.
-                for (written_key, written_previous) in written.into_iter().rev() {
-                    if let Err(rollback) =
-                        self.store.set_setting(written_key, &written_previous).await
-                    {
-                        warn!(
-                            key = written_key,
-                            "could not roll back a settings write: {rollback}"
-                        );
-                    }
-                }
-                return Err(Error::Store(format!(
-                    "could not persist setting `{key}`: {e}"
-                )));
+        let writes = changed
+            .iter()
+            .map(|(key, _, value)| ((*key).to_string(), value.clone()))
+            .collect::<Vec<_>>();
+        if let Err(e) = self.store.set_settings(&writes).await {
+            // SQLite already rolled the transaction back. This second batch is
+            // only a best-effort compatibility guard for stores that use the
+            // trait's sequential fallback; live state is never swapped here.
+            let previous = changed
+                .iter()
+                .map(|(key, value, _)| ((*key).to_string(), value.clone()))
+                .collect::<Vec<_>>();
+            if let Err(rollback) = self.store.set_settings(&previous).await {
+                warn!("could not roll back a settings patch: {rollback}");
             }
-            written.push((key, previous.clone()));
+            return Err(Error::Store(format!(
+                "could not persist settings patch: {e}"
+            )));
         }
 
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = next.clone();
@@ -2951,6 +2949,94 @@ mod tests {
         assert_eq!(restored.subagents.max_concurrent, 0);
         assert_eq!(restored.subagents.max_background, 0);
         assert_eq!(restored.subagents.max_depth, u8::MAX);
+    }
+
+    #[tokio::test]
+    async fn sqlite_patch_failure_keeps_live_and_persisted_settings_on_one_version() {
+        let root =
+            std::env::temp_dir().join(format!("kc-settings-atomic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let database = root.join("karucode.db");
+        let store = Arc::new(kc_store::SqliteStore::open(&database).await.expect("store"));
+        let original = Config {
+            data_dir: root.clone(),
+            workspace_root: root.clone(),
+            ..Config::default()
+        };
+        let handle = SettingsHandle::new(original.clone(), store.clone())
+            .await
+            .expect("settings");
+        let baseline = rows_for(&original)
+            .into_iter()
+            .filter(|(key, _)| {
+                matches!(
+                    *key,
+                    keys::LIMITS_MAX_ITERATIONS | keys::LIMITS_SEARCH_MAX_RESULTS
+                )
+            })
+            .map(|(key, value)| (key.to_string(), value))
+            .collect::<Vec<_>>();
+        store.set_settings(&baseline).await.expect("seed settings");
+
+        rusqlite::Connection::open(&database)
+            .expect("raw connection")
+            .execute_batch(
+                "CREATE TRIGGER reject_settings_patch
+                 BEFORE UPDATE OF value ON settings
+                 WHEN NEW.key = 'limits.search_max_results' AND NEW.value = '19'
+                 BEGIN SELECT RAISE(ABORT, 'injected later settings failure'); END;",
+            )
+            .expect("trigger");
+        let patch = ConfigPatch {
+            limits: Some(LimitsPatch {
+                max_iterations: Some(73),
+                search_max_results: Some(19),
+                ..LimitsPatch::default()
+            }),
+            ..ConfigPatch::default()
+        };
+        assert!(handle.update(&patch).await.is_err());
+        let live = handle.snapshot();
+        assert_eq!(live.limits.max_iterations, original.limits.max_iterations);
+        assert_eq!(
+            live.limits.search_max_results,
+            original.limits.search_max_results
+        );
+        for (key, value) in &baseline {
+            assert_eq!(
+                store.get_setting(key).await.expect("persisted").as_ref(),
+                Some(value),
+                "failed patch changed persisted {key}"
+            );
+        }
+
+        rusqlite::Connection::open(&database)
+            .expect("raw connection")
+            .execute_batch("DROP TRIGGER reject_settings_patch")
+            .expect("drop trigger");
+        let updated = handle.update(&patch).await.expect("successful retry");
+        assert_eq!(updated.limits.max_iterations, 73);
+        assert_eq!(updated.limits.search_max_results, 19);
+        assert_eq!(handle.snapshot().limits.max_iterations, 73);
+        assert_eq!(
+            store
+                .get_setting(keys::LIMITS_MAX_ITERATIONS)
+                .await
+                .expect("persisted max iterations")
+                .as_deref(),
+            Some("73")
+        );
+        assert_eq!(
+            store
+                .get_setting(keys::LIMITS_SEARCH_MAX_RESULTS)
+                .await
+                .expect("persisted search results")
+                .as_deref(),
+            Some("19")
+        );
+        drop(handle);
+        drop(store);
+        std::fs::remove_dir_all(root).expect("remove temp dir");
     }
 
     #[test]

@@ -366,6 +366,13 @@ describe('SessionInfoTab', () => {
     render(<SessionInfoTab />);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
+    // `refreshSessionInfo` coalesces: a tick that arrives while a read for the
+    // same session is still in flight joins that promise instead of issuing a
+    // second request. Effects flush on a microtask in tests (see
+    // `src/test/setup.ts`), so the tick below has to wait for the first read to
+    // settle or it legitimately joins it and the count stays at one.
+    await waitFor(() => expect(store.sessionInfoLoading.value).toBe(false));
+
     vi.useFakeTimers();
     try {
       store.sessionInfoTick.value += 1;

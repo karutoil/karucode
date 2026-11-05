@@ -315,6 +315,30 @@ describe('the notification centre’s actions', () => {
     );
   });
 
+  it('routes the toast one-argument Open path through the notification project', async () => {
+    store.currentProjectId.value = 'p_karucode';
+    store.currentSessionId.value = 's_here';
+    recordNotification();
+    stubFetch((url) => {
+      if (url === '/api/sessions/s_other') {
+        return jsonResponse({
+          ...detailFixture,
+          session: { ...detailFixture.session, id: 's_other', project_id: 'p_docs' },
+        });
+      }
+      if (url.startsWith('/api/sessions?')) return jsonResponse({ sessions: [] });
+      if (url.startsWith('/api/agents')) return jsonResponse({ agents: [] });
+      return jsonResponse({});
+    });
+
+    // This is exactly ToastRegion's call shape; the notification record supplies
+    // the missing project and focusSession delegates to openSessionInProject.
+    vi.spyOn(window, 'focus').mockImplementation(() => undefined);
+    actions.focusSession(entry.sessionId);
+    await vi.waitFor(() => expect(store.currentSessionId.value).toBe('s_other'));
+    expect(store.currentProjectId.value).toBe('p_docs');
+  });
+
   it('does not switch project for a session already in the open one', async () => {
     store.currentProjectId.value = 'p_docs';
     store.currentSessionId.value = 's_elsewhere';

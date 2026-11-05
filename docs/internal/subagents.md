@@ -175,13 +175,12 @@ failure, so it notifies and leaves it in its row and its summary.
 
 ## Gotchas
 
-* **Git worktrees isolate subagent work** when the workspace is a git repository.
-  A worktree is created for each subagent and cleaned up when it completes,
-  preventing direct file conflicts with the parent and sibling agents. The
-  worktree is detached, so creating and removing one leaves no branch behind in
-  your repository. If the workspace is not a git repository or worktree creation
-  fails, subagents transparently reuse the shared workspace and `owned_paths`
-  provides advisory conflict reporting.
+* **Subagents share the parent's live workspace**, including dirty and
+  untracked files. Automatic git worktrees are not created: a clean checkout
+  would hide parent work, and there is no durable patch handoff to make
+  deleting it safe. Child edits are immediately visible and survive completion.
+  `owned_paths` provides advisory conflict reporting, not locking or isolation;
+  assign disjoint paths and coordinate edits that overlap.
 * Recursion is off by default; enabling it without a depth budget turns one
   question into an expensive fan-out.
 * Subagent runs cost tokens and time. Delegating a one-file read is slower than
@@ -189,8 +188,9 @@ failure, so it notifies and leaves it in its row and its summary.
 * Tool calls inside a turn execute in order, so a blocking fan-out still issues
   its children one after another; `spawn_agents` is what makes them overlap.
 * `max_background` caps *live background* agents per session, when it is
-  finite. A blocking spawn is bounded by `max_concurrent` instead, because it
-  holds its parent's turn.
+  finite. A top-level blocking spawn may wait for `max_concurrent` capacity.
+  Background and nested blocking spawns are refused immediately at capacity;
+  a nested waiter would otherwise deadlock while holding its ancestor's slot.
 * Setting `max_concurrent` to `0` does not make spawning free: it removes one
   counter. `max_depth`, `timeout_secs`, the install's run clock and the bill for
   every concurrent provider stream still apply.

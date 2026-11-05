@@ -20,6 +20,11 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use std::io::Read;
+
+/// A configured web directory is writable input, not a trusted compiled bundle.
+/// Keep its per-response memory bounded just like the workspace preview routes.
+const MAX_DISK_ASSET_BYTES: u64 = 32 * 1024 * 1024;
 
 #[cfg(feature = "embed-ui")]
 #[derive(rust_embed::RustEmbed)]
@@ -48,16 +53,27 @@ impl WebAssets {
 
     /// Look up a URL path (without the leading slash). Returns `None` when the
     /// asset exists in neither the dev directory nor the embedded bundle.
-    pub fn get(&self, path: &str) -> Option<Asset> {
+    pub async fn get(&self, path: &str) -> Option<Asset> {
         let relative = normalize(path)?;
         if let Some(dir) = &self.dir {
-            if let Some(asset) = read_from_dir(dir, &relative) {
+            let dir = dir.clone();
+            let disk_relative = relative.clone();
+            // Directory traversal and disk reads can block on network filesystems;
+            // neither belongs on the async executor.
+            if let Ok(Some(asset)) = tokio::task::spawn_blocking(move || {
+                read_from_dir(&dir, &disk_relative, MAX_DISK_ASSET_BYTES)
+            })
+            .await
+            {
                 return Some(asset);
             }
         }
         #[cfg(feature = "embed-ui")]
         {
             if let Some(file) = EmbeddedAssets::get(&relative) {
+                if file.data.len() as u64 > MAX_DISK_ASSET_BYTES {
+                    return None;
+                }
                 return Some(Asset {
                     bytes: file.data.into_owned(),
                     mime: mime_for(&relative),
@@ -69,8 +85,8 @@ impl WebAssets {
     }
 
     /// Whether an embedded or on-disk `index.html` exists.
-    pub fn has_index(&self) -> bool {
-        self.get("index.html").is_some()
+    pub async fn has_index(&self) -> bool {
+        self.get("index.html").await.is_some()
     }
 }
 
@@ -98,25 +114,32 @@ fn normalize(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// Read a file from the dev directory, refusing symlinks that point outside it.
-fn read_from_dir(dir: &std::path::Path, relative: &str) -> Option<Asset> {
-    let candidate = dir.join(relative);
-    // Follow the link to decide whether it is a regular file, then verify the
-    // resolved location stays inside the configured directory.
-    if !std::fs::metadata(&candidate).ok()?.is_file() {
+/// Read a bounded regular file from the dev directory. Every candidate is
+/// canonicalised, not only a final-component symlink: an intermediate directory
+/// symlink is an equally effective escape and `starts_with` on the unresolved
+/// path cannot detect it.
+fn read_from_dir(dir: &std::path::Path, relative: &str, limit: u64) -> Option<Asset> {
+    let root = std::fs::canonicalize(dir).ok()?;
+    let candidate = std::fs::canonicalize(dir.join(relative)).ok()?;
+    if !candidate.starts_with(&root) {
         return None;
     }
-    let is_symlink = std::fs::symlink_metadata(&candidate)
-        .map(|meta| meta.file_type().is_symlink())
-        .unwrap_or(false);
-    if is_symlink {
-        let canon = std::fs::canonicalize(&candidate).ok()?;
-        let root = std::fs::canonicalize(dir).ok()?;
-        if !canon.starts_with(&root) {
-            return None;
-        }
+    // Do this before opening: opening a FIFO for read can wait forever for its
+    // writer even in a blocking worker, and devices/sockets are not web assets.
+    let meta = std::fs::metadata(&candidate).ok()?;
+    if !meta.is_file() || meta.len() > limit {
+        return None;
     }
-    let bytes = std::fs::read(&candidate).ok()?;
+    let file = std::fs::File::open(&candidate).ok()?;
+    let mut bytes = Vec::new();
+    // Metadata is only a snapshot. The extra byte makes growth after that
+    // snapshot fail closed without ever allocating the file's unbounded size.
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > limit {
+        return None;
+    }
     Some(Asset {
         bytes,
         mime: mime_for(relative),
@@ -226,11 +249,11 @@ pub async fn serve_spa(State(state): State<AppState>, uri: Uri) -> Response {
     let raw = uri.path().trim_start_matches('/');
     let requested = if raw.is_empty() { "index.html" } else { raw };
 
-    if let Some(asset) = state.web().get(requested) {
+    if let Some(asset) = state.web().get(requested).await {
         return asset_response(asset, requested);
     }
     if requested != "index.html" {
-        if let Some(asset) = state.web().get("index.html") {
+        if let Some(asset) = state.web().get("index.html").await {
             return asset_response(asset, "index.html");
         }
     }
@@ -259,8 +282,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn disk_assets_are_read_and_confined() {
+    #[tokio::test]
+    async fn disk_assets_are_read_and_confined() {
         let dir = std::env::temp_dir().join(format!(
             "kc-server-web-{}-{}",
             std::process::id(),
@@ -272,11 +295,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.html"), "<html>ok</html>").unwrap();
         let assets = WebAssets::new(Some(dir.clone()));
-        assert!(assets.has_index());
-        let index = assets.get("/").unwrap();
+        assert!(assets.has_index().await);
+        let index = assets.get("/").await.unwrap();
         assert_eq!(index.mime, "text/html");
         assert!(String::from_utf8_lossy(&index.bytes).contains("ok"));
-        assert!(assets.get("../etc/passwd").is_none());
+        assert!(assets.get("../etc/passwd").await.is_none());
 
         #[cfg(unix)]
         {
@@ -284,12 +307,36 @@ mod tests {
             std::fs::create_dir_all(&outside).unwrap();
             std::fs::write(outside.join("secret.txt"), "secret").unwrap();
             std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("link.txt")).unwrap();
-            assert!(assets.get("link.txt").is_none());
+            assert!(assets.get("link.txt").await.is_none());
+            // The old check looked only at a final-component symlink. An escape
+            // through a linked parent directory must be rejected just as firmly.
+            std::os::unix::fs::symlink(&outside, dir.join("linked-parent")).unwrap();
+            assert!(assets.get("linked-parent/secret.txt").await.is_none());
             std::os::unix::fs::symlink(dir.join("index.html"), dir.join("inside.html")).unwrap();
-            assert!(assets.get("inside.html").is_some());
+            assert!(assets.get("inside.html").await.is_some());
             std::fs::remove_dir_all(&outside).ok();
         }
 
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn disk_assets_are_bounded_before_growing_the_read_buffer() {
+        let dir = std::env::temp_dir().join(format!(
+            "kc-server-web-limit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), b"12345").unwrap();
+        assert!(read_from_dir(&dir, "index.html", 4).is_none());
+        assert_eq!(
+            read_from_dir(&dir, "index.html", 5).map(|asset| asset.bytes),
+            Some(b"12345".to_vec())
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -42,9 +42,15 @@ auto_approve_paths = ["target/", "docs/"]
 timeout_secs = 300
 ```
 
-* `allow_commands` entries are **prefix** matches on the exact command string:
-  `"git status"` allows `git status -s` but not `git push`. They only affect the
-  `ask`/`ask_commands` prompt; they do not exist in `read_only`.
+* `allow_commands` entries are **prefix** matches at command-word boundaries:
+  `"git status"` allows `git status -s` but not `git push` or `git statusish`;
+  `"rg"` allows both bare `rg` and `rg TODO src`, but never `rgx`. They only
+  affect the `ask`/`ask_commands` prompt; they do not exist in `read_only`.
+* An allowlist match does not bypass execution-specific option checks. For
+  `rg`, `--pre`, `--pre-glob` and `--hostname-bin` still
+  prompt, including their `--flag=value` spellings. This is not a complete
+  list of commands that can execute code (`cargo test` runs build scripts), so
+  keep the allowlist narrow and use a sandbox for untrusted work.
 * `auto_approve_paths` are workspace-relative prefixes for writes and edits.
 * `timeout_secs` bounds one approval. An unanswered approval expires and the
   action is treated as denied.

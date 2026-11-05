@@ -12,4 +12,9 @@ declare module 'node:fs' {
 }
 
 /** Read by the env-gated code generators (`first-paint.emit.test.ts`). */
-declare const process: { env: Record<string, string | undefined> };
+declare const process: {
+  env: Record<string, string | undefined>;
+  /** `RewindDialog.test.tsx` watches for a rejection nobody handled. */
+  on(event: 'unhandledRejection', listener: (reason: unknown) => void): void;
+  off(event: 'unhandledRejection', listener: (reason: unknown) => void): void;
+};

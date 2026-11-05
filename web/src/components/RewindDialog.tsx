@@ -74,6 +74,10 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
   const [note, setNote] = useState('');
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string | null>(null);
+  // Why the preview could not be read (a rejected request, not a rejected
+  // rewind). Kept apart from `error` so the message sits next to the count it
+  // replaces instead of under the submit button.
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const messageId = target?.messageId ?? null;
 
@@ -88,12 +92,14 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
       setPreview(null);
       setStatus('idle');
       setError(null);
+      setPreviewError(null);
       return;
     }
     setMode('none');
     setRevert(false);
     setNote('');
     setError(null);
+    setPreviewError(null);
     setStatus('idle');
     let cancelled = false;
     setLoading(true);
@@ -101,6 +107,19 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
     void load()
       .then((result) => {
         if (!cancelled) setPreview(result);
+      })
+      // A rejected preview (`GET /api/sessions/:id/rewind` 500s, the session was
+      // deleted under the dialog, the network went away) used to be an unhandled
+      // rejection: the count stayed on "Working out what this will change…" for
+      // ever and the dialog offered no explanation. The reader still gets the
+      // transcript half of the choice, so this is a line of text, not a dead end.
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setPreviewError(
+          cause instanceof Error && cause.message
+            ? `Could not read what this rewind would change: ${cause.message}`
+            : 'Could not read what this rewind would change. The conversation part can still be applied.',
+        );
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -113,15 +132,18 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
   if (!target) return null;
 
   const files = preview?.files ?? [];
-  const nothingToRevert = files.length === 0;
+  const previewFailed = preview === null && !loading;
+  const nothingToRevert = preview !== null && files.length === 0;
   const opaque = preview?.opaque_tools ?? [];
   const willReplace = mode !== 'none';
   const canSubmit =
+    preview !== null &&
     status !== 'running' &&
     !loading &&
     (mode !== 'note' || note.trim() !== '');
 
   const submit = async (): Promise<void> => {
+    if (!canSubmit) return;
     setStatus('running');
     setError(null);
     const run = apply ?? actions.applyRewind;
@@ -151,11 +173,22 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
     : 'Recall to this message';
   const summary = oneLine(target.preview);
 
+  // One close path for the X, the backdrop, Escape (which `useFocusTrap` routes
+  // here too) and the Cancel button. The destructive submit already disabled its
+  // own Cancel while it runs; every other dismissal route ignored that and closed
+  // the dialog mid-rewind, leaving the run to finish against a target the reader
+  // could no longer see. A rewind is short, so refusing to dismiss while it is in
+  // flight is the consistent reading of the existing contract.
+  const requestClose = (): void => {
+    if (status === 'running') return;
+    actions.closeRewind();
+  };
+
   return (
     <Dialog
       open
       title={heading}
-      onClose={actions.closeRewind}
+      onClose={requestClose}
       class="dialog-rewind"
       description={
         target.isAssistant
@@ -166,17 +199,26 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
       <div class="rewind-body">
         <blockquote class="rewind-target">{summary || '(empty message)'}</blockquote>
 
-        <p class="rewind-count">
+        <p
+          class={previewFailed ? 'rewind-count rewind-error' : 'rewind-count'}
+          role={previewFailed ? 'alert' : undefined}
+        >
           {preview === null
             ? loading
               ? 'Working out what this will change…'
-              : 'The consequences of this rewind could not be loaded.'
+              : 'The rewind preview could not be loaded. Close this dialog and try again before rewinding.'
             : preview.messages_removed === 0
               ? 'Nothing after this message: the agent will just answer it again.'
               : `${preview.messages_removed} message${
                   preview.messages_removed === 1 ? '' : 's'
                 } after this one will be removed.`}
         </p>
+
+        {previewError ? (
+          <p class="rewind-error" role="alert" data-testid="rewind-preview-error">
+            {previewError}
+          </p>
+        ) : null}
 
         <fieldset class="rewind-modes">
           <legend>What should happen next?</legend>
@@ -237,7 +279,13 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
 
         <fieldset class="rewind-revert">
           <legend>File changes made after this message</legend>
-          {nothingToRevert ? (
+          {preview === null ? (
+            <p class="rewind-empty">
+              {loading
+                ? 'Checking which file changes could be put back…'
+                : 'Whether any files changed is unknown. Rewind stays disabled until the preview can be loaded.'}
+            </p>
+          ) : nothingToRevert ? (
             <p class="rewind-empty">
               No file was changed after this message, so there is nothing to put back.
             </p>
@@ -292,7 +340,7 @@ export function RewindDialog({ loadPreview, apply }: RewindDialogProps): JSX.Ele
         <button
           type="button"
           class="button button-small"
-          onClick={actions.closeRewind}
+          onClick={requestClose}
           disabled={status === 'running'}
         >
           Cancel

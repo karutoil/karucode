@@ -141,7 +141,9 @@ describe('TerminalSocket', () => {
     const text = sent.filter((item): item is string => typeof item === 'string');
     const binary = sent.filter((item) => typeof item !== 'string') as Uint8Array[];
     // The initial resize on open, then the explicit one.
-    const resizes = text.map((item) => JSON.parse(item) as { type: string; cols: number; rows: number });
+    const resizes = text
+      .map((item) => JSON.parse(item) as { type: string; cols?: number; rows?: number })
+      .filter((frame) => frame.type === 'resize');
     expect(resizes.map((frame) => [frame.type, frame.cols, frame.rows])).toEqual([
       ['resize', 100, 30],
       ['resize', 120, 40],
@@ -234,12 +236,64 @@ describe('TerminalSocket', () => {
     expect(sockets).toHaveLength(2);
   });
 
-  it('closes a socket that never answers a ping', () => {
+  it('sends a text ping and closes a socket that never answers it', () => {
     const { socket, sockets } = harness();
     socket.connect();
     sockets[0]!.open();
+    const text = sockets[0]!.sent.filter((item): item is string => typeof item === 'string');
+    expect(text.map((item) => JSON.parse(item) as { type: string })).toEqual([
+      { type: 'resize', cols: 100, rows: 30 },
+      { type: 'ping' },
+    ]);
     // No pong: the watchdog closes, which triggers the reconnect path.
     vi.advanceTimersByTime(20_000);
+    expect(sockets[0]!.readyState).toBe(FakeSocket.CLOSED);
+  });
+
+  it('keeps a healthy text-control ping/pong loop alive at a deliberate cadence', () => {
+    const { socket, sockets, controls, statuses } = harness();
+    socket.connect();
+    sockets[0]!.open();
+    expect(sockets).toHaveLength(1);
+
+    for (let cycle = 0; cycle < 4; cycle += 1) {
+      sockets[0]!.control({ type: 'pong' });
+      expect(sockets[0]!.readyState).toBe(FakeSocket.OPEN);
+      vi.advanceTimersByTime(9_999);
+      expect(sockets[0]!.sent.filter((item) => item === '{"type":"ping"}')).toHaveLength(cycle + 1);
+      vi.advanceTimersByTime(1);
+      expect(sockets[0]!.sent.filter((item) => item === '{"type":"ping"}')).toHaveLength(cycle + 2);
+      vi.advanceTimersByTime(19_999);
+      expect(sockets[0]!.readyState).toBe(FakeSocket.OPEN);
+    }
+
+    // A pong is still an ordinary observable control frame for the terminal UI.
+    expect(controls).toEqual(Array.from({ length: 4 }, () => ({ type: 'pong' })));
+    expect(statuses).not.toContain('reconnecting');
+    expect(sockets).toHaveLength(1);
+  });
+
+  it('forwards binary PTY data without mistaking it for a pong', () => {
+    const { socket, sockets, data } = harness();
+    socket.connect();
+    sockets[0]!.open();
+    vi.advanceTimersByTime(10_000);
+    sockets[0]!.binary(new TextEncoder().encode('{"type":"pong"}'));
+    expect(new TextDecoder().decode(data[0]!)).toBe('{"type":"pong"}');
+    vi.advanceTimersByTime(9_999);
+    expect(sockets[0]!.readyState).toBe(FakeSocket.OPEN);
+    vi.advanceTimersByTime(1);
+    expect(sockets[0]!.readyState).toBe(FakeSocket.CLOSED);
+  });
+
+  it('does not let an unrelated control frame restart the pong watchdog', () => {
+    const { socket, sockets, controls } = harness();
+    socket.connect();
+    sockets[0]!.open();
+    vi.advanceTimersByTime(10_000);
+    sockets[0]!.control({ type: 'lagged', missed: 10 });
+    expect(controls).toEqual([{ type: 'lagged', missed: 10 }]);
+    vi.advanceTimersByTime(10_000);
     expect(sockets[0]!.readyState).toBe(FakeSocket.CLOSED);
   });
 });

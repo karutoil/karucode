@@ -37,6 +37,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -292,6 +293,9 @@ def screenshot(session: "Session", path: Path, clip: dict | None = None) -> None
     if clip is not None:
         params["clip"] = {**clip, "scale": 1}
     result = session.cdp("Page.captureScreenshot", params)
+    # Expanded-card shots happen before the later theme loop, so `--shots` may
+    # name a directory that does not exist yet. Create it at the actual sink.
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(base64.b64decode(result["data"]))
     print(f"   shot: {path}")
 
@@ -447,7 +451,12 @@ def main() -> int:
             isinstance(first.get("id"), str) and re.fullmatch(r"[0-9a-f]{32}", first["id"]) is not None,
             str(first.get("id")),
         )
-        status, headers, body = http_get(f"{api}/api/artifacts/{first.get('id')}")
+        artifact_url = api + first["url"]
+        status, headers, body = http_get(artifact_url)
+        check(
+            "an artifact URL without its capability is refused",
+            http_get(f"{api}/api/artifacts/{first['id']}")[0] == 401,
+        )
         policy = headers.get("content-security-policy", "")
         check("the document is served as HTML", status == 200 and headers.get("content-type", "").startswith("text/html"), f"{status} {headers.get('content-type')}")
         check("the served document is the artifact", b"<h1>API</h1>" in body, body[:200].decode(errors="replace"))
@@ -595,8 +604,13 @@ def main() -> int:
         check("the HTML artifact has a frame", bool(html_card and html_card.get("src")), json.dumps(html_card)[:300])
         if html_card and html_card.get("src"):
             check(
-                "the frame loads the artifact route",
-                re.fullmatch(r"/api/artifacts/[0-9a-f]{32}", html_card["src"]) is not None,
+                "the frame loads the scoped artifact route",
+                (lambda parts: (
+                    parts.path.startswith("/api/artifacts/")
+                    and re.fullmatch(r"[0-9a-f]{32}", parts.path.rsplit("/", 1)[-1]) is not None
+                    and len(urllib.parse.parse_qs(parts.query).get("capability", [])) == 1
+                    and "token" not in urllib.parse.parse_qs(parts.query)
+                ))(urllib.parse.urlsplit(html_card["src"])),
                 html_card["src"],
             )
             check(

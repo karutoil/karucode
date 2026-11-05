@@ -496,15 +496,31 @@ async fn fetch_catalog(url: &str) -> Result<Catalog, String> {
     if !status.is_success() {
         return Err(format!("models.dev answered {status} for {url}"));
     }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|e| format!("could not read the models.dev response: {e}"))?;
-    if body.len() > MAX_BODY_BYTES {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_BODY_BYTES as u64)
+    {
         return Err(format!(
             "models.dev response is larger than {} MiB; refusing it",
             MAX_BODY_BYTES / (1024 * 1024)
         ));
+    }
+    // `response.bytes()` buffers the complete response before returning, which
+    // makes a post-read length check useless. Stream chunks and reject the first
+    // one that crosses the cap before extending the allocation. This also covers
+    // chunked responses and a false/missing Content-Length.
+    use futures_util::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("could not read the models.dev response: {e}"))?;
+        if chunk.len() > MAX_BODY_BYTES.saturating_sub(body.len()) {
+            return Err(format!(
+                "models.dev response is larger than {} MiB; refusing it",
+                MAX_BODY_BYTES / (1024 * 1024)
+            ));
+        }
+        body.extend_from_slice(&chunk);
     }
     let value: serde_json::Value = serde_json::from_slice(&body)
         .map_err(|e| format!("models.dev returned invalid JSON: {e}"))?;
@@ -836,5 +852,59 @@ mod tests {
         assert!(outcome.error.is_some());
         assert_eq!(outcome.fetched_at_ms, 1234);
         assert_eq!(outcome.catalog.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_catalogs_are_rejected_with_or_without_content_length() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn server(
+            headers: &'static str,
+            chunk_count: usize,
+        ) -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 1024];
+                let _ = socket.read(&mut request).await;
+                socket.write_all(headers.as_bytes()).await.unwrap();
+                let payload = vec![b'x'; 64 * 1024];
+                for _ in 0..chunk_count {
+                    // A fixed, reusable write buffer avoids making the test server
+                    // allocate the oversized response it is streaming.
+                    if socket.write_all(b"10000\r\n").await.is_err() {
+                        return;
+                    }
+                    if socket.write_all(&payload).await.is_err() {
+                        return;
+                    }
+                    if socket.write_all(b"\r\n").await.is_err() {
+                        return;
+                    }
+                }
+                let _ = socket.write_all(b"0\r\n\r\n").await;
+            });
+            (format!("http://{address}/api.json"), task)
+        }
+
+        let (url, declared) = server(
+            "HTTP/1.1 200 OK\r\nContent-Length: 33554433\r\nConnection: close\r\n\r\n",
+            0,
+        )
+        .await;
+        let error = fetch_catalog(&url).await.unwrap_err();
+        assert!(error.contains("larger than 32 MiB"), "{error}");
+        declared.abort();
+
+        let chunks = MAX_BODY_BYTES / (64 * 1024) + 2;
+        let (url, streamed) = server(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            chunks,
+        )
+        .await;
+        let error = fetch_catalog(&url).await.unwrap_err();
+        assert!(error.contains("larger than 32 MiB"), "{error}");
+        streamed.abort();
     }
 }

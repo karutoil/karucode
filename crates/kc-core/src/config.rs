@@ -1475,13 +1475,25 @@ fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
     env_str(name).and_then(|v| v.trim().parse::<T>().ok())
 }
 
-/// Boolean environment flag. Accepts `1/0`, `true/false`, `yes/no`, `on/off` so
-/// a shell export cannot silently disagree with the documented spelling.
-fn env_bool(name: &str) -> Option<bool> {
-    match env_str(name)?.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
+/// Boolean environment flag. Accepts `1/0`, `true/false`, `yes/no`, `on/off`.
+/// A present but malformed value is a configuration error: silently keeping the
+/// old value could turn off a security control the operator explicitly enabled.
+fn env_bool(name: &str) -> Result<Option<bool>> {
+    let value = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(Error::Config(format!(
+                "invalid {name}: not valid Unicode; expected a boolean (1/0, true/false, yes/no, on/off)"
+            )));
+        }
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(Some(true)),
+        "0" | "false" | "no" | "off" => Ok(Some(false)),
+        _ => Err(Error::Config(format!(
+            "invalid {name}={value:?}: expected a boolean (1/0, true/false, yes/no, or on/off)"
+        ))),
     }
 }
 
@@ -1642,7 +1654,7 @@ impl Config {
         if let Some(v) = env_str("KARUCODE_AUTH_TOKEN") {
             cfg.auth_token = Some(v);
         }
-        if let Some(v) = env_bool("KARUCODE_LOCK_SETTINGS") {
+        if let Some(v) = env_bool("KARUCODE_LOCK_SETTINGS")? {
             cfg.lock_settings = v;
         }
         if let Some(v) = env_str("KARUCODE_LOG").or_else(|| env_str("RUST_LOG")) {
@@ -1657,7 +1669,7 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_RETENTION_DAYS") {
             cfg.retention_days = v;
         }
-        if let Some(v) = env_bool("KARUCODE_PLUGINS_WATCH") {
+        if let Some(v) = env_bool("KARUCODE_PLUGINS_WATCH")? {
             cfg.plugins_watch = v;
         }
         if let Some(v) = env_parse("KARUCODE_PLUGINS_WATCH_SECS") {
@@ -1666,7 +1678,7 @@ impl Config {
         // AI titles: one switch plus an optional second model. The env spelling
         // is `KARUCODE_TITLES_*` so an operator can turn the extra turn off in a
         // locked deployment without editing `[titles]`.
-        if let Some(v) = env_bool("KARUCODE_TITLES") {
+        if let Some(v) = env_bool("KARUCODE_TITLES")? {
             cfg.titles.enabled = v;
         }
         if let Some(v) = env_str("KARUCODE_TITLES_PROVIDER") {
@@ -1677,7 +1689,7 @@ impl Config {
         }
         // Notifications: one master switch plus a comma-separated event list, so a
         // locked deployment can silence the ping without editing `[notifications]`.
-        if let Some(v) = env_bool("KARUCODE_NOTIFICATIONS") {
+        if let Some(v) = env_bool("KARUCODE_NOTIFICATIONS")? {
             cfg.notifications.enabled = v;
         }
         if let Some(v) = env_str("KARUCODE_NOTIFICATIONS_EVENTS") {
@@ -1696,20 +1708,20 @@ impl Config {
                 }
             }
         }
-        if let Some(v) = env_bool("KARUCODE_NOTIFICATIONS_PLUGIN") {
+        if let Some(v) = env_bool("KARUCODE_NOTIFICATIONS_PLUGIN")? {
             cfg.notifications.plugin = v;
         }
         if let Some(v) = env_parse("KARUCODE_NOTIFICATIONS_MIN_RUN_SECS") {
             cfg.notifications.min_run_secs = v;
         }
-        if let Some(v) = env_bool("KARUCODE_NOTIFICATIONS_SAY_BODY") {
+        if let Some(v) = env_bool("KARUCODE_NOTIFICATIONS_SAY_BODY")? {
             cfg.notifications.say_body = v;
         }
         // The browser terminal. `KARUCODE_TERMINALS=0` is the switch a locked
         // deployment needs: with it off there is no PTY surface at all, so an
         // install that must not offer a shell does not have to rely on the UI
         // hiding the tab.
-        if let Some(v) = env_bool("KARUCODE_TERMINALS") {
+        if let Some(v) = env_bool("KARUCODE_TERMINALS")? {
             cfg.terminals.enabled = v;
         }
         if let Some(v) = env_str("KARUCODE_TERMINALS_SHELL") {
@@ -1732,7 +1744,7 @@ impl Config {
                 .filter(|p| !p.as_os_str().is_empty())
                 .collect();
         }
-        if let Some(v) = env_bool("KARUCODE_ALLOW_TEMP_DIR") {
+        if let Some(v) = env_bool("KARUCODE_ALLOW_TEMP_DIR")? {
             cfg.allow_temp_dir = v;
         }
 
@@ -1747,25 +1759,6 @@ impl Config {
         }
         if let Some(v) = env_api_key.clone() {
             cfg.model.api_key = Some(v);
-        }
-        // The flat KARUCODE_* model variables are the legacy way to configure a
-        // single endpoint. When any of them is set they win over [[providers]]
-        // tables in the file, expressed as a reserved `env` profile so there is
-        // exactly one code path that resolves an endpoint.
-        if env_model.is_some() || env_base_url.is_some() || env_api_key.is_some() {
-            cfg.providers.retain(|profile| profile.id != ENV_PROFILE_ID);
-            cfg.providers.push(ProviderProfile {
-                id: ENV_PROFILE_ID.to_string(),
-                name: "From environment".into(),
-                provider: cfg.model.provider.clone(),
-                base_url: cfg.model.base_url.clone(),
-                api_key: cfg.model.api_key.clone(),
-                models: vec![ModelEntry::new(cfg.model.model.clone())],
-                request_timeout_secs: cfg.model.request_timeout_secs,
-                ..ProviderProfile::default()
-            });
-            cfg.active_provider = Some(ENV_PROFILE_ID.to_string());
-            cfg.active_model = Some(cfg.model.model.clone());
         }
         if let Some(v) = env_parse("KARUCODE_TEMPERATURE") {
             cfg.model.temperature = v;
@@ -1794,8 +1787,31 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_RETRY_MAX_STREAM_RESTARTS") {
             cfg.model.retry_max_stream_restarts = v;
         }
-        if let Some(v) = env_bool("KARUCODE_MODEL_SUPPORTS_IMAGES") {
+        if let Some(v) = env_bool("KARUCODE_MODEL_SUPPORTS_IMAGES")? {
             cfg.model.supports_images = v;
+        }
+
+        // Build the reserved environment profile only after every flat model
+        // override has been applied. Otherwise the later request-timeout override
+        // updates `model` but is immediately replaced by the stale profile during
+        // normalisation. The flat file's remaining connection options still apply
+        // to this endpoint; do not reset them to ProviderProfile::default().
+        if env_model.is_some() || env_base_url.is_some() || env_api_key.is_some() {
+            cfg.providers.retain(|profile| profile.id != ENV_PROFILE_ID);
+            cfg.providers.push(ProviderProfile {
+                id: ENV_PROFILE_ID.to_string(),
+                name: "From environment".into(),
+                provider: cfg.model.provider.clone(),
+                base_url: cfg.model.base_url.clone(),
+                api_key: cfg.model.api_key.clone(),
+                models: vec![ModelEntry::new(cfg.model.model.clone())],
+                request_timeout_secs: cfg.model.request_timeout_secs,
+                extra_headers: cfg.model.extra_headers.clone(),
+                extra_body: cfg.model.extra_body.clone(),
+                aggregator: cfg.model.aggregator,
+            });
+            cfg.active_provider = Some(ENV_PROFILE_ID.to_string());
+            cfg.active_model = Some(cfg.model.model.clone());
         }
 
         if let Some(v) = env_parse("KARUCODE_MAX_ITERATIONS") {
@@ -1804,7 +1820,7 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_MAX_RUN_SECS") {
             cfg.limits.max_run_secs = v;
         }
-        if let Some(v) = env_bool("KARUCODE_AUTO_CONTINUE") {
+        if let Some(v) = env_bool("KARUCODE_AUTO_CONTINUE")? {
             cfg.limits.auto_continue = v;
         }
         if let Some(v) = env_parse("KARUCODE_MAX_CONTINUES") {
@@ -1856,10 +1872,10 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_SUBAGENT_TIMEOUT_SECS") {
             cfg.subagents.timeout_secs = v;
         }
-        if let Some(v) = env_bool("KARUCODE_ALLOW_RECURSIVE_SUBAGENTS") {
+        if let Some(v) = env_bool("KARUCODE_ALLOW_RECURSIVE_SUBAGENTS")? {
             cfg.subagents.allow_recursive = v;
         }
-        if let Some(v) = env_bool("KARUCODE_SUBAGENT_ALLOW_BACKGROUND") {
+        if let Some(v) = env_bool("KARUCODE_SUBAGENT_ALLOW_BACKGROUND")? {
             cfg.subagents.allow_background = v;
         }
         if let Some(v) = env_parse("KARUCODE_SUBAGENT_MAX_BACKGROUND") {
@@ -2006,7 +2022,7 @@ impl Config {
                 request_timeout_secs: self.model.request_timeout_secs,
                 extra_headers: self.model.extra_headers.clone(),
                 extra_body: self.model.extra_body.clone(),
-                aggregator: false,
+                aggregator: self.model.aggregator,
             });
             self.active_provider = Some(DEFAULT_PROFILE_ID.to_string());
             self.active_model = Some(self.model.model.clone());
@@ -2050,6 +2066,7 @@ impl Config {
         self.model.request_timeout_secs = profile.request_timeout_secs;
         self.model.extra_headers = profile.extra_headers.clone();
         self.model.extra_body = profile.extra_body.clone();
+        self.model.aggregator = profile.aggregator;
         if let Some(model) = self.active_model.clone() {
             self.model.model = model;
         }
@@ -2216,7 +2233,10 @@ mod tests {
 
         // And the env spelling, which shares the same normalisation as the
         // other booleans (`1/true/yes/on`).
-        assert_eq!(env_bool("KARUCODE_ALLOW_TEMP_DIR_NOPE_NOT_SET"), None);
+        assert_eq!(
+            env_bool("KARUCODE_ALLOW_TEMP_DIR_NOPE_NOT_SET").unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2354,6 +2374,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.model.model = "qwen3-32b".into();
         cfg.model.base_url = "http://127.0.0.1:8000/v1".into();
+        cfg.model.aggregator = true;
         cfg.normalize_providers();
 
         assert_eq!(cfg.providers.len(), 1);
@@ -2362,6 +2383,8 @@ mod tests {
         assert_eq!(active.base_url, "http://127.0.0.1:8000/v1");
         assert_eq!(active.models.len(), 1);
         assert_eq!(active.models[0].id, "qwen3-32b");
+        assert!(active.aggregator);
+        assert!(cfg.effective_model().aggregator);
         assert_eq!(cfg.active_model.as_deref(), Some("qwen3-32b"));
 
         // Idempotent: normalising again changes nothing.
@@ -2663,6 +2686,65 @@ retry_max_stream_restarts = 0
             3,
             "an env override must survive profile resolution"
         );
+    }
+
+    #[test]
+    fn environment_profile_applies_timeout_and_preserves_connection_options() {
+        let _guard = EnvVars::set([
+            "KARUCODE_MODEL",
+            "KARUCODE_BASE_URL",
+            "OPENAI_BASE_URL",
+            "KARUCODE_API_KEY",
+            "OPENAI_API_KEY",
+            "KARUCODE_REQUEST_TIMEOUT_SECS",
+        ]);
+        for name in ["OPENAI_BASE_URL", "KARUCODE_API_KEY", "OPENAI_API_KEY"] {
+            std::env::remove_var(name);
+        }
+        std::env::set_var("KARUCODE_MODEL", "from-env");
+        std::env::set_var("KARUCODE_BASE_URL", "http://127.0.0.1:9999/v1");
+        std::env::set_var("KARUCODE_REQUEST_TIMEOUT_SECS", "37");
+
+        let headers = BTreeMap::from([("X-From-File".to_string(), "kept".to_string())]);
+        let body = BTreeMap::from([("custom".to_string(), serde_json::json!({"kept": true}))]);
+        let file = ConfigFile {
+            model: Some(ModelConfig {
+                request_timeout_secs: 900,
+                extra_headers: headers.clone(),
+                extra_body: body.clone(),
+                aggregator: true,
+                ..ModelConfig::default()
+            }),
+            providers: Some(vec![ProviderProfile {
+                id: "file-profile".into(),
+                models: vec![ModelEntry::new("from-file")],
+                ..ProviderProfile::default()
+            }]),
+            active_provider: Some("file-profile".into()),
+            active_model: Some("from-file".into()),
+            ..ConfigFile::default()
+        };
+
+        let cfg = Config::from_parts(file, None).expect("config loads");
+        assert_eq!(cfg.active_provider.as_deref(), Some(ENV_PROFILE_ID));
+        let profile = cfg.active_profile().expect("environment profile");
+        assert_eq!(profile.base_url, "http://127.0.0.1:9999/v1");
+        assert_eq!(profile.models[0].id, "from-env");
+        assert_eq!(
+            profile.request_timeout_secs, 37,
+            "the env profile must be built after KARUCODE_REQUEST_TIMEOUT_SECS"
+        );
+        assert_eq!(profile.extra_headers, headers);
+        assert_eq!(profile.extra_body, body);
+        assert!(profile.aggregator);
+
+        let effective = cfg.effective_model();
+        assert_eq!(effective.request_timeout_secs, 37);
+        assert_eq!(effective.extra_headers, headers);
+        assert_eq!(effective.extra_body, body);
+        assert!(effective.aggregator);
+        assert_eq!(cfg.model.request_timeout_secs, 37);
+        assert!(cfg.model.aggregator);
     }
 
     #[test]
@@ -3099,7 +3181,7 @@ retry_max_stream_restarts = 0
     }
 
     /// `KARUCODE_LOCK_SETTINGS=1` is the spelling the docs use for pinning a
-    /// deployment; an unparseable value must not silently look like `false`.
+    /// deployment and must enable the lock rather than silently looking false.
     #[test]
     fn a_locked_deployment_is_locked_from_the_environment() {
         let _guard = EnvVars::set(["KARUCODE_LOCK_SETTINGS"]);
@@ -3109,6 +3191,35 @@ retry_max_stream_restarts = 0
             cfg.lock_settings,
             "KARUCODE_LOCK_SETTINGS=1 must lock settings"
         );
+    }
+
+    #[test]
+    fn malformed_boolean_env_values_fail_fast_and_name_the_variable() {
+        for name in [
+            "KARUCODE_LOCK_SETTINGS",
+            "KARUCODE_PLUGINS_WATCH",
+            "KARUCODE_TITLES",
+            "KARUCODE_NOTIFICATIONS",
+            "KARUCODE_NOTIFICATIONS_PLUGIN",
+            "KARUCODE_NOTIFICATIONS_SAY_BODY",
+            "KARUCODE_TERMINALS",
+            "KARUCODE_ALLOW_TEMP_DIR",
+            "KARUCODE_MODEL_SUPPORTS_IMAGES",
+            "KARUCODE_AUTO_CONTINUE",
+            "KARUCODE_ALLOW_RECURSIVE_SUBAGENTS",
+            "KARUCODE_SUBAGENT_ALLOW_BACKGROUND",
+        ] {
+            let _guard = EnvVars::set([name]);
+            std::env::set_var(name, "definitely-not-a-boolean");
+            let err = Config::from_parts(ConfigFile::default(), None)
+                .expect_err("a malformed boolean must stop configuration loading")
+                .to_string();
+            assert!(err.contains(name), "{name} missing from error: {err}");
+            assert!(
+                err.contains("expected a boolean") && err.contains("1/0"),
+                "error for {name} is not actionable: {err}"
+            );
+        }
     }
 
     /// Set environment variables for the duration of a test and put the previous

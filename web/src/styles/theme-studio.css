@@ -562,15 +562,33 @@
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   background: var(--surface);
+  /* A segmented control is the one control in the drawer whose *content* sets a
+   * floor: three buttons cannot shrink below their labels. `min-width: 0` on the
+   * container plus the same on the segments (below) lets the track win instead of
+   * the labels — without it the group's 141px of content painted inside a 120px
+   * column at 320px and spilled out of the drawer. */
+  min-width: 0;
 }
 
 .theme-segment {
-  flex: 1;
+  /* `flex-basis: auto`, not 0: the basis is each label's own width and the free
+   * space is shared equally on top, so a short label ("None") does not take room
+   * from a long one ("Tool calls"). With `0` the three segments are equal-width
+   * and the longest label is the one that gets clipped. */
+  flex: 1 1 auto;
+  min-width: 0;
   padding: var(--space-4);
   border-radius: var(--radius-sm);
   color: var(--muted);
   font-size: var(--fs-tiny);
   text-align: center;
+  /* Last resort at absurd widths: one segment ellipsises rather than the whole
+   * drawer gaining a horizontal scrollbar. The track minimum on
+   * `.theme-transcript-grid` below is what normally gives these controls the
+   * width their labels need. */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .theme-segment:hover {
@@ -627,6 +645,25 @@
   line-height: 1.45;
 }
 
+/* A trust boundary, not a decoration: see the note's own copy in ThemeStudio.
+ * Warn-inked on the warn tint, one rung below the help text it follows. */
+.theme-trust-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  margin: var(--space-5) 0 0;
+  padding: var(--space-4) var(--space-6);
+  border-left: 2px solid var(--warn);
+  color: var(--warn);
+  font-size: var(--fs-tiny);
+  line-height: 1.55;
+}
+
+.theme-trust-note svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
 /* The Reasoning control sits under the two-column grid rather than inside it,
  * so it needs the same breathing room the grid's row gap gives its own cells. */
 .theme-setting-grid + .theme-field {
@@ -635,8 +672,21 @@
 
 /* Inside the Transcript section a grid cell carries a hint paragraph under its
  * control, which makes the row taller than the mock's 12px gap allows for; the
- * extra room is scoped to this section so the Interface geometry is untouched. */
+ * extra room is scoped to this section so the Interface geometry is untouched.
+ *
+ * The track minimum is the grouping control's own requirement, not the mock's
+ * `1fr` half: that control is three labels in a row, so its min-content width is
+ * ~227px at spacious density and ~215px at comfortable. A plain two-up grid gave
+ * it 121px at a 320px viewport, and its content overflowed the column — measured
+ * in Chromium at 320x640: 141px of content inside a 120px box, the last button
+ * reaching 316px while the column ended at 296px, inside a modal with no
+ * horizontal scroll. `auto-fit` with a 232px minimum gives two columns whenever
+ * they fit (258px each at the 580px desktop drawer, i.e. unchanged) and one
+ * full-width column below that; `min(100%, …)` keeps a track from ever being
+ * wider than its container. The `.theme-segment` `min-width: 0` + ellipsis rule
+ * above is the backstop if a future label is longer still. */
 .theme-transcript-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 232px), 1fr));
   gap: var(--space-7) var(--space-6);
   align-items: start;
 }
@@ -997,7 +1047,7 @@
  * desktop geometry until 620px, then becomes a near-full-width sheet. */
 @media (max-width: 620px) {
   .theme-studio {
-    width: calc(100% - 56px);
+    width: min(580px, calc(100% - 28px));
   }
 
   .theme-studio-top {

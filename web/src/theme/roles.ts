@@ -273,6 +273,23 @@ function derivedValue(spec: RoleSpec, palette: ResolvedPalette, mode: ThemeMode)
   const anchorLum = clampLuminance(anchorLumRaw);
   const target = Math.exp(Math.log(anchorLum + 0.05) + step) - 0.05;
 
+  // A fill cut from a white panel must stay *a white panel*.
+  //
+  // In a light theme the palette's `surface` is pure white and its canvas is an
+  // off-white, so the card's mock offset ("one step darker than the surface")
+  // lands it at L96 — between the L95 canvas and the L100 panel, which is neither
+  // rung. Measured on Daybreak: card `#f6f6f6` against canvas `#f8f5ef`, 1.02:1,
+  // with the card *lighter* than the canvas it sits on. That is what "washed out"
+  // looks like in light mode: a panel you cannot find.
+  //
+  // The mirror of the mock's relationship is not a *smaller* step, it is the same
+  // relationship expressed in the room the light ramp has: a card is the panel
+  // colour, and separation comes from the border and the shadow the card carries.
+  // So when the derived fill would land between the canvas and a bright anchor
+  // with no room to read, it snaps up to the anchor's own rung instead.
+  const separated =
+    mode === 'light' ? liftOffCanvas(spec, target, palette, anchorLumRaw) : target;
+
   // Hierarchy guard. Preserving a *ratio* compounds when the anchor itself got
   // lighter: Ember's --text-body sits 1.84x its muted colour, and muted moved up,
   // which pushed body text to near-white and flattened every level together.
@@ -281,8 +298,26 @@ function derivedValue(spec: RoleSpec, palette: ResolvedPalette, mode: ThemeMode)
   // light theme it must stay *darker*. So the cap runs in the direction that
   // keeps contrast below primary text.
   const textLum = relativeLuminance(palette.text);
-  const bounded =
-    mode === 'dark' ? Math.min(target, textLum * 0.62) : Math.max(target, textLum * 1.6);
+  const capped =
+    mode === 'dark' ? Math.min(separated, textLum * 0.62) : Math.max(separated, textLum * 1.6);
+
+  // …then the *legibility* floor, which outranks the hierarchy guard.
+  //
+  // The hierarchy guard above bounds a role relative to primary text; nothing
+  // bounded it relative to the surface it is painted on. Roles cut from `faint`
+  // are the ones that suffered: `faint` is a decorative colour (3:1 by §4), so
+  // `--text-subtle` inherited "quiet" all the way down to 2.95:1 on Daybreak's
+  // raised surface — text a reader is meant to read, in the least readable state
+  // the app has. Brightening the palette was not a fix because the role kept its
+  // own ratio to that palette colour.
+  //
+  // So an ink role is bounded by the §4 text floor against **every** surface the
+  // theme paints, not just the one the reviewer happened to measure. The worst
+  // case is the surface closest to the ink: the lightest surface in a dark theme,
+  // the darkest in a light one. Only ink roles are floored — decorative fills,
+  // lines and `faint`-anchored icon roles keep their own contrast, because
+  // brightening a hairline or a drag handle is not legibility, it is noise.
+  const floored = applyInkFloor(spec, capped, palette, mode);
 
   // Inherit the ANCHOR's hue and saturation, not the mock literal's.
   //
@@ -291,12 +326,127 @@ function derivedValue(spec: RoleSpec, palette: ResolvedPalette, mode: ThemeMode)
   // hue" painted Ember's cool grey into every theme. Sakura's cards came out
   // 33-129° off its own plum surface, i.e. blue-grey panels inside a plum shell.
   // A fill must continue the surface it is cut from; only its lightness moves.
-  const anchorHsl = rgbToHsl(anchor);
-  return hslToHex(
-    anchorHsl.h,
-    resolveSaturation(spec, spec.ember, anchorHsl.s),
-    lightnessForLuminance(anchorHsl.h, resolveSaturation(spec, spec.ember, anchorHsl.s), bounded),
+  //
+  // …unless that surface *has* no hue. A light theme's `surface` is pure white,
+  // so every fill cut from it — card, console, diff body, user message — came out
+  // neutral grey on a warm canvas: `--surface-card` measured `#f6f6f6` (h=0, s=0)
+  // against Daybreak's `#f8f5ef` (h≈40). That is the light-mode half of "the
+  // designs clash", and the hue test above could not see it because it skips
+  // near-greys. So an achromatic anchor borrows the theme's own chromatic
+  // character instead of propagating "no hue" into a palette that has one.
+  const tint = tintFor(palette, spec.anchor);
+  const saturation = resolveSaturation(spec, spec.ember, tint.s);
+  return hslToHex(tint.h, saturation, lightnessForLuminance(tint.h, saturation, floored));
+}
+
+/** HSL saturation below which a colour reads as a neutral rather than a tint. */
+const TINT_FLOOR = 0.06;
+
+/** Surfaces to borrow a tint from, most representative first. */
+const TINT_SOURCES = ['bg', 'rail', 'sidebar', 'inspector', 'raised', 'hover'] as const;
+
+/**
+ * The hue/saturation a derived role continues.
+ *
+ * Usually its anchor's own. When the anchor is achromatic (a light theme's white
+ * `surface`, or a deliberately grey palette) there is nothing to continue, so the
+ * role takes the theme's own surface tint — the canvas first, because that is the
+ * colour the user sees around the card.
+ *
+ * Exported because `contrast.test.ts` has to measure each role against the colour
+ * it actually follows; comparing a card cut from a white `surface` to that white
+ * `surface` is how the light-mode clash stayed invisible to the hue guard.
+ */
+export function tintFor(palette: ResolvedPalette, anchor: Anchor): ReturnType<typeof rgbToHsl> {
+  const own = rgbToHsl(palette[anchor]);
+  if (own.s >= TINT_FLOOR) return own;
+  for (const key of TINT_SOURCES) {
+    const candidate = rgbToHsl(palette[key]);
+    if (candidate.s >= TINT_FLOOR) return candidate;
+  }
+  return own;
+}
+
+/**
+ * The contrast a fill needs against the canvas before it reads as its own rung.
+ *
+ * Below this the difference is one 8-bit step, and a light theme has no room to
+ * increase it — the ramp above the canvas is at most 1.05:1 wide.
+ */
+const CANVAS_SEPARATION = 1.03;
+
+/**
+ * Keep a fill that has landed *above* a light canvas but too close to it from
+ * disappearing: snap it to its anchor's own rung instead.
+ *
+ * Deliberately only the above-canvas case. A well — a console, a diff body, a code
+ * block — lands *below* the canvas in light mode and must stay there; lifting it
+ * would turn a recess into a second card. `target > canvas` is what separates the
+ * two, so the rule reads the geometry rather than naming roles.
+ */
+function liftOffCanvas(spec: RoleSpec, target: number, palette: ResolvedPalette, anchorLum: number): number {
+  if (spec.kind === 'alpha') return target;
+  if (INK_ROLE.test(spec.property) || INK_ROLE_NAMES.has(spec.property)) return target;
+  if (anchorLum < 0.9) return target;
+  const canvas = relativeLuminance(palette.bg);
+  if (target <= canvas) return target;
+  const contrast = (Math.max(canvas, target) + 0.05) / (Math.min(canvas, target) + 0.05);
+  if (contrast >= CANVAS_SEPARATION) return target;
+  return Math.max(target, anchorLum - 0.01);
+}
+
+/** The §4 floor for text a user must read. */
+const TEXT_FLOOR = 4.5;
+
+/**
+ * Roles whose value is *ink*, not a fill.
+ *
+ * `--tab-active-text`, `--row-selected-text` and `--row-accent-ink` are named
+ * around the accent rather than the word "text", so they are listed explicitly:
+ * a selected row's label is read, not decoration.
+ */
+const INK_ROLE = /^--(text|input-ink|input-placeholder|foot|chip-ink|meta)/;
+const INK_ROLE_NAMES = new Set([
+  '--tab-active-text',
+  '--tab-hover',
+  '--row-selected-text',
+  '--row-accent-ink',
+  '--rail-glyph-text',
+  '--rail-avatar-text',
+  '--toggle-knob',
+]);
+
+/** Surfaces a role can end up painted on, in the order §3.1 defines them. */
+const SURFACE_ANCHORS = ['bg', 'rail', 'sidebar', 'inspector', 'surface', 'raised', 'hover'] as const;
+
+/** Luminance of the surface a floored ink role is closest to — the worst case. */
+function worstSurfaceLuminance(palette: ResolvedPalette, mode: ThemeMode): number {
+  const values = SURFACE_ANCHORS.map((key) => relativeLuminance(palette[key])).filter((lum) =>
+    Number.isFinite(lum),
   );
+  if (values.length === 0) return mode === 'dark' ? 0.05 : 0.9;
+  return mode === 'dark' ? Math.max(...values) : Math.min(...values);
+}
+
+/**
+ * Raise (dark) or lower (light) an ink role until it clears the text floor on
+ * every surface. Contrast is linear in `luminance + 0.05`, so the required
+ * luminance is closed-form; no iteration and no perceptual guesswork.
+ */
+function applyInkFloor(
+  spec: RoleSpec,
+  luminance: number,
+  palette: ResolvedPalette,
+  mode: ThemeMode,
+): number {
+  if (!INK_ROLE.test(spec.property) && !INK_ROLE_NAMES.has(spec.property)) return luminance;
+  const surface = worstSurfaceLuminance(palette, mode);
+  const needed =
+    mode === 'dark'
+      ? (surface + 0.05) * TEXT_FLOOR - 0.05
+      : (surface + 0.05) / TEXT_FLOOR - 0.05;
+  const bounded = mode === 'dark' ? Math.max(luminance, needed) : Math.min(luminance, needed);
+  return Math.min(0.99, Math.max(0.001, bounded));
 }
 
 /**

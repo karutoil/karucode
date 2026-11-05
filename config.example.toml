@@ -3,6 +3,8 @@
 # Copy to ~/.config/karucode/config.toml (or point KARUCODE_CONFIG at it).
 # Precedence: UI/DB overrides > environment variables > this file > defaults.
 # Set KARUCODE_LOCK_SETTINGS=1 to ignore UI/DB overrides (env becomes truth).
+# Environment booleans accept 1/0, true/false, yes/no or on/off (case-insensitive).
+# Any other present value stops startup with an error naming that variable.
 # The KARUCODE_* model variables (KARUCODE_MODEL, KARUCODE_BASE_URL,
 # KARUCODE_API_KEY / OPENAI_*) override the [[providers]] tables below.
 
@@ -38,7 +40,6 @@ log_level = "info"
 
 [model]
 provider = "openai_compatible"
-# Use "openai_responses" for endpoints implementing the OpenAI Responses API.
 # Any OpenAI-compatible gateway works (LiteLLM, vLLM, Ollama /v1, OpenRouter, ...).
 base_url = "http://127.0.0.1:4000/v1"
 model = "gpt-4o-mini"
@@ -84,15 +85,17 @@ supports_images = false
 # --- Provider profiles (optional) -------------------------------------------
 # Named endpoints instead of the single [model] connection. With at least one
 # [[providers]] table present, the connection fields of [model] (provider,
-# base_url, model, api_key, request_timeout_secs, extra_headers, extra_body) are
-# ignored and the active profile supplies them. Sampling (temperature,
-# max_tokens, top_p, parallel_tool_calls) and the retry budgets
+# base_url, model, api_key, request_timeout_secs, extra_headers, extra_body,
+# aggregator) are ignored and the active profile supplies them. Sampling
+# (temperature, max_tokens, top_p, parallel_tool_calls) and the retry budgets
 # (retry_max_retries, retry_base_delay_ms, retry_max_delay_ms,
-# retry_max_stream_restarts) still come from [model].
+# retry_max_stream_restarts, retry_max_total_secs) still come from [model].
 #
 # KARUCODE_MODEL / KARUCODE_BASE_URL / KARUCODE_API_KEY (or OPENAI_BASE_URL /
 # OPENAI_API_KEY) override this whole section: they become the active "env"
-# profile. KARUCODE_MODELS_DEV_URL points the model-library catalog at a mirror
+# profile. The flat [model] request timeout, extra_headers, extra_body and
+# aggregator carry over; KARUCODE_REQUEST_TIMEOUT_SECS overrides that timeout.
+# KARUCODE_MODELS_DEV_URL points the model-library catalog at a mirror
 # (default https://models.dev/api.json; read once at startup, http(s) only).
 #
 # active_provider = "gateway"
@@ -102,7 +105,6 @@ supports_images = false
 # id = "gateway"                   # 1-64 chars: letters, digits, '.', '_', '-'
 # name = "LiteLLM gateway"
 # provider = "openai_compatible"
-# For a Responses API endpoint, set provider = "openai_responses" instead.
 # base_url = "http://127.0.0.1:4000/v1"
 # api_key = "sk-litellm"           # write-only: the browser only sees api_key_set
 # request_timeout_secs = 300
@@ -176,7 +178,9 @@ max_tool_calls_per_turn = 32
 [approvals]
 # ask | ask_commands | auto | read_only
 mode = "ask"
-# Prefixes that never prompt in ask modes.
+# Prefixes that never prompt in ask modes; matching stops at a word boundary,
+# so "rg" allows bare `rg` and `rg TODO .` but not `rgx`. Options that execute
+# another program still prompt: rg --pre, --pre-glob and --hostname-bin.
 allow_commands = ["rg", "git status", "cargo test", "cargo check"]
 # Workspace-relative prefixes that may be written without prompting in ask mode.
 auto_approve_paths = []

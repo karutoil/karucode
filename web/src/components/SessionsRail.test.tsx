@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/preact';
 import { SessionList, SessionsRail, sessionGroup, type SessionListProps } from './SessionsRail';
+import { Dialog } from './Dialog';
 import { secondSummaryFixture, summaryFixture, NOW } from '../test/fixtures';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
@@ -89,6 +90,18 @@ describe('SessionList', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete session' }));
     expect(props.onDelete).toHaveBeenCalledWith('s_ab12');
+  });
+
+  it('restores the session menu trigger when the delete child is cancelled', async () => {
+    renderList();
+    const trigger = screen.getByRole('button', { name: 'Actions for Fix login bug' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete…' }));
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    await vi.waitFor(() => expect(document.activeElement).toBe(cancel));
+    fireEvent.click(cancel);
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete session?' })).toBeNull());
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
   it('shows an explanatory empty state with a working create button', () => {
@@ -224,6 +237,31 @@ describe('SessionsRail shell', () => {
 
     refresh.mockRestore();
     settings.mockRestore();
+  });
+
+  it('restores Project options after the settings child closes', async () => {
+    function Harness() {
+      return <>
+        <SessionsRail />
+        <Dialog
+          open={store.settingsOpen.value}
+          title="Settings"
+          onClose={actions.closeSettings}
+        >
+          <button type="button" data-autofocus onClick={actions.closeSettings}>Done</button>
+        </Dialog>
+      </>;
+    }
+    store.settingsOpen.value = false;
+    render(<Harness />);
+    const trigger = screen.getByRole('button', { name: 'Project options' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Project settings…' }));
+    const done = await screen.findByRole('button', { name: 'Done' });
+    await vi.waitFor(() => expect(document.activeElement).toBe(done));
+    fireEvent.click(done);
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull());
+    expect(document.activeElement).toBe(trigger);
   });
 
   it('creates a session from the rail button', () => {
@@ -363,10 +401,130 @@ describe('SessionsRail project switcher (phones)', () => {
     expect(container.querySelector('.project-switcher')).not.toBeNull();
   });
 
+  it('restores Project options when Rename closes without closing the sessions sheet', async () => {
+    render(<SessionsRail />);
+    const trigger = screen.getByRole('button', { name: 'Project options' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename…' }));
+
+    const input = within(screen.getByRole('dialog', { name: 'Rename project' })).getByLabelText(
+      'Project name',
+    );
+    await vi.waitFor(() => expect(document.activeElement).toBe(input));
+    fireEvent.keyDown(input, { key: 'Escape' });
+
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename project' })).toBeNull());
+    expect(screen.getByRole('dialog', { name: 'Sessions' })).not.toBeNull();
+    expect(store.mobileSheet.value).toBe('sessions');
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('restores Project options when Delete closes', async () => {
+    render(<SessionsRail />);
+    const trigger = screen.getByRole('button', { name: 'Project options' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete project…' }));
+    const cancel = within(screen.getByRole('dialog', { name: 'Delete project?' })).getByRole('button', { name: 'Cancel' });
+    await vi.waitFor(() => expect(document.activeElement).toBe(cancel));
+    fireEvent.keyDown(cancel, { key: 'Escape' });
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete project?' })).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it('opens the add-project dialog from the switcher', () => {
     render(<SessionsRail />);
     fireEvent.click(screen.getByRole('button', { name: 'Add project' }));
     expect(screen.getByRole('dialog', { name: 'Add project' })).not.toBeNull();
+  });
+
+  it('gives the project menu the desktop keyboard contract', async () => {
+    render(<SessionsRail />);
+    fireEvent.click(screen.getByRole('button', { name: 'Project options' }));
+
+    const menu = screen.getByRole('menu', { name: /Project options for KaruCode/ });
+    const items = within(menu).getAllByRole('menuitem');
+    // Opening puts focus on the first item, like the desktop rail menu.
+    await vi.waitFor(() => expect(document.activeElement).toBe(items[0]));
+
+    fireEvent.keyDown(items[0]!, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(items[1]);
+    fireEvent.keyDown(items[1]!, { key: 'End' });
+    expect(document.activeElement).toBe(items[items.length - 1]);
+    fireEvent.keyDown(items[items.length - 1]!, { key: 'Home' });
+    expect(document.activeElement).toBe(items[0]);
+    fireEvent.keyDown(items[0]!, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(items[items.length - 1]);
+
+    // Tab leaves the menu (it does not trap focus inside a popup).
+    fireEvent.keyDown(items[items.length - 1]!, { key: 'Tab' });
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('closes the project menu on Escape and returns focus to its trigger', async () => {
+    const closeSheets = vi.spyOn(actions, 'closeSheets').mockImplementation(() => undefined);
+    render(<SessionsRail />);
+    const trigger = screen.getByRole('button', { name: 'Project options' });
+    fireEvent.click(trigger);
+    const first = within(
+      screen.getByRole('menu', { name: /Project options for KaruCode/ }),
+    ).getAllByRole('menuitem')[0]!;
+    await vi.waitFor(() => expect(document.activeElement).toBe(first));
+
+    fireEvent.keyDown(first, { key: 'Escape' });
+    // The menu owns the first Escape: the sheet stays open and focus comes back.
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(closeSheets).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
+    closeSheets.mockRestore();
+  });
+
+  it('closes a session menu on Escape without closing the sheet', async () => {
+    const closeSheets = vi.spyOn(actions, 'closeSheets').mockImplementation(() => undefined);
+    render(<SessionsRail />);
+    const trigger = screen.getByRole('button', { name: 'Actions for Fix login bug' });
+    fireEvent.click(trigger);
+    const first = within(
+      screen.getByRole('menu', { name: 'Session actions for Fix login bug' }),
+    ).getAllByRole('menuitem')[0]!;
+    await vi.waitFor(() => expect(document.activeElement).toBe(first));
+
+    fireEvent.keyDown(first, { key: 'Escape' });
+    expect(screen.queryByRole('menu', { name: 'Session actions for Fix login bug' })).toBeNull();
+    expect(closeSheets).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(trigger);
+    closeSheets.mockRestore();
+  });
+
+  it('lets the sheet’s own controls handle Escape before it closes', () => {
+    const closeSheets = vi.spyOn(actions, 'closeSheets').mockImplementation(() => undefined);
+    render(<SessionsRail />);
+    const search = screen.getByLabelText('Find a session') as HTMLInputElement;
+
+    fireEvent.input(search, { target: { value: 'Fix' } });
+    fireEvent.keyDown(search, { key: 'Escape' });
+    // First press: clear the query. The sheet's capture-phase focus trap would
+    // have closed everything here before the field ever saw the key.
+    expect(search.value).toBe('');
+    expect(closeSheets).not.toHaveBeenCalled();
+
+    // Nothing left to clear: the second press is the sheet's.
+    fireEvent.keyDown(search, { key: 'Escape' });
+    expect(closeSheets).toHaveBeenCalledTimes(1);
+    closeSheets.mockRestore();
+  });
+
+  it('lets an inline rename cancel with Escape without closing the sheet', () => {
+    const closeSheets = vi.spyOn(actions, 'closeSheets').mockImplementation(() => undefined);
+    render(<SessionsRail />);
+
+    fireEvent.dblClick(screen.getByText('Fix login bug'));
+    const input = screen.getByLabelText(/Rename session/) as HTMLInputElement;
+    fireEvent.input(input, { target: { value: 'Discard this' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+
+    expect(screen.queryByLabelText(/Rename session/)).toBeNull();
+    expect(closeSheets).not.toHaveBeenCalled();
+    closeSheets.mockRestore();
   });
 
   it('offers the close button the toolbar used to own', () => {
@@ -480,6 +638,68 @@ describe('the collapsed rail’s fly-out (RailPeek)', () => {
     fireEvent.click(screen.getByRole('button', { name: /New session/ }));
     expect(create).toHaveBeenCalledTimes(1);
     expect(railPeek.peekProjectId.value).toBeNull();
+    create.mockRestore();
+  });
+
+  it('switches to the peeked project before creating in it', async () => {
+    // `createSession()` creates in the *open* project. An empty preview of
+    // another project offered "New session" that would silently start the
+    // conversation somewhere else; the switch has to happen first.
+    const order: string[] = [];
+    const project = vi.spyOn(actions, 'switchProject').mockImplementation(async (id) => {
+      order.push(`switch:${id}`);
+      store.currentProjectId.value = id;
+    });
+    const create = vi.spyOn(actions, 'createSession').mockImplementation(async () => {
+      order.push('create');
+      return null;
+    });
+    railPeek.peekProjectId.value = 'p_docs';
+    railPeek.peekSessions.value = { p_docs: [] };
+    render(<SessionsRail />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'New session' }));
+    await vi.waitFor(() => expect(order).toEqual(['switch:p_docs', 'create']));
+    expect(railPeek.peekProjectId.value).toBeNull();
+    project.mockRestore();
+    create.mockRestore();
+  });
+
+  it('aborts creation when another project wins while the peeked switch is pending', async () => {
+    let resolveSwitch!: () => void;
+    const switching = new Promise<void>((resolve) => {
+      resolveSwitch = resolve;
+    });
+    const project = vi.spyOn(actions, 'switchProject').mockImplementation(() => switching);
+    const create = vi.spyOn(actions, 'createSession').mockResolvedValue(null);
+    store.projects.value = [
+      ...store.projects.value,
+      {
+        id: 'p_other',
+        name: 'Other',
+        path: '/home/me/other',
+        created_at: NOW,
+        updated_at: NOW,
+        session_count: 0,
+      },
+    ];
+    railPeek.peekProjectId.value = 'p_docs';
+    railPeek.peekSessions.value = { p_docs: [] };
+    render(<SessionsRail />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'New session' }));
+    expect(project).toHaveBeenCalledWith('p_docs');
+    expect(create).not.toHaveBeenCalled();
+
+    // A newer navigation finishes first. When the stale Docs switch resolves,
+    // creating now would put the session in Other rather than the previewed one.
+    store.currentProjectId.value = 'p_other';
+    resolveSwitch();
+    await switching;
+    await Promise.resolve();
+
+    expect(create).not.toHaveBeenCalled();
+    project.mockRestore();
     create.mockRestore();
   });
 

@@ -150,11 +150,30 @@ function liveLabel(agent: AgentRow, activity: AgentActivity): string {
  * server omits `progress` rather than sending `null`, which slips past a bare
  * `!== null` check.
  */
-function ProgressBar({ value }: { value: number | null | undefined }): JSX.Element | null {
+function ProgressBar({
+  value,
+  label = 'Agent progress',
+}: {
+  value: number | null | undefined;
+  label?: string;
+}): JSX.Element | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
+  // A bar is a picture of a number, so the number is what assistive tech needs:
+  // the width alone says nothing, and the `title` was the only place the value
+  // was written down. `aria-valuetext` carries the same sentence for a reader
+  // that does not do percentages.
   return (
-    <span class="agent-progress" title={`${pct}% complete, according to the agent`}>
+    <span
+      class="agent-progress"
+      role="progressbar"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={pct}
+      aria-valuetext={`${pct}% complete`}
+      title={`${pct}% complete, according to the agent`}
+    >
       <span class="agent-progress-fill" style={{ width: `${pct}%` }} />
     </span>
   );
@@ -288,19 +307,21 @@ function AgentsEmpty({ filtered }: { filtered: boolean }): JSX.Element {
  * Pause / resume / stop for one live agent.
  *
  * Rendered only while the loop exists: a settled agent's buttons would be dead
- * controls, and the 404 that followed would look like a failure. `onClick` stops
- * propagation because the whole card is a button that opens the drill-in.
+ * controls, and the 404 that followed would look like a failure.
+ *
+ * These are siblings of the card's own **Details** button, not children of it:
+ * a native button inside another clickable surface is the nested-interactive
+ * pattern that made Enter on Pause also open the drill-in.
  */
 function AgentControls({ agent }: { agent: AgentRow }): JSX.Element | null {
   const pending = store.agentControlPending.value[agent.id];
   if (!isAgentLive(agent.status)) return null;
   const paused = agent.status === 'paused';
-  const run = (action: AgentAction) => (event: MouseEvent) => {
-    event.stopPropagation();
+  const run = (action: AgentAction) => () => {
     void actions.controlAgent(agent.id, action);
   };
   return (
-    <div class="agent-controls" onClick={(event) => event.stopPropagation()}>
+    <div class="agent-controls">
       <button
         type="button"
         class="button button-small"
@@ -337,20 +358,7 @@ function AgentCard({
   onOpen: () => void;
 }): JSX.Element {
   return (
-    <article
-      class="agent-card"
-      data-status={agent.status}
-      role="button"
-      tabIndex={0}
-      aria-label={`Open ${agent.name} — ${agent.status}`}
-      onClick={onOpen}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          onOpen();
-        }
-      }}
-    >
+    <article class="agent-card" data-status={agent.status}>
       <header class="agent-head">
         <div class="agent-title-row">
           <span class="agent-icon" aria-hidden="true">
@@ -380,7 +388,7 @@ function AgentCard({
       ) : null}
 
       {agent.progress !== null && agent.progress !== undefined ? (
-        <ProgressBar value={agent.progress} />
+        <ProgressBar value={agent.progress} label={`Progress for ${agent.name || 'subagent'}`} />
       ) : null}
 
       <div class="agent-card-foot">
@@ -391,9 +399,18 @@ function AgentCard({
         <span>
           {agent.finished_at ? relativeTime(agent.finished_at, now) : elapsed(agent, now)}
         </span>
-        <span class="agent-card-open" aria-hidden="true">
+        {/* The card's one action, and a real button: the article itself is not
+            in the tab order, so Enter/Space on Pause or Stop cannot reach it. */}
+        <button
+          type="button"
+          class="agent-card-open"
+          title={`Open details for ${agent.name || 'subagent'}`}
+          aria-label={`Open details for ${agent.name || 'subagent'}`}
+          onClick={onOpen}
+        >
+          <span class="agent-card-open-label">Details</span>
           <ArrowRightIcon size={12} />
-        </span>
+        </button>
       </div>
 
       <AgentControls agent={agent} />
@@ -461,7 +478,10 @@ function AgentDetail({
           <span class="inspector-kicker">Says</span>
           <p>{agent.note}</p>
           {agent.progress !== null && agent.progress !== undefined ? (
-            <ProgressBar value={agent.progress} />
+            <ProgressBar
+              value={agent.progress}
+              label={`Progress for ${agent.name || 'subagent'}`}
+            />
           ) : null}
         </div>
       ) : null}

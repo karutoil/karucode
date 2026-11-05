@@ -97,7 +97,7 @@ export interface NotifierDeps {
   /** Whether this tab is showing something (read at emit time, never cached). */
   isVisible: () => boolean;
   /** Bring the window forward and open a session. */
-  focusSession: (sessionId: string) => void;
+  focusSession: (sessionId: string, projectId: string | null) => void;
   /** An in-app toast. */
   toast: (message: string, tone: 'info' | 'success' | 'error', sessionId?: string) => void;
   /**
@@ -152,6 +152,11 @@ export class Notifier {
     const current = this.deps.currentSessionId();
     const aboutCurrentSession = sessionId !== '' && sessionId === current;
     const visible = this.deps.isVisible();
+    const badge = sessionId !== '' && !(aboutCurrentSession && visible);
+    // Record synchronously before any asynchronous sound work. A toast Open can
+    // thereby resolve its session's project even when its component only passes
+    // the session id, and the centre remains complete if audio is blocked.
+    this.deps.record(payload, !badge);
 
     // 1. The toast. Always, if the server sent one at all: it is in-app, costs
     //    nothing, and is the only surface that cannot be blocked by a permission.
@@ -172,13 +177,8 @@ export class Notifier {
           : 'shown';
     const desktop = this.showDesktop(payload, kind, desktopSkipped);
 
-    // 4. The badge, for a session the user is not looking at.
-    const badge = sessionId !== '' && !(aboutCurrentSession && visible);
-    // Everything is kept for the notification centre; only the badge (and the
-    // per-project count derived from it) depends on whether it was already on
-    // screen.
-    this.deps.record(payload, !badge);
-
+    // 4. The badge was synchronously recorded above: it is unread unless this
+    // was already visible in the open session.
     return { toast: true, sound, desktop, badge };
   }
 
@@ -213,7 +213,7 @@ export class Notifier {
       // The app already played a cue, so the OS must stay quiet.
       silent: true,
       onClick: () => {
-        if (payload.session_id) this.deps.focusSession(payload.session_id);
+        if (payload.session_id) this.deps.focusSession(payload.session_id, payload.project_id ?? null);
       },
     });
     if (result.shown) return 'shown';

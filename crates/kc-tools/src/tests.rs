@@ -162,6 +162,37 @@ impl ApprovalGate for RecordingGate {
     }
 }
 
+struct EditDuringApproval {
+    root: PathBuf,
+}
+
+#[async_trait]
+impl ApprovalGate for EditDuringApproval {
+    async fn request(&self, request: ApprovalRequest) -> ApprovalDecision {
+        assert_eq!(request.kind, ApprovalKind::FileEdit);
+        std::fs::write(self.root.join("a.txt"), "alpha\nCONCURRENT\nomega\n").unwrap();
+        ApprovalDecision::AllowOnce
+    }
+}
+
+struct CancelDuringApproval {
+    token: CancellationToken,
+}
+
+#[async_trait]
+impl ApprovalGate for CancelDuringApproval {
+    async fn request(&self, _request: ApprovalRequest) -> ApprovalDecision {
+        self.token.cancel();
+        ApprovalDecision::AllowOnce
+    }
+}
+
+fn with_approval_gate(env: &TestEnv, gate: Arc<dyn ApprovalGate>) -> ToolCtx {
+    let mut ctx = env.ctx.clone();
+    ctx.approvals = ApprovalHandle::new(gate, SessionId::new(), RunId::new(), None);
+    ctx
+}
+
 struct TestEnv {
     tmp: TempWorkspace,
     ws: Arc<Workspace>,
@@ -978,6 +1009,71 @@ async fn edit_file_replaces_exactly_once() {
         .contains("+    let x = 2;"));
 }
 
+#[tokio::test]
+async fn edit_file_revalidates_after_approval_and_never_overwrites_a_concurrent_edit() {
+    let env = env("edit-stale-approval");
+    env.tmp.write("a.txt", "alpha\nomega\n");
+    let gate = Arc::new(EditDuringApproval {
+        root: env.tmp.path().to_path_buf(),
+    });
+    let ctx = with_approval_gate(&env, gate);
+
+    let out = call(
+        &EditFile,
+        &ctx,
+        json!({"path": "a.txt", "old_string": "omega", "new_string": "replacement"}),
+    )
+    .await;
+    assert!(!out.ok, "stale edit was applied: {}", out.content);
+    assert!(
+        out.content.contains("changed") && out.content.contains("approval"),
+        "{}",
+        out.content
+    );
+    assert_eq!(env.tmp.read("a.txt"), "alpha\nCONCURRENT\nomega\n");
+}
+
+#[tokio::test]
+async fn cancellation_during_approval_prevents_both_file_tools_from_writing() {
+    let write_env = env("cancel-write-approval");
+    let mut write_ctx = write_env.ctx.clone();
+    let write_gate = Arc::new(CancelDuringApproval {
+        token: write_ctx.cancel.clone(),
+    });
+    write_ctx = with_approval_gate(&write_env, write_gate);
+    let written = call(
+        &WriteFile,
+        &write_ctx,
+        json!({"path": "created.txt", "content": "must not land"}),
+    )
+    .await;
+    assert!(
+        !written.ok && written.content.contains("cancelled"),
+        "{}",
+        written.content
+    );
+    assert!(!write_env.tmp.exists("created.txt"));
+
+    let edit_env = env("cancel-edit-approval");
+    edit_env.tmp.write("a.txt", "before\n");
+    let edit_gate = Arc::new(CancelDuringApproval {
+        token: edit_env.ctx.cancel.clone(),
+    });
+    let edit_ctx = with_approval_gate(&edit_env, edit_gate);
+    let edited = call(
+        &EditFile,
+        &edit_ctx,
+        json!({"path": "a.txt", "old_string": "before", "new_string": "after"}),
+    )
+    .await;
+    assert!(
+        !edited.ok && edited.content.contains("cancelled"),
+        "{}",
+        edited.content
+    );
+    assert_eq!(edit_env.tmp.read("a.txt"), "before\n");
+}
+
 // ------------------------------------------------------- rewind journal ---
 //
 // The journal is what makes a rewind able to put the workspace back, so these
@@ -991,6 +1087,72 @@ fn env_with_journal(tag: &str) -> (TestEnv, Arc<RecordingJournal>) {
     let journal = RecordingJournal::new(env.tmp.path().to_path_buf());
     env.ctx.checkpoints = Some(journal.clone());
     (env, journal)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_backslash_paths_stay_literal_in_results_and_checkpoints() {
+    let (env, journal) = env_with_journal("literal-backslash-journal");
+    let path = r"dir\file.txt";
+    env.tmp.write(path, "before\n");
+    let out = call(
+        &EditFile,
+        &env.ctx,
+        json!({"path": path, "old_string": "before", "new_string": "after"}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(env.tmp.read(path), "after\n");
+    assert_eq!(out.meta.as_ref().unwrap()["path"], json!(path));
+    let captures = journal.captured();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].path, path);
+    assert_eq!(captures[0].before, "before\n");
+}
+
+#[tokio::test]
+async fn a_failed_checkpoint_refuses_write_and_edit_without_mutating_files() {
+    let write_env = env("checkpoint-write-fails");
+    write_env.tmp.write("a.txt", "write before\n");
+    let mut write_ctx = write_env.ctx.clone();
+    write_ctx.checkpoints = Some(Arc::new(RecordingJournal {
+        root: write_env.tmp.path().to_path_buf(),
+        captures: Mutex::new(Vec::new()),
+        succeed: false,
+    }));
+    let write = call(
+        &WriteFile,
+        &write_ctx,
+        json!({"path": "a.txt", "content": "write after\n"}),
+    )
+    .await;
+    assert!(
+        !write.ok && write.content.contains("checkpoint") && write.content.contains("unchanged"),
+        "{}",
+        write.content
+    );
+    assert_eq!(write_env.tmp.read("a.txt"), "write before\n");
+
+    let edit_env = env("checkpoint-edit-fails");
+    edit_env.tmp.write("a.txt", "edit before\n");
+    let mut edit_ctx = edit_env.ctx.clone();
+    edit_ctx.checkpoints = Some(Arc::new(RecordingJournal {
+        root: edit_env.tmp.path().to_path_buf(),
+        captures: Mutex::new(Vec::new()),
+        succeed: false,
+    }));
+    let edit = call(
+        &EditFile,
+        &edit_ctx,
+        json!({"path": "a.txt", "old_string": "edit before", "new_string": "edit after"}),
+    )
+    .await;
+    assert!(
+        !edit.ok && edit.content.contains("checkpoint") && edit.content.contains("unchanged"),
+        "{}",
+        edit.content
+    );
+    assert_eq!(edit_env.tmp.read("a.txt"), "edit before\n");
 }
 
 #[tokio::test]
@@ -1503,6 +1665,63 @@ async fn a_long_stdout_does_not_evict_stderr() {
 }
 
 #[tokio::test]
+async fn command_result_retains_raw_stream_ends_inside_the_final_runtime_budget() {
+    let limits = Limits {
+        max_tool_output_bytes: 800,
+        max_command_output_bytes: 1024,
+        ..Default::default()
+    };
+    let env = env_with(
+        "cmd-final-budget",
+        ask(),
+        limits,
+        ApprovalDecision::AllowOnce,
+    );
+    let out = call(
+        &RunCommand,
+        &env.ctx,
+        json!({"command": "{ printf 'STDOUT-%s\\n' HEAD; seq 1 1000; printf 'STDOUT-%s\\n' TAIL; }; { seq 1 150 >&2; printf 'STDERR-%s\\n' TRAILING >&2; }"}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.len() <= 800, "{} bytes", out.content.len());
+    for sentinel in ["STDOUT-HEAD", "STDOUT-TAIL", "STDERR-TRAILING"] {
+        assert!(
+            out.content.contains(sentinel),
+            "missing {sentinel}:\n{}",
+            out.content
+        );
+    }
+    assert!(
+        out.content.ends_with("STDERR-TRAILING\n"),
+        "{}",
+        out.content
+    );
+    assert_eq!(
+        out.content.matches("[truncated:").count(),
+        0,
+        "{}",
+        out.content
+    );
+
+    // At the configured cap the runtime's own limiter is a no-op. A still smaller
+    // final per-turn budget preserves the trailing error and adds one marker that
+    // is itself inside that smaller cap.
+    let (same, cut) = kc_core::tool::truncate_output(&out.content, 800);
+    assert!(!cut && same == out.content);
+    let (final_output, cut) = kc_core::tool::truncate_output(&out.content, 500);
+    assert!(cut);
+    assert!(final_output.len() <= 500);
+    assert!(final_output.contains("STDERR-TRAILING"), "{}", final_output);
+    assert_eq!(
+        final_output.matches("[truncated:").count(),
+        1,
+        "{}",
+        final_output
+    );
+}
+
+#[tokio::test]
 async fn run_command_clamps_the_requested_timeout() {
     let limits = Limits {
         max_command_timeout_secs: 2,
@@ -1822,6 +2041,52 @@ async fn git_status_and_diff_work_in_a_temp_repo() {
     let bad = call(&GitDiff, &env.ctx, json!({"base": "does-not-exist"})).await;
     assert!(!bad.ok);
     assert!(bad.content.contains("does-not-exist"), "{}", bad.content);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn narrowed_git_status_and_diff_include_a_deleted_tracked_destination() {
+    if !git_available() {
+        eprintln!("git not installed; skipping");
+        return;
+    }
+    let env = env("git-deleted-target");
+    env.tmp.write("subtree/gone.txt", "deleted sentinel\n");
+    env.tmp.write("other.txt", "one\n");
+    git(env.tmp.path(), &["init", "-q", "-b", "main"]);
+    git(env.tmp.path(), &["add", "."]);
+    git(env.tmp.path(), &["commit", "-qm", "init"]);
+    std::fs::remove_dir_all(env.tmp.path().join("subtree")).unwrap();
+    env.tmp.write("other.txt", "unrelated change\n");
+
+    let status = call(&GitStatus, &env.ctx, json!({"path": "subtree/gone.txt"})).await;
+    assert!(status.ok, "{}", status.content);
+    assert!(
+        status.content.contains("D subtree/gone.txt"),
+        "{}",
+        status.content
+    );
+    assert!(!status.content.contains("other.txt"), "{}", status.content);
+
+    let patch = call(&GitDiff, &env.ctx, json!({"path": "subtree/gone.txt"})).await;
+    assert!(patch.ok, "{}", patch.content);
+    assert!(
+        patch.content.contains("deleted sentinel"),
+        "{}",
+        patch.content
+    );
+    assert!(
+        !patch.content.contains("unrelated change"),
+        "{}",
+        patch.content
+    );
+
+    // Missing leaves are allowed only after existing-ancestor confinement. A
+    // symlinked parent outside the workspace must still be rejected.
+    let outside = TempWorkspace::new("git-deleted-outside");
+    std::os::unix::fs::symlink(outside.path(), env.tmp.path().join("escape")).unwrap();
+    let refused = call(&GitDiff, &env.ctx, json!({"path": "escape/missing.txt"})).await;
+    assert!(!refused.ok, "{}", refused.content);
 }
 
 /// FIX 1: the workspace is a *subdirectory* of a bigger repository. git walks up

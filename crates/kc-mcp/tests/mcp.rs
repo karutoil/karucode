@@ -1335,3 +1335,343 @@ async fn http_sse_survives_a_multibyte_character_split_across_writes() {
     manager.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Return one successful JSON-RPC body for the request.
+fn rpc_result(request: &HttpRequest, result: Value) -> (u16, Vec<(String, String)>, String) {
+    let payload = json!({"jsonrpc": "2.0", "id": request.json_body()["id"], "result": result});
+    (
+        200,
+        vec![("content-type".into(), "application/json".into())],
+        payload.to_string(),
+    )
+}
+
+fn initialize_result() -> Value {
+    json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
+           "serverInfo": {"name": "adversarial", "version": "0"}})
+}
+
+#[tokio::test]
+async fn reflected_credentials_are_scrubbed_from_request_and_notification_status() {
+    for failing_method in ["initialize", "notifications/initialized"] {
+        let reflected = format!(
+            "Authorization: bEaReR   sk-live-Secret; raw=sk-live-Secret; \
+             configured=Bearer sk-live-Secret; x-api-key=second-secret; failed={failing_method}"
+        );
+        let handler: Handler = Arc::new(move |request| {
+            let body = request.json_body();
+            let method = body["method"].as_str().unwrap_or_default();
+            if method == failing_method {
+                return (
+                    500,
+                    vec![("content-type".into(), "text/plain".into())],
+                    reflected.clone(),
+                );
+            }
+            match method {
+                "initialize" => rpc_result(request, initialize_result()),
+                "notifications/initialized" => (202, vec![], String::new()),
+                other => panic!("connection should stop at {failing_method}, got {other}"),
+            }
+        });
+        let server = CannedHttp::start(handler).await;
+        let headers = BTreeMap::from([
+            (
+                "Authorization".to_string(),
+                "Bearer sk-live-Secret".to_string(),
+            ),
+            ("X-Api-Key".to_string(), "second-secret".to_string()),
+        ]);
+        let mut manager = McpManager::new(&[http_config("reflected", server.url("/mcp"), headers)]);
+        manager.set_timeouts(McpTimeouts {
+            connect: Duration::from_secs(2),
+            call: Duration::from_secs(2),
+        });
+        manager.connect_all().await;
+
+        let status = &manager.statuses()[0];
+        assert_eq!(status.status, "failed", "{status:?}");
+        let text = format!("{status:?}");
+        assert!(text.contains("failed="), "{text}");
+        for credential in ["sk-live-Secret", "second-secret"] {
+            assert!(!text.contains(credential), "{failing_method}: {text}");
+        }
+        assert!(text.contains("[redacted]"), "{text}");
+        // Prove the test really did send the credentials the peer reflected.
+        assert!(server.requests().iter().all(|request| {
+            request.header("authorization") == Some("Bearer sk-live-Secret")
+                && request.header("x-api-key") == Some("second-secret")
+        }));
+        manager.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn reflected_credentials_never_reach_model_tool_errors() {
+    let handler: Handler = Arc::new(|request| {
+        let body = request.json_body();
+        match body["method"].as_str().unwrap_or_default() {
+            "initialize" => rpc_result(request, initialize_result()),
+            "notifications/initialized" => (202, vec![], String::new()),
+            "tools/list" => rpc_result(
+                request,
+                json!({"tools": [
+                    {"name": "remote", "description": "Remote error.",
+                     "inputSchema": {"type": "object"}},
+                    {"name": "reported", "description": "Tool error.",
+                     "inputSchema": {"type": "object"}}
+                ]}),
+            ),
+            "tools/call" if body["params"]["name"] == "remote" => {
+                let payload = json!({"jsonrpc": "2.0", "id": body["id"],
+                    "error": {"code": -32000,
+                              "message": "bearer  sk-live-Secret and second-secret"}});
+                (
+                    200,
+                    vec![("content-type".into(), "application/json".into())],
+                    payload.to_string(),
+                )
+            }
+            "tools/call" => rpc_result(
+                request,
+                json!({"content": [{"type": "text",
+                                    "text": "BEARER sk-live-Secret / second-secret"}],
+                       "isError": true}),
+            ),
+            other => panic!("unexpected method {other}"),
+        }
+    });
+    let server = CannedHttp::start(handler).await;
+    let headers = BTreeMap::from([
+        (
+            "Authorization".to_string(),
+            "Bearer sk-live-Secret".to_string(),
+        ),
+        ("X-Api-Key".to_string(), "second-secret".to_string()),
+    ]);
+    let mut manager = McpManager::new(&[http_config("model", server.url("/mcp"), headers)]);
+    manager.connect_all().await;
+    assert_eq!(manager.statuses()[0].status, "connected");
+    let dir = temp_dir("model-redaction");
+    for name in ["mcp__model__remote", "mcp__model__reported"] {
+        let out = call_tool(find(&manager.tools(), name), &dir, json!({})).await;
+        assert!(!out.ok);
+        assert!(!out.content.contains("sk-live-Secret"), "{}", out.content);
+        assert!(!out.content.contains("second-secret"), "{}", out.content);
+        assert!(out.content.contains("[redacted]"), "{}", out.content);
+    }
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn tools_list_follows_next_cursor_and_collects_every_page() {
+    let handler: Handler = Arc::new(|request| {
+        let body = request.json_body();
+        match body["method"].as_str().unwrap_or_default() {
+            "initialize" => rpc_result(request, initialize_result()),
+            "notifications/initialized" => (202, vec![], String::new()),
+            "tools/list" if body["params"]["cursor"].is_null() => rpc_result(
+                request,
+                json!({"tools": [{"name": "first", "description": "First.",
+                                  "inputSchema": {"type": "object"}}],
+                       "nextCursor": "page-two"}),
+            ),
+            "tools/list" if body["params"]["cursor"] == "page-two" => rpc_result(
+                request,
+                json!({"tools": [{"name": "second", "description": "Second.",
+                                  "inputSchema": {"type": "object"}}]}),
+            ),
+            other => panic!("unexpected request: {other}, params={}", body["params"]),
+        }
+    });
+    let server = CannedHttp::start(handler).await;
+    let mut manager = McpManager::new(&[http_config("paged", server.url("/mcp"), BTreeMap::new())]);
+    manager.connect_all().await;
+    assert_eq!(
+        manager.statuses()[0].tools,
+        vec!["mcp__paged__first", "mcp__paged__second"],
+        "{:?}",
+        manager.statuses()[0].error
+    );
+    let requests = server.requests();
+    let pages: Vec<_> = requests
+        .iter()
+        .filter(|request| request.json_body()["method"] == "tools/list")
+        .collect();
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0].json_body()["params"], json!({}));
+    assert_eq!(
+        pages[1].json_body()["params"],
+        json!({"cursor": "page-two"})
+    );
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn tools_list_cursor_cycle_fails_instead_of_looping() {
+    let handler: Handler = Arc::new(|request| {
+        let body = request.json_body();
+        match body["method"].as_str().unwrap_or_default() {
+            "initialize" => rpc_result(request, initialize_result()),
+            "notifications/initialized" => (202, vec![], String::new()),
+            "tools/list" => {
+                let cursor = body["params"]["cursor"].as_str();
+                let next = match cursor {
+                    None => "a",
+                    Some("a") => "b",
+                    Some("b") => "a",
+                    other => panic!("requested a page after cycle detection: {other:?}"),
+                };
+                rpc_result(request, json!({"tools": [], "nextCursor": next}))
+            }
+            other => panic!("unexpected method {other}"),
+        }
+    });
+    let server = CannedHttp::start(handler).await;
+    let mut manager = McpManager::new(&[http_config("cycle", server.url("/mcp"), BTreeMap::new())]);
+    manager.set_timeouts(McpTimeouts {
+        connect: Duration::from_secs(5),
+        call: Duration::from_secs(1),
+    });
+    let started = Instant::now();
+    manager.connect_all().await;
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let status = &manager.statuses()[0];
+    assert_eq!(status.status, "failed");
+    assert!(status
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("cyclic"));
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.json_body()["method"] == "tools/list")
+            .count(),
+        3,
+        "the repeated cursor must not cause a fourth page request"
+    );
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn tools_list_unique_cursors_share_one_connect_deadline() {
+    let handler: Handler = Arc::new(|request| {
+        let body = request.json_body();
+        match body["method"].as_str().unwrap_or_default() {
+            "initialize" => rpc_result(request, initialize_result()),
+            "notifications/initialized" => (202, vec![], String::new()),
+            "tools/list" => {
+                let page = body["params"]["cursor"]
+                    .as_str()
+                    .and_then(|cursor| cursor.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if page > 0 {
+                    // Each page fits a per-request timeout on the broken client,
+                    // but infinite unique pages must exhaust the total budget.
+                    std::thread::sleep(Duration::from_millis(120));
+                }
+                rpc_result(
+                    request,
+                    json!({"tools": [], "nextCursor": (page + 1).to_string()}),
+                )
+            }
+            other => panic!("unexpected method {other}"),
+        }
+    });
+    let server = CannedHttp::start(handler).await;
+    let mut manager =
+        McpManager::new(&[http_config("endless", server.url("/mcp"), BTreeMap::new())]);
+    manager.set_timeouts(McpTimeouts {
+        connect: Duration::from_millis(350),
+        call: Duration::from_secs(1),
+    });
+    let started = Instant::now();
+    manager.connect_all().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    let status = &manager.statuses()[0];
+    assert_eq!(status.status, "failed");
+    assert!(status
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("timed out"));
+    let page_count = server
+        .requests()
+        .iter()
+        .filter(|request| request.json_body()["method"] == "tools/list")
+        .count();
+    assert!((2..=4).contains(&page_count), "received {page_count} pages");
+    manager.shutdown().await;
+}
+
+/// The server closes stdout instead of answering tools/call, but deliberately
+/// remains alive. Only the EOF path can fail the waiter before the call budget.
+const STDOUT_EOF_SERVER: &str = r#"
+import json, os, sys, time
+
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
+            "serverInfo": {"name": "eof", "version": "0"}}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [
+            {"name": "disconnect", "description": "Close stdout without answering.",
+             "inputSchema": {"type": "object"}}]}})
+    elif method == "tools/call":
+        os.close(1)
+        time.sleep(30)
+"#;
+
+#[tokio::test]
+async fn stdio_stdout_eof_fails_the_call_and_status_before_process_exit() {
+    let dir = temp_dir("stdio-stdout-eof");
+    let script = dir.join("stdout_eof.py");
+    std::fs::write(&script, STDOUT_EOF_SERVER).unwrap();
+    let mut config = stdio_server("eof");
+    config.command = vec!["python3".into(), script.to_string_lossy().into_owned()];
+    let mut manager = McpManager::new(&[config]);
+    manager.set_timeouts(McpTimeouts {
+        connect: Duration::from_secs(5),
+        call: Duration::from_secs(5),
+    });
+    manager.connect_all().await;
+    assert_eq!(manager.statuses()[0].status, "connected");
+    let tool = find(&manager.tools(), "mcp__eof__disconnect");
+
+    let started = Instant::now();
+    let out = call_tool(tool, &dir, json!({})).await;
+    assert!(!out.ok);
+    assert!(out.content.contains("closed its stdout"), "{}", out.content);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    let status = &manager.statuses()[0];
+    assert_eq!(status.status, "failed", "{status:?}");
+    assert!(status
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("stdout"));
+    assert!(manager.tools().is_empty());
+
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}

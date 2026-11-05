@@ -266,7 +266,7 @@ def main() -> int:
             "chromium", "--headless=new", "--no-sandbox", "--disable-gpu",
             "--disable-dev-shm-usage", "--hide-scrollbars",
             f"--remote-debugging-port={cdp_port}", f"--user-data-dir={profile}",
-            "--window-size=1440,960", "--js-flags=--jitless", "about:blank",
+            "--window-size=1920,1080", "--js-flags=--jitless", "about:blank",
         ],
         stdout=chrome_log, stderr=subprocess.STDOUT, start_new_session=True,
     )
@@ -286,45 +286,52 @@ def main() -> int:
             "width": 1440, "height": 960, "deviceScaleFactor": 1, "mobile": False,
         })
 
-        for theme in ("ember", "daybreak"):
-            mode = "dark" if theme == "ember" else "light"
-            session.navigate(args.base)
-            set_theme(session, theme)
-            session.navigate(args.base)
-
-            measured = session.evaluate(MEASURE)
-            findings[f"{mode}:main"] = measured
-            session.screenshot(shots / f"{mode}-main.png")
-            check(
-                f"{mode}/main: no text below {FLOOR_TEXT}:1",
-                measured["failCount"] == 0,
-                f"{measured['failCount']} of {measured['total']} text nodes"
-                + (f", worst {measured['fails'][0]['ratio']}:1 at {measured['fails'][0]['px']}px \"{measured['fails'][0]['text']}\"" if measured["fails"] else ""),
-            )
-
-            overflow = session.evaluate(OVERFLOW)
-            findings[f"{mode}:overflow"] = overflow
-            check(f"{mode}/main: nothing clipped without a way to scroll", not overflow,
-                  f"{len(overflow)} elements")
-
-            surfaces = session.evaluate(SURFACES)
-            findings[f"{mode}:surfaces"] = surfaces
-
-            for name, script in SCREENS[1:]:
+        # Standard desktop panels, not just a 1440×960 laptop-sized approximation:
+        # 1920×1080 is 1080p and 2560×1440 is 1440p. Check both modes and every
+        # overlay at both sizes so enlarged gutters cannot hide a clipping defect.
+        for width, height, label in ((1920, 1080, "1080p"), (2560, 1440, "1440p")):
+            session._send("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False,
+            })
+            for theme in ("ember", "daybreak"):
+                mode = "dark" if theme == "ember" else "light"
                 session.navigate(args.base)
-                try:
-                    session.evaluate(script)
-                except SystemExit as error:
-                    print(f"  skip {mode}/{name}: {error}", flush=True)
-                    continue
-                session.screenshot(shots / f"{mode}-{name}.png")
-                result = session.evaluate(MEASURE)
-                findings[f"{mode}:{name}"] = result
+                set_theme(session, theme)
+                session.navigate(args.base)
+
+                measured = session.evaluate(MEASURE)
+                findings[f"{label}:{mode}:main"] = measured
+                session.screenshot(shots / f"{label}-{mode}-main.png")
                 check(
-                    f"{mode}/{name}: no text below {FLOOR_TEXT}:1",
-                    result["failCount"] == 0,
-                    f"{result['failCount']} of {result['total']}",
+                    f"{label}/{mode}/main: no text below {FLOOR_TEXT}:1",
+                    measured["failCount"] == 0,
+                    f"{measured['failCount']} of {measured['total']} text nodes"
+                    + (f", worst {measured['fails'][0]['ratio']}:1 at {measured['fails'][0]['px']}px \"{measured['fails'][0]['text']}\"" if measured["fails"] else ""),
                 )
+
+                overflow = session.evaluate(OVERFLOW)
+                findings[f"{label}:{mode}:overflow"] = overflow
+                check(f"{label}/{mode}/main: nothing clipped without a way to scroll", not overflow,
+                      f"{len(overflow)} elements")
+
+                surfaces = session.evaluate(SURFACES)
+                findings[f"{label}:{mode}:surfaces"] = surfaces
+
+                for name, script in SCREENS[1:]:
+                    session.navigate(args.base)
+                    try:
+                        session.evaluate(script)
+                    except SystemExit as error:
+                        print(f"  skip {label}/{mode}/{name}: {error}", flush=True)
+                        continue
+                    session.screenshot(shots / f"{label}-{mode}-{name}.png")
+                    result = session.evaluate(MEASURE)
+                    findings[f"{label}:{mode}:{name}"] = result
+                    check(
+                        f"{label}/{mode}/{name}: no text below {FLOOR_TEXT}:1",
+                        result["failCount"] == 0,
+                        f"{result['failCount']} of {result['total']}",
+                    )
 
         # Narrow viewports: the responsive breakpoints must not overflow.
         for width in (1100, 1024):
@@ -354,8 +361,9 @@ def main() -> int:
         "# Design verification",
         "",
         "Generated by `scripts/design_verify.py` against the built bundle in a real",
-        "Chromium at 1440×960 plus the 1100px and 1024px breakpoints, in Ember (dark)",
-        "and Daybreak (light). The contract is `docs/internal/DESIGN-SYSTEM.md`.",
+        "Chromium at true 1920×1080 (1080p) and 2560×1440 (1440p), plus the 1100px",
+        "and 1024px breakpoints, in Ember (dark) and Daybreak (light). The contract is",
+        "`docs/internal/DESIGN-SYSTEM.md`.",
         "",
         f"**{len(PASS)} passed, {len(FAIL)} failed.**",
         "",

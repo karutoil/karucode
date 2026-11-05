@@ -279,6 +279,20 @@ describe('buildTable', () => {
     expect(table.hiddenColumns).toBe(3);
     expect(MAX_TABLE_CHARS).toBeGreaterThan(0);
   });
+
+  it('counts narrow rows iteratively just below the source-size cap', () => {
+    const source = 'x\n'.repeat(127_000);
+    expect(source).toHaveLength(254_000);
+    expect(source.length).toBeLessThan(MAX_TABLE_CHARS);
+    const spec = parseFence('artifact csv', source)!;
+
+    const table = buildTable(spec);
+
+    expect(table.header).toEqual(['x']);
+    expect(table.rows).toHaveLength(MAX_TABLE_ROWS);
+    expect(table.hiddenRows).toBe(126_799);
+    expect(table.hiddenColumns).toBe(0);
+  });
 });
 
 describe('describeArtifact', () => {

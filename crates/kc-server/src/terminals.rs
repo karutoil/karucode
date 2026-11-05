@@ -60,7 +60,9 @@
 //   message;
 // * **text frames** are JSON and carry only control: `{"type":"resize","cols":120,"rows":40}`,
 //   and, from the server, `{"type":"ready","replay":true,"pid":1234}`,
-//   `{"type":"exit","code":0}`, `{"type":"error","message":"..."}`.
+//   `{"type":"exit","code":0}`, `{"type":"error","message":"..."}`. Sending
+//   `{"type":"ping"}` answers only that socket with text `{"type":"pong"}`;
+//   control JSON is never broadcast or disguised as binary PTY output.
 //
 // On attach the server first sends the tail of the replay buffer (the newest
 // `terminals.scrollback_bytes` of output) as one binary frame, then streams live
@@ -518,13 +520,6 @@ impl Terminal {
     pub fn record_activity(&self) {
         self.last_seen
             .store(crate::state::now_ms(), Ordering::Release);
-    }
-
-    /// Send a control frame to every attached browser.
-    fn broadcast_control(&self, value: serde_json::Value) {
-        let _ = self
-            .output
-            .send(Output::Data(format!("{value}").into_bytes()));
     }
 
     /// Hang up and reap the shell: SIGHUP to the group, SIGKILL after
@@ -1213,12 +1208,32 @@ async fn pump(
 
     let (mut sender, mut receiver) = socket.split();
     use futures_util::{SinkExt, StreamExt};
+    // Control replies belong only to the socket that asked. They never enter the
+    // PTY byte broadcast: that would turn JSON into binary terminal data and
+    // leak it to every other attached browser.
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<String>(8);
 
     // Shell -> browser.
     let to_browser = {
         async move {
             loop {
-                match output.recv().await {
+                tokio::select! {
+                    biased;
+                    control = control_rx.recv() => {
+                        let Some(frame) = control else { return };
+                        if tokio::time::timeout(
+                            SOCKET_SEND_TIMEOUT,
+                            sender.send(Message::Text(frame)),
+                        )
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .is_none()
+                        {
+                            return;
+                        }
+                    }
+                    received = output.recv() => match received {
                     Ok(Output::Data(bytes)) => {
                         if tokio::time::timeout(
                             SOCKET_SEND_TIMEOUT,
@@ -1260,6 +1275,7 @@ async fn pump(
                         return;
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
+                    }
                 }
             }
         }
@@ -1304,7 +1320,18 @@ async fn pump(
                                     }
                                 }
                                 Control::Ping => {
-                                    terminal.broadcast_control(json!({ "type": "pong" }));
+                                    let pong = json!({ "type": "pong" }).to_string();
+                                    if tokio::time::timeout(
+                                        SOCKET_SEND_TIMEOUT,
+                                        control_tx.send(pong),
+                                    )
+                                    .await
+                                    .ok()
+                                    .and_then(Result::ok)
+                                    .is_none()
+                                    {
+                                        return;
+                                    }
                                 }
                             }
                         }

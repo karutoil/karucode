@@ -19,10 +19,13 @@ What is covered, in the order the script runs:
 * unit discovery: no unit, no ExecStart=, a workspace that does not exist;
 * deriving the install configuration from the running unit, and letting an
   explicit flag win over it;
-* refusing a dirty checkout, and --allow-dirty accepting it;
+* refusing dirty tracked files and non-ignored untracked inputs, while allowing
+  tracked edits with --allow-dirty and always allowing ignored build output;
 * a failed build installing nothing;
 * the "already up to date" path, and --force overriding it;
-* the database snapshot (real SQLite file, real `VACUUM INTO`) and --no-backup;
+* the database snapshot (real SQLite file, real `VACUUM INTO`), mandatory sqlite3,
+  explicit --no-backup, 0700/0600 modes, and false-success fault injection;
+* detached runs failing closed on missing or malformed status files;
 * passing --allow-jit through only when the unit really has WME=no;
 * install.sh exit codes 0, 2 and 1 mapping to this script's 0, 2 and 1;
 * --check and --build-only changing nothing;
@@ -138,6 +141,9 @@ class Case(unittest.TestCase):
         (self.src / "packaging").mkdir(parents=True)
         (self.src / "Cargo.toml").write_text("[workspace]\nmembers = []\n", encoding="utf-8")
         (self.src / "README.md").write_text("demo\n", encoding="utf-8")
+        # Match the real checkout: build products are ignored, new source files
+        # are not. Without this rule a successful stub build dirties the fixture.
+        (self.src / ".gitignore").write_text("target/\nweb/dist/\n*.pyc\n", encoding="utf-8")
         shutil.copy(UPDATER, self.src / "packaging" / "update.sh")
         shutil.copy(ROOT / "packaging" / "karucode.service", self.src / "packaging" / "karucode.service")
         self.git("init", "-q", "-b", "main")
@@ -458,12 +464,29 @@ class WorkingTree(Case):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("dirty checkout on purpose", result.stderr)
 
-    def test_untracked_files_are_fine(self):
+    def test_ignored_build_output_is_fine(self):
         # target/ is untracked by definition; it must not count as dirty.
         (self.src / "target").mkdir()
         (self.src / "target" / "junk").write_text("x", encoding="utf-8")
         result = self.run_update(*self.base_args(), "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_nonignored_untracked_build_input_is_refused(self):
+        (self.src / "new-input.rs").write_text("fn only_on_this_machine() {}\n", encoding="utf-8")
+        result = self.run_update(*self.base_args(), "--dry-run")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("untracked, non-ignored build inputs", result.stderr)
+        self.assertIn("new-input.rs", result.stderr)
+        self.assert_no_install(result)
+
+    def test_allow_dirty_does_not_admit_untracked_build_inputs(self):
+        (self.src / "README.md").write_text("changed tracked file\n", encoding="utf-8")
+        (self.src / "new-input.rs").write_text("fn only_on_this_machine() {}\n", encoding="utf-8")
+        result = self.run_update(*self.base_args(), "--dry-run", "--allow-dirty")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("new-input.rs", result.stderr)
+        self.assertIn("does not permit unknown build inputs", result.stderr)
+        self.assert_no_install(result)
 
 
 # --- --check ----------------------------------------------------------------
@@ -671,6 +694,8 @@ class Backup(Case):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         snapshots = list((self.data_dir / "backups").glob("pre-update-*.db"))
         self.assertEqual(len(snapshots), 1, f"no snapshot written:\n{result.stdout}")
+        self.assertEqual((self.data_dir / "backups").stat().st_mode & 0o777, 0o700)
+        self.assertEqual(snapshots[0].stat().st_mode & 0o777, 0o600)
         connection = sqlite3.connect(snapshots[0])
         try:
             rows = connection.execute("SELECT id FROM sessions").fetchall()
@@ -685,26 +710,85 @@ class Backup(Case):
         self.assertIn("skipping the database snapshot", result.stdout)
         self.assertNotIn("would snapshot", result.stdout)
 
-    def test_no_sqlite3_warns_instead_of_failing(self):
-        self.make_db()
+    def bare_path_without_sqlite(self):
         # A PATH with every tool the script uses except sqlite3.
         bare = self.tmp / "bare-bin"
-        bare.mkdir()
+        bare.mkdir(exist_ok=True)
         needed = (
             "sh", "sed", "head", "awk", "tr", "wc", "cmp", "sha256sum", "date",
             "mkdir", "cat", "chmod", "dirname", "basename", "git", "id", "cut",
-            "grep", "install", "uname", "systemctl", "cargo", "python3",
+            "grep", "install", "uname", "systemctl", "cargo", "python3", "stat",
+            "rm", "mv", "mktemp", "sleep", "tail", "kill",
         )
         for tool in needed:
             found = shutil.which(tool) or (self.bin / tool if (self.bin / tool).exists() else None)
             if found:
                 os.symlink(found, bare / tool)
         self.assertFalse(list(bare.glob("sqlite3")), "the bare PATH must not contain sqlite3")
+        return f"{bare}:/nonexistent"
+
+    def test_no_sqlite3_fails_closed(self):
+        self.make_db()
         result = self.run_update(
-            *self.base_args(), "--dry-run", path=f"{bare}:/nonexistent"
+            *self.base_args(), "--dry-run", path=self.bare_path_without_sqlite()
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("sqlite3 is required", result.stderr)
+        self.assertIn("--no-backup", result.stderr)
+        self.assert_no_install(result)
+
+    def test_no_backup_is_the_only_missing_sqlite3_exception(self):
+        self.make_db()
+        result = self.run_update(
+            *self.base_args(), "--no-backup", "--dry-run",
+            path=self.bare_path_without_sqlite(),
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("sqlite3 is not installed", result.stderr)
+        self.assertIn("skipping the database snapshot", result.stdout)
+
+    def test_existing_backup_directory_is_brought_to_0700(self):
+        self.make_db()
+        backups = self.data_dir / "backups"
+        backups.mkdir(mode=0o755)
+        result = self.run_update(*self.base_args(), FAKE_INSTALL_RC="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(backups.stat().st_mode & 0o777, 0o700)
+        snapshots = list(backups.glob("pre-update-*.db"))
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0].stat().st_mode & 0o777, 0o600)
+
+    def test_successful_sqlite_without_a_snapshot_fails(self):
+        self.make_db()
+        self.write_stub("sqlite3", "#!/bin/sh\nexit 0\n")
+        result = self.run_update(*self.base_args())
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("reported success", result.stderr)
+        self.assert_no_install(result)
+
+    def test_injected_bad_snapshot_mode_is_rejected_and_removed(self):
+        self.make_db()
+        # Fault injection: sqlite3 exits zero but creates an over-broad file,
+        # and the chmod requested by the updater silently does nothing. The
+        # subsequent stat, rather than either exit code, must catch it.
+        self.write_stub(
+            "sqlite3",
+            "#!/bin/sh\n"
+            "snapshot=$(printf '%s\\n' \"$2\" | sed \"s/^VACUUM INTO '//; s/'$//\")\n"
+            ": > \"$snapshot\"\n"
+            "/bin/chmod 0644 \"$snapshot\"\n",
+        )
+        self.write_stub(
+            "chmod",
+            "#!/bin/sh\n"
+            "if [ \"$1\" = 0600 ]; then exit 0; fi\n"
+            "exec /bin/chmod \"$@\"\n",
+        )
+        result = self.run_update(*self.base_args())
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("not 0600", result.stderr)
+        backups = self.data_dir / "backups"
+        self.assertEqual(list(backups.glob("pre-update-*.db")), [])
+        self.assert_no_install(result)
 
 
 # --- staging ----------------------------------------------------------------
@@ -990,6 +1074,25 @@ class Detach(Case):
         self.assertIn("already finished", result.stdout)
         self.assertIn("hello from a finished job", result.stdout)
 
+    def test_follow_rejects_a_malformed_finished_status(self):
+        job = self.data_dir / "update-job"
+        job.mkdir(parents=True, exist_ok=True)
+        (job / "log").write_text("==> should not be called success\n", encoding="utf-8")
+        (job / "status").write_text("zero\n", encoding="utf-8")
+        result = self.run_update("--follow", "--no-sudo")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("malformed exit status", result.stderr)
+        self.assertNotIn("already finished", result.stdout)
+
+    def test_follow_fails_closed_when_a_dead_job_has_no_status(self):
+        job = self.data_dir / "update-job"
+        job.mkdir(parents=True, exist_ok=True)
+        (job / "log").write_text("==> interrupted before the status write\n", encoding="utf-8")
+        (job / "pid").write_text("99999999\n", encoding="utf-8")
+        result = self.run_update("--follow", "--no-sudo")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ended without a status", result.stderr)
+
     def test_follow_without_a_job_is_refused(self):
         result = self.run_update("--follow", "--no-sudo")
         self.assertEqual(result.returncode, 1)
@@ -1045,6 +1148,44 @@ class Detach(Case):
         self.assertIn("tracked file(s) are modified", result.stderr)
         self.assertIn("commit or stash", result.stderr)
         self.assertIn("Full log:", result.stderr)
+
+
+    def run_detached_with_status_fault(self, status_line):
+        self.build()
+        self.write_stub(
+            "sudo",
+            "#!/bin/sh\n"
+            'if [ "$1" = "-n" ] && [ "$2" = "true" ]; then exit 0; fi\n'
+            'if [ "$1" = "-n" ]; then shift; fi\n'
+            'exec "$@"\n',
+        )
+        script = self.src / "packaging" / "update.sh"
+        source = script.read_text()
+        original = "printf '%s\\n' \"$_code\" | root_write \"${JOB_DIR}/status\" 2>/dev/null || true"
+        self.assertIn(original, source)
+        if status_line is None:
+            replacement = ": # fault injection: status file never written"
+        else:
+            replacement = f"printf '%s\\n' '{status_line}' | root_write \"${{JOB_DIR}}/status\""
+        script.write_text(source.replace(original, replacement))
+        return self.run_update(
+            # The script edit simulates only the status fault; permit that tracked
+            # edit so the child otherwise completes successfully.
+            *self.base_args(), "--build-only", "--skip-build", "--detach", "--no-backup",
+            "--allow-dirty",
+        )
+
+    def test_detached_parent_rejects_missing_status(self):
+        result = self.run_detached_with_status_fault(None)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("without a valid exit status", result.stderr)
+        self.assertNotIn("update finished", result.stdout)
+
+    def test_detached_parent_rejects_malformed_status(self):
+        result = self.run_detached_with_status_fault("not-a-number")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("without a valid exit status", result.stderr)
+        self.assertNotIn("update finished", result.stdout)
 
 
 # --- one update at a time ---------------------------------------------------

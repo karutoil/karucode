@@ -133,6 +133,13 @@
   font-size: var(--fs-micro);
 }
 
+/* A rejected copy says so on the control the reader just pressed, not only in
+ * the live region: "nothing happened" is indistinguishable from a broken button. */
+.artifact-tool[data-copy-state='failed'] {
+  border-color: color-mix(in srgb, var(--danger) 42%, transparent);
+  color: var(--danger);
+}
+
 /* The body is where a preview or the source lives. It is one step above the
  * card, so the head reads as chrome and the content as content. */
 .artifact-body {
@@ -238,9 +245,12 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* A skipped/capped count is part of reading the table, not a decorative note:
+ * it uses `--muted` (the AA-safe quiet ink) rather than `--faint`, which is the
+ * faintest ink the theme publishes and drops below the floor at this size. */
 .artifact-caption {
   padding: var(--space-4) var(--space-6) var(--space-5);
-  color: var(--faint);
+  color: var(--muted);
   font-size: var(--fs-tiny);
 }
 
@@ -256,13 +266,16 @@
 
 /* ---------- states ---------- */
 
+/* Notes and notices say what the artifact is and what is missing from it ("shown
+ * as source only", "no network access") - essential, so they use `--muted`, not
+ * the faintest ink in the theme. */
 .artifact-note,
 .artifact-loading,
 .artifact-notice {
   margin: 0;
   padding: var(--space-5) var(--space-6);
   border-top: 1px solid var(--line-inset);
-  color: var(--faint);
+  color: var(--muted);
   font-size: var(--fs-tiny);
   line-height: 1.5;
 }
@@ -344,6 +357,9 @@
 .artifact-expanded .artifact-frame {
   flex: 1;
   min-height: 60vh;
+  /* Full screen is the one place an artifact may be taller than its card cap: the
+   * reader asked for it, and the dialog itself bounds the height. */
+  max-height: none;
   border: 1px solid var(--line-inset);
   border-radius: var(--radius-sm);
 }
@@ -389,6 +405,14 @@
 
   .artifact {
     --artifact-max-h: 380px;
+  }
+
+  /* A frame's height comes from the document itself (or the 420px default), and
+   * a measured mock may ask for up to 720px. The other kinds are already capped
+   * by `--artifact-max-h`; the frame was not, so one HTML mock could fill a phone
+   * screen and push the answer below it. Full screen opts out above. */
+  .artifact-frame {
+    max-height: var(--artifact-max-h);
   }
 }
 

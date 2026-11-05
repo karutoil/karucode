@@ -252,6 +252,74 @@ async fn concurrent_ensure_live_returns_one_shell() {
     h.delete(&format!("/api/terminals/{id}")).await;
 }
 
+#[tokio::test]
+async fn json_ping_gets_a_private_text_pong_not_broadcast_pty_bytes() {
+    use futures_util::{SinkExt, StreamExt};
+
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let id = h.post("/api/terminals", json!({})).await.json()["terminal"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = h.router.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let url = format!("ws://{address}/api/terminals/{id}/socket");
+    let (mut first, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut second, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    for socket in [&mut first, &mut second] {
+        let ready = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            ready.is_text(),
+            "ready control must be JSON text: {ready:?}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(ready.to_text().unwrap()).unwrap()["type"],
+            "ready"
+        );
+    }
+
+    first
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            r#"{"type":"ping"}"#.to_string(),
+        ))
+        .await
+        .unwrap();
+    let pong = tokio::time::timeout(Duration::from_secs(2), first.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        pong.is_text(),
+        "pong must not be a binary PTY frame: {pong:?}"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(pong.to_text().unwrap()).unwrap(),
+        json!({"type":"pong"})
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), second.next())
+            .await
+            .is_err(),
+        "one browser's ping must not be broadcast to another browser"
+    );
+
+    drop(first);
+    drop(second);
+    server.abort();
+    h.delete(&format!("/api/terminals/{id}")).await;
+}
+
 /// `terminals.enabled = false` removes the whole surface: no list, no create.
 #[tokio::test]
 async fn a_disabled_terminal_refuses_every_route() {

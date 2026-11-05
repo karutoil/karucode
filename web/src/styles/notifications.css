@@ -261,7 +261,7 @@
 
 @media (max-width: 640px) {
   .notification-center {
-    width: 100%;
+    width: calc(100vw - 28px);
     max-height: calc(100dvh - 24px);
   }
 

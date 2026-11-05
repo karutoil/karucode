@@ -34,7 +34,8 @@ whole workspace immediately, before you save anything.
 * **Interface** — dark or light mode, `compact` / `comfortable` / `spacious`
   density (spacing only), an interface font and a code font chosen from
   locally available stacks (nothing is downloaded), and a 0–22 px corner
-  radius.
+  radius. Code uses the bundled JetBrains Mono by default; the other two
+  choices are the operating system's own mono stack and Courier New.
 * **Transcript** — how much of the agent's work the conversation shows at
   once. See below; the defaults reproduce the original look, so nothing
   changes until you choose.
@@ -91,17 +92,22 @@ machine and are not shared between browsers. Up to 60 custom themes are kept.
 * **Import** reads such a file (maximum 150 KB) and rejects it with a toast if
   a colour is not a 6-digit hex value, the mode/density/font is unknown, or the
   file is larger than the limit.
-* **Reset colours** restores the palette of the theme you started from;
-  deleting a custom theme falls back to Ember. Clearing the storage key resets
-  everything to the defaults.
+* **Reset colours** restores the palette of the theme you started from,
+  re-based to the mode the draft is in: a theme's 18 colours belong to its
+  own mode, so resetting after an Appearance flip keeps the mode (and the
+  accent) and restores that mode's surfaces. Deleting a custom theme falls
+  back to Ember. Clearing the storage key resets everything to the defaults.
 
 ## Gotchas
 
 * Custom CSS is injected verbatim — it is your own browser, but an imported
   theme file can hide UI or load remote resources. Only import themes you
-  trust.
+  trust. Because the engine writes tokens inline on `<html>`, a `:root` rule
+  that overrides a `--theme-*` token needs `!important`; Copy variables emits
+  the applied palette and derived roles with that marker already included.
 * A light theme sets `color-scheme: light`, which changes native form controls
-  and scrollbars too; contrast is reported in the footer and warns below the
+  and scrollbars too; the footer reports the contrast of the colours actually
+  applied — the derived ones, not the raw hex you typed — and warns below the
   4.5:1 AA ratio for body text.
 * The engine writes `data-theme`, `data-mode`, `data-density`,
   `data-tool-style`, `data-grouping` and `data-thinking` on `<html>`;

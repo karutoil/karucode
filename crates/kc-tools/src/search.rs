@@ -109,7 +109,7 @@ pub(crate) async fn search_with_program(
         Some(result) => Ok(result),
         None => {
             tracing::debug!("`{program}` not found on PATH, using the built-in search walker");
-            search_fallback(ws, query).await
+            search_fallback_with_cancel(ws, query, cancel).await
         }
     }
 }
@@ -397,16 +397,40 @@ fn normalise_match_text(text: &str) -> String {
 }
 
 /// Built-in search: used when `rg` is unavailable, and by tests directly.
+///
+/// This convenience entry point retains the old detached behaviour for direct
+/// callers. The tool itself uses [`search_fallback_with_cancel`].
 pub async fn search_fallback(ws: &Workspace, query: &SearchQuery) -> Result<SearchResult> {
+    search_fallback_with_cancel(ws, query, &CancellationToken::new()).await
+}
+
+pub(crate) async fn search_fallback_with_cancel(
+    ws: &Workspace,
+    query: &SearchQuery,
+    cancel: &CancellationToken,
+) -> Result<SearchResult> {
     let ws = ws.clone();
     let query = query.clone();
-    tokio::task::spawn_blocking(move || search_fallback_sync(&ws, &query))
+    let cancel = cancel.clone();
+    tokio::task::spawn_blocking(move || search_fallback_sync_with_cancel(&ws, &query, &cancel))
         .await
         .map_err(|e| Error::Internal(format!("search task panicked: {e}")))?
 }
 
-/// Synchronous implementation of the fallback walker.
+/// Synchronous implementation of the fallback walker, retained for callers that
+/// deliberately do not have a cancellation token.
 pub fn search_fallback_sync(ws: &Workspace, query: &SearchQuery) -> Result<SearchResult> {
+    search_fallback_sync_with_cancel(ws, query, &CancellationToken::new())
+}
+
+fn search_fallback_sync_with_cancel(
+    ws: &Workspace,
+    query: &SearchQuery,
+    cancel: &CancellationToken,
+) -> Result<SearchResult> {
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     let base = ws.resolve_existing(&query.path)?;
     let max_results = query.max_results.max(1);
     let regex = RegexBuilder::new(&query.pattern)
@@ -423,11 +447,23 @@ pub fn search_fallback_sync(ws: &Workspace, query: &SearchQuery) -> Result<Searc
         None => None,
     };
 
-    let mut files: Vec<PathBuf> = Vec::new();
+    let mut matches: Vec<SearchMatch> = Vec::new();
     let mut walk_errors = 0usize;
-    if base.is_file() {
-        files.push(base.clone());
+
+    let hit_limit = if base.is_file() {
+        scan_fallback_entries(
+            std::iter::once(Ok(Some(base.clone()))),
+            ws,
+            &regex,
+            globset.as_ref(),
+            max_results,
+            &mut matches,
+            &mut walk_errors,
+            cancel,
+        )?
     } else {
+        // Do not materialise the tree. A matching early file can reach the global
+        // cap and stop this iterator before later directories are opened at all.
         let walker = ignore::WalkBuilder::new(&base)
             .require_git(false)
             .git_global(false)
@@ -437,62 +473,68 @@ pub fn search_fallback_sync(ws: &Workspace, query: &SearchQuery) -> Result<Searc
                 name != ".git" && name != "node_modules"
             })
             .build();
-        for entry in walker {
-            match entry {
-                Ok(e) if e.file_type().map(|t| t.is_file()).unwrap_or(false) => {
-                    files.push(e.into_path());
-                }
-                Ok(_) => {}
-                Err(_) => walk_errors += 1,
-            }
-        }
+        let entries = walker.map(|entry| match entry {
+            Ok(e) if e.file_type().map(|t| t.is_file()).unwrap_or(false) => Ok(Some(e.into_path())),
+            Ok(_) => Ok(None),
+            Err(_) => Err(()),
+        });
+        scan_fallback_entries(
+            entries,
+            ws,
+            &regex,
+            globset.as_ref(),
+            max_results,
+            &mut matches,
+            &mut walk_errors,
+            cancel,
+        )?
+    };
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
     }
+    Ok(fallback_result(matches, hit_limit, walk_errors))
+}
 
-    let mut matches: Vec<SearchMatch> = Vec::new();
-    let mut hit_limit = false;
-    'files: for file in files {
-        if let Some(set) = &globset {
-            let rel = ws.relative(&file);
-            let name = file
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if !set.is_match(&rel) && !set.is_match(&name) {
+#[allow(clippy::too_many_arguments)]
+fn scan_fallback_entries(
+    entries: impl IntoIterator<Item = std::result::Result<Option<PathBuf>, ()>>,
+    ws: &Workspace,
+    regex: &regex::Regex,
+    globset: Option<&GlobSet>,
+    max_results: usize,
+    matches: &mut Vec<SearchMatch>,
+    walk_errors: &mut usize,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    for entry in entries {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let file = match entry {
+            Ok(Some(file)) => file,
+            Ok(None) => continue,
+            Err(()) => {
+                *walk_errors += 1;
                 continue;
             }
-        }
-        let Ok(meta) = std::fs::metadata(&file) else {
-            walk_errors += 1;
-            continue;
         };
-        if meta.len() > MAX_FALLBACK_FILE_BYTES {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&file) else {
-            walk_errors += 1;
-            continue;
-        };
-        if bytes.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0) {
-            continue;
-        }
-        let text = String::from_utf8_lossy(&bytes);
-        let rel = ws.relative(&file);
-        for (idx, line) in text.lines().enumerate() {
-            if !regex.is_match(line) {
-                continue;
-            }
-            matches.push(SearchMatch {
-                path: rel.clone(),
-                line: idx as u64 + 1,
-                text: truncate_columns(line, MAX_MATCH_COLUMNS),
-            });
-            if matches.len() >= max_results {
-                hit_limit = true;
-                break 'files;
-            }
+        if scan_fallback_file(
+            ws,
+            &file,
+            regex,
+            globset,
+            max_results,
+            matches,
+            walk_errors,
+            cancel,
+        )? {
+            return Ok(true);
         }
     }
+    Ok(false)
+}
 
+fn fallback_result(matches: Vec<SearchMatch>, hit_limit: bool, walk_errors: usize) -> SearchResult {
     let warning = if walk_errors > 0 {
         Some(format!(
             "{walk_errors} paths could not be read and were skipped"
@@ -500,13 +542,113 @@ pub fn search_fallback_sync(ws: &Workspace, query: &SearchQuery) -> Result<Searc
     } else {
         None
     };
-
-    Ok(SearchResult {
+    SearchResult {
         engine: SearchEngine::Builtin,
         matches,
         hit_limit,
         warning,
-    })
+    }
+}
+
+/// Scan one file immediately, returning true as soon as the shared result cap is
+/// reached. Only this file's bounded bytes and the returned matches are live.
+#[allow(clippy::too_many_arguments)]
+fn scan_fallback_file(
+    ws: &Workspace,
+    file: &Path,
+    regex: &regex::Regex,
+    globset: Option<&GlobSet>,
+    max_results: usize,
+    matches: &mut Vec<SearchMatch>,
+    walk_errors: &mut usize,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    if let Some(set) = globset {
+        let rel = ws.relative(file);
+        let name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !set.is_match(&rel) && !set.is_match(&name) {
+            return Ok(false);
+        }
+    }
+
+    let bytes = match read_fallback_file(file, cancel) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Ok(false),
+        Err(Error::Cancelled) => return Err(Error::Cancelled),
+        Err(_) => {
+            *walk_errors += 1;
+            return Ok(false);
+        }
+    };
+    if bytes.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0) {
+        return Ok(false);
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let rel = ws.relative(file);
+    for (idx, line) in text.lines().enumerate() {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if !regex.is_match(line) {
+            continue;
+        }
+        matches.push(SearchMatch {
+            path: rel.clone(),
+            line: idx as u64 + 1,
+            text: truncate_columns(line, MAX_MATCH_COLUMNS),
+        });
+        if matches.len() >= max_results {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Read a regular file through the cap even if it grows after metadata.
+///
+/// `Ok(None)` means "not searchable text-shaped input" (too large or no longer a
+/// regular file). IO failures retain the old skip-and-warn behaviour in the
+/// caller; cancellation is the only fatal condition here.
+fn read_fallback_file(file: &Path, cancel: &CancellationToken) -> Result<Option<Vec<u8>>> {
+    read_fallback_file_bounded(file, MAX_FALLBACK_FILE_BYTES, cancel)
+}
+
+fn read_fallback_file_bounded(
+    file: &Path,
+    max_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<Option<Vec<u8>>> {
+    use std::io::Read;
+
+    let mut handle = std::fs::File::open(file).map_err(|e| Error::io(file, e))?;
+    let meta = handle.metadata().map_err(|e| Error::io(file, e))?;
+    if !meta.is_file() || meta.len() > max_bytes {
+        return Ok(None);
+    }
+    let mut bytes = Vec::with_capacity((meta.len() as usize).min(max_bytes as usize));
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let n = match handle.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(Error::io(file, e)),
+        };
+        if bytes.len().saturating_add(n) > max_bytes as usize {
+            return Ok(None);
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+    Ok(Some(bytes))
 }
 
 fn build_globset(pattern: &str) -> Result<GlobSet> {
@@ -870,5 +1012,76 @@ mod tests {
             builtin_text.starts_with(&expected),
             "builtin must keep the first {MAX_MATCH_COLUMNS} chars: {builtin_text:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn fallback_search_cancellation_reaches_the_blocking_worker() {
+        let tmp = TempWs::new("fallback-cancel");
+        tmp.write("a.txt", "needle\n");
+        let ws = tmp.ws();
+        let q = query("needle", ".", 10);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let err = search_fallback_with_cancel(&ws, &q, &cancel)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Cancelled), "{err}");
+    }
+
+    #[test]
+    fn fallback_file_reads_are_capped_at_a_small_deterministic_limit() {
+        let tmp = TempWs::new("fallback-read-cap");
+        tmp.write("small.txt", "need");
+        tmp.write("large.txt", "needle");
+        let cancel = CancellationToken::new();
+        let small = read_fallback_file_bounded(&tmp.path.join("small.txt"), 4, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(small, b"need");
+        assert!(
+            read_fallback_file_bounded(&tmp.path.join("large.txt"), 4, &cancel)
+                .unwrap()
+                .is_none()
+        );
+        cancel.cancel();
+        assert!(matches!(
+            read_fallback_file_bounded(&tmp.path.join("small.txt"), 4, &cancel),
+            Err(Error::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn fallback_iteration_is_lazy_and_stops_pulling_at_the_match_cap() {
+        use std::cell::Cell;
+
+        let tmp = TempWs::new("fallback-lazy");
+        tmp.write("first.txt", "needle\n");
+        tmp.write("second.txt", "needle\n");
+        let ws = tmp.ws();
+        let first = ws.resolve_existing("first.txt").unwrap();
+        let second = ws.resolve_existing("second.txt").unwrap();
+        let visited = Cell::new(0usize);
+        let entries = vec![first, second].into_iter().map(|path| {
+            visited.set(visited.get() + 1);
+            Ok::<Option<PathBuf>, ()>(Some(path))
+        });
+        let regex = RegexBuilder::new("needle").build().unwrap();
+        let mut matches = Vec::new();
+        let mut errors = 0usize;
+        let hit = scan_fallback_entries(
+            entries,
+            &ws,
+            &regex,
+            None,
+            1,
+            &mut matches,
+            &mut errors,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(hit);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(visited.get(), 1, "the second path must never be yielded");
+        assert_eq!(errors, 0);
     }
 }

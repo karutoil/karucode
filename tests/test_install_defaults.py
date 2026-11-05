@@ -8,11 +8,12 @@ inside a sudo session. Everything this script decides hangs off that one
 resolution, so this file tests it directly rather than inferring it from a full
 install.
 
-Everything below is a real `sh packaging/install.sh` process. It runs with
-`--dry-run`, which the installer supports without root and which mutates nothing,
-against a real binary and a `--prefix` in a temp directory. The `--dry-run` output
-is not a description of the plan: install.sh prints the drop-in it *would* write,
-so `User=`, `Group=` and `KARUCODE_DATA_DIR=` are asserted from the actual bytes.
+The account/default cases run real `sh packaging/install.sh --dry-run` processes
+against a real binary and a temp prefix. Transaction cases run real installs in
+temp directories with systemctl/curl/id stubbed; no root or live host path is
+needed. The `--dry-run` output is not a description of the plan: install.sh prints
+the drop-in it *would* write, so `User=`, `Group=` and `KARUCODE_DATA_DIR=` are
+asserted from the actual bytes.
 
 The host needs: `sh`, `getent`, and a few accounts to name (`root`, and at least
 one non-root account). Cases that are impossible to set up portably - an account
@@ -34,11 +35,14 @@ What is covered:
   own home for a system account (not `<home>/.local/share/karucode`);
 * the service account is printed in the summary, so it can be checked against
   `systemctl show -p User`;
-* `--no-systemd` installs no unit and resolves no account at all.
+* `--no-systemd` installs no unit and resolves no account at all;
+* unexpected/no HTTP health and a failed active streak roll back binary + unit;
+* the Docker auth healthcheck is executed with a stub curl, without a daemon.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import re
@@ -425,7 +429,8 @@ class NoSystemd(Case):
         # preview is asserted; that is the whole point of the dry run.
         result = self.run_install({"USER": self.me}, args=["--no-systemd"], systemd=False)
         self.assert_ok(result)
-        self.assertIn(f"install -m 0755 {self.binary} {self.prefix}/bin/karucode", result.stdout)
+        self.assertIn(f"would install {self.prefix}/bin/karucode", result.stdout)
+        self.assertFalse((self.prefix / "bin" / "karucode").exists())
 
 
 # --- the summary is checkable ----------------------------------------------
@@ -447,6 +452,220 @@ class Summary(Case):
             self.skipTest("this host has no `nobody` account")
         self.assert_ok(result)
         self.assertNotIn("who ran this installer", result.stdout)
+
+
+# --- transactional health failure and the container probe -------------------
+
+
+class TransactionalInstall(Case):
+    """Real installs in temp dirs; only system interfaces are stubbed."""
+
+    def setUp(self):
+        super().setUp()
+        self.live_bin = self.prefix / "bin"
+        self.live_bin.mkdir()
+        self.live_binary = self.live_bin / "karucode"
+        self.old_binary = self.tmp / "old-karucode"
+        self.old_binary.write_text('#!/bin/sh\necho "karucode 1.0.0-old"\n', encoding="utf-8")
+        self.old_binary.chmod(0o755)
+        shutil.copy(self.old_binary, self.live_binary)
+
+        self.unit_dir = self.tmp / "live-systemd"
+        self.unit_dir.mkdir()
+        self.unit_path = self.unit_dir / "karucode.service"
+        self.old_unit = b"[Unit]\nDescription=old sentinel\n[Service]\nExecStart=/old\n"
+        self.unit_path.write_bytes(self.old_unit)
+        self.data_dir = self.tmp / "live-data"
+        self.data_dir.mkdir()
+
+        self.stub_bin = self.tmp / "live-stubs"
+        self.stub_bin.mkdir()
+        self.systemctl_log = self.tmp / "systemctl.log"
+        real_id = shutil.which("id")
+        self.write_live_stub(
+            "id",
+            "#!/bin/sh\n"
+            'if [ "$1" = "-u" ]; then echo 0; exit 0; fi\n'
+            f'exec {real_id} "$@"\n',
+        )
+        self.write_live_stub(
+            "systemctl",
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n'
+            'if [ "$1" = "is-active" ]; then echo active; exit 0; fi\n'
+            'if [ "$1" = "is-enabled" ]; then echo enabled; exit 0; fi\n'
+            "exit 0\n",
+        )
+        self.write_live_stub(
+            "curl",
+            "#!/bin/sh\n"
+            'printf "%s" "${FAKE_HTTP_CODE:-}"\n'
+            'exit "${FAKE_CURL_RC:-0}"\n',
+        )
+        self.write_live_stub("sleep", "#!/bin/sh\nexit 0\n")
+        self.write_live_stub("ss", "#!/bin/sh\nexit 1\n")
+
+    def write_live_stub(self, name, body):
+        path = self.stub_bin / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+
+    def run_live(self, code="200", curl_rc="0", fresh=False):
+        if fresh:
+            self.live_binary.unlink(missing_ok=True)
+            self.unit_path.unlink(missing_ok=True)
+        group = group_name(account_field(self.me, 3))
+        self.assertTrue(group)
+        env = {
+            "PATH": f"{self.stub_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "HOME": str(self.tmp / "home"),
+            "USER": self.me,
+            "LOGNAME": self.me,
+            "KARUCODE_UNIT_DIR": str(self.unit_dir),
+            "SYSTEMCTL_LOG": str(self.systemctl_log),
+            "FAKE_HTTP_CODE": code,
+            "FAKE_CURL_RC": curl_rc,
+        }
+        argv = [
+            "sh", str(INSTALL_SH), "--binary", str(self.binary),
+            "--prefix", str(self.prefix), "--workspace", str(self.workspace),
+            "--data-dir", str(self.data_dir), "--service-user", self.me,
+            "--service-group", group, "--env-file", str(self.tmp / "env" / "karucode.env"),
+            "--unit-file", str(UNIT_FILE), "--force-systemd", "--no-enable",
+        ]
+        return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=30)
+
+    def assert_rolled_back(self, result, code):
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("HTTP health check failed", result.stderr)
+        self.assertIn(code, result.stderr)
+        self.assertEqual(self.live_binary.read_bytes(), self.old_binary.read_bytes())
+        self.assertEqual(self.unit_path.read_bytes(), self.old_unit)
+        self.assertEqual(
+            (self.live_bin / "karucode.old").read_bytes(), self.old_binary.read_bytes()
+        )
+        # The rollback uses a same-directory temporary file and an atomic rename,
+        # never a cp/install write directly onto the running destination.
+        self.assertEqual(list(self.live_bin.glob(".karucode.*")), [])
+        self.assertIn("restart karucode", self.systemctl_log.read_text())
+
+    def test_http_200_and_expected_auth_401_are_successes(self):
+        for code in ("200", "401"):
+            with self.subTest(code=code):
+                result = self.run_live(code)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.live_binary.read_bytes(), self.binary.read_bytes())
+                self.assertIn(f"HTTP {code}", result.stdout)
+
+    def test_unexpected_health_status_rolls_back_the_binary_and_unit(self):
+        result = self.run_live("500")
+        self.assert_rolled_back(result, "HTTP 500")
+
+    def test_refused_host_header_is_not_a_healthy_install(self):
+        result = self.run_live("403")
+        self.assert_rolled_back(result, "HTTP 403")
+
+    def test_no_http_answer_rolls_back_instead_of_reporting_active_success(self):
+        result = self.run_live("", curl_rc="1")
+        self.assert_rolled_back(result, "no answer")
+
+    def test_failed_first_install_removes_the_new_binary(self):
+        result = self.run_live("503", fresh=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertFalse(self.live_binary.exists())
+        self.assertFalse(self.unit_path.exists())
+
+    def test_backup_failure_leaves_the_installed_binary_untouched(self):
+        self.write_live_stub("cp", "#!/bin/sh\nexit 1\n")
+        result = self.run_live("200")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("could not preserve the previous binary", result.stderr)
+        self.assertEqual(self.live_binary.read_bytes(), self.old_binary.read_bytes())
+        self.assertEqual(self.unit_path.read_bytes(), self.old_unit)
+        self.assertNotIn("restart karucode", self.systemctl_log.read_text())
+
+    def test_failed_final_rename_leaves_the_installed_binary_untouched(self):
+        self.write_live_stub(
+            "mv",
+            "#!/bin/sh\n"
+            'case "$2" in *.karucode.new.*) exit 1 ;; esac\n'
+            'exec /bin/mv "$@"\n',
+        )
+        result = self.run_live("200")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("could not move the new binary into place", result.stderr)
+        self.assertEqual(self.live_binary.read_bytes(), self.old_binary.read_bytes())
+        self.assertEqual(self.unit_path.read_bytes(), self.old_unit)
+        self.assertEqual(list(self.live_bin.glob(".karucode.new.*")), [])
+
+    def test_failed_active_streak_also_restores_the_binary_and_unit(self):
+        # Preflight and was_active see the old active service; post-start polls
+        # see the new process fail. This path never reaches the HTTP probe and
+        # must not disarm rollback merely because STARTED is zero.
+        self.write_live_stub(
+            "systemctl",
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n'
+            'if [ "$1" = "is-active" ]; then\n'
+            '    calls=$(grep -c "^is-active" "$SYSTEMCTL_LOG")\n'
+            '    if [ "$calls" -le 2 ]; then echo active; else echo failed; fi\n'
+            "    exit 0\n"
+            "fi\n"
+            'if [ "$1" = "is-enabled" ]; then echo enabled; fi\n'
+            "exit 0\n",
+        )
+        result = self.run_live("200")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("NOT running", result.stdout)
+        self.assertEqual(self.live_binary.read_bytes(), self.old_binary.read_bytes())
+        self.assertEqual(self.unit_path.read_bytes(), self.old_unit)
+        self.assertIn("rolling back the systemd changes", result.stderr)
+        self.assertIn("restored the previous binary", result.stderr)
+
+
+class DockerHealthcheck(unittest.TestCase):
+    """Run the image's real probe command with curl stubbed, no daemon/root."""
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="kc-docker-health-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.args_file = self.tmp / "curl-args.json"
+        curl = self.tmp / "curl"
+        curl.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "with open(os.environ['CURL_ARGS'], 'w') as handle:\n"
+            "    json.dump(sys.argv[1:], handle)\n",
+            encoding="utf-8",
+        )
+        curl.chmod(0o755)
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        match = re.search(r'^\s*CMD (\["sh", "-c", .*\])$', dockerfile, re.MULTILINE)
+        self.assertIsNotNone(match, "the Dockerfile healthcheck must remain a JSON shell command")
+        self.command = json.loads(match.group(1))
+
+    def run_probe(self, token=None):
+        env = {
+            "PATH": f"{self.tmp}{os.pathsep}{os.environ.get('PATH', '')}",
+            "CURL_ARGS": str(self.args_file),
+        }
+        if token is not None:
+            env["KARUCODE_AUTH_TOKEN"] = token
+        result = subprocess.run(self.command, capture_output=True, text=True, env=env, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(self.args_file.read_text(encoding="utf-8"))
+
+    def test_bearer_header_is_one_correctly_quoted_argument(self):
+        token = "token with spaces;still-data"
+        args = self.run_probe(token)
+        index = args.index("-H")
+        self.assertEqual(args[index + 1], f"Authorization: Bearer {token}")
+        self.assertEqual(args[-1], "http://127.0.0.1:8787/api/health")
+
+    def test_no_token_does_not_add_an_authorization_header(self):
+        args = self.run_probe()
+        self.assertNotIn("-H", args)
+        self.assertEqual(args[-1], "http://127.0.0.1:8787/api/health")
 
 
 if __name__ == "__main__":

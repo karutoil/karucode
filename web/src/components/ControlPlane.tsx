@@ -184,10 +184,16 @@ export function ControlPlane(): JSX.Element {
       ? `Start work in project "${target.name}" (project_id: ${target.id}).\n\n${text}`
       : text;
     if (text === '') { await openControlSession(false); return; }
-    setDraft('');
+    const submitted = draft;
     const id = await openControlSession(false);
     // Only fill the composer once the control session is really the open one.
-    if (id && store.currentSessionId.value === id) actions.fillComposer(instruction);
+    // On failure, leave the launch prompt exactly where it can be retried. On
+    // success, clear only that submission: edits made while it was pending are
+    // new work and must not be replaced by an older continuation.
+    if (id && store.currentSessionId.value === id) {
+      actions.fillComposer(instruction);
+      setDraft((current) => (current === submitted ? '' : current));
+    }
   };
 
   const chosen = sessions.find((item) => item.id === selected)
@@ -322,16 +328,16 @@ export function ControlPlane(): JSX.Element {
       {error ? <div class="cp-error" role="alert">{error} <button type="button" onClick={() => setError(null)}>Dismiss</button></div> : null}
       {selected ? <section class="cp-session" aria-label="Open session">
         <header class="cp-session-head">
-          <button type="button" class="cp-back" onClick={back} aria-label="Back to overview">←</button>
+          <button type="button" class="cp-back" onClick={back} aria-label="Back to overview" title="Back to overview">←</button>
           <span class={`cp-glyph${isControl ? ' control' : ''}`} aria-hidden="true">{isControl ? 'k.' : initials(projectName(chosen?.project_id ?? null))}</span>
           <div class="cp-session-id">
             <div class="cp-eyebrow">{isControl ? 'Across all projects' : projectName(chosen?.project_id ?? null)}</div>
             <h2>{chosen?.title ?? (isControl ? 'Control chat' : 'Session')}</h2>
           </div>
           <div class="cp-session-actions">
-            {chosen ? <span class={`cp-state ${sessionStatus(chosen).tone}`}><i aria-hidden="true" />{sessionStatus(chosen).label}</span> : null}
+            {chosen ? <span class={`cp-state ${sessionStatus(chosen).tone}`} title={`Latest state: ${sessionStatus(chosen).label}`}><i aria-hidden="true" />{sessionStatus(chosen).label}</span> : null}
             {chosen ? <span class="cp-session-count">{chosen.message_count.toLocaleString()} messages</span> : null}
-            {isControl ? null : <button type="button" class="cp-secondary" onClick={openInProject}>Open in project ↗</button>}
+            {isControl ? null : <button type="button" class="cp-secondary" title="Open in project" aria-label="Open in project" onClick={openInProject}>Open in project ↗</button>}
           </div>
         </header>
         {opening && !chosen ? <div class="cp-loading"><span class="cp-spinner" aria-hidden="true" />Opening session…</div> : null}

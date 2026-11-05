@@ -26,7 +26,8 @@
 // * **Interface** — dark or light mode, `compact` / `comfortable` / `spacious`
 //   density (spacing only), an interface font and a code font chosen from
 //   locally available stacks (nothing is downloaded), and a 0–22 px corner
-//   radius.
+//   radius. Code uses the bundled JetBrains Mono by default; the other two
+//   choices are the operating system's own mono stack and Courier New.
 // * **Transcript** — how much of the agent's work the conversation shows at
 //   once. See below; the defaults reproduce the original look, so nothing
 //   changes until you choose.
@@ -83,17 +84,22 @@
 // * **Import** reads such a file (maximum 150 KB) and rejects it with a toast if
 //   a colour is not a 6-digit hex value, the mode/density/font is unknown, or the
 //   file is larger than the limit.
-// * **Reset colours** restores the palette of the theme you started from;
-//   deleting a custom theme falls back to Ember. Clearing the storage key resets
-//   everything to the defaults.
+// * **Reset colours** restores the palette of the theme you started from,
+//   re-based to the mode the draft is in: a theme's 18 colours belong to its
+//   own mode, so resetting after an Appearance flip keeps the mode (and the
+//   accent) and restores that mode's surfaces. Deleting a custom theme falls
+//   back to Ember. Clearing the storage key resets everything to the defaults.
 //
 // # Gotchas
 //
 // * Custom CSS is injected verbatim — it is your own browser, but an imported
 //   theme file can hide UI or load remote resources. Only import themes you
-//   trust.
+//   trust. Because the engine writes tokens inline on `<html>`, a `:root` rule
+//   that overrides a `--theme-*` token needs `!important`; Copy variables emits
+//   the applied palette and derived roles with that marker already included.
 // * A light theme sets `color-scheme: light`, which changes native form controls
-//   and scrollbars too; contrast is reported in the footer and warns below the
+//   and scrollbars too; the footer reports the contrast of the colours actually
+//   applied — the derived ones, not the raw hex you typed — and warns below the
 //   4.5:1 AA ratio for body text.
 // * The engine writes `data-theme`, `data-mode`, `data-density`,
 //   `data-tool-style`, `data-grouping` and `data-thinking` on `<html>`;
@@ -143,6 +149,7 @@ import { buildTokenMap, clampRounding, resolveTheme } from './tokens';
 import type {
   ResolvedTheme,
   Theme,
+  ThemeColors,
   ThemeColorsPatch,
   ThemeDensity,
   ThemeFont,
@@ -183,9 +190,19 @@ export const themeLibrary = computed<Theme[]>(() => [
   ...customThemes.value,
 ]);
 
-export const themeContrast = computed<number>(() =>
-  contrastRatio(activeTheme.value.colors.text, activeTheme.value.colors.bg),
-);
+/**
+ * Contrast of the *painted* ink on the painted canvas.
+ *
+ * Read from the resolved palette, not from `theme.colors`: `resolvePalette()`
+ * nudges primary text until it clears 11:1 on every surface, so the raw inputs
+ * describe a pair of colours the user typed while the palette describes the pair
+ * on screen. Reporting the first number made the footer disagree with the
+ * drawer it sits in (it read 4.6:1 for a draft that rendered at 12:1).
+ */
+export const themeContrast = computed<number>(() => {
+  const { palette } = activeTheme.value;
+  return contrastRatio(palette.text, palette.bg);
+});
 
 export function isCustomThemeId(id: string): boolean {
   return customThemes.value.some((theme) => theme.id === id);
@@ -355,18 +372,28 @@ export function updateColors(colors: ThemeColorsPatch): void {
   updateTheme({ colors });
 }
 
+/**
+ * The palette a mode requires.
+ *
+ * A theme's 18 colours are the palette *for its own mode* — a dark canvas in
+ * `light` mode is not a palette, it is a bug the resolver then has to rescue.
+ * So any operation that changes the mode without changing every colour
+ * (`setThemeMode`, and `resetColors` when the base theme's mode differs)
+ * re-derives the surfaces from the mode's preset and keeps only the two colours
+ * that carry the theme's identity: the accent and the syntax keyword that
+ * follows it.
+ */
+function paletteForMode(mode: ThemeMode, accent: string): ThemeColors {
+  const preset = modePreset(mode);
+  return { ...preset.colors, accent, syntaxKeyword: accent };
+}
+
 export function setThemeMode(mode: ThemeMode): void {
   if (currentTheme.value.mode === mode) return;
   const base = draftEdited.value ? currentTheme.value : beginDraft();
-  const preset = modePreset(mode);
   // Keep the user's accent (the one colour that defines the identity), re-base
   // the surfaces so the result is legible in the new mode.
-  const colors = {
-    ...preset.colors,
-    accent: base.colors.accent,
-    syntaxKeyword: base.colors.accent,
-  };
-  commit({ ...base, mode, colors }, true);
+  commit({ ...base, mode, colors: paletteForMode(mode, base.colors.accent) }, true);
 }
 
 export function setDensity(density: ThemeDensity): void {
@@ -401,12 +428,23 @@ export function setThinking(thinking: ThemeThinking): void {
   updateTheme({ thinking });
 }
 
-/** Restore the palette of the theme the draft was derived from. */
+/**
+ * Restore the palette of the theme the draft was derived from.
+ *
+ * The base's colours are a palette for the *base's* mode, so restoring them
+ * verbatim is only right while the draft is in that mode. After a mode flip it
+ * is not: "Ember → Light → Reset colours" used to paint Ember's near-black
+ * surfaces under `data-mode="light"`, which is how the drawer ended up with
+ * unreadable text after a reset. Reset therefore applies the same transformation
+ * `setThemeMode` does, so the result is always a palette for the current mode.
+ */
 export function resetColors(): void {
   const base = lookupSavedTheme(baseThemeId.value) ?? DEFAULT_THEME;
   // Nothing to undo: the applied theme already is the base palette.
   if (!draftEdited.value && currentTheme.value.id === base.id) return;
-  updateTheme({ colors: base.colors });
+  const mode = currentTheme.value.mode;
+  const colors = mode === base.mode ? base.colors : paletteForMode(mode, base.colors.accent);
+  updateTheme({ colors });
 }
 
 function uniqueThemeName(name: string): string {

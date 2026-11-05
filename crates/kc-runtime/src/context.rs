@@ -409,7 +409,11 @@ pub fn fit_detailed(
     // the digest: elide the surviving bodies, then rebuild.
     let mut window = prepared.clone();
     let notice_chars = notice.chars().count();
-    let shortened = shrink_bodies(&mut window, &dropped, max_chars - notice_chars);
+    let shortened = shrink_bodies(
+        &mut window,
+        &dropped,
+        max_chars.saturating_sub(notice_chars),
+    );
     let messages = rebuild(window, start, &dropped, notice.clone());
     if shortened > 0 {
         warn_elided(&messages, max_chars);
@@ -516,7 +520,12 @@ pub fn compact_run_window(history: &mut Vec<Message>, max_chars: usize) {
     // the surviving bodies, so what is held (and sent) respects the budget.
     let mut window = std::mem::take(history);
     let notice_chars = notice.chars().count();
-    if shrink_bodies(&mut window, &dropped, max_chars - notice_chars) > 0 {
+    if shrink_bodies(
+        &mut window,
+        &dropped,
+        max_chars.saturating_sub(notice_chars),
+    ) > 0
+    {
         let rebuilt = rebuild(window.clone(), start, &dropped, notice.clone());
         warn_elided(&rebuilt, max_chars);
         *history = rebuilt;
@@ -829,6 +838,9 @@ fn rebuild(messages: Vec<Message>, pin: usize, dropped: &[bool], notice: String)
 }
 
 fn push_digest(out: &mut Vec<Message>, notice: String) {
+    if notice.trim().is_empty() {
+        return;
+    }
     // A `user` turn, not an `assistant` one: the model did not say this, and a
     // transcript that claims it did makes the model believe it already
     // summarised or decided something.
@@ -899,7 +911,10 @@ fn compact_notice(
         notice.push_str(line);
         notice.push('\n');
     }
-    notice.trim_end().to_string()
+    // The fixed explanatory header can exceed a deliberately tiny budget. Cap
+    // the completed notice itself, not only its optional digest lines; otherwise
+    // saturating subtraction still rebuilds an over-budget request.
+    notice.trim_end().chars().take(max_chars).collect()
 }
 
 /// The body lines of a digest created by an earlier compaction.
@@ -1067,6 +1082,40 @@ mod tests {
                 arguments: "{}".into(),
             }],
         )
+    }
+
+    #[test]
+    fn tiny_budgets_cannot_underflow_the_notice_allowance() {
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("the original task"),
+            Message::assistant("an old answer", vec![]),
+            call_msg("call_old"),
+            tool_msg("call_old", "an old tool result"),
+            Message::user("the current request"),
+            Message::assistant("a large protected answer", vec![]),
+        ];
+        for budget in [0, 1, 8, 64, 199, 200] {
+            let notice = compact_notice(
+                &messages,
+                &vec![true; messages.len()],
+                messages.len(),
+                budget,
+            );
+            assert!(
+                notice.chars().count() <= budget,
+                "the fixed notice exceeded budget {budget}: {notice:?}"
+            );
+            let fitted = fit(messages.clone(), budget, 1_000);
+            assert!(!fitted.is_empty(), "fit lost every row at budget {budget}");
+
+            let mut window = messages.clone();
+            compact_run_window(&mut window, budget);
+            assert!(
+                !window.is_empty(),
+                "compaction lost every row at budget {budget}"
+            );
+        }
     }
 
     #[test]

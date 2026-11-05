@@ -22,6 +22,21 @@ import type {
 import { normalizeAgentRecord, queuedLists } from './chat';
 
 const MAX_STREAM_CHARS = 200_000;
+const MAX_RETIRED_QUEUED_IDS = 100;
+
+function retireQueuedIds(state: ChatState, ids: Iterable<string>): ChatState {
+  const retired = new Set(state.retiredQueuedIds);
+  for (const id of ids) retired.add(id);
+  if (retired.size === state.retiredQueuedIds.length) return state;
+  return {
+    ...state,
+    // FIFO eviction keeps the race guard bounded; accepting 100 newer queue
+    // mutations before the old HTTP response returns is already far beyond a
+    // realistic request/response race.
+    retiredQueuedIds: [...retired].slice(-MAX_RETIRED_QUEUED_IDS),
+  };
+}
+
 
 function clampOutput(text: string): { text: string; truncated: boolean } {
   if (text.length <= MAX_STREAM_CHARS) return { text, truncated: false };
@@ -693,17 +708,21 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
 
     case 'steer_applied': {
       // The steer joined the conversation, so it is no longer pending. Drop it
-      // from the queue here rather than waiting for the matching
-      // `queued_messages`: that frame carries the whole queue, but this event is
-      // the one that proves *this* message landed, and an optimistic row must not
-      // outlive its acceptance.
-      const queued = state.queued.filter((entry) => entry.id !== event.steer_id);
-      return queued.length === state.queued.length ? seen : { ...seen, queued };
+      // from the queue and remember the id before its possibly slower HTTP 202
+      // arrives: acceptance is not permission to resurrect a consumed entry.
+      const retired = retireQueuedIds(seen, [event.steer_id]);
+      const queued = retired.queued.filter((entry) => entry.id !== event.steer_id);
+      return queued.length === retired.queued.length ? retired : { ...retired, queued };
     }
 
     case 'queued_messages': {
       const queued = queuedLists(event.steers ?? [], event.follow_ups ?? []);
-      return { ...seen, queued };
+      const present = new Set(queued.map((entry) => entry.id));
+      const retired = retireQueuedIds(
+        seen,
+        seen.queued.filter((entry) => !present.has(entry.id)).map((entry) => entry.id),
+      );
+      return { ...retired, queued };
     }
 
     case 'session_created':

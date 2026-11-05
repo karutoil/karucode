@@ -710,3 +710,24 @@ async fn mission_budget_is_enforced_at_each_physical_retry() {
     drop(store);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn transient_http_status_wins_over_context_wording() {
+    for (status, label) in [
+        ("429 Too Many Requests", "429"),
+        ("503 Service Unavailable", "503"),
+    ] {
+        let failure = response(
+            status,
+            "application/json",
+            "{\"error\":{\"message\":\"upstream busy: too many tokens / context length\"}}",
+        );
+        let server = flaky_server(1, failure).await;
+        let stream = retrying(&server, 2)
+            .stream_chat(chat_request(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(texts(stream).await, "ok", "{label} was not retried");
+        assert_eq!(hit_count(&server), 2, "{label} must retry exactly once");
+    }
+}

@@ -35,7 +35,7 @@ const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 pub(crate) struct HttpTransport {
     name: String,
     url: String,
-    headers: Vec<(String, String)>,
+    headers: BTreeMap<String, String>,
     client: reqwest::Client,
     session: Mutex<Option<String>>,
     next_id: AtomicU64,
@@ -54,7 +54,7 @@ impl HttpTransport {
         Ok(Self {
             name,
             url,
-            headers: headers.into_iter().collect(),
+            headers,
             client,
             session: Mutex::new(None),
             next_id: AtomicU64::new(0),
@@ -156,10 +156,32 @@ impl Transport for HttpTransport {
                 pick_response(value, id)
             }
         };
-        bounded(exchange, timeout, cancel).await
+        bounded(exchange, timeout, cancel)
+            .await
+            .map_err(|error| error.redacted(&self.headers))
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
+        self.notify_unbounded(method, params)
+            .await
+            .map_err(|error| error.redacted(&self.headers))
+    }
+
+    async fn close(&self) {
+        self.set_session(None);
+    }
+
+    fn alive(&self) -> bool {
+        true
+    }
+
+    fn kind(&self) -> &'static str {
+        "http"
+    }
+}
+
+impl HttpTransport {
+    async fn notify_unbounded(&self, method: &str, params: Value) -> Result<(), McpError> {
         let body = notification_body(method, params);
         let response = self.post(&body).send().await.map_err(|e| {
             McpError::Transport(format!("request to MCP server `{}` failed: {e}", self.name))
@@ -184,18 +206,6 @@ impl Transport for HttpTransport {
         }
         debug!(server = %self.name, method, "MCP notification delivered over HTTP");
         Ok(())
-    }
-
-    async fn close(&self) {
-        self.set_session(None);
-    }
-
-    fn alive(&self) -> bool {
-        true
-    }
-
-    fn kind(&self) -> &'static str {
-        "http"
     }
 }
 

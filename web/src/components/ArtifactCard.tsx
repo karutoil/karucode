@@ -9,7 +9,7 @@ import {
   type ArtifactSpec,
   type ArtifactView,
 } from '../lib/artifacts';
-import { artifactUrl, publishArtifact } from '../lib/artifactPreview';
+import { publishArtifact } from '../lib/artifactPreview';
 import { copyText } from '../lib/clipboard';
 import { downloadText, safeFilename } from '../lib/download';
 import { renderCodeBlock, renderMarkdown } from '../lib/markdown';
@@ -152,12 +152,11 @@ function HtmlPreview({
     let cancelled = false;
     setState({ status: 'loading' });
     publishArtifact(spec.source, theme)
-      .then((id) => {
+      .then((base) => {
         if (cancelled) return;
-        // `nonce` only changes when the reader asks for a reload: the document
-        // itself is immutable (its id is its content hash), so the URL is all
-        // that has to move to make the browser fetch it again.
-        const base = artifactUrl(id);
+        // `publishArtifact` returns the server-issued per-artifact capability
+        // URL. Never replace it with a URL bearing the app's master credential.
+        // The reload nonce is a separate query key, so the capability is intact.
         const url = nonce > 0 ? `${base}${base.includes('?') ? '&' : '?'}v=${nonce}` : base;
         setState({ status: 'ready', html: '', url });
       })
@@ -576,6 +575,7 @@ export function ArtifactCard({ spec }: { spec: ArtifactSpec }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const [nonce, setNonce] = useState(0);
   const [copied, setCopied] = useState<'idle' | 'done' | 'failed'>('idle');
+  const [announcement, setAnnouncement] = useState('');
   const copyTimer = useRef<number | null>(null);
 
   useEffect(
@@ -596,8 +596,19 @@ export function ArtifactCard({ spec }: { spec: ArtifactSpec }): JSX.Element {
   const onCopy = (): void => {
     void copyText(spec.source).then((ok) => {
       setCopied(ok ? 'done' : 'failed');
+      // Announced through the live region below, not just painted: the button's
+      // `aria-label` is its name, so a rejected copy would otherwise change
+      // nothing a screen reader could hear.
+      setAnnouncement(
+        ok
+          ? 'Artifact source copied to the clipboard.'
+          : 'Copy failed: the clipboard is unavailable here. Use Download instead.',
+      );
       if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-      copyTimer.current = window.setTimeout(() => setCopied('idle'), 1600);
+      copyTimer.current = window.setTimeout(() => {
+        setCopied('idle');
+        setAnnouncement('');
+      }, 1600);
     });
   };
 
@@ -682,11 +693,31 @@ export function ArtifactCard({ spec }: { spec: ArtifactSpec }): JSX.Element {
           <button
             type="button"
             class="artifact-tool"
-            title={copied === 'done' ? 'Copied' : 'Copy source'}
-            aria-label="Copy this artifact's source"
+            data-copy-state={copied}
+            title={
+              copied === 'done'
+                ? 'Copied'
+                : copied === 'failed'
+                  ? 'Copy failed — use Download'
+                  : 'Copy source'
+            }
+            aria-label={
+              copied === 'failed'
+                ? "Copy failed — copy this artifact's source again"
+                : "Copy this artifact's source"
+            }
             onClick={onCopy}
           >
-            {copied === 'done' ? <span class="artifact-tool-text">Copied</span> : <CopyIcon size={13} />}
+            {copied === 'done' ? (
+              <span class="artifact-tool-text">Copied</span>
+            ) : copied === 'failed' ? (
+              <>
+                <AlertIcon size={13} />
+                <span class="artifact-tool-text">Copy failed</span>
+              </>
+            ) : (
+              <CopyIcon size={13} />
+            )}
           </button>
           <button
             type="button"
@@ -710,6 +741,18 @@ export function ArtifactCard({ spec }: { spec: ArtifactSpec }): JSX.Element {
       </div>
       <div class="artifact-body">{body}</div>
       {note !== null ? <p class="artifact-note">{note}</p> : null}
+      {/* Copy result announced, not just painted: the tool button's name is its
+          `aria-label`, so the visible "Copied"/"Copy failed" text alone is not a
+          change assistive technology reports. `aria-live` rather than
+          `role="status"` keeps the transcript's own status regions unambiguous. */}
+      <span
+        class="sr-only"
+        aria-live="polite"
+        aria-atomic="true"
+        data-testid="artifact-announcement"
+      >
+        {announcement}
+      </span>
       <Dialog
         open={expanded}
         title={title}

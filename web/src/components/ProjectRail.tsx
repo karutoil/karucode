@@ -611,7 +611,10 @@ export function ProjectRail(): JSX.Element {
             data-tip="Settings"
             aria-label="Open settings"
             aria-haspopup="dialog"
-            onClick={actions.openSettings}
+            onClick={(event) => {
+              event.currentTarget.focus();
+              actions.openSettings();
+            }}
           >
             KC
           </button>
@@ -622,6 +625,7 @@ export function ProjectRail(): JSX.Element {
             ref={menuRef}
             class="project-rail-menu"
             role="menu"
+            data-escape-local
             aria-label={`Project actions for ${menuProject.name}`}
             style={{ top: `${menu.top}px`, left: `${menu.left}px` }}
             onKeyDown={(event) => {
@@ -655,6 +659,9 @@ export function ProjectRail(): JSX.Element {
               role="menuitem"
               class="menu-item"
               onClick={() => {
+                // The menu item unmounts before the dialog records its return
+                // target; synchronously restore the persistent trigger first.
+                menuTriggerRef.current?.focus();
                 closeMenu(false);
                 setDialog('rename');
               }}
@@ -666,6 +673,9 @@ export function ProjectRail(): JSX.Element {
               role="menuitem"
               class="menu-item menu-item-danger"
               onClick={() => {
+                // The menu item unmounts when the child opens. Give the dialog a
+                // connected return target before that happens.
+                menuTriggerRef.current?.focus();
                 closeMenu(false);
                 setDialog('delete');
               }}

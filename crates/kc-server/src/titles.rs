@@ -468,13 +468,11 @@ pub async fn maybe_auto_title(
 
 /// Rename a session only if its title is still `expected`.
 ///
-/// This is what makes "a human wins" true rather than aspirational. The check and
-/// the write are two statements, but the window is a single in-process await on a
-/// SQLite write whose only competitor is the same process, and the failure mode
-/// if they did interleave is that the user's rename is replaced by a title
-/// - not that data is lost. The re-read is done on the store's write path so an
-///   out-of-process writer (none exist: the data directory is flock'd) cannot
-///   slip between them either.
+/// This is what makes "a human wins" true rather than aspirational: production
+/// SQLite executes one conditional UPDATE, so the expected-title comparison and
+/// rename cannot be separated by a manual rename. Compatibility stores may use
+/// the trait's read-then-write fallback, but this caller never reimplements that
+/// race-prone sequence itself.
 ///
 /// Returns `Ok(false)` when the title had already changed.
 pub async fn rename_if_unchanged(
@@ -483,14 +481,13 @@ pub async fn rename_if_unchanged(
     expected: &str,
     title: &str,
 ) -> kc_core::error::Result<bool> {
-    let store = state.store();
-    let Some(current) = store.get_session(session_id).await? else {
-        return Ok(false);
-    };
-    if current.title != expected {
+    let changed = state
+        .store()
+        .rename_session_if_title(session_id, expected, title)
+        .await?;
+    if !changed {
         return Ok(false);
     }
-    store.rename_session(session_id, title).await?;
     state.runtime().emit(
         Some(session_id),
         None,

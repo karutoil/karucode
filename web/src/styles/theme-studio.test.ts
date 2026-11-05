@@ -26,6 +26,10 @@ function cssDeclarations(selector: string): Record<string, string> {
 }
 
 describe('theme studio stylesheet fidelity', () => {
+  it('keeps a narrow scrim gutter around the drawer', () => {
+    expect(cssSource).toMatch(/\.theme-studio\s*\{[\s\S]*?width:\s*min\(580px, calc\(100% - 28px\)\)/);
+  });
+
   it('keeps the drawer on the mock line rhythm and a neutral scrim', () => {
     // `html,body` in the mock is 13px/1.5 and the drawer inherits it.
     expect(cssDeclarations('.theme-studio')['line-height']).toBe('1.5');
@@ -174,7 +178,7 @@ describe('theme studio stylesheet fidelity', () => {
     expect(cssSource).not.toMatch(/max-width:\s*800px/);
     expect(cssSource).not.toMatch(/max-width:\s*430px/);
     expect(cssSource).toMatch(
-      /@media \(max-width: 620px\) \{[\s\S]*?\.theme-studio \{\s*width: calc\(100% - 56px\);/,
+      /@media \(max-width: 620px\) \{[\s\S]*?\.theme-studio \{[\s\S]*?width: min\(580px, calc\(100% - 28px\)\);/,
     );
   });
 
@@ -206,5 +210,45 @@ describe('theme studio stylesheet fidelity', () => {
   it('keeps the mock reduced-motion escape hatch', () => {
     expect(cssSource).toMatch(/@media \(prefers-reduced-motion: reduce\) \{/);
     expect(cssSource).not.toContain('.theme-colors-hint');
+  });
+
+  it('gives the transcript controls a track wide enough for their labels', () => {
+    /* The grouping control is three labels in a row: min-content measured in
+     * Chromium at 227px (spacious) / 215px (comfortable). A plain two-up grid
+     * gave it 121px at a 320px viewport — the control's content overflowed its
+     * column (141px inside 120px, last button at 316px while the column ended at
+     * 296px) inside a modal with no horizontal scroll.
+     *
+     * The fix is the track minimum, not a viewport breakpoint: `auto-fit` with a
+     * 232px minimum gives two columns whenever they fit — 258px each at the 580px
+     * desktop drawer, unchanged — and one full-width column below that. */
+    const columns = cssDeclarations('.theme-transcript-grid')['grid-template-columns'];
+    expect(columns).toBe('repeat(auto-fit, minmax(min(100%, 232px), 1fr))');
+    // The Interface grid keeps the mock's plain two-up geometry.
+    expect(cssDeclarations('.theme-setting-grid')['grid-template-columns']).toBe(
+      'repeat(2, minmax(0, 1fr))',
+    );
+  });
+
+  it('lets a segmented control shrink with its column instead of overflowing it', () => {
+    // flex children default to `min-width: auto` (min-content), which is exactly
+    // how the buttons escaped the track. Both the container and the segments opt
+    // out, and the label ellipsises as the last resort.
+    expect(cssDeclarations('.theme-segments')['min-width']).toBe('0');
+    const segment = cssDeclarations('.theme-segment');
+    expect(segment['min-width']).toBe('0');
+    // `1 1 auto`: each segment starts at its own label width and shares the
+    // remainder, so "Tool calls" is not squeezed to the width of "None".
+    expect(segment['flex']).toBe('1 1 auto');
+    expect(segment['overflow']).toBe('hidden');
+    expect(segment['text-overflow']).toBe('ellipsis');
+  });
+
+  it('paints the custom-CSS trust note with the warning role', () => {
+    // The note states a trust boundary; it must read as a warning, from the theme
+    // tokens, not as ordinary secondary copy.
+    expect(cssDeclarations('.theme-trust-note')['color']).toBe('var(--warn)');
+    expect(cssDeclarations('.theme-trust-note')['border-left']).toBe('2px solid var(--warn)');
+    expect(cssDeclarations('.theme-trust-note')['font-size']).toBe('var(--fs-tiny)');
   });
 });

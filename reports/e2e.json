@@ -32,7 +32,7 @@
     "only the restart's answer is persisted",
     "subagent runs and reports",
     "a fan-out runs both children",
-    "a background spawn detaches and is collected by a wait",
+    "a background spawn and wait in one run collect the child",
     "controlling a finished agent is a 404",
     "an unknown agent action is a 400 naming the verbs",
     "plugin tool requires approval",
@@ -53,7 +53,7 @@
   ],
   "failed": [],
   "skipped": [],
-  "events": 464,
-  "server_log": "/tmp/kc-e2e-kka4w6ap/server.log",
-  "mock_requests": 50
+  "events": 445,
+  "server_log": "/tmp/kc-e2e-d0i7tm__/server.log",
+  "mock_requests": 47
 }

@@ -98,6 +98,37 @@ describe('the base layer uses the scale', () => {
   });
 });
 
+describe('the bundled typefaces are declared honestly', () => {
+  /* `/fonts/*.ttf` are static instances: Inter Regular (usWeightClass 400), Inter
+   * Bold (700) and JetBrains Mono Regular (400). None of them has an `fvar`
+   * table, so a descriptor like `font-weight: 400 600` promises a range the file
+   * cannot render — the browser then resolves weight 600 to the 400 face and
+   * synthesises it, which is what made headings look smeared rather than bold. */
+  const faces = [...base.matchAll(/@font-face\s*\{([^}]+)\}/g)].map((match) => match[1] ?? '');
+
+  it('declares one face per shipped weight, each with a single weight value', () => {
+    expect(faces).toHaveLength(3);
+    for (const face of faces) {
+      const weight = /font-weight:\s*([^;]+);/.exec(face)?.[1]?.trim() ?? '';
+      expect(weight, face).toMatch(/^\d{3}$/);
+    }
+    // The two Inter files are the regular and the bold, and nothing else.
+    const weights = faces
+      .filter((face) => face.includes("font-family: 'Inter'"))
+      .map((face) => /font-weight:\s*(\d+);/.exec(face)?.[1]);
+    expect(weights.sort()).toEqual(['400', '700']);
+  });
+
+  it('serves every face from the app itself, with no third-party request', () => {
+    for (const face of faces) {
+      expect(face, face).toMatch(/src:\s*url\('\/fonts\/[A-Za-z-]+\.ttf'\) format\('truetype'\)/);
+    }
+    // No protocol-relative or absolute URL anywhere in the base layer: the app
+    // makes no font request off-origin, and `web/README.md` says so.
+    expect(base).not.toMatch(/url\(\s*['"]?(?:https?:)?\/\//);
+  });
+});
+
 describe('weights are a closed set, not one-offs', () => {
   // DESIGN-SYSTEM.md §3.3: {400, 500, 550, 600, 660, 700, 720, 800}. The shell
   // had drifted into 540, 560, 620, 650, 670, 680, 690, 710 and 740 as well —
@@ -118,5 +149,33 @@ describe('weights are a closed set, not one-offs', () => {
 describe('the shell titles use the scale', () => {
   it('.main-title is a step, not a literal', () => {
     expect(rule(layout, '.main-title')).toMatch(/font-size:\s*var\(--fs-/);
+  });
+});
+describe('ordinary shell metadata is tiny, not micro', () => {
+  // The scale reserves `--fs-micro` for "uppercase kickers and badges only"
+  // (tokens.css §3.3). Six shell rules were using it for lowercase metadata a
+  // reader scans — the project path, the context meter's label, the provider
+  // name, the tab strip's status note, the transcript footer and the empty rail
+  // — so the quietest text in the chrome sat on the 10px floor instead of the
+  // 11px metadata step. Kickers (`.head-activity`, `.session-group-label`),
+  // badges (`.badge`, `.session-unread`, `.tab-count`) and keycaps stay micro.
+  const rail = read('rail.css');
+
+  it.each([
+    ['layout.css', layout, '.path-hint'],
+    ['layout.css', layout, '.side-meter-top'],
+    ['layout.css', layout, '.settings-row .provider'],
+    ['layout.css', layout, '.tab-note'],
+    ['layout.css', layout, '.transcript-foot'],
+    ['rail.css', rail, '.project-rail-empty'],
+  ])('%s %s uses --fs-tiny', (_file, css, selector) => {
+    expect(rule(css, selector)).toMatch(/font-size:\s*var\(--fs-tiny\)/);
+  });
+
+  it('leaves the uppercase kickers and badges on the micro step', () => {
+    expect(rule(layout, '.head-activity')).toMatch(/font-size:\s*var\(--fs-micro\)/);
+    expect(rule(layout, '.session-group-label')).toMatch(/font-size:\s*var\(--fs-micro\)/);
+    expect(rule(layout, '.session-unread')).toMatch(/font-size:\s*var\(--fs-micro\)/);
+    expect(rule(rail, '.project-rail-avatar')).toMatch(/font-size:\s*var\(--fs-micro\)/);
   });
 });

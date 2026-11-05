@@ -65,8 +65,8 @@
 # Exit codes:
 #   0  updated, and the service is serving the new binary
 #   1  nothing was changed (bad argument, dirty tree, build failed, no unit)
-#   2  installed, but the service did not come back - install.sh prints the
-#      checklist, and `karucode.old` is the previous binary
+#   2  start/health failed; install.sh restored the previous unit and binary,
+#      restarted a previously active service, and left `karucode.old` for recovery
 #   3  --check only: the checkout is behind its upstream (nothing changed)
 
 set -eu
@@ -191,7 +191,8 @@ Source:
                         (leaves a detached HEAD; `git switch -` undoes it)
   --no-pull             build the working tree as it is; no fetch, no pull
   --no-fetch            with --check: do not contact the remote, use what is local
-  --allow-dirty         permit modified tracked files (they get built and shipped)
+  --allow-dirty         permit modified tracked files; untracked build inputs
+                        are still refused unless committed or ignored
 
 Build:
   --skip-build          use the binary already in target/release instead of
@@ -563,6 +564,17 @@ root_write() {
 # second run: it re-executes the same script with the same arguments and
 # KARUCODE_DETACHED=1, which is what stops decide_detach() from forking forever
 # and lets the child report its real exit code back through $STATUS.
+job_status() {
+    _status_file="$1/status"
+    [ -f "$_status_file" ] && [ -r "$_status_file" ] || return 1
+    _status_value="$(cat "$_status_file" 2>/dev/null)" || return 1
+    case "$_status_value" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$_status_value" -le 255 ] 2>/dev/null || return 1
+    printf '%s\n' "$_status_value"
+}
+
 detach_run() {
     root_mkdir "$JOB_DIR" || die "cannot create the job directory ${JOB_DIR}"
     # A record of what was asked for, so --follow can name it later.
@@ -627,11 +639,16 @@ detach_run() {
     done
     trap - HUP
 
-    _child=0
-    [ -f "${JOB_DIR}/status" ] && _child="$(cat "${JOB_DIR}/status" 2>/dev/null || printf 0)"
-    case "$_child" in
-        ''|*[!0-9]*) _child=0 ;;
-    esac
+    # Missing or malformed status is not success. The child might have been
+    # killed during the switch, so fail closed and point at the log for recovery.
+    if ! _child="$(job_status "$JOB_DIR")"; then
+        root_readable "${JOB_DIR}/log"
+        printf '\nupdate.sh: error: the detached run ended without a valid exit status at %s/status\n' \
+            "$JOB_DIR" >&2
+        printf 'Do not assume the service was updated; inspect %s/log before retrying.\n' \
+            "$JOB_DIR" >&2
+        exit 1
+    fi
 
     # Now that the run is over, let the operator read its own output.
     root_readable "${JOB_DIR}/log"
@@ -679,13 +696,18 @@ It was written by an elevated run. Read it with:
     sudo tail -f ${_dir}/log"
     fi
     if [ -f "${_dir}/status" ]; then
-        info "job already finished (status $(cat "${_dir}/status")):"
+        if ! _status="$(job_status "$_dir")"; then
+            die "the job has a malformed exit status at ${_dir}/status; do not assume it succeeded"
+        fi
+        info "job already finished (status ${_status}):"
         cat "${_dir}/log"
         return 0
     fi
     _pid="$(cat "${_dir}/pid" 2>/dev/null || true)"
     if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
         info "following ${_dir}/log (pid ${_pid}); Ctrl-C stops following, not the job"
+    elif [ -n "$_pid" ]; then
+        die "the detached run (pid ${_pid}) ended without a status at ${_dir}/status; do not assume it succeeded"
     else
         info "following ${_dir}/log"
     fi
@@ -1088,9 +1110,19 @@ if [ "$IS_REPO" -eq 1 ]; then
     # commit the checkout is on, and whether it is dirty, cannot change them, so
     # asking about it would only block a switch for an irrelevant reason.
     dirty_count="$(git_ status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')"
+    # target/, web/dist and editor debris are deliberately ignored. A new source
+    # file is not: otherwise a successful local build can embed bytes that are
+    # absent from the commit and cannot be reproduced from a clean checkout.
+    # --allow-dirty covers edits to tracked files, not unknown build inputs.
+    untracked_inputs="$(git_ ls-files --others --exclude-standard 2>/dev/null || true)"
     # --check only compares HEAD with its upstream; a dirty tree does not stop
     # that question from having an answer, so the refusal lives further down.
     if [ "$CHECK" -eq 0 ] && [ "$FROM_STAGE" -eq 0 ]; then
+        if [ -n "$untracked_inputs" ]; then
+            printf 'update.sh: error: untracked, non-ignored build inputs in %s:\n' "$SOURCE" >&2
+            printf '%s\n' "$untracked_inputs" | sed 's/^/    /' >&2
+            die "commit or ignore these files; --allow-dirty does not permit unknown build inputs"
+        fi
         if [ "$dirty_count" != "0" ] && [ "$ALLOW_DIRTY" -eq 0 ]; then
             printf 'update.sh: error: %s tracked file(s) are modified in %s:\n' "$dirty_count" "$SOURCE" >&2
             git_ status --short --untracked-files=no | sed 's/^/    /' >&2
@@ -1319,39 +1351,59 @@ elif [ ! -f "$db_path" ]; then
 else
     sqlite_bin="$(command -v sqlite3 2>/dev/null || true)"
     if [ -z "$sqlite_bin" ]; then
-        warn "sqlite3 is not installed, so the database was NOT snapshotted."
-        warn "Back it up by hand before a schema migration, or install sqlite3."
+        die "sqlite3 is required for the pre-upgrade database snapshot, but is not installed.
+Install sqlite3, or pass --no-backup to make the deliberate no-snapshot choice."
+    fi
+    if [ -z "$BACKUP_DIR" ]; then
+        BACKUP_DIR="${DATA_DIR}/backups"
+    fi
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    snapshot="${BACKUP_DIR}/pre-update-${stamp}.db"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "would snapshot ${db_path} to ${snapshot} (directory 0700, file 0600)"
     else
-        if [ -z "$BACKUP_DIR" ]; then
-            BACKUP_DIR="${DATA_DIR}/backups"
-        fi
-        stamp="$(date +%Y%m%d-%H%M%S)"
-        snapshot="${BACKUP_DIR}/pre-update-${stamp}.db"
-        if [ "$DRY_RUN" -eq 1 ]; then
-            info "would snapshot ${db_path} to ${snapshot}"
-        else
-            info "snapshotting ${db_path} to ${snapshot}"
-            # Whose job is it to create the backup dir? Root hands it to the
-            # service user; anyone else may just create it themselves when they
-            # own the data dir, and only reaches for sudo when they do not.
-            if [ ! -d "$BACKUP_DIR" ]; then
-                if [ "$IS_ROOT" -eq 1 ]; then
-                    install -d -m 0700 -o "$SVC_USER" -g "$SVC_GROUP" "$BACKUP_DIR" \
-                        || die "could not create ${BACKUP_DIR}"
-                elif ! mkdir -p "$BACKUP_DIR" 2>/dev/null; then
-                    die "could not create ${BACKUP_DIR}; pass --backup-dir to put the
-snapshot somewhere you can write, or --no-backup to skip it."
-                fi
-                chmod 0700 "$BACKUP_DIR" 2>/dev/null || true
+        info "snapshotting ${db_path} to ${snapshot}"
+        # A database snapshot contains the provider credential as well as all
+        # sessions. Existing directories are checked just as strictly as new
+        # ones; creation umask and chmod alone are not verification.
+        if [ ! -d "$BACKUP_DIR" ]; then
+            if [ "$IS_ROOT" -eq 1 ]; then
+                install -d -m 0700 -o "$SVC_USER" -g "$SVC_GROUP" "$BACKUP_DIR" \
+                    || die "could not create ${BACKUP_DIR}"
+            else
+                ( umask 077; mkdir -p "$BACKUP_DIR" ) 2>/dev/null \
+                    || die "could not create ${BACKUP_DIR}; pass an accessible --backup-dir or --no-backup"
             fi
-            escaped="$(printf '%s' "$snapshot" | sed "s/'/''/g")"
-            if ! as_data_owner "$sqlite_bin" "$db_path" "VACUUM INTO '${escaped}'"; then
-                die "the database snapshot failed (${snapshot}); nothing was installed.
+        fi
+        chmod 0700 "$BACKUP_DIR" 2>/dev/null \
+            || die "could not set mode 0700 on the backup directory ${BACKUP_DIR}"
+        _dir_mode="$(stat -c %a "$BACKUP_DIR" 2>/dev/null)" \
+            || die "could not verify the backup directory mode: ${BACKUP_DIR}"
+        [ "$_dir_mode" = "700" ] \
+            || die "the backup directory ${BACKUP_DIR} has mode ${_dir_mode}, not 0700"
+
+        rm -f "$snapshot" 2>/dev/null || true
+        escaped="$(printf '%s' "$snapshot" | sed "s/'/''/g")"
+        if ! ( umask 077; as_data_owner "$sqlite_bin" "$db_path" "VACUUM INTO '${escaped}'" ); then
+            rm -f "$snapshot" 2>/dev/null || true
+            die "the database snapshot failed (${snapshot}); nothing was installed.
 Pass --no-backup to update without one, but know that a schema migration would
 then have no copy to fall back to."
-            fi
-            info "snapshot written: ${snapshot}"
         fi
+        [ -f "$snapshot" ] || die "sqlite3 reported success but ${snapshot} does not exist"
+        if ! chmod 0600 "$snapshot" 2>/dev/null; then
+            rm -f "$snapshot" 2>/dev/null || true
+            die "could not set mode 0600 on the snapshot ${snapshot}; it was removed"
+        fi
+        if ! _file_mode="$(stat -c %a "$snapshot" 2>/dev/null)"; then
+            rm -f "$snapshot" 2>/dev/null || true
+            die "could not verify the snapshot mode: ${snapshot}; it was removed"
+        fi
+        if [ "$_file_mode" != "600" ]; then
+            rm -f "$snapshot" 2>/dev/null || true
+            die "the snapshot ${snapshot} had mode ${_file_mode}, not 0600; it was removed"
+        fi
+        info "snapshot written: ${snapshot} (directory 0700, file 0600)"
     fi
 fi
 
@@ -1400,9 +1452,9 @@ set -e
 case "$rc" in
     0) ;;
     2)
-        printf '\nupdate.sh: the new binary is installed, but the service did not stay up.\n' >&2
-        printf 'Roll back with:\n    sudo cp -p %s.old %s && sudo systemctl restart %s\n' \
-            "$installed_bin" "$installed_bin" "$SERVICE" >&2
+        printf '\nupdate.sh: the service did not stay up or failed its HTTP health check.\n' >&2
+        printf 'install.sh attempted to restore the previous unit and binary and restart the previous service; check its warnings.\n' >&2
+        printf 'The previous binary remains at %s.old for manual recovery.\n' "$installed_bin" >&2
         exit 2
         ;;
     *)
@@ -1425,8 +1477,8 @@ printf '\n'
 info "${served:-karucode (no --version output)} is installed at ${installed_bin}"
 printf 'Service: %s\n' "$("$SYSTEMCTL" is-active "$SERVICE" 2>/dev/null || true)"
 printf 'Logs:    journalctl -u %s -f\n' "$SERVICE"
-printf 'Roll back: sudo cp -p %s.old %s && sudo systemctl restart %s\n' \
-    "$installed_bin" "$installed_bin" "$SERVICE"
+printf 'Roll back: stop %s; install %s.old to %s.rollback; mv it onto %s; start %s\n' \
+    "$SERVICE" "$installed_bin" "$installed_bin" "$installed_bin" "$SERVICE"
 if [ "$KARUCODE_DETACHED" = "1" ]; then
     printf 'This run log: %s/log\n' "${JOB_DIR:-$(job_dir_for)}"
 fi

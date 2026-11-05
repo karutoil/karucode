@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { DEFAULT_THEME } from './builtins';
+import { BUILTIN_THEMES, DEFAULT_THEME, modePreset } from './builtins';
+import { contrastRatio, isDarkColor } from './color';
 import {
   activeTheme,
   activeThemeId,
@@ -210,6 +211,117 @@ describe('editing a draft', () => {
 
   it('reports the text/background contrast for the studio footer', () => {
     expect(themeContrast.value).toBeGreaterThan(4.5);
+  });
+
+  it('reports the contrast of the applied palette, not of the raw hex pair', () => {
+    /* The palette resolver nudges primary text until it clears 11:1 on every
+     * surface, so `colors.text`/`colors.bg` can describe a pair that is not on
+     * screen. The footer used to print that pair's ratio, which disagreed with
+     * the drawer it sits in. */
+    selectTheme('paper');
+    updateColors({ text: '#e8e4dd' });
+    const theme = activeTheme.value;
+    expect(contrastRatio(theme.colors.text, theme.colors.bg)).toBeLessThan(4.5);
+    expect(themeContrast.value).toBeGreaterThanOrEqual(11);
+    expect(themeContrast.value).toBeCloseTo(contrastRatio(theme.palette.text, theme.palette.bg), 6);
+  });
+
+  it('still warns when the applied pair really is illegible', () => {
+    // A hostile palette: the resolver can only walk toward an ink that is itself
+    // the canvas, so this one stays broken and the footer has to say so.
+    selectTheme('paper');
+    updateColors({ bg: '#000000', text: '#000000' });
+    expect(themeContrast.value).toBeLessThan(4.5);
+  });
+});
+
+describe('palette and mode belong together', () => {
+  /**
+   * The palette `mode` must produce: the mode's own preset surfaces plus the two
+   * colours that carry the theme's identity (the accent, and the syntax keyword
+   * that follows it). `modePreset()` alone is the *stock* Daybreak/Ember palette.
+   */
+  function paletteFor(mode: 'dark' | 'light', accent: string) {
+    return { ...modePreset(mode).colors, accent, syntaxKeyword: accent };
+  }
+  /** The floors `resolvePalette` promises, checked on whatever it just returned. */
+  function expectLegible(id: string, mode: string): void {
+    const theme = activeTheme.value;
+    expect(theme.mode, id).toBe(mode as typeof theme.mode);
+    // The canvas the palette paints has to belong to the mode it declares. This is
+    // the invariant "Ember -> Light -> Reset colours" used to break: it restored
+    // Ember's near-black surfaces while `data-mode` said light, and the drawer
+    // (text, muted labels, borders, chips) fell to 6 of 92 text nodes below AA.
+    expect(isDarkColor(theme.colors.bg), `${id}: canvas lightness vs mode`).toBe(mode === 'dark');
+    const p = theme.palette;
+    const surfaces = [p.bg, p.rail, p.sidebar, p.inspector, p.surface, p.raised, p.hover];
+    for (const surface of surfaces) {
+      expect(contrastRatio(p.text, surface), `${id}: text on ${surface}`).toBeGreaterThanOrEqual(11);
+      expect(contrastRatio(p.textSecondary, surface), `${id}: text-secondary on ${surface}`)
+        .toBeGreaterThanOrEqual(7);
+      expect(contrastRatio(p.muted, surface), `${id}: muted on ${surface}`)
+        .toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(p.faint, surface), `${id}: faint on ${surface}`)
+        .toBeGreaterThanOrEqual(3);
+    }
+    for (const [label, ink] of [
+      ['accent-text', p.accentText],
+      ['warn', p.warn],
+    ] as const) {
+      expect(contrastRatio(ink, p.surface), `${id}: ${label} on surface`).toBeGreaterThanOrEqual(4.5);
+    }
+    for (const [label, ink, fill] of [
+      ['success', p.success, p.successBg],
+      ['danger', p.danger, p.dangerBg],
+    ] as const) {
+      expect(contrastRatio(ink, fill), `${id}: ${label}`).toBeGreaterThanOrEqual(4.5);
+    }
+    expect(contrastRatio(p.onAccent, p.accentText), `${id}: ink on the accent fill`)
+      .toBeGreaterThanOrEqual(4.5);
+  }
+
+  it.each(BUILTIN_THEMES.map((theme) => theme.id))(
+    '%s: flipping the mode keeps a legible palette for the new mode',
+    (id) => {
+      selectTheme(id);
+      const before = activeTheme.value.mode;
+      const next = before === 'dark' ? 'light' : 'dark';
+
+      setThemeMode(next);
+
+      expect(activeTheme.value.colors).toEqual(paletteFor(next, getTheme(id).colors.accent));
+      // The accent is the identity colour and survives the flip.
+      expect(activeTheme.value.colors.accent).toBe(getTheme(id).colors.accent);
+      expectLegible(`${id} flipped to ${next}`, next);
+    },
+  );
+
+  it.each(BUILTIN_THEMES.map((theme) => theme.id))(
+    '%s: Reset colours after a flip restores that mode’s palette, not the base’s dark one',
+    (id) => {
+      selectTheme(id);
+      const base = getTheme(id);
+      const next = base.mode === 'dark' ? 'light' : 'dark';
+      setThemeMode(next);
+      updateColors({ bg: '#123456', surface: '#654321' });
+
+      resetColors();
+
+      expect(activeTheme.value.mode).toBe(next);
+      expect(activeTheme.value.colors).toEqual(paletteFor(next, base.colors.accent));
+      expect(activeTheme.value.colors.accent).toBe(base.colors.accent);
+      expectLegible(`${id} reset in ${next}`, next);
+      // The draft is still a draft: reset restores colours, not the save state.
+      expect(draftEdited.value).toBe(true);
+    },
+  );
+
+  it('resets to the base palette verbatim while the mode is unchanged', () => {
+    // The mode-aware branch must not touch the ordinary case.
+    selectTheme('forest');
+    updateColors({ bg: '#000000', accent: '#ff0000' });
+    resetColors();
+    expect(activeTheme.value.colors).toEqual(getTheme('forest').colors);
   });
 });
 

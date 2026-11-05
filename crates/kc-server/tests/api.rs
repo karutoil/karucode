@@ -317,6 +317,62 @@ async fn mission_draft_obeys_read_only_and_ask_approval() {
 }
 
 #[tokio::test]
+async fn mission_list_is_bounded_and_pages_without_losing_detail() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let project = h.get("/api/projects").await.json()["projects"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for title in ["One", "Two", "Three"] {
+        let created = h
+            .post("/api/missions", json!({"project_id":project,"title":title}))
+            .await;
+        assert_eq!(created.status, StatusCode::OK, "{}", created.text());
+    }
+
+    let first = h
+        .get(&format!("/api/missions?project={project}&offset=0&limit=2"))
+        .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    let first = first.json();
+    assert_eq!(first["limit"], 2);
+    assert_eq!(first["offset"], 0);
+    assert_eq!(first["has_more"], true);
+    assert_eq!(first["next_offset"], 2);
+    assert_eq!(first["missions"].as_array().unwrap().len(), 2);
+    for mission in first["missions"].as_array().unwrap() {
+        assert!(mission["sessions"].is_array());
+        assert!(mission["tasks"].is_array());
+        assert!(mission.get("schedule_state").is_some());
+        assert!(mission.get("provider_attempts").is_some());
+    }
+
+    let second = h
+        .get(&format!("/api/missions?project={project}&offset=2&limit=2"))
+        .await
+        .json();
+    assert_eq!(second["missions"].as_array().unwrap().len(), 1);
+    assert_eq!(second["has_more"], false);
+    assert!(second["next_offset"].is_null());
+    let ids = first["missions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(second["missions"].as_array().unwrap())
+        .map(|mission| mission["id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(ids.len(), 3, "pages overlap or drop a mission");
+
+    for limit in [0, 101] {
+        let rejected = h
+            .get(&format!("/api/missions?project={project}&limit={limit}"))
+            .await;
+        assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
+        assert!(rejected.error_message().contains("limit"));
+    }
+}
+
+#[tokio::test]
 async fn missions_start_real_runs_and_replay_without_duplicates() {
     let h = HarnessBuilder::new(vec![text("mission complete")])
         .build()
@@ -2859,7 +2915,10 @@ async fn git_manager_stages_commits_branches_and_history() {
         untracked_diff.text()
     );
     assert!(
-        untracked_diff.json()["diff"].as_str().unwrap().contains("+new"),
+        untracked_diff.json()["diff"]
+            .as_str()
+            .unwrap()
+            .contains("+new"),
         "an untracked file's content is shown as added"
     );
     let staged = h
@@ -2906,9 +2965,7 @@ async fn git_manager_stages_commits_branches_and_history() {
     );
 
     // ---- commit ----
-    let empty_message = h
-        .post("/api/git/commit", json!({ "message": "   " }))
-        .await;
+    let empty_message = h.post("/api/git/commit", json!({ "message": "   " })).await;
     assert_eq!(empty_message.status, StatusCode::BAD_REQUEST);
     let nothing_staged = h
         .post("/api/git/commit", json!({ "message": "nope" }))
@@ -2966,9 +3023,7 @@ async fn git_manager_stages_commits_branches_and_history() {
         .iter()
         .any(|branch| branch["name"] == "feat/x" && branch["current"] == true));
 
-    let switched = h
-        .post("/api/git/checkout", json!({ "name": "main" }))
-        .await;
+    let switched = h.post("/api/git/checkout", json!({ "name": "main" })).await;
     assert_eq!(switched.status, StatusCode::OK, "{}", switched.text());
     assert_eq!(switched.json()["status"]["branch"], "main");
 
@@ -3017,7 +3072,9 @@ async fn git_manager_stages_commits_branches_and_history() {
 
     // ---- discard: the destructive verb, gated by `confirm` ----
     std::fs::write(ws.join("a.txt"), "scribble\n").unwrap();
-    let unconfirmed = h.post("/api/git/discard", json!({ "paths": ["a.txt"] })).await;
+    let unconfirmed = h
+        .post("/api/git/discard", json!({ "paths": ["a.txt"] }))
+        .await;
     assert_eq!(unconfirmed.status, StatusCode::BAD_REQUEST);
     assert!(unconfirmed.error_message().contains("confirm"));
     assert_eq!(
@@ -3054,14 +3111,20 @@ async fn git_manager_stages_commits_branches_and_history() {
 
     // The staged side is discarded back to HEAD, index included.
     std::fs::write(ws.join("a.txt"), "three\n").unwrap();
-    h.post("/api/git/stage", json!({ "paths": ["a.txt"] })).await;
+    h.post("/api/git/stage", json!({ "paths": ["a.txt"] }))
+        .await;
     let back_to_head = h
         .post(
             "/api/git/discard",
             json!({ "paths": ["a.txt"], "staged": true, "confirm": true }),
         )
         .await;
-    assert_eq!(back_to_head.status, StatusCode::OK, "{}", back_to_head.text());
+    assert_eq!(
+        back_to_head.status,
+        StatusCode::OK,
+        "{}",
+        back_to_head.text()
+    );
     assert_eq!(
         std::fs::read_to_string(ws.join("a.txt")).unwrap(),
         "one\ntwo\n"
@@ -3080,7 +3143,10 @@ async fn git_manager_stages_commits_branches_and_history() {
         )
         .await;
     assert_eq!(push.status, StatusCode::OK, "{}", push.text());
-    assert!(push.json()["status"]["files"].as_array().unwrap().is_empty());
+    assert!(push.json()["status"]["files"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     let stash_list = h.get("/api/git/stash").await.json();
     let stashes = stash_list["stashes"].as_array().unwrap();
     assert_eq!(stashes.len(), 1);
@@ -3107,7 +3173,10 @@ async fn git_manager_stages_commits_branches_and_history() {
 
     h.post("/api/git/stash", json!({ "action": "push" })).await;
     let dropped = h
-        .post("/api/git/stash", json!({ "action": "drop", "confirm": true }))
+        .post(
+            "/api/git/stash",
+            json!({ "action": "drop", "confirm": true }),
+        )
         .await;
     assert_eq!(dropped.status, StatusCode::OK, "{}", dropped.text());
     assert!(h.get("/api/git/stash").await.json()["stashes"]
@@ -5755,11 +5824,16 @@ async fn control_chat_dispatch_is_approval_aware_and_idempotent() {
     assert_eq!(first["project_id"], Value::Null);
     let workspace = first["workspace"].as_str().unwrap();
     assert!(workspace.contains("control-workspaces"), "{workspace}");
-    assert!(!workspace.contains(&project), "must not live in a project: {workspace}");
+    assert!(
+        !workspace.contains(&project),
+        "must not live in a project: {workspace}"
+    );
     assert_ne!(workspace, second["workspace"].as_str().unwrap());
     let listed = h.get("/api/control/sessions").await.json();
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 2, "{listed}");
-    assert!(listed["sessions"].as_array().unwrap()
+    assert!(listed["sessions"]
+        .as_array()
+        .unwrap()
         .iter()
         .all(|session| session["project_id"].is_null()));
     let central = first["session_id"].as_str().unwrap();
@@ -5851,8 +5925,14 @@ async fn control_chat_can_list_projects_before_dispatching() {
     h.wait_until_idle(&central).await;
     let detail = h.get(&format!("/api/sessions/{central}")).await;
     let body = detail.text();
-    assert!(body.contains(&id), "tool output must name the real project id: {body}");
-    assert!(body.contains(&name), "tool output must name the project: {body}");
+    assert!(
+        body.contains(&id),
+        "tool output must name the real project id: {body}"
+    );
+    assert!(
+        body.contains(&name),
+        "tool output must name the project: {body}"
+    );
 }
 
 #[tokio::test]
@@ -5863,7 +5943,10 @@ async fn control_chat_audits_and_guides_other_sessions() {
         .unwrap()
         .to_owned();
     let target = h
-        .post("/api/sessions", json!({"project":project,"title":"Audited session"}))
+        .post(
+            "/api/sessions",
+            json!({"project":project,"title":"Audited session"}),
+        )
         .await
         .json()["id"]
         .as_str()
@@ -5879,14 +5962,25 @@ async fn control_chat_audits_and_guides_other_sessions() {
     h.factory.push(tool_call("control_list_sessions", "{}"));
     h.factory.push(text("Listed."));
     assert_eq!(
-        h.post(&send, json!({"content":"What is running?"})).await.status,
+        h.post(&send, json!({"content":"What is running?"}))
+            .await
+            .status,
         StatusCode::ACCEPTED
     );
     h.wait_until_idle(&central).await;
     // The tool result is what the model saw on its next turn.
-    let seen = h.factory.prompts().into_iter().flatten().collect::<Vec<_>>().join("\n");
+    let seen = h
+        .factory
+        .prompts()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(seen.contains("Audited session"), "list output: {seen}");
-    assert!(seen.contains(&target), "list must name the session id: {seen}");
+    assert!(
+        seen.contains(&target),
+        "list must name the session id: {seen}"
+    );
 
     h.factory.push(tool_call(
         "control_read_session",
@@ -5894,11 +5988,19 @@ async fn control_chat_audits_and_guides_other_sessions() {
     ));
     h.factory.push(text("Read it."));
     assert_eq!(
-        h.post(&send, json!({"content":"Read that session"})).await.status,
+        h.post(&send, json!({"content":"Read that session"}))
+            .await
+            .status,
         StatusCode::ACCEPTED
     );
     h.wait_until_idle(&central).await;
-    let seen = h.factory.prompts().into_iter().flatten().collect::<Vec<_>>().join("\n");
+    let seen = h
+        .factory
+        .prompts()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(seen.contains("Audited session"), "read output: {seen}");
     assert!(seen.contains("messages"), "read output: {seen}");
 
@@ -5911,7 +6013,9 @@ async fn control_chat_audits_and_guides_other_sessions() {
     // The next call belongs to the target session's new run.
     h.factory.push(text("worker done"));
     assert_eq!(
-        h.post(&send, json!({"content":"Ask it to continue"})).await.status,
+        h.post(&send, json!({"content":"Ask it to continue"}))
+            .await
+            .status,
         StatusCode::ACCEPTED
     );
     let approval = h.wait_for_approval(&central).await;
@@ -5937,7 +6041,10 @@ async fn control_tools_refuse_ordinary_sessions_and_self_messaging() {
         .unwrap()
         .to_owned();
     let other = h
-        .post("/api/sessions", json!({"project":project,"title":"Ordinary"}))
+        .post(
+            "/api/sessions",
+            json!({"project":project,"title":"Ordinary"}),
+        )
         .await
         .json()["id"]
         .as_str()
@@ -6070,11 +6177,18 @@ async fn chat_artifacts_are_published_once_and_served_as_an_isolated_page() {
     assert_eq!(first.status, StatusCode::CREATED, "{}", first.text());
     let body = first.json();
     let id = body["id"].as_str().expect("an id").to_string();
+    let frame_url = body["url"]
+        .as_str()
+        .expect("a scoped frame URL")
+        .to_string();
     assert_eq!(id.len(), 32, "128 bits of hash, hex: {id}");
     assert!(id
         .chars()
         .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-    assert_eq!(body["url"], json!(format!("/api/artifacts/{id}")));
+    assert!(frame_url.starts_with(&format!("/api/artifacts/{id}?capability=")));
+    let capability = frame_url.split("capability=").nth(1).unwrap();
+    assert_eq!(capability.len(), 32, "128 random bits, hex");
+    assert!(!frame_url.contains("token="));
     assert_eq!(body["theme"], "dark");
 
     let again = h
@@ -6085,7 +6199,10 @@ async fn chat_artifacts_are_published_once_and_served_as_an_isolated_page() {
     // `theme` only decides the wrapper's own colours, and a complete document has
     // no wrapper - so the same page in either theme is one document.
     let light = h
-        .post("/api/artifacts", json!({ "html": source, "theme": "light" }))
+        .post(
+            "/api/artifacts",
+            json!({ "html": source, "theme": "light" }),
+        )
         .await;
     assert_eq!(
         light.json()["id"],
@@ -6094,18 +6211,25 @@ async fn chat_artifacts_are_published_once_and_served_as_an_isolated_page() {
     );
     // A fragment is wrapped, so its two themes really are two documents.
     let fragment_dark = h
-        .post("/api/artifacts", json!({ "html": "<div>frag</div>", "theme": "dark" }))
+        .post(
+            "/api/artifacts",
+            json!({ "html": "<div>frag</div>", "theme": "dark" }),
+        )
         .await;
     let fragment_light = h
-        .post("/api/artifacts", json!({ "html": "<div>frag</div>", "theme": "light" }))
+        .post(
+            "/api/artifacts",
+            json!({ "html": "<div>frag</div>", "theme": "light" }),
+        )
         .await;
     assert_ne!(fragment_dark.json()["id"], fragment_light.json()["id"]);
 
-    let document = h.get(&format!("/api/artifacts/{id}")).await;
+    let document = h.get(&frame_url).await;
     assert_eq!(document.status, StatusCode::OK);
     assert_eq!(document.headers["content-type"], "text/html; charset=utf-8");
     assert_eq!(document.headers["x-content-type-options"], "nosniff");
     assert_eq!(document.headers["cache-control"], "no-store");
+    assert_eq!(document.headers["referrer-policy"], "no-referrer");
     assert_eq!(
         document.headers["cross-origin-resource-policy"],
         "cross-origin"
@@ -6114,16 +6238,36 @@ async fn chat_artifacts_are_published_once_and_served_as_an_isolated_page() {
         document.headers.get("x-frame-options").is_none(),
         "the transcript's own frame has to be able to embed this"
     );
-    let csp = document.headers["content-security-policy"].to_str().unwrap();
+    let csp = document.headers["content-security-policy"]
+        .to_str()
+        .unwrap();
     assert!(csp.starts_with("sandbox allow-scripts"), "{csp}");
-    assert!(!csp.contains("allow-same-origin"), "that would share the app's origin");
+    assert!(
+        !csp.contains("allow-same-origin"),
+        "that would share the app's origin"
+    );
     assert!(csp.contains("connect-src 'none'"), "{csp}");
-    assert!(!csp.contains("*"), "a prompt-injected mock must not be able to beacon out");
+    assert!(
+        !csp.contains("*"),
+        "a prompt-injected mock must not be able to beacon out"
+    );
     let html = document.text();
     assert!(html.contains("<h1>Mock</h1>"), "{html}");
     assert!(
         html.contains("karucode-artifact"),
         "the document reports its own height"
+    );
+
+    // The id alone is not authority, even in a deployment without a master token.
+    assert_eq!(
+        h.get(&format!("/api/artifacts/{id}")).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        h.get(&format!("/api/artifacts/{id}?capability=wrong"))
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
     );
 
     // Anything the client cannot render is a 404 it answers by re-posting.
@@ -6149,9 +6293,9 @@ async fn chat_artifacts_are_published_once_and_served_as_an_isolated_page() {
     assert_eq!(missing.status, StatusCode::BAD_REQUEST);
 }
 
-/// An artifact frame is a browser navigation: it cannot carry a bearer header.
+/// Artifact frames receive a scoped read capability, never the master bearer.
 #[tokio::test]
-async fn artifact_frames_take_the_query_token_an_iframe_cannot_send() {
+async fn artifact_frames_use_a_capability_instead_of_the_master_query_token() {
     let token = "0123456789abcdef0123456789abcdef";
     let h = HarnessBuilder::new(Vec::new())
         .auth_token(token)
@@ -6170,40 +6314,72 @@ async fn artifact_frames_take_the_query_token_an_iframe_cannot_send() {
         )
         .await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.text());
-    let id = created.json()["id"].as_str().unwrap().to_string();
-    let frame = format!("/api/artifacts/{id}");
+    let created = created.json();
+    let id = created["id"].as_str().unwrap().to_string();
+    let frame = created["url"].as_str().unwrap().to_string();
+    let capability = frame.split("capability=").nth(1).unwrap();
+    assert!(
+        !frame.contains(token),
+        "the master must not enter the frame URL"
+    );
 
+    assert_eq!(h.get(&frame).await.status, StatusCode::OK);
     assert_eq!(
-        h.get(&frame).await.status,
-        StatusCode::UNAUTHORIZED,
-        "the document is still behind auth"
-    );
-    assert_eq!(
-        h.get(&format!("{frame}?token={token}")).await.status,
-        StatusCode::OK,
-        "an iframe cannot set a header, so this one path takes the token in the URL"
-    );
-    assert_eq!(
-        h.get(&format!("{frame}?token=wrong")).await.status,
+        h.get(&format!("/api/artifacts/{id}")).await.status,
         StatusCode::UNAUTHORIZED
     );
-    // Narrow on purpose: the exemption is a well-formed artifact path, nothing else.
     assert_eq!(
-        h.get(&format!("/api/artifacts/not-an-id?token={token}"))
+        h.get(&format!("/api/artifacts/{id}?token={token}"))
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED,
+        "the master query token is not an artifact grant"
+    );
+    assert_eq!(
+        h.get(&format!("/api/artifacts/{id}?capability=wrong"))
             .await
             .status,
         StatusCode::UNAUTHORIZED
     );
+
+    // One artifact's grant authorises neither another artifact nor the API.
+    let other = h
+        .send_with(
+            Method::POST,
+            "/api/artifacts",
+            Some(json!({ "html": "<p>other</p>" })),
+            &[("authorization", &bearer)],
+            true,
+        )
+        .await
+        .json();
+    let other_id = other["id"].as_str().unwrap();
     assert_eq!(
-        h.get(&format!("/api/health?token={token}")).await.status,
+        h.get(&format!(
+            "/api/artifacts/{other_id}?capability={capability}"
+        ))
+        .await
+        .status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        h.get(&format!("/api/health?capability={capability}"))
+            .await
+            .status,
         StatusCode::UNAUTHORIZED,
-        "the query token did not become a general exemption"
+        "the artifact grant did not become a general exemption"
+    );
+    assert_eq!(
+        h.get(&format!("/api/artifacts/not-an-id?capability={capability}"))
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
     );
     // Publishing is a JSON POST with a header, so it keeps the header rule.
     let posted = h
         .send_with(
             Method::POST,
-            &format!("/api/artifacts?token={token}"),
+            &format!("/api/artifacts?capability={capability}"),
             Some(json!({ "html": source })),
             &[],
             true,

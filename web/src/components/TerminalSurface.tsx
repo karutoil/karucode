@@ -5,7 +5,7 @@ import { Terminal as XTerm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import type { Terminal } from '../api/types';
 import { toErrorMessage } from '../api/client';
-import { contrastRatio, mix, normalizeHex } from '../theme';
+import { activeTheme, contrastRatio, mix, normalizeHex } from '../theme';
 import * as terminalsState from '../state/terminals';
 import { TerminalSocket, type TerminalSocketStatus } from '../state/terminalSocket';
 import { RefreshIcon } from './icons';
@@ -23,7 +23,10 @@ import { RefreshIcon } from './icons';
  * keeps its emulator, FitAddon, canvas and listeners alive for the life of the
  * page - up to `terminals.max_terminals` (16) of them.
  */
-const instances = new Map<string, { term: XTerm; fit: FitAddon }>();
+const instances = new Map<
+  string,
+  { term: XTerm; fit: FitAddon; appearance: TerminalAppearance }
+>();
 
 /**
  * Release a terminal's emulator. Called when the terminal is closed, so closing
@@ -54,10 +57,15 @@ export function terminalInstanceCount(): number {
   return instances.size;
 }
 
-function getInstance(id: string): { term: XTerm; fit: FitAddon } {
+function getInstance(id: string): {
+  term: XTerm;
+  fit: FitAddon;
+  appearance: TerminalAppearance;
+} {
   const existing = instances.get(id);
   if (existing) return existing;
   const fit = new FitAddon();
+  const appearance = terminalAppearance();
   const term = new XTerm({
     // The server's replay is the source of truth for content, so the local
     // buffer only needs to be long enough to scroll a screenful or two of the
@@ -65,33 +73,20 @@ function getInstance(id: string): { term: XTerm; fit: FitAddon } {
     scrollback: 5000,
     cursorBlink: true,
     convertEol: false,
-    fontFamily:
-      'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
     // Read from the type scale so a density change moves the shell too.
-    fontSize: terminalFontSize(),
+    fontFamily: appearance.fontFamily,
+    fontSize: appearance.fontSize,
     lineHeight: 1.25,
-    theme: terminalTheme(),
+    theme: appearance.theme,
     allowProposedApi: true,
   });
   term.loadAddon(fit);
-  instances.set(id, { term, fit });
-  return { term, fit };
+  const instance = { term, fit, appearance };
+  instances.set(id, instance);
+  return instance;
 }
 
-/**
- * Colours for xterm, read from the live theme tokens.
- *
- * xterm draws to a canvas and cannot use CSS custom properties, so the values
- * are resolved once per surface. A theme change while the tab is open repaints
- * on the next mount; a live theme switch does not need to retint a shell.
- */
-/**
- * The cell size, from the type scale rather than a magic number.
- *
- * xterm measures glyphs in CSS pixels, so a density change has to reach it
- * explicitly. `--fs-body` is the 13px step the shell uses for prose, which keeps
- * a shell's text the same size as the app's.
- */
+/** The cell size, from the type scale rather than a magic number. */
 function terminalFontSize(): number {
   if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return 13;
   const value = window.getComputedStyle(document.documentElement).getPropertyValue('--fs-body').trim();
@@ -99,17 +94,58 @@ function terminalFontSize(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 13;
 }
 
-function terminalTheme(): Record<string, string> {
-  const read = (name: string, fallback: string): string => {
-    if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') {
-      return fallback;
-    }
-    const value = window
-      .getComputedStyle(document.documentElement)
-      .getPropertyValue(name)
-      .trim();
-    return value || fallback;
+const DEFAULT_FONT_FAMILY =
+  'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace';
+
+/** One live token, with the fallback the first paint would have used. */
+function readToken(name: string, fallback: string): string {
+  if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') {
+    return fallback;
+  }
+  const value = window.getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+/**
+ * The mono stack from the Theme studio, so choosing a code font retypes the
+ * shell with the rest of the app instead of leaving it on the default.
+ */
+function terminalFontFamily(): string {
+  return readToken('--font-mono', DEFAULT_FONT_FAMILY);
+}
+
+/** Everything xterm has to be told again when the theme changes. */
+interface TerminalAppearance {
+  fontSize: number;
+  fontFamily: string;
+  theme: Record<string, string>;
+}
+
+function terminalAppearance(): TerminalAppearance {
+  return {
+    fontSize: terminalFontSize(),
+    fontFamily: terminalFontFamily(),
+    theme: terminalTheme(),
   };
+}
+
+function sameTheme(a: Record<string, string>, b: Record<string, string>): boolean {
+  const keys = Object.keys(a);
+  return (
+    keys.length === Object.keys(b).length &&
+    keys.every((key) => Object.hasOwn(b, key) && a[key] === b[key])
+  );
+}
+
+/**
+ * Colours for xterm, read from the live theme tokens.
+ *
+ * xterm draws to a canvas and cannot use CSS custom properties, so the values
+ * are resolved whenever the theme changes and pushed back into the cached
+ * emulator's options (see the appearance effect in `TerminalSurface`).
+ */
+function terminalTheme(): Record<string, string> {
+  const read = (name: string, fallback: string): string => readToken(name, fallback);
   // The canvas xterm paints on is `.terminal-surface`'s `--bg-sunken`. Reading a
   // different token (`--surface-sunken`, which is a *line* tone) left the emulator
   // believing its background was one colour while the CSS painted another, so
@@ -170,15 +206,26 @@ function terminalTheme(): Record<string, string> {
   };
 }
 
-export function TerminalSurface({ terminal }: { terminal: Terminal }): JSX.Element {
+export function TerminalSurface({
+  terminal,
+  autoFocus = true,
+}: {
+  terminal: Terminal;
+  autoFocus?: boolean;
+}): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<TerminalSocket | null>(null);
   const [status, setStatus] = useState<TerminalSocketStatus>('connecting');
   const [detail, setDetail] = useState<string | null>(null);
   const [exited, setExited] = useState<number | null>(null);
   const [reconnectTick, setReconnectTick] = useState(0);
+  // Subscribing to the resolved theme is what makes a Theme studio edit reach a
+  // shell that is already running; the signal changes before `applyTheme()` has
+  // written the new custom properties, so the effect below reads them after.
+  const theme = activeTheme.value;
 
-  const { term, fit } = useMemo(() => getInstance(terminal.id), [terminal.id]);
+  const instance = useMemo(() => getInstance(terminal.id), [terminal.id]);
+  const { term, fit } = instance;
 
   // Let the tab strip release this emulator when the terminal is closed. The
   // disposer is registered from inside the lazily-loaded chunk so `state/terminals`
@@ -221,19 +268,59 @@ export function TerminalSurface({ terminal }: { terminal: Terminal }): JSX.Eleme
     const observer =
       typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
     observer?.observe(host);
-    // Focus follows the move: the surface the user just selected is the one
-    // that should take keystrokes, and a re-parent loses the focused node's
-    // place in the document.
-    try {
-      term.focus();
-    } catch {
-      // A hidden host cannot take focus; the observer retries the fit.
+    // Pointer selection and a programmatically opened surface still move into
+    // the shell. Keyboard activation is different: its focused tab owns the next
+    // Arrow key, so stealing focus during this keyed remount would make the
+    // second key go to the PTY instead of the tablist.
+    if (autoFocus) {
+      try {
+        term.focus();
+      } catch {
+        // A hidden host cannot take focus; the observer retries the fit.
+      }
     }
     return () => {
       window.cancelAnimationFrame(frame);
       observer?.disconnect();
     };
-  }, [term, fit]);
+  }, [term, fit, autoFocus]);
+
+  // Live theme, mode, mono stack and density.
+  //
+  // activeTheme also changes for rounding, transcript preferences, custom CSS
+  // and other settings which may not alter a single terminal token. Resolve the
+  // actual values first and retain them on the cached instance: only a real
+  // colour difference paints again, and only a real font metric difference
+  // writes font options and re-fits the grid (which still reaches onResize).
+  // The buffer, scrollback, cursor and websocket are untouched.
+  useEffect(() => {
+    const appearance = terminalAppearance();
+    const previous = instance.appearance;
+    const fontChanged =
+      appearance.fontSize !== previous.fontSize ||
+      appearance.fontFamily !== previous.fontFamily;
+    const colorsChanged = !sameTheme(appearance.theme, previous.theme);
+    if (!fontChanged && !colorsChanged) return;
+    instance.appearance = appearance;
+
+    if (colorsChanged) term.options.theme = appearance.theme;
+    if (fontChanged) {
+      term.options.fontSize = appearance.fontSize;
+      term.options.fontFamily = appearance.fontFamily;
+      try {
+        fit.fit();
+      } catch {
+        // A hidden element measures as zero; the observer retries the fit.
+      }
+    }
+    if (colorsChanged) {
+      try {
+        term.refresh(0, Math.max(0, term.rows - 1));
+      } catch {
+        // A disposed emulator has nothing to repaint.
+      }
+    }
+  }, [instance, term, fit, theme]);
 
   // Keep the tab's status in the shared store so the strip can draw a dot.
   useEffect(() => {

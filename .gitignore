@@ -65,5 +65,9 @@ Thumbs.db
 *.rej
 
 node_modules/
-# Generated screenshots from the browser-based design verification report.
-docs/internal/design-verify/screens/
+
+# Design explorations, captures, and raw browser-verification output are local
+# artifacts, not product source. The written verification report stays versioned.
+/docs/mockups/
+/docs/internal/design-verify/screens/
+/docs/internal/design-verify/appearance-matrix.json

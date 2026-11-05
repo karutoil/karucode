@@ -14,7 +14,7 @@ use kc_core::approval::ApprovalKind;
 use kc_core::config::{ApprovalPolicy, Limits, ModelConfig, SessionModelSelection, SubagentConfig};
 use kc_core::error::{Error, Result};
 use kc_core::events::EventEnvelope;
-use kc_core::hooks::NoHooks;
+use kc_core::hooks::{Hooks, NoHooks};
 use kc_core::message::ToolCall;
 use kc_core::paths::Workspace;
 use kc_core::provider::{ChatRequest, Provider, ProviderChunk, ProviderFactory, ProviderStream};
@@ -87,9 +87,49 @@ struct Db {
     usage: Vec<UsageRecord>,
 }
 
+pub(crate) struct StoreFaultGate {
+    entered: AtomicBool,
+    entered_notify: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+}
+
+impl StoreFaultGate {
+    fn new() -> Self {
+        Self {
+            entered: AtomicBool::new(false),
+            entered_notify: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    pub(crate) async fn wait_entered(&self) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let notified = self.entered_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.entered.load(Ordering::SeqCst) {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("store call never reached its fault barrier");
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
 pub(crate) struct FakeStore {
     db: Mutex<Db>,
     fail_appends: std::sync::atomic::AtomicBool,
+    fail_checkpoints: AtomicBool,
+    fail_checkpoint_binds: AtomicBool,
+    fail_approval_resolutions: AtomicBool,
+    operation_gates: Mutex<HashMap<&'static str, Arc<StoreFaultGate>>>,
     /// Fail `append_message` for content containing this needle (one failure
     /// mode for exercising a single failed tool-result persist).
     fail_append_content: Mutex<Option<String>>,
@@ -106,13 +146,61 @@ impl FakeStore {
         Self {
             db: Mutex::new(Db::default()),
             fail_appends: std::sync::atomic::AtomicBool::new(false),
+            fail_checkpoints: AtomicBool::new(false),
+            fail_checkpoint_binds: AtomicBool::new(false),
+            fail_approval_resolutions: AtomicBool::new(false),
+            operation_gates: Mutex::new(HashMap::new()),
             fail_append_content: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn fail_approval_resolutions(&self, fail: bool) {
+        self.fail_approval_resolutions.store(fail, Ordering::SeqCst);
+    }
+
+    pub(crate) fn gate_next(&self, operation: &'static str) -> Arc<StoreFaultGate> {
+        let gate = Arc::new(StoreFaultGate::new());
+        let previous = self
+            .operation_gates
+            .lock()
+            .expect("fake store gates lock")
+            .insert(operation, Arc::clone(&gate));
+        assert!(
+            previous.is_none(),
+            "a gate for {operation} is already armed"
+        );
+        gate
+    }
+
+    async fn wait_at_gate(&self, operation: &'static str) {
+        let gate = self
+            .operation_gates
+            .lock()
+            .expect("fake store gates lock")
+            .remove(operation);
+        let Some(gate) = gate else {
+            return;
+        };
+        gate.entered.store(true, Ordering::SeqCst);
+        gate.entered_notify.notify_waiters();
+        let permit = tokio::time::timeout(Duration::from_secs(5), gate.release.acquire())
+            .await
+            .expect("store fault barrier was never released")
+            .expect("store fault barrier semaphore closed");
+        permit.forget();
     }
 
     /// Make the next `append_message` calls fail, to exercise storage errors.
     pub(crate) fn fail_appends(&self, fail: bool) {
         self.fail_appends.store(fail, Ordering::SeqCst);
+    }
+
+    pub(crate) fn fail_checkpoints(&self, fail: bool) {
+        self.fail_checkpoints.store(fail, Ordering::SeqCst);
+    }
+
+    pub(crate) fn fail_checkpoint_binds(&self, fail: bool) {
+        self.fail_checkpoint_binds.store(fail, Ordering::SeqCst);
     }
 
     /// Fail only appends whose content contains `needle`.
@@ -550,6 +638,7 @@ impl Store for FakeStore {
     }
 
     async fn finish_run(&self, run_id: &str, status: RunStatus, error: Option<&str>) -> Result<()> {
+        self.wait_at_gate("finish_run").await;
         let mut db = self.db();
         match db.runs.iter_mut().find(|r| r.id == run_id) {
             Some(run) => {
@@ -697,6 +786,10 @@ impl Store for FakeStore {
     }
 
     async fn resolve_approval(&self, id: &str, decision: &str) -> Result<()> {
+        self.wait_at_gate("resolve_approval").await;
+        if self.fail_approval_resolutions.load(Ordering::SeqCst) {
+            return Err(Error::Store("approval store unavailable".into()));
+        }
         let mut db = self.db();
         match db.approvals.iter_mut().find(|a| a.id == id) {
             Some(approval) if approval.status == "pending" => {
@@ -946,6 +1039,7 @@ impl Store for FakeStore {
     }
 
     async fn mark_messages_rewound(&self, session_id: &str, keep_through: i64) -> Result<usize> {
+        self.wait_at_gate("rewind").await;
         let mut db = self.db();
         let now = now_ms();
         let mut hidden = 0;
@@ -965,6 +1059,9 @@ impl Store for FakeStore {
         &self,
         checkpoint: &kc_core::checkpoint::FileCheckpoint,
     ) -> Result<i64> {
+        if self.fail_checkpoints.load(Ordering::SeqCst) {
+            return Err(Error::Store("injected checkpoint insert failure".into()));
+        }
         let mut db = self.db();
         db.next_checkpoint_id += 1;
         let mut row = checkpoint.clone();
@@ -973,6 +1070,21 @@ impl Store for FakeStore {
         row.message_id = 0;
         db.checkpoints.push(row);
         Ok(db.next_checkpoint_id)
+    }
+
+    async fn bind_checkpoints(&self, ids: &[i64], message_id: i64) -> Result<usize> {
+        if self.fail_checkpoint_binds.load(Ordering::SeqCst) {
+            return Err(Error::Store("injected checkpoint bind failure".into()));
+        }
+        let mut db = self.db();
+        let mut bound = 0;
+        for row in &mut db.checkpoints {
+            if row.message_id == 0 && ids.contains(&row.id) {
+                row.message_id = message_id;
+                bound += 1;
+            }
+        }
+        Ok(bound)
     }
 
     async fn list_checkpoints(
@@ -2064,6 +2176,7 @@ pub(crate) struct HarnessBuilder {
     /// about which project it lives in. A notification carries its session's
     /// project, so a test of that field opts in here.
     project_id: Option<String>,
+    hooks: Arc<dyn Hooks>,
 }
 
 impl HarnessBuilder {
@@ -2073,7 +2186,13 @@ impl HarnessBuilder {
             settings: FakeSettings::default(),
             tools: Vec::new(),
             project_id: None,
+            hooks: Arc::new(NoHooks),
         }
+    }
+
+    pub(crate) fn hooks(mut self, hooks: Arc<dyn Hooks>) -> Self {
+        self.hooks = hooks;
+        self
     }
 
     /// Put the harness session in a project, so emitted notifications name it.
@@ -2116,7 +2235,7 @@ impl HarnessBuilder {
             providers: factory.clone(),
             tools: Arc::new(registry),
             settings: settings.clone(),
-            hooks: Arc::new(NoHooks),
+            hooks: self.hooks,
             workspaces: Arc::new(crate::SingleWorkspace::new(workspace)),
         });
         let events = runtime.subscribe();
@@ -2278,10 +2397,12 @@ pub(crate) fn test_inner_with_settings(settings: FakeSettings) -> Arc<RuntimeInn
         events: broadcast::channel(64).0,
         tools: RwLock::new(Arc::new(ToolRegistry::new())),
         runs: Mutex::new(HashMap::new()),
+        session_lifecycle: Mutex::new(HashMap::new()),
         approvals: ApprovalRegistry::new(),
         subagents: Arc::new(SubagentLimiter::new(Default::default())),
         hub: Arc::new(crate::hub::AgentHub::new()),
         seq: Mutex::new(0),
+        queue_publication: Mutex::new(()),
         events_emitted: AtomicU64::new(0),
         session_allow: Mutex::new(std::collections::HashSet::new()),
         steers: Mutex::new(HashMap::new()),

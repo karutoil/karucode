@@ -73,9 +73,48 @@ describe('accent fill: a primary action is readable in every theme', () => {
   });
 
   it('keeps text accents on the role meant for text', () => {
-    // The model pill is small mono type on an accent tint: that is `accentText`,
-    // the AA-safe ink, not the raw accent.
+    // The model pill is small mono type on an accent *tint*. `--accent-text` is
+    // the AA-safe ink against the canvas; a tint lifts the ground under it, where
+    // the pair measured 3.62:1 in Daybreak. `--accent-on-tint` is the same accent
+    // mixed toward primary text for exactly that case, so it is the stricter of
+    // the two answers and the one this pill must use.
     const pill = declarations(chat, '.model-pill');
-    expect(pill['color']).toBe('var(--accent-text)');
+    expect(pill['color']).toBe('var(--accent-on-tint)');
+  });
+
+  it('defines one ink for accent-on-tint and uses it wherever a tint is painted', () => {
+    expect(tokens).toMatch(/--accent-on-tint:\s*color-mix\(in srgb, var\(--accent-fill\)/);
+    // A bare `--accent` on `--accent-bg` was the 3.62:1 chip the audit measured.
+    // Nothing may reintroduce that pair: scan every rule body that paints one of
+    // the accent tints for an accent-coloured ink.
+    const tints = /background(-color)?:\s*var\(--(accent-bg|accent-surface|row-accent-bg|row-selected-bg|btn-accent-bg|btn-accent-bg-hover|theme-accent-bg)\)/;
+    const offenders: string[] = [];
+    for (const name of ['chat.css', 'composer.css', 'git.css', 'inspector.css', 'layout.css', 'overlays.css', 'rail.css', 'settings.css', 'goals.css', 'todo.css', 'session-control.css']) {
+      const css = read(`./${name}`);
+      for (const match of css.matchAll(/\{[^{}]*\}/g)) {
+        const body = match[0];
+        if (!tints.test(body)) continue;
+        // Split on `;` and read the *property*, not a substring: `border-color`
+        // and `background-color` both end in "color" and are not ink.
+        const inks = body
+          .split(';')
+          .map((decl) => decl.trim())
+          .filter((decl) => /^color:\s*var\(--(accent|accent-fill|accent-text|accent-text-soft|accent-hi)\)$/.test(decl));
+        if (inks.length > 0) {
+          offenders.push(`${name}: ${body.replace(/\s+/g, ' ').slice(0, 90)}`);
+        }
+      }
+    }
+    expect(offenders, 'accent ink on an accent tint').toEqual([]);
+  });
+
+  it('paints the control plane’s project initials with the AA accent role', () => {
+    // The tones are how the control plane tells projects apart. Tone 3 is the
+    // accent tile, and its initials were `--accent` on `--accent-bg`: 3.61:1 in
+    // Daybreak. Initials are text, so they take the same role as every other
+    // accent label on a tint.
+    const glyph = ruleBody(read('./session-control.css'), ".cp-glyph[data-tone='3']");
+    expect(glyph).toContain('color: var(--accent-on-tint);');
+    expect(glyph).not.toMatch(/color:\s*var\(--accent\);/);
   });
 });

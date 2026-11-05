@@ -901,3 +901,39 @@ async fn dsml_markup_with_no_tools_offered_is_never_executed() {
         "Format: <||DSML||tool_calls><||DSML||invoke name=\"read_file\"></||DSML||invoke></||DSML||tool_calls>"
     );
 }
+
+#[tokio::test]
+async fn dsml_tail_text_precedes_finish_and_usage_on_a_real_stream() {
+    // A trailing `<` is deliberately held because it could start DSML markup.
+    // Without an explicit flush before Finish/Usage it is queued by [DONE] only
+    // after consumers that stop at terminal accounting have gone away.
+    let body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"tail <\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, body).await }).await;
+    let (stream, _cancel) = start(model_config(&server), request_with_tools(&["read_file"])).await;
+    let chunks = collect(stream).await;
+    assert_eq!(texts(&chunks), "tail <", "{chunks:?}");
+    let last_text = chunks
+        .iter()
+        .rposition(|chunk| matches!(chunk, ProviderChunk::Text(_)))
+        .expect("tail text");
+    let finish = chunks
+        .iter()
+        .position(|chunk| matches!(chunk, ProviderChunk::Finish { .. }))
+        .expect("finish");
+    let usage = chunks
+        .iter()
+        .position(|chunk| matches!(chunk, ProviderChunk::Usage { .. }))
+        .expect("usage");
+    assert!(last_text < finish, "text after Finish: {chunks:?}");
+    assert!(last_text < usage, "text after Usage: {chunks:?}");
+    assert!(
+        finish < usage,
+        "wire Finish/Usage order changed: {chunks:?}"
+    );
+}

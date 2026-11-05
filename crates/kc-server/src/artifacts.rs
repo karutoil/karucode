@@ -19,9 +19,9 @@
 //!
 //! ```text
 //! POST /api/artifacts   {"html": "<!doctype html>…", "theme": "dark"}
-//!   → 201 {"id": "9f2c…", "url": "/api/artifacts/9f2c…", "bytes": 1204, "theme": "dark"}
-//! GET  /api/artifacts/9f2c…
-//!   → 200 text/html  (sandboxed, opaque origin, no network)
+//!   → 201 {"id": "9f2c…", "url": "/api/artifacts/9f2c…?capability=<random>", "bytes": 1204, "theme": "dark"}
+//! GET  /api/artifacts/9f2c…?capability=<random>
+//!   → 200 text/html  (opaque origin; fetch/remote assets/forms disabled)
 //! ```
 //!
 //! # Why a store at all, and why content-addressed
@@ -45,7 +45,10 @@
 //! model wrote: `img-src *` in a prompt-injected mock is a tracking beacon (the
 //! attacker learns you opened it) and a way to exfiltrate whatever the mock was
 //! given. [`ARTIFACT_CONTENT_SECURITY_POLICY`] therefore keeps the opaque origin
-//! and the inline script/style a mock needs, and closes the network entirely.
+//! and the inline script/style a mock needs, and closes fetch, remote subresources
+//! and form submission. A directly opened top-level document can still navigate
+//! itself in Chromium; its URL carries only the per-artifact capability and a
+//! `no-referrer` response prevents copying even that capability into `Referer`.
 //!
 //! # What a model should write
 //!
@@ -89,8 +92,10 @@ pub const ID_LEN: usize = 32;
 ///   `<img src="https://…">` must not become a beacon that tells a third party
 ///   the reader opened the message. (A mock that references a CDN stylesheet or a
 ///   web font renders without it, which is a degradation, not a break.)
-/// * `connect-src 'none'` closes fetch/XHR/WebSocket - the one channel that could
-///   lift data out of the document - and `form-action 'none'` closes submission.
+/// * `connect-src 'none'` closes fetch/XHR/WebSocket and `form-action 'none'`
+///   closes submission. Neither sandbox nor CSP offers a supported blanket ban on
+///   a document navigating itself; that residual is why the URL must never carry
+///   the master credential and why the response suppresses Referer.
 /// * `base-uri 'none'` stops a `<base>` re-pointing the document's own URLs;
 ///   `frame-src`/`child-src`/`worker-src`/`object-src 'none'` stop it nesting or
 ///   loading plugins.
@@ -236,6 +241,35 @@ img{{max-width:100%}}</style></head><body>\n{source}\n{RESIZE_REPORTER}\n</body>
 
 struct Entry {
     body: Vec<u8>,
+    /// Random, unguessable read grant for this one document. This is deliberately
+    /// independent of the content id: the id names immutable content, while the
+    /// capability authorises an iframe navigation without exposing the master API
+    /// bearer to the untrusted document.
+    capability: String,
+}
+
+/// An artifact id and the read capability returned to its authenticated publisher.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishedArtifact {
+    pub id: String,
+    pub capability: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArtifactAccessError {
+    NotFound,
+    Unauthorized,
+}
+
+fn capability_eq(actual: &str, expected: &str) -> bool {
+    if actual.len() != expected.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (a, b) in actual.bytes().zip(expected.bytes()) {
+        difference |= a ^ b;
+    }
+    difference == 0
 }
 
 #[derive(Default)]
@@ -258,7 +292,7 @@ impl ArtifactStore {
         Self::default()
     }
 
-    /// Store one document and return its id.
+    /// Store one document and return its id and per-document read capability.
     ///
     /// Idempotent by content: the same bytes always map to the same entry, so a
     /// transcript that is re-rendered (or reloaded, or rendered twice by two
@@ -266,18 +300,31 @@ impl ArtifactStore {
     /// store. A document larger than [`MAX_STORE_BYTES`] is not stored at all -
     /// the caller rejects it against [`MAX_ARTIFACT_BYTES`] long before this, and
     /// there is no sensible way to hold it.
-    pub fn insert(&self, document: Vec<u8>) -> String {
+    pub fn insert(&self, document: Vec<u8>) -> PublishedArtifact {
         let id = artifact_id(&document);
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner.entries.contains_key(&id) {
-            return id;
+        if let Some(entry) = inner.entries.get(&id) {
+            return PublishedArtifact {
+                id,
+                capability: entry.capability.clone(),
+            };
         }
         if document.len() > MAX_STORE_BYTES {
-            return id;
+            return PublishedArtifact {
+                id,
+                capability: uuid::Uuid::new_v4().simple().to_string(),
+            };
         }
+        let capability = uuid::Uuid::new_v4().simple().to_string();
         inner.bytes += document.len();
         inner.order.push_back(id.clone());
-        inner.entries.insert(id.clone(), Entry { body: document });
+        inner.entries.insert(
+            id.clone(),
+            Entry {
+                body: document,
+                capability: capability.clone(),
+            },
+        );
         while inner.entries.len() > MAX_STORE_ENTRIES
             || (inner.bytes > MAX_STORE_BYTES && inner.entries.len() > 1)
         {
@@ -288,7 +335,34 @@ impl ArtifactStore {
                 inner.bytes = inner.bytes.saturating_sub(removed.body.len());
             }
         }
-        id
+        PublishedArtifact { id, capability }
+    }
+
+    /// Whether a query capability grants this one artifact. The middleware uses
+    /// this instead of accepting the master bearer in an untrusted frame URL.
+    pub fn capability_matches(&self, id: &str, capability: &str) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner
+            .entries
+            .get(id)
+            .is_some_and(|entry| capability_eq(&entry.capability, capability))
+    }
+
+    /// Read a document only with its own capability. A wrong grant never reveals
+    /// whether some other artifact would have accepted it.
+    pub fn get_with_capability(
+        &self,
+        id: &str,
+        capability: &str,
+    ) -> Result<Vec<u8>, ArtifactAccessError> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = inner.entries.get(id) else {
+            return Err(ArtifactAccessError::NotFound);
+        };
+        if !capability_eq(&entry.capability, capability) {
+            return Err(ArtifactAccessError::Unauthorized);
+        }
+        Ok(entry.body.clone())
     }
 
     /// The bytes behind an id, if they are still here.
@@ -309,7 +383,10 @@ impl ArtifactStore {
 /// `/api/artifacts/../../etc/passwd` never reaches a `HashMap` lookup with a
 /// string that means something else.
 pub fn valid_id(id: &str) -> bool {
-    id.len() == ID_LEN && id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    id.len() == ID_LEN
+        && id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 #[cfg(test)]
@@ -324,7 +401,7 @@ mod tests {
         let second = store.insert(document.clone());
         assert_eq!(first, second);
         assert_eq!(store.stats(), (1, document.len()));
-        assert_eq!(store.get(&first).as_deref(), Some(document.as_slice()));
+        assert_eq!(store.get(&first.id).as_deref(), Some(document.as_slice()));
     }
 
     #[test]
@@ -343,12 +420,18 @@ mod tests {
         let store = ArtifactStore::new();
         let first = store.insert(wrap_document("<p>first</p>", ArtifactTheme::Light));
         for index in 0..MAX_STORE_ENTRIES {
-            store.insert(wrap_document(&format!("<p>{index}</p>"), ArtifactTheme::Light));
+            store.insert(wrap_document(
+                &format!("<p>{index}</p>"),
+                ArtifactTheme::Light,
+            ));
         }
         let (entries, bytes) = store.stats();
         assert_eq!(entries, MAX_STORE_ENTRIES);
         assert!(bytes <= MAX_STORE_BYTES);
-        assert!(store.get(&first).is_none(), "the oldest entry is the one evicted");
+        assert!(
+            store.get(&first.id).is_none(),
+            "the oldest entry is the one evicted"
+        );
     }
 
     #[test]
@@ -357,11 +440,19 @@ mod tests {
         let document = wrap_document("<p>again</p>", ArtifactTheme::Light);
         let id = store.insert(document.clone());
         for index in 0..MAX_STORE_ENTRIES {
-            store.insert(wrap_document(&format!("<p>{index}</p>"), ArtifactTheme::Light));
+            store.insert(wrap_document(
+                &format!("<p>{index}</p>"),
+                ArtifactTheme::Light,
+            ));
         }
-        assert!(store.get(&id).is_none());
-        assert_eq!(store.insert(document.clone()), id);
-        assert_eq!(store.get(&id).as_deref(), Some(document.as_slice()));
+        assert!(store.get(&id.id).is_none());
+        let restored = store.insert(document.clone());
+        assert_eq!(restored.id.as_str(), id.id.as_str());
+        assert_ne!(
+            restored.capability, id.capability,
+            "eviction revokes the old grant"
+        );
+        assert_eq!(store.get(&id.id).as_deref(), Some(document.as_slice()));
     }
 
     #[test]
@@ -386,8 +477,14 @@ mod tests {
         assert!(light.contains("color-scheme:light"));
         assert!(light.contains("background:#ffffff"));
         assert!(light.contains("<button>Buy</button>"));
-        assert!(!light.contains("<html lang=\"en\">\n<html"), "one document, not two");
-        assert!(light.contains("karucode-artifact"), "the card can size to it");
+        assert!(
+            !light.contains("<html lang=\"en\">\n<html"),
+            "one document, not two"
+        );
+        assert!(
+            light.contains("karucode-artifact"),
+            "the card can size to it"
+        );
 
         let dark =
             String::from_utf8(wrap_document("<button>Buy</button>", ArtifactTheme::Dark)).unwrap();
@@ -401,7 +498,10 @@ mod tests {
         let source = "<!doctype html><html><head><style>b{color:red}</style></head>\
 <body><b>hi</b></body></html>";
         let served = String::from_utf8(wrap_document(source, ArtifactTheme::Dark)).unwrap();
-        assert!(served.contains("<style>b{color:red}</style>"), "the author's CSS survives");
+        assert!(
+            served.contains("<style>b{color:red}</style>"),
+            "the author's CSS survives"
+        );
         assert!(is_complete_document(source));
         assert!(is_complete_document("  <html lang=\"en\">"));
         assert!(!is_complete_document("<div>fragment</div>"));
@@ -414,8 +514,14 @@ mod tests {
         let served = inject_reporter(source);
         let reporter = served.find("karucode-artifact").expect("reporter present");
         let body = served.find("</body>").expect("body close present");
-        assert!(reporter < body, "the reporter goes inside the body, before its close");
-        assert!(served.ends_with("</body></html>"), "the closing tags are kept: {served}");
+        assert!(
+            reporter < body,
+            "the reporter goes inside the body, before its close"
+        );
+        assert!(
+            served.ends_with("</body></html>"),
+            "the closing tags are kept: {served}"
+        );
 
         // A document with no body close still gets it, at the end.
         let bare = inject_reporter("<p>hi</p>");
@@ -428,7 +534,10 @@ mod tests {
         assert_eq!(ArtifactTheme::parse(Some("dark")), ArtifactTheme::Dark);
         assert_eq!(ArtifactTheme::parse(Some("DARK")), ArtifactTheme::Dark);
         assert_eq!(ArtifactTheme::parse(Some("light")), ArtifactTheme::Light);
-        assert_eq!(ArtifactTheme::parse(Some("chartreuse")), ArtifactTheme::Light);
+        assert_eq!(
+            ArtifactTheme::parse(Some("chartreuse")),
+            ArtifactTheme::Light
+        );
         assert_eq!(ArtifactTheme::parse(None), ArtifactTheme::Light);
         assert_eq!(ArtifactTheme::default(), ArtifactTheme::Light);
         assert_eq!(ArtifactTheme::Dark.as_str(), "dark");
@@ -438,11 +547,17 @@ mod tests {
     fn artifacts_policy_keeps_the_origin_opaque_and_the_network_closed() {
         let policy = ARTIFACT_CONTENT_SECURITY_POLICY;
         assert!(policy.starts_with("sandbox allow-scripts"));
-        assert!(!policy.contains("allow-same-origin"), "that would share the app's origin");
+        assert!(
+            !policy.contains("allow-same-origin"),
+            "that would share the app's origin"
+        );
         assert!(policy.contains("connect-src 'none'"));
         // No wildcard sources at all: a remote asset must not load, so a
         // prompt-injected mock cannot beacon out.
-        assert!(!policy.contains("*;") && !policy.contains("* "), "no wildcard source");
+        assert!(
+            !policy.contains("*;") && !policy.contains("* "),
+            "no wildcard source"
+        );
         assert!(!policy.contains("img-src *"));
     }
 }

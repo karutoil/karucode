@@ -62,25 +62,25 @@
    *   EMIT_FIRST_PAINT=1 npx vitest run src/theme/first-paint.emit.test.ts
    * `roles.test.ts` fails if this block drifts from the resolver. */
   --surface-input: #272422;
-  --line-input: #4d4337;
+  --line-input: #4e4338;
   --focus-input: #89755a;
   --input-ink: #cbc1b7;
-  --input-placeholder: #9b9287;
+  --input-placeholder: #a29a90;
   --surface-plus-hover: #393532;
   --surface-hover-strong: #363330;
   --line-hair: #363430;
   --gold-send: #dfb680;
   --gold-send-hover: #e3c398;
   --on-gold: #0f0e0d;
-  --foot-ink: #9b9287;
+  --foot-ink: #a29a90;
   --foot-strong: #c5bdb3;
   --ring-fill: #dfb680;
-  --ring-track: #3f3c38;
-  --chip-surface: #2b2928;
-  --chip-line: #3f3c38;
+  --ring-track: #403b37;
+  --chip-surface: #2c2927;
+  --chip-line: #403b37;
   --chip-ink: #c8c2b7;
-  --surface-menu: #2f2c2a;
-  --line-menu: #4b4237;
+  --surface-menu: #2f2c29;
+  --line-menu: #4d4238;
   --text-menu-title: #b2aaa0;
   --text-menu-item: #c8c2b7;
   --text-menu-meta: #c5bdb3;
@@ -88,12 +88,12 @@
   --row-accent-ink: #dfb680;
   --surface-inset: #2b2926;
   --line-inset: #363430;
-  --line-card: #433b30;
-  --line-divider: #342f26;
-  --line-keycap: #433b31;
-  --line-overlay: #4b4237;
+  --line-card: #443a31;
+  --line-divider: #372f27;
+  --line-keycap: #443a31;
+  --line-overlay: #4d4238;
   --text-caption: #c8c2b7;
-  --text-subtle: #9b9287;
+  --text-subtle: #a29a90;
   --text-kicker: #b2aaa0;
   --text-kicker-panel: #c5bdb3;
   --tab-active-text: #c9c1b9;
@@ -101,7 +101,7 @@
   --row-selected-bg: #42331f;
   --row-selected-text: #dfb680;
   --surface-preview: #272422;
-  --line-preview: #433b31;
+  --line-preview: #443a31;
   --icon-folder: #aea18f;
   --icon-rust: #b7ab9b;
   --icon-file: #b2aaa0;
@@ -113,36 +113,36 @@
   --btn-accent-bg-hover: #463621;
   --btn-accent-line: #89755a;
   --btn-accent-text: #dfb680;
-  --toggle-track: #3f3c38;
-  --toggle-knob: #99938b;
+  --toggle-track: #403b37;
+  --toggle-knob: #9f9a93;
   --toggle-on-track: #dfb680;
   --toggle-on-knob: #e3c398;
   --surface-card: #1e1c1b;
-  --line-card-strong: #433b30;
+  --line-card-strong: #443a31;
   --surface-command: #1e1c1b;
-  --line-command: #433b30;
+  --line-command: #443a31;
   --surface-command-hover: #2a2725;
   --surface-command-output: #131110;
   --text-command: #c8c2b7;
   --text-command-output: #b2c8bd;
-  --surface-symbol: #302e2c;
-  --line-symbol: #373127;
+  --surface-symbol: #312d2a;
+  --line-symbol: #383029;
   --text-symbol: #c8c2b7;
   --text-output: #c5bdb3;
-  --text-output-num: #9b9287;
+  --text-output-num: #a29a90;
   --text-expand: #c5bdb3;
   --text-body: #c8c2b7;
-  --text-date: #9b9287;
+  --text-date: #a29a90;
   --text-user: #c8c2b7;
   --surface-user: #1a1817;
-  --surface-avatar: #34312f;
-  --line-avatar: #433b31;
+  --surface-avatar: #35312e;
+  --line-avatar: #443a31;
   --text-avatar: #c8c2b7;
   --surface-avatar-agent: #42331f;
   --line-avatar-agent: #89755a;
   --surface-diff: #151312;
-  --line-diff: #39332a;
-  --line-diff-head: #342f26;
+  --line-diff: #3b322a;
+  --line-diff-head: #372f27;
   --surface-diff-add: #172920;
   --surface-diff-del: #38150e;
   --surface-diff-ctx: #171514;
@@ -152,14 +152,14 @@
   --text-empty-title: #cbc1b7;
   --text-empty-copy: #c5bdb3;
   --text-empty-symbol: #dfb680;
-  --surface-toast: #34312f;
-  --line-toast: #544b3d;
+  --surface-toast: #35312e;
+  --line-toast: #55493e;
   --text-toast: #cbc1b7;
   --rail-glyph-text: #b2aaa0;
-  --rail-add-line: #3f3c38;
+  --rail-add-line: #403b37;
   --rail-add-line-hover: #89755a;
-  --rail-avatar-bg: #34312f;
-  --rail-avatar-line: #3f3c38;
+  --rail-avatar-bg: #35312e;
+  --rail-avatar-line: #403b37;
   --rail-avatar-text: #c7c2b9;
   --accent-faint: #89755a;
   --accent-surface: #42331f;
@@ -217,6 +217,16 @@
   --accent-text: var(--theme-accent-text);
   --accent-fill: var(--theme-accent-text);
   --on-accent: var(--theme-on-accent);
+  /* Accent as ink *on an accent tint*. `--accent-fill` is tuned against the
+   * canvas; a tinted surface lifts the ground under it and the pair drops to
+   * 3.62:1 in Daybreak — below §4's 4.5 floor, on a chip whose whole job is to be
+   * read. Mixing toward the theme's own primary text darkens the ink on a light
+   * tint and lightens it on a dark one, so one definition clears the floor in
+   * every theme while staying unmistakably accent-coloured. Use this — never a
+   * bare `--accent` — whenever the background is `--accent-bg`,
+   * `--accent-surface`, `--row-accent-bg`, `--row-selected-bg` or
+   * `--btn-accent-bg`. */
+  --accent-on-tint: color-mix(in srgb, var(--accent-fill) 78%, var(--text));
   --success: var(--theme-success);
   --success-bg: var(--theme-success-bg);
   --warn: var(--theme-warn);
@@ -257,7 +267,8 @@
   --font-ui:
     Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
     Arial, 'Noto Sans', sans-serif;
-  --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, ui-monospace, monospace;
+  --font-mono:
+    'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, ui-monospace, monospace;
 
   /* An eleven-step scale with a floor. There used to be twenty-five sizes and
    * 220 declarations below 11px, which is what "washed out" was: the quiet text
@@ -285,6 +296,8 @@
   --fs-heading: 18px;
   --fs-display: 20px;
   --fs-hero: 24px;
+  /* Visually hidden redundant labels, never a readable type step. */
+  --fs-hidden: 0;
   --lh-body: 1.5;
   /* message copy is denser than UI copy */
   --lh-message: 1.72;

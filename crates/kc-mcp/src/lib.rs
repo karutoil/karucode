@@ -119,7 +119,7 @@ use kc_core::config::McpServerConfig;
 use kc_core::tool::{Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOrigin, ToolOutcome, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -132,7 +132,7 @@ mod rpc;
 mod stdio;
 mod transport;
 
-use rpc::McpError;
+use rpc::{redact_headers, McpError};
 use transport::Transport;
 
 /// MCP protocol revision this client speaks.
@@ -358,7 +358,10 @@ impl McpManager {
             let state = Arc::clone(&slot.state);
             let timeouts = Arc::clone(&self.timeouts);
             let name = slot.config.name.clone();
-            set.spawn(async move { connect_server(name, transport, state, timeouts).await });
+            let headers = slot.config.headers.clone();
+            set.spawn(
+                async move { connect_server(name, transport, state, timeouts, headers).await },
+            );
         }
         while let Some(joined) = set.join_next().await {
             if let Err(e) = joined {
@@ -417,6 +420,7 @@ impl McpManager {
                     transport: Arc::clone(&transport),
                     state: Arc::clone(&slot.state),
                     budget: self.timeouts.call(),
+                    headers: slot.config.headers.clone(),
                     require_approval: slot.config.require_approval,
                 }));
             }
@@ -465,7 +469,7 @@ impl McpManager {
                         transport: slot.config.transport.clone(),
                         status: ServerStatus::Failed.as_str().into(),
                         tools: Vec::new(),
-                        error: Some(err.clone()),
+                        error: Some(redact_headers(err, &slot.config.headers)),
                     };
                 }
                 let (mut status, mut error, tools) = {
@@ -511,7 +515,7 @@ impl McpManager {
                     transport: slot.config.transport.clone(),
                     status: status.as_str().into(),
                     tools,
-                    error,
+                    error: error.map(|message| redact_headers(&message, &slot.config.headers)),
                 }
             })
             .collect()
@@ -581,6 +585,7 @@ async fn connect_server(
     transport: Arc<dyn Transport>,
     state: Arc<ServerState>,
     timeouts: Arc<TimeoutRefs>,
+    headers: BTreeMap<String, String>,
 ) {
     let budget = timeouts.connect();
     let attempt = async {
@@ -611,10 +616,7 @@ async fn connect_server(
         transport
             .notify("notifications/initialized", json!({}))
             .await?;
-        let list = transport
-            .request("tools/list", json!({}), budget, None)
-            .await?;
-        parse_tools(&name, list)
+        list_all_tools(transport.as_ref(), &name, budget).await
     };
 
     match tokio::time::timeout(budget, attempt).await {
@@ -623,7 +625,7 @@ async fn connect_server(
             state.connected(tools);
         }
         Ok(Err(e)) => {
-            let message = e.describe();
+            let message = redact_headers(&e.describe(), &headers);
             warn!(server = %name, "MCP server failed to connect: {message}");
             transport.close().await;
             state.failed(message);
@@ -637,6 +639,49 @@ async fn connect_server(
             transport.close().await;
             state.failed(message);
         }
+    }
+}
+
+/// Fetch every tools/list page under one wall-clock budget. A server controls the
+/// cursor sequence, so each request gets only the time remaining and a repeated
+/// cursor fails discovery instead of looping forever.
+async fn list_all_tools(
+    transport: &dyn Transport,
+    server: &str,
+    budget: Duration,
+) -> Result<Vec<McpToolDef>, McpError> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut cursor: Option<String> = None;
+    let mut seen = BTreeSet::new();
+    let mut tools = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(McpError::Timeout(budget));
+        }
+        let params = match cursor.as_deref() {
+            Some(cursor) => json!({"cursor": cursor}),
+            None => json!({}),
+        };
+        let page = transport
+            .request("tools/list", params, remaining, None)
+            .await?;
+        tools.extend(parse_tools(server, page.clone())?);
+        let next = match page.get("nextCursor") {
+            None | Some(Value::Null) => return Ok(tools),
+            Some(Value::String(next)) => next,
+            Some(_) => {
+                return Err(McpError::Protocol(
+                    "malformed `tools/list` result: `nextCursor` must be a string".into(),
+                ))
+            }
+        };
+        if !seen.insert(next.clone()) {
+            return Err(McpError::Protocol(format!(
+                "MCP server `{server}` returned a cyclic `tools/list` nextCursor; discovery was                  stopped before requesting the same page again"
+            )));
+        }
+        cursor = Some(next.clone());
     }
 }
 
@@ -671,6 +716,9 @@ struct McpTool {
     transport: Arc<dyn Transport>,
     state: Arc<ServerState>,
     budget: Duration,
+    /// Configured values are scrubbed again at the tool/model boundary, including
+    /// a server reporting `isError` with a credential reflected in its content.
+    headers: BTreeMap<String, String>,
     /// `McpServerConfig.require_approval`: `false` exempts the server's tools
     /// from the runtime-level approval prompt (the class stays `External`).
     require_approval: bool,
@@ -753,6 +801,7 @@ impl Tool for McpTool {
                 } else {
                     text
                 };
+                let content = redact_headers(&content, &self.headers);
                 if is_error {
                     ToolOutcome::err(format!(
                         "MCP server `{}` reported that tool `{}` failed: {content}",
@@ -765,9 +814,13 @@ impl Tool for McpTool {
             Err(e) => {
                 if matches!(e, McpError::Transport(_) | McpError::Http { .. }) {
                     // Keep `GET /api/mcp` honest about a dead/unreachable server.
-                    self.state.failed(e.describe());
+                    self.state
+                        .failed(redact_headers(&e.describe(), &self.headers));
                 }
-                ToolOutcome::err(e.tool_message(&self.server, &self.name, self.budget))
+                ToolOutcome::err(redact_headers(
+                    &e.tool_message(&self.server, &self.name, self.budget),
+                    &self.headers,
+                ))
             }
         }
     }

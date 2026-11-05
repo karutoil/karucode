@@ -1,11 +1,19 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CommandPalette } from './CommandPalette';
 import { ThemeStudio } from './ThemeStudio';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import {
   DEFAULT_THEME,
+  THEME_COLOR_GROUPS,
+  THEME_COLOR_KEYS,
   THEME_STORAGE_KEY,
+  THEME_TOKEN_ENTRIES,
+  ROLE_PROPERTIES,
+  activeTheme,
+  buildTokenMap,
+  contrastRatio,
   findBuiltin,
   resolvePalette,
   customThemes,
@@ -38,11 +46,13 @@ beforeEach(() => {
   localStorage.clear();
   resetTheme();
   store.themeStudioOpen.value = false;
+  store.paletteOpen.value = false;
   store.resetToastTimers();
 });
 
 afterEach(() => {
   store.themeStudioOpen.value = false;
+  store.paletteOpen.value = false;
   store.resetToastTimers();
 });
 
@@ -108,6 +118,29 @@ describe('theme studio shell', () => {
     fireEvent.click(shade as Element);
     expect(screen.queryByTestId('theme-studio')).toBeNull();
   });
+
+  it('leaves only the command palette modal when the palette replaces the studio', () => {
+    render(
+      <>
+        <ThemeStudio />
+        <CommandPalette />
+      </>,
+    );
+    act(() => {
+      actions.openThemeStudio();
+    });
+    expect(screen.getByTestId('theme-studio').getAttribute('aria-modal')).toBe('true');
+
+    act(() => {
+      actions.togglePalette();
+    });
+
+    expect(store.themeStudioOpen.value).toBe(false);
+    expect(store.paletteOpen.value).toBe(true);
+    expect(screen.queryByTestId('theme-studio')).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'Command palette' })).toBeTruthy();
+    expect(document.querySelectorAll('[aria-modal="true"]')).toHaveLength(1);
+  });
 });
 
 describe('applying a built-in theme', () => {
@@ -140,6 +173,56 @@ describe('applying a built-in theme', () => {
 });
 
 describe('colour editing', () => {
+  it('exposes all eighteen editable colours, each with exactly one picker and one hex field', () => {
+    renderOpen();
+
+    // The palette input is `ThemeColors`; the studio groups are the only place a
+    // user can reach those keys. They drifted once: `warn` was in the type, in
+    // the resolver and in every built-in theme, and had no control at all, so 17
+    // of the 18 colours were editable and Warning could not be changed from the
+    // studio. This pins the count and the key set together.
+    const grouped = THEME_COLOR_GROUPS.flatMap((group) => group.fields);
+    expect(THEME_COLOR_KEYS).toHaveLength(18);
+    expect(grouped).toHaveLength(18);
+    expect(grouped.map((field) => field.key).sort()).toEqual([...THEME_COLOR_KEYS].sort());
+
+    const applied = activeTheme.value.colors;
+    for (const field of grouped) {
+      const picker = screen.getByTestId(`theme-color-${field.key}`) as HTMLInputElement;
+      expect(picker.type, field.key).toBe('color');
+      expect(picker.value, field.key).toBe(applied[field.key]);
+      expect(picker.getAttribute('aria-label')).toBe(`${field.label} colour picker`);
+      // A colour control is described by the section copy it sits under.
+      const describedBy = picker.getAttribute('aria-describedby') ?? '';
+      expect(document.getElementById(describedBy)?.textContent, field.key).toBeTruthy();
+
+      const hex = screen.getByTestId(`theme-hex-${field.key}`) as HTMLInputElement;
+      expect(hex.value, field.key).toBe(applied[field.key].toUpperCase());
+      expect(hex.getAttribute('aria-label')).toBe(`${field.label} hex value`);
+    }
+    expect(document.querySelectorAll('.theme-color-cell')).toHaveLength(18);
+  });
+
+  it('offers Warning as a first-class status colour next to Success, Error and Info', () => {
+    renderOpen();
+    const cell = screen.getByTestId('theme-hex-warn').closest('.theme-color-cell');
+    if (!(cell instanceof HTMLElement)) throw new Error('no warning colour cell');
+    expect(within(cell).getByText('Warning')).toBeTruthy();
+    expect(within(cell).getByLabelText(/Warning hex value/)).toBeTruthy();
+    expect(within(cell).getByLabelText(/Warning colour picker/)).toBeTruthy();
+    // It lives with the other status inks, not in a section of its own.
+    const section = cell.closest('.theme-section');
+    expect(within(section as HTMLElement).getByText('Success')).toBeTruthy();
+    expect(within(section as HTMLElement).getByText('Info')).toBeTruthy();
+
+    fireEvent.input(screen.getByTestId('theme-hex-warn'), { target: { value: '#ffcc00' } });
+    expect(activeTheme.value.colors.warn).toBe('#ffcc00');
+    expect(document.documentElement.style.getPropertyValue('--theme-warn')).toBe(
+      activeTheme.value.palette.warn,
+    );
+    expect(persisted().draft).toMatchObject({ colors: { warn: '#ffcc00' } });
+  });
+
   it('applies a valid hex live, starts a draft and persists it', () => {
     renderOpen();
     const input = screen.getByTestId('theme-hex-bg');
@@ -224,11 +307,77 @@ describe('interface settings', () => {
     expect(document.getElementById('kc-theme-custom-css')?.textContent).toContain('blur(8px)');
   });
 
+  it('describes Custom CSS with both the override example and the trust note', () => {
+    renderOpen();
+    const textarea = screen.getByTestId('theme-custom-css');
+    const describedBy = textarea.getAttribute('aria-describedby')?.split(/\s+/) ?? [];
+
+    expect(describedBy).toHaveLength(2);
+    expect(describedBy[0]).toMatch(/-css-help$/);
+    expect(describedBy[1]).toMatch(/-css-trust-note$/);
+    const help = document.getElementById(describedBy[0] as string);
+    const trustNote = document.getElementById(describedBy[1] as string);
+    expect(help?.textContent).toContain(':root { --theme-accent: #eaa06d !important; }');
+    expect(trustNote?.textContent).toMatch(/Only paste CSS you trust/);
+  });
+
+  it('copies real theme variables that can override inline tokens in Custom CSS', async () => {
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
+    renderOpen();
+    fireEvent.input(screen.getByTestId('theme-custom-css'), {
+      target: { value: '/* existing custom rule */' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy variables' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+
+    const css = writeText.mock.calls[0]?.[0] as string;
+    expect(css).toContain("/* !important lets Custom CSS replace the engine's inline token values. */");
+    expect(css).toContain(`--theme-accent: ${DEFAULT_THEME.colors.accent} !important;`);
+    expect(css).toContain(`--theme-syntax-keyword: ${DEFAULT_THEME.colors.syntaxKeyword} !important;`);
+    expect(css).toContain(`--theme-line-strong: ${DEFAULT_THEME.colors.border} !important;`);
+    const declarations = css.match(/^  --[a-z0-9-]+:/gim) ?? [];
+    expect(declarations.length).toBeGreaterThanOrEqual(Object.keys(DEFAULT_THEME.colors).length);
+    // Includes derived roles too; all of them must beat the engine's inline skin.
+    expect(css.match(/ !important;$/gm)).toHaveLength(declarations.length);
+    expect(css).not.toContain('--kc-');
+    expect(css.endsWith('/* existing custom rule */')).toBe(true);
+  });
+
   it('shows the live contrast status', () => {
     renderOpen();
     const contrast = screen.getByTestId('theme-contrast');
     expect(contrast.textContent).toMatch(/Contrast \d+\.\d:1/);
     expect(contrast.classList.contains('warning')).toBe(false);
+  });
+
+  it('prints the contrast of the palette it applied, not of the raw hex pair', () => {
+    /* `resolvePalette` nudges primary text until it clears 11:1 on every surface,
+     * so the two hexes in the form are inputs, not the painted result. The footer
+     * has to report what is on screen or the number argues with the drawer. */
+    renderOpen();
+    fireEvent.input(screen.getByTestId('theme-hex-text'), { target: { value: '#3a3a3a' } });
+
+    const raw = contrastRatio(activeTheme.value.colors.text, activeTheme.value.colors.bg);
+    const applied = contrastRatio(activeTheme.value.palette.text, activeTheme.value.palette.bg);
+    expect(raw).toBeLessThan(4.5);
+    expect(screen.getByTestId('theme-contrast').textContent).toBe(
+      `Contrast ${applied.toFixed(1)}:1 ✓`,
+    );
+    expect(screen.getByTestId('theme-contrast').classList.contains('warning')).toBe(false);
+  });
+
+  it('warns when the applied pair really is below AA', () => {
+    renderOpen();
+    // A light theme whose canvas is forced to black: the resolver can only walk
+    // the ink toward black too, so this pair stays illegible and must be flagged.
+    fireEvent.click(screen.getByTestId('theme-preset-paper'));
+    fireEvent.input(screen.getByTestId('theme-hex-bg'), { target: { value: '#000000' } });
+    fireEvent.input(screen.getByTestId('theme-hex-text'), { target: { value: '#000000' } });
+
+    const contrast = screen.getByTestId('theme-contrast');
+    expect(contrast.classList.contains('warning')).toBe(true);
+    expect(contrast.textContent).toMatch(/· Low$/);
   });
 });
 
@@ -511,5 +660,85 @@ describe('mock fidelity', () => {
     expect(summary.textContent?.trim()).toBe('Custom CSS');
     expect(summary.querySelector('svg')).not.toBeNull();
     expect(summary.textContent).not.toContain('Optional');
+  });
+});
+
+describe('custom CSS is a trust boundary', () => {
+  it('says that pasted or imported CSS can load remote resources and hide the UI', () => {
+    renderOpen();
+    fireEvent.click(document.querySelector('.theme-advanced summary') as HTMLElement);
+
+    const note = screen.getByTestId('theme-css-trust');
+    expect(note.getAttribute('role')).toBe('note');
+    const text = note.textContent ?? '';
+    expect(text).toMatch(/only paste CSS you trust/i);
+    // The two consequences a user cannot otherwise predict.
+    expect(text).toMatch(/remote fonts, images and beacons/i);
+    expect(text).toMatch(/hide parts of the interface/i);
+    // And the vector: an imported theme file carries its CSS with it.
+    expect(text).toMatch(/imported theme carries its CSS/i);
+  });
+
+  it('copies the real --theme-* tokens and roles, not invented --kc-* names', async () => {
+    const writeText = vi.fn<(text: string) => Promise<void>>(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    renderOpen();
+    fireEvent.click(document.querySelector('.theme-advanced summary') as HTMLElement);
+    fireEvent.click(screen.getByRole('button', { name: /copy variables/i }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const code = writeText.mock.calls[0]?.[0] as string;
+
+    // Every declaration is a property the app actually reads.
+    const applied = buildTokenMap(activeTheme.value);
+    const declared = [...code.matchAll(/^\s{2}(--[a-z-]+):\s(.+);$/gm)];
+    expect(declared.length).toBe(THEME_TOKEN_ENTRIES.length + ROLE_PROPERTIES.length);
+    for (const [, property, value] of declared) {
+      expect(value).toMatch(/ !important$/);
+      expect(applied[property!], property).toBe(value?.replace(/ !important$/, ''));
+    }
+    // The palette half is `--theme-*`; the fidelity roles are the derived half.
+    const palette = declared.filter(([, property]) => property!.startsWith('--theme-'));
+    expect(palette).toHaveLength(THEME_TOKEN_ENTRIES.length);
+    expect(declared.some(([, property]) => property!.startsWith('--kc-'))).toBe(false);
+    // The custom CSS travels with the block, so the copy is the whole theme.
+    fireEvent.input(screen.getByTestId('theme-custom-css'), {
+      target: { value: '.project-rail { filter: blur(2px); }' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /copy variables/i }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+    expect(writeText.mock.calls[1]?.[0]).toContain('.project-rail { filter: blur(2px); }');
+    expect(store.toasts.value.at(-1)?.tone).toBe('success');
+  });
+});
+
+describe('control descriptions are wired to their controls', () => {
+  it('describes every transcript and appearance control with text that exists', () => {
+    renderOpen();
+
+    const groups = [
+      'theme-tool-style',
+      'theme-grouping',
+      'theme-thinking',
+    ].map((testId) => screen.getByTestId(testId));
+    for (const group of groups) {
+      const describedBy = group.getAttribute('aria-describedby') ?? '';
+      expect(describedBy, group.dataset.testid).toBeTruthy();
+      const hint = document.getElementById(describedBy);
+      expect(hint?.classList.contains('theme-field-hint'), group.dataset.testid).toBe(true);
+      const labelledBy = group.getAttribute('aria-labelledby') ?? '';
+      expect(document.getElementById(labelledBy)?.textContent).toBeTruthy();
+    }
+
+    for (const testId of ['theme-density', 'theme-font', 'theme-mono']) {
+      const select = screen.getByTestId(testId);
+      const describedBy = select.getAttribute('aria-describedby') ?? '';
+      expect(document.getElementById(describedBy)?.textContent, testId).toMatch(/mood, spacing/);
+    }
+
+    // The Appearance group explains the flip before it happens, because the
+    // palette is re-based and only the accent survives.
+    const mode = document.querySelector('[aria-labelledby] .theme-segment')?.parentElement;
+    expect(mode?.getAttribute('aria-describedby')).toBeTruthy();
   });
 });

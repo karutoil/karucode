@@ -4,6 +4,7 @@ import type { Project } from '../api/types';
 import * as store from '../state/store';
 import * as actions from '../state/actions';
 import { ProjectRail, pathHint, projectInitials } from './ProjectRail';
+import { Dialog } from './Dialog';
 import * as railPeek from '../state/railPeek';
 
 vi.mock('../state/actions', () => ({
@@ -270,6 +271,65 @@ describe('ProjectRail', () => {
 
     expect(actions.renameProjectById).toHaveBeenCalledWith(mainProject.id, 'KaruCode CLI');
     await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename project' })).toBeNull());
+  });
+
+  it('restores the project-menu trigger when its Rename dialog closes', async () => {
+    renderRail();
+    const trigger = screen.getByRole('button', { name: 'Project actions for KaruCode' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename…' }));
+
+    const input = within(screen.getByRole('dialog', { name: 'Rename project' })).getByLabelText(
+      'Project name',
+    );
+    await vi.waitFor(() => expect(document.activeElement).toBe(input));
+    fireEvent.keyDown(input, { key: 'Escape' });
+
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename project' })).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('restores the project-menu trigger when its Delete dialog closes', async () => {
+    renderRail();
+    const trigger = screen.getByRole('button', { name: 'Project actions for KaruCode' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete project…' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Delete project?' });
+    const cancel = within(dialog).getByRole('button', { name: 'Cancel' });
+    await vi.waitFor(() => expect(document.activeElement).toBe(cancel));
+    fireEvent.keyDown(cancel, { key: 'Escape' });
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete project?' })).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('restores the settings trigger after its child dialog closes', async () => {
+    vi.mocked(actions.openSettings).mockImplementation(() => {
+      store.settingsOpen.value = true;
+    });
+    function Harness() {
+      return <>
+        <ProjectRail />
+        <Dialog
+          open={store.settingsOpen.value}
+          title="Settings"
+          onClose={() => { store.settingsOpen.value = false; }}
+        >
+          <button type="button" data-autofocus onClick={() => { store.settingsOpen.value = false; }}>
+            Done
+          </button>
+        </Dialog>
+      </>;
+    }
+    render(<Harness />);
+    const trigger = screen.getByRole('button', { name: 'Open settings' });
+    fireEvent.click(trigger);
+    const done = await screen.findByRole('button', { name: 'Done' });
+    await vi.waitFor(() => expect(document.activeElement).toBe(done));
+    vi.mocked(actions.openSettings).mockClear();
+    fireEvent.keyDown(done, { key: 'Escape' });
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull());
+    expect(document.activeElement).toBe(trigger);
   });
 
   it('refuses an empty rename without calling the action', () => {

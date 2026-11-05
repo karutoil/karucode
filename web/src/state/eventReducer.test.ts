@@ -673,6 +673,9 @@ describe('queued messages', () => {
       follow_ups: [],
     } as unknown as KarucodeEvent);
     expect(drained.queued).toEqual([]);
+    // A follow-up has no steer_applied event. The whole-queue frame is also its
+    // tombstone, so a delayed HTTP acceptance cannot put it back in the panel.
+    expect(drained.retiredQueuedIds).toContain('steer_1');
   });
 
   it('drops a steer the moment the run applies it', () => {
@@ -689,6 +692,7 @@ describe('queued messages', () => {
     // The transcript row is not added here (the message arrives on the next
     // request), but the optimistic pending row must not outlive its acceptance.
     expect(applied.queued).toEqual([]);
+    expect(applied.retiredQueuedIds).toContain('steer_1');
   });
 
   it('leaves other queued messages alone when one steer lands', () => {

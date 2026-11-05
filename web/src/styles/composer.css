@@ -293,7 +293,7 @@
   padding: var(--space-1) var(--space-3);
   border-radius: var(--radius-xs);
   background: var(--accent-surface);
-  color: var(--accent-text-soft);
+  color: var(--accent-on-tint);
   font-size: var(--fs-micro);
   font-weight: 660;
   letter-spacing: 0.03em;
@@ -485,7 +485,10 @@
  * `.open` is identical to `:hover` in the mock — no accent outline. */
 .compose-bottom .model-switcher-button {
   gap: var(--space-3);
-  max-width: 230px;
+  /* `100%` of the pill's own wrapper: the wrapper is the thing the row shrinks, so
+   * without this the button kept its full width inside a narrower box and spilled
+   * out of `.compose-bar-left`'s clip. */
+  max-width: min(230px, 100%);
   height: 23px;
   padding: 0 var(--space-4);
   border: 1px solid transparent;
@@ -494,6 +497,14 @@
   color: var(--muted);
   font-size: var(--fs-tiny);
   font-weight: 500;
+  /* Between the phone breakpoint and a full-width window the row can be too
+   * narrow for both pills. A flex item defaults to `min-width: auto`, so without
+   * this the pills refuse to shrink and `.compose-bar-left`'s `overflow: hidden`
+   * silently cuts the reasoning pill off — a control that exists, is clickable
+   * by tab order, and cannot be seen. Letting them shrink turns that into an
+   * ellipsised label on a control that is still there. */
+  min-width: 0;
+  overflow: hidden;
 }
 
 .compose-bottom .model-switcher-button:hover,
@@ -539,6 +550,9 @@
 
 .compose-bottom .reasoning-selector-button .model-switcher-model {
   max-width: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* `.pill-divider`: 1×16 `--line-soft`, `margin:0 3px`, between the two pills. */
@@ -546,6 +560,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-3);
+  min-width: 0;
 }
 
 .compose-bottom .reasoning-selector::before {
@@ -717,6 +732,10 @@
   /* Anchored to the box, like the mock's `.dropdown{bottom:49px;left:16px}`,
    * so both menus share the box's 16px inset instead of hugging their pill. */
   position: static;
+  /* Both pill wrappers are flex items in `.composer-controls`; `min-width: auto`
+  * would forbid them shrinking below their label, so the last pill in the row was
+  * clipped by `.compose-bar-left` instead of ellipsising. */
+  min-width: 0;
 }
 
 .compose-bottom .model-switcher-menu.dropup {
@@ -769,7 +788,7 @@
 
 .compose-bottom .model-switcher-option.is-active {
   background: var(--row-accent-bg);
-  color: var(--accent-text);
+  color: var(--accent-on-tint);
 }
 
 .compose-bottom .model-switcher-option-name {
@@ -1016,7 +1035,7 @@
 
 .mention-item.is-active {
   background: var(--row-accent-bg);
-  color: var(--accent-text);
+  color: var(--accent-on-tint);
 }
 
 .mention-icon {

@@ -130,11 +130,32 @@ describe('CommandCard', () => {
     const scroller = container.querySelector('.command-scroll');
     if (!scroller) throw new Error('command output scroller missing');
     fakeScroll(scroller, { scrollHeight: 500, clientHeight: 100 }, 400);
+    fireEvent.scroll(scroller);
 
     rerender(
       <CommandCard item={command({ status: 'running', exitCode: null, stdout: 'a\nb\nc\n' })} defaultOpen />,
     );
     expect(scroller.scrollTop).toBe(500);
+  });
+
+  it('keeps a prior pinned reader following even when one burst is much taller than 96px', () => {
+    const { container, rerender } = render(
+      <CommandCard item={command({ status: 'running', exitCode: null, stdout: 'a\n' })} defaultOpen />,
+    );
+    const scroller = container.querySelector('.command-scroll');
+    if (!scroller) throw new Error('command output scroller missing');
+    const box = { scrollHeight: 500, clientHeight: 100 };
+    fakeScroll(scroller, box, 400);
+    fireEvent.scroll(scroller);
+
+    box.scrollHeight = 10_000;
+    rerender(
+      <CommandCard
+        item={command({ status: 'running', exitCode: null, stdout: 'a\n'.repeat(5_000) })}
+        defaultOpen
+      />,
+    );
+    expect(scroller.scrollTop).toBe(10_000);
   });
 
   it('never yanks the view away from a reader who scrolled up', () => {
@@ -144,6 +165,7 @@ describe('CommandCard', () => {
     const scroller = container.querySelector('.command-scroll');
     if (!scroller) throw new Error('command output scroller missing');
     fakeScroll(scroller, { scrollHeight: 500, clientHeight: 100 }, 50);
+    fireEvent.scroll(scroller);
 
     rerender(
       <CommandCard item={command({ status: 'running', exitCode: null, stdout: 'a\nb\nc\n' })} defaultOpen />,
@@ -151,9 +173,127 @@ describe('CommandCard', () => {
     expect(scroller.scrollTop).toBe(50);
   });
 
+  it('stops following on an explicit upward scroll even inside the bottom tolerance', () => {
+    const { container, rerender } = render(
+      <CommandCard item={command({ status: 'running', exitCode: null, stdout: 'a\n' })} defaultOpen />,
+    );
+    const scroller = container.querySelector('.command-scroll');
+    if (!scroller) throw new Error('command output scroller missing');
+    const box = { scrollHeight: 500, clientHeight: 100 };
+    fakeScroll(scroller, box, 400);
+    fireEvent.scroll(scroller);
+    scroller.scrollTop = 390;
+    fireEvent.scroll(scroller);
+
+    box.scrollHeight = 600;
+    rerender(
+      <CommandCard item={command({ status: 'running', exitCode: null, stdout: 'a\nb\nc\n' })} defaultOpen />,
+    );
+    expect(scroller.scrollTop).toBe(390);
+  });
+
   it('renders stderr as text, never as markup', () => {
     render(<CommandCard item={command({ stderr: '<script>bad()</script>', status: 'error', exitCode: 1 })} defaultOpen />);
     expect(document.querySelector('.cmd-output script')).toBeNull();
     expect(screen.getByLabelText('stderr').textContent).toContain('<script>bad()</script>');
+  });
+});
+
+describe('CommandCard row variant', () => {
+  function row(): HTMLElement {
+    const element = document.querySelector('.command-row');
+    if (!element) throw new Error('command row did not render');
+    return element as HTMLElement;
+  }
+
+  function head(): HTMLButtonElement {
+    return document.querySelector('.command-row-head') as HTMLButtonElement;
+  }
+
+  it('is one line: command, working directory, exit status and duration', () => {
+    render(<CommandCard item={command()} variant="row" />);
+
+    expect(document.querySelector('.command-card')).toBeNull();
+    expect(row().querySelector('.command-text')?.textContent).toBe('cargo test');
+    expect(row().querySelector('.command-cwd')?.textContent).toBe('crates/kc-core');
+    expect(row().querySelector('.command-status')?.textContent).toBe('exit 0');
+    expect(row().querySelector('.command-duration')?.textContent).toBe('1.3s');
+    expect(head().getAttribute('aria-expanded')).toBe('false');
+    expect(row().getAttribute('data-status')).toBe('ok');
+  });
+
+  it('collapses without rendering the output well at all', () => {
+    render(<CommandCard item={command()} variant="row" />);
+    expect(document.querySelector('.cmd-output')).toBeNull();
+    expect(screen.queryByText('running 12 tests')).toBeNull();
+  });
+
+  it('keeps stdout and stderr one disclosure away, separated as in the card', () => {
+    render(
+      <CommandCard
+        item={command({ status: 'error', exitCode: 101, stdout: 'running 1 test\n', stderr: 'panicked\n' })}
+        variant="row"
+      />,
+    );
+
+    fireEvent.click(head());
+
+    expect(head().getAttribute('aria-expanded')).toBe('true');
+    expect(row().getAttribute('data-open')).toBe('true');
+    expect(screen.getByLabelText('stdout').textContent).toContain('running 1 test');
+    expect(screen.getByLabelText('stderr').textContent).toContain('panicked');
+    // The outcome is in the line and stays there; the output is the detail.
+    expect(row().querySelector('.command-status')?.textContent).toBe('exit 101');
+
+    fireEvent.click(head());
+    expect(document.querySelector('.cmd-output')).toBeNull();
+  });
+
+  it('opens a running command itself, and says it is waiting', () => {
+    render(
+      <CommandCard
+        item={command({ status: 'running', exitCode: null, stdout: '', durationMs: null })}
+        variant="row"
+        defaultOpen
+      />,
+    );
+    expect(head().getAttribute('aria-expanded')).toBe('true');
+    expect(row().querySelector('.command-status')?.textContent).toBe('running');
+    expect(screen.getByText('Waiting for output…')).not.toBeNull();
+  });
+
+  it('opens a command that turns running after mount', () => {
+    const { rerender } = render(<CommandCard item={command()} variant="row" />);
+    expect(document.querySelector('.cmd-output')).toBeNull();
+
+    rerender(
+      <CommandCard
+        item={command({ status: 'running', exitCode: null, durationMs: null })}
+        variant="row"
+        defaultOpen
+      />,
+    );
+    expect(head().getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('labels a stopped command instead of inventing an exit code', () => {
+    render(<CommandCard item={command({ status: 'stopped', exitCode: null, durationMs: null })} variant="row" />);
+    expect(head().textContent).toContain('Stopped');
+    expect(screen.queryByText(/exit/)).toBeNull();
+  });
+
+  it('keeps the truncated badge and the full command in the row', () => {
+    const long = 'cargo test --workspace --all-targets -- --nocapture';
+    render(<CommandCard item={command({ command: long, truncated: true })} variant="row" />);
+    expect(screen.getByText('truncated')).not.toBeNull();
+    expect(head().getAttribute('title')).toBe(long);
+    expect(row().querySelector('.command-text')?.getAttribute('title')).toBe(long);
+  });
+
+  it('wires the disclosure to the output region by id', () => {
+    render(<CommandCard item={command()} variant="row" />);
+    fireEvent.click(head());
+    const panel = document.getElementById(head().getAttribute('aria-controls') ?? '');
+    expect(panel?.className).toContain('cmd-output');
   });
 });

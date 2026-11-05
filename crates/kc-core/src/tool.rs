@@ -877,10 +877,11 @@ pub fn capture_file(abs: &std::path::Path) -> CapturedFile {
 
 /// Records the before-image of every file a mutating tool changes.
 ///
-/// The runtime builds one per run and hands it to each [`ToolCtx`]; the tool
-/// calls [`JournalHandle::record`] immediately *before* it writes. Recording is
-/// deliberately not a step the agent can skip or forget: it happens inside the
-/// file tool, next to the write it describes.
+/// The runtime builds one per run and hands it to each [`ToolCtx`]. Built-in file
+/// mutations call [`ToolCtx::capture_checkpoint`] immediately before writing and
+/// refuse when that managed capture fails. The lower-level best-effort
+/// [`JournalHandle::record`] remains available to callers that explicitly permit
+/// an unrestorable change.
 #[async_trait]
 pub trait JournalHandle: Send + Sync {
     /// Capture `rel` (workspace-relative) because `tool` is about to change it.
@@ -941,6 +942,16 @@ impl ToolCtx {
     pub async fn record_checkpoint(&self, rel: &str, tool: &str) {
         if let Some(journal) = &self.checkpoints {
             journal.record(rel, tool).await;
+        }
+    }
+
+    /// Capture the before-image and say whether it is safe for a managed write to
+    /// proceed. Direct tool use without a journal deliberately keeps its existing
+    /// non-journaled behaviour; an attached journal must confirm the capture.
+    pub async fn capture_checkpoint(&self, rel: &str, tool: &str) -> bool {
+        match &self.checkpoints {
+            Some(journal) => journal.capture_path(rel, tool).await,
+            None => true,
         }
     }
 }
@@ -1025,21 +1036,39 @@ impl ToolRegistry {
 }
 
 /// Truncate a tool result to a byte budget without splitting a UTF-8 character.
+///
+/// The complete return value - marker included - fits the budget. Keeping a tail
+/// matters for shell output: a final runtime-budget cut must not remove the error
+/// that a command printed to stderr after a noisy stdout stream. Tiny budgets too
+/// small for the explanatory marker keep a valid prefix; `cut` still reports it.
 pub fn truncate_output(text: &str, max_bytes: usize) -> (String, bool) {
     if text.len() <= max_bytes {
         return (text.to_string(), false);
     }
-    let mut end = max_bytes.min(text.len());
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
+    let marker = format!(
+        "\n\n[truncated: {}-byte result; middle bytes omitted; kept head+tail]\n\n",
+        text.len()
+    );
+    if marker.len() >= max_bytes {
+        let mut end = max_bytes.min(text.len());
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        return (text[..end].to_string(), true);
     }
-    let omitted = text.len() - end;
+    let payload = max_bytes - marker.len();
+    let mut head_end = payload / 2;
+    while head_end > 0 && !text.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let tail_bytes = payload - (payload / 2);
+    let mut tail_start = text.len().saturating_sub(tail_bytes);
+    while tail_start < text.len() && !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    debug_assert!(head_end <= tail_start);
     (
-        format!(
-            "{}\n\n[truncated: {} bytes omitted; raise the limit or read a narrower range]",
-            &text[..end],
-            omitted
-        ),
+        format!("{}{}{}", &text[..head_end], marker, &text[tail_start..]),
         true,
     )
 }
@@ -1049,12 +1078,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncation_respects_char_boundaries() {
+    fn truncation_respects_char_boundaries_and_the_final_cap() {
         let s = "héllo wörld";
         let (out, cut) = truncate_output(s, 4);
         assert!(cut);
-        assert!(out.starts_with("hél"));
-        assert!(out.contains("bytes omitted"));
+        assert_eq!(out, "hél");
+        assert!(out.len() <= 4);
+
+        let long = format!("head-{}-TAIL-SENTINEL", "x".repeat(500));
+        let (out, cut) = truncate_output(&long, 180);
+        assert!(cut);
+        assert!(out.len() <= 180, "{long:?} -> {}", out.len());
+        assert!(out.starts_with("head-"), "{out}");
+        assert!(out.ends_with("TAIL-SENTINEL"), "{out}");
+        assert_eq!(out.matches("[truncated:").count(), 1, "{out}");
     }
 
     #[test]

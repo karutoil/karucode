@@ -344,9 +344,54 @@ describe('TodoPanel', () => {
       items: [item({ status: 'partial', label: 'Implemented (limited)', limitation: 'no retry on 429', started: true })],
     });
     render(<TodoPanel {...{ panel: panel(), plugin: 'kc-todo', version: '0.1.0', data, refresh: () => {} }} />);
-    const toggle = screen.getByRole('button', { name: 'Show details' });
+    const toggle = screen.getByRole('button', { name: 'Show details for t1: A task' });
     toggle.click();
     await waitFor(() => expect(screen.getByText('no retry on 429')).toBeTruthy());
+  });
+
+  it('names each disclosure after its own task and points it at its own body', async () => {
+    // Ten rows used to produce ten buttons all called "Show details", and the
+    // body they opened had no id to reference. Both sides are now task-specific.
+    const data = payload({
+      items: [
+        item({ id: 't1', title: 'First task', detail: 'first detail' }),
+        item({ id: 't2', title: 'Second task', detail: 'second detail' }),
+      ],
+    });
+    render(<TodoPanel {...{ panel: panel(), plugin: 'kc-todo', version: '0.1.0', data, refresh: () => {} }} />);
+
+    const first = screen.getByRole('button', { name: 'Show details for t1: First task' });
+    const second = screen.getByRole('button', { name: 'Show details for t2: Second task' });
+    expect(first).not.toBe(second);
+    expect(first.getAttribute('aria-controls')).toBe('todo-details-t1');
+    expect(second.getAttribute('aria-controls')).toBe('todo-details-t2');
+    expect(first.getAttribute('aria-expanded')).toBe('false');
+
+    const body = document.getElementById('todo-details-t1');
+    expect(body).not.toBeNull();
+    // The body exists in both states, so `aria-controls` is never a dangling id.
+    expect(body?.hasAttribute('hidden')).toBe(true);
+
+    first.click();
+    await waitFor(() =>
+      expect(document.getElementById('todo-details-t1')?.hasAttribute('hidden')).toBe(false),
+    );
+    expect(screen.getByRole('button', { name: 'Hide details for t1: First task' })).toBeTruthy();
+    // The sibling's body is untouched.
+    expect(document.getElementById('todo-details-t2')?.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('does not offer a nameless disabled disclosure for a row with nothing to show', () => {
+    const data = payload({ items: [item({ id: 't1', title: 'Nothing extra' })] });
+    render(<TodoPanel {...{ panel: panel(), plugin: 'kc-todo', version: '0.1.0', data, refresh: () => {} }} />);
+    // No detail, no note: the leaf marker is decoration, not a dead button.
+    expect(screen.queryByRole('button')).toBeNull();
+    const marker = document.querySelector<HTMLElement>('.todo-item-toggle.is-static');
+    expect(marker).not.toBeNull();
+    // This span is why :not(:disabled) was insufficient: only buttons can be
+    // disabled. The CSS contract separately excludes .is-static from hover.
+    expect(marker?.matches(':not(:disabled)')).toBe(true);
+    expect(marker?.matches('.todo-item-toggle:not(:disabled):not(.is-static)')).toBe(false);
   });
 
   it('renders markup in a title as text, never as HTML', () => {

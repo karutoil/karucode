@@ -48,25 +48,6 @@
   color: var(--accent);
 }
 
-.goals-refresh {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-subtle);
-  cursor: pointer;
-}
-
-.goals-refresh:hover {
-  background: var(--surface-inset);
-  color: var(--text);
-}
-
 /* ---------- one goal --------------------------------------------------- */
 
 .goals-goal {

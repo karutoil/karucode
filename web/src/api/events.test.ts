@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { consumeSseBuffer, parseEventPayload, startEventStream } from './events';
+import { consumeSseBuffer, consumeSseFrames, parseEventPayload, startEventStream } from './events';
 import type { ConnectionState, RawEvent } from './types';
 
 function sseResponse(chunks: string[], close = true): Response {
@@ -14,6 +14,10 @@ function sseResponse(chunks: string[], close = true): Response {
     status: 200,
     headers: { 'content-type': 'text/event-stream' },
   });
+}
+
+function framedEvent(seq: number, delta: string, type = 'text_delta'): string {
+  return `id: ${seq}\r\ndata: ${eventPayload(seq, delta, type)}\r\n\r\n`;
 }
 
 function eventPayload(seq: number, delta: string, type = 'text_delta'): string {
@@ -52,14 +56,34 @@ describe('consumeSseBuffer', () => {
     expect(parseEventPayload('"nope"')).toBeNull();
     expect(parseEventPayload('{"seq":"1","ts_ms":2,"type":"x"}')).toBeNull();
   });
+
+  it('parses the SSE id independently of the JSON envelope and event name', () => {
+    const payload = eventPayload(41, 'resumed');
+    // SSE joins repeated data fields with a newline; split between JSON tokens,
+    // not in the middle of a number or string.
+    const splitAt = payload.indexOf(',"session_id"');
+    const parsed = consumeSseFrames(
+      `event: text_delta\r\nid: 41\r\ndata: ${payload.slice(0, splitAt)}\r\n` +
+        `data: ${payload.slice(splitAt)}\r\n\r\n`,
+    );
+    expect(parsed.rest).toBe('');
+    expect(parsed.frames).toHaveLength(1);
+    expect(parsed.frames[0]?.id).toBe('41');
+    expect(parsed.frames[0]?.event.seq).toBe(41);
+    expect(parsed.frames[0]?.event.delta).toBe('resumed');
+    // The existing data-only API remains useful to parser callers and tests.
+    expect(consumeSseBuffer(`id: 41\ndata: ${payload}\n\n`).events[0]?.seq).toBe(41);
+  });
 });
 
 describe('startEventStream', () => {
-  it('reconnects after EOF with backoff and dedupes seq per connection', async () => {
+  it('reconnects after EOF with Last-Event-ID and dedupes replay across connections', async () => {
     const responses = [
-      sseResponse([`data: ${eventPayload(5, 'a')}\n\n`, `data: ${eventPayload(5, 'duplicate')}\n\n`]),
-      sseResponse([`data: ${eventPayload(5, 'b')}\n\n`]),
-      sseResponse([`data: ${eventPayload(6, 'never')}\n\n`]),
+      sseResponse([framedEvent(5, 'a'), framedEvent(5, 'duplicate')]),
+      // A replay can race the old connection's last frame. The persistent cursor
+      // drops that duplicate, then delivers the first genuinely new event.
+      sseResponse([framedEvent(5, 'replay duplicate'), framedEvent(6, 'b')]),
+      sseResponse([framedEvent(7, 'never')]),
     ];
     const fetchMock = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) => responses.shift() ?? sseResponse([]),
@@ -87,6 +111,8 @@ describe('startEventStream', () => {
     await vi.waitFor(() => expect(received).toHaveLength(2));
     expect(received.map((event) => event.delta)).toEqual(['a', 'b']);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    const reconnect = fetchMock.mock.calls[1]?.[1] as RequestInit | undefined;
+    expect((reconnect?.headers as Record<string, string>)['Last-Event-ID']).toBe('5');
     expect(states).toContain('connecting');
     expect(states.filter((state) => state === 'open')).toHaveLength(2);
     expect(states).toContain('reconnecting');
@@ -96,6 +122,52 @@ describe('startEventStream', () => {
     expect((request?.headers as Record<string, string>).Authorization).toBe('Bearer secret');
     expect((request?.headers as Record<string, string>).Accept).toBe('text/event-stream');
   });
+
+  it.each(['/api/events', '/api/events?session=s_1'])(
+    'persists Last-Event-ID and suppresses replay duplicates for %s',
+    async (url) => {
+      // The filtered case deliberately skips foreign sessions' global seqs;
+      // the unfiltered case stays contiguous so only replay itself is tested.
+      const filtered = url.includes('session=');
+      const before = filtered ? 4 : 3;
+      const after = filtered ? 7 : 4;
+      const responses = [
+        sseResponse([framedEvent(2, 'first'), framedEvent(before, 'before disconnect')]),
+        sseResponse([framedEvent(before, 'duplicate'), framedEvent(after, 'after reconnect')]),
+        sseResponse([]),
+      ];
+      const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => responses.shift() ?? sseResponse([]));
+      const gaps: unknown[] = [];
+      const received: RawEvent[] = [];
+      const handle = startEventStream({
+        url,
+        fetchImpl: fetchMock as unknown as typeof fetch,
+        minDelayMs: 1,
+        maxDelayMs: 1,
+        random: () => 0,
+        sleep: async () => undefined,
+        onGap: (gap) => gaps.push(gap),
+        onEvent: (event) => {
+          received.push(event);
+          if (received.length === 3) handle.stop();
+        },
+      });
+
+      await vi.waitFor(() => expect(received).toHaveLength(3));
+      expect(received.map((event) => event.delta)).toEqual([
+        'first',
+        'before disconnect',
+        'after reconnect',
+      ]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const reconnect = fetchMock.mock.calls[1]?.[1] as RequestInit | undefined;
+      expect((reconnect?.headers as Record<string, string>)['Last-Event-ID']).toBe(String(before));
+      // Filtered streams have ordinary holes from other sessions; the unfiltered
+      // stream replays through its cursor, so neither reconnect invents a gap.
+      expect(gaps).toEqual([]);
+      handle.stop();
+    },
+  );
 
   it('stops on 401 instead of retrying', async () => {
     const fetchMock = vi.fn(async () =>
@@ -233,8 +305,8 @@ describe('startEventStream', () => {
         `data: ${eventPayload(5, 'c')}\n\n`,
         `data: ${eventPayload(6, 'd')}\n\n`,
       ]),
-      // A reconnect starts a fresh dedupe scope: a high first seq is not a hole.
-      sseResponse([`data: ${eventPayload(50, 'e')}\n\n`]),
+      // Replay resumes immediately after the persisted cursor.
+      sseResponse([`data: ${eventPayload(7, 'e')}\n\n`]),
     ];
     const fetchMock = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) => responses.shift() ?? sseResponse([]),
@@ -413,6 +485,41 @@ describe('startEventStream', () => {
       handle.stop();
     },
   );
+
+  it('advances the reconnect cursor on resync and lag controls without losing the next event', async () => {
+    for (const kind of ['resync', 'stream_lagged']) {
+      const payload = JSON.stringify({
+        seq: 5, ts_ms: 5, session_id: 's_1', type: kind,
+        ...(kind === 'resync'
+          ? { requested_id: 2, oldest_available: 4 }
+          : { skipped: 2 }),
+      });
+      const responses = [
+        sseResponse([`id: 5\nevent: ${kind}\ndata: ${payload}\n\n`]),
+        sseResponse([framedEvent(5, 'duplicate control cursor'), framedEvent(6, 'next live event')]),
+      ];
+      const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => responses.shift() ?? sseResponse([]));
+      const received: RawEvent[] = [];
+      const onResync = vi.fn();
+      const handle = startEventStream({
+        fetchImpl: fetchMock as unknown as typeof fetch,
+        minDelayMs: 1,
+        maxDelayMs: 1,
+        random: () => 0,
+        sleep: async () => undefined,
+        onResync,
+        onEvent: (event) => {
+          received.push(event);
+          if (event.delta === 'next live event') handle.stop();
+        },
+      });
+      await vi.waitFor(() => expect(received.some((event) => event.delta === 'next live event')).toBe(true));
+      expect((fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>)['Last-Event-ID']).toBe('5');
+      expect(received.filter((event) => event.type === 'text_delta')).toHaveLength(1);
+      expect(onResync).toHaveBeenCalledTimes(kind === 'resync' ? 1 : 0);
+      handle.stop();
+    }
+  });
 
   it('stops cleanly when aborted while the stream is open', async () => {
     const holder: { controller: ReadableStreamDefaultController<Uint8Array> | null } = {

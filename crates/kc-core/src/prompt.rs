@@ -284,7 +284,10 @@ mod tests {
         assert!(p.contains("Artifacts:"));
         assert!(p.contains("```artifact"));
         assert!(p.contains("mermaid"));
-        assert!(p.contains("`artifacts`"), "point at the topic for the detail");
+        assert!(
+            p.contains("`artifacts`"),
+            "point at the topic for the detail"
+        );
     }
 
     #[test]

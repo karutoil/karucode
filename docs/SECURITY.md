@@ -204,11 +204,22 @@ system prompt tells the model to treat such content as data, and approvals gate
 mutations, but prompt injection is not solved. Do not run an unattended agent
 with `auto` approval on an untrusted repository.
 
+**Chat artifacts.** HTML artifacts execute in opaque-origin sandboxed frames and
+use a random capability that grants read access only to that artifact; they never
+receive the deployment's master bearer token. In the app frame, script-initiated
+network requests, remote subresources and form submissions are blocked. A directly
+opened top-level artifact can still navigate itself to another URL, which can reveal
+the viewing event and that artifact's capability (and therefore that document) to a
+destination its script chooses. `Referrer-Policy: no-referrer` suppresses incidental
+referrer leakage, but cannot stop script explicitly putting the capability in a new
+URL. Keep secrets out of artifact source and share capability URLs only with people
+allowed to read that document.
+
 **Local multi-user hosts.** There is no per-user authorization beyond the optional
 shared token. Any process that can read the token can use the agent. On a shared
 machine, run it under your own account and keep the data directory private.
 
-**Shared workspaces (with git worktree isolation).** Sessions in the same workspace see each other's file changes. Subagents use git worktrees (when the workspace is a git repository) to isolate work and prevent direct file conflicts. If the workspace is not a git repository or worktree creation fails, subagents reuse the parent's workspace and `owned_paths` serves as advisory conflict reporting (a warning in the subagent result and a row in the claims table), not file locking or isolation.
+**Shared workspaces, including subagents.** Sessions and subagents in the same workspace see and change the same live files, including dirty and untracked parent state. Completed subagent edits are not rolled back by a separate-worktree cleanup. `owned_paths` serves as advisory conflict reporting (a warning in the subagent result and a row in the claims table), not file locking or isolation; use disjoint paths and coordinate overlapping work.
 
 **Model provider.** Whatever you point `base_url` at receives your prompts, file
 contents the agent reads, and command output. Use a gateway you trust, ideally on

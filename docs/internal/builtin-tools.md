@@ -18,8 +18,8 @@
 | `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries; the walk stops at the cap and a truncated listing reports the total as a lower bound (`500+`) |
 | `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`. The result cap is global across files, and long matching lines keep their first 300 characters in both engines |
 | `write_file` | mutating | policy | create/overwrite atomically, max 2 MiB per call; journals the previous bytes for a rewind |
-| `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff; journals the previous bytes |
-| `run_command` | shell | policy | `/bin/sh -c` in the workspace, streamed output, timeout, own process group. On timeout or cancellation the whole group gets SIGTERM, then SIGKILL after a grace period, so a child that ignores SIGTERM cannot survive |
+| `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff; revalidates the file after approval and journals the previous bytes |
+| `run_command` | shell | policy | `/bin/sh -c` in the workspace, incrementally UTF-8-decoded streamed output, timeout, own process group. On timeout or cancellation the whole group gets SIGTERM, then SIGKILL after a grace period, so a child that ignores SIGTERM cannot survive |
 | `git_status` | read_only | none | branch + porcelain status for the workspace or a subdirectory, **confined to the workspace** |
 | `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref, **confined to the workspace** (paths are workspace-relative) |
 | `karucode_docs` | read_only | none | search and read karucode's own documentation (this system) |
@@ -46,32 +46,41 @@ surface. Plugin tools are namespaced `plugin__<plugin>__<tool>` and MCP tools
 ## Output limits
 
 Tool output kept for the model is bounded by `limits.max_tool_output_bytes`
-(default 24000). A truncated result says so explicitly and tells the model to
-narrow the request; it is never silently cut. `run_command` keeps head and tail
-of a long stream within `max_command_output_bytes`.
+(default 24000), **including the truncation marker**. A cut retains head+tail so
+a final runtime-budget reduction does not discard a trailing error; unusually
+tiny budgets that cannot fit the explanatory marker retain a UTF-8-safe prefix.
+`run_command` retains raw stdout head+tail and trailing stderr within that final
+budget rather than front-truncating an already-rendered marker. Capture is first
+bounded per stream by `max_command_output_bytes`; long command lines in the
+result header are previewed at 512 characters (metadata still has the command).
 
 ## Gotchas
 
 * `edit_file` is exact-match and ambiguity-safe: it refuses when the old string
-  appears twice (pass `replace_all`) or not at all. Read the region first.
+  appears twice (pass `replace_all`) or not at all. Read the region first. After
+  approval it re-reads and re-plans with a SHA-256 fingerprint; if the file
+  changed during the wait, it refuses without writing so the fresh diff can be
+  reviewed. Dense `replace_all` diffs use an 80-line capped block preview rather
+  than allocating LCS/operation state for every changed line.
 * File tools are confined to the run's project directory **plus the system
   temporary directory**: `..`, any other absolute path and symlink escapes are
   refused, for reads and writes alike. See "Scratch space" below.
 * `run_command` is **not** sandboxed. It runs as the server user, in a process
   group that is killed on timeout or cancellation; an approved command can do
   anything that user can do.
-* `write_file` and `edit_file` record the file's previous bytes in the rewind
-  journal immediately before they write, so `POST /api/sessions/:id/rewind`
-  with `revert` can put the file back. The journal is worth knowing about for
-  two reasons: an edit is undoable only if the before-image fit the 4 MiB cap
-  and was valid UTF-8 (otherwise the rewind reports that path as incomplete
-  instead of half-restoring it), and a tool that changes files without
-  recording cannot be undone at all - `run_command` is the big one, and the
-  preview lists it under `opaque_tools`.
+* `write_file` and `edit_file` must capture the file's previous bytes in the
+  rewind journal immediately before they write; if an attached journal cannot
+  persist a complete before-image, the tool refuses and leaves the file
+  unchanged. `POST /api/sessions/:id/rewind` with `revert` can then put the file
+  back. Direct tool calls with no journal keep their non-journaled behaviour.
+  A tool that changes files without recording cannot be undone - `run_command`
+  is the big one, and the preview lists it under `opaque_tools`.
 * `run_command` returns `ok: false` for a non-zero exit, with the exit code in
   the header - a failing test run is a failed tool call, not a silent success.
 * `search_files` honours `.gitignore`. Searching ignored/build output needs a
-  pattern under an explicitly named path, not a glob trick.
+  pattern under an explicitly named path, not a glob trick. The pure-Rust
+  fallback walks lazily, observes cancellation during walking/reads, and skips
+  files over 4 MiB; bounded reads cannot grow past that cap during the scan.
 * `search_files` caps results globally, not per file, and both engines agree on
   the cap. A match on a very long line keeps its first 300 **characters** rather
   than being replaced by a placeholder; the cap is counted in characters, not
@@ -83,6 +92,11 @@ of a long stream within `max_command_output_bytes`.
   child running in the background (`build & exit 0`) instead of waiting for that
   child to close the output pipes. The result says the output may be incomplete
   and `background_output` is set in the metadata.
+* On Unix, backslashes in filenames are literal characters, including in tool
+  metadata and rewind checkpoint keys; they are not rewritten as `/` separators.
+* A narrowed `git_status`/`git_diff` path also accepts a deleted tracked file
+  (or one whose parent directory was deleted). The path is checked lexically and
+  through its deepest existing ancestor, so symlink escapes are still refused.
 * `read_file` reports the file's real line count in its header even when the
   byte cap truncated the content; when the byte cap (not the line window) ended
   the read, there is no "continue with offset" hint, because those lines cannot

@@ -16,6 +16,9 @@ A mission belongs to a home project and groups independent project-local session
 including sessions in other registered projects. Create one with
 `POST /api/missions` and JSON `{"project_id":"p_...","title":"Upgrade","description":"Optional"}`.
 List with `GET /api/missions?project=p_...` and inspect with `GET /api/missions/:id`.
+Listing is newest-first and bounded to 50 detailed missions by default; use
+`offset=0&limit=50` (limit 1-100), follow the returned `next_offset` while
+`has_more` is true, and inspect an individual mission for its current full detail.
 Start an explicitly authorized session with `POST /api/missions/:id/sessions`
 and JSON `{"request_id":"unique-client-key","project_id":"p_...","title":"Review","prompt":"Review the code"}`.
 `project_id` is optional and defaults to the mission home project; it selects the

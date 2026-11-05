@@ -14,6 +14,8 @@ const RECONNECT_DELAYS_MS = [250, 500, 1000, 2000, 5000, 10_000];
 
 /** How long to wait for the shell to answer a ping before treating it as gone. */
 const PING_TIMEOUT_MS = 20_000;
+/** After a healthy pong, wait this long before checking the connection again. */
+const PING_INTERVAL_MS = 10_000;
 
 export type TerminalSocketStatus =
   | 'idle'
@@ -169,17 +171,29 @@ export class TerminalSocket {
     if (frame?.type === 'error') {
       this.setStatus('failed', frame.message);
     }
+    if (frame?.type === 'pong') {
+      // Only this control frame answers the heartbeat. PTY bytes prove output is
+      // flowing, but not that the server can still answer our control channel.
+      this.schedulePing();
+    }
     this.options.handlers.onControl(frame);
   }
 
   private startPing(): void {
     this.clearPing();
+    // Heartbeats are text control frames; keystrokes and PTY output stay binary.
+    this.post({ type: 'ping' });
     this.pingTimer = window.setTimeout(() => {
       // No pong within the window means the socket is dead on a network the
       // browser has not noticed yet (a laptop that changed network). Closing it
       // makes `onclose` fire and the reconnect path run.
       this.socket?.close(4000, 'no response');
     }, PING_TIMEOUT_MS);
+  }
+
+  private schedulePing(): void {
+    this.clearPing();
+    this.pingTimer = window.setTimeout(() => this.startPing(), PING_INTERVAL_MS);
   }
 
   private clearPing(): void {

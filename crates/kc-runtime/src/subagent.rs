@@ -186,13 +186,12 @@
 //
 // # Gotchas
 //
-// * **Git worktrees isolate subagent work** when the workspace is a git repository.
-//   A worktree is created for each subagent and cleaned up when it completes,
-//   preventing direct file conflicts with the parent and sibling agents. The
-//   worktree is detached, so creating and removing one leaves no branch behind in
-//   your repository. If the workspace is not a git repository or worktree creation
-//   fails, subagents transparently reuse the shared workspace and `owned_paths`
-//   provides advisory conflict reporting.
+// * **Subagents share the parent's live workspace**, including dirty and
+//   untracked files. Automatic git worktrees are not created: a clean checkout
+//   would hide parent work, and there is no durable patch handoff to make
+//   deleting it safe. Child edits are immediately visible and survive completion.
+//   `owned_paths` provides advisory conflict reporting, not locking or isolation;
+//   assign disjoint paths and coordinate edits that overlap.
 // * Recursion is off by default; enabling it without a depth budget turns one
 //   question into an expensive fan-out.
 // * Subagent runs cost tokens and time. Delegating a one-file read is slower than
@@ -200,8 +199,9 @@
 // * Tool calls inside a turn execute in order, so a blocking fan-out still issues
 //   its children one after another; `spawn_agents` is what makes them overlap.
 // * `max_background` caps *live background* agents per session, when it is
-//   finite. A blocking spawn is bounded by `max_concurrent` instead, because it
-//   holds its parent's turn.
+//   finite. A top-level blocking spawn may wait for `max_concurrent` capacity.
+//   Background and nested blocking spawns are refused immediately at capacity;
+//   a nested waiter would otherwise deadlock while holding its ancestor's slot.
 // * Setting `max_concurrent` to `0` does not make spawning free: it removes one
 //   counter. `max_depth`, `timeout_secs`, the install's run clock and the bill for
 //   every concurrent provider stream still apply.
@@ -884,18 +884,26 @@ async fn spawn_batch(
     let mut refusals: Vec<String> = Vec::new();
 
     for (index, spawn) in tasks.iter().enumerate() {
-        // A blocking spawn holds its parent's turn, so `max_concurrent` is its
-        // real bound and a wait for a slot is honest. A background spawn must
-        // never park the parent, so it takes a slot only if one is free right now
-        // and is otherwise refused.
-        let permit = if options.background {
+        // Background and nested blocking spawns take a slot only when one is
+        // immediately available. In particular, a nested blocking waiter holds
+        // an ancestor's permit until its own child returns, so waiting for a full
+        // limiter is a wait-for cycle: the only task that could release a slot is
+        // waiting for this spawn. Only a top-level blocking spawn may queue.
+        let permit = if options.background || ctx.depth > 0 {
             match inner.subagents.try_acquire(cfg.max_concurrent) {
                 Some(permit) => permit,
                 None => {
+                    let nested = if options.background || ctx.depth == 0 {
+                        String::new()
+                    } else {
+                        "; nested blocking spawns never wait for a slot held by their own ancestry"
+                            .to_string()
+                    };
                     refusals.push(format!(
-                        "{}: settings.subagents.max_concurrent = {} subagents are already running",
+                        "{}: settings.subagents.max_concurrent = {} subagents are already running{}",
                         spawn.label(index),
-                        cfg.max_concurrent
+                        cfg.max_concurrent,
+                        nested
                     ));
                     continue;
                 }
@@ -1374,7 +1382,7 @@ async fn run_child_loop(
     inner: Arc<RuntimeInner>,
     live: Arc<LiveAgent>,
     record: AgentRecord,
-    mut spec: LoopSpec,
+    spec: LoopSpec,
     _permit: SubagentPermit,
     mut warnings: Vec<String>,
     _task: String,
@@ -1386,43 +1394,14 @@ async fn run_child_loop(
         cfg.timeout_secs.max(1)
     };
 
-    // Try to create a git worktree for this subagent if the repository supports it.
-    // If the workspace is not a git repo or worktree creation fails, we fall back
-    // to using the main workspace path.
-    let worktree =
-        match crate::worktree::WorktreeGuard::try_create(spec.workspace.root(), &agent_id).await {
-            Ok(wt) => {
-                if wt.is_active() {
-                    tracing::debug!(
-                        agent_id = %agent_id.0,
-                        worktree_path = %wt.path().display(),
-                        "subagent using git worktree"
-                    );
-                }
-                wt
-            }
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %agent_id.0,
-                    error = %e,
-                    "worktree creation error, proceeding with main workspace"
-                );
-                crate::worktree::WorktreeGuard::try_create(spec.workspace.root(), &agent_id)
-                    .await
-                    .unwrap_or_else(|_| {
-                        // Last resort: create an inactive guard that points to the main workspace
-                        crate::worktree::WorktreeGuard::fallback(spec.workspace.root())
-                    })
-            }
-        };
-
-    // Update the spec's workspace to point to the worktree (or main workspace if fallback)
-    if worktree.is_active() || worktree.path() != spec.workspace.root() {
-        spec.workspace = Arc::new(
-            kc_core::paths::Workspace::new(worktree.path())
-                .unwrap_or_else(|_| (*spec.workspace).clone()),
-        );
-    }
+    // Children deliberately share the parent's live workspace. A detached git
+    // worktree starts at HEAD, hiding uncommitted parent state, and without a
+    // durable patch-handoff protocol its cleanup would destroy completed edits.
+    // Keeping this guard also makes the invariant explicit: the journal and the
+    // tools in `spec` resolve the same workspace, so rewind never targets a
+    // temporary checkout.
+    let worktree = crate::worktree::WorktreeGuard::fallback(spec.workspace.root());
+    debug_assert_eq!(worktree.path(), spec.workspace.root());
 
     let guarded = std::panic::AssertUnwindSafe(crate::agent::run_loop(Arc::clone(&inner), spec))
         .catch_unwind();
@@ -1494,7 +1473,8 @@ async fn run_child_loop(
     inner.runs.lock().expect("runs lock").remove(&agent_id.0);
 
     // --- finish ---------------------------------------------------------------
-    // The worktree guard is dropped here, cleaning up the worktree if it was active.
+    // The shared guard owns no checkout and removes nothing. Every edit the
+    // child completed remains in the parent workspace.
     drop(worktree);
 
     let (summary_raw, _) = truncate_output(&outcome.text, MAX_SUMMARY_BYTES);
@@ -2333,18 +2313,33 @@ impl Tool for PauseAgentsTool {
                 inner.hub.pause(&agent.id.0, &by)
             };
             match result {
-                Ok(status) => {
-                    ctx.emit(Event::AgentPaused {
-                        agent_id: agent.id.0.clone(),
-                        paused: !self.resume,
-                        by: by.clone(),
-                    });
-                    if let Err(e) = mark_paused(&inner, agent, !self.resume, status).await {
-                        lines.push(format!("`{}`: {verb} but {e}", agent.id.0));
-                    } else {
-                        lines.push(format!("`{}` {verb}", agent.id.0));
+                Ok(status) => match mark_paused(&inner, agent, !self.resume, status).await {
+                    Ok(actual) => {
+                        let requested = if self.resume {
+                            AgentStatus::Running
+                        } else {
+                            AgentStatus::Paused
+                        };
+                        if actual == requested {
+                            ctx.emit(Event::AgentPaused {
+                                agent_id: agent.id.0.clone(),
+                                paused: !self.resume,
+                                by: by.clone(),
+                            });
+                            lines.push(format!("`{}` {verb}", agent.id.0));
+                        } else {
+                            lines.push(format!(
+                                "`{}` is {}; the {verb} transition did not apply because its persisted state won the race",
+                                agent.id.0,
+                                actual.as_str()
+                            ));
+                        }
                     }
-                }
+                    Err(e) => lines.push(format!(
+                        "`{}`: {verb} in the live roster but {e}",
+                        agent.id.0
+                    )),
+                },
                 Err(e) => lines.push(format!("`{}`: {}", agent.id.0, e.message())),
             }
         }
@@ -2358,32 +2353,49 @@ impl Tool for PauseAgentsTool {
     }
 }
 
-/// Persist the visible half of a pause: the row's status, so a reload shows what
-/// the roster showed live. A failure is reported to the caller but does not undo
-/// the pause - the loop really is parked either way.
+/// Persist a pause/resume without replacing any other agent fields. The returned
+/// status is authoritative: when a terminal write wins, it is returned instead
+/// of the requested live state.
 async fn mark_paused(
     inner: &Arc<RuntimeInner>,
     agent: &Arc<LiveAgent>,
     paused: bool,
     status: AgentStatus,
-) -> Result<()> {
-    let store = inner.deps.store.clone();
-    let mut record = match store.get_agent(&agent.id.0).await? {
-        Some(summary) => summary.agent,
-        None => return Ok(()),
-    };
-    record.status = if paused {
-        AgentStatus::Paused.as_str().to_string()
+) -> Result<AgentStatus> {
+    // Resuming an already-cancelled loop must not turn its row back into a live
+    // one while finalization is still unwinding.
+    if !paused && status == AgentStatus::Cancelled {
+        return Ok(AgentStatus::Cancelled);
+    }
+    let (expected, requested) = if paused {
+        (AgentStatus::Running.as_str(), AgentStatus::Paused)
     } else {
-        // A resumed agent that was killed in between stays cancelled; anything
-        // else is running again.
-        match status {
-            AgentStatus::Cancelled => AgentStatus::Cancelled.as_str().to_string(),
-            _ => AgentStatus::Running.as_str().to_string(),
-        }
+        (AgentStatus::Paused.as_str(), AgentStatus::Running)
     };
-    record.updated_at = now_ms();
-    store.upsert_agent(&record).await
+    let store = inner.deps.store.clone();
+    let changed = store
+        .transition_agent_status(&agent.id.0, &[expected], requested.as_str(), now_ms())
+        .await?;
+    if changed {
+        return Ok(requested);
+    }
+
+    // A terminal full-row upsert may have landed after the hub control check.
+    // Conditional UPDATE deliberately loses that race; return the persisted
+    // state instead of resurrecting a settled agent with a whole-row write.
+    let record = store
+        .get_agent(&agent.id.0)
+        .await?
+        .ok_or_else(|| {
+            kc_core::error::Error::NotFound(format!("agent {} no longer exists", agent.id.0))
+        })?
+        .agent;
+    AgentStatus::parse(&record.status).ok_or_else(|| {
+        kc_core::error::Error::Store(format!(
+            "agent {} has unknown persisted status `{}`",
+            agent.id.0, record.status
+        ))
+    })
 }
 
 pub(crate) struct KillAgentsTool {
@@ -2584,6 +2596,7 @@ pub fn child_timeout_secs(cfg: &kc_core::config::SubagentConfig) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn limiter_counts_and_releases() {
@@ -2679,6 +2692,332 @@ mod tests {
 
         drop(permits);
         assert_eq!(limiter.active(), 0, "every permit is released on drop");
+    }
+
+    #[tokio::test]
+    async fn a_recursive_blocking_spawn_is_refused_at_capacity_instead_of_deadlocking() {
+        use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+
+        let settings = subagent_config_for_test(1);
+        let task = "level one";
+        let spawn = |call_id: &str, task: &str| {
+            Script::call(&[(
+                call_id,
+                SPAWN_AGENT_TOOL,
+                &serde_json::json!({ "task": task }).to_string(),
+            )])
+        };
+        let mut h =
+            HarnessBuilder::new(vec![spawn("root_spawn", task), Script::text("parent done")])
+                .settings(FakeSettings::default().with_subagents(settings))
+                .build()
+                .await;
+        h.factory.key(
+            task,
+            vec![
+                spawn("nested_spawn", "level two"),
+                Script::text("child done after the refusal"),
+            ],
+        );
+
+        // Harness timeouts turn the old wait-for cycle into a bounded failure.
+        let events = h.run_to_finish("start the recursive chain").await;
+        let spawned = events
+            .iter()
+            .filter(|event| matches!(event.event, Event::AgentSpawned { .. }))
+            .count();
+        assert_eq!(spawned, 1, "the at-capacity grandchild must not start");
+        let nested = events
+            .iter()
+            .find_map(|event| match &event.event {
+                Event::ToolCallFinished {
+                    call_id,
+                    ok,
+                    output,
+                    ..
+                } if call_id == "nested_spawn" => Some((*ok, output.clone())),
+                _ => None,
+            })
+            .expect("nested spawn result");
+        assert!(!nested.0, "the nested spawn must refuse: {}", nested.1);
+        assert!(nested.1.contains("max_concurrent = 1"), "{}", nested.1);
+        assert!(nested.1.contains("own ancestry"), "{}", nested.1);
+        assert!(h.store.agents().iter().all(|a| a.status == "completed"));
+    }
+
+    struct SharedWorkspaceWrite;
+
+    #[async_trait]
+    impl Tool for SharedWorkspaceWrite {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "write_file".into(),
+                description: "Verify dirty parent reads, then write one child file".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                origin: kc_core::tool::ToolOrigin::Builtin,
+            }
+        }
+
+        fn class(&self) -> ToolClass {
+            ToolClass::Mutating
+        }
+
+        async fn invoke(&self, _request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+            let dirty = match std::fs::read_to_string(ctx.workspace.root().join("dirty.txt")) {
+                Ok(text) => text,
+                Err(e) => {
+                    return ToolOutcome::err(format!("could not read dirty parent file: {e}"))
+                }
+            };
+            let untracked =
+                match std::fs::read_to_string(ctx.workspace.root().join("parent-untracked.txt")) {
+                    Ok(text) => text,
+                    Err(e) => {
+                        return ToolOutcome::err(format!(
+                            "could not read untracked parent file: {e}"
+                        ))
+                    }
+                };
+            ctx.record_checkpoint("child-created.txt", "write_file")
+                .await;
+            if let Err(e) = std::fs::write(
+                ctx.workspace.root().join("child-created.txt"),
+                "completed child edit\n",
+            ) {
+                return ToolOutcome::err(format!("could not write child file: {e}"));
+            }
+            ToolOutcome::ok(format!("dirty={dirty}; untracked={untracked}"))
+        }
+    }
+
+    fn git(workspace: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run git for shared-workspace regression");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[tokio::test]
+    async fn a_completed_child_shares_dirty_parent_state_and_rewinds_the_same_tree() {
+        use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+        use kc_core::checkpoint::UndoOutcome;
+        use kc_core::store::Store as _;
+
+        let child_task = "edit the live parent workspace";
+        let spawn = Script::call(&[(
+            "root_spawn",
+            SPAWN_AGENT_TOOL,
+            &serde_json::json!({ "task": child_task }).to_string(),
+        )]);
+        let mut h = HarnessBuilder::new(vec![spawn, Script::text("parent done")])
+            .tool(Arc::new(SharedWorkspaceWrite))
+            .settings(FakeSettings::default().with_subagents(subagent_config_for_test(2)))
+            .build()
+            .await;
+        h.factory.key(
+            child_task,
+            vec![
+                Script::call(&[("child_write", "write_file", "{}")]),
+                Script::text("child completed"),
+            ],
+        );
+
+        // A real HEAD is required to reproduce the old automatic-worktree path.
+        git(&h.workspace_dir, &["init", "-q"]);
+        std::fs::write(h.workspace_dir.join("dirty.txt"), "committed\n").unwrap();
+        git(&h.workspace_dir, &["add", "dirty.txt"]);
+        git(
+            &h.workspace_dir,
+            &[
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        );
+        std::fs::write(h.workspace_dir.join("dirty.txt"), "parent dirty\n").unwrap();
+        std::fs::write(
+            h.workspace_dir.join("parent-untracked.txt"),
+            "parent untracked\n",
+        )
+        .unwrap();
+
+        let events = h.run_to_finish("exercise the shared child workspace").await;
+        h.wait_idle().await;
+        let child_write = events
+            .iter()
+            .find_map(|event| match &event.event {
+                Event::ToolCallFinished {
+                    call_id,
+                    ok,
+                    output,
+                    ..
+                } if call_id == "child_write" => Some((*ok, output.clone())),
+                _ => None,
+            })
+            .expect("child write result");
+        assert!(child_write.0, "{}", child_write.1);
+        assert!(
+            child_write.1.contains("dirty=parent dirty"),
+            "{}",
+            child_write.1
+        );
+        assert!(
+            child_write.1.contains("untracked=parent untracked"),
+            "{}",
+            child_write.1
+        );
+        assert_eq!(
+            std::fs::read_to_string(h.workspace_dir.join("child-created.txt")).unwrap(),
+            "completed child edit\n",
+            "the edit must survive child completion"
+        );
+
+        let rows = h.store.list_checkpoints(h.session(), 0).await.unwrap();
+        assert_eq!(rows.len(), 1, "the shared child write is journaled once");
+        assert_eq!(rows[0].path, "child-created.txt");
+        assert!(rows[0].agent_id.is_some(), "the row names the child");
+        let prompt = h
+            .session_messages()
+            .await
+            .into_iter()
+            .find(|m| m.role == "user" && m.agent_id.is_none())
+            .expect("parent prompt");
+        let outcome = h
+            .runtime
+            .rewind(h.session(), prompt.id, true, true)
+            .await
+            .expect("rewind the shared child checkpoint");
+        assert_eq!(outcome.outcomes, vec![UndoOutcome::Removed]);
+        assert!(
+            !h.workspace_dir.join("child-created.txt").exists(),
+            "the journal and child tools must resolve the same parent tree"
+        );
+    }
+
+    fn status_record(id: &str, status: AgentStatus) -> AgentRecord {
+        AgentRecord {
+            id: id.into(),
+            session_id: "s_status".into(),
+            parent_run_id: "r_status".into(),
+            parent_agent_id: None,
+            name: "worker".into(),
+            role: "worker".into(),
+            task: "work".into(),
+            status: status.as_str().into(),
+            model: "fake".into(),
+            iterations: 0,
+            summary: String::new(),
+            error: None,
+            owned_paths: Vec::new(),
+            created_at: 10,
+            updated_at: 10,
+            finished_at: None,
+            background: false,
+            note: String::new(),
+            progress: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_never_overwrite_a_terminal_record() {
+        let inner = crate::tests_support::test_inner();
+        for (id, paused, hub_status) in [
+            ("a_pause_loses", true, AgentStatus::Paused),
+            ("a_resume_loses", false, AgentStatus::Running),
+        ] {
+            let mut record = status_record(id, AgentStatus::Running);
+            inner.deps.store.upsert_agent(&record).await.unwrap();
+            let live = inner.hub.insert(
+                &record,
+                record.parent_run_id.clone(),
+                1,
+                CancellationToken::new(),
+            );
+
+            // This is the final full-row write that used to race the control
+            // read/upsert. Its result and metadata must all remain authoritative.
+            record.status = AgentStatus::Completed.as_str().into();
+            record.iterations = 7;
+            record.summary = "terminal result".into();
+            record.updated_at = 999;
+            record.finished_at = Some(1_000);
+            record.note = "finished".into();
+            record.progress = Some(1.0);
+            inner.deps.store.upsert_agent(&record).await.unwrap();
+
+            let actual = mark_paused(&inner, &live, paused, hub_status)
+                .await
+                .expect("terminal CAS miss is an observed state, not a store error");
+            assert_eq!(actual, AgentStatus::Completed);
+            let after = inner.deps.store.get_agent(id).await.unwrap().unwrap().agent;
+            assert_eq!(after.status, "completed");
+            assert_eq!(after.iterations, 7);
+            assert_eq!(after.summary, "terminal result");
+            assert_eq!(after.updated_at, 999);
+            assert_eq!(after.finished_at, Some(1_000));
+            assert_eq!(after.note, "finished");
+            assert_eq!(after.progress, Some(1.0));
+            inner.hub.finish(id, AgentStatus::Completed);
+        }
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_transition_only_live_states() {
+        let inner = crate::tests_support::test_inner();
+        let record = status_record("a_control", AgentStatus::Running);
+        inner.deps.store.upsert_agent(&record).await.unwrap();
+        let live = inner.hub.insert(
+            &record,
+            record.parent_run_id.clone(),
+            1,
+            CancellationToken::new(),
+        );
+        assert_eq!(
+            mark_paused(&inner, &live, true, AgentStatus::Paused)
+                .await
+                .unwrap(),
+            AgentStatus::Paused
+        );
+        assert_eq!(
+            mark_paused(&inner, &live, false, AgentStatus::Running)
+                .await
+                .unwrap(),
+            AgentStatus::Running
+        );
+        let after = inner
+            .deps
+            .store
+            .get_agent(&record.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .agent;
+        assert_eq!(after.status, "running");
+        assert_eq!(after.created_at, 10);
+        assert!(after.updated_at >= 10);
+    }
+
+    fn subagent_config_for_test(max_concurrent: usize) -> kc_core::config::SubagentConfig {
+        kc_core::config::SubagentConfig {
+            max_concurrent,
+            max_iterations: 6,
+            max_continues: 0,
+            allow_recursive: true,
+            max_depth: 3,
+            timeout_secs: 10,
+            allow_background: true,
+            max_background: 4,
+            wait_timeout_secs: 5,
+        }
     }
 
     #[test]

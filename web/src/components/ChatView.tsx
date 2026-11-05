@@ -97,15 +97,20 @@ function BranchChip({ onShowChanges }: { onShowChanges?: () => void }): JSX.Elem
   }, [projectId]);
 
   if (!branch) return null;
+  // The branch name is the accessible name: on a phone the visible text becomes
+  // the icon alone, and a button with no text would have no name there.
   return (
     <button
       type="button"
       class="head-btn branch-chip"
+      aria-label={`Branch ${branch} — open Changes`}
       title={`On branch ${branch} — open Changes`}
       onClick={onShowChanges}
     >
       <BranchIcon size={13} />
-      <span class="branch-chip-name">{branch}</span>
+      <span class="branch-chip-name" title={branch}>
+        {branch}
+      </span>
     </button>
   );
 }
