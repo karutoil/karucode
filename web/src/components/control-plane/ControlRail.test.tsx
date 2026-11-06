@@ -305,7 +305,7 @@ describe('the rail speaks the workbench’s session-row grammar', () => {
       '.session-menu-trigger',
       '.badge', // the counts
       '.rail-avatar', // the project tile
-      '.eyebrow', // the group kickers
+      '.session-group-label', // the group headings
       '.button', // the New button
     ]) {
       expect(browser.querySelector(selector), selector).toBeTruthy();
@@ -434,7 +434,9 @@ describe('the rail foot', () => {
     expect(foot?.querySelector('.online-row')?.textContent).toBe('Live2 projects');
     expect(foot?.querySelector('.online-ind')?.className).toContain('status-ok');
     // The count badge is the shared pill, not a bare number in a span.
-    expect(projectGroup.querySelector('.cp-group .badge')?.textContent).toBe('2');
+    // The count is the shared label's mono span, as `SessionsRail` draws its day
+    // groups - not a second badge in a row of badges.
+    expect(projectGroup.querySelector('.session-group-label span')?.textContent).toBe('2');
   });
 
   it('pluralises one project instead of saying "1 projects"', async () => {

@@ -419,8 +419,8 @@ export function ControlRail({
     </div>
     <nav class="session-nav" aria-label="Session list">
       <section aria-label="Control chats">
-        <div class="cp-group">
-          <span class="eyebrow">Control chats</span>
+        <div class="cp-group-head">
+          <h2 class="session-group-label">Control chats</h2>
           <button
             type="button"
             class="button button-small"
@@ -441,10 +441,7 @@ export function ControlRail({
       {/* The project-session group keeps a stable name so a screen reader (and
           the browser verification script) can tell which group a row is in. */}
       <section aria-label="Sessions">
-        <div class="cp-group">
-          <span class="eyebrow">Sessions</span>
-          <span class="badge">{projectSessions.length}</span>
-        </div>
+        <h2 class="session-group-label">Sessions<span aria-hidden="true">{projectSessions.length}</span></h2>
         {!loading && projectSessions.length === 0 && !listError
           ? <p class="cp-note">No sessions yet. Start one from control chat.</p>
           : null}
@@ -452,10 +449,10 @@ export function ControlRail({
           {/* The sub-group count is only worth drawing when it says something
               the outer "Sessions" count does not: one group with every session
               in it repeated the same number twice in a row. */}
-          <div class="cp-group cp-group-sub">
-            <span class="eyebrow">{group.label}</span>
-            {groups.length > 1 ? <span class="badge">{group.items.length}</span> : null}
-          </div>
+          <h2 class="session-group-label cp-group-sub">
+            {group.label}
+            {groups.length > 1 ? <span aria-hidden="true">{group.items.length}</span> : null}
+          </h2>
           <ul class="session-list">{group.items.map((session) => row(session, rowActions))}</ul>
         </section>)}
         {!loading && filtered.length === 0 && query.trim() !== '' ? <p class="cp-note">No sessions match “{query}”.</p> : null}

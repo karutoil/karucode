@@ -310,6 +310,7 @@ to adopt (owner file in parentheses):
 | session row | `.cp-row*` | `.session-row`/`.session-open`/`.session-head`/`.session-title`/`.session-meta`/`.session-state-<tone>` (layout.css) |
 | row kebab + menu | `.cp-row-menu*` | `.session-menu-wrap`/`.session-menu-trigger`/`.session-menu`/`.menu-item` (layout.css) |
 | rail head / foot | `.cp-browser-head`, `.cp-browser-foot` | `.side-head`, `.side-footer`/`.online-row` (layout.css) |
+| list group heading | `.cp-group` + `.eyebrow` | `.session-group-label` with its mono count span (layout.css) |
 | agent card | `.cp-agent*` | `.agent-card`/`.agent-head`/`.agent-name`/`.agent-role`/`.agent-task`/`.agent-note`/`.agent-progress` (inspector.css) |
 | facts / metrics | `.cp-facts dl` | `.inspector-section`/`.inspector-kicker`/`.metric`/`.metric-label`/`.metric-num` (inspector.css) |
 | empty state | `.cp-intro*` | `.empty-state`/`.empty-symbol`/`.empty-title`/`.empty-copy` (chat.css) |
@@ -350,6 +351,32 @@ breakpoints to `@container`. Phone-only concerns (`dvh`, safe-area) may stay
 Finally, the plane's own header must not restate what the embedded conversation
 already says. `.cp-session-head` and the `ChatView` header both render the title
 and run state; pick one owner (§ shared rule 5, "one owner per fact").
+
+**State of this rule (2026-11-06): implemented, and enforced.** Every row of the
+table above is now the class the plane renders; the private classes it replaced
+are deleted, not aliased. What remains `.cp-*` is what the workbench genuinely has
+no equivalent for — the two-group rail chrome, the launch box, the overview
+dashboard grid, the facts panel's copy-id row and the `k.` chat glyph — plus one
+*variant* of a shared class, `.rail-avatar[data-tone]`, the hue that makes an
+all-projects list scannable. The header question was settled by giving the title
+to the plane's breadcrumb and suppressing the embedded conversation's header
+(`.cp-chat .main-head { display: none }`).
+
+Three things keep it true rather than merely done:
+
+- `scripts/verify_control_parity.py` measures both surfaces in Chromium: which
+  shared classes the plane actually renders, that no `.cp-*` stand-in remains for
+  an adopted role, that variant-matched roles compute identical styles, and — the
+  check that makes adoption honest — that no control-plane sheet redefines a bare
+  shared primitive. A plane-local modifier that *adds* properties passes; one that
+  re-sets a property the shared recipe owns fails.
+- `styles/workflow-panels.test.ts` pins the status word: `.session-state` may
+  never be `font-size: 0` at any width, because a colour-only 6px dot was exactly
+  how "Finished", "Cancelled" and "No runs" became indistinguishable.
+- The status word itself moved to `layout.css` with the rest of the `.session-*`
+  family (it had been scoped to `.session-row-quiet` in
+  `workbench-navigation.css`, so only one list could use it). One rule, one
+  spelling, every surface.
 
 ---
 

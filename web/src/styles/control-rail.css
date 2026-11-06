@@ -15,7 +15,7 @@
  *      own width changes;
  *   2. the row's avatar column (`.cp-row-body` / `.cp-row-text`) - this list
  *      mixes projects, the workbench's does not;
- *   3. the two-group list (`.cp-group`, and `.cp-filters` as a hook);
+ *   3. the two-group list (`.session-group-label` headings, `.cp-filters` as a hook);
  *   4. the `k.` tile's ink.
  *
  * Before this sheet was reduced it held 290 lines re-drawing the row, its title,
@@ -75,9 +75,12 @@
 
 /* ------------------------------------------------------------- group heads */
 
-/* The two-group list: "Control chats" above "Sessions", each with its count. The
- * kicker is `.eyebrow` and the count is `.badge`; this rule is only the row. */
-.cp-group {
+/* The "Control chats" heading row: the workbench's `.session-group-label` plus an
+ * action of the plane's own (New chat). The workbench's new-session button lives
+ * in the rail head, so a group that carries its own action needs a wrapper the
+ * shared label does not have. The label itself is the shared class - same ink,
+ * same tracking, same mono count - so the two rails cannot drift on it. */
+.cp-group-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -85,9 +88,16 @@
   padding: var(--space-4) var(--space-3) var(--space-2);
 }
 
+/* The wrapper carries the group's padding, so the label inside it adds none of
+ * its own: the text lands exactly where a bare `.session-group-label` puts it,
+ * and the action beside it lines up with the rows' kebab. */
+.cp-group-head .session-group-label {
+  padding: 0;
+}
+
 /* The running/recent split inside the Sessions group: a sub-heading, so it
  * starts closer to the rows above it than a top-level group does. */
-.cp-group-sub {
+.session-group-label.cp-group-sub {
   padding-top: var(--space-5);
 }
 

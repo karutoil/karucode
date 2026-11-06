@@ -164,6 +164,7 @@ SHARED_PRIMITIVES = frozenset({
     ".session-meta",
     ".session-state",
     ".session-list",
+    ".session-group-label",
     ".session-menu-trigger",
     ".filter-chip",
     ".side-head",
@@ -532,15 +533,20 @@ def main() -> int:
             // a contract (the unit tests and verify_control_plane.py both rely on
             // it) while the private class is exactly what this work retires.
             const rail = document.querySelector('[aria-label="Sessions across projects"]');
+            // Only classes the rail renders unconditionally. `.badge` is not one:
+            // it is the agent-count pill on a chat row, drawn only when a chat has
+            // agents, and the group count is now the shared label's mono span
+            // exactly as `SessionsRail` draws its day groups. `ControlRail.test.tsx`
+            // pins that the count pill, when present, is the shared `.badge`.
             const want = {
               row: '.session-row',
               iconButton: '.icon-button',
-              badge: '.badge',
               statusDot: '.status-dot',
               filterChip: '.filter-chip',
               menuTrigger: '.session-menu-trigger',
               sideHead: '.side-head',
               sideFooter: '.side-footer',
+              groupLabel: '.session-group-label',
             };
             const out = { rail: !!rail };
             for (const [k, sel] of Object.entries(want)) {
@@ -558,7 +564,7 @@ def main() -> int:
         check(
             "the rail adopts the workbench's shared primitives",
             not missing,
-            "missing: " + ", ".join(missing) if missing else "row/icon-button/badge/status-dot/filter-chip/menu/side-head/side-footer",
+            "missing: " + ", ".join(missing) if missing else "row/icon-button/status-dot/filter-chip/menu/side-head/side-footer/group-label",
         )
 
         overview_adopted = js(
