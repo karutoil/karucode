@@ -292,6 +292,15 @@ def main() -> int:
         check('control plane opens', True)
         # Opening the plane replaces the workspace, so focus has to move into it:
         # otherwise the next nine tab stops walk the rail behind the new screen.
+        # The component retries the move for a few frames (the browser's own
+        # fix-up for the unmounted trigger runs after the effect), so wait for it
+        # rather than sampling once.
+        wait(
+            "const el=document.activeElement;"
+            "const plane=document.querySelector('.control-plane.cp');"
+            "return !!(plane && el && plane.contains(el));",
+            10,
+        )
         focused = js(
             "const el=document.activeElement;"
             "const plane=document.querySelector('.control-plane.cp');"

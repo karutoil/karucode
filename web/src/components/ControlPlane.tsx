@@ -197,18 +197,30 @@ export function ControlPlane(): JSX.Element {
   useEffect(() => {
     mounted.current = true;
     // Land the reader inside the plane: it replaced the workspace on screen, so
-    // focus must not stay in the rail that is now hidden behind it. Two calls,
-    // because the browser's own focus fix-up for the button that opened the plane
-    // runs after this effect: the frame callback is what actually sticks.
-    const focusRail = (): void => browserRef.current?.focus({ preventScroll: true });
+    // focus must not stay on the button that opened it (which is now gone) or
+    // fall back to `<body>`. The browser's own focus fix-up for an unmounted
+    // trigger runs *after* this effect and can undo a single `focus()` call, so
+    // it is retried until something inside the plane actually holds focus.
+    // `setTimeout`, not `requestAnimationFrame`: rAF is throttled (or paused) in
+    // a backgrounded/headless tab, which is exactly when a retry is still needed.
+    let attempts = 0;
+    let retry = 0;
+    const focusRail = (): void => {
+      const rail = browserRef.current;
+      if (!rail) return;
+      rail.focus({ preventScroll: true });
+      const inside = rail.contains(document.activeElement) || document.activeElement === rail;
+      attempts += 1;
+      // Bounded: a genuinely un-focusable plane must not retry forever.
+      if (!inside && attempts < 12) retry = window.setTimeout(focusRail, 16);
+    };
     focusRail();
-    const frame = window.requestAnimationFrame(focusRail);
     void refresh();
     const timer = window.setInterval(() => void refresh(), CONTROL_REFRESH_MS);
     return () => {
       mounted.current = false;
       generation.current++;
-      window.cancelAnimationFrame(frame);
+      window.clearTimeout(retry);
       window.clearInterval(timer);
     };
   }, []);
