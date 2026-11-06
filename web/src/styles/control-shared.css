@@ -108,50 +108,36 @@
  * file should be empty and deleted when the last of them is adopted.
  */
 
-.cp-glyph.control {
-  color: var(--theme-accent-hi);
-  border-color: var(--theme-accent-line);
-  background: var(--theme-accent-bg);
-}
-
-.cp-glyph {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  flex: none;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-md);
-  background: var(--theme-raised);
-  color: var(--theme-text-secondary);
-  font-size: var(--fs-micro);
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
-.cp-glyph.small { width: 24px; height: 24px; font-size: var(--fs-micro); border-radius: var(--radius-sm); }
-
-.cp-glyph[data-tone='1'] {
+/* A stable hue per project, as a variant of the shared avatar rather than as a
+ * second avatar class. The workbench shows one project at a time and has no
+ * equivalent; the plane is the one screen that lists every project at once, so
+ * the hue is what makes an interleaved list scannable by project. It is identity,
+ * never status - a run's state is the `.status-dot` beside the row's title.
+ *
+ * Both plane lists must use it: an avatar tinted in the overview and neutral in
+ * the rail is the same project read two different ways, which is the defect the
+ * parity rule exists to prevent.
+ */
+.rail-avatar[data-tone='1'] {
   color: var(--success);
   border-color: color-mix(in srgb, var(--success) 40%, transparent);
   background: color-mix(in srgb, var(--success) 14%, var(--theme-surface));
 }
 
-.cp-glyph[data-tone='2'] {
+.rail-avatar[data-tone='2'] {
   color: var(--info);
   border-color: color-mix(in srgb, var(--info) 40%, transparent);
   background: color-mix(in srgb, var(--info) 14%, var(--theme-surface));
 }
 
-.cp-glyph[data-tone='3'] {
+.rail-avatar[data-tone='3'] {
   /* Project initials are text. `--accent` is tuned against the canvas, so on the
    * accent tint it measured 3.61:1 in Daybreak; `--accent-on-tint` is the AA role
-   * for accent ink on an accent tint (§4.8). */
+   * for accent ink on an accent tint (§4.8). `styles/accent.test.ts` pins it. */
   color: var(--accent-on-tint);
   border-color: var(--accent-line);
   background: var(--accent-bg);
 }
-
 
 .cp-note { padding: var(--space-6) var(--space-5); color: var(--muted); font-size: var(--fs-tiny); line-height: 1.6; }
 

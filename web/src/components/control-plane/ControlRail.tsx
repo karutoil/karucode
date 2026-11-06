@@ -20,6 +20,7 @@ import {
   chatTitle,
   initials,
   sessionStatus,
+  tone,
 } from './controlModel';
 import '../../styles/control-rail.css';
 
@@ -152,9 +153,14 @@ function RowMenu({ session, title, onRename, onDelete }: {
   </div>;
 }
 
-/** The project tile on a row: the workbench's `.rail-avatar`, at the rail's size. */
-function ProjectTile({ project }: { project: string }): JSX.Element {
-  return <span class="rail-avatar" aria-hidden="true">{initials(project)}</span>;
+/**
+ * The project tile on a row: the workbench's `.rail-avatar`, at the rail's size,
+ * carrying the same per-project tone the overview's tiles carry. One project must
+ * read the same colour in every list on this screen, so the hue comes from the
+ * shared variant in `control-shared.css`, not from anything this file owns.
+ */
+function ProjectTile({ project, id }: { project: string; id: string | null }): JSX.Element {
+  return <span class="rail-avatar" data-tone={tone(id)} aria-hidden="true">{initials(project)}</span>;
 }
 
 interface RailRowProps {
@@ -317,7 +323,7 @@ export function ControlRail({
       active={selected === session.id}
       status={status}
       needsYou={false}
-      tile={<ProjectTile project={project} />}
+      tile={<ProjectTile project={project} id={session.project_id} />}
       badge={null}
       // The project name is the fact this list has and the workbench's row does
       // not; recency stays where the workbench reads it. The message count is

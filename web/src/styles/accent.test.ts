@@ -109,12 +109,14 @@ describe('accent fill: a primary action is readable in every theme', () => {
   });
 
   it('paints the control plane’s project initials with the AA accent role', () => {
-    // The tones are how the control plane tells projects apart. Tone 3 is the
+    // The tones are how the control plane tells projects apart at a glance; the
+    // workbench shows one project at a time and has no equivalent. Tone 3 is the
     // accent tile, and its initials were `--accent` on `--accent-bg`: 3.61:1 in
     // Daybreak. Initials are text, so they take the same role as every other
     // accent label on a tint.
-    // The glyph is shared by all three regions, so it lives in the shared sheet.
-    const glyph = ruleBody(read('./control-shared.css'), ".cp-glyph[data-tone='3']");
+    // The avatar is the workbench's `.rail-avatar`; the tone is a variant the
+    // plane adds in the shared sheet so both of its lists agree.
+    const glyph = ruleBody(read('./control-shared.css'), ".rail-avatar[data-tone='3']");
     expect(glyph).toContain('color: var(--accent-on-tint);');
     expect(glyph).not.toMatch(/color:\s*var\(--accent\);/);
   });

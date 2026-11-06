@@ -170,9 +170,6 @@
  * an ink change only - the shape, fill and border stay the product's - and it
  * uses roles the palette already has. No new hue, no new surface.
  */
-.cp-overview .rail-avatar[data-tone='1'] { color: var(--success); }
-.cp-overview .rail-avatar[data-tone='2'] { color: var(--info); }
-.cp-overview .rail-avatar[data-tone='3'] { color: var(--accent-on-tint); }
 
 /* -------------------------------------------------------- recent sessions
  *
