@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
+import type { AgentStatus, RunStatus, SessionSummary } from '../api/types';
 import { emptyChatState } from './chat';
 import {
+  AGENT_STATUS_LABEL,
+  agentStatusLabel,
+  agentStatusTone,
   contextTone,
   contextUsage,
   formatContextPercent,
+  runStatusLabel,
+  sessionStatusView,
   totalUsage,
   type ContextUsage,
 } from './selectors';
@@ -89,3 +95,129 @@ describe('totalUsage', () => {
     ).toBe('1,500 in · 400 out · 80% cached');
   });
 });
+
+describe('sessionStatusView', () => {
+  /** One session row, with only the two fields the view reads. */
+  const session = (
+    running: boolean,
+    lastRunStatus: RunStatus | null | undefined = null,
+  ): Pick<SessionSummary, 'running' | 'last_run_status'> => ({
+    running,
+    // The server skips the key when it is null, so an absent key must behave
+    // exactly like an explicit null.
+    ...(lastRunStatus === undefined ? {} : { last_run_status: lastRunStatus }),
+  });
+
+  it('announces a run in flight, whatever the last settled run did', () => {
+    expect(sessionStatusView(session(true))).toEqual({ label: 'Running', tone: 'running' });
+    // A stored `failed` is the *previous* run; the row is running now.
+    expect(sessionStatusView(session(true, 'failed'))).toEqual({
+      label: 'Running',
+      tone: 'running',
+    });
+  });
+
+  it('announces a failed run', () => {
+    expect(sessionStatusView(session(false, 'failed'))).toEqual({
+      label: 'Failed',
+      tone: 'danger',
+    });
+  });
+
+  it('announces an interrupted run', () => {
+    expect(sessionStatusView(session(false, 'interrupted'))).toEqual({
+      label: 'Interrupted',
+      tone: 'warn',
+    });
+  });
+
+  it('stays quiet for a settled or never-run session', () => {
+    // A list where every row wears a badge is a list where no badge means
+    // anything: completed, cancelled and never-run rows render no indicator.
+    for (const status of ['completed', 'cancelled', 'limit_reached', null, undefined] as const) {
+      expect(sessionStatusView(session(false, status))).toEqual({ label: null, tone: null });
+    }
+  });
+
+  it('ignores a stale `running` status on a session that is not running', () => {
+    // The `running` flag is the authority; a status left mid-run by a crash must
+    // not paint a live dot on a dead row.
+    expect(sessionStatusView(session(false, 'running'))).toEqual({ label: null, tone: null });
+  });
+
+  it('spells the word the way the rest of the app spells it', () => {
+    // Derived, not copied: the labels come from `runStatusLabel` and the tones
+    // from `agentStatusTone`, so the rails and the announcer cannot drift.
+    expect(sessionStatusView(session(true)).label).toBe(runStatusLabel('running'));
+    expect(sessionStatusView(session(false, 'failed')).label).toBe(runStatusLabel('failed'));
+    expect(sessionStatusView(session(false, 'failed')).tone).toBe(agentStatusTone('failed'));
+    expect(sessionStatusView(session(false, 'interrupted')).tone).toBe(
+      agentStatusTone('interrupted'),
+    );
+  });
+
+  it('never returns a label without a tone, or a tone without a label', () => {
+    for (const status of [
+      'running',
+      'completed',
+      'failed',
+      'cancelled',
+      'interrupted',
+      'limit_reached',
+      null,
+    ] as const) {
+      for (const running of [true, false]) {
+        const view = sessionStatusView(session(running, status));
+        expect(view.label === null).toBe(view.tone === null);
+      }
+    }
+  });
+});
+
+describe('AGENT_STATUS_LABEL / agentStatusLabel', () => {
+  it('says the one word each status has everywhere in the UI', () => {
+    expect(AGENT_STATUS_LABEL).toEqual({
+      running: 'running',
+      paused: 'paused',
+      completed: 'done',
+      failed: 'failed',
+      cancelled: 'cancelled',
+      interrupted: 'interrupted',
+    });
+  });
+
+  it('covers every status the wire type declares', () => {
+    const statuses: AgentStatus[] = [
+      'running',
+      'paused',
+      'completed',
+      'failed',
+      'cancelled',
+      'interrupted',
+    ];
+    for (const status of statuses) {
+      expect(agentStatusLabel(status)).toBe(AGENT_STATUS_LABEL[status]);
+    }
+    // A new status added to the type fails here until it gets a word.
+    expect(Object.keys(AGENT_STATUS_LABEL).sort()).toEqual([...statuses].sort());
+  });
+
+  it('echoes a status this build has never seen instead of dropping it', () => {
+    // The server can be newer than the bundle; a blank cell would hide an agent.
+    expect(agentStatusLabel('paused_by_policy')).toBe('paused_by_policy');
+    expect(agentStatusLabel('')).toBe('');
+  });
+});
+
+describe('agentStatusTone', () => {
+  it('maps live, settled and unknown statuses onto the shared tone scale', () => {
+    expect(agentStatusTone('running')).toBe('running');
+    expect(agentStatusTone('completed')).toBe('ok');
+    expect(agentStatusTone('failed')).toBe('danger');
+    expect(agentStatusTone('cancelled')).toBe('warn');
+    expect(agentStatusTone('interrupted')).toBe('warn');
+    expect(agentStatusTone('paused')).toBe('muted');
+    expect(agentStatusTone('something_new')).toBe('muted');
+  });
+});
+

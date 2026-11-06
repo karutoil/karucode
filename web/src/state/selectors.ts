@@ -53,6 +53,13 @@ export function agentActivity(state: ChatState): Activity {
   return { kind: 'idle', label: 'Ready' };
 }
 
+/**
+ * A run status as the word the UI says: `limit_reached` reads `Limit reached`,
+ * and an absent or unknown status reads `Idle` rather than nothing.
+ *
+ * The live announcer, the context drawer and {@link sessionStatusView} all read
+ * this, so a status is spelled one way everywhere it appears.
+ */
 export function runStatusLabel(status: RunStatus | null): string {
   switch (status) {
     case 'running':
@@ -72,6 +79,60 @@ export function runStatusLabel(status: RunStatus | null): string {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Status vocabulary
+// ---------------------------------------------------------------------------
+//
+// One definition per status word and per status colour, shared by the agent
+// roster, the session rails and the control plane. This file owns them rather
+// than `lib/format.ts` because it already owns the rest of the vocabulary
+// (`runStatusLabel`, `toolStatusLabel`, `agentStatusTone`) and already imports
+// the wire types the words are keyed on; `lib/format.ts` formats values
+// (durations, bytes, counts, times) and imports nothing at all. A status is not
+// a value format - it is a fact about a row - so the mapping lives with the
+// other status facts.
+
+/**
+ * The tone names the shared stylesheet paints: `status-dot status-<tone>`,
+ * `session-state-<tone>`, `badge-<tone>`, `online-ind status-<tone>`.
+ *
+ * `running` is a tone of its own rather than a flavour of `ok`, because a live
+ * row is animated in CSS where a settled one is not.
+ */
+export type StatusTone = 'ok' | 'warn' | 'danger' | 'muted' | 'running';
+
+/**
+ * Every agent status as the one word the UI says about it: `completed` reads
+ * as `done` everywhere, never `Completed` in one list and `finished` in another.
+ *
+ * The live label is *not* here — an agent that is still running says what it is
+ * running (`running edit_file`, `waiting for approval`, `thinking`), which
+ * `AgentsTab.tsx`'s `liveLabel` derives from the agent's own feed. This record is
+ * the settled vocabulary only, so it cannot go stale as the live label evolves.
+ * Read it through {@link agentStatusLabel} unless you need to iterate it.
+ */
+export const AGENT_STATUS_LABEL: Readonly<Record<AgentStatus, string>> = {
+  running: 'running',
+  paused: 'paused',
+  completed: 'done',
+  failed: 'failed',
+  cancelled: 'cancelled',
+  interrupted: 'interrupted',
+};
+
+/**
+ * The word for one agent status, tolerant of a status this build has never seen.
+ *
+ * The server can be newer than the bundle: an unknown status is echoed back as
+ * it arrived rather than dropped or rendered `undefined`, which is the same
+ * contract {@link agentStatusTone} keeps by returning `muted`.
+ */
+export function agentStatusLabel(status: AgentStatus | string): string {
+  return Object.hasOwn(AGENT_STATUS_LABEL, status)
+    ? AGENT_STATUS_LABEL[status as AgentStatus]
+    : String(status);
+}
+
 export function toolStatusLabel(status: ToolItem['status'] | CommandItem['status']): string {
   switch (status) {
     case 'running':
@@ -87,7 +148,14 @@ export function toolStatusLabel(status: ToolItem['status'] | CommandItem['status
   }
 }
 
-export function agentStatusTone(status: AgentStatus | string): 'ok' | 'warn' | 'danger' | 'muted' | 'running' {
+/**
+ * The tone a status is painted with: agents, runs and sessions share the scale,
+ * because the stylesheet's `status-<tone>` classes are shared too.
+ *
+ * An unknown status is `muted`, not a guess: a bundle older than the server
+ * draws a neutral grey rather than a confident colour.
+ */
+export function agentStatusTone(status: AgentStatus | string): StatusTone {
   switch (status) {
     case 'running':
       return 'running';
@@ -101,6 +169,70 @@ export function agentStatusTone(status: AgentStatus | string): 'ok' | 'warn' | '
     default:
       return 'muted';
   }
+}
+
+/** What one session list row says about its run: a word plus the tone that paints it. */
+export interface SessionStatusView {
+  /**
+   * The word to show — and to hand a screen reader — or `null` when the row has
+   * no state worth shouting about (a completed, cancelled or never-run session).
+   */
+  label: string | null;
+  /**
+   * The tone to paint, or `null` for no indicator at all. It is always non-null
+   * exactly when `label` is: a word with no colour and a colour with no word are
+   * both half an indicator.
+   */
+  tone: StatusTone | null;
+}
+
+/**
+ * The one state a session list shouts about, from the two fields every list row
+ * carries (`running`, `last_run_status`).
+ *
+ * Shared by the workbench's session rail and the control plane's session lists,
+ * so a failed run cannot read `Failed` in one and `bad` in the other. Only three
+ * states earn an indicator at all — a run in flight, a failure and an
+ * interruption — because a list where every row wears a badge is a list where no
+ * badge means anything. Everything else is `{ label: null, tone: null }`.
+ *
+ * A run in flight wins over the last settled run: `last_run_status` still names
+ * the *previous* run until the server rewrites it, so a session that is running
+ * now must not be announced by what its last run did.
+ *
+ * Both halves are derived, not copied: the word comes from {@link runStatusLabel}
+ * (the same function the live announcer and the context drawer read) and the
+ * colour from {@link agentStatusTone}, so this helper cannot drift from either.
+ *
+ * A view that always has a word — a facts panel, a badge, an `<option>` —
+ * composes the two directly instead: `runStatusLabel(session.last_run_status ?? null)`
+ * (which says `Idle` when the session has never run) plus
+ * `agentStatusTone(session.last_run_status ?? '')`.
+ *
+ * The tone is only ever `running`, `danger` or `warn`, which are exactly the
+ * three the shared stylesheet paints (`.status-dot.status-<tone>` in base.css,
+ * `.session-row-quiet .session-state-<tone>` in workbench-navigation.css). A row
+ * adopting this helper therefore needs no new CSS.
+ */
+export function sessionStatusView(
+  session: Pick<SessionSummary, 'running' | 'last_run_status'>,
+): SessionStatusView {
+  // `running` is the server's word for "a run is in flight right now", so it
+  // wins: `last_run_status` still names the *previous* run until the server
+  // rewrites it, and a live session must not be announced by a settled one.
+  if (session.running) {
+    return { label: runStatusLabel('running'), tone: agentStatusTone('running') };
+  }
+  // `last_run_status` is optional on the wire (`skip_serializing_if`), so an
+  // absent key and an explicit `null` are the same "never ran". A stored
+  // `running` here is a stale row (a crash mid-run) rather than a live one — the
+  // `running` flag above is the authority — so it stays quiet instead of
+  // painting a live dot on a session that is not running.
+  const status = session.last_run_status ?? null;
+  if (status === 'failed' || status === 'interrupted') {
+    return { label: runStatusLabel(status), tone: agentStatusTone(status) };
+  }
+  return { label: null, tone: null };
 }
 
 export function summaryFromDetail(detail: SessionDetail): SessionSummary {

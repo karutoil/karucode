@@ -20,8 +20,38 @@ import { CheckIcon, ChevronDownIcon, CpuIcon, SparkIcon } from './icons';
  * a control, so the gate is "a session is open", not "a list knows about it".
  */
 
-/** Reasoning efforts accepted by the server (`none` = reasoning off). */
-const REASONING_OPTIONS: { value: string; label: string; description: string }[] = [
+/**
+ * One entry of {@link REASONING_OPTIONS}: the wire value, the word the picker
+ * shows, and the sentence that explains the wire value.
+ */
+export interface ReasoningOption {
+  /**
+   * What goes in `PATCH /api/sessions/:id/model` as `reasoning_effort`.
+   *
+   * `default` is not a server value: it means "send nothing, let the endpoint
+   * decide", which `ReasoningSelector` stores as `null` when pinned.
+   */
+  value: string;
+  /** The word in the button and in the option list. */
+  label: string;
+  /** The one-line explanation under the label in the option list. */
+  description: string;
+}
+
+/**
+ * The reasoning efforts the UI offers, in display order.
+ *
+ * This is the single source of truth for that list: the composer's
+ * {@link ReasoningSelector} renders it, and any other surface that lets a user
+ * choose an effort (the control plane's launch box) imports it rather than
+ * keeping a copy, so a new effort cannot be added to one picker and not the
+ * other. `REASONING_OPTIONS[0]` is the "no preference" entry.
+ *
+ * The server validates the value at run time — an endpoint that does not offer
+ * `max` refuses it — so the list is deliberately the full set the server
+ * accepts, not a per-model subset.
+ */
+export const REASONING_OPTIONS: readonly ReasoningOption[] = [
   { value: 'default', label: 'Default', description: 'Send nothing; the endpoint decides.' },
   { value: 'none', label: 'Off', description: 'reasoning_effort: none — skip reasoning.' },
   { value: 'minimal', label: 'Minimal', description: 'reasoning_effort: minimal.' },
@@ -255,7 +285,9 @@ export function ReasoningSelector(): JSX.Element | null {
   // (null) stays selectable and the endpoint validates at run time.
   if (entry?.reasoning === false) return null;
 
-  const DEFAULT_OPTION = REASONING_OPTIONS[0] as (typeof REASONING_OPTIONS)[number];
+  // The list is non-empty by construction, and index 0 is the "no preference"
+  // entry: a stored effort this build has never heard of falls back to it.
+  const DEFAULT_OPTION = REASONING_OPTIONS[0] as ReasoningOption;
   const current = REASONING_OPTIONS.find((option) => option.value === (effort ?? 'default')) ?? DEFAULT_OPTION;
 
   const choose = async (value: string): Promise<void> => {

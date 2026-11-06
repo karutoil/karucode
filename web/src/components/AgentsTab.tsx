@@ -12,6 +12,7 @@ import {
   type AgentActivity,
   type AgentActivityItem,
 } from '../state/agentConsole';
+import { agentStatusLabel } from '../state/selectors';
 import * as store from '../state/store';
 import {
   AgentsIcon,
@@ -43,15 +44,6 @@ const FILTERS: FilterChip[] = [
   { id: 'cancelled', label: 'Cancelled' },
   { id: 'interrupted', label: 'Interrupted' },
 ];
-
-const STATUS_LABEL: Record<AgentStatus, string> = {
-  running: 'running',
-  paused: 'paused',
-  completed: 'done',
-  failed: 'failed',
-  cancelled: 'cancelled',
-  interrupted: 'interrupted',
-};
 
 function agentGlyph(role: string | null | undefined, name: string | null | undefined): JSX.Element {
   // `role`/`name` come straight off an agent row and the reducer's placeholders
@@ -117,10 +109,17 @@ function statusCounts(agents: AgentRow[]): Record<store.AgentFilter, number> {
  * A paused agent answers "paused" even though its feed still has a tool marked
  * running: that tool finished or was never resumed, and saying `running a
  * command` about a parked agent is the one thing this label must not do.
+ *
+ * Only the *live* half lives here — it reads the agent's own activity feed, which
+ * only this tab has. The settled word for every status comes from
+ * `agentStatusLabel` in `state/selectors.ts`, so this file cannot drift from the
+ * vocabulary the rest of the app (the control plane included) uses.
  */
 function liveLabel(agent: AgentRow, activity: AgentActivity): string {
   if (agent.status === 'paused') return 'paused';
-  if (agent.status !== 'running') return STATUS_LABEL[agent.status];
+  // `agentStatusLabel` (not a local map) so an unknown status from a newer
+  // server echoes its wire word instead of rendering `undefined`.
+  if (agent.status !== 'running') return agentStatusLabel(agent.status);
   const tail = [...activity.items].reverse();
   const active = tail.find(
     (item): item is Extract<AgentActivityItem, { kind: 'tool' | 'command' }> =>
@@ -374,7 +373,7 @@ function AgentCard({
             </p>
           </div>
           <span class="agent-live" title={liveLabel(agent, activity)}>
-            {agent.status === 'running' ? liveLabel(agent, activity) : STATUS_LABEL[agent.status]}
+            {agent.status === 'running' ? liveLabel(agent, activity) : agentStatusLabel(agent.status)}
           </span>
         </div>
       </header>
@@ -461,7 +460,7 @@ function AgentDetail({
           <p class="agent-role">{agent.role || 'agent'}</p>
         </div>
         <span class="agent-live" data-status={agent.status}>
-          {isAgentLive(agent.status) ? liveLabel(agent, activity) : STATUS_LABEL[agent.status]}
+          {isAgentLive(agent.status) ? liveLabel(agent, activity) : agentStatusLabel(agent.status)}
         </span>
       </header>
 

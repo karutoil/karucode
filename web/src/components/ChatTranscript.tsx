@@ -20,7 +20,7 @@ import {
   type Turn,
   type TurnRow,
 } from '../state/transcriptLayout';
-import { formatDuration } from '../lib/format';
+import { clockTime, formatDuration } from '../lib/format';
 import * as store from '../state/store';
 import { activeTheme, type ThemeGrouping, type ThemeThinking, type ThemeToolStyle } from '../theme';
 import { ApprovalCard } from './ApprovalCard';
@@ -96,12 +96,15 @@ function validAt(at: number): boolean {
   return Number.isFinite(at) && at > 0;
 }
 
-/** Local wall-clock label, e.g. "12:14 PM". Empty when the item has no timestamp. */
-function clockTime(at: number): string {
-  if (!validAt(at)) return '';
-  return new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-}
-
+/**
+ * Day grouping for the date markers.
+ *
+ * The clock label that sits beside these (`12:14 PM`) moved to `lib/format.ts`
+ * as `clockTime`, where any other view — the control plane's timestamps are the
+ * next reader — can share it instead of writing a second `toLocaleTimeString`.
+ * `validAt`, `dayStart` and `dayLabel` stay here: they are the transcript's own
+ * grouping vocabulary, not shared formatters.
+ */
 function dayStart(at: number): number {
   const date = new Date(at);
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();

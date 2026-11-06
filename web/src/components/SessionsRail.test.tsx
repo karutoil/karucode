@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/preact';
+import type { SessionSummary } from '../api/types';
 import { SessionList, SessionsRail, sessionGroup, type SessionListProps } from './SessionsRail';
 import { Dialog } from './Dialog';
 import { secondSummaryFixture, summaryFixture, NOW } from '../test/fixtures';
+import { sessionStatusView } from '../state/selectors';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import * as sessionFacts from '../state/sessionFacts';
@@ -53,6 +55,48 @@ describe('SessionList', () => {
     });
     expect(container.querySelector('.status-dot.status-running')).not.toBeNull();
     expect(screen.getByText('Running.')).not.toBeNull();
+  });
+
+  it('reads every state word and colour from the shared session status view', () => {
+    // `sessionStatusView` is what the control plane reads too. Asserting the row
+    // against it — rather than against literals — is what stops the two lists
+    // drifting apart: a rename in the helper moves both surfaces at once.
+    const states: Array<Pick<SessionSummary, 'running' | 'last_run_status'>> = [
+      { running: true, last_run_status: 'running' },
+      { running: false, last_run_status: 'failed' },
+      { running: false, last_run_status: 'interrupted' },
+      { running: false, last_run_status: 'completed' },
+      { running: false, last_run_status: 'cancelled' },
+      { running: false, last_run_status: null },
+    ];
+    for (const state of states) {
+      const view = sessionStatusView(state);
+      const { container, unmount } = renderList({
+        sessions: [{ ...summaryFixture, ...state }],
+      });
+      const dot = container.querySelector('.status-dot');
+      const word = container.querySelector('.session-state');
+      if (view.tone === null) {
+        expect(dot, JSON.stringify(state)).toBeNull();
+        expect(word, JSON.stringify(state)).toBeNull();
+      } else {
+        expect(dot?.classList.contains(`status-${view.tone}`), JSON.stringify(state)).toBe(true);
+        expect(word?.classList.contains(`session-state-${view.tone}`), JSON.stringify(state)).toBe(
+          true,
+        );
+        expect(word?.textContent, JSON.stringify(state)).toBe(view.label);
+      }
+      unmount();
+    }
+  });
+
+  it('says "Interrupted" for an interrupted run, in the warn tone', () => {
+    const { container } = renderList({
+      sessions: [{ ...summaryFixture, running: false, last_run_status: 'interrupted' }],
+    });
+    expect(container.querySelector('.status-dot.status-warn')).not.toBeNull();
+    expect(container.querySelector('.session-state-warn')?.textContent).toBe('Interrupted');
+    expect(screen.getByText('Last run interrupted.')).not.toBeNull();
   });
 
   it('keeps working details discoverable without repeating tool glyphs in every row', () => {

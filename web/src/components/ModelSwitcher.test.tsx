@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
-import { ModelControls, ModelSwitcher, ReasoningSelector } from './ModelSwitcher';
+import { ModelControls, ModelSwitcher, REASONING_OPTIONS, ReasoningSelector } from './ModelSwitcher';
 import type { Config, SessionModelSelection, SessionSummary } from '../api/types';
 import { jsonResponse, resetAppState, summaryFixture } from '../test/fixtures';
 import * as store from '../state/store';
@@ -360,5 +360,57 @@ describe('ModelControls', () => {
     render(<ModelControls />);
     expect(screen.getByRole('button', { name: /Model for this session/ })).not.toBeNull();
     expect(screen.getByRole('button', { name: /Reasoning effort:/ })).not.toBeNull();
+  });
+});
+
+/**
+ * The list is exported so any other surface that offers a reasoning effort —
+ * the control plane's launch box — renders this table instead of a copy of it.
+ * These tests pin what a second reader is allowed to assume about it.
+ */
+describe('REASONING_OPTIONS', () => {
+  it('is the server’s own set of efforts, with "no preference" first', () => {
+    // `default` is not a wire value: it means "send nothing", which is why
+    // `ReasoningSelector` stores `null` for it.
+    expect(REASONING_OPTIONS.map((option) => option.value)).toEqual([
+      'default',
+      'none',
+      'minimal',
+      'low',
+      'medium',
+      'high',
+      'max',
+    ]);
+    expect(REASONING_OPTIONS[0]?.label).toBe('Default');
+  });
+
+  it('gives every entry a label and a description, so a picker can render all three fields', () => {
+    for (const option of REASONING_OPTIONS) {
+      expect(option.label.trim()).not.toBe('');
+      expect(option.description.trim()).not.toBe('');
+    }
+    // A `<select>` shows the label; the description is what the popover shows.
+    expect(REASONING_OPTIONS.find((option) => option.value === 'none')?.label).toBe('Off');
+  });
+
+  it('has no duplicate wire values', () => {
+    const values = REASONING_OPTIONS.map((option) => option.value);
+    expect(new Set(values).size).toBe(values.length);
+  });
+
+  it('renders exactly these options, in this order, in the popover', () => {
+    resetAppState();
+    store.config.value = twoProfileConfig();
+    store.currentSessionId.value = summaryFixture.id;
+    const { container } = render(<ReasoningSelector />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Reasoning effort:/ }));
+    expect(
+      [...container.querySelectorAll('.model-switcher-option-name')].map((node) => node.textContent),
+    ).toEqual(REASONING_OPTIONS.map((option) => option.label));
+    // The description line is the option's explanation of the wire value.
+    expect(
+      [...container.querySelectorAll('.model-switcher-option-id')].map((node) => node.textContent),
+    ).toEqual(REASONING_OPTIONS.map((option) => option.description));
   });
 });

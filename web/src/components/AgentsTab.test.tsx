@@ -6,6 +6,7 @@ import { Inspector } from './Inspector';
 import { emptyChatState, type AgentView } from '../state/chat';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
+import { AGENT_STATUS_LABEL } from '../state/selectors';
 import { jsonResponse, resetAppState } from '../test/fixtures';
 
 const NOW = 1_700_000_000_000;
@@ -345,5 +346,78 @@ describe('agent history pagination', () => {
     expect(await screen.findByText('older output')).toBeTruthy();
     expect(screen.getByText('newer output')).toBeTruthy();
     expect(screen.queryByText('Earlier history is not loaded.')).toBeNull();
+  });
+});
+
+/**
+ * The roster's status words come from `state/selectors.ts`, not from a map this
+ * file keeps — that is what stops the tab and the control plane spelling the
+ * same status differently. These tests assert the *rendered* card against the
+ * shared vocabulary.
+ */
+describe('AgentsTab status vocabulary', () => {
+  beforeEach(() => {
+    resetAppState();
+    store.currentProjectId.value = 'p_1';
+    stubFetch();
+  });
+
+  afterEach(() => {
+    resetAppState();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('renders every settled status with the shared word', () => {
+    const statuses: AgentSummary['status'][] = [
+      'completed',
+      'failed',
+      'cancelled',
+      'interrupted',
+      'paused',
+    ];
+    store.agentsAll.value = statuses.map((status, index) =>
+      agent(`a_${status}`, { status, created_at: NOW - index }),
+    );
+    const { container } = render(<AgentsTab />);
+
+    // The roster sorts live agents first, so read each word off its own card
+    // rather than off the array order.
+    const words = new Map(
+      [...container.querySelectorAll('.agent-card')].map((card) => [
+        card.querySelector('.agent-name')?.textContent,
+        card.querySelector('.agent-live')?.textContent,
+      ]),
+    );
+    for (const status of statuses) {
+      expect(words.get(`a_${status}`), status).toBe(AGENT_STATUS_LABEL[status]);
+    }
+    // The one that matters most: `completed` reads `done`, everywhere.
+    expect(words.get('a_completed')).toBe('done');
+  });
+
+  it('still says what a running agent is doing, not just "running"', () => {
+    store.agentsAll.value = [
+      agent('a_live', { status: 'running', finished_at: null, note: 'reading the fixtures' }),
+    ];
+    const { container } = render(<AgentsTab />);
+    const live = container.querySelector('.agent-card .agent-live');
+    expect(live?.textContent).toBe('reading the fixtures');
+    // …and a running agent with nothing to report yet is not a blank cell.
+    store.agentsAll.value = [
+      agent('a_fresh', { status: 'running', finished_at: null, note: '', iterations: 0 }),
+    ];
+    const { container: fresh } = render(<AgentsTab />);
+    expect(fresh.querySelector('.agent-card .agent-live')?.textContent).toBe('starting');
+  });
+
+  it('echoes a status this build has never seen instead of leaving the cell empty', () => {
+    // The server can be newer than the bundle; `Record` indexing would print
+    // `undefined` in the card.
+    store.agentsAll.value = [
+      { ...agent('a_new', { status: 'completed' }), status: 'timed_out' } as unknown as AgentSummary,
+    ];
+    const { container } = render(<AgentsTab />);
+    expect(container.querySelector('.agent-card .agent-live')?.textContent).toBe('timed_out');
   });
 });

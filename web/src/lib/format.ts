@@ -1,3 +1,15 @@
+/**
+ * "How long ago" for anything with an `updated_at`: the session rail, the agent
+ * roster, the command palette, the notification centre and the session-info tab
+ * all read the same recency out of this one function, so a row cannot say
+ * `2m ago` in one list and `2 minutes` in another. It is the canonical recency
+ * formatter — any new list (the control plane's included) reads this rather than
+ * writing its own. `now` is injectable for tests and for a rail that re-renders
+ * on a shared clock tick rather than on `Date.now()`.
+ *
+ * A negative delta (a server clock ahead of the browser's) clamps to `just now`
+ * instead of reporting a time in the future.
+ */
 export function relativeTime(timestamp: number, now: number = Date.now()): string {
   const delta = Math.max(0, now - timestamp);
   const seconds = Math.round(delta / 1000);
@@ -15,6 +27,25 @@ export function relativeTime(timestamp: number, now: number = Date.now()): strin
     day: 'numeric',
     ...(sameYear ? {} : { year: 'numeric' }),
   });
+}
+
+/**
+ * Local wall-clock label, e.g. `12:14 PM` — the time of day on its own.
+ *
+ * The transcript renders this inside each message's `<time>`, and it is the
+ * canonical "when, on the clock" formatter: any other view that wants an absolute
+ * moment beside `relativeTime`'s "how long ago" reads this instead of writing its
+ * own `toLocaleTimeString`, so the two cannot disagree about a session's
+ * timestamp.
+ *
+ * Empty — never `Invalid Date` — when the caller has no usable timestamp: a row
+ * with no time renders no `<time>` at all. `dayLabel` (the transcript's
+ * "Today · October 28, 2026" date marker) stays private to `ChatTranscript.tsx`;
+ * it is that view's grouping vocabulary, not a shared formatter.
+ */
+export function clockTime(at: number): string {
+  if (!Number.isFinite(at) || at <= 0) return '';
+  return new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
 export function formatDuration(ms: number | null): string {

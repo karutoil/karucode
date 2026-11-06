@@ -5,7 +5,7 @@ import { copyText } from '../lib/clipboard';
 import { modKey } from '../lib/platform';
 import type { SessionSummary } from '../api/types';
 import { formatCount, relativeTime } from '../lib/format';
-import { contextUsage } from '../state/selectors';
+import { contextUsage, sessionStatusView } from '../state/selectors';
 import * as store from '../state/store';
 import * as actions from '../state/actions';
 import {
@@ -170,13 +170,10 @@ function SessionRow({
     else setDraft(session.title);
   };
 
-  const statusTone = session.running
-    ? 'running'
-    : session.last_run_status === 'failed'
-      ? 'danger'
-      : session.last_run_status === 'interrupted'
-        ? 'warn'
-        : null;
+  // The word and the colour both come from `sessionStatusView` (`state/selectors.ts`),
+  // the same helper the control plane reads: a failed run must not be spelled one
+  // way here and another way there.
+  const { label: statusLabel, tone: statusTone } = sessionStatusView(session);
   // The mock's row classes drive the status rail: a run in flight, a failure,
   // and a session waiting on the reader (unread news) each paint it differently.
   const rowState = [
@@ -187,13 +184,6 @@ function SessionRow({
     .filter(Boolean)
     .join(' ');
   const turns = facts ? facts.turns : null;
-  const statusLabel = session.running
-    ? 'Running'
-    : session.last_run_status === 'failed'
-      ? 'Failed'
-      : session.last_run_status === 'interrupted'
-        ? 'Interrupted'
-        : null;
   // Tool names and turn/call counts stay discoverable without making every row
   // repeat the same fingerprint. The visible line is reserved for state, recency
   // and the server's message count.

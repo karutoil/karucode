@@ -459,6 +459,40 @@ export function CollapseIcon(props: IconProps): JSX.Element {
   );
 }
 
+/**
+ * "Open elsewhere": an arrow leaving the frame it points out of.
+ *
+ * The third arrow of this family and the one the app was missing — {@link ExpandIcon}
+ * stays inside this surface (full screen), {@link CollapseIcon} comes back, and
+ * this one leaves it: a session that opens in its own project, a row that opens a
+ * document in another tab. It is the glyph for any `↗` a view was drawing as a
+ * text character.
+ *
+ * It is also the last glyph that role needed. A **clock** and a **gauge/activity**
+ * icon are deliberately *not* here: no existing view draws either, so adding them
+ * would invent a role rather than de-duplicate one. The transcript renders a
+ * timestamp as text inside `<time class="msg-time">` (`clockTime` from
+ * `lib/format.ts`), and a "live" indicator is the stylesheet's own dot —
+ * `.online-ind status-<tone>` inside `.online-row` (layout.css, as the session
+ * rail's footer draws it) or the pulsing `.status-dot status-running` (base.css).
+ * Use those instead of a new glyph.
+ *
+ * It is *not* in `PLUGIN_PANEL_ICONS` below: that registry is a documented
+ * capability (the `icon` names a plugin may put in its manifest, listed in
+ * `docs/PLUGINS.md` and the `@kc-doc: plugins` block), so adding a name there is
+ * a doc change as well as a code one. "Open elsewhere" is an app navigation role,
+ * not a panel glyph; a plugin that wants it adds the name and updates that block.
+ */
+export function ExternalIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M14 4h6v6" />
+      <path d="M20 4l-8.5 8.5" />
+      <path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" />
+    </svg>
+  );
+}
+
 /** A spark in a frame: this block is content, not code. */
 export function ArtifactIcon(props: IconProps): JSX.Element {
   return (
