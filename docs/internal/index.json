@@ -1042,6 +1042,7 @@
         "file:web/src/components/control-plane/ControlOverview.tsx",
         "file:web/src/components/control-plane/ControlSession.tsx",
         "file:web/src/components/control-plane/controlModel.ts",
+        "file:web/src/styles/control-shared.css",
         "file:web/src/styles/control-rail.css",
         "file:web/src/styles/control-overview.css",
         "file:web/src/styles/control-session.css"
