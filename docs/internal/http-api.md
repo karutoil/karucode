@@ -585,18 +585,22 @@ curl -s localhost:8787/api/control/sessions | jq '.sessions[] | {title, model_la
 
 `GET /api/control/overview` is the whole plane in one read-only snapshot, for a
 dashboard that would otherwise make five requests: `sessions {total, running,
-failed, control}`, `agents {live, paused, failed, total}`, `projects` (with
-`sessions` and `running` per project), `control` (the rows of the listing
-above), `running` / `attention` / `recent` (project sessions only, at most 12
-each, and `attention` means the latest run ended `failed`, `interrupted` or
-`limit_reached`) and `live_agents` (running or paused, most recently active
-first, with the session each belongs to). Control chats never appear in the
+failed, control}` (the first three count **project sessions only**; control
+chats are the fourth), `agents {live, paused, failed, total}`, `approvals
+{pending}`, `projects` (with `sessions` and `running` per project), `control`
+(the rows of the listing above), `running` / `attention` / `waiting` / `recent`
+(project sessions only, at most 12 each; `attention` means the latest run ended
+`failed`, `interrupted` or `limit_reached`, and `waiting` means an unanswered
+approval) and `live_agents` (running or paused, most recently active first,
+with the session each belongs to). Control chats never appear in the
 project-session lists; they are their own array.
 
-A chat is named by its **first message** if it was created without a title or a
-prompt, so `POST /api/sessions/:id/messages` is where an untitled chat gets its
-name. An explicitly titled chat is never renamed - see the `session-titles`
-topic for the model, the prompt and what is refused.
+A chat is named by its **first message** if it was created with neither a title
+nor a prompt, so `POST /api/sessions/:id/messages` is where an untitled chat
+gets its name. A `prompt` passed to `POST /api/control/sessions` is only a
+naming hint - it is not stored as a message and starts no run. An explicitly
+titled chat is never renamed - see the `session-titles` topic for the model, the
+prompt and what is refused.
 
 ```bash
 curl -s localhost:8787/api/control/overview | jq '.sessions, .agents, (.control | length)'
