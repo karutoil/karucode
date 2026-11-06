@@ -12,7 +12,7 @@ use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use futures_util::StreamExt;
 use kc_core::config::{
-    Config, McpServerConfig, ModelConfig, PluginConfig, TerminalConfig, TitlesConfig,
+    ApprovalMode, Config, McpServerConfig, ModelConfig, PluginConfig, TerminalConfig, TitlesConfig,
 };
 use kc_core::hooks::NoHooks;
 use kc_core::paths::Workspace;
@@ -288,6 +288,8 @@ pub struct HarnessBuilder {
     strict_root: bool,
     /// `[titles]`. `None` keeps the shipped default, which is AI titles **on**.
     titles: Option<TitlesConfig>,
+    /// `[approvals] mode`. `None` keeps the shipped default, `ask`.
+    approval_mode: Option<ApprovalMode>,
 }
 
 impl HarnessBuilder {
@@ -307,6 +309,7 @@ impl HarnessBuilder {
             terminals: None,
             strict_root: false,
             titles: None,
+            approval_mode: None,
         }
     }
 
@@ -377,6 +380,12 @@ impl HarnessBuilder {
         self
     }
 
+    /// Run with `approvals.mode = auto`, so a mutating tool call is not parked.
+    pub fn auto_approvals(mut self) -> Self {
+        self.approval_mode = Some(ApprovalMode::Auto);
+        self
+    }
+
     pub fn web_dir(mut self, dir: PathBuf) -> Self {
         self.web_dir = Some(dir);
         self
@@ -441,6 +450,10 @@ impl HarnessBuilder {
             project_roots: self.project_roots.clone(),
             allow_temp_dir: !self.strict_root,
             titles: self.titles.clone().unwrap_or_default(),
+            approvals: kc_core::config::ApprovalPolicy {
+                mode: self.approval_mode.unwrap_or_default(),
+                ..Default::default()
+            },
             model: ModelConfig {
                 base_url: "http://127.0.0.1:9/v1".into(),
                 model: "test-model".into(),

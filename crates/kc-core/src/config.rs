@@ -2656,9 +2656,19 @@ retry_max_stream_restarts = 0
 
     #[test]
     fn retry_budget_env_overrides_win() {
-        // Only this test reads these variables, so setting them cannot perturb
-        // another test's expectations; they are removed before asserting so a
-        // failure cannot leak into the rest of the binary.
+        // These variables are ours alone, but the *config load* parses every
+        // `KARUCODE_*` variable, so a test that writes an unrelated one at the
+        // same moment (the malformed-boolean test deliberately writes an invalid
+        // `KARUCODE_TITLES`) makes this load fail for a reason that has nothing
+        // to do with the retry budget. `EnvVars` holds the shared environment lock
+        // and restores the previous values even on a panic.
+        let _guard = EnvVars::set([
+            "KARUCODE_RETRY_MAX_RETRIES",
+            "KARUCODE_RETRY_BASE_DELAY_MS",
+            "KARUCODE_RETRY_MAX_DELAY_MS",
+            "KARUCODE_RETRY_MAX_STREAM_RESTARTS",
+            "KARUCODE_RETRY_MAX_TOTAL_SECS",
+        ]);
         std::env::set_var("KARUCODE_RETRY_MAX_RETRIES", "3");
         std::env::set_var("KARUCODE_RETRY_BASE_DELAY_MS", "25");
         std::env::set_var("KARUCODE_RETRY_MAX_DELAY_MS", "250");

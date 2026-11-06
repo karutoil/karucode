@@ -7,7 +7,7 @@
 
 - **Slug:** `session-titles`
 - **Tags:** titles, sessions, naming, models, titles.enabled
-- **Applies to:** `config:[titles]`, `env:KARUCODE_TITLES`, `env:KARUCODE_TITLES_PROVIDER`, `env:KARUCODE_TITLES_MODEL`, `config:titles.enabled`, `config:titles.provider`, `config:titles.model`, `config:titles.max_chars`, `config:titles.timeout_secs`, `route:POST /api/sessions`, `route:POST /api/sessions/:id/messages`, `route:PATCH /api/config`, `ui:SessionsRail`
+- **Applies to:** `config:[titles]`, `env:KARUCODE_TITLES`, `env:KARUCODE_TITLES_PROVIDER`, `env:KARUCODE_TITLES_MODEL`, `config:titles.enabled`, `config:titles.provider`, `config:titles.model`, `config:titles.max_chars`, `config:titles.timeout_secs`, `route:POST /api/sessions`, `route:POST /api/sessions/:id/messages`, `route:POST /api/control/sessions`, `route:PATCH /api/config`, `tool:control_start_session`, `ui:SessionsRail`
 - **Source:** `crates/kc-server/src/titles.rs:1`
 
 ---
@@ -18,7 +18,8 @@ working on, and a rail full of untitled rows is unusable after a day.
 ## What happens by default
 
 **AI titles are on out of the box** (`[titles] enabled = true`). When a session
-that is still untitled receives its first user message, karucode:
+that is still untitled receives its first user message - or is created with
+its opening prompt, see below - karucode:
 
 1. renames it immediately with a deterministic title derived from that message
    (whitespace collapsed, cut at 60 characters) so the rail never shows an
@@ -33,6 +34,22 @@ stays and the reason is logged. A failed title is never an error the user sees.
 
 Use the same session twice? A second message does not retitle the session. A
 title is written once, from the opening request.
+
+## Sessions that are created with their opening request
+
+A session the API starts *from* a prompt is named from that prompt at creation
+time, by the same two steps (deterministic title now, model title in the
+background). That covers:
+
+* `POST /api/control/sessions` with `{"prompt": "..."}` - a control-plane chat
+  opened with its first request;
+* a session the control plane dispatches into a project
+  (`control_start_session`) without a `title`.
+
+Both are created untitled (`""`), so the first-message hook below never sees
+them: they have no "first message" - the prompt is already the reason they
+exist. An unnamed control chat created with no prompt stays untitled and is
+named by its first message, exactly like an ordinary session.
 
 ## Which model writes the title
 
@@ -90,6 +107,7 @@ export KARUCODE_TITLES_MODEL=gpt-4o-mini
   concurrent title, or a session deleted mid-request all win; the session is
   left exactly as it is.
 * **It does not run on an explicitly named session.** `POST /api/sessions`
+  with a `title`, `POST /api/control/sessions` with a `title`, or a dispatch
   with a `title` means you named it - there is nothing to improve on.
 * **It does not read your conversation.** The request carries the first user
   message, truncated to 2000 characters, and nothing else: no tool output, no

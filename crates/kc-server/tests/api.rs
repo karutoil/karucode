@@ -5811,7 +5811,7 @@ async fn mission_replan_api_validates_review_dag_and_releases_blocked_task() {
 
 #[tokio::test]
 async fn control_chat_dispatch_is_approval_aware_and_idempotent() {
-    let h = HarnessBuilder::new(vec![]).build().await;
+    let h = HarnessBuilder::new(vec![]).no_ai_titles().build().await;
     let project = h.get("/api/projects").await.json()["projects"][0]["id"]
         .as_str()
         .unwrap()
@@ -5902,8 +5902,189 @@ async fn control_chat_dispatch_is_approval_aware_and_idempotent() {
 }
 
 #[tokio::test]
+async fn control_overview_launch_and_naming_are_one_snapshot() {
+    // Deterministic titles: the harness provider is scripted, so with `[titles]`
+    // on a model-titling turn would race the control chat's own run for the next
+    // script. Creation-time naming is covered here; the model-written half is
+    // `an_auto_title_is_announced_on_the_event_stream`.
+    let h = HarnessBuilder::new(vec![text("On it")])
+        .no_ai_titles()
+        .auto_approvals()
+        .build()
+        .await;
+    let project = h.get("/api/projects").await.json()["projects"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // An untitled chat carries the empty title, and a prompt names it.
+    let created = h
+        .post(
+            "/api/control/sessions",
+            json!({"prompt": "  Plan   the next release  "}),
+        )
+        .await
+        .json();
+    let central = created["session_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        created["title"], "Plan the next release",
+        "the prompt names the chat up front: {created}"
+    );
+
+    // The chat's own first message is its run. It must not retitle the chat.
+    assert_eq!(
+        h.post(
+            &format!("/api/sessions/{central}/messages"),
+            json!({"content":"Start"}),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    assert_eq!(
+        h.get(&format!("/api/sessions/{central}")).await.json()["session"]["title"],
+        "Plan the next release"
+    );
+
+    // A dispatch without a title is named from its prompt. (With `[titles]` on it
+    // would also ask for a model-written title, on a task of its own, so the
+    // control chat's turn is never queued behind that request.)
+    h.factory.push(tool_call(
+        "control_start_session",
+        &json!({"request_id":"launch-1","project_id":project,"prompt":"Port the CLI to Rust"})
+            .to_string(),
+    ));
+    h.factory.push(text("Dispatched."));
+    assert_eq!(
+        h.post(
+            &format!("/api/sessions/{central}/messages"),
+            json!({"content":"Port it"}),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    // The child is named on a spawned task the moment it is reserved, so poll
+    // for its row instead of assuming it is already on disk.
+    let mut dispatched = Value::Null;
+    for _ in 0..300 {
+        let sessions = h.get("/api/sessions").await.json();
+        if let Some(row) = sessions["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["id"] != central.as_str())
+        {
+            dispatched = row.clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!dispatched.is_null(), "the dispatched session");
+    assert_eq!(dispatched["project_id"], project);
+    assert_eq!(
+        dispatched["title"], "Port the CLI to Rust",
+        "an untitled dispatch is named from its prompt: {dispatched}"
+    );
+
+    // The listing row says it is a control chat, with what it is running and
+    // which model answers for it.
+    let listed = h.get("/api/control/sessions").await.json();
+    let row = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"] == central.as_str())
+        .expect("control chat listed");
+    assert_eq!(row["control"], json!(true), "{row}");
+    assert_eq!(row["project_id"], Value::Null);
+    assert!(
+        row["agents"]["live"].is_u64() && row["agents"]["total"].is_u64(),
+        "{row}"
+    );
+    assert!(
+        row["model_label"].is_string() || row["model_label"].is_null(),
+        "{row}"
+    );
+    let raw = serde_json::to_string(&listed).unwrap();
+    assert!(!raw.contains("sk-"), "no credential may reach the browser");
+
+    // The overview is the whole plane in one snapshot.
+    let overview = h.get("/api/control/overview").await.json();
+    assert!(overview["generated_at"].as_i64().unwrap() > 0, "{overview}");
+    assert_eq!(overview["sessions"]["control"], 1, "{overview}");
+    assert_eq!(overview["sessions"]["total"], 1, "one project session");
+    assert_eq!(overview["sessions"]["running"], 0);
+    assert_eq!(overview["sessions"]["failed"], 0);
+    assert_eq!(overview["agents"]["total"], 0);
+    let projects = overview["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1, "{projects:?}");
+    assert_eq!(projects[0]["id"], project);
+    assert_eq!(projects[0]["sessions"], 1);
+    assert_eq!(projects[0]["running"], 0);
+    assert_eq!(overview["control"].as_array().unwrap().len(), 1);
+    assert_eq!(overview["control"][0]["id"], central.as_str());
+    assert_eq!(overview["control"][0]["control"], json!(true));
+    // Control chats never appear in the project-session lists.
+    for list in ["running", "attention", "recent"] {
+        assert!(
+            overview[list]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|session| session["id"] != central.as_str()),
+            "{list} must exclude control chats: {overview}"
+        );
+    }
+    assert_eq!(
+        overview["recent"].as_array().unwrap().len(),
+        1,
+        "{overview}"
+    );
+    assert_eq!(overview["recent"][0]["id"], dispatched["id"]);
+    assert_eq!(overview["live_agents"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn an_untitled_control_chat_is_named_by_its_first_message() {
+    let h = HarnessBuilder::new(vec![text("ok")])
+        .no_ai_titles()
+        .build()
+        .await;
+    // The deterministic title, by construction: the harness provider is
+    // scripted, so with `[titles]` on the background titling turn would consume
+    // the next script. The derived title is what this test is about.
+    let created = h.post("/api/control/sessions", json!({})).await.json();
+    let central = created["session_id"].as_str().unwrap().to_owned();
+    assert_eq!(created["title"], "", "an unnamed chat starts untitled");
+    // A prompt-less, title-less chat is still untitled in the listing.
+    assert_eq!(
+        h.get(&format!("/api/sessions/{central}")).await.json()["session"]["title"],
+        ""
+    );
+
+    assert_eq!(
+        h.post(
+            &format!("/api/sessions/{central}/messages"),
+            json!({"content":"  Audit   the open pull requests  "}),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    let titled =
+        h.get(&format!("/api/sessions/{central}")).await.json()["session"]["title"].clone();
+    assert_eq!(titled, "Audit the open pull requests");
+    // And a year from now the rail does not show "Control chat 7".
+    assert!(!titled.as_str().unwrap_or_default().contains("Control chat"));
+    h.wait_until_idle(&central).await;
+}
+
+#[tokio::test]
 async fn control_chat_can_list_projects_before_dispatching() {
-    let h = HarnessBuilder::new(vec![]).build().await;
+    let h = HarnessBuilder::new(vec![]).no_ai_titles().build().await;
     let project = h.get("/api/projects").await.json()["projects"][0].clone();
     let id = project["id"].as_str().unwrap().to_owned();
     let name = project["name"].as_str().unwrap().to_owned();
@@ -5937,7 +6118,7 @@ async fn control_chat_can_list_projects_before_dispatching() {
 
 #[tokio::test]
 async fn control_chat_audits_and_guides_other_sessions() {
-    let h = HarnessBuilder::new(vec![]).build().await;
+    let h = HarnessBuilder::new(vec![]).no_ai_titles().build().await;
     let project = h.get("/api/projects").await.json()["projects"][0]["id"]
         .as_str()
         .unwrap()
@@ -6158,6 +6339,575 @@ async fn control_dispatch_rejects_unrelated_chat_and_read_only() {
             .unwrap()
             .is_empty());
     }
+}
+
+/// The JSON one of the control tools returned, read back from the transcript.
+///
+/// A tool result is what the model saw, and the transcript is the only place a
+/// test can see it verbatim. `key` picks the newest result that looks like the
+/// answer being asserted, because two calls of one tool leave two results behind
+/// and the older one stays in the conversation.
+fn tool_result_json(detail: &Value, key: &str) -> Value {
+    detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .filter(|message| message["role"] == "tool")
+        .filter_map(|message| serde_json::from_str::<Value>(message["content"].as_str()?).ok())
+        .find(|value| value.get(key).is_some())
+        .unwrap_or_else(|| panic!("no tool result carrying `{key}` in {detail}"))
+}
+
+/// `control_list_agents` is the control chat's view of delegated work: a project
+/// session's subagent, and - through `session_id` - a control chat's own, which
+/// no project-filtered listing can find because a control chat has no project.
+#[tokio::test]
+async fn control_chat_lists_agents_of_a_project_session_and_of_itself() {
+    let h = HarnessBuilder::new(vec![])
+        .no_ai_titles()
+        .auto_approvals()
+        .build()
+        .await;
+    let project = h.get("/api/projects").await.json()["projects"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let target = h
+        .post(
+            "/api/sessions",
+            json!({"project": project, "title": "Delegating session"}),
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let central = h
+        .post("/api/control/sessions", json!({"title": "Supervisor"}))
+        .await
+        .json()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Seed the two agents directly: this test is about what the tool *sees*, and
+    // a scripted spawn would only add a second scheduling race to it.
+    let store = support::store_of(&h);
+    for (offset, (session_id, name, status)) in [
+        (target.as_str(), "reviewer", "completed"),
+        (central.as_str(), "scout", "running"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .upsert_agent(&kc_core::store::AgentRecord {
+                id: format!("a_{name}"),
+                session_id: session_id.to_string(),
+                parent_run_id: String::new(),
+                parent_agent_id: None,
+                name: name.to_string(),
+                role: name.to_string(),
+                task: "look at the open pull requests".to_string(),
+                status: status.to_string(),
+                model: "test-model".to_string(),
+                iterations: 3,
+                summary: format!("{name} summary"),
+                error: None,
+                owned_paths: vec![],
+                created_at: 1_700_000_000_000 + offset as i64,
+                updated_at: 1_700_000_100_000 + offset as i64,
+                finished_at: None,
+                background: false,
+                note: format!("{name} is working"),
+                progress: Some(0.5),
+            })
+            .await
+            .unwrap();
+    }
+    let send = format!("/api/sessions/{central}/messages");
+
+    // Without a filter the tool answers for the whole server.
+    h.factory.push(tool_call("control_list_agents", "{}"));
+    h.factory.push(text("Two agents."));
+    assert_eq!(
+        h.post(&send, json!({"content":"Who is doing what?"}))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let all = tool_result_json(&detail, "agents");
+    assert_eq!(all["total"], 2, "{all}");
+    let agents = all["agents"].as_array().unwrap();
+    let reviewer = agents
+        .iter()
+        .find(|agent| agent["name"] == "reviewer")
+        .unwrap_or_else(|| panic!("the project session's agent: {all}"));
+    assert_eq!(reviewer["status"], "completed");
+    assert_eq!(reviewer["session_id"], target.as_str());
+    assert_eq!(reviewer["session_title"], "Delegating session");
+    assert_eq!(reviewer["project_id"], project.as_str());
+    assert_eq!(reviewer["iterations"], 3);
+    assert_eq!(reviewer["model"], "test-model");
+    assert_eq!(reviewer["note"], "reviewer is working");
+    assert_eq!(reviewer["progress"], 0.5);
+    assert_eq!(reviewer["summary"], "reviewer summary");
+    let scout = agents
+        .iter()
+        .find(|agent| agent["name"] == "scout")
+        .unwrap_or_else(|| panic!("the control chat's own agent: {all}"));
+    assert_eq!(scout["session_title"], "Supervisor");
+    assert_eq!(scout["project_id"], Value::Null);
+    assert_eq!(scout["status"], "running");
+
+    // With `session_id` the per-session listing answers, and the status filter
+    // still narrows it.
+    h.factory.push(tool_call(
+        "control_list_agents",
+        &json!({"session_id": central, "status": "running"}).to_string(),
+    ));
+    h.factory.push(text("Only the scout."));
+    assert_eq!(
+        h.post(&send, json!({"content":"And my own agents?"}))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let mine = tool_result_json(&detail, "agents");
+    assert_eq!(mine["total"], 1, "{mine}");
+    assert_eq!(mine["agents"][0]["name"], "scout");
+    assert_eq!(mine["agents"][0]["session_id"], central.as_str());
+}
+
+/// `control_set_session_model` does what the model switcher does: it pins one
+/// session, refuses a model the install does not offer, and clears the pin.
+#[tokio::test]
+async fn control_chat_pins_and_clears_a_session_model() {
+    let h = HarnessBuilder::new(vec![])
+        .no_ai_titles()
+        .auto_approvals()
+        .build()
+        .await;
+    let project = h.get("/api/projects").await.json()["projects"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let target = h
+        .post(
+            "/api/sessions",
+            json!({"project": project, "title": "Model chosen by control"}),
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let central = h.post("/api/control/sessions", json!({})).await.json()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let send = format!("/api/sessions/{central}/messages");
+
+    h.factory.push(tool_call(
+        "control_set_session_model",
+        &json!({"session_id": target, "provider": "default", "model": "test-model",
+                "reasoning_effort": "high"})
+        .to_string(),
+    ));
+    h.factory.push(text("Pinned."));
+    assert_eq!(
+        h.post(&send, json!({"content":"Use the small model"}))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    // The pin is on the session, visible exactly where the model switcher reads it.
+    let pinned = h.get(&format!("/api/sessions/{target}")).await.json();
+    assert_eq!(pinned["session"]["model"]["provider"], "default");
+    assert_eq!(pinned["session"]["model"]["model"], "test-model");
+    assert_eq!(pinned["session"]["model"]["reasoning_effort"], "high");
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let answer = tool_result_json(&detail, "model_label");
+    assert_eq!(answer["cleared"], false, "{answer}");
+    assert_eq!(answer["model"], pinned["session"]["model"]);
+    assert_eq!(answer["model_label"], "test-model");
+    assert!(
+        !serde_json::to_string(&answer).unwrap().contains("sk-"),
+        "no credential in the answer: {answer}"
+    );
+
+    // A provider that does not exist is refused, and the pin is untouched.
+    h.factory.push(tool_call(
+        "control_set_session_model",
+        &json!({"session_id": target, "provider": "nope", "model": "test-model"}).to_string(),
+    ));
+    h.factory.push(text("Refused."));
+    assert_eq!(
+        h.post(&send, json!({"content":"Try a bad provider"}))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    let after = h.get(&format!("/api/sessions/{target}")).await.json();
+    assert_eq!(after["session"]["model"]["reasoning_effort"], "high");
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let raw = serde_json::to_string(&detail).unwrap();
+    assert!(
+        raw.contains("does not match any configured provider"),
+        "the model was told why: {raw}"
+    );
+
+    // `provider` and `model` both absent clear the pin: the session follows the
+    // install-wide default again, and the answer still names the model that
+    // would answer.
+    h.factory.push(tool_call(
+        "control_set_session_model",
+        &json!({"session_id": target}).to_string(),
+    ));
+    h.factory.push(text("Cleared."));
+    assert_eq!(
+        h.post(&send, json!({"content":"Back to the default"}))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    let cleared = h.get(&format!("/api/sessions/{target}")).await.json();
+    assert!(cleared["session"].get("model").is_none(), "{cleared}");
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let answer = tool_result_json(&detail, "cleared");
+    assert_eq!(answer["cleared"], true, "{answer}");
+    assert!(answer["model"].is_null(), "{answer}");
+    assert_eq!(answer["model_label"], "test-model", "{answer}");
+}
+
+/// `control_create_control_chat` is the rail's "New": a second chat, its own
+/// server-owned directory, and no project.
+#[tokio::test]
+async fn control_chat_opens_another_control_chat() {
+    let h = HarnessBuilder::new(vec![])
+        .no_ai_titles()
+        .auto_approvals()
+        .build()
+        .await;
+    let first = h
+        .post("/api/control/sessions", json!({"title": "First"}))
+        .await
+        .json();
+    let central = first["session_id"].as_str().unwrap().to_owned();
+
+    // A prompt names the new chat, exactly like `POST /api/control/sessions`.
+    h.factory.push(tool_call(
+        "control_create_control_chat",
+        &json!({"prompt": "Audit the open pull requests"}).to_string(),
+    ));
+    h.factory.push(text("Opened one."));
+    assert_eq!(
+        h.post(
+            &format!("/api/sessions/{central}/messages"),
+            json!({"content":"I need a second chat"}),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let answer = tool_result_json(&detail, "workspace");
+    let created = answer["session_id"].as_str().unwrap().to_owned();
+    assert_ne!(created, central);
+    assert_eq!(answer["title"], "Audit the open pull requests");
+
+    // The new chat is in the rail's listing, with its own workspace.
+    let listed = h.get("/api/control/sessions").await.json();
+    let rows = listed["sessions"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{listed}");
+    let row = rows
+        .iter()
+        .find(|row| row["id"] == created.as_str())
+        .unwrap_or_else(|| panic!("the new chat is listed: {listed}"));
+    assert_eq!(row["title"], "Audit the open pull requests");
+    assert_eq!(row["control"], json!(true));
+    assert_eq!(row["project_id"], Value::Null);
+    assert_eq!(row["workspace"], answer["workspace"]);
+    let workspace = row["workspace"].as_str().unwrap();
+    assert!(workspace.contains("control-workspaces"), "{workspace}");
+    assert_ne!(workspace, first["workspace"].as_str().unwrap());
+    assert!(
+        std::path::Path::new(workspace).is_dir(),
+        "the chat owns its directory: {workspace}"
+    );
+}
+
+/// `control_delete_control_chat` deletes a control chat and nothing else: a
+/// project session is the user's decision, and the scratch directory stays.
+#[tokio::test]
+async fn control_chat_deletes_a_control_chat_but_not_a_project_session() {
+    let h = HarnessBuilder::new(vec![])
+        .no_ai_titles()
+        .auto_approvals()
+        .build()
+        .await;
+    let project = h.get("/api/projects").await.json()["projects"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let central = h.post("/api/control/sessions", json!({})).await.json()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let victim = h
+        .post("/api/control/sessions", json!({"title": "Disposable"}))
+        .await
+        .json();
+    let victim_id = victim["session_id"].as_str().unwrap().to_owned();
+    let victim_workspace = victim["workspace"].as_str().unwrap().to_owned();
+    let target = h
+        .post(
+            "/api/sessions",
+            json!({"project": project, "title": "User's own session"}),
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let send = format!("/api/sessions/{central}/messages");
+
+    // A project session is refused, and nothing is removed.
+    h.factory.push(tool_call(
+        "control_delete_control_chat",
+        &json!({"session_id": target}).to_string(),
+    ));
+    h.factory.push(text("Refused."));
+    assert_eq!(
+        h.post(&send, json!({"content":"Delete that session"}))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    assert_eq!(
+        h.get(&format!("/api/sessions/{target}")).await.status,
+        StatusCode::OK
+    );
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let raw = serde_json::to_string(&detail).unwrap();
+    assert!(
+        raw.contains("Only a control chat can be deleted here"),
+        "the refusal has to point at the user: {raw}"
+    );
+
+    // A control chat is deleted: its row is gone, the standing directory is not.
+    h.factory.push(tool_call(
+        "control_delete_control_chat",
+        &json!({"session_id": victim_id}).to_string(),
+    ));
+    h.factory.push(text("Deleted."));
+    assert_eq!(
+        h.post(&send, json!({"content":"Delete the spare chat"}))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    assert_eq!(
+        h.get(&format!("/api/sessions/{victim_id}")).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let listed = h.get("/api/control/sessions").await.json();
+    assert_eq!(
+        listed["sessions"].as_array().unwrap().len(),
+        1,
+        "only the chat that did the deleting is left: {listed}"
+    );
+    assert_eq!(listed["sessions"][0]["id"], central.as_str());
+    assert!(
+        std::path::Path::new(&victim_workspace).is_dir(),
+        "the scratch directory is left on disk: {victim_workspace}"
+    );
+}
+
+/// A dispatch can choose the model in the same call, and a replay never re-pins
+/// a session whose model the user has changed since.
+#[tokio::test]
+async fn control_dispatch_pins_the_new_session_and_a_replay_does_not() {
+    let h = HarnessBuilder::new(vec![])
+        .no_ai_titles()
+        .auto_approvals()
+        .build()
+        .await;
+    let project = h.get("/api/projects").await.json()["projects"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let central = h.post("/api/control/sessions", json!({})).await.json()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let send = format!("/api/sessions/{central}/messages");
+    let dispatch = json!({"request_id": "pin-on-launch", "project_id": project,
+                          "prompt": "Port the CLI to Rust", "provider": "default",
+                          "model": "test-model", "reasoning_effort": "high"});
+
+    h.factory
+        .push(tool_call("control_start_session", &dispatch.to_string()));
+    h.factory.push(text("Dispatched."));
+    assert_eq!(
+        h.post(&send, json!({"content":"Port it on the small model"}))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    let child = h.get("/api/sessions").await.json()["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"] != central.as_str())
+        .cloned()
+        .unwrap_or_else(|| panic!("the dispatched session"));
+    let child_id = child["id"].as_str().unwrap().to_owned();
+    // The child runs on the model the dispatch chose, as the switcher shows it.
+    let pinned = h.get(&format!("/api/sessions/{child_id}")).await.json();
+    assert_eq!(pinned["session"]["model"]["provider"], "default");
+    assert_eq!(pinned["session"]["model"]["model"], "test-model");
+    assert_eq!(pinned["session"]["model"]["reasoning_effort"], "high");
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let answer = tool_result_json(&detail, "replayed");
+    assert_eq!(answer["replayed"], false, "{answer}");
+    assert_eq!(answer["session_id"], child_id.as_str());
+    assert_eq!(answer["model"]["reasoning_effort"], "high");
+
+    // The user picks something else; a replay of the same launch must not undo it.
+    let cleared = h
+        .patch(&format!("/api/sessions/{child_id}/model"), json!({}))
+        .await;
+    assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.text());
+    h.factory
+        .push(tool_call("control_start_session", &dispatch.to_string()));
+    h.factory.push(text("Already running."));
+    assert_eq!(
+        h.post(&send, json!({"content":"Start it again"}))
+            .await
+            .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+    let replayed = h.get(&format!("/api/sessions/{child_id}")).await.json();
+    assert!(
+        replayed["session"].get("model").is_none(),
+        "a replay must not re-pin the session: {replayed}"
+    );
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let answer = tool_result_json(&detail, "replayed");
+    assert_eq!(answer["replayed"], true, "{answer}");
+    assert_eq!(answer["session_id"], child_id.as_str());
+    // And it did not start a second session for the same request.
+    assert_eq!(
+        h.get("/api/sessions").await.json()["sessions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+/// A parked approval is the one state a control plane must never hide: the run
+/// is stopped until a person answers, so the overview has to name the session.
+#[tokio::test]
+async fn control_overview_names_the_sessions_waiting_for_an_approval() {
+    // Default `ask` policy: the tool below parks its call on a real approval.
+    let h = HarnessBuilder::new(vec![tool_call("needs_approval", "{}"), text("all done")])
+        .tool(std::sync::Arc::new(ApprovalTool))
+        .no_ai_titles()
+        .build()
+        .await;
+    let project = h.get("/api/projects").await.json()["projects"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let session = h
+        .post(
+            "/api/sessions",
+            json!({"title": "Waiting work", "project": project}),
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        h.post(
+            &format!("/api/sessions/{session}/messages"),
+            json!({"content":"please run it"}),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    let approval = h.wait_for_approval(&session).await;
+    assert_eq!(approval["status"], "pending");
+
+    let overview = h.get("/api/control/overview").await.json();
+    assert_eq!(overview["approvals"]["pending"], 1, "{overview}");
+    let waiting = overview["waiting"].as_array().unwrap();
+    assert_eq!(waiting.len(), 1, "{overview}");
+    assert_eq!(waiting[0]["id"], session.as_str());
+    assert_eq!(waiting[0]["project_id"], project);
+    // It is waiting, not failing: nothing about it belongs in `attention`.
+    assert!(
+        overview["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != session.as_str()),
+        "{overview}"
+    );
+
+    // A control chat carries its own count, and project sessions never appear in
+    // the chats listing.
+    let central = h.post("/api/control/sessions", json!({})).await.json();
+    let chat_id = central["session_id"].as_str().unwrap().to_owned();
+    let listed = h.get("/api/control/sessions").await.json();
+    let row = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == chat_id.as_str())
+        .expect("the new chat");
+    assert_eq!(row["pending_approvals"], 0, "{row}");
+    assert!(
+        listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != session.as_str()),
+        "a project session is not a control chat: {listed}"
+    );
+
+    // Answering it empties both lists on the next read - no cache, no stale row.
+    let approval_id = approval["id"].as_str().unwrap();
+    assert_eq!(
+        h.post(
+            &format!("/api/approvals/{approval_id}"),
+            json!({"decision": "allow_once"}),
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    h.wait_until_idle(&session).await;
+    let after = h.get("/api/control/overview").await.json();
+    assert_eq!(after["approvals"]["pending"], 0, "{after}");
+    assert!(after["waiting"].as_array().unwrap().is_empty(), "{after}");
 }
 
 /// A chat artifact: published, stored once, and served as an isolated page.

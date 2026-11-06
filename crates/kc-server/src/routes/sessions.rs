@@ -797,7 +797,10 @@ fn is_placeholder_title(title: &str) -> bool {
 ///    append `…` when text was dropped (so at most 61 characters total).
 ///
 /// Returns `None` when nothing printable is left, which leaves the title alone.
-fn derive_title(content: &str) -> Option<String> {
+///
+/// Shared with `crate::titles`, which derives the placeholder title a control
+/// chat or a dispatched session gets before any model sees it.
+pub(crate) fn derive_title(content: &str) -> Option<String> {
     let text = collapse_whitespace(strip_leading_marker(content.trim()));
     if text.is_empty() {
         return None;

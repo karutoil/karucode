@@ -7,7 +7,7 @@
 
 - **Slug:** `web-ui`
 - **Tags:** ui, web, frontend, workbench, panels, context, shortcuts, preact
-- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:RailPeek`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:ResultResizer`, `route:PATCH /api/projects/:id/preferences`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:notification-bell`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `config:providers.models.context_window`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/state/railPeek.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/components/SessionsRail.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `fn:registerPluginPanelRenderer`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`, `ui:GitManager`, `ui:GitChanges`, `ui:GitCommitBox`, `ui:GitBranchDialog`, `ui:GitHistory`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `file:web/src/components/git/GitManager.tsx`, `file:web/src/styles/git.css`, `ui:WorkbenchTaskMenu`, `ui:ContextDrawer`, `file:web/src/components/WorkbenchTaskMenu.tsx`, `file:web/src/components/ContextDrawer.tsx`, `file:web/src/state/workbench.ts`, `file:web/src/lib/approvalCopy.ts`, `file:web/src/styles/workbench.css`, `file:web/src/styles/workbench-navigation.css`, `file:scripts/verify_workbench_frontend.py`, `cmd:python3 scripts/verify_workbench_frontend.py`
+- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:RailPeek`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:ResultResizer`, `route:PATCH /api/projects/:id/preferences`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:notification-bell`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `config:providers.models.context_window`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/state/railPeek.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/components/SessionsRail.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `fn:registerPluginPanelRenderer`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`, `ui:GitManager`, `ui:GitChanges`, `ui:GitCommitBox`, `ui:GitBranchDialog`, `ui:GitHistory`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `file:web/src/components/git/GitManager.tsx`, `file:web/src/styles/git.css`, `ui:WorkbenchTaskMenu`, `ui:ContextDrawer`, `file:web/src/components/WorkbenchTaskMenu.tsx`, `file:web/src/components/ContextDrawer.tsx`, `file:web/src/state/workbench.ts`, `file:web/src/lib/approvalCopy.ts`, `file:web/src/styles/workbench.css`, `file:web/src/styles/workbench-navigation.css`, `file:scripts/verify_workbench_frontend.py`, `cmd:python3 scripts/verify_workbench_frontend.py`, `ui:ControlPlane`, `route:GET /api/control/overview`, `route:GET /api/control/sessions`, `file:web/src/state/controlPlane.ts`, `file:web/src/components/ControlPlane.tsx`, `file:web/src/styles/session-control.css`
 - **Source:** `web/src/app.tsx:1`
 
 ---
@@ -27,24 +27,49 @@
   The expanded ordinary Workbench instead puts project switching, management
   and the control-plane link in `SessionsRail`. On an ordinary narrow layout
   the sessions sheet carries those project controls (see **Mobile**).
-* **Control plane**: browse sessions across projects (search, status filters,
-  running first), select one to switch to its project and open its ordinary
-  chat, or open a **control chat**. Control chats are their own unlimited set,
-  listed above the sessions; **＋ New** starts another. They have a private
-  workspace rather than a project, so they act on projects only through their
-  tools, and their `@` menu lists projects. With nothing selected the plane is a
-  dashboard: a launch box that hands a draft to a control chat, running work as
-  cards, a recent-sessions table, and columns for what needs attention, live
-  agents and projects. From 1560px it is two columns; the whole block is capped
-  at 1880px so a 4K monitor does not strand a narrow column of text. An open
-  conversation gains a facts panel (where, state, messages, session id, and
-  *Open in project* / *Stop this run*) from 1400px. The list refreshes every five
-  seconds and **Project workspace** exits the plane. See `central-control` for the
-  tools, dispatch and approval semantics. Its embedded conversation is a real
-  `ChatView` with `mode="control-plane"`: that mode does not mount the
-  project-scoped Inspector or Context drawer. Composer still shows reported
-  Usage telemetry, but without a Usage callback it is read-only, not a link to a
-  project drawer.
+* **Control plane**: one browser of every project, split into two groups. The
+  **Control chats** group (above) lists conversations that act on *other*
+  projects: each row carries the title (or *Untitled chat*), the model it is
+  pinned to, a live/total subagent badge, its status word and how long ago it
+  last moved. The **Sessions** group below lists the ordinary project
+  conversations — search, status filters, running first, project glyph and
+  name — and a session the server marks `control` is never drawn there as
+  well. **＋ New** creates a chat; a row's kebab renames (`PATCH
+  /api/sessions/:id`) or deletes (`DELETE /api/sessions/:id`, after a
+  confirmation, and deleting the open chat returns to the overview). Selecting
+  a project session switches to its project and opens its ordinary chat; a
+  control chat is opened where it is, in its own workspace with no project, so
+  its `@` menu lists projects instead of files. With nothing selected the pane
+  is a dashboard drawn from **one** read (`GET /api/control/overview` via
+  `state/controlPlane.ts`): counters for running sessions, sessions, live
+  agents and projects, running work as cards, a recent-sessions table, and
+  columns for what needs attention, the live agents (with a link to the session
+  they belong to) and the projects with their own session/running counts. A
+  session or chat parked on an unanswered approval is called out above the
+  dashboard and listed under **Waiting on you**, because a run that cannot
+  proceed without a person is not "running" in any useful sense. A failed read
+  never empties it: the last snapshot stays and is labelled
+  `stale · <reason>`. The launch box names a project and takes a draft, and it
+  also picks the model and reasoning effort of the chat it will open — the chat
+  is pinned (`PATCH /api/sessions/:id/model`) *before* the draft is handed to
+  the composer, so the first message already runs on the model that was shown.
+  From 1560px the dashboard is two columns; the whole block is capped at 1880px
+  so a 4K monitor does not strand a narrow column of text. An open conversation
+  carries the composer's own **model** and **reasoning** selectors in its
+  header (they write the open session's pin, and a control chat resolves as the
+  open session), and an inspector column holds its facts (where, state,
+  messages, session id, and *Open in project* / *Stop this run*) plus a
+  **Subagents** list from the same snapshot as the rail's badges — name, role,
+  live status word, what the agent says it is doing, its iterations and a link
+  into its own transcript — with a quiet empty state when the chat has
+  delegated nothing. The inspector is a column from 1400px and stacks under the
+  transcript below that; the rail hides behind the back button on a phone. The
+  list refreshes every five seconds and **Project workspace** exits the plane.
+  See `central-control` for the tools, dispatch and approval semantics. Its
+  embedded conversation is a real `ChatView` with `mode="control-plane"`: that
+  mode does not mount the project-scoped Inspector or Context drawer. Composer
+  still shows reported Usage telemetry, but without a Usage callback it is
+  read-only, not a link to a project drawer.
 * **Sessions rail**: the current project's disclosure and management actions,
   session search (`/`), available status filters and sessions grouped by last
   activity with running/failure indicators. Create a session with
@@ -73,7 +98,9 @@
   controls remain real. Built-in themes start with compact tool/command **rows**
   and **completed-turn grouping**. **Show the working** opens a finished turn,
   an expanded call group reveals its rows, and a row opens its actual tool output
-  or separate command stdout/stderr. Tool failures open to their explanation;
+  or separate command stdout/stderr. Expanded command output owns one bounded
+  scrolling region; its wrapper does not add a second nested scrollbar.
+  Tool failures open to their explanation;
   running work, pending approvals, errors, interruptions and notices remain
   discoverable rather than disappearing into a fold. Full activity remains an
   explicit **Grouping → None** option; **Cards** remains the alternate presentation
@@ -153,6 +180,11 @@
   failed writes retain the local choice and explain that it was not saved. In a
   wide split the fixed separator and Results stay flush with the workspace's
   right edge during the gesture; no width animation can leave a trailing gap.
+  Narrowing Results transfers the entire released width to Conversation instead
+  of leaving dead space beside its separator. On a wide user-resized split, the
+  transcript matches the composer's box rather than filling the Conversation pane:
+  assistant messages and tools stay left-anchored while compact user messages
+  remain on the right.
 * **Context drawer** (`Ctrl/Cmd+J`): a transient sibling overlay driven by
   `state/workbench.ts`, with **Now**, **Usage** and **Access**. It does not replace
   or unmount the Inspector, conversation, full Git or terminal below it. **Now**

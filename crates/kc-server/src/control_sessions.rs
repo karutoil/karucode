@@ -8,7 +8,9 @@
 use async_trait::async_trait;
 use kc_core::{
     approval::ApprovalKind,
-    store::StoredMessage,
+    config::SessionModelSelection,
+    events::Event,
+    store::{AgentStatus, AgentSummary, StoredMessage},
     tool::{Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOutcome, ToolSpec},
 };
 use serde::Deserialize;
@@ -551,10 +553,462 @@ impl Tool for RenameSession {
     }
 }
 
+// ---------------------------------------------------------------- agents
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListAgentsArgs {
+    /// One session's subagents. This is the only way to see the agents of a
+    /// control chat, which belongs to no project.
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+pub struct ListAgents(pub AppState);
+
+/// One row of `control_list_agents`.
+///
+/// The whole `AgentRecord` except its task: a supervisor needs to know *what* an
+/// agent is doing (`note`, `summary`, `progress`) and whether it is still paying
+/// (`status`), not to re-read the instructions it was given.
+fn agent_row(summary: &AgentSummary) -> serde_json::Value {
+    let agent = &summary.agent;
+    json!({
+        "id": agent.id,
+        "session_id": agent.session_id,
+        "session_title": summary.session_title,
+        "project_id": summary.project_id,
+        "name": agent.name,
+        "role": agent.role,
+        "status": agent.status,
+        "model": agent.model,
+        "iterations": agent.iterations,
+        "note": agent.note,
+        "progress": agent.progress,
+        "created_at": agent.created_at,
+        "updated_at": agent.updated_at,
+        "finished_at": agent.finished_at,
+        "background": agent.background,
+        "summary": agent.summary,
+        "error": agent.error,
+    })
+}
+
+#[async_trait]
+impl Tool for ListAgents {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "control_list_agents".into(),
+            description: "List subagents across every project and every control chat: status, model, iterations, newest note, progress and their session's title. Pass `session_id` to see one session's subagents (the only way to see a control chat's own agents); omit it to see them all, optionally narrowed by `project_id` or `status`. Read-only; this is how you audit delegated work.".into(),
+            parameters: json!({"type":"object","properties":{
+                "session_id":{"type":"string","description":"Only subagents of this session, including a control chat"},
+                "status":{"type":"string","enum":["running","paused","completed","failed","cancelled","interrupted"]},
+                "project_id":{"type":"string","description":"Only subagents working in this registered project"},
+                "limit":{"type":"integer","minimum":1,"maximum":100,"description":"How many rows (default 40); `total` counts all of them"}
+            },"additionalProperties":false}),
+            origin: Default::default(),
+        }
+    }
+    fn class(&self) -> ToolClass {
+        ToolClass::ReadOnly
+    }
+    async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        if let Some(err) = control_only(&self.0, &ctx).await {
+            return err;
+        }
+        let args: ListAgentsArgs = match serde_json::from_value(request.arguments) {
+            Ok(args) => args,
+            Err(e) => return ToolOutcome::err(format!("invalid arguments: {e}")),
+        };
+        if let Some(session_id) = &args.session_id {
+            if let Err(e) = check_text(session_id, "session_id", 128) {
+                return ToolOutcome::err(e);
+            }
+        }
+        // Validated rather than passed through: an unknown status would filter
+        // every row away and read as "no agents", which is a lie.
+        let status = match args
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|status| !status.is_empty())
+        {
+            Some(raw) => match AgentStatus::parse(raw) {
+                Some(status) => Some(status.as_str().to_string()),
+                None => {
+                    return ToolOutcome::err(format!(
+                        "status must be one of running, paused, completed, failed, cancelled, interrupted (got `{raw}`)"
+                    ))
+                }
+            },
+            None => None,
+        };
+        let limit = args.limit.unwrap_or(40).clamp(1, 100) as usize;
+        let store = self.0.store();
+        let mut agents = if let Some(session_id) = args.session_id.as_deref() {
+            match store.list_agent_summaries_for_session(session_id).await {
+                Ok(agents) => agents,
+                Err(e) => return ToolOutcome::err(e.to_string()),
+            }
+        } else {
+            let statuses: Vec<String> = status.clone().into_iter().collect();
+            match store
+                .list_agents_filtered(args.project_id.as_deref(), None, &statuses)
+                .await
+            {
+                Ok(agents) => agents,
+                Err(e) => return ToolOutcome::err(e.to_string()),
+            }
+        };
+        // The per-session listing takes no filter, so both predicates are applied
+        // here; for the global listing they are already applied in SQL.
+        if args.session_id.is_some() {
+            agents.retain(|summary| {
+                status
+                    .as_deref()
+                    .is_none_or(|want| summary.agent.status == want)
+                    && args
+                        .project_id
+                        .as_deref()
+                        .is_none_or(|id| summary.project_id.as_deref() == Some(id))
+            });
+        }
+        let total = agents.len();
+        let rows: Vec<_> = agents.iter().take(limit).map(agent_row).collect();
+        ToolOutcome::ok(json!({"total": total, "agents": rows}).to_string())
+    }
+}
+
+// ---------------------------------------------------------------- model pin
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetModelArgs {
+    session_id: String,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+}
+
+pub struct SetSessionModel(pub AppState);
+
+#[async_trait]
+impl Tool for SetSessionModel {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "control_set_session_model".into(),
+            description: "Pin one session - a project session or a control chat - to a provider and model, or clear the pin so it follows the install-wide default again. Give `provider` and `model` (optionally `reasoning_effort`); omit `provider` and `model` to clear. An unknown provider or a model the provider does not offer is refused. Mutating, so it follows the approval policy; it takes effect on that session's next run.".into(),
+            parameters: json!({"type":"object","properties":{
+                "session_id":{"type":"string"},
+                "provider":{"type":"string","description":"Provider profile id from the install's configured profiles"},
+                "model":{"type":"string","description":"Model id the provider offers"},
+                "reasoning_effort":{"type":"string","enum":["none","minimal","low","medium","high","max"]}
+            },"required":["session_id"],"additionalProperties":false}),
+            origin: Default::default(),
+        }
+    }
+    fn class(&self) -> ToolClass {
+        ToolClass::Mutating
+    }
+    async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        if let Some(err) = control_only(&self.0, &ctx).await {
+            return err;
+        }
+        let args: SetModelArgs = match serde_json::from_value(request.arguments) {
+            Ok(args) => args,
+            Err(e) => return ToolOutcome::err(format!("invalid arguments: {e}")),
+        };
+        if let Err(e) = check_text(&args.session_id, "session_id", 128) {
+            return ToolOutcome::err(e);
+        }
+        // No provider and no model is the documented way to clear the pin. An
+        // effort on its own would be silently dropped by a clear, so it is
+        // refused instead of reported as done.
+        let selection = if args.provider.is_none() && args.model.is_none() {
+            if args.reasoning_effort.is_some() {
+                return ToolOutcome::err(
+                    "reasoning_effort only applies to a pinned model: give `provider` and `model` as well, or omit all three to clear the pin",
+                );
+            }
+            None
+        } else {
+            let selection = SessionModelSelection {
+                provider: args.provider.clone().unwrap_or_default(),
+                model: args.model.clone().unwrap_or_default(),
+                reasoning_effort: args.reasoning_effort.clone(),
+            }
+            .normalized();
+            if let Err(e) =
+                crate::settings::validate_session_model(&self.0.settings().snapshot(), &selection)
+            {
+                return ToolOutcome::err(format!("invalid model selection: {e}"));
+            }
+            Some(selection)
+        };
+        if !matches!(
+            self.0.store().get_session(&args.session_id).await,
+            Ok(Some(_))
+        ) {
+            return ToolOutcome::err("no such session");
+        }
+        let title = match &selection {
+            Some(selection) => format!(
+                "Pin session {} to {}/{}",
+                args.session_id, selection.provider, selection.model
+            ),
+            None => format!("Clear the model pin of session {}", args.session_id),
+        };
+        let detail = match &selection {
+            Some(selection) => format!(
+                "The session's next run will use {}/{}{}.",
+                selection.provider,
+                selection.model,
+                selection
+                    .reasoning_effort
+                    .as_deref()
+                    .map(|effort| format!(" with reasoning effort {effort}"))
+                    .unwrap_or_default()
+            ),
+            None => {
+                "The session's next run will follow the install-wide default model.".to_string()
+            }
+        };
+        if let Some(err) = gate(
+            &ctx,
+            title,
+            detail,
+            json!({"tool":"control_set_session_model","session_id":args.session_id,"model":selection}),
+        )
+        .await
+        {
+            return err;
+        }
+        if let Err(e) = self
+            .0
+            .store()
+            .set_session_model(&args.session_id, selection.as_ref())
+            .await
+        {
+            return ToolOutcome::err(e.to_string());
+        }
+        self.0.runtime().emit(
+            Some(&args.session_id),
+            None,
+            None,
+            Event::SessionModelChanged {
+                session_id: args.session_id.clone(),
+                model: selection.clone(),
+            },
+        );
+        // The stored row is the answer: what the next run resolves from it is the
+        // label, and a label never carries a key or a base URL.
+        let session = match self.0.store().get_session(&args.session_id).await {
+            Ok(Some(session)) => session,
+            Ok(None) => return ToolOutcome::err("no such session"),
+            Err(e) => return ToolOutcome::err(e.to_string()),
+        };
+        ToolOutcome::ok(
+            json!({
+                "session_id": session.id,
+                "model": session.model,
+                "cleared": selection.is_none(),
+                "model_label": crate::control::model_label(&self.0, session.model.as_ref()),
+            })
+            .to_string(),
+        )
+    }
+}
+
+// ---------------------------------------------------------------- control chats
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateChatArgs {
+    #[serde(default)]
+    title: Option<String>,
+    /// The chat's opening request. When present without a `title` the chat is
+    /// named from it, exactly as `POST /api/control/sessions` does.
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+pub struct CreateControlChat(pub AppState);
+
+#[async_trait]
+impl Tool for CreateControlChat {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "control_create_control_chat".into(),
+            description: "Open another control chat, alongside this one: its own server-owned workspace and its own conversation, with no project. `title` names it, `prompt` is its opening request and names an untitled chat. The new chat does not start running; the user talks to it from the rail. Mutating, so it follows the approval policy.".into(),
+            parameters: json!({"type":"object","properties":{
+                "title":{"type":"string","description":"Optional name; a named chat is never renamed"},
+                "prompt":{"type":"string","description":"Optional opening request; names the chat when no title is given"}
+            },"additionalProperties":false}),
+            origin: Default::default(),
+        }
+    }
+    fn class(&self) -> ToolClass {
+        ToolClass::Mutating
+    }
+    async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        if let Some(err) = control_only(&self.0, &ctx).await {
+            return err;
+        }
+        let args: CreateChatArgs = match serde_json::from_value(request.arguments) {
+            Ok(args) => args,
+            Err(e) => return ToolOutcome::err(format!("invalid arguments: {e}")),
+        };
+        if let Some(err) = gate(
+            &ctx,
+            format!(
+                "Open a control chat: {}",
+                args.title.as_deref().unwrap_or("untitled")
+            ),
+            match args.prompt.as_deref() {
+                Some(prompt) => format!("Opening request: {}", snippet(prompt)),
+                None => "The chat starts empty; its first message names it.".to_string(),
+            },
+            json!({"tool":"control_create_control_chat","title":args.title,"prompt":args.prompt}),
+        )
+        .await
+        {
+            return err;
+        }
+        match crate::control::new_control_chat(
+            &self.0,
+            args.title.as_deref(),
+            args.prompt.as_deref(),
+        )
+        .await
+        {
+            Ok(session) => ToolOutcome::ok(
+                json!({
+                    "session_id": session.id,
+                    "title": session.title,
+                    "workspace": session.workspace,
+                })
+                .to_string(),
+            ),
+            Err(e) => ToolOutcome::err(e.message),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteChatArgs {
+    session_id: String,
+}
+
+pub struct DeleteControlChat(pub AppState);
+
+#[async_trait]
+impl Tool for DeleteControlChat {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "control_delete_control_chat".into(),
+            description: "Delete one control chat: its transcript, runs and agent rows are gone for good. Only a control chat may be deleted this way - deleting a project session is the user's decision, so ask them and let them do it. The chat's scratch directory stays on disk. An in-flight run is cancelled first. Mutating, so it follows the approval policy. Deleting the chat you are running in is refused.".into(),
+            parameters: json!({"type":"object","properties":{"session_id":{"type":"string"}},"required":["session_id"],"additionalProperties":false}),
+            origin: Default::default(),
+        }
+    }
+    fn class(&self) -> ToolClass {
+        ToolClass::Mutating
+    }
+    async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        if let Some(err) = control_only(&self.0, &ctx).await {
+            return err;
+        }
+        let args: DeleteChatArgs = match serde_json::from_value(request.arguments) {
+            Ok(args) => args,
+            Err(e) => return ToolOutcome::err(format!("invalid arguments: {e}")),
+        };
+        if let Err(e) = check_text(&args.session_id, "session_id", 128) {
+            return ToolOutcome::err(e);
+        }
+        if args.session_id == ctx.approvals.session_id.as_str() {
+            return ToolOutcome::err(
+                "Refusing to delete the control chat you are running in; ask the user to delete it from the rail.",
+            );
+        }
+        let session = match self.0.store().get_session(&args.session_id).await {
+            Ok(Some(session)) => session,
+            Ok(None) => return ToolOutcome::err("no such session"),
+            Err(e) => return ToolOutcome::err(e.to_string()),
+        };
+        // A project session is the user's call, not the control chat's: its work,
+        // its project and its workspace belong to them.
+        if !matches!(
+            self.0.store().is_control_session(&args.session_id).await,
+            Ok(true)
+        ) {
+            return ToolOutcome::err(format!(
+                "Only a control chat can be deleted here. Session `{}` belongs to project {}; ask the user to delete it from the session list.",
+                session.id,
+                session.project_id.as_deref().unwrap_or("(none)")
+            ));
+        }
+        if let Some(err) = gate(
+            &ctx,
+            format!("Delete control chat {}", session.id),
+            format!(
+                "Title: {}. Its transcript, runs and agent rows are removed for good; its directory stays on disk.",
+                if session.title.trim().is_empty() {
+                    "(untitled)"
+                } else {
+                    session.title.trim()
+                }
+            ),
+            json!({"tool":"control_delete_control_chat","session_id":session.id,"title":session.title,"workspace":session.workspace}),
+        )
+        .await
+        {
+            return err;
+        }
+        // Same order as `DELETE /api/sessions/:id`: stop the run loop before the
+        // rows go, so it cannot write to a session that no longer exists.
+        self.0.runtime().cancel(&session.id);
+        if let Err(e) = self.0.store().delete_session(&session.id).await {
+            return ToolOutcome::err(e.to_string());
+        }
+        self.0.runtime().clear_session_allows(&session.id);
+        self.0.runtime().emit(
+            Some(&session.id),
+            None,
+            None,
+            Event::SessionDeleted {
+                session_id: session.id.clone(),
+            },
+        );
+        ToolOutcome::ok(
+            json!({
+                "deleted": true,
+                "session_id": session.id,
+                "workspace_kept": session.workspace,
+                "note": "The transcript is gone; the chat's scratch directory was left on disk.",
+            })
+            .to_string(),
+        )
+    }
+}
+
 pub fn tools(state: AppState) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(ListSessions(state.clone())),
         Arc::new(ReadSession(state.clone())),
+        Arc::new(ListAgents(state.clone())),
+        Arc::new(SetSessionModel(state.clone())),
+        Arc::new(CreateControlChat(state.clone())),
+        Arc::new(DeleteControlChat(state.clone())),
         Arc::new(SendMessage(state.clone())),
         Arc::new(CancelRun(state.clone())),
         Arc::new(RenameSession(state)),

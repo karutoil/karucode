@@ -184,8 +184,31 @@
   text-transform: uppercase;
 }
 .cp-group-count { font-variant-numeric: tabular-nums; }
+/* The running/recent split inside the Sessions group: a sub-heading, so it does
+ * not compete with the two top-level group names. */
+.cp-group-sub {
+  padding-top: var(--space-5);
+  padding-bottom: var(--space-2);
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+}
 
 .cp-list { list-style: none; margin: 0; padding: 0; }
+
+/* A rail row and its kebab share a wrapper so the menu never sits inside the
+ * button (nested buttons are invalid, and the row's accessible name would
+ * swallow "Rename"). */
+.cp-row-item { position: relative; }
+.cp-row-menu { position: absolute; top: var(--space-2); right: var(--space-2); }
+.cp-row-menu-trigger { width: 24px; height: 24px; opacity: 0; transition: opacity var(--transition-fast); }
+.cp-row-item:hover .cp-row-menu-trigger,
+.cp-row-item:focus-within .cp-row-menu-trigger,
+.cp-row-menu-trigger[aria-expanded='true'] { opacity: 1; }
+.cp-row-menu-list { top: 28px; right: 0; }
+/* The kebab sits over the row's right edge, so the row yields that corner: the
+ * status word is `flex: none`, which is what used to push the menu off-row. */
+.cp-row-item .cp-row { padding-right: calc(var(--space-9) + var(--space-2)); }
 
 .cp-row {
   display: flex;
@@ -241,22 +264,67 @@
 
 .cp-row-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: var(--space-1); }
 .cp-row-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
   font-size: var(--fs-label);
   font-weight: 600;
   color: var(--text);
 }
+.cp-row-title-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .cp-row-meta {
   display: flex;
-  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-2);
+  row-gap: var(--space-1);
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   color: var(--muted);
   font-size: var(--fs-tiny);
 }
 .cp-dot { color: var(--muted); }
+
+/* Model and agent pills on a control-chat row.
+ *
+ * Both are chips of two short facts, so they read on the same muted/raised pair
+ * in every theme: no colour carries meaning here, only the words do. `--text` on
+ * `--theme-raised` and `--accent-on-tint` on `--theme-accent-bg` are the AA pairs
+ * DESIGN-SYSTEM.md §4.8 defines, so Daybreak and the dark themes both pass.
+ * `max-width` + ellipsis keeps a long model id from pushing the time out of the
+ * 300px rail. */
+.cp-badge {
+  display: inline-block;
+  flex: 0 0 auto;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--theme-raised);
+  color: var(--text);
+  font-size: var(--fs-tiny);
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+.cp-badge-model {
+  border-color: var(--theme-accent-line);
+  background: var(--theme-accent-bg);
+  color: var(--accent-on-tint);
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.cp-badge-agents { font-variant-numeric: tabular-nums; }
 
 .cp-state {
   display: inline-flex;
@@ -332,6 +400,19 @@
 }
 .cp-error button { margin-left: var(--space-4); text-decoration: underline; color: inherit; }
 
+/* A failed snapshot read: the previous overview stays on screen and is marked
+ * stale, because an empty dashboard ("nothing is running anywhere") would be a
+ * different and wrong answer. Warn marks the edge; the word carries the meaning. */
+.cp-stale {
+  margin: var(--space-6) var(--space-8) 0;
+  padding: var(--space-3) var(--space-6);
+  border: 1px solid var(--theme-warn);
+  border-radius: var(--radius-md);
+  background: var(--theme-raised);
+  color: var(--text);
+  font-size: var(--fs-tiny);
+}
+
 /* --------------------------------------------------------------- overview */
 
 .cp-overview { flex: 1; min-height: 0; overflow: auto; padding: var(--space-10) clamp(22px, 3.4vw, 54px) var(--space-10); }
@@ -368,10 +449,25 @@
   text-transform: uppercase;
 }
 
+/* A run parked on an approval question is the one thing on this page that cannot
+ * make progress without a person, so it is said in words above the dashboard
+ * rather than left to a count in a corner. */
+.cp-pending {
+  margin: var(--space-6) auto 0;
+  padding: var(--space-4) var(--space-6);
+  max-width: 1880px;
+  border: 1px solid var(--theme-accent-line);
+  border-radius: var(--radius);
+  background: var(--theme-accent-bg);
+  color: var(--accent-on-tint);
+  font-size: var(--fs-small);
+}
+.cp-pending strong { color: var(--accent-on-tint); }
+
 .cp-stats { display: grid; grid-template-columns: repeat(2, 92px); gap: var(--space-4); flex: none; }
 @media (min-width: 1200px) {
-  .cp-stats { grid-template-columns: repeat(4, minmax(96px, 1fr)); gap: var(--space-5); }
-  .cp-stats div { min-width: 96px; }
+  .cp-stats { grid-template-columns: repeat(5, minmax(88px, 1fr)); gap: var(--space-4); }
+  .cp-stats div { min-width: 88px; }
 }
 .cp-stats div {
   padding: var(--space-5) var(--space-6);
@@ -426,6 +522,34 @@
   font-size: var(--fs-label);
 }
 .cp-launch-project:focus { border-color: var(--accent); }
+
+/* The launch box's model + reasoning choice: the chat does not exist yet, so
+ * these are plain selects rather than the composer's session-pin popovers. */
+.cp-launch-model {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  margin-top: var(--space-5);
+}
+.cp-launch-pick { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
+.cp-launch-mini {
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.cp-launch-pick select {
+  max-width: 100%;
+  height: 34px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--theme-bg);
+  color: var(--theme-text-secondary);
+  font-size: var(--fs-label);
+}
+.cp-launch-pick select:focus { border-color: var(--accent); }
 
 /* The control chat's own first-run state, drawn inside the transcript area. */
 .cp-intro {
@@ -616,21 +740,37 @@
   .cp-table-head span:nth-child(3), .cp-table-head span:nth-child(4) { display: none; }
 }
 
-/* Session facts beside an open conversation, so a wide pane is not mostly empty. */
-.cp-session-body { display: flex; flex: 1; min-height: 0; }
-.cp-facts { display: none; }
+/* The inspector beside an open conversation, so a wide pane is not mostly empty.
+ *
+ * Below 1400px it stacks under the transcript instead of disappearing: a control
+ * chat's subagents and session facts are the point of the panel, and a phone has
+ * no room for a side column. The chat keeps `flex: 1` and its own composer, so
+ * stacking never pushes the composer off the pane. */
+.cp-session-body { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+.cp-inspector {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--space-7);
+  min-height: 0;
+  /* Stacked, the inspector is a secondary panel: it scrolls inside a cap so the
+     transcript and its composer stay the larger half of the pane. */
+  max-height: min(40dvh, 340px);
+  overflow: auto;
+  padding: var(--space-7);
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+}
 @media (min-width: 1400px) {
-  .cp-facts {
-    display: flex;
+  .cp-session-body { flex-direction: row; }
+  .cp-inspector {
     flex: 0 0 300px;
-    flex-direction: column;
-    gap: var(--space-7);
-    overflow: auto;
-    padding: var(--space-7);
+    max-height: none;
+    border-top: 0;
     border-left: 1px solid var(--line);
-    background: var(--panel-2);
   }
 }
+.cp-facts { display: flex; flex-direction: column; gap: var(--space-7); }
 .cp-facts dl { display: grid; gap: var(--space-5); margin: 0; }
 .cp-facts dt {
   color: var(--muted);
@@ -657,6 +797,91 @@
 .cp-facts-id .cp-link { flex: none; }
 .cp-facts-actions { display: flex; flex-direction: column; gap: var(--space-3); margin-top: auto; }
 .cp-facts-actions .cp-secondary { width: 100%; text-align: center; }
+
+/* ------------------------------------------------------------- subagents */
+
+.cp-subagents { display: flex; flex-direction: column; gap: var(--space-4); }
+/* Stacked, the panel scrolls inside a short cap, so what is happening now comes
+ * before the session's static facts: a chat that delegated work must show it
+ * without a scroll. In the wide column the facts keep the top, where they read
+ * as the header of the panel. */
+@media (max-width: 1399px) {
+  .cp-subagents { order: -1; }
+}
+.cp-agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.cp-agent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--theme-surface);
+}
+.cp-agent-head { display: flex; align-items: center; gap: var(--space-4); }
+.cp-agent-title { display: flex; flex: 1; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.cp-agent-title strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cp-agent-title small { color: var(--muted); font-size: var(--fs-tiny); }
+.cp-agent-note { margin: 0; color: var(--text); font-size: var(--fs-tiny); line-height: 1.55; }
+.cp-agent-note.muted { color: var(--muted); }
+.cp-agent-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line-soft);
+}
+.cp-agent-message { display: flex; flex-direction: column; gap: var(--space-1); }
+.cp-agent-role {
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.cp-agent-message p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--fs-tiny);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+/* The rename dialog's one field. */
+.cp-dialog-label {
+  display: block;
+  margin-bottom: var(--space-3);
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.cp-dialog-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 var(--space-5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--theme-bg);
+  color: var(--text);
+  font-size: var(--fs-label);
+}
+.cp-dialog-input:focus { border-color: var(--accent); }
 
 .cp-projects { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: var(--space-4); }
 .cp-project {
@@ -714,6 +939,21 @@
 }
 .cp-session-actions { display: flex; align-items: center; gap: var(--space-5); flex: none; }
 .cp-session-count { color: var(--muted); font-size: var(--fs-tiny); white-space: nowrap; }
+
+/* The composer's model pills, reused in the header.
+ *
+ * `.model-switcher-menu.dropup` opens *upward* because the composer sits at the
+ * bottom of the pane; in a header at the top of the same pane that would draw the
+ * menu off-screen. It opens downward here instead, and the header keeps its
+ * buttons from crowding the title. */
+.cp-session-actions .model-switcher-button { max-width: 200px; }
+.cp-session-actions .model-switcher-menu.dropup {
+  top: calc(100% + var(--space-3));
+  right: 0;
+  bottom: auto;
+  left: auto;
+  width: min(280px, calc(100vw - 24px));
+}
 
 .cp-secondary {
   padding: var(--space-3) var(--space-5);
@@ -774,6 +1014,15 @@
   .cp-stats { grid-template-columns: repeat(2, 84px); }
 }
 
+/* The header's model and reasoning pills need room beside the title. Below this
+ * the actions take their own row (the title keeps the full width), and the
+ * message count steps aside — `SessionFacts` still carries it. */
+@media (max-width: 1100px) {
+  .cp-session-head { flex-wrap: wrap; }
+  .cp-session-actions { flex: 1 0 100%; flex-wrap: wrap; gap: var(--space-4); }
+  .cp-session-count { display: none; }
+}
+
 @media (max-width: 900px) {
   /* One column: the session list on top (its own short scroll), then the
      overview below it, so the dashboard is reachable on a phone too. */
@@ -785,6 +1034,8 @@
   .cp-back { display: grid; }
   .cp-session-head { padding: var(--space-5) var(--space-6); gap: var(--space-4); }
   .cp-session-count { display: none; }
+  .cp-inspector { max-height: 32dvh; }
+  .cp-session-actions .model-switcher-button { max-width: 100%; }
   .cp-overview { padding: var(--space-9) var(--space-7) var(--space-10); }
   .cp-hero { display: block; }
   .cp-hero h1 { font-size: var(--fs-hero); }

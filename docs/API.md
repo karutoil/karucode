@@ -1291,21 +1291,67 @@ and `dependencies`. It returns the updated task; stale or ineligible changes
 return 400. Only never-claimed pending/blocked tasks in active or paused missions
 are eligible. The scheduler may claim the task immediately after approval.
 
-### Central control chat
+### Central control plane
 
-`POST /api/control/session` reserves or reopens one persistent central chat and
-returns `{session_id, project_id, created}`. It requires a registered project;
-the first reservation chooses one as its workspace and retains that binding.
-Use the ordinary session transcript, message, event and approval APIs. The chat
-is not an isolation boundary: its normal tools operate in its bound workspace.
+A control chat is an ordinary session that belongs to **no project**: `project_id`
+is `null`, its workspace is a private directory
+(`<data_dir>/control-workspaces/<session_id>`) so its file tools never touch a
+project, and it reaches projects only through its own tools. There is no
+singleton: any number of chats coexist, and each is listed and opened like any
+other session.
 
-Only that chat's root agent can call `control_start_session`, with a unique
-`request_id`, explicit registered `project_id`, `title`, and `prompt`. The
-approval presents the target project, path and complete prompt. `read_only`
-refuses, `ask` and `ask_commands` ask, and `auto` permits the dispatch. A
-transaction reserves the request and creates an ordinary project-local session;
-reusing the key with different input is rejected and identical replays never
-start another run. Reservation and runtime submission are not atomic: after a
-crash or failed submission inspect the returned session rather than generating
-a new request key. Deleting the control chat leaves its reservation intact and
-cannot silently create a replacement. This mechanism does not change missions.
+`POST /api/control/sessions` creates one and returns
+`{session_id, project_id, workspace, title, created}`. The body is optional:
+
+* `title` names it, and a named chat is never renamed;
+* `prompt` (≤32 KiB) is its opening request, and without a `title` the chat is
+  named from it - deterministically at once, then by a model when `[titles]` is
+  enabled (the default);
+* with neither, the chat starts with the **empty title** and
+  `POST /api/sessions/:id/messages` names it from its first message, exactly as
+  an ordinary session is named.
+
+`GET /api/control/sessions` lists them newest-activity first. Each row is a
+`SessionSummary` (now carrying `control: true`) plus `agents: {live, total}`
+(live is running *or* paused), `pending_approvals`, and `model_label` - the model
+the chat resolves to right now (its own pin, else the install-wide default). It
+is a model id, never a key or a base URL.
+
+`GET /api/control/overview` is the whole plane in one read-only snapshot:
+`sessions {total, running, failed, control}`, `agents {live, paused, failed,
+total}`, `approvals {pending}`, per-project `sessions`/`running`, the `control`
+rows above, and the project-session lists `running`, `attention` (latest run
+`failed`, `interrupted` or `limit_reached`), `waiting` (an unanswered approval)
+and `recent`, each capped at 12, plus `live_agents` (running or paused subagents,
+most recently active first, each with its session). Control chats appear only in
+`control`.
+
+Only a control chat may call the `control_*` tools; ordinary sessions and
+subagents are refused. Mutating ones follow the approval policy: `read_only`
+refuses, `ask`/`ask_commands` ask with the exact action, `auto` permits.
+
+* `control_list_projects`, `control_list_sessions`, `control_read_session`,
+  `control_list_agents` are read-only: projects with ids and paths, sessions
+  across projects with status, one session's newest messages, and the subagents of
+  one session (`agent` rows with name, role, status, model, iterations, note and
+  progress).
+* `control_send_message` (`send` starts a run, `steer` folds into the live turn,
+  `follow_up` queues the next one), `control_cancel_run`,
+  `control_rename_session`, `control_set_session_model`,
+  `control_create_control_chat` and `control_delete_control_chat` mutate. The
+  model pin is validated against the live provider profiles and emits
+  `session_model_changed`; `control_delete_control_chat` refuses a project
+  session and leaves the chat's scratch directory on disk.
+* `control_start_session` starts work in an explicit registered `project_id` with
+  an idempotent `request_id`. `title` is optional (omit it and the session is
+  named from its `prompt`), and `provider`/`model`/`reasoning_effort` pin the new
+  session. The approval presents the target project, path and complete prompt. A
+  transaction reserves the request and creates the session, so an identical
+  replay never starts a second run and never re-pins the session; reusing a key
+  with different input is rejected. Reservation and runtime submission are not
+  atomic: after a crash or a failed submission, inspect the returned session
+  rather than generating a new request key.
+
+Deleting a control chat removes its transcript, runs and agent rows and keeps its
+directory; the other chats are unaffected and dispatch request identities stay
+reserved. This mechanism does not change missions.

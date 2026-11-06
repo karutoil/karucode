@@ -18,6 +18,7 @@ import type {
 } from '../api/types';
 import { isAgentLive } from '../api/types';
 import { emptyChatState, type ChatState } from './chat';
+import { controlChats as controlChatList } from './controlPlane';
 import { agentActivity, pendingApprovals } from './selectors';
 import type { AgentActivity } from './agentConsole';
 
@@ -653,9 +654,26 @@ export const sessionInfoError = signal<string | null>(null);
 /** Bumped by a run/usage event, so an open tab refreshes without polling. */
 export const sessionInfoTick = signal(0);
 
+/**
+ * The open session when it is a control chat, otherwise `null`.
+ *
+ * A control chat is not inside a project: `sessions.value` only ever holds the
+ * active project's rows, so this reads the control plane's own chat list
+ * (`state/controlPlane.ts`). Keeping the lookup here means every consumer - the
+ * composer's model pills, the chat header, the transcript - resolves "which
+ * session am I in" the same way, whether it lives in a project or beside them.
+ */
+export const activeControlChat = computed<SessionSummary | null>(() => {
+  const id = currentSessionId.value;
+  if (id === null) return null;
+  return controlChatList().find((session) => session.id === id) ?? null;
+});
+
 export const activeSession = computed<SessionSummary | null>(
-  () => sessions.value.find((session) => session.id === currentSessionId.value) ?? null,
+  () => sessions.value.find((session) => session.id === currentSessionId.value)
+    ?? activeControlChat.value,
 );
+
 
 export const currentProject = computed<Project | null>(() => {
   const list = projects.value;

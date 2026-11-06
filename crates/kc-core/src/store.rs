@@ -207,6 +207,11 @@ pub struct SessionSummary {
     pub last_run_status: Option<String>,
     #[serde(default)]
     pub running: bool,
+    /// True for a control-plane chat. Those sessions belong to no project and
+    /// live in the server's own directory, so a client that draws "the
+    /// sessions of a project" must be able to tell them apart from one.
+    #[serde(default)]
+    pub control: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1104,6 +1109,21 @@ pub trait Store: Send + Sync {
             agents.retain(|summary| statuses.contains(&summary.agent.status));
         }
         Ok(agents)
+    }
+    /// Every subagent of one session, newest `created_at` first, each with the
+    /// session context (`session_title`, `workspace`, `project_id`) the Agents
+    /// view groups by.
+    ///
+    /// Not scoped to a project: the control plane shows the agents of a control
+    /// chat and of a project session in the same list, and a control chat has no
+    /// project at all. The default is empty so a store that does not implement
+    /// it still compiles.
+    async fn list_agent_summaries_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<AgentSummary>> {
+        let _ = session_id;
+        Ok(Vec::new())
     }
     /// One agent by id, with its session context. `None` when it does not exist.
     async fn get_agent(&self, id: &str) -> Result<Option<AgentSummary>>;

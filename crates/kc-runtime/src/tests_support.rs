@@ -342,6 +342,7 @@ impl Store for FakeStore {
                 message_count: 0,
                 last_run_status: None,
                 running: false,
+                control: false,
             })
             .collect())
     }

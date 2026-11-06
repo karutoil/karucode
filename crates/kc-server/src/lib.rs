@@ -22,7 +22,7 @@
 // @kc-title: Call the HTTP API
 // @kc-summary: Authenticate, send the CSRF header, and find the endpoint for sessions, config, approvals, files, git, plugins, MCP and the event stream.
 // @kc-tags: api, http, rest, sse, curl, endpoints
-// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:PATCH /api/projects/:id/preferences, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, route:POST /api/artifacts, route:GET /api/artifacts/:id, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, config:plugin_panels, route:GET /api/events, event:notification, event:queued_messages, event:session_rewound, config:[notifications], header:X-Karucode-Client, env:KARUCODE_AUTH_TOKEN, doc:docs/API.md
+// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:PATCH /api/projects/:id/preferences, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/control/sessions, route:POST /api/control/sessions, route:GET /api/control/overview, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, route:POST /api/artifacts, route:GET /api/artifacts/:id, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, config:plugin_panels, route:GET /api/events, event:notification, event:queued_messages, event:session_rewound, config:[notifications], header:X-Karucode-Client, env:KARUCODE_AUTH_TOKEN, doc:docs/API.md
 //
 // The API is same-origin only; there is no CORS surface. Two rules matter:
 //
@@ -571,6 +571,48 @@
 // `tool_call_started/finished`, `command_*` and `approval_*` frames stamped with
 // the subagent's `agent_id`. One SSE connection therefore feeds every agent in
 // every session; no per-agent stream exists.
+//
+// # The control plane
+//
+// A control chat is an ordinary session that belongs to **no project**: its
+// `project_id` is `null`, its workspace is a private directory
+// (`<data_dir>/control-workspaces/<session_id>`) and it reaches projects only
+// through its own tools (see the `central-control` topic). Any number of them can
+// exist at once, so `POST` creates one rather than reopening a singleton.
+//
+// ```bash
+// # Open a chat with its opening request. Without a `title` the chat is named
+// # from that prompt: deterministically at once, then by a model when [titles]
+// # is on (the default).
+// curl -s -X POST localhost:8787/api/control/sessions \
+//   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+//   -d '{"prompt":"audit the open pull requests"}'
+// # 200 {"session_id":"s_ab12","project_id":null,"workspace":"/…/control-workspaces/s_ab12",
+// #      "title":"audit the open pull requests","created":true}
+//
+// # Every chat, newest activity first: a SessionSummary each, plus
+// # agents {live,total} and the model the chat would use right now.
+// curl -s localhost:8787/api/control/sessions | jq '.sessions[] | {title, model_label, agents}'
+// ```
+//
+// `GET /api/control/overview` is the whole plane in one read-only snapshot, for a
+// dashboard that would otherwise make five requests: `sessions {total, running,
+// failed, control}`, `agents {live, paused, failed, total}`, `projects` (with
+// `sessions` and `running` per project), `control` (the rows of the listing
+// above), `running` / `attention` / `recent` (project sessions only, at most 12
+// each, and `attention` means the latest run ended `failed`, `interrupted` or
+// `limit_reached`) and `live_agents` (running or paused, most recently active
+// first, with the session each belongs to). Control chats never appear in the
+// project-session lists; they are their own array.
+//
+// A chat is named by its **first message** if it was created without a title or a
+// prompt, so `POST /api/sessions/:id/messages` is where an untitled chat gets its
+// name. An explicitly titled chat is never renamed - see the `session-titles`
+// topic for the model, the prompt and what is refused.
+//
+// ```bash
+// curl -s localhost:8787/api/control/overview | jq '.sessions, .agents, (.control | length)'
+// ```
 //
 // # Managing the working tree
 //

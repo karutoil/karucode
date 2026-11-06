@@ -60,6 +60,7 @@ pub fn api_router() -> Router<AppState> {
             "/control/sessions",
             get(crate::control::list_sessions).post(crate::control::create_session),
         )
+        .route("/control/overview", get(crate::control::overview))
         .route(
             "/config",
             get(config::get_config).patch(patch_config_guarded),

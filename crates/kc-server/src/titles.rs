@@ -2,7 +2,7 @@
 // @kc-title: Give sessions AI-written titles
 // @kc-summary: Sessions are titled from their first message; with `[titles]` on (the default) a model writes a short, plain-language title instead, using the session's own model or a cheaper one you pick.
 // @kc-tags: titles, sessions, naming, models, titles.enabled
-// @kc-applies-to: config:[titles], env:KARUCODE_TITLES, env:KARUCODE_TITLES_PROVIDER, env:KARUCODE_TITLES_MODEL, config:titles.enabled, config:titles.provider, config:titles.model, config:titles.max_chars, config:titles.timeout_secs, route:POST /api/sessions, route:POST /api/sessions/:id/messages, route:PATCH /api/config, ui:SessionsRail
+// @kc-applies-to: config:[titles], env:KARUCODE_TITLES, env:KARUCODE_TITLES_PROVIDER, env:KARUCODE_TITLES_MODEL, config:titles.enabled, config:titles.provider, config:titles.model, config:titles.max_chars, config:titles.timeout_secs, route:POST /api/sessions, route:POST /api/sessions/:id/messages, route:POST /api/control/sessions, route:PATCH /api/config, tool:control_start_session, ui:SessionsRail
 //
 // Every session needs a name. The session rail is the only map of what you are
 // working on, and a rail full of untitled rows is unusable after a day.
@@ -10,7 +10,8 @@
 // # What happens by default
 //
 // **AI titles are on out of the box** (`[titles] enabled = true`). When a session
-// that is still untitled receives its first user message, karucode:
+// that is still untitled receives its first user message - or is created with
+// its opening prompt, see below - karucode:
 //
 // 1. renames it immediately with a deterministic title derived from that message
 //    (whitespace collapsed, cut at 60 characters) so the rail never shows an
@@ -25,6 +26,22 @@
 //
 // Use the same session twice? A second message does not retitle the session. A
 // title is written once, from the opening request.
+//
+// # Sessions that are created with their opening request
+//
+// A session the API starts *from* a prompt is named from that prompt at creation
+// time, by the same two steps (deterministic title now, model title in the
+// background). That covers:
+//
+// * `POST /api/control/sessions` with `{"prompt": "..."}` - a control-plane chat
+//   opened with its first request;
+// * a session the control plane dispatches into a project
+//   (`control_start_session`) without a `title`.
+//
+// Both are created untitled (`""`), so the first-message hook below never sees
+// them: they have no "first message" - the prompt is already the reason they
+// exist. An unnamed control chat created with no prompt stays untitled and is
+// named by its first message, exactly like an ordinary session.
 //
 // # Which model writes the title
 //
@@ -82,6 +99,7 @@
 //   concurrent title, or a session deleted mid-request all win; the session is
 //   left exactly as it is.
 // * **It does not run on an explicitly named session.** `POST /api/sessions`
+//   with a `title`, `POST /api/control/sessions` with a `title`, or a dispatch
 //   with a `title` means you named it - there is nothing to improve on.
 // * **It does not read your conversation.** The request carries the first user
 //   message, truncated to 2000 characters, and nothing else: no tool output, no
@@ -514,6 +532,93 @@ pub fn is_untitled(title: &str) -> bool {
     title.is_empty() || title == crate::routes::sessions::DEFAULT_SESSION_TITLE
 }
 
+/// Give a session that is still untitled a real name: a deterministic title
+/// derived from `prompt`, and - when `[titles]` is on - a model-written one in
+/// the background.
+///
+/// This is the naming path for sessions nobody typed a name for but that are
+/// created *with* their opening request: a control chat opened with a `prompt`,
+/// and a session the control plane dispatches into a project. Neither goes
+/// through `POST /api/sessions/:id/messages` to be created, so
+/// [`crate::routes::sessions::send_message`] never sees an untitled row.
+///
+/// A session somebody already named is left exactly as it is: the derived title
+/// is what the model's title later replaces, so a named session has nothing to
+/// replace and needs no titling turn at all. A prompt with nothing printable in
+/// it (or a rename that did not land) leaves the session as it was, which is the
+/// documented "titles are cosmetic" behaviour.
+///
+/// Returns the derived title when it was stored.
+pub async fn name_untitled_session(
+    state: &AppState,
+    session_id: &str,
+    prompt: &str,
+) -> Option<String> {
+    let derived = derive_untitled_title(state, session_id, prompt).await?;
+    // The model title replaces the derived one, so it is gated on the derived
+    // title still being in place - a rename in between wins.
+    if state.settings().snapshot().titles.enabled {
+        maybe_auto_title(state, session_id, &derived, prompt).await;
+    }
+    Some(derived)
+}
+
+/// Store the deterministic title and hand back the model-titling turn to run.
+///
+/// The split exists so a caller that must not wait on a provider - the control
+/// plane's dispatch tool runs inside an agent turn, and a titling request ahead
+/// of it would hold that turn for `titles.timeout_secs` - can keep the derived
+/// title immediately and spawn the rest. `None` means nothing was renamed, so
+/// there is no model title to ask for either.
+pub(crate) async fn derive_untitled_title(
+    state: &AppState,
+    session_id: &str,
+    prompt: &str,
+) -> Option<String> {
+    let session = match state.store().get_session(session_id).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                session = %session_id,
+                error = %error,
+                "could not read the session to name it"
+            );
+            return None;
+        }
+    };
+    if !is_untitled(&session.title) {
+        return None;
+    }
+    let derived = match crate::routes::sessions::derive_title(prompt) {
+        Some(derived) if !is_untitled(&derived) => derived,
+        // Nothing usable in the prompt: leave it for the first message to name.
+        _ => return None,
+    };
+    match state.store().rename_session(session_id, &derived).await {
+        Ok(()) => {
+            state.runtime().emit(
+                Some(session_id),
+                None,
+                None,
+                kc_core::events::Event::SessionRenamed {
+                    session_id: session_id.to_string(),
+                    title: derived.clone(),
+                },
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                session = %session_id,
+                error = %error,
+                "could not store the derived title"
+            );
+            return None;
+        }
+    }
+    Some(derived)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,6 +784,29 @@ mod tests {
         assert!(is_untitled(crate::routes::sessions::DEFAULT_SESSION_TITLE));
         assert!(!is_untitled("New session!"));
         assert!(!is_untitled("fix the build"));
+    }
+
+    /// A control chat is created with an empty title, and a dispatched session
+    /// with either an empty one or the derived placeholder. Both have to count
+    /// as untitled, or those sessions would never be named.
+    #[test]
+    fn an_empty_title_is_untitled_too() {
+        assert!(is_untitled(""));
+        assert!(
+            is_untitled(crate::routes::sessions::DEFAULT_SESSION_TITLE.trim()),
+            "the framework's placeholder is untitled"
+        );
+        assert_eq!(
+            crate::routes::sessions::derive_title("  build   the release  ").as_deref(),
+            Some("build the release"),
+            "the derived title a control chat or dispatch is born with"
+        );
+        // The placeholder the model title later replaces must never itself look
+        // like a placeholder, or a second message would retitle the session.
+        assert!(!is_untitled(
+            &crate::routes::sessions::derive_title("a").unwrap()
+        ));
+        assert_eq!(crate::routes::sessions::derive_title("   "), None);
     }
 
     #[test]

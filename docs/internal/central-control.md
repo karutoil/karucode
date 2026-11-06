@@ -7,7 +7,7 @@
 
 - **Slug:** `central-control`
 - **Tags:** control, projects, sessions, dispatch, approvals, audit
-- **Applies to:** `route:GET /api/control/sessions`, `route:POST /api/control/sessions`, `tool:control_start_session`, `tool:control_list_projects`, `tool:control_list_sessions`, `tool:control_read_session`, `tool:control_send_message`, `tool:control_cancel_run`, `tool:control_rename_session`, `file:crates/kc-server/src/control.rs`, `file:crates/kc-server/src/control_sessions.rs`, `file:web/src/components/ControlPlane.tsx`
+- **Applies to:** `route:GET /api/control/sessions`, `route:POST /api/control/sessions`, `route:GET /api/control/overview`, `tool:control_start_session`, `tool:control_list_projects`, `tool:control_list_sessions`, `tool:control_list_agents`, `tool:control_read_session`, `tool:control_send_message`, `tool:control_cancel_run`, `tool:control_rename_session`, `tool:control_set_session_model`, `tool:control_create_control_chat`, `tool:control_delete_control_chat`, `file:crates/kc-server/src/control.rs`, `file:crates/kc-server/src/control_sessions.rs`, `file:web/src/components/ControlPlane.tsx`
 - **Source:** `crates/kc-server/src/control.rs:3`
 
 ---
@@ -20,18 +20,71 @@ search and status filters; selecting one switches to its project and opens the
 ordinary conversation, where the usual composer steers or follows up.
 
 **Control chats** are listed above those sessions and there is no limit: use
-"New" to start another, and they run alongside each other. `GET
-/api/control/sessions` lists them (newest activity first) and `POST
-/api/control/sessions` creates one, optionally with `{"title":"..."}`. The
-response is `{session_id, project_id, workspace, created}`, with `project_id`
-null.
+"New" to start another, and they run alongside each other.
+
+`POST /api/control/sessions` creates one and answers
+`{session_id, project_id, workspace, title, created}`, with `project_id` null.
+The body is optional:
+
+```bash
+curl -X POST localhost:8787/api/control/sessions \
+    -H 'content-type: application/json' -H 'x-karucode-client: web' \
+    -d '{"prompt":"audit the open pull requests"}'
+```
+
+- `title` names the chat. A chat you name is never renamed.
+- `prompt` (at most 32 KiB) is the chat's opening request. Without a `title` a
+  chat created with a prompt is named from it - deterministically, and by a
+  model as well when `[titles]` is on (the default; see `session-titles`).
+- With neither, the chat is created **untitled** and its first message names it
+  (`POST /api/sessions/:id/messages`), so the rail rarely shows an empty row.
+
+`GET /api/control/sessions` lists them, newest activity first. Each row is the
+session summary - `id`, `title`, `workspace`, `project_id` (null), `model`,
+`created_at`, `updated_at`, `message_count`, `last_run_status`, `running` and
+`control: true` - plus `agents: {live, total}` (live is running *or* paused) and
+`model_label`, the model the chat would use right now: its own pin, else the
+install-wide default. `model_label` is a model id, never a key or a base URL.
+
+## The overview
+
+`GET /api/control/overview` is the whole plane in one read-only call, for a
+dashboard that would otherwise make five requests:
+
+```json
+{ "generated_at": 1730000000000,
+  "sessions": { "total": 4, "running": 1, "failed": 0, "control": 2 },
+  "agents": { "live": 1, "paused": 0, "failed": 0, "total": 3 },
+  "approvals": { "pending": 1 },
+  "projects": [ { "id": "p_...", "name": "karucode", "path": "/home/me/karucode",
+                  "sessions": 2, "running": 1 } ],
+  "control": [ /* the rows of GET /api/control/sessions */ ],
+  "running": [ /* SessionSummary, at most 12 */ ],
+  "attention": [ /* SessionSummary, at most 12 */ ],
+  "waiting": [ /* SessionSummary, at most 12 */ ],
+  "recent": [ /* SessionSummary, not running, at most 12 */ ],
+  "live_agents": [ /* AgentSummary with session_title, workspace, project_id */ ] }
+```
+
+- Control chats appear only in `control`; the other lists are project sessions.
+- `attention` is a session whose **latest run** ended `failed`, `interrupted`
+  or `limit_reached`. `cancelled` is something you asked for and `completed`
+  needs nothing, so neither is listed; `sessions.failed` is that list's length.
+- `waiting` is every project session with an **unanswered approval**, and
+  `approvals.pending` counts the questions. An approval means the run is
+  stopped until a person answers, so these are the most actionable rows on the
+  plane; each control chat carries its own `pending_approvals` count.
+- `live_agents` is running or paused subagents, most recently active first, at
+  most 12, and each row carries the session it belongs to so a click can open it.
 
 A control chat is **not inside a project**. Each owns its own directory,
 `<data_dir>/control-workspaces/<session_id>`, so its file tools never touch a
 project and two chats never share a scratch space. On startup a chat created by
 an older version is detached from its project and rebound to that directory.
 Deleting a control chat is ordinary; the others are unaffected, and dispatch
-request identities stay reserved.
+request identities stay reserved. Deleting it removes its transcript, its runs
+and its agent rows and leaves its directory on disk: the store is not the
+owner of files a tool wrote into that scratch space.
 
 ## Tools
 
@@ -44,6 +97,10 @@ refused.
 - `control_list_sessions` (read-only): sessions across projects with status,
   project, message count and last update; optionally by `project_id`, `running`
   or a title `query`.
+- `control_list_agents` (read-only): the subagents of any session - including a
+  control chat's own - with status, model, iterations, latest `note` and
+  `progress`. Pass `session_id` for one session, or narrow the whole server by
+  `project_id` and `status`. This is how the chat audits delegated work.
 - `control_read_session` (read-only): the newest messages of one session,
   bounded and truncated, for auditing.
 - `control_send_message` (mutating): `mode=send` starts a run, `mode=steer`
@@ -51,8 +108,29 @@ refused.
   refuses the control chat itself.
 - `control_cancel_run` (mutating): stop the run in flight in one session.
 - `control_rename_session` (mutating): rename one session.
+- `control_set_session_model` (mutating): pin one session to `provider` +
+  `model`, optionally with a `reasoning_effort`, or clear the pin by omitting
+  them so the session follows the install-wide default. An unknown provider or
+  a model the profile does not offer is refused; the pin takes effect on that
+  session's next run.
+- `control_create_control_chat` (mutating): open another control chat, with its
+  own workspace and its own conversation, exactly like `New` in the rail. It
+  does not run anything: the user talks to the new chat.
+- `control_delete_control_chat` (mutating): delete one **control chat**. A
+  project session is refused - deleting it is the user's decision - and the
+  chat's scratch directory is left on disk. Deleting the chat the tool is
+  running in is refused too.
 - `control_start_session` (mutating): start a new session in an explicit
-  registered project, with an idempotent `request_id`.
+  registered project, with an idempotent `request_id`. `title` is optional:
+  omit it and the new session is named from its `prompt` (and by a model when
+  `[titles]` is on), exactly like a chat opened with a prompt. Pass a title only
+  when the user named the work, because a named session is never renamed.
+  `provider` + `model` (and optionally `reasoning_effort`) pin the new session
+  to that model, so "start this in project X on model Y" is one call.
+
+A replay of the same `request_id` never retitles the session, never starts a
+second run and never re-pins its model: only the call that created it names it
+and sets its model, so a choice the user has changed since is left alone.
 
 Mutating tools follow the approval policy: `read_only` refuses them, `ask` and
 `ask_commands` request approval with the exact action, `auto` does not ask.

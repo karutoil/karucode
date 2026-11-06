@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 22;
+const SCHEMA_VERSION: i64 = 23;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -354,6 +354,14 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_content_id ON checkpoints(content_id)
 /// The nullable column lives in [`ADDED_COLUMNS`]; existing projects use the
 /// frontend default until their operator chooses a size.
 const MIGRATION_22: &str = "";
+
+/// Schema v23: the control plane lists control chats and project sessions side
+/// by side, ordered by activity, so it filters and sorts on the control flag.
+/// `idx_sessions_control` alone answers "which chats exist"; this covering pair
+/// also answers "the newest ones" without a sort of every session.
+const MIGRATION_23: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_sessions_control_updated ON sessions(control, updated_at);
+"#;
 
 const MIGRATION_12: &str = r#"
 CREATE TABLE IF NOT EXISTS missions (
@@ -740,6 +748,11 @@ fn map_session_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         message_count: row.get("message_count")?,
         last_run_status: row.get("last_run_status")?,
         running: row.get::<_, i64>("running")? != 0,
+        // Older rows predate the column's default; `NULL` is "not a control
+        // chat", which is what every row written before v20 was.
+        control: row
+            .get::<_, Option<i64>>("control")?
+            .is_some_and(|value| value == 1),
     })
 }
 
@@ -758,6 +771,7 @@ fn summarize_sessions(
 ) -> Result<Vec<SessionSummary>> {
     let base =
         "SELECT s.id, s.title, s.workspace, s.project_id, s.model, s.created_at, s.updated_at,
+                       s.control,
                        (SELECT COUNT(*) FROM messages m
                          WHERE m.session_id = s.id AND m.rewound_at IS NULL) AS message_count,
                        (SELECT r.status FROM runs r
@@ -1272,6 +1286,7 @@ impl SqliteStore {
                     20 => MIGRATION_20,
                     21 => MIGRATION_21,
                     22 => MIGRATION_22,
+                    23 => MIGRATION_23,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -3343,6 +3358,34 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn list_agent_summaries_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<AgentSummary>> {
+        let session_id = session_id.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT a.id, a.session_id, a.parent_run_id, a.parent_agent_id, a.name,
+                            a.role, a.task, a.status, a.model, a.iterations, a.summary, a.error,
+                            a.owned_paths, a.created_at, a.updated_at, a.finished_at,
+                            a.background, a.note, a.progress,
+                            s.title AS session_title, s.workspace AS workspace,
+                            s.project_id AS project_id
+                       FROM agents a JOIN sessions s ON s.id = a.session_id
+                      WHERE a.session_id = ?1
+                      ORDER BY a.created_at DESC, a.id DESC",
+                )
+                .map_err(|e| db_err("list_agent_summaries_for_session prepare", e))?;
+            let rows = stmt
+                .query_map(params![session_id], map_agent_summary)
+                .map_err(|e| db_err("list_agent_summaries_for_session query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("list_agent_summaries_for_session rows", e))
+        })
+        .await
+    }
+
     async fn get_agent(&self, id: &str) -> Result<Option<AgentSummary>> {
         let id = id.to_string();
         self.read(move |conn| {
@@ -4424,6 +4467,7 @@ mod tests {
                 20 => MIGRATION_20,
                 21 => MIGRATION_21,
                 22 => MIGRATION_22,
+                23 => MIGRATION_23,
                 other => panic!("no batch for v{other}"),
             };
             for (_, table, column, decl) in ADDED_COLUMNS
@@ -4546,6 +4590,41 @@ mod tests {
                 .unwrap(),
             ("dispatched".into(), false)
         );
+    }
+
+    /// A listing row says whether it is a control chat, so a client can draw
+    /// "chat" and "project session" differently without a second lookup.
+    #[tokio::test]
+    async fn session_listings_carry_the_control_flag() {
+        let db = TempDb::new("control-flag");
+        let store = db.open().await;
+        store
+            .create_control_session("central", "Control chat", "/control/central")
+            .await
+            .expect("control chat");
+        store
+            .create_session("work", "Project work", "/w", None)
+            .await
+            .expect("ordinary session");
+
+        let sessions = store.list_sessions().await.expect("sessions");
+        let control = sessions
+            .iter()
+            .find(|session| session.id == "central")
+            .expect("control chat listed");
+        assert!(control.control, "a control chat is marked: {control:?}");
+        let ordinary = sessions
+            .iter()
+            .find(|session| session.id == "work")
+            .expect("ordinary session listed");
+        assert!(!ordinary.control, "a project session is not: {ordinary:?}");
+        // The flag survives serde, so a client that never sees `Session` still
+        // gets it in `/api/sessions`.
+        let json = serde_json::to_value(control).expect("serialize");
+        assert_eq!(json["control"], serde_json::json!(true), "{json}");
+        // And the control-only listing marks it too.
+        let chats = store.list_control_sessions().await.expect("chats");
+        assert!(chats.iter().all(|chat| chat.control), "{chats:?}");
     }
 
     /// v19 held one control chat in a singleton table; v20 turns that row into a
@@ -6797,6 +6876,72 @@ mod tests {
             .expect("a_2 present");
         assert_eq!(got.session_title, "Beta");
         assert!(store.get_agent("a_missing").await.expect("get").is_none());
+    }
+
+    /// The Agents view asks "who is working in *this* session", which for a
+    /// control chat has no project to filter on: the lookup is by session id
+    /// alone, newest first, and a session without subagents answers empty.
+    #[tokio::test]
+    async fn agents_of_one_session_are_listed_newest_first() {
+        let db = TempDb::new("agents-for-session");
+        let store = db.open().await;
+        let project = store
+            .create_project("p_1", "one", "/w/one")
+            .await
+            .expect("project");
+        store
+            .create_session("s_busy", "Busy", "/w/one", Some(&project.id))
+            .await
+            .expect("busy");
+        store
+            .create_session("s_quiet", "Quiet", "/w/one", Some(&project.id))
+            .await
+            .expect("quiet");
+        // A control chat has no project, and its subagents must still be listed.
+        store
+            .create_control_session("s_central", "Control chat", "/control/x")
+            .await
+            .expect("control");
+
+        let mut older = agent("a_old", "s_busy", "completed");
+        older.created_at = 10;
+        let mut newer = agent("a_new", "s_busy", "running");
+        newer.created_at = 20;
+        store.upsert_agent(&older).await.expect("old");
+        store.upsert_agent(&newer).await.expect("new");
+        store
+            .upsert_agent(&agent("a_central", "s_central", "paused"))
+            .await
+            .expect("central");
+
+        let busy = store
+            .list_agent_summaries_for_session("s_busy")
+            .await
+            .expect("busy agents");
+        assert_eq!(
+            busy.iter()
+                .map(|summary| summary.agent.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a_new", "a_old"],
+            "newest created_at first"
+        );
+        assert_eq!(busy[0].session_title, "Busy");
+        assert_eq!(busy[0].workspace, "/w/one");
+        assert_eq!(busy[0].project_id.as_deref(), Some("p_1"));
+
+        let central = store
+            .list_agent_summaries_for_session("s_central")
+            .await
+            .expect("control agents");
+        assert_eq!(central.len(), 1);
+        assert_eq!(central[0].agent.id, "a_central");
+        assert_eq!(central[0].project_id, None);
+
+        assert!(store
+            .list_agent_summaries_for_session("s_quiet")
+            .await
+            .expect("no agents")
+            .is_empty());
     }
 
     #[tokio::test]
