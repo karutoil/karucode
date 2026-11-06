@@ -127,7 +127,11 @@
         "tool:control_delete_control_chat",
         "file:crates/kc-server/src/control.rs",
         "file:crates/kc-server/src/control_sessions.rs",
-        "file:web/src/components/ControlPlane.tsx"
+        "file:web/src/components/control-plane/ControlPlane.tsx",
+        "file:web/src/components/control-plane/ControlRail.tsx",
+        "file:web/src/components/control-plane/ControlOverview.tsx",
+        "file:web/src/components/control-plane/ControlSession.tsx",
+        "file:web/src/components/control-plane/controlModel.ts"
       ],
       "path": "central-control.md",
       "slug": "central-control",
@@ -1033,8 +1037,14 @@
         "route:GET /api/control/overview",
         "route:GET /api/control/sessions",
         "file:web/src/state/controlPlane.ts",
-        "file:web/src/components/ControlPlane.tsx",
-        "file:web/src/styles/session-control.css"
+        "file:web/src/components/control-plane/ControlPlane.tsx",
+        "file:web/src/components/control-plane/ControlRail.tsx",
+        "file:web/src/components/control-plane/ControlOverview.tsx",
+        "file:web/src/components/control-plane/ControlSession.tsx",
+        "file:web/src/components/control-plane/controlModel.ts",
+        "file:web/src/styles/control-rail.css",
+        "file:web/src/styles/control-overview.css",
+        "file:web/src/styles/control-session.css"
       ],
       "path": "web-ui.md",
       "slug": "web-ui",

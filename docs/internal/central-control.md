@@ -7,7 +7,7 @@
 
 - **Slug:** `central-control`
 - **Tags:** control, projects, sessions, dispatch, approvals, audit
-- **Applies to:** `route:GET /api/control/sessions`, `route:POST /api/control/sessions`, `route:GET /api/control/overview`, `tool:control_start_session`, `tool:control_list_projects`, `tool:control_list_sessions`, `tool:control_list_agents`, `tool:control_read_session`, `tool:control_send_message`, `tool:control_cancel_run`, `tool:control_rename_session`, `tool:control_set_session_model`, `tool:control_create_control_chat`, `tool:control_delete_control_chat`, `file:crates/kc-server/src/control.rs`, `file:crates/kc-server/src/control_sessions.rs`, `file:web/src/components/ControlPlane.tsx`
+- **Applies to:** `route:GET /api/control/sessions`, `route:POST /api/control/sessions`, `route:GET /api/control/overview`, `tool:control_start_session`, `tool:control_list_projects`, `tool:control_list_sessions`, `tool:control_list_agents`, `tool:control_read_session`, `tool:control_send_message`, `tool:control_cancel_run`, `tool:control_rename_session`, `tool:control_set_session_model`, `tool:control_create_control_chat`, `tool:control_delete_control_chat`, `file:crates/kc-server/src/control.rs`, `file:crates/kc-server/src/control_sessions.rs`, `file:web/src/components/control-plane/ControlPlane.tsx`, `file:web/src/components/control-plane/ControlRail.tsx`, `file:web/src/components/control-plane/ControlOverview.tsx`, `file:web/src/components/control-plane/ControlSession.tsx`, `file:web/src/components/control-plane/controlModel.ts`
 - **Source:** `crates/kc-server/src/control.rs:3`
 
 ---

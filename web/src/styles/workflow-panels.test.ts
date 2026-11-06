@@ -27,7 +27,13 @@ const read = (name: string): string => readFileSync(new URL(name, import.meta.ur
 
 const git = read('./git.css');
 const todo = read('./todo.css');
-const sessionControl = read('./session-control.css');
+// The control plane's sheet is three region sheets now; `sessionControl` is all
+// of them joined, so a whole-file assertion still reads every rule while the
+// phone-width tier below is read from the sheet that owns the session header.
+const controlRail = read('./control-rail.css');
+const controlOverview = read('./control-overview.css');
+const controlSession = read('./control-session.css');
+const sessionControl = [controlRail, controlOverview, controlSession].join('\n');
 const inspector = read('./inspector.css');
 const tokensCss = read('./tokens.css');
 
@@ -175,7 +181,7 @@ describe('control plane: status words survive, actions keep names', () => {
 
   it('keeps Finished, Cancelled and No runs readable in the ≤520px header', () => {
     expect(sessionControl).not.toMatch(/\.cp-state[^{]*\{[^}]*font-size:\s*0/g);
-    const phoneTier = sessionControl.slice(sessionControl.indexOf('@media (max-width: 520px)'));
+    const phoneTier = controlSession.slice(controlSession.indexOf('@media (max-width: 520px)'));
     expect(phoneTier).toContain(
       '.cp-session-actions .cp-state { font-size: var(--fs-tiny); gap: var(--space-2); }',
     );

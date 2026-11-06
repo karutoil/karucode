@@ -1,0 +1,366 @@
+/* --------------------------------------------------------------- overview */
+
+.cp-overview { flex: 1; min-height: 0; overflow: auto; padding: var(--space-10) clamp(22px, 3.4vw, 54px) var(--space-10); }
+
+/* The three top-level blocks share one measure, so the plane is a page rather
+   than a narrow column stranded on the left of a 4K screen. */
+.cp-hero, .cp-launch, .cp-dash {
+  width: 100%;
+  max-width: 1880px;
+  margin-inline: auto;
+}
+
+.cp-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-10);
+}
+.cp-hero h1 {
+  margin: var(--space-3) 0 var(--space-4);
+  font-size: var(--fs-hero);
+  font-weight: 660;
+  letter-spacing: -0.035em;
+  line-height: 1.15;
+}
+.cp-hero h1 span { color: var(--accent-fill); }
+.cp-hero p { max-width: 540px; margin: 0; color: var(--muted); font-size: var(--fs-body); line-height: 1.65; }
+
+.cp-eyebrow {
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.125em;
+  text-transform: uppercase;
+}
+
+/* A run parked on an approval question is the one thing on this page that cannot
+ * make progress without a person, so it is said in words above the dashboard
+ * rather than left to a count in a corner. */
+.cp-pending {
+  margin: var(--space-6) auto 0;
+  padding: var(--space-4) var(--space-6);
+  max-width: 1880px;
+  border: 1px solid var(--theme-accent-line);
+  border-radius: var(--radius);
+  background: var(--theme-accent-bg);
+  color: var(--accent-on-tint);
+  font-size: var(--fs-small);
+}
+.cp-pending strong { color: var(--accent-on-tint); }
+
+.cp-stats { display: grid; grid-template-columns: repeat(2, 92px); gap: var(--space-4); flex: none; }
+/* Three columns is the widest that still fits beside the hero copy from 900 px;
+   five counters in two columns turned the headline row into a 2x3 block that
+   pushed the launch box off the fold at 1024. One row from 1100 px. */
+@media (min-width: 900px) {
+  .cp-stats { grid-template-columns: repeat(3, minmax(84px, 1fr)); }
+  .cp-stats div { min-width: 84px; }
+}
+@media (min-width: 1100px) {
+  .cp-stats { grid-template-columns: repeat(5, minmax(84px, 1fr)); gap: var(--space-4); }
+  .cp-stats div { min-width: 84px; }
+}
+.cp-stats div {
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--theme-surface);
+}
+.cp-stats strong { display: block; font-size: var(--fs-display); letter-spacing: -0.02em; line-height: 1.2; }
+.cp-stats span {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.125em;
+  text-transform: uppercase;
+}
+
+.cp-launch {
+  margin: var(--space-9) auto var(--space-2);
+  padding: var(--space-7);
+  border: 1px solid var(--theme-accent-line);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(180deg, var(--theme-accent-bg), transparent 78%),
+    var(--theme-surface);
+}
+.cp-launch-label { color: var(--accent-fill); font-size: var(--fs-tiny); font-weight: 660; }
+.cp-launch-row { display: flex; align-items: center; gap: var(--space-5); margin-top: var(--space-5); }
+.cp-launch-row input {
+  flex: 1;
+  min-width: 0;
+  height: 42px;
+  padding: 0 var(--space-6);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--theme-bg);
+  color: var(--text);
+  font-size: var(--fs-body);
+}
+.cp-launch-row input::placeholder { color: var(--muted); }
+.cp-launch-row input:focus { border-color: var(--accent); }
+.cp-launch-project {
+  flex: none;
+  height: 42px;
+  max-width: 168px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--theme-bg);
+  color: var(--theme-text-secondary);
+  font-size: var(--fs-label);
+}
+.cp-launch-project:focus { border-color: var(--accent); }
+
+/* The launch box's model + reasoning choice: the chat does not exist yet, so
+ * these are plain selects rather than the composer's session-pin popovers. */
+.cp-launch-model {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  margin-top: var(--space-5);
+}
+.cp-launch-pick { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
+.cp-launch-mini {
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.cp-launch-pick select {
+  max-width: 100%;
+  height: 34px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--theme-bg);
+  color: var(--theme-text-secondary);
+  font-size: var(--fs-label);
+}
+.cp-launch-pick select:focus { border-color: var(--accent); }
+
+.cp-launch-hint { margin: var(--space-5) 0 0; color: var(--muted); font-size: var(--fs-tiny); line-height: 1.5; }
+
+.cp-spark {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: var(--radius-md);
+  background: var(--theme-accent-bg);
+  color: var(--theme-accent);
+  font-size: var(--fs-lead);
+}
+.cp-chev { color: var(--theme-accent); font-size: var(--fs-body); }
+
+.cp-section { margin-top: var(--space-9); }
+
+/* Two columns of dashboard from 1400px up: live work on the left, the things
+   that need a human on the right. Below that it is one column, unchanged. */
+.cp-dash { display: grid; gap: var(--space-9); margin-top: var(--space-10); }
+.cp-dash-main, .cp-dash-side { min-width: 0; }
+.cp-dash-main > .cp-section:first-child, .cp-dash-side > .cp-section:first-child { margin-top: 0; }
+@media (min-width: 1560px) {
+  .cp-dash { grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); align-items: start; }
+  .cp-dash-side { position: sticky; top: 0; }
+}
+.cp-section-head { display: flex; align-items: center; gap: var(--space-5); margin-bottom: var(--space-6); }
+.cp-section-head h3 { margin: 0; font-size: var(--fs-body); letter-spacing: -0.01em; }
+.cp-section-head > span {
+  padding: var(--hairline) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--theme-raised);
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+.cp-section-head .cp-link { margin-left: auto; }
+.cp-link { color: var(--accent-fill); font-size: var(--fs-tiny); }
+/* The inline links ("Copy", "Details", "→") are the smallest targets in the
+   plane; 17 px tall is below the floor, and a padding-only change keeps the
+   type size and the layout. */
+.cp-link { min-height: 24px; padding: var(--space-1) var(--space-2); border-radius: var(--radius); }
+.cp-link:hover { color: var(--theme-accent-hi); }
+
+.cp-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: var(--space-5); }
+@media (min-width: 1700px) {
+  .cp-cards { grid-template-columns: repeat(auto-fill, minmax(252px, 1fr)); gap: var(--space-6); }
+}
+.cp-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--theme-surface);
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.cp-card:hover { border-color: var(--theme-accent-line); transform: translateY(-1px); }
+.cp-card-top { display: flex; align-items: center; justify-content: space-between; }
+.cp-card strong {
+  font-size: var(--fs-message);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cp-card-meta { color: var(--muted); font-size: var(--fs-tiny); }
+.cp-card-action { margin-top: auto; padding-top: var(--space-2); color: var(--accent-fill); font-size: var(--fs-tiny); }
+
+.cp-agents {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--theme-surface);
+}
+.cp-agents li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-4) var(--space-6);
+  font-size: var(--fs-small);
+}
+.cp-agents li + li { border-top: 1px solid var(--line-soft); }
+.cp-agent-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--theme-success); }
+.cp-agent-dot.paused { background: var(--theme-warn); }
+.cp-agent-name { min-width: 92px; font-weight: 600; }
+.cp-agent-task {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.cp-recent {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--theme-surface);
+}
+.cp-recent li + li { border-top: 1px solid var(--line-soft); }
+.cp-recent button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  width: 100%;
+  padding: var(--space-5) var(--space-6);
+  text-align: left;
+}
+.cp-recent button:hover { background: var(--theme-hover); }
+
+.cp-table { overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: var(--theme-surface); }
+.cp-table-head, .cp-table-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2.4fr) minmax(0, 1fr) 110px 62px 104px;
+  gap: var(--space-6);
+  align-items: center;
+  padding: var(--space-4) var(--space-6);
+  text-align: left;
+}
+.cp-table-head {
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.125em;
+  text-transform: uppercase;
+}
+.cp-table-row { width: 100%; font-size: var(--fs-small); }
+.cp-table-row + .cp-table-row { border-top: 1px solid var(--line-soft); }
+.cp-table-row:hover { background: var(--theme-hover); }
+.cp-table-session { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
+.cp-table-session strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.cp-table-cell { overflow: hidden; color: var(--muted); font-size: var(--fs-tiny); text-overflow: ellipsis; white-space: nowrap; }
+.cp-table-cell.num { font-variant-numeric: tabular-nums; text-align: right; }
+/* In its own column a state is words, not a bare dot: the row has the space and
+   "Interrupted" vs "Finished" is the reason to read the column. */
+.cp-table-row .cp-state { gap: var(--space-2); font-size: var(--fs-tiny); }
+@media (max-width: 1100px) {
+  .cp-table-head, .cp-table-row { grid-template-columns: minmax(0, 2.4fr) 104px; }
+  .cp-table-head span:nth-child(2), .cp-table-row .cp-table-cell:not(.cp-table-state-cell),
+  .cp-table-head span:nth-child(3), .cp-table-head span:nth-child(4) { display: none; }
+}
+
+.cp-projects { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: var(--space-4); }
+.cp-project {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-5);
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--theme-surface);
+}
+.cp-project:hover { border-color: var(--theme-accent-line); }
+.cp-project-copy { min-width: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.cp-project-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-label);
+  font-weight: 600;
+}
+.cp-project-copy small { color: var(--muted); font-size: var(--fs-tiny); }
+.cp-recent-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: var(--space-1); }
+.cp-recent-main strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-label);
+  font-weight: 600;
+}
+.cp-recent-main small { color: var(--muted); font-size: var(--fs-tiny); }
+
+/* ------------------------------------------------------------- responsive */
+
+@media (max-width: 1180px) {
+  /* Five counters in two columns turned the headline row into a 2x3 block at
+     1024 and pushed the launch box below the fold. They stay one row, with the
+     quieter type a narrow hero can afford. */
+  .cp-stats { grid-template-columns: repeat(5, minmax(64px, 1fr)); gap: var(--space-3); }
+  .cp-stats div { min-width: 0; padding: var(--space-4); }
+  .cp-stats strong { font-size: var(--fs-title); }
+  /* Beside a 540 px headline there is no room left for five counters, and the
+     flex row spent the shortage wrapping the copy to five lines (283 px tall).
+     Stacking the headline above its counters is the same information in a third
+     of the height, and keeps the launch box above the fold. */
+  .cp-hero { display: block; }
+  .cp-hero p { max-width: 62ch; }
+  .cp-stats { margin-top: var(--space-6); }
+}
+
+@media (max-width: 900px) {
+  .cp-overview { padding: var(--space-9) var(--space-7) var(--space-10); }
+  .cp-hero { display: block; }
+  .cp-hero h1 { font-size: var(--fs-hero); }
+  .cp-stats { grid-template-columns: repeat(3, 1fr); gap: var(--space-3); margin-top: var(--space-7); }
+  .cp-stats div { padding: var(--space-4); }
+  .cp-stats strong { font-size: var(--fs-title); }
+  .cp-launch-row { flex-wrap: wrap; }
+  .cp-launch-row .cp-spark { display: none; }
+  .cp-launch-row input { flex-basis: 100%; }
+  .cp-launch-project { width: 100%; max-width: none; }
+  .cp-launch-row .cp-primary { width: 100%; }
+  .cp-cards { grid-template-columns: 1fr; }
+  .cp-agent-name { min-width: 70px; }
+}
+
+@media (max-width: 520px) {
+  .cp-recent-main small { font-size: var(--fs-micro); }
+}

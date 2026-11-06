@@ -4,7 +4,7 @@
 // @kc-title: Coordinate work across projects
 // @kc-summary: Open as many control-plane chats as you need; each audits, steers and starts sessions under normal approvals, outside every project.
 // @kc-tags: control, projects, sessions, dispatch, approvals, audit
-// @kc-applies-to: route:GET /api/control/sessions, route:POST /api/control/sessions, route:GET /api/control/overview, tool:control_start_session, tool:control_list_projects, tool:control_list_sessions, tool:control_list_agents, tool:control_read_session, tool:control_send_message, tool:control_cancel_run, tool:control_rename_session, tool:control_set_session_model, tool:control_create_control_chat, tool:control_delete_control_chat, file:crates/kc-server/src/control.rs, file:crates/kc-server/src/control_sessions.rs, file:web/src/components/ControlPlane.tsx
+// @kc-applies-to: route:GET /api/control/sessions, route:POST /api/control/sessions, route:GET /api/control/overview, tool:control_start_session, tool:control_list_projects, tool:control_list_sessions, tool:control_list_agents, tool:control_read_session, tool:control_send_message, tool:control_cancel_run, tool:control_rename_session, tool:control_set_session_model, tool:control_create_control_chat, tool:control_delete_control_chat, file:crates/kc-server/src/control.rs, file:crates/kc-server/src/control_sessions.rs, file:web/src/components/control-plane/ControlPlane.tsx, file:web/src/components/control-plane/ControlRail.tsx, file:web/src/components/control-plane/ControlOverview.tsx, file:web/src/components/control-plane/ControlSession.tsx, file:web/src/components/control-plane/controlModel.ts
 //
 // # The control plane
 //

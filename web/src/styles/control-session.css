@@ -1,0 +1,338 @@
+/* ------------------------------------------------------------------- pane */
+
+.cp-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--theme-bg);
+}
+
+.cp-control-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  width: 100%;
+  margin-bottom: var(--space-5);
+  padding: var(--space-5);
+  text-align: left;
+  border: 1px solid var(--theme-accent-line);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, var(--theme-accent-bg), transparent 85%), var(--theme-surface);
+}
+.cp-control-entry:hover { border-color: var(--theme-accent); }
+.cp-control-entry.selected { box-shadow: inset 0 0 0 1px var(--theme-accent-line); }
+
+.cp-control-copy { min-width: 0; flex: 1; }
+.cp-control-copy strong { display: block; font-size: var(--fs-label); }
+.cp-control-copy small { display: block; margin-top: var(--space-1); font-size: var(--fs-tiny); color: var(--muted); }
+
+/* The control chat's own first-run state, drawn inside the transcript area.
+ *
+ * It has to fit over the composer: the transcript pane is the one that scrolls,
+ * so an intro taller than the pane hides its own "start in this project"
+ * buttons below the fold (they were unreachable at 1024x768). The padding and
+ * the mark are therefore compact, and the first child has no extra top margin. */
+.cp-intro {
+  max-width: 620px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-8) var(--space-8);
+  text-align: center;
+}
+.cp-intro-mark {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  margin: 0 auto var(--space-5);
+  border: 1px solid var(--theme-accent-line);
+  border-radius: var(--radius-lg);
+  background: var(--theme-accent-bg);
+  color: var(--theme-accent);
+  font-size: var(--fs-title);
+}
+.cp-intro h2 { margin: 0 0 var(--space-3); font-size: var(--fs-title); letter-spacing: -0.03em; }
+.cp-intro p { margin: 0 auto; max-width: 480px; color: var(--muted); font-size: var(--fs-small); line-height: 1.6; }
+/* A short window (a laptop with the browser chrome open) gets the tightest
+   version rather than a scroll position that starts mid-sentence. */
+@media (max-height: 820px) {
+  .cp-intro { padding-block: var(--space-4) var(--space-6); }
+  .cp-intro-mark { display: none; }
+  .cp-intro p { line-height: 1.5; }
+}
+.cp-chat .chat-inner { padding-top: 0; }
+.cp-intro-projects {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  margin: var(--space-8) 0 0;
+}
+.cp-intro-projects .cp-eyebrow { width: 100%; margin-bottom: var(--space-2); }
+.cp-intro-projects button {
+  padding: var(--space-3) var(--space-5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--theme-surface);
+  color: var(--text);
+  font-size: var(--fs-tiny);
+}
+.cp-intro-projects button:hover { border-color: var(--theme-accent); color: var(--theme-accent-hi); }
+.cp-intro-empty { color: var(--muted); font-size: var(--fs-tiny); }
+.cp-intro-hint { margin-top: var(--space-8) !important; color: var(--muted) !important; font-size: var(--fs-tiny) !important; }
+
+.cp-primary {
+  height: 42px;
+  padding: 0 var(--space-7);
+  flex: none;
+  border-radius: var(--radius);
+  background: var(--accent-fill);
+  color: var(--on-accent);
+  font-size: var(--fs-label);
+  font-weight: 700;
+}
+.cp-primary:hover { background: var(--theme-accent-hi); }
+
+/* The inspector beside an open conversation, so a wide pane is not mostly empty.
+ *
+ * Below 1400px it stacks under the transcript instead of disappearing: a control
+ * chat's subagents and session facts are the point of the panel, and a phone has
+ * no room for a side column. The chat keeps `flex: 1` and its own composer, so
+ * stacking never pushes the composer off the pane. */
+.cp-session-body { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+.cp-inspector {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--space-7);
+  min-height: 0;
+  /* Stacked, the inspector is a secondary panel: it scrolls inside a cap so the
+     transcript and its composer stay the larger half of the pane. The cap is
+     tall enough for the whole facts list plus one subagent row (a smaller one
+     clipped the session id and its Copy button with no visible scrollbar),
+     and `overscroll-behavior` keeps a wheel gesture inside it. */
+  max-height: min(46dvh, 420px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-7);
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+}
+@media (min-width: 1400px) {
+  .cp-session-body { flex-direction: row; }
+  .cp-inspector {
+    flex: 0 0 300px;
+    max-height: none;
+    border-top: 0;
+    border-left: 1px solid var(--line);
+  }
+}
+.cp-facts { display: flex; flex-direction: column; gap: var(--space-7); }
+.cp-facts dl { display: grid; gap: var(--space-5); margin: 0; }
+.cp-facts dt {
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.125em;
+  text-transform: uppercase;
+}
+.cp-facts-path { font-size: var(--fs-tiny); color: var(--muted); }
+.cp-facts dd {
+  margin: var(--space-1) 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--fs-small);
+}
+.cp-facts-id {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--fs-tiny);
+}
+.cp-facts-id span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-facts-id .cp-link { flex: none; }
+.cp-facts-actions { display: flex; flex-direction: column; gap: var(--space-3); margin-top: auto; }
+.cp-facts-actions .cp-secondary { width: 100%; text-align: center; }
+
+/* ------------------------------------------------------------- subagents */
+
+.cp-subagents { display: flex; flex-direction: column; gap: var(--space-4); }
+/* Stacked, the panel scrolls inside a short cap, so what is happening now comes
+ * before the session's static facts: a chat that delegated work must show it
+ * without a scroll. In the wide column the facts keep the top, where they read
+ * as the header of the panel. */
+@media (max-width: 1399px) {
+  .cp-subagents { order: -1; }
+}
+.cp-agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.cp-agent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--theme-surface);
+}
+.cp-agent-head { display: flex; align-items: center; gap: var(--space-4); }
+.cp-agent-title { display: flex; flex: 1; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.cp-agent-title strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cp-agent-title small { color: var(--muted); font-size: var(--fs-tiny); }
+.cp-agent-note { margin: 0; color: var(--text); font-size: var(--fs-tiny); line-height: 1.55; }
+.cp-agent-note.muted { color: var(--muted); }
+.cp-agent-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line-soft);
+}
+.cp-agent-message { display: flex; flex-direction: column; gap: var(--space-1); }
+.cp-agent-role {
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.cp-agent-message p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--fs-tiny);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+/* The rename dialog's one field. */
+.cp-dialog-label {
+  display: block;
+  margin-bottom: var(--space-3);
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.cp-dialog-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 var(--space-5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--theme-bg);
+  color: var(--text);
+  font-size: var(--fs-label);
+}
+.cp-dialog-input:focus { border-color: var(--accent); }
+
+/* ---------------------------------------------------------- open session */
+
+.cp-session { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+.cp-session-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  min-height: 64px;
+  padding: var(--space-6) var(--space-8);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.cp-session-id { min-width: 0; flex: 1; }
+.cp-session-id h2 {
+  margin: var(--space-1) 0 0;
+  font-size: var(--fs-lead);
+  font-weight: 660;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cp-session-actions { display: flex; align-items: center; gap: var(--space-5); flex: none; }
+.cp-session-count { color: var(--muted); font-size: var(--fs-tiny); white-space: nowrap; }
+
+/* There is no model switcher in the header any more: the composer's own pills
+ * are the one place the model and the reasoning effort are named and changed,
+ * so there is no header copy to restyle. The `.model-switcher-menu.dropup`
+ * override that used to live here (which opened the menu downward, because a
+ * header is at the top of the pane) is gone with it - the composer's menu is
+ * positioned by `composer.css`. */
+
+.cp-secondary {
+  padding: var(--space-3) var(--space-5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--theme-surface);
+  color: var(--text);
+  font-size: var(--fs-tiny);
+  white-space: nowrap;
+}
+.cp-secondary:hover { border-color: var(--theme-accent-line); }
+
+.cp-back { display: none; width: 30px; height: 30px; place-items: center; border-radius: var(--radius-md); color: var(--muted); }
+.cp-back:hover { background: var(--theme-hover); color: var(--text); }
+
+.cp-chat { flex: 1; min-height: 0; display: flex; }
+.cp-chat .chat-main { flex: 1; min-width: 0; height: 100%; }
+/* The session's own header would repeat what this pane already says. */
+.cp-chat .main-head, .cp-chat .workspace-tabbar { display: none; }
+.cp-chat .center-body { min-height: 0; }
+
+.cp-control-note {
+  margin: 0;
+  padding: var(--space-4) var(--space-8);
+  border-bottom: 1px solid var(--theme-accent-line);
+  background: var(--theme-accent-bg);
+  color: var(--accent-on-tint);
+  font-size: var(--fs-tiny);
+  line-height: 1.5;
+}
+
+/* ------------------------------------------------------------- responsive */
+
+/* The header's actions (the state word, the message count, "Open in project")
+ * need room beside the title. Below this the actions take their own row (the
+ * title keeps the full width), and the message count steps aside —
+ * `SessionFacts` still carries it. The model and reasoning pills are not here:
+ * they live in the composer, which is below this breakpoint in any case. */
+@media (max-width: 1100px) {
+  .cp-session-head { flex-wrap: wrap; }
+  .cp-session-actions { flex: 1 0 100%; flex-wrap: wrap; gap: var(--space-4); }
+  .cp-session-count { display: none; }
+}
+
+@media (max-width: 900px) {
+  .cp-pane { display: flex; min-height: 0; }
+  .control-plane.cp.detail-open .cp-pane { min-height: calc(100dvh - 56px); }
+  .cp-back { display: grid; }
+  .cp-session-head { padding: var(--space-5) var(--space-6); gap: var(--space-4); }
+  .cp-session-count { display: none; }
+  .cp-inspector { max-height: 42dvh; }
+}
+
+@media (max-width: 520px) {
+  /* A Finished/Cancelled/No runs word is meaningful content, even in the phone
+     header. The flexible, ellipsized session title yields instead. */
+  .cp-session-actions .cp-state { font-size: var(--fs-tiny); gap: var(--space-2); }
+  /* The accessible action name stays; only the duplicate words are visually
+     replaced by the arrow glyph below. */
+  .cp-session-actions .cp-secondary { font-size: var(--fs-hidden); padding: var(--space-3) var(--space-4); }
+  .cp-session-actions .cp-secondary::after { content: '↗'; font-size: var(--fs-body); }
+}

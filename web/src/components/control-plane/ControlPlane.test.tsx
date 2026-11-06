@@ -6,32 +6,32 @@ import type {
   ControlChatSummary,
   ControlOverview,
   SessionSummary,
-} from '../api/types';
-import * as store from '../state/store';
-import * as actions from '../state/actions';
-import { resetControlPlane } from '../state/controlPlane';
-import { apiRequest } from '../api/client';
-import { getControlOverview, listAgents, listSessions } from '../api/endpoints';
+} from '../../api/types';
+import * as store from '../../state/store';
+import * as actions from '../../state/actions';
+import { resetControlPlane } from '../../state/controlPlane';
+import { apiRequest } from '../../api/client';
+import { getControlOverview, listAgents, listSessions } from '../../api/endpoints';
+import { ControlPlane } from './ControlPlane';
 import {
-  ControlPlane,
   agentBadgeTitle,
   agentStatusWord,
   controlStarter,
   initials,
   sessionStatus,
   shortAgo,
-} from './ControlPlane';
+} from './controlModel';
 
-vi.mock('../api/client', () => ({
+vi.mock('../../api/client', () => ({
   apiRequest: vi.fn(),
   toErrorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
-vi.mock('../api/endpoints', () => ({
+vi.mock('../../api/endpoints', () => ({
   listSessions: vi.fn(),
   listAgents: vi.fn(),
   getControlOverview: vi.fn(),
 }));
-vi.mock('../state/actions', () => ({
+vi.mock('../../state/actions', () => ({
   openSession: vi.fn(async (id: string) => { store.currentSessionId.value = id; return true; }),
   switchProject: vi.fn(async (id: string) => { store.currentProjectId.value = id; }),
   fillComposer: vi.fn(),
@@ -46,7 +46,7 @@ vi.mock('../state/actions', () => ({
   // real one clears the id, the transcript and the remembered pin.
   closeSession: vi.fn(() => { store.currentSessionId.value = null; }),
 }));
-vi.mock('./ChatView', () => ({
+vi.mock('../ChatView', () => ({
   ChatView: (props: { emptyContent?: unknown; mentionProjects?: { name: string }[] }) =>
     <div>Normal chat{props.emptyContent ? <div>Control intro</div> : null}{props.mentionProjects ? <div>Mentions: {props.mentionProjects.map((p) => p.name).join(', ')}</div> : null}</div>,
 }));

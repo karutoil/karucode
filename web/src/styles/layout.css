@@ -475,7 +475,7 @@
  * the rows around it. `--accent-bg` is §2's "one active-state tint", it is
  * 1.44:1 in Ember, and in Daybreak it separates by hue instead of luminance,
  * which is the only channel the light ladder leaves. `.cp-row.selected` in
- * session-control.css already reads this way, so the shell now matches it. */
+ * control-rail.css already reads this way, so the shell now matches it. */
 .session-row.is-active {
   background: var(--accent-bg);
 }
