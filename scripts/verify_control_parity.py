@@ -712,15 +712,30 @@ def main() -> int:
                     if primitive not in SHARED_PRIMITIVES:
                         continue
                     # Scoped inside the plane's own layout: adapts the primitive to
-                    # one context. The workbench does this to its own primitives and
-                    # the phone-width tier is *required* by a style contract.
+                    # one context. The workbench does this to its own primitives
+                    # (`.session-meta .status-dot`) and the phone-width tier is
+                    # *required* by a style contract.
                     if len(tokens) > 1:
                         continue
+                    # What narrows the last compound, if anything. A plane-local
+                    # class (`.cp-head`) or an attribute the workbench never sets
+                    # (`[data-tone='3']`) selects a subset the workbench does not
+                    # draw, so re-setting the recipe there introduces a variant
+                    # rather than redefining one - the same move the workbench makes
+                    # with `.session-row.is-active`. A *shared* modifier
+                    # (`.button-primary`, `:hover`) selects elements the workbench
+                    # also draws, so re-setting the recipe there is drift.
+                    rest = last[len(primitive):]
+                    modifiers = re.findall(r"\.[A-Za-z][\w-]*|\[[^\]]*\]|::?[A-Za-z-]+", rest)
+                    plane_local = all(
+                        m.startswith("[")
+                        or m.startswith(".cp-")
+                        or m.startswith(".control-plane")
+                        for m in modifiers
+                    )
                     sets = set(re.findall(r"([\w-]+)\s*:", body))
                     owned = recipe_props(primitive)
-                    # A bare restatement of the primitive, or a modifier that
-                    # re-sets a property the shared recipe owns, is a shadow.
-                    if not (set(last.split(".")) - {primitive}) or (sets & owned):
+                    if not modifiers or (not plane_local and sets & owned):
                         shadowed.append(
                             f"{sheet}: `{part} {{ {body[:60]} }}`"
                             + (f" (re-sets {sorted(sets & owned)})" if sets & owned else "")
