@@ -42,8 +42,13 @@
 .cp-brand { display: flex; align-items: center; gap: var(--space-5); min-width: 0; }
 
 .cp-brand-mark {
-  display: grid;
-  place-items: center;
+  /* `inline-flex`, not `grid`: the mark is `k` plus a styled dot, and as grid
+     items they became two rows - the dot painted *outside* the badge. A single
+     baseline row keeps the mark inside its 34 px tile in every theme. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
   width: 34px;
   height: 34px;
   flex: none;
@@ -54,6 +59,7 @@
   font-size: var(--fs-heading);
   font-weight: 720;
   letter-spacing: -0.06em;
+  overflow: hidden;
 }
 
 .cp-brand-mark i { font-style: normal; color: var(--accent-fill); }
@@ -83,7 +89,9 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--theme-surface);
-  color: var(--theme-faint);
+  /* `--theme-faint` on `--theme-surface` is 4.47:1 - just under AA for the
+     13 px magnifier. `--muted` is the same quiet tone and passes. */
+  color: var(--muted);
 }
 .cp-search:focus-within { border-color: var(--accent); }
 .cp-search input {
@@ -124,7 +132,10 @@
 
 .cp-group-action { align-items: center; }
 .cp-new-chat {
-  padding: var(--space-1) var(--space-4);
+  /* A 23 px tall pill was under the 24 px hit-target floor the rest of the
+     shell keeps; the extra block padding is invisible at this size. */
+  min-height: 26px;
+  padding: var(--space-1) var(--space-5);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-pill);
   background: var(--theme-surface);
@@ -273,7 +284,7 @@
   color: var(--text);
 }
 .cp-row-title-text {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -293,14 +304,15 @@
 }
 .cp-dot { color: var(--muted); }
 
-/* Model and agent pills on a control-chat row.
+/* The agent-count pill on a control-chat row.
  *
- * Both are chips of two short facts, so they read on the same muted/raised pair
- * in every theme: no colour carries meaning here, only the words do. `--text` on
- * `--theme-raised` and `--accent-on-tint` on `--theme-accent-bg` are the AA pairs
- * DESIGN-SYSTEM.md §4.8 defines, so Daybreak and the dark themes both pass.
- * `max-width` + ellipsis keeps a long model id from pushing the time out of the
- * 300px rail. */
+ * A chip of one short fact, so it reads on the muted/raised pair in every theme:
+ * no colour carries meaning here, only the words do. `--text` on
+ * `--theme-raised` is the AA pair DESIGN-SYSTEM.md §4.8 defines, so Daybreak and
+ * the dark themes both pass.
+ *
+ * There is no model pill here any more: a chat's model is not part of its
+ * identity, and the composer is where the model is named and changed. */
 .cp-badge {
   display: inline-block;
   flex: 0 0 auto;
@@ -317,12 +329,6 @@
   text-overflow: ellipsis;
   vertical-align: bottom;
   white-space: nowrap;
-}
-.cp-badge-model {
-  border-color: var(--theme-accent-line);
-  background: var(--theme-accent-bg);
-  color: var(--accent-on-tint);
-  font-family: var(--mono, ui-monospace, monospace);
 }
 .cp-badge-agents { font-variant-numeric: tabular-nums; }
 
@@ -465,9 +471,16 @@
 .cp-pending strong { color: var(--accent-on-tint); }
 
 .cp-stats { display: grid; grid-template-columns: repeat(2, 92px); gap: var(--space-4); flex: none; }
-@media (min-width: 1200px) {
-  .cp-stats { grid-template-columns: repeat(5, minmax(88px, 1fr)); gap: var(--space-4); }
-  .cp-stats div { min-width: 88px; }
+/* Three columns is the widest that still fits beside the hero copy from 900 px;
+   five counters in two columns turned the headline row into a 2x3 block that
+   pushed the launch box off the fold at 1024. One row from 1100 px. */
+@media (min-width: 900px) {
+  .cp-stats { grid-template-columns: repeat(3, minmax(84px, 1fr)); }
+  .cp-stats div { min-width: 84px; }
+}
+@media (min-width: 1100px) {
+  .cp-stats { grid-template-columns: repeat(5, minmax(84px, 1fr)); gap: var(--space-4); }
+  .cp-stats div { min-width: 84px; }
 }
 .cp-stats div {
   padding: var(--space-5) var(--space-6);
@@ -551,27 +564,40 @@
 }
 .cp-launch-pick select:focus { border-color: var(--accent); }
 
-/* The control chat's own first-run state, drawn inside the transcript area. */
+/* The control chat's own first-run state, drawn inside the transcript area.
+ *
+ * It has to fit over the composer: the transcript pane is the one that scrolls,
+ * so an intro taller than the pane hides its own "start in this project"
+ * buttons below the fold (they were unreachable at 1024x768). The padding and
+ * the mark are therefore compact, and the first child has no extra top margin. */
 .cp-intro {
   max-width: 620px;
   margin: 0 auto;
-  padding: var(--space-10) var(--space-9);
+  padding: var(--space-6) var(--space-8) var(--space-8);
   text-align: center;
 }
 .cp-intro-mark {
   display: grid;
   place-items: center;
-  width: 46px;
-  height: 46px;
-  margin: 0 auto var(--space-7);
+  width: 38px;
+  height: 38px;
+  margin: 0 auto var(--space-5);
   border: 1px solid var(--theme-accent-line);
   border-radius: var(--radius-lg);
   background: var(--theme-accent-bg);
   color: var(--theme-accent);
-  font-size: var(--fs-display);
+  font-size: var(--fs-title);
 }
-.cp-intro h2 { margin: 0 0 var(--space-4); font-size: var(--fs-display); letter-spacing: -0.03em; }
-.cp-intro p { margin: 0 auto; max-width: 480px; color: var(--muted); font-size: var(--fs-message); line-height: 1.7; }
+.cp-intro h2 { margin: 0 0 var(--space-3); font-size: var(--fs-title); letter-spacing: -0.03em; }
+.cp-intro p { margin: 0 auto; max-width: 480px; color: var(--muted); font-size: var(--fs-small); line-height: 1.6; }
+/* A short window (a laptop with the browser chrome open) gets the tightest
+   version rather than a scroll position that starts mid-sentence. */
+@media (max-height: 820px) {
+  .cp-intro { padding-block: var(--space-4) var(--space-6); }
+  .cp-intro-mark { display: none; }
+  .cp-intro p { line-height: 1.5; }
+}
+.cp-chat .chat-inner { padding-top: 0; }
 .cp-intro-projects {
   display: flex;
   flex-wrap: wrap;
@@ -630,6 +656,10 @@
 }
 .cp-section-head .cp-link { margin-left: auto; }
 .cp-link { color: var(--accent-fill); font-size: var(--fs-tiny); }
+/* The inline links ("Copy", "Details", "→") are the smallest targets in the
+   plane; 17 px tall is below the floor, and a padding-only change keeps the
+   type size and the layout. */
+.cp-link { min-height: 24px; padding: var(--space-1) var(--space-2); border-radius: var(--radius); }
 .cp-link:hover { color: var(--theme-accent-hi); }
 
 .cp-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: var(--space-5); }
@@ -754,9 +784,13 @@
   gap: var(--space-7);
   min-height: 0;
   /* Stacked, the inspector is a secondary panel: it scrolls inside a cap so the
-     transcript and its composer stay the larger half of the pane. */
-  max-height: min(40dvh, 340px);
+     transcript and its composer stay the larger half of the pane. The cap is
+     tall enough for the whole facts list plus one subagent row (a smaller one
+     clipped the session id and its Copy button with no visible scrollbar),
+     and `overscroll-behavior` keeps a wheel gesture inside it. */
+  max-height: min(46dvh, 420px);
   overflow: auto;
+  overscroll-behavior: contain;
   padding: var(--space-7);
   border-top: 1px solid var(--line);
   background: var(--panel-2);
@@ -940,20 +974,12 @@
 .cp-session-actions { display: flex; align-items: center; gap: var(--space-5); flex: none; }
 .cp-session-count { color: var(--muted); font-size: var(--fs-tiny); white-space: nowrap; }
 
-/* The composer's model pills, reused in the header.
- *
- * `.model-switcher-menu.dropup` opens *upward* because the composer sits at the
- * bottom of the pane; in a header at the top of the same pane that would draw the
- * menu off-screen. It opens downward here instead, and the header keeps its
- * buttons from crowding the title. */
-.cp-session-actions .model-switcher-button { max-width: 200px; }
-.cp-session-actions .model-switcher-menu.dropup {
-  top: calc(100% + var(--space-3));
-  right: 0;
-  bottom: auto;
-  left: auto;
-  width: min(280px, calc(100vw - 24px));
-}
+/* There is no model switcher in the header any more: the composer's own pills
+ * are the one place the model and the reasoning effort are named and changed,
+ * so there is no header copy to restyle. The `.model-switcher-menu.dropup`
+ * override that used to live here (which opened the menu downward, because a
+ * header is at the top of the pane) is gone with it - the composer's menu is
+ * positioned by `composer.css`. */
 
 .cp-secondary {
   padding: var(--space-3) var(--space-5);
@@ -1011,12 +1037,26 @@
 
 @media (max-width: 1180px) {
   .cp-browser { flex-basis: 300px; width: 300px; }
-  .cp-stats { grid-template-columns: repeat(2, 84px); }
+  /* Five counters in two columns turned the headline row into a 2x3 block at
+     1024 and pushed the launch box below the fold. They stay one row, with the
+     quieter type a narrow hero can afford. */
+  .cp-stats { grid-template-columns: repeat(5, minmax(64px, 1fr)); gap: var(--space-3); }
+  .cp-stats div { min-width: 0; padding: var(--space-4); }
+  .cp-stats strong { font-size: var(--fs-title); }
+  /* Beside a 540 px headline there is no room left for five counters, and the
+     flex row spent the shortage wrapping the copy to five lines (283 px tall).
+     Stacking the headline above its counters is the same information in a third
+     of the height, and keeps the launch box above the fold. */
+  .cp-hero { display: block; }
+  .cp-hero p { max-width: 62ch; }
+  .cp-stats { margin-top: var(--space-6); }
 }
 
-/* The header's model and reasoning pills need room beside the title. Below this
- * the actions take their own row (the title keeps the full width), and the
- * message count steps aside — `SessionFacts` still carries it. */
+/* The header's actions (the state word, the message count, "Open in project")
+ * need room beside the title. Below this the actions take their own row (the
+ * title keeps the full width), and the message count steps aside —
+ * `SessionFacts` still carries it. The model and reasoning pills are not here:
+ * they live in the composer, which is below this breakpoint in any case. */
 @media (max-width: 1100px) {
   .cp-session-head { flex-wrap: wrap; }
   .cp-session-actions { flex: 1 0 100%; flex-wrap: wrap; gap: var(--space-4); }
@@ -1034,12 +1074,11 @@
   .cp-back { display: grid; }
   .cp-session-head { padding: var(--space-5) var(--space-6); gap: var(--space-4); }
   .cp-session-count { display: none; }
-  .cp-inspector { max-height: 32dvh; }
-  .cp-session-actions .model-switcher-button { max-width: 100%; }
+  .cp-inspector { max-height: 42dvh; }
   .cp-overview { padding: var(--space-9) var(--space-7) var(--space-10); }
   .cp-hero { display: block; }
   .cp-hero h1 { font-size: var(--fs-hero); }
-  .cp-stats { grid-template-columns: repeat(4, 1fr); gap: var(--space-3); margin-top: var(--space-7); }
+  .cp-stats { grid-template-columns: repeat(3, 1fr); gap: var(--space-3); margin-top: var(--space-7); }
   .cp-stats div { padding: var(--space-4); }
   .cp-stats strong { font-size: var(--fs-title); }
   .cp-launch-row { flex-wrap: wrap; }

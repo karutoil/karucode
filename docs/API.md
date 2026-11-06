@@ -1304,9 +1304,10 @@ other session.
 `{session_id, project_id, workspace, title, created}`. The body is optional:
 
 * `title` names it, and a named chat is never renamed;
-* `prompt` (≤32 KiB) is its opening request, and without a `title` the chat is
+* `prompt` (≤32 KiB) is its opening request as a **naming hint**: it is not
+  stored as a message and does not start a run. Without a `title` the chat is
   named from it - deterministically at once, then by a model when `[titles]` is
-  enabled (the default);
+  enabled (the default). The response returns before that model call finishes;
 * with neither, the chat starts with the **empty title** and
   `POST /api/sessions/:id/messages` names it from its first message, exactly as
   an ordinary session is named.
@@ -1324,7 +1325,9 @@ rows above, and the project-session lists `running`, `attention` (latest run
 `failed`, `interrupted` or `limit_reached`), `waiting` (an unanswered approval)
 and `recent`, each capped at 12, plus `live_agents` (running or paused subagents,
 most recently active first, each with its session). Control chats appear only in
-`control`.
+`control`, and `sessions.total`/`running`/`failed` count **project sessions
+only** - they are separate totals, not parts of one. `failed` counts every
+failing session even though the `attention` list shows the newest 12.
 
 Only a control chat may call the `control_*` tools; ordinary sessions and
 subagents are refused. Mutating ones follow the approval policy: `read_only`

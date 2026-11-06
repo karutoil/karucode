@@ -29,9 +29,11 @@
   the sessions sheet carries those project controls (see **Mobile**).
 * **Control plane**: one browser of every project, split into two groups. The
   **Control chats** group (above) lists conversations that act on *other*
-  projects: each row carries the title (or *Untitled chat*), the model it is
-  pinned to, a live/total subagent badge, its status word and how long ago it
-  last moved. The **Sessions** group below lists the ordinary project
+  projects: each row carries the title (or *Untitled chat*), a live/total
+  subagent badge, its status word and how long ago it last moved. The model a
+  chat is pinned to is deliberately *not* on the row - a name is an identity,
+  and the composer is the one place that says which model will answer. The
+  **Sessions** group below lists the ordinary project
   conversations — search, status filters, running first, project glyph and
   name — and a session the server marks `control` is never drawn there as
   well. **＋ New** creates a chat; a row's kebab renames (`PATCH
@@ -41,7 +43,7 @@
   control chat is opened where it is, in its own workspace with no project, so
   its `@` menu lists projects instead of files. With nothing selected the pane
   is a dashboard drawn from **one** read (`GET /api/control/overview` via
-  `state/controlPlane.ts`): counters for running sessions, sessions, live
+  `state/controlPlane.ts`): counters for running sessions, chats, sessions, live
   agents and projects, running work as cards, a recent-sessions table, and
   columns for what needs attention, the live agents (with a link to the session
   they belong to) and the projects with their own session/running counts. A
@@ -55,16 +57,20 @@
   the composer, so the first message already runs on the model that was shown.
   From 1560px the dashboard is two columns; the whole block is capped at 1880px
   so a 4K monitor does not strand a narrow column of text. An open conversation
-  carries the composer's own **model** and **reasoning** selectors in its
-  header (they write the open session's pin, and a control chat resolves as the
-  open session), and an inspector column holds its facts (where, state,
+  is the ordinary `Composer`, so its **model** and **reasoning** selectors live
+  where they always do — in the composer, and they stay mounted for as long as a
+  session is open (the pin is held outside the session lists, so an open chat
+  whose row has not arrived yet keeps its controls). The session header does not
+  repeat them. An inspector column holds the chat's facts (where, state,
   messages, session id, and *Open in project* / *Stop this run*) plus a
-  **Subagents** list from the same snapshot as the rail's badges — name, role,
-  live status word, what the agent says it is doing, its iterations and a link
-  into its own transcript — with a quiet empty state when the chat has
-  delegated nothing. The inspector is a column from 1400px and stacks under the
-  transcript below that; the rail hides behind the back button on a phone. The
-  list refreshes every five seconds and **Project workspace** exits the plane.
+  **Subagents** list read per session from `GET /api/agents?session=`, so a
+  finished child is still listed — name, role, status word, what the agent says
+  it is doing, its iterations and a link into its own transcript — with a quiet
+  empty state when the chat has delegated nothing. The inspector is a column
+  from 1400px and stacks under the transcript below that; the rail hides behind
+  the back button on a phone, and opening the plane moves focus into its rail.
+  The list refreshes every five seconds and **Project workspace** exits the
+  plane.
   See `central-control` for the tools, dispatch and approval semantics. Its
   embedded conversation is a real `ChatView` with `mode="control-plane"`: that
   mode does not mount the project-scoped Inspector or Context drawer. Composer

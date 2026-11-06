@@ -118,6 +118,20 @@ function isUnauthorized(error: unknown): boolean {
 function mergeSummary(summary: SessionSummary): void {
   const list = store.sessions.value;
   const index = list.findIndex((session) => session.id === summary.id);
+  // The merged row is the server's own answer for that session, so for the open
+  // session it is also the answer to "what is this pinned to?" - recorded in the
+  // open session's own signal, where it survives the row being dropped from
+  // every list (a control chat, or a list refresh mid-flight).
+  if (summary.id === store.currentSessionId.value) {
+    store.rememberSessionModel(summary.id, summary.model ?? null);
+  }
+  // A control chat belongs to the control plane's list, never to `sessions.value`:
+  // that list is "this project's sessions" and the workspace rail draws it
+  // unfiltered, so inserting a project-less chat here made it appear as a project
+  // row and then vanish at the next refresh (a second flicker of its own).
+  if (!list.some((session) => session.id === summary.id) && (summary.control || summary.project_id === null)) {
+    return;
+  }
   if (index === -1) {
     store.sessions.value = [summary, ...list];
     return;
@@ -134,6 +148,8 @@ function summaryFromSession(session: Session): SessionSummary {
 function clearSelection(): void {
   if (store.currentSessionId.value !== null) resetPluginPanelData();
   store.currentSessionId.value = null;
+  // Nothing is open, so there is no session whose pin the pills may show.
+  store.rememberSessionModel(null, null);
   store.chat.value = emptyChatState(null);
   store.chatLoading.value = false;
   store.chatError.value = null;
@@ -145,6 +161,19 @@ function clearSelection(): void {
   store.sessionInfoError.value = null;
   store.sessionInfoLoading.value = false;
   store.writeLastSessionId(null);
+}
+
+/**
+ * Close the open session: no session, no transcript, no remembered pin.
+ *
+ * Exported because the control plane deletes sessions it did not create through
+ * `deleteSessionById` (that one opens the next session in the workspace rail,
+ * which is not what a plane that shows its own list wants). A bare
+ * `currentSessionId = null` would leave the transcript, the pin record and the
+ * remembered last session behind.
+ */
+export function closeSession(): void {
+  clearSelection();
 }
 
 function pickSession(): SessionSummary | null {
@@ -350,6 +379,16 @@ function handleRawEvent(raw: RawEvent): void {
       else clearSelection();
     }
     return;
+  }
+
+  if (event.type === 'session_model_changed') {
+    // The list row is patched by the reducer above, but the open session's own
+    // pin lives outside every list: a control chat has no row, and a list
+    // refresh drops the row of a project-less session. The pills read the pin
+    // from the signal, so the event has to be recorded there too.
+    if (event.session_id === store.currentSessionId.value) {
+      store.rememberSessionModel(event.session_id, event.model ?? null);
+    }
   }
 
   if (event.type === 'session_renamed' || event.type === 'session_model_changed') {
@@ -680,6 +719,10 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
   else if (store.sessionHistory.value.loading) store.sessionHistory.value = { ...store.sessionHistory.value, loading: false };
   store.currentSessionId.value = id;
   if (sessionChanged) resetPluginPanelData();
+  // The pills must never show the previous session's pin while this one is
+  // being read, but they must not vanish either: an unknown pin is not the
+  // same as no pin, so `undefined` is recorded until the read answers.
+  if (sessionChanged) store.rememberSessionModel(id, undefined);
   store.writeLastSessionId(id);
   // Opening a session is what "reads" its notifications: the badge clears here
   // rather than on a timer, so it reflects what you have actually looked at.
@@ -724,6 +767,8 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
       if (remembered !== null) store.chat.value = { ...store.chat.value, lastPromptTokens: remembered };
     }
     seedAgentState(detail);
+    // The session's own model pin is recorded by `mergeSummary` below, which
+    // is the one place that sees the server's answer for a session.
     mergeSummary(summaryFromDetail(detail));
     store.chatLoading.value = false;
     store.chatError.value = null;
@@ -1244,6 +1289,9 @@ export async function setSessionModelSelection(
     store.sessions.value = store.sessions.value.map((entry) =>
       entry.id === sessionId ? { ...entry, model: session.model ?? null } : entry,
     );
+    // The server's answer is authoritative for the open session, and the pills
+    // read it from their own signal rather than from the list row.
+    store.rememberSessionModel(sessionId, session.model ?? null);
     const provider = store.config.value?.providers.find((profile) => profile.id === providerId);
     const label = provider?.models.find((model) => model.id === modelId)?.name ?? modelId;
     store.pushToast(`This session now uses ${label}.`, 'success');
@@ -1267,6 +1315,9 @@ export async function clearSessionModelSelection(): Promise<boolean> {
     store.sessions.value = store.sessions.value.map((entry) =>
       entry.id === sessionId ? { ...entry, model: session.model ?? null } : entry,
     );
+    // The pin is gone: the session follows the install default again, and the
+    // pill must say so without waiting for a list refresh.
+    store.rememberSessionModel(sessionId, session.model ?? null);
     store.pushToast('This session follows the install default again.', 'success');
     return true;
   } catch (error) {

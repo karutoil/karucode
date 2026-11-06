@@ -51,6 +51,11 @@ them: they have no "first message" - the prompt is already the reason they
 exist. An unnamed control chat created with no prompt stays untitled and is
 named by its first message, exactly like an ordinary session.
 
+The `prompt` is only a **naming hint**: neither route stores it as a message or
+starts a run. Both answer as soon as the deterministic title is stored - the
+model's title is asked for on a background task - and a name you passed as
+`title` always wins, even when it is one of the placeholders above.
+
 ## Which model writes the title
 
 By default the title is written by **the model the session itself is running**

@@ -43,6 +43,11 @@
 // exist. An unnamed control chat created with no prompt stays untitled and is
 // named by its first message, exactly like an ordinary session.
 //
+// The `prompt` is only a **naming hint**: neither route stores it as a message or
+// starts a run. Both answer as soon as the deterministic title is stored - the
+// model's title is asked for on a background task - and a name you passed as
+// `title` always wins, even when it is one of the placeholders above.
+//
 // # Which model writes the title
 //
 // By default the title is written by **the model the session itself is running**
@@ -556,9 +561,18 @@ pub async fn name_untitled_session(
 ) -> Option<String> {
     let derived = derive_untitled_title(state, session_id, prompt).await?;
     // The model title replaces the derived one, so it is gated on the derived
-    // title still being in place - a rename in between wins.
+    // title still being in place - a rename in between wins. Spawned, not
+    // awaited: `[titles]` is on by default and a provider call ahead of this
+    // return would hold `POST /api/control/sessions` (a browser request) for up
+    // to `titles.timeout_secs`. Same split the dispatch tool uses.
     if state.settings().snapshot().titles.enabled {
-        maybe_auto_title(state, session_id, &derived, prompt).await;
+        let state = state.clone();
+        let session_id = session_id.to_string();
+        let prompt = prompt.to_string();
+        let expected = derived.clone();
+        tokio::spawn(async move {
+            maybe_auto_title(&state, &session_id, &expected, &prompt).await;
+        });
     }
     Some(derived)
 }
@@ -566,10 +580,10 @@ pub async fn name_untitled_session(
 /// Store the deterministic title and hand back the model-titling turn to run.
 ///
 /// The split exists so a caller that must not wait on a provider - the control
-/// plane's dispatch tool runs inside an agent turn, and a titling request ahead
-/// of it would hold that turn for `titles.timeout_secs` - can keep the derived
-/// title immediately and spawn the rest. `None` means nothing was renamed, so
-/// there is no model title to ask for either.
+/// plane's dispatch tool runs inside an agent turn, and the HTTP route that
+/// creates a chat must answer now rather than after `titles.timeout_secs` - can
+/// keep the derived title immediately and spawn the rest. `None` means nothing
+/// was renamed, so there is no model title to ask for either.
 pub(crate) async fn derive_untitled_title(
     state: &AppState,
     session_id: &str,
@@ -595,18 +609,15 @@ pub(crate) async fn derive_untitled_title(
         // Nothing usable in the prompt: leave it for the first message to name.
         _ => return None,
     };
-    match state.store().rename_session(session_id, &derived).await {
-        Ok(()) => {
-            state.runtime().emit(
-                Some(session_id),
-                None,
-                None,
-                kc_core::events::Event::SessionRenamed {
-                    session_id: session_id.to_string(),
-                    title: derived.clone(),
-                },
-            );
-        }
+    // Guarded, not a plain rename: the title read above is the expected value, so
+    // a name the user typed in the meantime wins. The model title that may follow
+    // uses the same guard, and a rename should not be the one path without it.
+    let renamed = match state
+        .store()
+        .rename_session_if_title(session_id, &session.title, &derived)
+        .await
+    {
+        Ok(changed) => changed,
         Err(error) => {
             tracing::warn!(
                 session = %session_id,
@@ -615,7 +626,23 @@ pub(crate) async fn derive_untitled_title(
             );
             return None;
         }
+    };
+    if !renamed {
+        tracing::debug!(
+            session = %session_id,
+            "the session was named while its derived title was being written; keeping that name"
+        );
+        return None;
     }
+    state.runtime().emit(
+        Some(session_id),
+        None,
+        None,
+        kc_core::events::Event::SessionRenamed {
+            session_id: session_id.to_string(),
+            title: derived.clone(),
+        },
+    );
     Some(derived)
 }
 

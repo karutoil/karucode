@@ -27,16 +27,21 @@
 // ```
 //
 // - `title` names the chat. A chat you name is never renamed.
-// - `prompt` (at most 32 KiB) is the chat's opening request. Without a `title` a
-//   chat created with a prompt is named from it - deterministically, and by a
-//   model as well when `[titles]` is on (the default; see `session-titles`).
+// - `prompt` (at most 32 KiB) is the chat's opening request, and **only** names
+//   it: it is not stored as a message and does not start a run. Without a `title`
+//   a chat created with a prompt is named from it - deterministically at once, and
+//   by a model as well when `[titles]` is on (the default; see `session-titles`).
+//   The response returns before that model call finishes.
 // - With neither, the chat is created **untitled** and its first message names it
 //   (`POST /api/sessions/:id/messages`), so the rail rarely shows an empty row.
+// - A `title` you pass always wins: the prompt does not rename a named chat, even
+//   when the name happens to be one the framework also uses as a placeholder.
 //
 // `GET /api/control/sessions` lists them, newest activity first. Each row is the
 // session summary - `id`, `title`, `workspace`, `project_id` (null), `model`,
 // `created_at`, `updated_at`, `message_count`, `last_run_status`, `running` and
-// `control: true` - plus `agents: {live, total}` (live is running *or* paused) and
+// `control: true` - plus `agents: {live, total}` (live is running *or* paused),
+// `pending_approvals` (unanswered approval questions on that chat's run) and
 // `model_label`, the model the chat would use right now: its own pin, else the
 // install-wide default. `model_label` is a model id, never a key or a base URL.
 //
@@ -61,9 +66,13 @@
 // ```
 //
 // - Control chats appear only in `control`; the other lists are project sessions.
+// - `sessions.total` counts **project sessions only** (control chats are counted
+//   in `sessions.control`), so the two are separate totals rather than parts of
+//   one. `sessions.running` is likewise project sessions.
 // - `attention` is a session whose **latest run** ended `failed`, `interrupted`
 //   or `limit_reached`. `cancelled` is something you asked for and `completed`
-//   needs nothing, so neither is listed; `sessions.failed` is that list's length.
+//   needs nothing, so neither is listed. `sessions.failed` counts every such
+//   session, not the first twelve.
 // - `waiting` is every project session with an **unanswered approval**, and
 //   `approvals.pending` counts the questions. An approval means the run is
 //   stopped until a person answers, so these are the most actionable rows on the
@@ -166,14 +175,9 @@ use std::sync::Arc;
 /// the model label the rail draws next to it.
 pub async fn list_sessions(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let sessions = state.store().list_control_sessions().await?;
-    let pending = state.store().list_pending_approvals(None).await?;
-    let mut pending_by_session: HashMap<String, usize> = HashMap::new();
-    for approval in &pending {
-        *pending_by_session
-            .entry(approval.session_id.clone())
-            .or_default() += 1;
-    }
-    let chats = control_chat_summaries(&state, sessions, &pending_by_session).await?;
+    let (pending, _) = pending_counts(&state).await?;
+    let counts = agent_counts(&state).await?;
+    let chats = control_chat_summaries(&state, sessions, &pending, &counts).await?;
     Ok(Json(json!({ "sessions": chats })))
 }
 
@@ -230,17 +234,21 @@ pub(crate) async fn new_control_chat(
     let title = match title {
         Some(title) => {
             require_text(title, "title", 200)?;
-            title.trim().to_owned()
+            Some(title.trim().to_owned())
         }
         // Untitled by design: the first message (or the prompt below) names it,
         // and a numbered default would make every chat look deliberately named.
-        None => String::new(),
+        None => None,
     };
     let id = SessionId::new();
     let root = workspace_for_control_chat(state, id.as_str())?;
     let session = state
         .store()
-        .create_control_session(id.as_str(), &title, &root.to_string_lossy())
+        .create_control_session(
+            id.as_str(),
+            title.as_deref().unwrap_or(""),
+            &root.to_string_lossy(),
+        )
         .await?;
     state.runtime().emit(
         Some(&session.id),
@@ -251,7 +259,11 @@ pub(crate) async fn new_control_chat(
             title: session.title.clone(),
         },
     );
-    if let Some(prompt) = &prompt {
+    // Only an *unnamed* chat is named from its prompt. A title the caller typed is
+    // a decision: `is_untitled` also treats the framework's `New session`
+    // placeholder as untitled, so naming after a title would overwrite a chat
+    // somebody named exactly that - which the docs promise never happens.
+    if let (None, Some(prompt)) = (title.as_deref(), prompt.as_deref()) {
         crate::titles::name_untitled_session(state, &session.id, prompt).await;
     }
     Ok(state
@@ -290,7 +302,10 @@ fn workspace_for_control_chat(state: &AppState, id: &str) -> ApiResult<std::path
 /// How many rows each activity list of [`overview`] carries.
 const OVERVIEW_LIMIT: usize = 12;
 /// A launching prompt is a first message, not a transcript.
-const MAX_LAUNCH_PROMPT_BYTES: usize = 32 * 1024;
+///
+/// Public because `control_create_control_chat` validates its own arguments
+/// against the same bound before asking for approval.
+pub(crate) const MAX_LAUNCH_PROMPT_BYTES: usize = 32 * 1024;
 /// Run outcomes that mean "a person should look at this".
 ///
 /// The store's own vocabulary: `cancelled` is something a human asked for and
@@ -327,9 +342,9 @@ struct AgentCounts {
 /// The whole control plane in one call: counts, projects, control chats and the
 /// three session lists the overview panel draws, plus the live subagents.
 ///
-/// Read-only and one pass over four store calls - a session's agents come from
-/// [`Store::list_agent_summaries_for_session`], not from a scan - so this stays
-/// cheap enough for the panel to poll.
+/// Read-only and a fixed number of store calls - five reads plus one grouped
+/// count, never one query per chat - so this stays cheap enough for the panel to
+/// poll every few seconds.
 #[derive(serde::Serialize)]
 pub struct ControlOverview {
     /// When this snapshot was taken, in epoch milliseconds.
@@ -419,27 +434,50 @@ async fn control_chat_summaries(
     state: &AppState,
     sessions: Vec<SessionSummary>,
     pending: &HashMap<String, usize>,
+    agent_counts: &HashMap<String, (usize, usize)>,
 ) -> ApiResult<Vec<ControlChatSummary>> {
     let mut chats = Vec::with_capacity(sessions.len());
     for session in sessions {
-        let agents = state
-            .store()
-            .list_agent_summaries_for_session(&session.id)
-            .await?;
+        let (live, total) = agent_counts.get(&session.id).copied().unwrap_or((0, 0));
         chats.push(ControlChatSummary {
             model_label: model_label(state, session.model.as_ref()),
             pending_approvals: pending.get(&session.id).copied().unwrap_or(0),
-            agents: AgentCounts {
-                live: agents
-                    .iter()
-                    .filter(|summary| is_live_agent(summary))
-                    .count(),
-                total: agents.len(),
-            },
+            agents: AgentCounts { live, total },
             session,
         });
     }
     Ok(chats)
+}
+
+/// Group `(session_id, live, total)` rows the store returns into a lookup.
+///
+/// `None` is fine: a session with no subagents simply has no row, and every
+/// caller treats a missing entry as `0 / 0`.
+async fn agent_counts(state: &AppState) -> ApiResult<HashMap<String, (usize, usize)>> {
+    Ok(state
+        .store()
+        .agent_counts_by_session()
+        .await?
+        .into_iter()
+        .map(|(id, live, total)| (id, (live, total)))
+        .collect())
+}
+
+/// Pending approval counts per session, and how many questions are parked.
+///
+/// One query for the whole server: an approval means a run is *stopped* until a
+/// person answers, so both the per-chat badge and the overview's total come from
+/// the same read and can never disagree.
+async fn pending_counts(
+    state: &AppState,
+) -> ApiResult<(HashMap<String, usize>, usize)> {
+    let pending = state.store().list_pending_approvals(None).await?;
+    let total = pending.len();
+    let mut by_session: HashMap<String, usize> = HashMap::new();
+    for approval in &pending {
+        *by_session.entry(approval.session_id.clone()).or_default() += 1;
+    }
+    Ok((by_session, total))
 }
 
 /// `GET /api/control/overview` - the control plane's one-shot snapshot.
@@ -449,15 +487,7 @@ pub async fn overview(State(state): State<AppState>) -> ApiResult<Json<ControlOv
     let control_sessions = store.list_control_sessions().await?;
     let projects = store.list_projects().await?;
     let agents = store.list_agents_all(None).await?;
-    // One query for every parked question: an approval means a run is *stopped*
-    // until a person answers, so this is the most actionable number on the plane.
-    let pending_approvals = store.list_pending_approvals(None).await?;
-    let mut pending_by_session: HashMap<String, usize> = HashMap::new();
-    for approval in &pending_approvals {
-        *pending_by_session
-            .entry(approval.session_id.clone())
-            .or_default() += 1;
-    }
+    let (pending_by_session, pending_total) = pending_counts(&state).await?;
 
     let mut running: Vec<SessionSummary> = Vec::new();
     let mut attention: Vec<SessionSummary> = Vec::new();
@@ -480,6 +510,9 @@ pub async fn overview(State(state): State<AppState>) -> ApiResult<Json<ControlOv
             waiting.push(session.clone());
         }
     }
+    // Counted before the lists are truncated: `sessions.failed` is a total, and a
+    // truncated list must not turn 30 failing sessions into 12.
+    let attention_total = attention.len();
     // Sorted by `updated_at` already; the calls above only drop rows.
     running.truncate(OVERVIEW_LIMIT);
     recent.truncate(OVERVIEW_LIMIT);
@@ -529,7 +562,9 @@ pub async fn overview(State(state): State<AppState>) -> ApiResult<Json<ControlOv
     });
     live_agents.truncate(OVERVIEW_LIMIT);
 
-    let control = control_chat_summaries(&state, control_sessions, &pending_by_session).await?;
+    let counts = agent_counts(&state).await?;
+    let control =
+        control_chat_summaries(&state, control_sessions, &pending_by_session, &counts).await?;
 
     Ok(Json(ControlOverview {
         generated_at: crate::state::now_ms(),
@@ -538,7 +573,7 @@ pub async fn overview(State(state): State<AppState>) -> ApiResult<Json<ControlOv
             running: project_running,
             // The latest-run outcome is per session, not a stored counter: a
             // session that failed and was retried successfully is not failed.
-            failed: attention.len(),
+            failed: attention_total,
             control: control.len(),
         },
         agents: AgentTotals {
@@ -557,7 +592,7 @@ pub async fn overview(State(state): State<AppState>) -> ApiResult<Json<ControlOv
             total: agents.len(),
         },
         approvals: ApprovalTotals {
-            pending: pending_approvals.len(),
+            pending: pending_total,
         },
         projects: rows,
         control,
@@ -839,9 +874,33 @@ impl Tool for StartSession {
                 );
             }
             if let Err(e) = self.0.runtime().submit(&id, args.prompt).await {
-                return ToolOutcome::err(format!("Session {id} reserved but run did not start: {e}. Do not retry with a new request ID; inspect the session."));
+                return ToolOutcome::err(format!("Session {id} reserved but run did not start: {e}. Do not retry with a new request ID; inspect the session (control_read_session), and re-send with control_send_message if it has no messages."));
             }
         }
-        ToolOutcome::ok(json!({"session_id":id,"project_id":args.project_id,"model":pin,"replayed":!created,"note":"A replay never starts another run and never re-pins the session; inspect it if the original start was interrupted."}).to_string())
+        // A replay is only reassuring if the work is actually moving. The reserve
+        // and the submit are two steps, so a crash or a failed submit in between
+        // leaves a session with no run; a replay must say that rather than
+        // answer "already started".
+        let (run_started, stored_model) = match self.0.store().get_session(&id).await {
+            Ok(Some(session)) => (
+                !self
+                    .0
+                    .store()
+                    .list_runs(&id, 1)
+                    .await
+                    .unwrap_or_default()
+                    .is_empty(),
+                session.model,
+            ),
+            // Gone (the user deleted it): the replay is pointing at nothing.
+            Ok(None) => (false, None),
+            Err(_) => (true, None),
+        };
+        let note = if run_started {
+            "A replay never starts another run and never re-pins the session; inspect it if the original start was interrupted."
+        } else {
+            "No run has ever started in that session: the original dispatch reserved it but did not submit. Do not retry with a new request ID - send control_send_message to it instead."
+        };
+        ToolOutcome::ok(json!({"session_id":id,"project_id":args.project_id,"model":stored_model,"requested_model":pin,"run_started":run_started,"replayed":!created,"note":note}).to_string())
     }
 }

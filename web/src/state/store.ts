@@ -13,6 +13,7 @@ import type {
   ProviderProfile,
   QueuedAttachment,
   SessionInfo,
+  SessionModelSelection,
   SessionSummary,
   Toast,
 } from '../api/types';
@@ -699,6 +700,53 @@ export const activeModelLabel = computed<string | null>(() => {
   return entry?.name?.trim() ? entry.name : modelId;
 });
 
+/**
+ * The open session's own model pin, remembered outside every session list.
+ *
+ * The composer's model and reasoning pills must never appear and disappear:
+ * they are the control a user reaches for mid-sentence, and a control that
+ * blinks out because a list snapshot has not caught up yet is worse than no
+ * control at all. A control chat is not in `sessions.value` and a project-less
+ * session loses its row on every session-list refresh, so the pin cannot live
+ * in a list row.
+ *
+ * Three states, not two, because "we have not read it yet" and "the server says
+ * this session has no pin" are different answers and only one of them may be
+ * shown as a fact:
+ *
+ * * `null` - no session is open;
+ * * `{sessionId, model: undefined}` - that session is open and its pin is being
+ *   read, so the pill falls back to the install default without claiming a pin;
+ * * `{sessionId, model: Some | null}` - what the server said (a `null` model is
+ *   "this session follows the default").
+ *
+ * Overloading "not read" with "no pin" made the pill change value on every
+ * control-chat open: it showed the default, then flipped to the real pin when
+ * the read landed.
+ */
+export const openSessionModel = signal<{
+  sessionId: string;
+  model: SessionModelSelection | null | undefined;
+} | null>(null);
+
+/**
+ * Record the open session's model pin.
+ *
+ * `sessionId === null` closes the record (nothing is open). `model === undefined`
+ * records the session whose pin is still being read; `null` is the server's
+ * answer "no pin, follow the install default".
+ */
+export function rememberSessionModel(
+  sessionId: string | null,
+  model: SessionModelSelection | null | undefined,
+): void {
+  if (sessionId === null) {
+    openSessionModel.value = null;
+    return;
+  }
+  openSessionModel.value = { sessionId, model };
+}
+
 /** The model a run of the open session would use right now. */
 export interface ModelSelection {
   providerId: string | null;
@@ -716,10 +764,23 @@ export interface ModelSelection {
  * and edits it) and the context pill (which needs the same model's window).
  * Two copies of this resolution is how the pill ends up reporting against a
  * different model from the one named in the switcher beside it.
+ *
+ * The open session's own pin (`openSessionModel`) wins over a list row: the
+ * pills must not depend on the session happening to be in `sessions.value`
+ * right now, which is not true for a control chat and is briefly false for
+ * every session on every list refresh. `pinned` is only true when a pin is
+ * actually known - the pill must never claim "this session" on a guess.
  */
 export const modelSelection = computed<ModelSelection>(() => {
   const current = config.value;
-  const pin = activeSession.value?.model ?? null;
+  const open = openSessionModel.value;
+  // The open session's own record comes first, because it is the only source
+  // that survives the session having no row in any list (a control chat) or a
+  // list refresh that dropped the row. `undefined` is "not read yet" and falls
+  // through to the row; `null` is the server's "no pin" and is a fact, so it
+  // must not be replaced by a row that may be stale.
+  const recorded = open && open.sessionId === currentSessionId.value ? open.model : undefined;
+  const pin = recorded !== undefined ? recorded : activeSession.value?.model ?? null;
   if (pin) {
     return {
       providerId: pin.provider,

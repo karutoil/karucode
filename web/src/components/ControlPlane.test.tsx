@@ -41,6 +41,10 @@ vi.mock('../state/actions', () => ({
   openAgentDetail: vi.fn(async () => {}),
   closeAgentDetail: vi.fn(),
   stopRun: vi.fn(async () => {}),
+  renameSessionById: vi.fn(async () => true),
+  // The plane's delete path closes the open session through this action; the
+  // real one clears the id, the transcript and the remembered pin.
+  closeSession: vi.fn(() => { store.currentSessionId.value = null; }),
 }));
 vi.mock('./ChatView', () => ({
   ChatView: (props: { emptyContent?: unknown; mentionProjects?: { name: string }[] }) =>
@@ -108,8 +112,9 @@ function controlChat(overrides: Partial<ControlChatSummary> & { id: string }): C
 }
 
 const chats: ControlChatSummary[] = [
-  // The row the browser script and every rail assertion looks for: a title, a
-  // model badge and a live-plus-finished subagent count.
+  // The row the browser script and every rail assertion looks for: a title and a
+  // live-plus-finished subagent count. It also carries a `model_label`, which
+  // the rail must NOT draw - the model belongs to the composer, not to the name.
   controlChat({ id: 'c1', title: 'Control chat', agents: { live: 1, total: 2 }, model_label: 'gpt-4o-mini' }),
   // Created without a prompt, so the server sends an empty title.
   controlChat({ id: 'c2', title: '', updated_at: NOW - 120_000 }),
@@ -237,26 +242,28 @@ describe('the rail separates control chats from project sessions', () => {
     expect(within(browser).getAllByText('Control chat')).toHaveLength(1);
   });
 
-  it('shows the model and subagent badges on a control-chat row', async () => {
+  it('keeps the model off the row: the chat name is not a model label', async () => {
     render(<ControlPlane />);
     const group = await screen.findByLabelText('Control chats');
     const row = within(group).getByRole('button', { name: /^Control chat/ });
 
-    const model = row.querySelector('.cp-badge.cp-badge-model');
-    expect(model?.textContent).toBe('gpt-4o-mini');
-    expect(model?.getAttribute('title')).toBe('Model: gpt-4o-mini');
+    // The snapshot still carries a `model_label` for this chat, but the rail must
+    // not draw it: a chat's model is not part of its identity, and the composer
+    // is the one place the model is named.
+    expect(row.textContent).not.toContain('gpt-4o-mini');
+    expect(row.querySelector('.cp-badge-model')).toBeNull();
+    expect(row.querySelector('[title^="Model:"]')).toBeNull();
 
     const agents = row.querySelector('.cp-badge.cp-badge-agents');
     expect(agents?.textContent).toBe('1/2 agents');
     expect(agents?.getAttribute('title')).toBe('1 subagent running · 2 total');
   });
 
-  it('hides the badges a chat has nothing to say for', async () => {
+  it('hides the badge a chat has nothing to say for', async () => {
     render(<ControlPlane />);
     const group = await screen.findByLabelText('Control chats');
     const untitled = within(group).getByRole('button', { name: /^Untitled chat/ });
-    // No model pin and no subagents: a "0/0" chip would be noise, not information.
-    expect(untitled.querySelector('.cp-badge-model')).toBeNull();
+    // No subagents: a "0/0" chip would be noise, not information.
     expect(untitled.querySelector('.cp-badge-agents')).toBeNull();
   });
 });
@@ -304,7 +311,7 @@ describe('opening conversations', () => {
     expect(await screen.findByText(/What are we building/)).toBeTruthy();
   });
 
-  it('headers a control chat as the control plane and offers the model pin', async () => {
+  it('headers a control chat as the control plane, and leaves the model to the composer', async () => {
     render(<ControlPlane />);
     const group = await screen.findByLabelText('Control chats');
     fireEvent.click(within(group).getByRole('button', { name: /^Control chat/ }));
@@ -312,10 +319,12 @@ describe('opening conversations', () => {
 
     const head = screen.getByLabelText('Open session');
     expect(within(head).getByText('Control plane · across projects')).toBeTruthy();
-    // The composer's own selectors, reused: they read the open session, and a
-    // control chat resolves as the open session now.
-    expect(within(head).getByRole('button', { name: /^Model for this session:/ })).toBeTruthy();
-    expect(within(head).getByRole('button', { name: /^Reasoning effort:/ })).toBeTruthy();
+    // The composer owns the model and the reasoning effort, and it is the one
+    // place they stay shown. The header used to mount a second copy of the same
+    // two selectors, and that copy was what came and went as the snapshot
+    // refreshed - so the header must not carry a trigger at all.
+    expect(within(head).queryByRole('button', { name: /^Model for this session:/ })).toBeNull();
+    expect(within(head).queryByRole('button', { name: /^Reasoning effort:/ })).toBeNull();
     // A chat is not inside a project, so there is nothing to open.
     expect(within(head).queryByRole('button', { name: 'Open in project' })).toBeNull();
   });
@@ -448,10 +457,9 @@ describe('row actions', () => {
     fireEvent.input(within(dialog).getByLabelText('Session title'), { target: { value: 'Release planning' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Rename' }));
 
-    await waitFor(() => expect(apiRequest).toHaveBeenCalledWith(
-      '/api/sessions/c1',
-      { method: 'PATCH', body: { title: 'Release planning' } },
-    ));
+    // The shared action owns the PATCH (and the optimistic row patch the
+    // workspace rail needs); the plane only asks it and re-reads its snapshot.
+    await waitFor(() => expect(actions.renameSessionById).toHaveBeenCalledWith('c1', 'Release planning'));
     // A rename is only real once the rail's own source says so.
     await waitFor(() => expect(getControlOverview).toHaveBeenCalledTimes(2));
   });
@@ -642,6 +650,37 @@ describe('the open chat’s subagents', () => {
     expect(section.textContent).toContain('cancelled');
     expect(within(section).queryByText(/No subagents yet/)).toBeNull();
     expect(within(section).queryByText(/none of them loaded yet/)).toBeNull();
+  });
+
+  it('drops the previous chat’s subagents when another chat opens', async () => {
+    // The rows are read per session, so switching chats must clear them first:
+    // showing chat A's children under chat B's heading (until B's read lands) is
+    // the same class of lie as a stale title.
+    vi.mocked(listAgents).mockImplementation((async (options?: { session?: string }) => {
+      if (options?.session === 'c1') return [agent('first', { session_id: 'c1' })];
+      return new Promise(() => {}); // the second chat's read never answers
+    }) as never);
+    vi.mocked(getControlOverview).mockResolvedValue(overviewWith({
+      live_agents: [],
+      control: [
+        controlChat({ id: 'c1', title: 'First chat' }),
+        controlChat({ id: 'c2', title: 'Second chat' }),
+      ],
+    }));
+    render(<ControlPlane />);
+    const group = await screen.findByLabelText('Control chats');
+    fireEvent.click(within(group).getByRole('button', { name: /^First chat/ }));
+    await screen.findByText('Normal chat');
+    const section = await screen.findByLabelText('Subagents of this chat');
+    await waitFor(() => expect(section.textContent).toContain('first'));
+
+    fireEvent.click(within(group).getByRole('button', { name: /^Second chat/ }));
+    // Re-query: the inspector is re-rendered for the new session, so the element
+    // captured above may be detached by now.
+    await waitFor(() =>
+      expect(screen.getByLabelText('Subagents of this chat').textContent).not.toContain('first'),
+    );
+    expect(within(screen.getByLabelText('Subagents of this chat')).getByText(/No subagents yet/)).toBeTruthy();
   });
 });
 

@@ -3386,6 +3386,32 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn agent_counts_by_session(&self) -> Result<Vec<(String, usize, usize)>> {
+        self.read(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT session_id,
+                            SUM(CASE WHEN status IN ('running','paused') THEN 1 ELSE 0 END) AS live,
+                            COUNT(*) AS total
+                       FROM agents
+                      GROUP BY session_id",
+                )
+                .map_err(|e| db_err("agent_counts_by_session prepare", e))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?.max(0) as usize,
+                        row.get::<_, i64>(2)?.max(0) as usize,
+                    ))
+                })
+                .map_err(|e| db_err("agent_counts_by_session query", e))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| db_err("agent_counts_by_session rows", e))
+        })
+        .await
+    }
+
     async fn get_agent(&self, id: &str) -> Result<Option<AgentSummary>> {
         let id = id.to_string();
         self.read(move |conn| {
@@ -6942,6 +6968,51 @@ mod tests {
             .await
             .expect("no agents")
             .is_empty());
+    }
+
+    /// The control plane's per-chat badge needs `live` and `total` per session in
+    /// one read: a paused agent is live (it still holds its slot), and a session
+    /// with no agents simply has no row rather than a zero one.
+    #[tokio::test]
+    async fn agent_counts_are_one_row_per_session_with_paused_counted_live() {
+        let db = TempDb::new("agent-counts");
+        let store = db.open().await;
+        let project = store
+            .create_project("p_1", "one", "/w/one")
+            .await
+            .expect("project");
+        store
+            .create_session("s_busy", "Busy", "/w/one", Some(&project.id))
+            .await
+            .expect("busy");
+        store
+            .create_session("s_quiet", "Quiet", "/w/one", Some(&project.id))
+            .await
+            .expect("quiet");
+        for (id, status) in [
+            ("a_run", "running"),
+            ("a_paused", "paused"),
+            ("a_done", "completed"),
+            ("a_failed", "failed"),
+        ] {
+            store
+                .upsert_agent(&agent(id, "s_busy", status))
+                .await
+                .expect("agent");
+        }
+
+        let counts = store.agent_counts_by_session().await.expect("counts");
+        let busy = counts
+            .iter()
+            .find(|(id, ..)| id == "s_busy")
+            .cloned()
+            .unwrap_or_else(|| panic!("a row for the busy session: {counts:?}"));
+        assert_eq!(busy.1, 2, "running + paused are both live: {counts:?}");
+        assert_eq!(busy.2, 4);
+        assert!(
+            counts.iter().all(|(id, ..)| id != "s_quiet"),
+            "no row for an agentless session: {counts:?}"
+        );
     }
 
     #[tokio::test]

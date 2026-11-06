@@ -4,6 +4,7 @@ vi.mock('../api/endpoints', () => ({
   listSessions: vi.fn(),
   listAgents: vi.fn(async () => []),
   getAgents: vi.fn(async () => []),
+  getSession: vi.fn(),
 }));
 
 import * as api from '../api/endpoints';
@@ -53,5 +54,33 @@ describe('refreshing a project session list', () => {
       projectId ? [projectSession] : [projectSession]) as never);
     await actions.refreshSessions();
     expect(store.currentSessionId.value).toBe('s-project');
+  });
+
+  it('never inserts a control chat into the project list', async () => {
+    // Opening a chat from the control plane used to merge its summary into
+    // `sessions.value`, which the workspace rail draws unfiltered: the chat
+    // appeared as a project row and vanished at the next refresh. It belongs to
+    // the plane's own list, so opening it must not touch this one.
+    vi.mocked(api.getSession).mockResolvedValue({
+      session: {
+        id: 's-control',
+        title: 'Control chat',
+        workspace: '/data/control-workspace',
+        project_id: null,
+        created_at: 0,
+        updated_at: 2,
+      },
+      messages: [],
+      runs: [],
+      agents: [],
+      approvals: [],
+      claims: [],
+      running: false,
+    } as never);
+    store.sessions.value = [projectSession as never];
+    await actions.openSession('s-control');
+    expect(store.sessions.value.map((session) => session.id)).toEqual([projectSession.id]);
+    // …and it is open, which is what the pills and the composer read.
+    expect(store.currentSessionId.value).toBe('s-control');
   });
 });

@@ -17,7 +17,6 @@ import {
 } from '../state/controlPlane';
 import { ChatView } from './ChatView';
 import { Dialog } from './Dialog';
-import { ModelSwitcher, ReasoningSelector } from './ModelSwitcher';
 import { KebabIcon } from './icons';
 import '../styles/session-control.css';
 
@@ -148,6 +147,8 @@ export function ControlPlane(): JSX.Element {
   const navigation = useRef<Promise<void>>(Promise.resolve());
   const mounted = useRef(true);
   const refreshTick = useRef(0);
+  /** The rail region, focused when the plane opens (see the mount effect). */
+  const browserRef = useRef<HTMLElement>(null);
 
   const overview = controlOverview.value;
   const staleReason = controlOverviewError.value;
@@ -195,11 +196,19 @@ export function ControlPlane(): JSX.Element {
 
   useEffect(() => {
     mounted.current = true;
+    // Land the reader inside the plane: it replaced the workspace on screen, so
+    // focus must not stay in the rail that is now hidden behind it. Two calls,
+    // because the browser's own focus fix-up for the button that opened the plane
+    // runs after this effect: the frame callback is what actually sticks.
+    const focusRail = (): void => browserRef.current?.focus({ preventScroll: true });
+    focusRail();
+    const frame = window.requestAnimationFrame(focusRail);
     void refresh();
     const timer = window.setInterval(() => void refresh(), CONTROL_REFRESH_MS);
     return () => {
       mounted.current = false;
       generation.current++;
+      window.cancelAnimationFrame(frame);
       window.clearInterval(timer);
     };
   }, []);
@@ -218,6 +227,9 @@ export function ControlPlane(): JSX.Element {
       setDetailAgents(null);
       return;
     }
+    // Drop the previous chat's rows before the new read: `Subagents` falls back
+    // to the snapshot meanwhile, which is the honest answer for *this* chat.
+    setDetailAgents(null);
     let cancelled = false;
     const read = async (): Promise<void> => {
       try {
@@ -328,20 +340,20 @@ export function ControlPlane(): JSX.Element {
     }
   };
 
-  /** Rename through the ordinary route, then re-read the snapshot the rail draws. */
+  /**
+   * Rename through the shared action, then re-read the snapshot the rail draws.
+   *
+   * The action patches `store.sessions.value` as well, which is what keeps a
+   * project session's row in the workspace rail correct without waiting for an
+   * SSE frame - the control plane draws its own list, so that does not show.
+   */
   const rename = async (session: SessionSummary, title: string): Promise<void> => {
     const trimmed = title.trim();
     if (trimmed === '') return;
-    try {
-      await apiRequest(`/api/sessions/${encodeURIComponent(session.id)}`, {
-        method: 'PATCH',
-        body: { title: trimmed },
-      });
-      setRenaming(null);
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not rename this session.');
-    }
+    setRenaming(null);
+    const ok = await actions.renameSessionById(session.id, trimmed);
+    if (!ok) return;
+    await refresh();
   };
 
   /** Delete one session; the open one returns the pane to the overview. */
@@ -352,8 +364,9 @@ export function ControlPlane(): JSX.Element {
       if (selected === session.id) { setSelected(null); setError(null); }
       // The workspace store may still be pointing at the row that just vanished;
       // leaving it there would make the ordinary workspace open a dead session
-      // after **Project workspace**.
-      if (store.currentSessionId.value === session.id) store.currentSessionId.value = null;
+      // after **Project workspace**. `clearSelection` is the full teardown (id,
+      // transcript, remembered pin, last-session id), not a bare assignment.
+      if (store.currentSessionId.value === session.id) actions.closeSession();
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not delete this session.');
@@ -439,13 +452,11 @@ export function ControlPlane(): JSX.Element {
       >
         <span class="cp-glyph control" aria-hidden="true">k.</span>
         <span class="cp-row-main">
-          {/* The model rides on the title line: a chat's model is part of what it
-              is, and the meta line below is where the live numbers go. */}
+          {/* Only the name lives on the title line. A chat's model is not part of
+              its identity - the composer says which model will answer - so the
+              title gets the whole line and truncates on its own. */}
           <span class="cp-row-title">
             <span class="cp-row-title-text">{title}</span>
-            {chat.model_label
-              ? <span class="cp-badge cp-badge-model" title={`Model: ${chat.model_label}`}>{chat.model_label}</span>
-              : null}
           </span>
           <span class="cp-row-meta">
             {chat.agents.total > 0 ? <span
@@ -486,7 +497,12 @@ export function ControlPlane(): JSX.Element {
   const sessionCounts = overview?.sessions;
 
   return <div class={`control-plane cp${selected ? ' detail-open' : ''}`}>
-    <aside class="cp-browser" aria-label="Sessions across projects">
+    {/* `tabIndex={-1}` + the mount effect: opening the plane used to leave focus
+        in the app's project rail, so the next nine tabs walked the rail behind
+        this screen before reaching it. Focusing the region itself puts the
+        reader (and the ring) inside the plane, and the first Tab then lands on
+        its own refresh button. */}
+    <aside ref={browserRef} class="cp-browser" aria-label="Sessions across projects" tabIndex={-1}>
       <header class="cp-browser-head">
         <div class="cp-brand">
           <span class="cp-brand-mark" aria-hidden="true">k<i>.</i></span>
@@ -535,7 +551,13 @@ export function ControlPlane(): JSX.Element {
             ? <p class="cp-note">No sessions yet. Start one from control chat.</p>
             : null}
           {groups.map((group) => <section key={group.key} aria-label={group.label}>
-            <div class="cp-group cp-group-sub"><span>{group.label}</span><span class="cp-group-count">{group.items.length}</span></div>
+            {/* The sub-group count is only worth drawing when it says something
+                the outer "Sessions" count does not: one group with every session
+                in it repeated the same number twice in a row. */}
+            <div class="cp-group cp-group-sub">
+              <span>{group.label}</span>
+              {groups.length > 1 ? <span class="cp-group-count">{group.items.length}</span> : null}
+            </div>
             <ul class="cp-list">{group.items.map((session) => row(session, rowActions))}</ul>
           </section>)}
           {!loading && filtered.length === 0 && query.trim() !== '' ? <p class="cp-note">No sessions match “{query}”.</p> : null}
@@ -563,10 +585,9 @@ export function ControlPlane(): JSX.Element {
           <div class="cp-session-actions">
             {chosen ? <span class={`cp-state ${sessionStatus(chosen).tone}`} title={`Latest state: ${sessionStatus(chosen).label}`}><i aria-hidden="true" />{sessionStatus(chosen).label}</span> : null}
             {chosen ? <span class="cp-session-count">{chosen.message_count.toLocaleString()} messages</span> : null}
-            {/* Both selectors write the *open session's* pin, and `store.activeSession`
-                resolves a control chat too, so they work here unchanged. */}
-            <ModelSwitcher />
-            <ReasoningSelector />
+            {/* The model and reasoning selectors live in the composer, once. They
+                used to be mounted here too, and this pair was what appeared and
+                disappeared as the snapshot refreshed. */}
             {isControl ? null : <button type="button" class="cp-secondary" title="Open in project" aria-label="Open in project" onClick={openInProject}>Open in project ↗</button>}
           </div>
         </header>

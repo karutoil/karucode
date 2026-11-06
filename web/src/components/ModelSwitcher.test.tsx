@@ -265,6 +265,80 @@ describe('ReasoningSelector', () => {
   });
 });
 
+describe('ModelSwitcher stability (the pills never blink out)', () => {
+  beforeEach(() => {
+    resetAppState();
+    store.config.value = twoProfileConfig();
+  });
+
+  afterEach(() => {
+    resetAppState();
+    vi.unstubAllGlobals();
+  });
+
+  it('renders for an open session that has no row in any list', () => {
+    // The bug: a brand-new control chat has no row until the overview
+    // snapshot catches up, so the pills used to vanish for seconds.
+    store.currentSessionId.value = 'c_fresh';
+    render(<ModelControls />);
+    expect(screen.getByRole('button', { name: /Model for this session/ })).not.toBeNull();
+    expect(screen.getByRole('button', { name: /Reasoning effort:/ })).not.toBeNull();
+  });
+
+  it('keeps rendering after the session list is replaced', async () => {
+    openSession();
+    const { container } = render(<ModelControls />);
+    const button = screen.getByRole('button', { name: /Model for this session/ });
+    // A run event replaces `sessions.value` with the project's own list.
+    store.sessions.value = [];
+    await waitFor(() => expect(container.firstChild).not.toBeNull());
+    expect(screen.getByRole('button', { name: /Model for this session/ })).toBe(button);
+  });
+
+  it('shows the install default and then the pinned model without unmounting', async () => {
+    store.currentSessionId.value = 'c_fresh';
+    render(<ModelSwitcher />);
+    const button = screen.getByRole('button', { name: /Model for this session: Model B on Gateway/i });
+    expect(screen.queryByText(/this session/)).toBeNull();
+
+    store.rememberSessionModel('c_fresh', { provider: 'local', model: 'tiny' });
+
+    // Same button element: the pill changed its label, it did not remount.
+    await waitFor(() => expect(button.getAttribute('aria-label')).toMatch(/Tiny/));
+    expect(screen.getByRole('button', { name: /Model for this session/ })).toBe(button);
+    expect(screen.getByText(/this session/)).not.toBeNull();
+  });
+
+  it('puts the session back on the install default when the pin is cleared', async () => {
+    const { calls } = installModelFetch();
+    store.currentSessionId.value = summaryFixture.id;
+    store.rememberSessionModel(summaryFixture.id, { provider: 'local', model: 'tiny' });
+    render(<ModelSwitcher />);
+    expect(screen.getByRole('button', { name: /Model for this session: Tiny/i })).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /Model for this session: Tiny/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Follow install default' }));
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Model for this session: Model B on Gateway/i })).not.toBeNull(),
+    );
+    expect(screen.queryByText(/this session/)).toBeNull();
+  });
+
+  it('says so honestly when no model is configured at all', () => {
+    const bare = twoProfileConfig();
+    bare.active = { provider: 'gateway', model: '' };
+    bare.providers = [{ ...bare.providers[0]!, models: [] }];
+    store.config.value = bare;
+    store.currentSessionId.value = 'c_fresh';
+    render(<ModelSwitcher />);
+    const button = screen.getByRole('button', { name: /Model for this session/ });
+    expect(button.getAttribute('title')).toBe('No model configured yet');
+    expect(button.textContent).toContain('—');
+  });
+});
+
 describe('ModelControls', () => {
   beforeEach(() => {
     resetAppState();

@@ -7,7 +7,7 @@ use axum::http::{Method, StatusCode};
 use serde_json::{json, Value};
 use std::time::Duration;
 use support::{
-    collect_events_until, events_within, text, tool_call, wait_for_running,
+    collect_events_until, events_within, store_of, text, tool_call, wait_for_running,
     wait_until_idle_ignored, ApprovalTool, HarnessBuilder, ModelsMode, Script,
 };
 
@@ -6589,6 +6589,81 @@ async fn control_chat_pins_and_clears_a_session_model() {
 
 /// `control_create_control_chat` is the rail's "New": a second chat, its own
 /// server-owned directory, and no project.
+/// A name the caller typed is a decision. `is_untitled` also treats the
+/// framework's `New session` placeholder as untitled, so a chat named exactly
+/// that - with a prompt alongside - used to be renamed away from it, which is
+/// the one thing the docs promise never happens.
+#[tokio::test]
+async fn a_named_control_chat_is_never_renamed_by_its_prompt() {
+    let h = HarnessBuilder::new(vec![]).no_ai_titles().build().await;
+    let created = h
+        .post(
+            "/api/control/sessions",
+            json!({"title": "New session", "prompt": "fix the flaky login test"}),
+        )
+        .await
+        .json();
+    assert_eq!(
+        created["title"], "New session",
+        "the typed name wins over the derived one: {created}"
+    );
+    let id = created["session_id"].as_str().unwrap();
+    assert_eq!(
+        h.get(&format!("/api/sessions/{id}")).await.json()["session"]["title"],
+        "New session"
+    );
+    // With no title the prompt still names it, so the rule is "a name wins", not
+    // "a prompt never names a chat".
+    let derived = h
+        .post(
+            "/api/control/sessions",
+            json!({"prompt": "fix the flaky login test"}),
+        )
+        .await
+        .json();
+    assert_eq!(derived["title"], "fix the flaky login test", "{derived}");
+}
+
+/// `sessions.failed` is a total, not the length of a truncated list: fifteen
+/// failing sessions must not be reported as twelve.
+#[tokio::test]
+async fn the_overview_counts_every_failing_session_not_just_the_page() {
+    let h = HarnessBuilder::new(vec![]).no_ai_titles().build().await;
+    let store = store_of(&h);
+    let project = h.get("/api/projects").await.json()["projects"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // 15 sessions whose latest run failed. The transcript is irrelevant, so each
+    // run is written straight to the store rather than driven through a provider.
+    for index in 0..15 {
+        let id = format!("s_failed_{index:02}");
+        store
+            .create_session(&id, "Broken work", "/w", Some(&project))
+            .await
+            .expect("session");
+        store
+            .create_run(&format!("r_{index:02}"), &id, "test-model", "go")
+            .await
+            .expect("run");
+        store
+            .finish_run(
+                &format!("r_{index:02}"),
+                kc_core::store::RunStatus::Failed,
+                Some("boom"),
+            )
+            .await
+            .expect("finish");
+    }
+    let overview = h.get("/api/control/overview").await.json();
+    assert_eq!(overview["sessions"]["failed"], 15, "{overview}");
+    assert_eq!(
+        overview["attention"].as_array().unwrap().len(),
+        12,
+        "the list itself is still capped: {overview}"
+    );
+}
+
 #[tokio::test]
 async fn control_chat_opens_another_control_chat() {
     let h = HarnessBuilder::new(vec![])
@@ -6810,6 +6885,17 @@ async fn control_dispatch_pins_the_new_session_and_a_replay_does_not() {
     let answer = tool_result_json(&detail, "replayed");
     assert_eq!(answer["replayed"], true, "{answer}");
     assert_eq!(answer["session_id"], child_id.as_str());
+    // The reply reports the session's *stored* pin, not the one this replay
+    // asked for, and says the original dispatch really did start a run.
+    assert!(
+        answer["model"].is_null(),
+        "a replay reports the stored pin, not the requested one: {answer}"
+    );
+    assert!(
+        !answer["requested_model"].is_null(),
+        "the request that was replayed is still described: {answer}"
+    );
+    assert_eq!(answer["run_started"], true, "{answer}");
     // And it did not start a second session for the same request.
     assert_eq!(
         h.get("/api/sessions").await.json()["sessions"]
@@ -6817,6 +6903,78 @@ async fn control_dispatch_pins_the_new_session_and_a_replay_does_not() {
             .unwrap()
             .len(),
         2
+    );
+}
+
+/// A session can be reserved and then never run (the process died, or `submit`
+/// failed). A replay of that request must say so instead of implying the work is
+/// moving - the whole point of an idempotency key is that the caller can trust
+/// the answer.
+#[tokio::test]
+async fn a_replay_reports_that_no_run_ever_started() {
+    // `auto` so the dispatch tool is not parked on an approval: this test is
+    // about the replay's answer, not about the policy.
+    let h = HarnessBuilder::new(vec![])
+        .no_ai_titles()
+        .auto_approvals()
+        .build()
+        .await;
+    let project = h.get("/api/projects").await.json()["projects"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Reserve a dispatch exactly as the tool does, and never submit it: this is
+    // the state a crash between the two steps leaves behind.
+    let (id, created) = store_of(&h)
+        .reserve_control_dispatch(
+            "interrupted-launch",
+            "s_reserved",
+            &project,
+            "",
+            &h.workspace_dir.to_string_lossy(),
+            "Port the CLI to Rust",
+        )
+        .await
+        .expect("reserve");
+    assert!(created, "the first reserve creates the session");
+    assert_eq!(id, "s_reserved");
+
+    let central = h.post("/api/control/sessions", json!({})).await.json()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    h.factory.push(tool_call(
+        "control_start_session",
+        &json!({"request_id": "interrupted-launch", "project_id": project,
+                "prompt": "Port the CLI to Rust"})
+            .to_string(),
+    ));
+    h.factory.push(text("Checked."));
+    assert_eq!(
+        h.post(
+            &format!("/api/sessions/{central}/messages"),
+            json!({"content":"did it start?"}),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    h.wait_until_idle(&central).await;
+
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let answer = tool_result_json(&detail, "run_started");
+    assert_eq!(answer["replayed"], true, "{answer}");
+    assert_eq!(answer["session_id"], "s_reserved");
+    assert_eq!(
+        answer["run_started"], false,
+        "no run ever started, and the replay must say so: {answer}"
+    );
+    assert!(
+        answer["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("control_send_message"),
+        "the note names the recovery action: {answer}"
     );
 }
 

@@ -539,6 +539,13 @@
   text-overflow: ellipsis;
 }
 
+/* On a phone the composer cannot give the reasoning pill room for the word and
+ * the effort, so the word steps aside: "Default" beside the spark glyph is
+ * readable, "Rea…" is not, and the accessible name keeps the whole sentence. */
+@media (max-width: 560px) {
+  .compose-bottom .reasoning-prefix { display: none; }
+}
+
 /* `.pill-divider`: 1×16 `--line-soft`, `margin:0 3px`, between the two pills. */
 .compose-bottom .reasoning-selector {
   display: inline-flex;

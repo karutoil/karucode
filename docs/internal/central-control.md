@@ -33,16 +33,21 @@ curl -X POST localhost:8787/api/control/sessions \
 ```
 
 - `title` names the chat. A chat you name is never renamed.
-- `prompt` (at most 32 KiB) is the chat's opening request. Without a `title` a
-  chat created with a prompt is named from it - deterministically, and by a
-  model as well when `[titles]` is on (the default; see `session-titles`).
+- `prompt` (at most 32 KiB) is the chat's opening request, and **only** names
+  it: it is not stored as a message and does not start a run. Without a `title`
+  a chat created with a prompt is named from it - deterministically at once, and
+  by a model as well when `[titles]` is on (the default; see `session-titles`).
+  The response returns before that model call finishes.
 - With neither, the chat is created **untitled** and its first message names it
   (`POST /api/sessions/:id/messages`), so the rail rarely shows an empty row.
+- A `title` you pass always wins: the prompt does not rename a named chat, even
+  when the name happens to be one the framework also uses as a placeholder.
 
 `GET /api/control/sessions` lists them, newest activity first. Each row is the
 session summary - `id`, `title`, `workspace`, `project_id` (null), `model`,
 `created_at`, `updated_at`, `message_count`, `last_run_status`, `running` and
-`control: true` - plus `agents: {live, total}` (live is running *or* paused) and
+`control: true` - plus `agents: {live, total}` (live is running *or* paused),
+`pending_approvals` (unanswered approval questions on that chat's run) and
 `model_label`, the model the chat would use right now: its own pin, else the
 install-wide default. `model_label` is a model id, never a key or a base URL.
 
@@ -67,9 +72,13 @@ dashboard that would otherwise make five requests:
 ```
 
 - Control chats appear only in `control`; the other lists are project sessions.
+- `sessions.total` counts **project sessions only** (control chats are counted
+  in `sessions.control`), so the two are separate totals rather than parts of
+  one. `sessions.running` is likewise project sessions.
 - `attention` is a session whose **latest run** ended `failed`, `interrupted`
   or `limit_reached`. `cancelled` is something you asked for and `completed`
-  needs nothing, so neither is listed; `sessions.failed` is that list's length.
+  needs nothing, so neither is listed. `sessions.failed` counts every such
+  session, not the first twelve.
 - `waiting` is every project session with an **unanswered approval**, and
   `approvals.pending` counts the questions. An approval means the run is
   stopped until a person answers, so these are the most actionable rows on the

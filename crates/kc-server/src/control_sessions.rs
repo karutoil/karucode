@@ -867,6 +867,25 @@ impl Tool for CreateControlChat {
             Ok(args) => args,
             Err(e) => return ToolOutcome::err(format!("invalid arguments: {e}")),
         };
+        // Validate before asking: a person should never be shown a prompt to
+        // approve that the server is about to reject anyway (a 5 MB body in an
+        // approval dialog is not a decision, it is a bug).
+        if let Some(title) = args.title.as_deref() {
+            if title.trim().is_empty() || title.len() > 200 || title.trim() != title {
+                return ToolOutcome::err("title must be nonempty, trimmed and at most 200 bytes");
+            }
+        }
+        if let Some(prompt) = args.prompt.as_deref() {
+            if prompt.trim().is_empty()
+                || prompt.len() > crate::control::MAX_LAUNCH_PROMPT_BYTES
+                || prompt.trim() != prompt
+            {
+                return ToolOutcome::err(format!(
+                    "prompt must be nonempty, trimmed and at most {} bytes",
+                    crate::control::MAX_LAUNCH_PROMPT_BYTES
+                ));
+            }
+        }
         if let Some(err) = gate(
             &ctx,
             format!(

@@ -1125,6 +1125,15 @@ pub trait Store: Send + Sync {
         let _ = session_id;
         Ok(Vec::new())
     }
+    /// Per-session subagent counts: `(session_id, live, total)`, where live is a
+    /// running **or paused** agent.
+    ///
+    /// One grouped query, for the control plane's per-chat badges: asking
+    /// `list_agent_summaries_for_session` once per chat is an N+1 that grows with
+    /// the number of chats, and the badge only needs two numbers.
+    async fn agent_counts_by_session(&self) -> Result<Vec<(String, usize, usize)>> {
+        Ok(Vec::new())
+    }
     /// One agent by id, with its session context. `None` when it does not exist.
     async fn get_agent(&self, id: &str) -> Result<Option<AgentSummary>>;
     /// That agent's own transcript (messages carrying its agent id), oldest

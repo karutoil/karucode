@@ -9,8 +9,12 @@ What this proves, which the unit tests cannot:
     sessions**, and a project session never appears in the chats group;
   * an untitled control chat is named by its **first message** - deterministically
     at once, then by the scripted model, which is what `[titles]` buys a chat;
-  * the open chat's **model and reasoning** controls write the session pin
-    (`PATCH /api/sessions/:id/model`) and the server agrees;
+  * the open chat's **model and reasoning** controls live in the composer, stay
+    shown while the snapshot refreshes, and write the session pin
+    (`PATCH /api/sessions/:id/model`) with the server agreeing;
+  * the chat's **name** carries no model: the rail row shows the title, the
+    subagent count, the status word and the time - the model belongs to the
+    composer;
   * the chat's **subagents** are listed in its inspector from
     `agentsForControlChat`, and the agent API agrees;
   * `GET /api/control/overview` is one snapshot that matches what the hero
@@ -286,21 +290,35 @@ def main() -> int:
         click('Open control plane')
         wait("return !!document.querySelector('.control-plane.cp');")
         check('control plane opens', True)
+        # Opening the plane replaces the workspace, so focus has to move into it:
+        # otherwise the next nine tab stops walk the rail behind the new screen.
+        focused = js(
+            "const el=document.activeElement;"
+            "const plane=document.querySelector('.control-plane.cp');"
+            "return JSON.stringify({inside: !!(plane && el && plane.contains(el)),"
+            " tag: el ? el.tagName + (el.getAttribute('aria-label') ? '[' + el.getAttribute('aria-label') + ']' : '') : null});"
+        )
+        check('the plane holds focus once it is open', json.loads(focused).get('inside') is True, focused)
 
         # ------------------------------------------------- 1. the separated rail
         wait("return !!document.querySelector('[aria-label=\"Control chats\"]');")
         check('rail has a Control chats group', True)
-        # The project session is in its own group and not in the chats group.
+        # Wait for the project list rather than sampling the body once: the rail
+        # paints the chats group before `/api/sessions` answers.
+        wait(
+            "return document.body.innerText.includes('Ordinary project session');",
+            30,
+        )
+        # The session is in its own group and not in the chats group.
         js(
             "const chats=document.querySelector('[aria-label=\"Control chats\"]');"
             "globalThis.__chatsHasOrdinary = chats ? chats.innerText.includes('Ordinary project session') : null;"
             "return true;"
         )
-        body_text = js('return document.body.innerText;') or ''
         check(
             'a project session is listed in the plane',
-            'Ordinary project session' in body_text,
-            'body listing',
+            True,
+            'in the Sessions group',
         )
         check(
             'a project session is not a control chat',
@@ -358,7 +376,7 @@ def main() -> int:
             what='the chat in the listing',
         )
         check(
-            'the chat row carries model, agent counts and the control flag',
+            'the chat listing carries the model, agent counts and the control flag',
             isinstance(chat.get('model_label'), str)
             and chat['model_label'] != ''
             and isinstance(chat.get('agents'), dict)
@@ -372,12 +390,61 @@ def main() -> int:
             30,
         )
         check('the rail shows the generated title', True, MODEL_TITLE)
-        wait("return !!document.querySelector('.cp-badge-model');")
-        model_badge = js(
-            "const b=document.querySelector('.cp-row .cp-badge-model');"
-            "return b ? (b.innerText + '|' + (b.getAttribute('title')||'')) : null;"
+
+        # The chat's model is NOT part of its name. The rail row carries no
+        # model text at all; the composer is the one place the model is named.
+        rail_text = js(
+            "const rows=[...document.querySelectorAll('[aria-label=\"Control chats\"] .cp-row')];"
+            "const row=rows.find(r => r.innerText.includes(" + json.dumps(MODEL_TITLE) + "));"
+            "return row ? row.innerText : null;"
         )
-        check('the chat row shows a model badge', bool(model_badge), str(model_badge))
+        check(
+            'the chat row carries no model text',
+            bool(rail_text) and 'stub' not in rail_text.lower(),
+            (rail_text or '').replace('\n', ' / '),
+        )
+        check(
+            'the rail has no model badge at all',
+            js("return document.querySelector('.cp-badge-model') === null;") is True,
+            'no .cp-badge-model in the rail',
+        )
+        composer_text = js(
+            "const pill=document.querySelector('.composer-session-pins')"
+            " || document.querySelector('.compose-bottom .composer-controls');"
+            "return pill ? pill.innerText : null;"
+        )
+        check(
+            'the composer is where the model is named',
+            bool(composer_text) and 'Stub' in composer_text,
+            (composer_text or '').replace('\n', ' / '),
+        )
+
+        # The controls STAY shown. The complaint was that they "go in and out":
+        # the header copy of them was mounted and unmounted as the 5s snapshot
+        # refreshed. Poll for longer than one snapshot period and require the
+        # composer's pills on every single sample.
+        samples = 0
+        missing = 0
+        for _ in range(int(8 / 0.25)):
+            present = js(
+                "return JSON.stringify({"
+                "model: !!document.querySelector('[aria-label^=\"Model for this session\"]'),"
+                "reasoning: !!document.querySelector('[aria-label^=\"Reasoning effort\"]')"
+                "});"
+            )
+            samples += 1
+            try:
+                state = json.loads(present)
+            except (TypeError, ValueError):
+                state = {}
+            if not (state.get('model') and state.get('reasoning')):
+                missing += 1
+            time.sleep(0.25)
+        check(
+            'the model and reasoning controls stay shown for 8 seconds',
+            missing == 0 and samples >= 32,
+            f'{samples} samples, {missing} without the controls',
+        )
 
         # --------------------------------------- 3. model + reasoning selection
         click('Model for this session')
@@ -510,26 +577,146 @@ def main() -> int:
         check('the overview carries no credential', 'sk-' not in raw, 'no sk- in the snapshot')
 
         # --------------------------------------------------- 6. narrow viewport
-        session.cdp('Emulation.setDeviceMetricsOverride', {
-            'width': 390, 'height': 844, 'deviceScaleFactor': 2, 'mobile': True,
-        })
-        time.sleep(0.6)
-        overflow = js(
-            "const el=document.querySelector('.control-plane.cp') || document.body;"
-            "return JSON.stringify({scroll: el.scrollWidth, client: el.clientWidth});"
+        def viewport(width: int, height: int, mobile: bool = False) -> None:
+            session.cdp('Emulation.setDeviceMetricsOverride', {
+                'width': width, 'height': height, 'deviceScaleFactor': 1, 'mobile': mobile,
+            })
+            time.sleep(0.5)
+
+        def no_overflow(selector: str) -> str:
+            return js(
+                "const el=document.querySelector(" + json.dumps(selector) + ") || document.body;"
+                "return JSON.stringify({scroll: el.scrollWidth, client: el.clientWidth});"
+            )
+
+        viewport(390, 844, mobile=True)
+        # The overview is on screen already; open the chat at this width, because
+        # at 390 the rail is hidden once a chat is open.
+        wait("return !!document.querySelector('[aria-label=\"Control chats\"] .cp-row');")
+        js(
+            "const b=[...document.querySelectorAll('[aria-label=\"Control chats\"] .cp-row')][0];"
+            "if(b) b.click();"
+            "return true;"
         )
+        wait("return !!document.querySelector('#composer-input');", 20)
+        overflow = no_overflow('.control-plane.cp')
         metrics = json.loads(overflow)
         check(
             'the plane does not overflow a 390px phone',
             metrics['scroll'] <= metrics['client'] + 1,
             overflow,
         )
+        # A control that exists but is unreadable is the failure this check is
+        # for: at 390 px the reasoning pill had 86 px for a 98 px label and
+        # ellipsised to "Rea…". The word now steps aside and the effort shows.
+        prefix = js(
+            "const p=document.querySelector('.compose-bottom .reasoning-prefix');"
+            "const label=document.querySelector('.compose-bottom .reasoning-selector .model-switcher-model');"
+            "return JSON.stringify({display: p ? getComputedStyle(p).display : 'missing',"
+            " fits: label ? label.scrollWidth <= label.clientWidth + 1 : null,"
+            " text: label ? label.innerText.trim() : null});"
+        )
+        pill = json.loads(prefix)
+        check(
+            'the reasoning pill is readable on a phone',
+            pill['display'] == 'none' and pill['fits'] is True and pill['text'] not in (None, ''),
+            prefix,
+        )
+
+        # 1024x768 is the tight laptop case: the intro's own "start in this
+        # project" buttons were below the fold, and the hero was a 2x3 block.
+        viewport(1024, 768)
+        click('Back to overview')
+        wait("return !!document.querySelector('[aria-label=\"Workspace summary\"]');")
+        hero = js(
+            "const h=document.querySelector('.cp-hero');"
+            "const s=document.querySelector('.cp-stats');"
+            "if(!h||!s) return null;"
+            "const rows=getComputedStyle(s).gridTemplateColumns.split(' ').length;"
+            "return JSON.stringify({height: Math.round(h.getBoundingClientRect().height), rows});"
+        )
+        hero_metrics = json.loads(hero)
+        launch = js(
+            "const i=document.querySelector('#cp-launch-input');"
+            "if(!i) return JSON.stringify({present:false});"
+            "const r=i.getBoundingClientRect();"
+            "const hit=document.elementFromPoint(r.left + r.width/2, r.top + r.height/2);"
+            "return JSON.stringify({present:true, top: Math.round(r.top),"
+            " inViewport: r.top >= 0 && r.bottom <= innerHeight,"
+            " hit: hit ? (hit === i || i.contains(hit)) : false});"
+        )
+        launch_metrics = json.loads(launch)
+        check(
+            'the overview keeps its launch box above the fold at 1024',
+            launch_metrics.get('present') is True
+            and launch_metrics.get('inViewport') is True
+            and launch_metrics.get('hit') is True,
+            launch,
+        )
+        check(
+            'the overview counters stay one row at 1024',
+            hero_metrics['rows'] == 5 and hero_metrics['height'] < 240,
+            hero,
+        )
+        # A brand-new chat is the only one with the first-run intro, so open one:
+        # the check is that its own buttons are visible, not that some other chat
+        # happens to be empty.
+        click('New control chat')
+        wait("return !!document.querySelector('#composer-input');", 20)
+        wait("return !!document.querySelector('.cp-intro-projects button');", 20)
+        # The empty-chat intro is the one place a user starts work from; if its
+        # buttons are under the composer they cannot be clicked at all.
+        intro = js(
+            "const btn=document.querySelector('.cp-intro-projects button');"
+            "if(!btn) return JSON.stringify({present:false});"
+            "btn.scrollIntoView({block:'nearest'});"
+            "const r=btn.getBoundingClientRect();"
+            "const hit=document.elementFromPoint(r.left + r.width/2, r.top + r.height/2);"
+            "return JSON.stringify({present:true, inViewport: r.top >= 0 && r.bottom <= innerHeight,"
+            " hit: hit ? (hit === btn || btn.contains(hit)) : false});"
+        )
+        intro_metrics = json.loads(intro)
+        check(
+            'the empty chat’s start buttons are on screen at 1024',
+            intro_metrics.get('present') is True
+            and intro_metrics.get('inViewport') is True
+            and intro_metrics.get('hit') is True,
+            intro,
+        )
+        # The stacked inspector must not hide its own facts: the session id and
+        # its Copy button used to sit outside a capped, unfocused panel. Scroll it
+        # to the end and require the Copy button to be reachable.
+        inspector = js(
+            "const i=document.querySelector('.cp-inspector');"
+            "if(!i) return JSON.stringify({present:false});"
+            "const copy=i.querySelector('.cp-facts-id .cp-link');"
+            "i.scrollTop = i.scrollHeight;"
+            "const ir=i.getBoundingClientRect();"
+            "const cr=copy ? copy.getBoundingClientRect() : null;"
+            "return JSON.stringify({present:true, overflowY: getComputedStyle(i).overflowY,"
+            " copyReachable: !!(cr && cr.top >= ir.top - 1 && cr.bottom <= ir.bottom + 1)});"
+        )
+        inspector_metrics = json.loads(inspector)
+        check(
+            'the facts panel does not hide the session id at 1024',
+            inspector_metrics.get('present') is True
+            and inspector_metrics.get('copyReachable') is True,
+            inspector,
+        )
+        brand = js(
+            "const m=document.querySelector('.cp-brand-mark');"
+            "return m ? JSON.stringify({scroll: m.scrollHeight, client: m.clientHeight}) : null;"
+        )
+        brand_metrics = json.loads(brand)
+        check(
+            'the k. brand mark stays inside its tile',
+            brand_metrics['scroll'] <= brand_metrics['client'] + 1,
+            brand,
+        )
+
         session.cdp('Emulation.clearDeviceMetricsOverride')
         time.sleep(0.3)
-        overflow = js(
-            "const el=document.querySelector('.control-plane.cp') || document.body;"
-            "return JSON.stringify({scroll: el.scrollWidth, client: el.clientWidth});"
-        )
+        overflow = no_overflow('.control-plane.cp')
         metrics = json.loads(overflow)
         check(
             'the plane does not overflow at 1280px',

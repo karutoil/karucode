@@ -12,6 +12,12 @@ import { CheckIcon, ChevronDownIcon, CpuIcon, SparkIcon } from './icons';
  * Both selectors write the *session's* model pin (`PATCH /api/sessions/:id/model`),
  * so two sessions can run different models and efforts at the same time. A
  * session without a pin follows — and displays — the install-wide default.
+ *
+ * They are mounted whenever a session is open. They used to be mounted only
+ * when the open session had a row in a session list, which made them blink out
+ * whenever a list snapshot had not caught up yet (a fresh control chat, a
+ * project-less session after a refresh). A control that comes and goes is not
+ * a control, so the gate is "a session is open", not "a list knows about it".
  */
 
 /** Reasoning efforts accepted by the server (`none` = reasoning off). */
@@ -64,19 +70,41 @@ function usePopover(open: boolean, close: () => void, root: { current: HTMLEleme
 /** Per-session model picker; opens upward from the composer. */
 export function ModelSwitcher(): JSX.Element | null {
   const config = store.config.value;
-  const session = store.activeSession.value;
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
   usePopover(open, () => setOpen(false), root);
 
-  if (!config || !session || config.providers.length === 0) return null;
+  // A session is open: the pills stay mounted, whether or not the session
+  // happens to have a row in a list right now.
+  if (!config || store.currentSessionId.value === null || config.providers.length === 0) return null;
   const { providerId, modelId, pinned, effort } = effectiveSelection();
-  if (!providerId) return null;
 
-  const provider = config.providers.find((profile) => profile.id === providerId) ?? null;
+  const provider = providerId ? config.providers.find((profile) => profile.id === providerId) ?? null : null;
   const entry = provider?.models.find((model) => model.id === modelId);
-  const label = entry?.name?.trim() ? entry.name : (modelId ?? 'No model');
+  // No model at all is a real state (a fresh install with no provider models),
+  // and it is drawn as an honest placeholder rather than an empty button.
+  //
+  // A pin can also go stale: the profile or the model it names was removed in
+  // Settings, so the server falls back to the install default while the session
+  // row still carries the pin. Saying "this session" about that is a lie, so it
+  // is drawn as unavailable instead - still mounted, still repairable from here.
+  const dangling = Boolean(
+    pinned && (!provider || (provider.models.length > 0 && !entry)),
+  );
+  const resolved = Boolean(provider && modelId) && !dangling;
+  const label = resolved
+    ? (entry?.name?.trim() ? entry.name : (modelId as string))
+    : dangling
+      ? (modelId ?? '—')
+      : '—';
+  const providerLabel = dangling ? 'unavailable' : (provider?.name ?? providerId ?? 'No provider');
+  const title = dangling
+    ? `Pinned to ${providerId ?? '?'} / ${modelId ?? '?'}, which is no longer available — this session will use the install default. Switch model`
+    : resolved
+      ? `${providerLabel} · ${label} — switch model for this session`
+      : 'No model configured yet';
+  const pinSuffix = dangling ? ' · unavailable' : pinned ? ' · this session' : '';
 
   const choose = async (nextProviderId: string, nextModelId: string): Promise<void> => {
     if (nextProviderId === providerId && nextModelId === modelId) {
@@ -111,15 +139,15 @@ export function ModelSwitcher(): JSX.Element | null {
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        title={`${provider?.name ?? providerId} · ${label} — switch model for this session`}
-        aria-label={`Model for this session: ${label} on ${provider?.name ?? providerId}. Switch model`}
+        title={title}
+        aria-label={`Model for this session: ${label} on ${providerLabel}. Switch model`}
       >
         <span class="model-switcher-text">
           <CpuIcon size={13} />
           <span class="model-switcher-model">{label}</span>
           <span class="model-switcher-provider">
-            {provider?.name ?? providerId}
-            {pinned ? ' · this session' : ''}
+            {providerLabel}
+            {pinSuffix}
           </span>
         </span>
         <ChevronDownIcon size={12} class="down" />
@@ -206,18 +234,23 @@ export function ModelSwitcher(): JSX.Element | null {
 /** Per-session reasoning effort picker; hidden when the model cannot reason. */
 export function ReasoningSelector(): JSX.Element | null {
   const config = store.config.value;
-  const session = store.activeSession.value;
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   usePopover(open, () => setOpen(false), root);
 
-  if (!config || !session || config.providers.length === 0) return null;
+  // Same gate as the model picker: a session is open, so the picker is there.
+  if (!config || store.currentSessionId.value === null || config.providers.length === 0) return null;
   const { providerId, modelId, pinned, effort } = effectiveSelection();
-  if (!providerId || !modelId) return null;
 
-  const provider = config.providers.find((profile) => profile.id === providerId) ?? null;
+  // The capability is looked up through the config, not through the session
+  // row: the row may not exist, and the picker must not come and go with it.
+  const provider = providerId ? config.providers.find((profile) => profile.id === providerId) ?? null : null;
   const entry = provider?.models.find((model) => model.id === modelId);
+  // A pin whose profile or model was removed in Settings cannot be run, so its
+  // effort is not a choice: the picker stays mounted (a control that vanishes is
+  // worse) but says so and refuses to write a pin the server would reject.
+  const dangling = Boolean(pinned && (!provider || (provider.models.length > 0 && !entry)));
   // models.dev's `reasoning: false` is a positive "cannot reason"; unknown
   // (null) stays selectable and the endpoint validates at run time.
   if (entry?.reasoning === false) return null;
@@ -233,6 +266,11 @@ export function ReasoningSelector(): JSX.Element | null {
     }
     if (nextEffort === null && !pinned) {
       // Already following the install default with no override: nothing to do.
+      setOpen(false);
+      return;
+    }
+    if (dangling || !providerId || !modelId) {
+      // No usable model to pin the effort to: the server would refuse the patch.
       setOpen(false);
       return;
     }
@@ -253,12 +291,22 @@ export function ReasoningSelector(): JSX.Element | null {
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        title="Reasoning effort for this session"
+        disabled={dangling}
+        title={dangling
+          ? 'This session is pinned to a model that is no longer available; its effort cannot be changed until you pick a model.'
+          : 'Reasoning effort for this session'}
         aria-label={`Reasoning effort: ${current.label}. Change reasoning effort`}
       >
         <span class="model-switcher-text">
           <SparkIcon size={13} />
-          <span class="model-switcher-model">Reasoning: {current.label}</span>
+          <span class="model-switcher-model">
+            {/* The word is for a wide composer; on a phone the spark icon and the
+                effort name are what fit, and the full sentence stays in the
+                label and the tooltip. Hiding it in CSS keeps it readable rather
+                than ellipsised to "Rea…". */}
+            <span class="reasoning-prefix">Reasoning: </span>
+            {current.label}
+          </span>
         </span>
         <ChevronDownIcon size={12} class="down" />
       </button>
@@ -294,8 +342,7 @@ export function ReasoningSelector(): JSX.Element | null {
 /** The composer's model row; renders nothing when no session is open. */
 export function ModelControls(): JSX.Element | null {
   const config = store.config.value;
-  const session = store.activeSession.value;
-  if (!config || !session || config.providers.length === 0) return null;
+  if (!config || store.currentSessionId.value === null || config.providers.length === 0) return null;
   return (
     <div class="composer-controls">
       <ModelSwitcher />
