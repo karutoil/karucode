@@ -27,8 +27,9 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`missions`](missions.md) | Group explicitly started project-local sessions across projects in durable missions. | `crates/kc-server/src/routes/missions.rs:3` |
 | [`notifications`](notifications.md) | karucode pings you when a run settles, parks on an approval or fails — with a sound per kind, desktop notifications, an unread badge, and four independent ways to turn it off. | `crates/kc-core/src/notify.rs:24` |
 | [`plugins`](plugins.md) | Build an out-of-process plugin that adds tools, hooks and inspector panels, register it, and debug it when it fails to start. | `crates/kc-plugin-sdk/src/lib.rs:49` |
+| [`project-instructions`](project-instructions.md) | How karucode finds a workspace's instructions file, which name wins, how much of it reaches the system prompt, and why it cannot override your request. | `crates/kc-core/src/prompt.rs:3` |
 | [`projects`](projects.md) | How projects map to directories, how sessions are confined to one, and what happens when a project's directory moves or is deleted. | `crates/kc-server/src/state.rs:6` |
-| [`prompt-cache`](prompt-cache.md) | Why a long run can re-bill its whole context every turn, what karucode does to keep the cached prefix stable, and how to read the hit rate. | `crates/kc-runtime/src/context.rs:46` |
+| [`prompt-cache`](prompt-cache.md) | Why a long run can re-bill its whole context every turn, what karucode does to keep the cached prefix stable, and how to read the hit rate. | `crates/kc-runtime/src/context.rs:89` |
 | [`provider-profiles`](provider-profiles.md) | Point karucode at any OpenAI-compatible endpoint, by environment or as named profiles, and choose the active model. | `crates/kc-provider/src/lib.rs:8` |
 | [`run-server`](run-server.md) | Build the UI and the binary, start it against a workspace, and know what each CLI flag and startup failure means. | `crates/kc-server/src/bootstrap.rs:8` |
 | [`security`](security.md) | What karucode protects by default, what it explicitly does not, and the recipe for safe remote access. | `crates/kc-server/src/app.rs:16` |
@@ -39,4 +40,4 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`tool-call-errors`](tool-call-errors.md) | A call that fails because of how it was written comes back with a working version of itself, so the next attempt is correct instead of another guess. | `crates/kc-core/src/tool.rs:1` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-23 topic(s).
+24 topic(s).

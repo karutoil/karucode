@@ -1,5 +1,5 @@
 {
-  "count": 23,
+  "count": 24,
   "generated_by": "cargo run -p kc-docs -- --write",
   "topics": [
     {
@@ -65,11 +65,13 @@
         "tool:read_file",
         "tool:list_dir",
         "tool:search_files",
+        "tool:glob",
         "tool:write_file",
         "tool:edit_file",
         "tool:run_command",
         "tool:git_status",
         "tool:git_diff",
+        "tool:git_log",
         "tool:karucode_docs",
         "tool:spawn_agent",
         "tool:spawn_agents",
@@ -83,6 +85,9 @@
         "tool:report_status",
         "route:POST /api/sessions/:id/rewind",
         "config:[limits]",
+        "config:limits.max_file_read_bytes",
+        "config:limits.search_max_results",
+        "config:limits.max_tool_output_bytes",
         "config:allow_temp_dir",
         "env:KARUCODE_ALLOW_TEMP_DIR",
         "config:[model]",
@@ -506,6 +511,7 @@
         "config:plugin_panels",
         "method:notify",
         "hook:on_notify",
+        "hook:before_prompt",
         "fn:PluginBuilder::panel",
         "fn:PluginBuilder::on_notify",
         "fn:notify"
@@ -525,6 +531,28 @@
         "notifications"
       ],
       "title": "Write and install a plugin"
+    },
+    {
+      "applies_to": [
+        "file:AGENTS.md",
+        "file:CLAUDE.md",
+        "file:.karucode/instructions.md",
+        "concept:system prompt",
+        "concept:project instructions"
+      ],
+      "path": "project-instructions.md",
+      "slug": "project-instructions",
+      "source": "crates/kc-core/src/prompt.rs:3",
+      "summary": "How karucode finds a workspace's instructions file, which name wins, how much of it reaches the system prompt, and why it cannot override your request.",
+      "tags": [
+        "agents.md",
+        "claude.md",
+        "instructions",
+        "prompt",
+        "workspace",
+        "conventions"
+      ],
+      "title": "Follow a project's own AGENTS.md instructions"
     },
     {
       "applies_to": [
@@ -558,16 +586,18 @@
     {
       "applies_to": [
         "config:limits.context_max_chars",
+        "config:limits.max_context_messages",
         "config:limits.max_tool_output_bytes",
         "config:limits.max_tool_calls_per_turn",
         "env:KARUCODE_CONTEXT_MAX_CHARS",
         "env:KARUCODE_MAX_TOOL_OUTPUT_BYTES",
         "route:GET /api/events",
-        "ui:ChatView"
+        "ui:ChatView",
+        "tool:note"
       ],
       "path": "prompt-cache.md",
       "slug": "prompt-cache",
-      "source": "crates/kc-runtime/src/context.rs:46",
+      "source": "crates/kc-runtime/src/context.rs:89",
       "summary": "Why a long run can re-bill its whole context every turn, what karucode does to keep the cached prefix stable, and how to read the hit rate.",
       "tags": [
         "cache",

@@ -1519,7 +1519,16 @@ impl PluginHooks {
 #[async_trait]
 impl kc_core::hooks::Hooks for PluginHooks {
     async fn before_prompt(&self, session_id: &str, workspace: &str) -> Vec<String> {
-        prompt_notes(&self.plugins, session_id, workspace).await
+        prompt_notes(&self.plugins, session_id, workspace, None).await
+    }
+
+    async fn before_prompt_for_turn(
+        &self,
+        session_id: &str,
+        workspace: &str,
+        turn: Option<&str>,
+    ) -> Vec<String> {
+        prompt_notes(&self.plugins, session_id, workspace, turn).await
     }
 
     async fn on_run_end(&self, session_id: &str, run_id: &str, status: &str) {
@@ -1562,7 +1571,16 @@ impl kc_core::hooks::NotificationObserver for PluginHooks {
 #[async_trait]
 impl kc_core::hooks::Hooks for PluginHost {
     async fn before_prompt(&self, session_id: &str, workspace: &str) -> Vec<String> {
-        prompt_notes(&self.ready_plugins(), session_id, workspace).await
+        prompt_notes(&self.ready_plugins(), session_id, workspace, None).await
+    }
+
+    async fn before_prompt_for_turn(
+        &self,
+        session_id: &str,
+        workspace: &str,
+        turn: Option<&str>,
+    ) -> Vec<String> {
+        prompt_notes(&self.ready_plugins(), session_id, workspace, turn).await
     }
 
     async fn on_run_end(&self, session_id: &str, run_id: &str, status: &str) {
@@ -1594,6 +1612,15 @@ impl kc_core::hooks::Hooks for PluginHost {
 pub(crate) const MAX_HOOK_NOTE_BYTES: usize = 4 * 1024;
 /// Largest total of all hook contributions injected into the system prompt.
 pub(crate) const MAX_HOOK_NOTES_BYTES: usize = 16 * 1024;
+/// Largest user turn forwarded in the `before_prompt` payload.
+///
+/// The turn is the user's own text and can be a pasted file, but a plugin's hook
+/// runs on **every** model call of the run: forwarding a megabyte per call would
+/// make the hook expensive in exactly the way it must not be. 4 KiB is enough to
+/// retrieve against (a question, a task, the head of a pasted log) and is the same
+/// cap a contribution has. A plugin that needs the whole conversation should call
+/// a tool instead.
+pub(crate) const MAX_HOOK_TURN_BYTES: usize = 4 * 1024;
 /// Marker appended to a contribution that was cut short.
 pub(crate) const TRUNCATION_MARKER: &str = " [… truncated]";
 
@@ -1610,15 +1637,37 @@ fn cap_text(text: &str, max: usize) -> (String, bool) {
     (format!("{}{TRUNCATION_MARKER}", &text[..end]), true)
 }
 
+/// Fan `before_prompt` out and collect the contributions for the prompt.
+///
+/// `turn` is the user message the run is answering. It is forwarded as a payload
+/// field so a plugin can retrieve against the question instead of memoising one
+/// static block per session; it is capped at [`MAX_HOOK_TURN_BYTES`] and omitted
+/// entirely when there is no turn, so a plugin that ignores the field sees the
+/// same payload it always did. Contributions still come back in **plugin order**
+/// (see [`fan_out`]): the text lands in the system prompt on every call, and an
+/// order that depended on which process answered first would rewrite message 0
+/// between turns.
 async fn prompt_notes(
     plugins: &[Arc<PluginShared>],
     session_id: &str,
     workspace: &str,
+    turn: Option<&str>,
 ) -> Vec<String> {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "session_id": session_id,
         "workspace": workspace,
     });
+    if let Some(turn) = turn {
+        let (text, cut) = cap_text(turn, MAX_HOOK_TURN_BYTES);
+        if cut {
+            debug!(
+                hook = hooks::BEFORE_PROMPT,
+                limit = MAX_HOOK_TURN_BYTES,
+                "the user turn forwarded to plugins was truncated"
+            );
+        }
+        payload["turn"] = Value::String(text);
+    }
     let mut out = Vec::new();
     let mut total = 0usize;
     for value in fan_out(plugins, hooks::BEFORE_PROMPT, &payload).await {

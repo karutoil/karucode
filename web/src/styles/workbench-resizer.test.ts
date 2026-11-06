@@ -10,10 +10,19 @@ describe('Workbench result resizing', () => {
   it('uses a fixed separator and right dock around a bounded flexible conversation', () => {
     expect(tokens).toMatch(/--workbench-resizer-w:\s*24px/);
     expect(workbench).toMatch(/\.center-body\.has-result \{[^}]*display:\s*flex;[^}]*flex-direction:\s*row;/s);
-    expect(workbench).toMatch(/> \.chat-panel \{[^}]*min-width:\s*330px;/s);
+    expect(workbench).toMatch(/> \.chat-panel \{\s*flex:\s*0\.72 1 0;[^}]*min-width:\s*330px;/s);
+    expect(workbench).toMatch(/style\*='--workbench-result-w'\] > \.chat-panel \{[^}]*flex:\s*1 1 0;/s);
     expect(workbench).toMatch(/\.result-resizer \{[^}]*flex:\s*0 0 var\(--workbench-resizer-w\);[^}]*margin-inline-start:\s*auto;/s);
     expect(workbench).toMatch(/style\*='--workbench-result-w'\] > \.inspector \{\s*flex:\s*0 0 var\(--workbench-result-w\);/);
     expect(workbench).toMatch(/\.result-resizer \{[^}]*cursor:\s*col-resize;[^}]*touch-action:\s*none;/s);
+  });
+
+  it('matches the resized transcript to the composer while keeping speakers distinct', () => {
+    const wide = workbench.slice(
+      workbench.indexOf('@container workbench (min-width: 1100.01px)'),
+      workbench.indexOf('@container workbench (max-width: 1100px)'),
+    );
+    expect(wide).toMatch(/\.chat-inner,\s*[^\{]*\.composer-inner \{[^}]*max-width:\s*var\(--content-max\);/s);
   });
 
   it('removes the separator from intermediate overlay and phone layouts', () => {

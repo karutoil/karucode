@@ -8,18 +8,20 @@
 // @kc-title: The built-in tools the agent can call
 // @kc-summary: What each first-party tool does, how it is gated, and the limits and gotchas that shape its output.
 // @kc-tags: tools, agent, files, search, shell, git
-// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:karucode_docs, tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, route:POST /api/sessions/:id/rewind, config:[limits], config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES
+// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:glob, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:git_log, tool:karucode_docs, tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, route:POST /api/sessions/:id/rewind, config:[limits], config:limits.max_file_read_bytes, config:limits.search_max_results, config:limits.max_tool_output_bytes, config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES
 //
 // | Tool | Class | Approval | What it does |
 // | --- | --- | --- | --- |
-// | `read_file` | read_only | none | UTF-8 text with numbered lines and a `path - lines A-B of N` header; `offset`/`limit` (default 400, max 2000 lines). `N` is the real line count of the whole file, even when `limits.max_file_read_bytes` cut the read short. A PNG/JPEG/GIF/WebP is attached as an image for a model that takes image input; a text-only model gets a refusal it can pass on |
+// | `read_file` | read_only | none | UTF-8 text with numbered lines and a `path - lines A-B of N` header; `offset`/`limit` (default 400, max 2000 lines). One call reads one file (`path`), several files (`paths`) or several windows of one file (`ranges`); a bad path or range is reported inline and the other reads still return. `limits.max_file_read_bytes` bounds the bytes one read *returns*, not the offsets it can reach, so any line of a huge file is readable. A PNG/JPEG/GIF/WebP given as `path` is attached as an image for a model that takes image input; a text-only model gets a refusal it can pass on |
 // | `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries; the walk stops at the cap and a truncated listing reports the total as a lower bound (`500+`) |
-// | `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`. The result cap is global across files, and long matching lines keep their first 300 characters in both engines |
+// | `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`, plus `path:line- text` context lines with `context`, or one path per line with `files_only`. The result cap is global across files, `max_matches_per_file` stops one noisy file spending it, and long matching lines keep their first 300 characters in both engines |
+// | `glob` | read_only | none | name-based finder (not a content search): a glob over the same `.gitignore`-aware walker the search fallback uses. Directories carry a trailing `/`; bounded at 200 paths and a truncated walk says so |
 // | `write_file` | mutating | policy | create/overwrite atomically, max 2 MiB per call; journals the previous bytes for a rewind |
 // | `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff; revalidates the file after approval and journals the previous bytes |
 // | `run_command` | shell | policy | `/bin/sh -c` in the workspace, incrementally UTF-8-decoded streamed output, timeout, own process group. On timeout or cancellation the whole group gets SIGTERM, then SIGKILL after a grace period, so a child that ignores SIGTERM cannot survive |
 // | `git_status` | read_only | none | branch + porcelain status for the workspace or a subdirectory, **confined to the workspace** |
 // | `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref, **confined to the workspace** (paths are workspace-relative) |
+// | `git_log` | read_only | none | bounded commit history: one line per commit (`sha date subject`), `max_count` default 20 and hard-capped at 200, optional `path` narrowing, **confined to the workspace** |
 // | `karucode_docs` | read_only | none | search and read karucode's own documentation (this system) |
 //
 // The delegate family - `spawn_agent`, `spawn_agents`, `send_message`,
@@ -37,7 +39,13 @@
 //
 // ```json
 // {"name": "read_file", "arguments": {"path": "src/main.rs", "offset": 120, "limit": 40}}
+// {"name": "read_file", "arguments": {"paths": ["Cargo.toml", "README.md"]}}
+// {"name": "read_file", "arguments": {"path": "src/lib.rs", "ranges": [{"offset": 1, "limit": 40}, {"offset": 900, "limit": 40}]}}
 // {"name": "search_files", "arguments": {"pattern": "fn main", "glob": "*.rs"}}
+// {"name": "search_files", "arguments": {"pattern": "spawn_agent", "context": 2, "max_matches_per_file": 5}}
+// {"name": "search_files", "arguments": {"pattern": "TODO", "files_only": true}}
+// {"name": "glob", "arguments": {"pattern": "*.toml"}}
+// {"name": "git_log", "arguments": {"path": "crates/kc-tools", "max_count": 10}}
 // {"name": "edit_file", "arguments": {"path": "a.txt", "old_string": "old", "new_string": "new"}}
 // ```
 //
@@ -80,28 +88,60 @@
 //   fallback walks lazily, observes cancellation during walking/reads, and skips
 //   files over 4 MiB; bounded reads cannot grow past that cap during the scan.
 // * `search_files` caps results globally, not per file, and both engines agree on
-//   the cap. A match on a very long line keeps its first 300 **characters** rather
-//   than being replaced by a placeholder; the cap is counted in characters, not
-//   bytes, so a line of multi-byte text is cut in the same place by both engines
-//   (ripgrep's own `--max-columns` counts bytes, so it is set wide enough that our
-//   character cap is the one that decides). A path containing `:` is reported
-//   correctly: ripgrep is asked for `--null` records.
+//   the cap. `max_matches_per_file` adds a per-file cap on top, so one noisy file
+//   cannot spend the whole global budget; `0` (the default) leaves only the
+//   global cap. `context` (N lines before *and* after each match, like `grep -C`)
+//   is reported as `path:line- text` so a context line is never mistaken for the
+//   matching line, and it is capped at 10 lines. `files_only` returns the
+//   distinct paths that matched, one per line, like `grep -l`; `context` has no
+//   meaning there and is ignored. Both engines produce the **same shape** for
+//   all three - the crate's promise is that the model cannot tell them apart
+//   except by the engine label in the header.
+// * `search_files` keeps the first 300 **characters** of a very long matching
+//   line rather than replacing it with a placeholder; the cap is counted in
+//   characters, not bytes, so a line of multi-byte text is cut in the same place
+//   by both engines (ripgrep's own `--max-columns` counts bytes, so it is set
+//   wide enough that our character cap is the one that decides). A path
+//   containing `:` is reported correctly: ripgrep is asked for `--null` records.
+// * `glob` matches an entry's file name, its path relative to `path` and its
+//   workspace-relative path, so `*.rs`, `src/**/*.rs` and `crates/*/src/lib.rs`
+//   all work. It lists directories too, with a trailing `/`, and its walk stops
+//   at 200 paths (the note says the cap cut it). Read-only, no approval.
 // * `run_command` reports a **success** when the command exits 0 and leaves a
 //   child running in the background (`build & exit 0`) instead of waiting for that
 //   child to close the output pipes. The result says the output may be incomplete
 //   and `background_output` is set in the metadata.
 // * On Unix, backslashes in filenames are literal characters, including in tool
 //   metadata and rewind checkpoint keys; they are not rewritten as `/` separators.
-// * A narrowed `git_status`/`git_diff` path also accepts a deleted tracked file
-//   (or one whose parent directory was deleted). The path is checked lexically and
-//   through its deepest existing ancestor, so symlink escapes are still refused.
+// * A narrowed `git_status`/`git_diff`/`git_log` path also accepts a deleted
+//   tracked file (or one whose parent directory was deleted). The path is checked
+//   lexically and through its deepest existing ancestor, so symlink escapes are
+//   still refused.
 // * `read_file` reports the file's real line count in its header even when the
-//   byte cap truncated the content; when the byte cap (not the line window) ended
-//   the read, there is no "continue with offset" hint, because those lines cannot
-//   be reached without raising `limits.max_file_read_bytes`.
+//   byte cap truncated the content. The cap bounds the bytes *returned* by one
+//   read, not the offsets that can be asked for: an `offset` past what
+//   `limits.max_file_read_bytes` covers is reached by streaming forward to that
+//   window (bounded work, cancellable), so a 400 KB file is readable at line 9 000
+//   without raising the limit or shelling out to `sed`. A window cut by the byte
+//   cap - not by `limit` and not by the end of the file - carries the cap note and
+//   no "continue with offset" hint, because that hint would promise lines the same
+//   cap cannot return; ask for the next window explicitly instead.
+// * A batched `read_file` (`paths` or `ranges`) divides `limits.max_tool_output_bytes`
+//   across its sections, so a wide batch still shows every file's header and first
+//   lines instead of returning one file in full. Up to 32 reads are attempted per
+//   call; a larger request is cut and says how many were dropped. A failed entry
+//   keeps its place in the result as `[error: ...]` and the others still return -
+//   `ok: false` is reported only when *every* read failed. Images are only
+//   attached for a single `path`, so read an image on its own.
 // * Binary files are refused by `read_file` instead of being rendered as noise:
-//   the check covers the whole window that would be returned, so a NUL deep in a
-//   large file cannot reach the model as U+0000.
+//   the check covers the whole window that would be returned, and the offset in
+//   the message is the byte offset in the file, even for a far window; so a NUL
+//   deep in a large file cannot reach the model as U+0000.
+// * `git_log` runs with the same hardened config as `git_status`/`git_diff` and
+//   additionally disables signature display, because showing a signature runs the
+//   repository's own `gpg` program. It prints `sha date subject` per commit and
+//   requests one extra commit so a "showing the latest N" note is a fact rather
+//   than a guess.
 //
 // # Scratch space: the temp directory
 //
@@ -312,117 +352,429 @@ async fn gate(
 
 pub struct ReadFile;
 
+/// How many separate reads one `read_file` call may ask for.
+///
+/// A batch is not refused for being large; it is cut and says so. The cap exists
+/// so one call cannot ask the filesystem for a thousand files.
+const MAX_MULTI_READS: usize = 32;
+
+/// One requested read of one file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileRead {
+    path: String,
+    offset: Option<u64>,
+    limit: Option<u64>,
+}
+
+/// What a batch entry produced: the rendered read, or the reason it could not be
+/// read. One bad path never discards the good ones.
+enum ReadEntry {
+    Read {
+        /// The path as the caller wrote it, for the section separator.
+        path: String,
+        rendered: file_ops::Rendered,
+    },
+    Failed {
+        label: String,
+        message: String,
+    },
+}
+
+/// One entry of the parsed request: a read to perform, or an entry that is
+/// malformed (a `paths` element that is not a string, a range with an unknown
+/// key). A malformed entry keeps its place in the result instead of failing the
+/// whole call.
+enum PlannedRead {
+    Read(FileRead),
+    Bad { label: String, message: String },
+}
+
+/// One `read_file` call, parsed.
+struct ReadPlan {
+    reads: Vec<PlannedRead>,
+    /// True when the caller used `paths`/`ranges`, so the batch result shape is
+    /// kept even for a single entry.
+    batch: bool,
+    /// Reads the per-call cap dropped.
+    dropped: usize,
+}
+
+/// Parse `path` / `paths` / `ranges` into the reads the call asked for.
+///
+/// `Err` is a usage failure at the top level (two shapes at once, an empty list,
+/// no shape at all): it is not clear what was asked, so there is nothing to
+/// report "inline and continue" with. A single bad *entry* is a
+/// [`PlannedRead::Bad`] and does not disturb its neighbours.
+fn parse_reads(arguments: &serde_json::Value) -> std::result::Result<ReadPlan, String> {
+    let offset = arguments.get("offset").and_then(|v| v.as_u64());
+    let limit = arguments.get("limit").and_then(|v| v.as_u64());
+    let single = arguments.get("path").and_then(|v| v.as_str());
+    let paths = arguments.get("paths").filter(|v| !v.is_null());
+    let ranges = arguments.get("ranges").filter(|v| !v.is_null());
+
+    let mut reads = Vec::new();
+    let batch = paths.is_some() || ranges.is_some();
+
+    if let Some(paths) = paths {
+        if single.is_some() {
+            return Err(
+                "read_file takes either `path` (one file) or `paths` (several files), not both"
+                    .into(),
+            );
+        }
+        if ranges.is_some() {
+            return Err(
+                "read_file takes either `paths` (several files) or `path` + `ranges` (several \
+                 windows of one file), not both"
+                    .into(),
+            );
+        }
+        let Some(items) = paths.as_array() else {
+            return Err("`paths` must be an array of path strings".into());
+        };
+        if items.is_empty() {
+            return Err("`paths` is empty; name at least one file".into());
+        }
+        for (i, item) in items.iter().enumerate() {
+            let label = format!("paths[{i}]");
+            match item.as_str().filter(|p| !p.trim().is_empty()) {
+                Some(path) => reads.push(PlannedRead::Read(FileRead {
+                    path: path.to_string(),
+                    offset,
+                    limit,
+                })),
+                None => reads.push(PlannedRead::Bad {
+                    label,
+                    message: "this entry is not a non-empty path string".into(),
+                }),
+            }
+        }
+    } else if let Some(ranges) = ranges {
+        let Some(path) = single else {
+            return Err(
+                "`ranges` applies to one file: give `path` as well, e.g. {\"path\":\"a.rs\",\
+                 \"ranges\":[{\"offset\":1,\"limit\":40},{\"offset\":800,\"limit\":40}]}"
+                    .into(),
+            );
+        };
+        let Some(items) = ranges.as_array() else {
+            return Err("`ranges` must be an array of {\"offset\", \"limit\"} objects".into());
+        };
+        if items.is_empty() {
+            return Err("`ranges` is empty; give at least one {\"offset\", \"limit\"}".into());
+        }
+        for (i, item) in items.iter().enumerate() {
+            let label = format!("{path} (range {i})");
+            let Some(object) = item.as_object() else {
+                reads.push(PlannedRead::Bad {
+                    label,
+                    message: "this range is not an object like {\"offset\": 1, \"limit\": 40}"
+                        .into(),
+                });
+                continue;
+            };
+            if let Some(key) = object
+                .keys()
+                .find(|key| *key != "offset" && *key != "limit")
+            {
+                reads.push(PlannedRead::Bad {
+                    label,
+                    message: format!(
+                        "this range has an unknown key `{key}`; a range is {{\"offset\", \"limit\"}}"
+                    ),
+                });
+                continue;
+            }
+            reads.push(PlannedRead::Read(FileRead {
+                path: path.to_string(),
+                offset: object.get("offset").and_then(|v| v.as_u64()).or(offset),
+                limit: object.get("limit").and_then(|v| v.as_u64()).or(limit),
+            }));
+        }
+    } else if let Some(path) = single {
+        reads.push(PlannedRead::Read(FileRead {
+            path: path.to_string(),
+            offset,
+            limit,
+        }));
+    }
+
+    if reads.is_empty() {
+        return Err(
+            "read_file needs `path` (one file), `paths` (several files) or `path` + `ranges` \
+             (several windows of one file)"
+                .into(),
+        );
+    }
+    // A request wider than the cap is cut and says so, rather than refused.
+    let dropped = reads.len().saturating_sub(MAX_MULTI_READS);
+    reads.truncate(MAX_MULTI_READS);
+    Ok(ReadPlan {
+        reads,
+        batch,
+        dropped,
+    })
+}
+
 #[async_trait]
 impl Tool for ReadFile {
     fn spec(&self) -> ToolSpec {
         spec(
             "read_file",
-            "Read a file inside the workspace. Text comes back as numbered lines with a \
-             `path — lines A-B of N (bytes)` header (use offset/limit for large files: default \
-             400 lines, max 2000). An image (PNG/JPEG/GIF/WebP) is attached for a model that \
-             accepts image input; on a text-only model it is refused with an explanation, as are \
-             binary files and image formats vision APIs do not accept. Output is capped by the \
-             configured tool-output limit.",
+            "Read one file, several files, or several windows of one file, inside the workspace. \
+             Text comes back as numbered lines with a `path — lines A-B of N (bytes)` header (use \
+             offset/limit for large files: default 400 lines, max 2000). Any line of a large file \
+             is reachable: `limits.max_file_read_bytes` bounds the bytes *returned* by one read, \
+             not the offsets you can ask for. `paths` reads several files in one call and \
+             `ranges` reads several windows of `path`; a bad path or range is reported inline and \
+             the other reads still return. An image (PNG/JPEG/GIF/WebP) passed as `path` is \
+             attached for a model that accepts image input; on a text-only model it is refused \
+             with an explanation, as are binary files and image formats vision APIs do not \
+             accept. Output is capped by the configured tool-output limit.",
             json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative path"},
-                    "offset": {"type": "integer", "description": "1-based first line to return"},
-                    "limit": {"type": "integer", "description": "Max lines to return (default 400, max 2000)"}
-                },
-                "required": ["path"]
+                    "path": {"type": "string", "description": "Workspace-relative path (one file)"},
+                    "offset": {"type": "integer", "description": "1-based first line to return (default 1)"},
+                    "limit": {"type": "integer", "description": "Max lines to return per read (default 400, max 2000)"},
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Several files in one call, each read with `offset`/`limit`"
+                    },
+                    "ranges": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "offset": {"type": "integer"},
+                                "limit": {"type": "integer"}
+                            }
+                        },
+                        "description": "Several windows of `path`: [{\"offset\": 1, \"limit\": 40}, …]"
+                    }
+                }
             }),
         )
     }
 
     async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
-        let path = match request.arg_str("path") {
-            Ok(p) => p,
-            Err(e) => return ToolOutcome::err(e.to_string()),
+        let plan = match parse_reads(&request.arguments) {
+            Ok(plan) => plan,
+            Err(message) => return ToolOutcome::err(message),
         };
-        let offset = request.opt_u64("offset");
-        let limit = request.opt_u64("limit");
         let limits = ctx.limits().await;
+        let (reads, batch, dropped) = (plan.reads, plan.batch, plan.dropped);
 
-        // An image is not text. Classify it first: a vision model gets the pixels,
-        // a text-only model gets a refusal it can pass on instead of a guess.
-        match file_ops::probe_image(&ctx.workspace, path) {
-            Ok(file_ops::ImageProbe::Vision {
-                rel,
-                media_type,
-                size,
-            }) => {
-                if !ctx.supports_images {
+        // An image is not text. Classify the single-file form first: a vision model
+        // gets the pixels, a text-only model gets a refusal it can pass on. A batch
+        // is text-only - attaching several images would ignore the per-call cap.
+        if !batch {
+            let path = match reads.first() {
+                Some(PlannedRead::Read(request)) => request.path.as_str(),
+                // A malformed single entry is reported by the read loop below.
+                Some(PlannedRead::Bad { .. }) | None => "",
+            };
+            match file_ops::probe_image(&ctx.workspace, path) {
+                Ok(file_ops::ImageProbe::Vision {
+                    rel,
+                    media_type,
+                    size,
+                }) => {
+                    if !ctx.supports_images {
+                        return ToolOutcome::err(format!(
+                            "`{rel}` is an image ({media_type}, {}). The active model cannot see images \
+                             (model.supports_images is off), so read_file cannot show it to you. Tell \
+                             the user plainly that you cannot view images, and that they can describe it, \
+                             or switch to a vision-capable model (model.supports_images = true, or \
+                             vision = true on the model's provider entry) and ask again.",
+                            file_ops::format_size(size)
+                        ));
+                    }
+                    return match file_ops::read_image(
+                        &ctx.workspace,
+                        path,
+                        media_type,
+                        limits.max_image_read_bytes,
+                    ) {
+                        Ok(image) => {
+                            let text = format!(
+                                "{rel} — {media_type} ({})\n[the image itself is attached to this result: look \
+                                 at it directly, there is no text to read]",
+                                file_ops::format_size(size)
+                            );
+                            ToolOutcome::ok(text)
+                                .with_images(vec![image])
+                                .with_meta(json!({
+                                    "path": rel,
+                                    "media_type": media_type,
+                                    "bytes": size,
+                                    "image": true,
+                                }))
+                        }
+                        Err(e) => ToolOutcome::err(e.to_string()),
+                    };
+                }
+                Ok(file_ops::ImageProbe::Unsupported {
+                    rel,
+                    media_type,
+                    size,
+                }) => {
                     return ToolOutcome::err(format!(
-                        "`{rel}` is an image ({media_type}, {}). The active model cannot see images \
-                         (model.supports_images is off), so read_file cannot show it to you. Tell \
-                         the user plainly that you cannot view images, and that they can describe it, \
-                         or switch to a vision-capable model (model.supports_images = true, or \
-                         vision = true on the model's provider entry) and ask again.",
-                        file_ops::format_size(size)
+                        "`{rel}` is a {media_type} image ({}), a format the vision APIs do not accept, \
+                         so read_file cannot attach it. Convert it first - e.g. run_command with \
+                         `magick '{rel}' out.png` or `ffmpeg -i '{rel}' out.png` - then read the \
+                         converted file. Accepted formats: {}.",
+                        file_ops::format_size(size),
+                        file_ops::VISION_MEDIA_TYPES.join(", ")
                     ));
                 }
-                return match file_ops::read_image(
-                    &ctx.workspace,
-                    path,
-                    media_type,
-                    limits.max_image_read_bytes,
-                ) {
-                    Ok(image) => {
-                        let text = format!(
-                            "{rel} — {media_type} ({})\n[the image itself is attached to this result: look \
-                             at it directly, there is no text to read]",
-                            file_ops::format_size(size)
-                        );
-                        ToolOutcome::ok(text)
-                            .with_images(vec![image])
-                            .with_meta(json!({
-                                "path": rel,
-                                "media_type": media_type,
-                                "bytes": size,
-                                "image": true,
-                            }))
-                    }
-                    Err(e) => ToolOutcome::err(e.to_string()),
-                };
+                // Not an image, or a path error the text read reports precisely.
+                Ok(file_ops::ImageProbe::NotAnImage) | Err(_) => {}
             }
-            Ok(file_ops::ImageProbe::Unsupported {
-                rel,
-                media_type,
-                size,
-            }) => {
-                return ToolOutcome::err(format!(
-                    "`{rel}` is a {media_type} image ({}), a format the vision APIs do not accept, \
-                     so read_file cannot attach it. Convert it first - e.g. run_command with \
-                     `magick '{rel}' out.png` or `ffmpeg -i '{rel}' out.png` - then read the \
-                     converted file. Accepted formats: {}.",
-                    file_ops::format_size(size),
-                    file_ops::VISION_MEDIA_TYPES.join(", ")
-                ));
-            }
-            // Not an image, or a path error the text read reports precisely.
-            Ok(file_ops::ImageProbe::NotAnImage) | Err(_) => {}
         }
 
-        // The file is read and (when the byte cap cut it) scanned to count lines:
-        // blocking work that must not run on a runtime worker.
-        let rendered = match blocking("read_file", &ctx.cancel, {
+        // Each file is read and (when the byte cap cut it) scanned to count lines:
+        // blocking work that must not run on a runtime worker. One read failing
+        // must not discard the ones that worked.
+        let entries = match blocking("read_file", &ctx.cancel, {
             let ws = ctx.workspace.clone();
-            let path = path.to_string();
+            let cancel = ctx.cancel.clone();
             let max_bytes = limits.max_file_read_bytes;
-            move || file_ops::read_file(&ws, &path, offset, limit, max_bytes)
+            move || {
+                let mut out = Vec::with_capacity(reads.len());
+                for planned in reads {
+                    let request = match planned {
+                        PlannedRead::Read(request) => request,
+                        // A malformed entry keeps its place and is not attempted.
+                        PlannedRead::Bad { label, message } => {
+                            out.push(ReadEntry::Failed { label, message });
+                            continue;
+                        }
+                    };
+                    if cancel.is_cancelled() {
+                        out.push(ReadEntry::Failed {
+                            label: request.path,
+                            message: "cancelled before this read started".into(),
+                        });
+                        continue;
+                    }
+                    match file_ops::read_file_cancellable(
+                        &ws,
+                        &request.path,
+                        request.offset,
+                        request.limit,
+                        max_bytes,
+                        &cancel,
+                    ) {
+                        Ok(rendered) => out.push(ReadEntry::Read {
+                            path: request.path,
+                            rendered,
+                        }),
+                        Err(kc_core::Error::Cancelled) => out.push(ReadEntry::Failed {
+                            label: request.path,
+                            message: "cancelled during this read".into(),
+                        }),
+                        Err(e) => out.push(ReadEntry::Failed {
+                            label: request.path,
+                            message: e.to_string(),
+                        }),
+                    }
+                }
+                Ok(out)
+            }
         })
         .await
         {
             Err(refusal) => return refusal,
             Ok(Err(e)) => return ToolOutcome::err(e.to_string()),
-            Ok(Ok(rendered)) => rendered,
+            Ok(Ok(entries)) => entries,
         };
-        let (text, cut) = truncate_output(&rendered.text, limits.max_tool_output_bytes);
-        ToolOutcome::ok(text)
-            .truncated(cut || rendered.truncated)
-            .with_meta(rendered.meta)
+
+        if !batch {
+            return match entries.into_iter().next() {
+                Some(ReadEntry::Read { rendered, .. }) => {
+                    let (text, cut) = truncate_output(&rendered.text, limits.max_tool_output_bytes);
+                    ToolOutcome::ok(text)
+                        .truncated(cut || rendered.truncated)
+                        .with_meta(rendered.meta)
+                }
+                Some(ReadEntry::Failed { message, .. }) => ToolOutcome::err(message),
+                None => ToolOutcome::err("read_file read nothing"),
+            };
+        }
+        render_batch(entries, dropped, limits.max_tool_output_bytes)
     }
+}
+
+/// Join several reads into one result: a separator naming the path, the read's
+/// own header and numbered lines, then the next. A failed entry keeps its place
+/// with the reason, so the model can fix just that one.
+///
+/// The per-call byte cap is divided across the sections *before* anything is
+/// rendered, because a first-come-first-served cap would return the first file
+/// in full and drop the rest - the batch would then be no better than a single
+/// read. The division is recomputed from what is left as each section is written,
+/// so the finished text fits the cap without the final head+tail cut removing a
+/// section in the middle.
+fn render_batch(entries: Vec<ReadEntry>, dropped: usize, max_bytes: usize) -> ToolOutcome {
+    let mut text = String::new();
+    let mut reads = Vec::with_capacity(entries.len());
+    let mut failures = 0usize;
+    let mut any_truncated = false;
+    let total = entries.len();
+    // Reserve the truncation note up front: the last file must not push it out.
+    let mut remaining = max_bytes.saturating_sub(if dropped > 0 { 160 } else { 0 });
+    for (i, entry) in entries.iter().enumerate() {
+        let newline = usize::from(i > 0);
+        let before = text.len();
+        let header = match entry {
+            ReadEntry::Read { path, .. } => format!("--- {path} ---\n"),
+            ReadEntry::Failed { label, .. } => format!("--- {label} ---\n"),
+        };
+        if newline == 1 {
+            text.push('\n');
+        }
+        // The separator and the numbered header are part of the cost of this
+        // section; they are subtracted before the budget is divided so four
+        // sections plus four separators still fit the call's cap exactly.
+        let overhead = newline + header.len();
+        let share = remaining.saturating_sub(overhead) / (total - i).max(1);
+        text.push_str(&header);
+        match entry {
+            ReadEntry::Read { rendered, .. } => {
+                let (body, cut) = truncate_output(&rendered.text, share.max(1));
+                any_truncated |= cut;
+                text.push_str(&body);
+                reads.push(rendered.meta.clone());
+            }
+            ReadEntry::Failed { label, message } => {
+                failures += 1;
+                text.push_str(&format!("[error: {message}]"));
+                reads.push(json!({"path": label, "error": message}));
+            }
+        }
+        remaining = remaining.saturating_sub(text.len() - before);
+    }
+    if failures == entries.len() {
+        // Nothing worked: a failure, not a success with notes in it.
+        return ToolOutcome::err(text);
+    }
+    if dropped > 0 {
+        text.push_str(&format!(
+            "\n\n[note: {dropped} more read(s) were not attempted; read_file takes at most \
+             {MAX_MULTI_READS} per call]"
+        ));
+    }
+    let (text, cut) = truncate_output(&text, max_bytes);
+    ToolOutcome::ok(text)
+        .truncated(cut || any_truncated)
+        .with_meta(json!({
+            "reads": reads,
+            "read_count": total,
+            "failed_count": failures,
+            "dropped_count": dropped,
+        }))
 }
 
 pub struct ListDir;
@@ -478,8 +830,11 @@ impl Tool for SearchFiles {
         spec(
             "search_files",
             "Search file contents. Uses ripgrep when installed and falls back to a built-in regex \
-             walker (both honour .gitignore). Returns `path:line: text` matches and reports which \
-             engine ran; results are bounded by the configured search limit.",
+             walker (both honour .gitignore) and both return exactly the same shape. Returns \
+             `path:line: text` matches; `context` adds the `N` lines either side of each match as \
+             `path:line- text`, `files_only` returns just the distinct paths that matched, and \
+             `max_matches_per_file` stops one noisy file from spending the whole result cap. \
+             Results are bounded by the configured search limit.",
             json!({
                 "type": "object",
                 "properties": {
@@ -487,7 +842,10 @@ impl Tool for SearchFiles {
                     "path": {"type": "string", "description": "Workspace-relative file or directory (default '.')"},
                     "glob": {"type": "string", "description": "Optional glob filter, e.g. *.rs"},
                     "max_results": {"type": "integer", "description": "Cap on returned matches"},
-                    "case_sensitive": {"type": "boolean", "description": "Default true"}
+                    "case_sensitive": {"type": "boolean", "description": "Default true"},
+                    "context": {"type": "integer", "description": "Lines of context before and after each match, like grep -C (default 0, max 10)"},
+                    "files_only": {"type": "boolean", "description": "Return distinct matching paths instead of lines, like grep -l"},
+                    "max_matches_per_file": {"type": "integer", "description": "Cap on matches reported per file (default 0 = only the global cap)"}
                 },
                 "required": ["pattern"]
             }),
@@ -507,28 +865,56 @@ impl Tool for SearchFiles {
             .opt_u64("max_results")
             .unwrap_or(limits.search_max_results as u64);
         let max_results = requested.min(limits.search_max_results as u64).max(1) as usize;
+        let context = request
+            .opt_u64("context")
+            .unwrap_or(0)
+            .min(search::MAX_CONTEXT_LINES as u64) as usize;
+        let files_only = request.opt_bool("files_only").unwrap_or(false);
+        let per_file = request
+            .opt_u64("max_matches_per_file")
+            .unwrap_or(0)
+            .min(max_results as u64) as usize;
         let query = search::SearchQuery {
             pattern: pattern.to_string(),
             path: request.opt_str("path").unwrap_or(".").to_string(),
             glob: request.opt_str("glob").map(|g| g.to_string()),
             case_insensitive: !request.opt_bool("case_sensitive").unwrap_or(true),
             max_results,
+            context,
+            files_only,
+            max_matches_per_file: per_file,
         };
 
         match search::search(&ctx.workspace, &query, &ctx.cancel).await {
             Ok(result) => {
-                let mut text = format!(
-                    "{} match(es) for pattern {:?} in `{}` (engine: {}, cap {})\n\n{}",
-                    result.matches.len(),
+                let mut header = format!(
+                    "{} match(es) for pattern {:?} in `{}` (engine: {}, cap {})",
+                    result.matched,
                     query.pattern,
                     query.path,
                     result.engine.label(),
-                    max_results,
-                    result.body()
+                    max_results
                 );
+                if files_only {
+                    header = format!(
+                        "{} file(s) matching pattern {:?} in `{}` (engine: {}, cap {})",
+                        result.matched,
+                        query.pattern,
+                        query.path,
+                        result.engine.label(),
+                        max_results
+                    );
+                } else if context > 0 {
+                    header.push_str(&format!(", {context} line(s) of context"));
+                }
+                if per_file > 0 {
+                    header.push_str(&format!(", max {per_file} match(es) per file"));
+                }
+                let mut text = format!("{header}\n\n{}", result.body());
                 if result.hit_limit {
+                    let what = if files_only { "file" } else { "match" };
                     text.push_str(&format!(
-                        "\n\n[hit the {max_results}-match cap; narrow the pattern, add a glob or \
+                        "\n\n[hit the {max_results}-{what} cap; narrow the pattern, add a glob or \
                          raise limits.search_max_results]"
                     ));
                 }
@@ -540,7 +926,12 @@ impl Tool for SearchFiles {
                     .truncated(cut || result.hit_limit)
                     .with_meta(json!({
                         "engine": result.engine.label(),
-                        "matches": result.matches.len(),
+                        "matches": result.matched,
+                        "lines": result.matches.len(),
+                        "files": result.files().len(),
+                        "files_only": files_only,
+                        "context": context,
+                        "max_matches_per_file": per_file,
                         "hit_limit": result.hit_limit,
                         "pattern": query.pattern,
                         "path": query.path,
@@ -549,6 +940,60 @@ impl Tool for SearchFiles {
             Err(kc_core::Error::Cancelled) => ToolOutcome::err("search cancelled"),
             Err(e) => ToolOutcome::err(e.to_string()),
         }
+    }
+}
+
+pub struct Glob;
+
+#[async_trait]
+impl Tool for Glob {
+    fn spec(&self) -> ToolSpec {
+        spec(
+            "glob",
+            "Find files and directories by name with a glob. This is the name-based finder (not a \
+             content search): it is `.gitignore`-aware and skips `.git`/`node_modules`. The pattern \
+             is matched against each entry's file name, its path relative to `path` and its \
+             workspace-relative path, so `*.rs`, `src/**/*.rs` and `crates/*/src/lib.rs` all work. \
+             Directories are listed with a trailing `/`. Bounded at 200 paths, and a truncated \
+             result says the walk stopped at the cap. Read-only, no approval.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Glob for a name or path, e.g. *.rs or src/**/*.rs"},
+                    "path": {"type": "string", "description": "Workspace-relative directory to search under (default '.')"},
+                    "max_results": {"type": "integer", "description": "Cap on returned paths (default 200, max 200)"}
+                },
+                "required": ["pattern"]
+            }),
+        )
+    }
+
+    async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        let pattern = match request.arg_str("pattern") {
+            Ok(pattern) => pattern.to_string(),
+            Err(e) => return ToolOutcome::err(e.to_string()),
+        };
+        let path = request.opt_str("path").unwrap_or(".").to_string();
+        let max = request
+            .opt_u64("max_results")
+            .unwrap_or(file_ops::MAX_GLOB_ENTRIES as u64)
+            .clamp(1, file_ops::MAX_GLOB_ENTRIES as u64) as usize;
+        let limits = ctx.limits().await;
+        let rendered = match blocking("glob", &ctx.cancel, {
+            let ws = ctx.workspace.clone();
+            let path = path.clone();
+            move || file_ops::glob(&ws, &pattern, &path, max)
+        })
+        .await
+        {
+            Err(refusal) => return refusal,
+            Ok(Err(e)) => return ToolOutcome::err(e.to_string()),
+            Ok(Ok(rendered)) => rendered,
+        };
+        let (text, cut) = truncate_output(&rendered.text, limits.max_tool_output_bytes);
+        ToolOutcome::ok(text)
+            .truncated(cut || rendered.truncated)
+            .with_meta(rendered.meta)
     }
 }
 
@@ -1160,17 +1605,63 @@ impl Tool for GitDiff {
     }
 }
 
+pub struct GitLog;
+
+#[async_trait]
+impl Tool for GitLog {
+    fn spec(&self) -> ToolSpec {
+        spec(
+            "git_log",
+            "Show recent commit history: one line per commit (`sha date subject`), read-only and \
+             no approval. `max_count` defaults to 20 and is capped at 200; when the log continues \
+             past it, the result says so. `path` narrows to commits that touch that workspace path. \
+             Confined to the workspace: when the workspace is a subdirectory of a bigger repository, \
+             commits that touch nothing inside it are not listed.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative file or directory (default '.')"},
+                    "max_count": {"type": "integer", "description": "Commits to show (default 20, max 200)"}
+                }
+            }),
+        )
+    }
+
+    async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        let path = request.opt_str("path");
+        let max_count = request.opt_u64("max_count").map(|n| n as usize);
+        let limits = ctx.limits().await;
+        match git::log(&ctx.workspace, path, max_count).await {
+            Ok(report) => {
+                let (text, cut) = truncate_output(&report.text, limits.max_tool_output_bytes);
+                ToolOutcome::ok(text)
+                    .truncated(cut || report.capped)
+                    .with_meta(json!({
+                        "is_repo": report.is_repo,
+                        "commits": report.commits.len(),
+                        "capped": report.capped,
+                        "confined": report.confined,
+                        "path": path.unwrap_or("."),
+                    }))
+            }
+            Err(e) => ToolOutcome::err(e.to_string()),
+        }
+    }
+}
+
 /// All first-party tools, ready to register.
 pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(ReadFile),
         Arc::new(ListDir),
         Arc::new(SearchFiles),
+        Arc::new(Glob),
         Arc::new(WriteFile),
         Arc::new(EditFile),
         Arc::new(RunCommand),
         Arc::new(GitStatus),
         Arc::new(GitDiff),
+        Arc::new(GitLog),
         Arc::new(docs_tool::KarucodeDocs),
     ]
 }

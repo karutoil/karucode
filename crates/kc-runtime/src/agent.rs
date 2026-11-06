@@ -112,6 +112,18 @@ impl LoopSpec {
             self.agent_id.as_ref().map(|a| a.0.clone()),
         )
     }
+
+    /// The two ceilings every request this loop builds has to satisfy: the
+    /// character budget derived from the model's window, and the item ceiling
+    /// the gateway in front of it enforces (`limits.max_context_messages`).
+    ///
+    /// Read from `limits` rather than carried as another field: a loop's
+    /// character budget is pinned at construction (`context_max_chars`), and the
+    /// item ceiling has to come from the same `Limits` that pinned it or the two
+    /// could disagree after a config reload.
+    pub(crate) fn context_limits(&self) -> context::ContextLimits {
+        context::ContextLimits::new(self.context_max_chars, self.limits.max_context_messages)
+    }
 }
 
 #[derive(Clone)]
@@ -680,7 +692,7 @@ async fn finalize_top_level(
 
 /// The shared agent loop. Never panics on model or tool misbehaviour: every
 /// failure becomes a status plus a visible event.
-pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, spec: LoopSpec) -> LoopOutcome {
+pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOutcome {
     let scope = spec.approval_scope.clone();
     let session_id = spec.session_id.0.clone();
     let run_id = spec.run_id.0.clone();
@@ -692,9 +704,46 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, spec: LoopSpec) -> LoopOu
         .unwrap_or(0);
     let ctx = spec.emit_ctx(&inner);
 
-    let outcome = match std::panic::AssertUnwindSafe(run_loop_inner(Arc::clone(&inner), spec))
-        .catch_unwind()
-        .await
+    // The notebook belongs to *this run* (a child agent gets its own), and the
+    // `note` tool has to carry it, so the tool is installed into a per-run copy
+    // of the registry. That is also why `note` is not part of
+    // `Runtime::builtin_tool_names()`: the delegate family is one shared registry,
+    // and this one cannot be shared without sharing its notebook.
+    let notebook = Arc::new(std::sync::Mutex::new(crate::context::Notebook::new()));
+    spec.tools = Arc::new(crate::context::with_note_tool(
+        &spec.tools,
+        Arc::clone(&notebook),
+    ));
+
+    // The workspace's own instructions are read **once here**, not per
+    // iteration: the block becomes part of message 0, and a file that changed
+    // between two turns of the same run would cost a full prompt-cache miss on a
+    // request that is otherwise append-only. A subagent loop reads its own copy
+    // (it inherits its parent's workspace, so it sees the same file) for the same
+    // reason a top-level run does.
+    let instructions = kc_core::prompt::load_project_instructions(spec.workspace.root())
+        .map(|instructions| kc_core::prompt::instructions_block(&instructions));
+    // The user turn this run is answering, captured before the loop mutates the
+    // conversation: `run_loop_inner` pushes steers, mail and continuation nudges
+    // onto the same history, so deriving it later would drift. It is the last
+    // `user` message the run was handed - the follow-up the user just sent, or a
+    // subagent's task - and `None` only when there is no such message at all.
+    let turn = spec
+        .history
+        .iter()
+        .rev()
+        .find(|message| message.role == kc_core::message::Role::User)
+        .map(|message| message.content.clone());
+
+    let outcome = match std::panic::AssertUnwindSafe(run_loop_inner(
+        Arc::clone(&inner),
+        spec,
+        Arc::clone(&notebook),
+        instructions,
+        turn,
+    ))
+    .catch_unwind()
+    .await
     {
         Ok(outcome) => outcome,
         Err(payload) => {
@@ -722,7 +771,15 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, spec: LoopSpec) -> LoopOu
     outcome
 }
 
-async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOutcome {
+async fn run_loop_inner(
+    inner: Arc<RuntimeInner>,
+    mut spec: LoopSpec,
+    notebook: Arc<std::sync::Mutex<crate::context::Notebook>>,
+    // The workspace's instructions block, rendered once at run start.
+    instructions: Option<String>,
+    // The user turn this run is answering, read once at run start.
+    turn: Option<String>,
+) -> LoopOutcome {
     let ctx = spec.emit_ctx(&inner);
     let mut history = std::mem::take(&mut spec.history);
     // `iterations` counts every model round-trip in the loop; `segment_iterations`
@@ -743,6 +800,16 @@ async fn run_loop_inner(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> LoopOut
     // paying for the same page again.
     let mut repeats: std::collections::HashMap<[u8; 32], Repeat> = std::collections::HashMap::new();
     let mut mutations: u64 = 0;
+    // One forced compaction for the whole run. A provider that refuses the
+    // conversation as too large earns exactly one rebuilt request; a second
+    // refusal fails the turn with the provider's own message. The flag is a
+    // local of this loop, so it dies with the run and can never become a
+    // per-turn retry chain (each refusal costs a billed generation).
+    //
+    // The smaller budgets it computes are kept for the rest of the run (see the
+    // forced-compaction block below), so a later turn starts already compacted
+    // instead of walking into the same refusal again.
+    let mut forced_compaction = false;
 
     loop {
         if spec.cancel.is_cancelled() {
@@ -995,7 +1062,7 @@ segment, limits.max_continues is {})",
                 inner
                     .deps
                     .hooks
-                    .before_prompt(&spec.session_id.0, &workspace_label),
+                    .before_prompt_for_turn(&spec.session_id.0, &workspace_label, turn.as_deref()),
             ) => match notes {
                 Ok(notes) => notes,
                 Err(_) => {
@@ -1031,17 +1098,18 @@ segment, limits.max_continues is {})",
             }
         }
         let tool_specs = spec.tools.specs();
-        let system = kc_core::prompt::system_prompt_with_roots(
+        let system = kc_core::prompt::system_prompt_with_instructions(
             &spec.workspace.root().to_string_lossy(),
             spec.workspace.extra_roots(),
             &tool_specs,
             &spec.approval_mode,
             &spec.budget,
             &extra,
+            instructions.as_deref(),
         );
-        let mut messages = Vec::with_capacity(history.len() + 2);
-        messages.push(Message::system(system));
-        messages.extend(history.iter().cloned());
+        let mut base = Vec::with_capacity(history.len() + 2);
+        base.push(Message::system(system));
+        base.extend(history.iter().cloned());
         // The tail note is appended *after* the fitted conversation, so it can
         // never disturb the cached prefix: it costs its own few hundred tokens
         // and nothing else. Its size is reserved out of the context budget so the
@@ -1061,76 +1129,64 @@ segment, limits.max_continues is {})",
         // request committed normally, but a note that changes mid-run costs a
         // prompt-cache miss from position 1, so karucode sends no runtime notes
         // at all: the request is exactly the conversation.
-        let messages = context::fit(
-            messages,
-            spec.context_max_chars,
-            spec.limits.max_tool_output_bytes,
-        );
+        // A snapshot of the notebook, so the request can carry the model's own
+        // findings inside the digest. Copied rather than locked across the call:
+        // the digest is built synchronously and a `note` in a parallel tool call
+        // must never wait on it.
+        let notes: Vec<String> = notebook
+            .lock()
+            .map(|notebook| notebook.entries().to_vec())
+            .unwrap_or_default();
 
-        let request = ChatRequest {
-            admission: Some(kc_core::provider::AttemptAdmission {
-                store: Arc::clone(&inner.deps.store),
-                session_id: spec.session_id.0.clone(),
-            }),
-            model: spec.model.model.clone(),
-            messages,
-            tools: tool_specs,
-            temperature: spec.model.temperature,
-            send_temperature: spec.model.send_temperature,
-            max_tokens: spec.model.max_tokens,
-            top_p: spec.model.top_p,
-            parallel_tool_calls: spec.model.parallel_tool_calls,
-            extra_headers: spec
-                .model
-                .extra_headers
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            extra_body: spec
-                .model
-                .extra_body
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        };
+        // --- request, and at most one forced retry of it -----------------------
+        // The window is built from `base` on every attempt, so a retry never
+        // inherits anything from the attempt it replaces.
+        let mut limits = spec.context_limits();
+        let turn = 'request: loop {
+            let messages = context::fit_with_notes_and_limits(
+                base.clone(),
+                limits,
+                spec.limits.max_tool_output_bytes,
+                &notes,
+            )
+            .messages;
 
-        // --- stream -----------------------------------------------------------
-        let provider = match inner.deps.providers.build(&spec.model).await {
-            Ok(provider) => provider,
-            Err(e) => {
-                if spec.cancel.is_cancelled() {
-                    return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
-                }
-                let message = format!("could not start the provider: {e}");
-                ctx.error("provider", message.clone());
-                return LoopOutcome::new(RunStatus::Failed, Some(message), last_text, iterations);
-            }
-        };
+            let request = ChatRequest {
+                admission: Some(kc_core::provider::AttemptAdmission {
+                    store: Arc::clone(&inner.deps.store),
+                    session_id: spec.session_id.0.clone(),
+                }),
+                model: spec.model.model.clone(),
+                messages,
+                tools: tool_specs.clone(),
+                temperature: spec.model.temperature,
+                send_temperature: spec.model.send_temperature,
+                max_tokens: spec.model.max_tokens,
+                top_p: spec.model.top_p,
+                parallel_tool_calls: spec.model.parallel_tool_calls,
+                extra_headers: spec
+                    .model
+                    .extra_headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                extra_body: spec
+                    .model
+                    .extra_body
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            };
 
-        // One turn, at most `retry_max_stream_restarts + 1` stream attempts. A
-        // stream that dies *after* it started delivering cannot be retried one
-        // level down (the provider layer hands chunks straight to the UI and
-        // replaying them would duplicate the answer), so it is handled here:
-        // the partial attempt is discarded - nothing was persisted for it - the
-        // client is told to drop what it rendered, and the identical request is
-        // re-issued. See `crate::restart`.
-        let restarts = StreamRestarts::from_config(&spec.model);
-        let mut attempt: u32 = 0;
-        let (text, reasoning, calls, end, finish_reason) = loop {
-            attempt = attempt.saturating_add(1);
-            let stream = match provider
-                .stream_chat(request.clone(), spec.cancel.clone())
-                .await
-            {
-                Ok(stream) => stream,
+            // --- stream ---------------------------------------------------------
+            let provider = match inner.deps.providers.build(&spec.model).await {
+                Ok(provider) => provider,
                 Err(e) => {
-                    // A cancel that lands before the request completes is still a
-                    // cancellation, not a provider failure.
                     if spec.cancel.is_cancelled() {
                         ctx.notice("info", "run cancelled");
                         return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
                     }
-                    let message = format!("provider request failed: {e}");
+                    let message = format!("could not start the provider: {e}");
                     ctx.error("provider", message.clone());
                     return LoopOutcome::new(
                         RunStatus::Failed,
@@ -1141,41 +1197,157 @@ segment, limits.max_continues is {})",
                 }
             };
 
-            let outcome = consume(&ctx, &spec.cancel, spec.deadline, stream).await;
-            let restart = match &outcome.3 {
-                StreamEnd::Failed { message, transient } => {
-                    *transient
-                        && !spec.cancel.is_cancelled()
-                        && attempt < restarts.max_attempts()
-                        && tokio::time::Instant::now() < spec.deadline
-                        && {
-                            tracing::warn!(
-                                attempt,
-                                max_attempts = restarts.max_attempts(),
-                                error = %message,
-                                "provider stream died mid-answer; restarting it"
+            // One turn, at most `retry_max_stream_restarts + 1` stream attempts. A
+            // stream that dies *after* it started delivering cannot be retried one
+            // level down (the provider layer hands chunks straight to the UI and
+            // replaying them would duplicate the answer), so it is handled here:
+            // the partial attempt is discarded - nothing was persisted for it - the
+            // client is told to drop what it rendered, and the identical request is
+            // re-issued. See `crate::restart`.
+            let restarts = StreamRestarts::from_config(&spec.model);
+            let mut attempt: u32 = 0;
+            let mut turn = loop {
+                attempt = attempt.saturating_add(1);
+                let stream = match provider
+                    .stream_chat(request.clone(), spec.cancel.clone())
+                    .await
+                {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        // A cancel that lands before the request completes is still a
+                        // cancellation, not a provider failure.
+                        if spec.cancel.is_cancelled() {
+                            ctx.notice("info", "run cancelled");
+                            return LoopOutcome::new(
+                                RunStatus::Cancelled,
+                                None,
+                                last_text,
+                                iterations,
                             );
-                            ctx.emit(Event::StreamRetry {
-                                attempt,
-                                max_attempts: restarts.max_attempts(),
-                                reason: message.clone(),
-                            });
-                            true
                         }
-                }
-                _ => false,
-            };
-            if !restart {
-                break outcome;
-            }
+                        // Not restartable from here: the provider layer
+                        // (`RetryingProvider`) has already spent its own attempt
+                        // budget on this exact request, so re-sending it from this
+                        // level would only multiply the cost. The failure is handed
+                        // to the overflow check below instead, which changes the
+                        // *request* rather than repeating it.
+                        break (
+                            String::new(),
+                            None,
+                            Vec::new(),
+                            StreamEnd::Failed {
+                                message: format!("provider request failed: {e}"),
+                                transient: false,
+                            },
+                            None,
+                        );
+                    }
+                };
 
-            let delay = restarts.delay(attempt.saturating_sub(1));
-            tokio::select! {
-                biased;
-                _ = spec.cancel.cancelled() => {}
-                _ = tokio::time::sleep(delay) => {}
+                let outcome = consume(&ctx, &spec.cancel, spec.deadline, stream).await;
+                let restart = match &outcome.3 {
+                    StreamEnd::Failed { message, transient } => {
+                        *transient
+                            && !spec.cancel.is_cancelled()
+                            && attempt < restarts.max_attempts()
+                            && tokio::time::Instant::now() < spec.deadline
+                            && {
+                                tracing::warn!(
+                                    attempt,
+                                    max_attempts = restarts.max_attempts(),
+                                    error = %message,
+                                    "provider stream died mid-answer; restarting it"
+                                );
+                                ctx.emit(Event::StreamRetry {
+                                    attempt,
+                                    max_attempts: restarts.max_attempts(),
+                                    reason: message.clone(),
+                                });
+                                true
+                            }
+                    }
+                    _ => false,
+                };
+                if !restart {
+                    break outcome;
+                }
+
+                let delay = restarts.delay(attempt.saturating_sub(1));
+                tokio::select! {
+                    biased;
+                    _ = spec.cancel.cancelled() => {}
+                    _ = tokio::time::sleep(delay) => {}
+                }
+            };
+
+            // --- forced compaction -------------------------------------------------
+            // A refusal that says the *conversation* is too long is not a failed
+            // run: it is a request the endpoint will not accept, and the only thing
+            // that can change is the request. So the window is rebuilt once against
+            // a smaller pair of ceilings and the same turn is asked for again. This
+            // is what makes a session whose history outgrew a gateway's item limit
+            // resumable instead of dead.
+            if let StreamEnd::Failed { message, .. } = &turn.3 {
+                if kc_core::error::is_context_overflow(message) {
+                    let refused = message.clone();
+                    if forced_compaction {
+                        // One forced compaction per run. A second refusal means the
+                        // cut did not help - the system prompt alone is too big, or
+                        // the endpoint's real limit is smaller than anything a
+                        // window can be cut to - and re-sending a third time would
+                        // only re-bill the same refusal.
+                        turn.3 = StreamEnd::Failed {
+                            message: format!(
+                                "{refused} - a forced compaction of the context was already \
+                             attempted (60% of limits.context_max_chars / \
+                             limits.max_context_messages) and the retried request was refused \
+                             too, so this run cannot be shrunk any further. Start a new session, \
+                             or declare the model's real `context_window` if it is set too high."
+                            ),
+                            transient: false,
+                        };
+                        break 'request turn;
+                    }
+                    forced_compaction = true;
+                    let before = limits;
+                    limits = limits.forced_smaller();
+                    // Keep the smaller budgets for the rest of the run. Without
+                    // this the very next turn would rebuild the same oversized
+                    // window and be refused again - with this run's one forced
+                    // retry already spent.
+                    spec.context_max_chars = limits.max_chars;
+                    spec.limits.max_context_messages = limits.max_messages;
+                    // A stream that had started delivering must be discarded on the
+                    // client too, or the transcript would show text that was never
+                    // persisted. Nothing is persisted for a refused attempt, so
+                    // there is nothing to duplicate.
+                    if !turn.0.is_empty() {
+                        ctx.emit(Event::StreamRetry {
+                            attempt: 1,
+                            max_attempts: 2,
+                            reason: refused.clone(),
+                        });
+                    }
+                    ctx.notice(
+                        "warn",
+                        format!(
+                            "the provider rejected the conversation as too large ({refused}). \
+                             Rather than failing the run, the context was compacted further and \
+                             the same turn is retried once: the request is now cut to {} \
+                             characters and {} messages, from {} / {} (limits.context_max_chars / \
+                             limits.max_context_messages).",
+                            limits.max_chars,
+                            ceiling_label(limits.max_messages),
+                            before.max_chars,
+                            ceiling_label(before.max_messages),
+                        ),
+                    );
+                    continue 'request;
+                }
             }
+            break 'request turn;
         };
+        let (text, reasoning, calls, end, finish_reason) = turn;
 
         if !text.is_empty() {
             last_text = text.clone();
@@ -1290,32 +1462,30 @@ segment, limits.max_continues is {})",
             );
         }
 
-        for (index, call) in calls.iter().enumerate() {
-            let skip_reason = if index >= per_turn {
-                Some(format!(
-                    "{SKIPPED_PREFIX}per-turn tool call limit ({per_turn}) reached]"
-                ))
-            } else if spec.cancel.is_cancelled() {
-                Some(format!("{SKIPPED_PREFIX}run cancelled]"))
-            } else {
-                None
-            };
-            if let Some(reason) = skip_reason {
-                // The assistant message already carries the call, so a tool
-                // message must exist or the transcript becomes invalid for the
-                // next request.
-                let placeholder = Message::tool_result(call.id.clone(), call.name.clone(), reason);
-                if let Err(e) = persist(
+        // A turn made entirely of read-only, approval-free calls runs
+        // concurrently: they touch nothing, so the only thing a strict order buys
+        // is a network round trip per call. Everything that decides *whether* to
+        // run is still evaluated in call order here, before anything starts (see
+        // `plan_parallel_turn`); anything else - a mutating call, an approval, a
+        // refused repeat, a skipped call - takes the sequential path below
+        // unchanged.
+        match plan_parallel_turn(
+            &spec, &calls, per_turn, &repeats, mutations, turn_cap, turn_chars,
+        ) {
+            Some(budgets) => {
+                if let Err(message) = run_parallel_turn(
                     &inner,
-                    &spec.session_id,
-                    &spec.run_id,
-                    spec.agent_id.as_ref(),
-                    &placeholder,
+                    &spec,
+                    &ctx,
+                    &calls,
+                    &budgets,
+                    &mut repeats,
+                    mutations,
+                    &mut turn_chars,
+                    &mut history,
                 )
                 .await
                 {
-                    let message = format!("could not persist the tool message: {e}");
-                    ctx.error("store", message.clone());
                     return LoopOutcome::new(
                         RunStatus::Failed,
                         Some(message),
@@ -1323,160 +1493,35 @@ segment, limits.max_continues is {})",
                         iterations,
                     );
                 }
-                history.push(placeholder);
-                continue;
             }
-
-            // A read-only call whose exact arguments already returned the same
-            // answer, with no mutation in between, cannot produce anything new:
-            // invoking it again only re-bills the same bytes. Walk the model
-            // forward instead of paying for the same page twice.
-            let repeat_key = repeat_fingerprint(&[&call.name, &call.arguments]);
-            let read_only = spec
-                .tools
-                .get(&call.name)
-                .map(|tool| tool.class() == kc_core::tool::ToolClass::ReadOnly)
-                .unwrap_or(false);
-            let repeat_stale = read_only
-                && repeats.get(&repeat_key).is_some_and(|repeat| {
-                    // The third identical answer carries the warning; the
-                    // fourth is refused rather than paying for the same page
-                    // again (measured: one review run re-read the same file
-                    // 27 times while ignoring the warning).
-                    //
-                    // The refusal is bounded. `mutations` only counts writes made
-                    // by this loop, so "nothing has been written" says nothing
-                    // about a subagent, the user or an editor having changed the
-                    // file - and an unbounded block would make a run unable to
-                    // re-read a page it knows changed. After
-                    // `REPEAT_MAX_BLOCKS` refusals the call is allowed through:
-                    // the cost of one more identical answer is smaller than
-                    // losing the rest of the run.
-                    repeat.count >= REPEAT_NOTE_AFTER
-                        && repeat.seen_at == mutations
-                        && repeat.blocked < REPEAT_MAX_BLOCKS
-                });
-            if repeat_stale {
-                let count = repeats.get(&repeat_key).map(|r| r.count).unwrap_or(0);
-                if let Some(repeat) = repeats.get_mut(&repeat_key) {
-                    repeat.blocked = repeat.blocked.saturating_add(1);
-                }
-                let note = format!(
-                    "[blocked: this exact call has already returned the same result {count} times \
-                     in this run, and this run has written nothing in between. Re-issuing it cannot \
-                     produce new information. Use what you already have, read a range you have not \
-                     seen, or check whether something outside this run changed it.]"
-                );
-                ctx.emit(Event::ToolCallFinished {
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    ok: false,
-                    output: note.clone(),
-                    truncated: false,
-                    duration_ms: 0,
-                    // A blocked repeat is refused, so there is nothing to show.
-                    images: Vec::new(),
-                });
-                ctx.notice(
-                    "warn",
-                    format!(
-                        "blocked a repeated identical `{}` call ({count}x): nothing changed since",
-                        call.name
-                    ),
-                );
-                let message = Message::tool_result(call.id.clone(), call.name.clone(), note);
-                if let Err(e) = persist(
-                    &inner,
-                    &spec.session_id,
-                    &spec.run_id,
-                    spec.agent_id.as_ref(),
-                    &message,
-                )
-                .await
-                {
-                    let message = format!("could not persist the tool message: {e}");
-                    ctx.error("store", message.clone());
-                    return LoopOutcome::new(
-                        RunStatus::Failed,
-                        Some(message),
-                        last_text,
-                        iterations,
-                    );
-                }
-                history.push(message);
-                continue;
-            }
-
-            let remaining = turn_cap
-                .saturating_sub(turn_chars)
-                .max(TURN_RESULT_FLOOR_BYTES);
-            let result = run_one_tool(&inner, &spec, &ctx, call, remaining).await;
-            match result {
-                Ok(message) => {
-                    // Same call, same answer: say so instead of pretending it is
-                    // new information.
-                    let key = repeat_key;
-                    let hash = result_fingerprint(&message);
-                    let count = match repeats.get_mut(&key) {
-                        Some(repeat) if repeat.hash == hash => {
-                            repeat.count = repeat.count.saturating_add(1);
-                            repeat.seen_at = mutations;
-                            repeat.count
-                        }
-                        _ => {
-                            repeats.insert(
-                                key,
-                                Repeat {
-                                    count: 1,
-                                    hash,
-                                    seen_at: mutations,
-                                    blocked: 0,
-                                },
-                            );
-                            1
-                        }
+            None => {
+                // The sequential path: today's behaviour, unchanged, one call at a
+                // time and folded as each one finishes.
+                for (index, call) in calls.iter().enumerate() {
+                    let skip_reason = if index >= per_turn {
+                        Some(format!(
+                            "{SKIPPED_PREFIX}per-turn tool call limit ({per_turn}) reached]"
+                        ))
+                    } else if spec.cancel.is_cancelled() {
+                        Some(format!("{SKIPPED_PREFIX}run cancelled]"))
+                    } else {
+                        None
                     };
-                    // No note is appended to the result itself: adding text to a
-                    // tool result is one of the shapes that pushes this model into
-                    // a reasoning stall (see the request-building comment). The
-                    // fourth identical call is refused outright instead.
-                    if count >= REPEAT_NOTE_AFTER && read_only {
-                        ctx.notice(
-                            "warn",
-                            format!(
-                                "`{}` returned an identical result {count} times in this run",
-                                call.name
-                            ),
-                        );
-                    }
-                    if !read_only {
-                        mutations = mutations.saturating_add(1);
-                    }
-                    turn_chars = turn_chars.saturating_add(
-                        message.content.len()
-                            + message
-                                .images
-                                .len()
-                                .saturating_mul(context::IMAGE_CONTEXT_CHARS),
-                    );
-                    let persisted = persist(
-                        &inner,
-                        &spec.session_id,
-                        &spec.run_id,
-                        spec.agent_id.as_ref(),
-                        &message,
-                    )
-                    .await;
-                    match persisted {
-                        Ok(id) => {
-                            // Place the journal rows this call wrote on the
-                            // transcript timeline: they were recorded *before* the
-                            // write, so the row they belong to did not exist yet.
-                            if let Some(journal) = &spec.journal {
-                                journal.bind_message(id).await;
-                            }
-                        }
-                        Err(e) => {
+                    if let Some(reason) = skip_reason {
+                        // The assistant message already carries the call, so a tool
+                        // message must exist or the transcript becomes invalid for the
+                        // next request.
+                        let placeholder =
+                            Message::tool_result(call.id.clone(), call.name.clone(), reason);
+                        if let Err(e) = persist(
+                            &inner,
+                            &spec.session_id,
+                            &spec.run_id,
+                            spec.agent_id.as_ref(),
+                            &placeholder,
+                        )
+                        .await
+                        {
                             let message = format!("could not persist the tool message: {e}");
                             ctx.error("store", message.clone());
                             return LoopOutcome::new(
@@ -1486,17 +1531,138 @@ segment, limits.max_continues is {})",
                                 iterations,
                             );
                         }
+                        history.push(placeholder);
+                        continue;
                     }
-                    history.push(message)
-                }
-                Err(e) => {
-                    ctx.error("store", format!("could not persist the tool message: {e}"));
-                    return LoopOutcome::new(
-                        RunStatus::Failed,
-                        Some(e.to_string()),
-                        last_text,
-                        iterations,
-                    );
+
+                    // A read-only call whose exact arguments already returned the same
+                    // answer, with no mutation in between, cannot produce anything new:
+                    // invoking it again only re-bills the same bytes. Walk the model
+                    // forward instead of paying for the same page twice.
+                    let repeat_key = repeat_fingerprint(&[&call.name, &call.arguments]);
+                    let read_only = spec
+                .tools
+                .get(&call.name)
+                .map(|tool| tool.class() == kc_core::tool::ToolClass::ReadOnly)
+                .unwrap_or(false)
+                // A notebook append is not a read of the workspace: recording a
+                // finding twice is allowed, and refusing it would throw away the
+                // only durable memory this run has.
+                && call.name != context::NOTE_TOOL;
+                    let repeat_stale = read_only
+                        && repeats.get(&repeat_key).is_some_and(|repeat| {
+                            // The third identical answer carries the warning; the
+                            // fourth is refused rather than paying for the same page
+                            // again (measured: one review run re-read the same file
+                            // 27 times while ignoring the warning).
+                            //
+                            // The refusal is bounded. `mutations` only counts writes made
+                            // by this loop, so "nothing has been written" says nothing
+                            // about a subagent, the user or an editor having changed the
+                            // file - and an unbounded block would make a run unable to
+                            // re-read a page it knows changed. After
+                            // `REPEAT_MAX_BLOCKS` refusals the call is allowed through:
+                            // the cost of one more identical answer is smaller than
+                            // losing the rest of the run.
+                            repeat.count >= REPEAT_NOTE_AFTER
+                                && repeat.seen_at == mutations
+                                && repeat.blocked < REPEAT_MAX_BLOCKS
+                        });
+                    if repeat_stale {
+                        let count = repeats.get(&repeat_key).map(|r| r.count).unwrap_or(0);
+                        if let Some(repeat) = repeats.get_mut(&repeat_key) {
+                            repeat.blocked = repeat.blocked.saturating_add(1);
+                        }
+                        let note = format!(
+                    "[blocked: this exact call has already returned the same result {count} times \
+                     in this run, and this run has written nothing in between. Re-issuing it cannot \
+                     produce new information. Use what you already have, read a range you have not \
+                     seen, or check whether something outside this run changed it.]"
+                );
+                        ctx.emit(Event::ToolCallFinished {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            ok: false,
+                            output: note.clone(),
+                            truncated: false,
+                            duration_ms: 0,
+                            // A blocked repeat is refused, so there is nothing to show.
+                            images: Vec::new(),
+                        });
+                        ctx.notice(
+                            "warn",
+                            format!(
+                        "blocked a repeated identical `{}` call ({count}x): nothing changed since",
+                        call.name
+                    ),
+                        );
+                        let message =
+                            Message::tool_result(call.id.clone(), call.name.clone(), note);
+                        if let Err(e) = persist(
+                            &inner,
+                            &spec.session_id,
+                            &spec.run_id,
+                            spec.agent_id.as_ref(),
+                            &message,
+                        )
+                        .await
+                        {
+                            let message = format!("could not persist the tool message: {e}");
+                            ctx.error("store", message.clone());
+                            return LoopOutcome::new(
+                                RunStatus::Failed,
+                                Some(message),
+                                last_text,
+                                iterations,
+                            );
+                        }
+                        history.push(message);
+                        continue;
+                    }
+
+                    let remaining = turn_cap
+                        .saturating_sub(turn_chars)
+                        .max(TURN_RESULT_FLOOR_BYTES);
+                    let result = run_one_tool(&inner, &spec, &ctx, call, remaining, true).await;
+                    match result {
+                        Ok(message) => {
+                            // Same call, same answer: say so instead of pretending it is
+                            // new information.
+                            match fold_tool_result(
+                                &inner,
+                                &spec,
+                                &ctx,
+                                call,
+                                message,
+                                read_only,
+                                &mut repeats,
+                                &mut mutations,
+                                &mut turn_chars,
+                                &mut history,
+                            )
+                            .await
+                            {
+                                Ok(()) => {}
+                                Err(message) => {
+                                    return LoopOutcome::new(
+                                        RunStatus::Failed,
+                                        Some(message),
+                                        last_text,
+                                        iterations,
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            ctx.error("store", format!("could not persist the tool message: {e}"));
+                            return LoopOutcome::new(
+                                RunStatus::Failed,
+                                Some(e.to_string()),
+                                last_text,
+                                iterations,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1509,8 +1675,20 @@ segment, limits.max_continues is {})",
         // Bound the in-memory working set: a long session must not keep (and
         // re-clone, every iteration) a transcript far past the request budget.
         // The dropped turns survive in the persisted transcript and in the
-        // digest notice, so nothing is lost, only unbounded memory growth.
-        context::compact_run_window(&mut history, spec.context_max_chars);
+        // digest notice, so nothing is lost, only unbounded memory growth. The
+        // run's notebook goes into that notice: it is the model's own record of
+        // what it worked out, and it is the only thing here a compaction cannot
+        // re-read from a file.
+        //
+        // Both ceilings apply here too - a held window of 2,000 short messages
+        // is refused by the gateway exactly like one of 2 M characters, and
+        // bounding only the characters is what let a real session reach 2,055
+        // items while staying under the budget.
+        let notes: Vec<String> = notebook
+            .lock()
+            .map(|notebook| notebook.entries().to_vec())
+            .unwrap_or_default();
+        context::compact_run_window_with_limits(&mut history, spec.context_limits(), &notes);
     }
 }
 
@@ -1679,17 +1857,310 @@ fn truncate_detail(text: &str, max_bytes: usize) -> String {
     format!("{}... [truncated]", &text[..end])
 }
 
+/// How many read-only calls one turn may run at once.
+///
+/// Eight, not `calls.len()`: the win is avoiding a network round trip per call,
+/// and past eight the marginal call buys nothing while every plugin or MCP call
+/// is another process. It is also small enough that a turn cannot flood a
+/// provider or a plugin with concurrent work.
+const PARALLEL_READONLY_LIMIT: usize = 8;
+
+/// Whether this turn may run its calls concurrently, and each call's byte budget
+/// when it does.
+///
+/// Everything that decides *whether* a call runs is evaluated here, in call
+/// order, before any of them starts:
+///
+/// * the per-turn call cap - one call over it and the whole turn takes the
+///   sequential path, because that path is what writes the `[skipped: ...]`
+///   placeholders in order;
+/// * cancellation - an already-cancelled turn starts nothing;
+/// * the identical-repeat block, against the repeat state as it stands at the
+///   start of the turn (which is exactly what the sequential path sees for its
+///   first call). A turn with a refused repeat runs sequentially, so the block's
+///   own counter and `REPEAT_MAX_BLOCKS` let-through keep happening in call order;
+/// * the per-turn byte budget: an equal share of what is left of it, so the batch
+///   as a whole stays inside the allowance (each call still gets
+///   `TURN_RESULT_FLOOR_BYTES`, the same floor the sequential path applies). The
+///   sequential path can be more generous to an early call because it knows what
+///   that call actually returned; a concurrent batch cannot, so it reserves
+///   before it starts.
+///
+/// `None` means "run this turn the way it has always run": one call, a mutating
+/// call, an approval-gated call, an unknown tool, or anything above.
+fn plan_parallel_turn(
+    spec: &LoopSpec,
+    calls: &[ToolCall],
+    per_turn: usize,
+    repeats: &std::collections::HashMap<[u8; 32], Repeat>,
+    mutations: u64,
+    turn_cap: usize,
+    turn_chars: usize,
+) -> Option<Vec<usize>> {
+    if calls.len() < 2 || calls.len() > per_turn || spec.cancel.is_cancelled() {
+        return None;
+    }
+    let share = turn_cap
+        .saturating_sub(turn_chars)
+        .checked_div(calls.len())?
+        .max(TURN_RESULT_FLOOR_BYTES);
+    let mut budgets = Vec::with_capacity(calls.len());
+    for call in calls {
+        let tool = spec.tools.get(&call.name)?;
+        // Read-only *and* approval-free. A gated tool would park a worker on a
+        // human answer, and a mutating one must stay in call order: two writes to
+        // the same file do not commute.
+        if tool.class() != kc_core::tool::ToolClass::ReadOnly || tool.requires_approval() {
+            return None;
+        }
+        // The notebook is read-only by class but appends state: two notes in one
+        // batch would land in completion order, and the notebook is the model's
+        // ordered record of what it worked out.
+        if call.name == context::NOTE_TOOL {
+            return None;
+        }
+        let key = repeat_fingerprint(&[&call.name, &call.arguments]);
+        let refused = repeats.get(&key).is_some_and(|repeat| {
+            repeat.count >= REPEAT_NOTE_AFTER
+                && repeat.seen_at == mutations
+                && repeat.blocked < REPEAT_MAX_BLOCKS
+        });
+        if refused {
+            return None;
+        }
+        budgets.push(share);
+    }
+    Some(budgets)
+}
+
+/// Run a turn's read-only calls concurrently, then fold the results back in.
+///
+/// **Ordering guarantee.** `ToolCallStarted` is emitted for every call in call
+/// order before any of them runs, so the UI never shows call 3 starting before
+/// call 1. Results are then persisted, journal-bound and pushed to `history` in
+/// call order too, so the transcript and the next request are identical to what
+/// the sequential path would have produced - same messages, same order, same
+/// bytes. What is *not* ordered is the interleaving of `ToolCallFinished`: those
+/// arrive as calls complete. That is acceptable because the two events are paired
+/// by `call_id` and the UI is event-driven, while `history` - the only thing the
+/// model and a transcript re-read depend on - stays deterministic.
+///
+/// A call that fails, or whose future panics, produces its own `tool` message
+/// (the transcript must always answer every `tool_call`) and never costs its
+/// siblings their results.
+///
+/// `Err` is returned only when the store refused to persist a result; the caller
+/// turns that into a failed run, exactly as the sequential path does.
+#[allow(clippy::too_many_arguments)]
+async fn run_parallel_turn(
+    inner: &Arc<RuntimeInner>,
+    spec: &LoopSpec,
+    ctx: &EmitCtx,
+    calls: &[ToolCall],
+    budgets: &[usize],
+    repeats: &mut std::collections::HashMap<[u8; 32], Repeat>,
+    mut mutations: u64,
+    turn_chars: &mut usize,
+    history: &mut Vec<Message>,
+) -> std::result::Result<(), String> {
+    // Announce first, in call order: the batch's *started* events are as
+    // deterministic as the sequential path's.
+    for call in calls {
+        ctx.emit(Event::ToolCallStarted {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: announced_arguments(call),
+        });
+    }
+
+    // Calls run in windows of at most `PARALLEL_READONLY_LIMIT`, and every window
+    // is folded in call order before the next one starts. `join_all` inside a
+    // window (rather than a `buffer_unordered` over the whole turn) is what keeps
+    // the concurrency bounded and the order deterministic - and it avoids a
+    // `Send`-is-not-general-enough inference failure that `FuturesUnordered`
+    // produces for these borrowed futures inside `tokio::spawn`.
+    let mut done: Vec<(usize, std::result::Result<Message, String>)> =
+        Vec::with_capacity(calls.len());
+    for (window, chunk) in calls.chunks(PARALLEL_READONLY_LIMIT).enumerate() {
+        let first = window * PARALLEL_READONLY_LIMIT;
+        let batch = chunk.iter().enumerate().map(|(offset, call)| {
+            let index = first + offset;
+            // `catch_unwind` per call, not per batch: a panic in one call becomes
+            // that call's error message instead of unwinding the window and
+            // losing results its siblings already produced.
+            let caught = std::panic::AssertUnwindSafe(run_one_tool(
+                inner,
+                spec,
+                ctx,
+                call,
+                budgets[index],
+                false,
+            ))
+            .catch_unwind();
+            async move {
+                let result = match caught.await {
+                    Ok(result) => result.map_err(|e| e.to_string()),
+                    Err(payload) => Err(format!(
+                        "tool `{}` panicked: {}",
+                        call.name,
+                        panic_message(payload.as_ref())
+                    )),
+                };
+                (index, result)
+            }
+        });
+        done.extend(futures_util::future::join_all(batch).await);
+    }
+    done.sort_by_key(|(index, _)| *index);
+
+    for (index, result) in done {
+        let call = &calls[index];
+        let message = match result {
+            Ok(message) => message,
+            // A call that produced no result still answers its own `tool_call`,
+            // or the next request is invalid. The failure is this call's, not its
+            // siblings'.
+            Err(error) => Message::tool_result(call.id.clone(), call.name.clone(), error),
+        };
+        fold_tool_result(
+            inner,
+            spec,
+            ctx,
+            call,
+            message,
+            true,
+            repeats,
+            &mut mutations,
+            turn_chars,
+            history,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Fold one tool result into the turn: repeat bookkeeping, the turn's byte
+/// budget, persistence, journal binding and `history` - in that order, so the
+/// persisted transcript and the in-memory conversation never disagree.
+///
+/// Shared by the sequential and the concurrent path so both produce the same
+/// messages and the same notices; the only difference between them is *when* the
+/// call ran.
+#[allow(clippy::too_many_arguments)]
+async fn fold_tool_result(
+    inner: &Arc<RuntimeInner>,
+    spec: &LoopSpec,
+    ctx: &EmitCtx,
+    call: &ToolCall,
+    message: Message,
+    read_only: bool,
+    repeats: &mut std::collections::HashMap<[u8; 32], Repeat>,
+    mutations: &mut u64,
+    turn_chars: &mut usize,
+    history: &mut Vec<Message>,
+) -> std::result::Result<(), String> {
+    let key = repeat_fingerprint(&[&call.name, &call.arguments]);
+    let hash = result_fingerprint(&message);
+    let count = match repeats.get_mut(&key) {
+        Some(repeat) if repeat.hash == hash => {
+            repeat.count = repeat.count.saturating_add(1);
+            repeat.seen_at = *mutations;
+            repeat.count
+        }
+        _ => {
+            repeats.insert(
+                key,
+                Repeat {
+                    count: 1,
+                    hash,
+                    seen_at: *mutations,
+                    blocked: 0,
+                },
+            );
+            1
+        }
+    };
+    // No note is appended to the result itself: adding text to a tool result is
+    // one of the shapes that pushes this model into a reasoning stall (see the
+    // request-building comment). The fourth identical call is refused outright
+    // instead.
+    if count >= REPEAT_NOTE_AFTER && read_only {
+        ctx.notice(
+            "warn",
+            format!(
+                "`{}` returned an identical result {count} times in this run",
+                call.name
+            ),
+        );
+    }
+    if !read_only {
+        *mutations = mutations.saturating_add(1);
+    }
+    *turn_chars = turn_chars.saturating_add(
+        message.content.len()
+            + message
+                .images
+                .len()
+                .saturating_mul(context::IMAGE_CONTEXT_CHARS),
+    );
+    match persist(
+        inner,
+        &spec.session_id,
+        &spec.run_id,
+        spec.agent_id.as_ref(),
+        &message,
+    )
+    .await
+    {
+        Ok(id) => {
+            // Place the journal rows this call wrote on the transcript timeline:
+            // they were recorded *before* the write, so the row they belong to
+            // did not exist yet.
+            if let Some(journal) = &spec.journal {
+                journal.bind_message(id).await;
+            }
+        }
+        Err(e) => {
+            let message = format!("could not persist the tool message: {e}");
+            ctx.error("store", message.clone());
+            return Err(message);
+        }
+    }
+    history.push(message);
+    Ok(())
+}
+
+/// The arguments shown in `ToolCallStarted`.
+///
+/// A malformed string is repaired **for display only** (see
+/// `repair_arguments`): the runtime never executes a guess at what the model
+/// meant, it shows the call that would parse and lets the model re-issue it.
+fn announced_arguments(call: &ToolCall) -> serde_json::Value {
+    if call.arguments.trim().is_empty() {
+        return serde_json::json!({});
+    }
+    serde_json::from_str(&call.arguments)
+        .ok()
+        .or_else(|| kc_core::tool::repair_arguments(&call.arguments))
+        .unwrap_or_else(|| serde_json::Value::String(call.arguments.clone()))
+}
+
 /// Execute a single tool call: emit start/finish, invoke, truncate.
 ///
 /// `remaining` is what is left of the turn's byte budget; a result larger than
 /// that is truncated here, before it is persisted, so the transcript and the
 /// request always agree about every byte.
+///
+/// `emit_started` is `false` for a call whose `ToolCallStarted` the caller has
+/// already emitted in call order (the concurrent path in
+/// [`run_parallel_turn`]); the finish event is always emitted here.
 async fn run_one_tool(
     inner: &Arc<RuntimeInner>,
     spec: &LoopSpec,
     ctx: &EmitCtx,
     call: &ToolCall,
     remaining: usize,
+    emit_started: bool,
 ) -> Result<Message> {
     let started = Instant::now();
     // A malformed argument string is repaired *for display only* (see
@@ -1705,14 +2176,16 @@ async fn run_one_tool(
     } else {
         serde_json::from_str(&call.arguments).ok()
     };
-    ctx.emit(Event::ToolCallStarted {
-        call_id: call.id.clone(),
-        name: call.name.clone(),
-        arguments: parsed
-            .clone()
-            .or_else(|| repaired.clone())
-            .unwrap_or_else(|| serde_json::Value::String(call.arguments.clone())),
-    });
+    if emit_started {
+        ctx.emit(Event::ToolCallStarted {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: parsed
+                .clone()
+                .or_else(|| repaired.clone())
+                .unwrap_or_else(|| serde_json::Value::String(call.arguments.clone())),
+        });
+    }
 
     let max_bytes = spec.limits.max_tool_output_bytes.min(remaining);
     let tool = spec.tools.get(&call.name);
@@ -1989,6 +2462,17 @@ fn result_fingerprint(message: &Message) -> [u8; 32] {
 /// Notice emitted when the model stopped because it hit its output budget.
 pub(crate) const TOKEN_LIMIT_NOTICE: &str =
     "response hit the model's max_tokens limit; the answer may be incomplete and its final text is truncated";
+
+/// How a ceiling reads in a notice: its value, or `none` when the operator
+/// disabled it with `0` (`limits.max_context_messages = 0` is "no item limit",
+/// and printing "0 messages" there would look like an impossible target).
+fn ceiling_label(value: usize) -> String {
+    if value == 0 {
+        "no ceiling".to_string()
+    } else {
+        value.to_string()
+    }
+}
 
 /// How long to keep reading after `finish_reason` for the trailing `usage`
 /// block. Generous for a same-connection frame, short enough that a gateway
@@ -2673,6 +3157,123 @@ pub fn default_approval_kind(class: kc_core::tool::ToolClass) -> ApprovalKind {
         kc_core::tool::ToolClass::Shell => ApprovalKind::ShellCommand,
         kc_core::tool::ToolClass::Delegate => ApprovalKind::Other,
         kc_core::tool::ToolClass::External => ApprovalKind::NetworkTool,
+    }
+}
+
+#[cfg(test)]
+mod notebook_wiring_tests {
+    use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+    use kc_core::config::Limits;
+    use kc_core::message::Role;
+    use kc_core::tool::{Tool, ToolCallRequest, ToolCtx, ToolOrigin, ToolOutcome, ToolSpec};
+    use std::sync::Arc;
+
+    /// A tool whose result is big enough to push a small window over budget, so a
+    /// real run compacts and the notebook has something to survive.
+    struct BigTool;
+
+    #[async_trait::async_trait]
+    impl Tool for BigTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "big".into(),
+                description: "Return a large page of text.".into(),
+                parameters: serde_json::json!({ "type": "object" }),
+                origin: ToolOrigin::Builtin,
+            }
+        }
+
+        async fn invoke(&self, _request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+            ToolOutcome::ok(format!("BIG\n{}", "y".repeat(20_000)))
+        }
+    }
+
+    /// The end-to-end wiring: the `note` tool is advertised to the model in a real
+    /// request, a call to it stores the finding, and after a compaction drops the
+    /// turn that carried it the finding is still in the request - inside the
+    /// `user`-role digest, never appended to the end.
+    #[tokio::test]
+    async fn a_note_is_offered_stored_and_replayed_in_the_digest() {
+        let finding = "FINDING: the journal is bound before the row exists";
+        let limits = Limits {
+            context_max_chars: 30_000,
+            ..Default::default()
+        };
+        let mut h = HarnessBuilder::new(vec![
+            Script::call(&[(
+                "call_note",
+                crate::context::NOTE_TOOL,
+                &format!("{{\"text\":\"{finding}\"}}"),
+            )]),
+            Script::call(&[("call_big1", "big", "{}")]),
+            Script::call(&[("call_big2", "big", "{}")]),
+            Script::call(&[("call_big3", "big", "{}")]),
+            Script::text("done"),
+        ])
+        .tool(Arc::new(BigTool))
+        .settings(FakeSettings::default().with_limits(limits))
+        .build()
+        .await;
+
+        h.run_to_finish("review the runtime").await;
+
+        let requests = h.factory.requests();
+        assert!(requests.len() >= 3, "the run should take several turns");
+        // 1. The model is offered the notebook tool.
+        assert!(
+            requests[0]
+                .tools
+                .iter()
+                .any(|tool| tool.name == crate::context::NOTE_TOOL),
+            "note is not in the tool list the request advertises: {:?}",
+            requests[0]
+                .tools
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>()
+        );
+        // 2. The call stored the finding and the result came back to the model.
+        assert!(
+            requests.iter().any(|request| request
+                .messages
+                .iter()
+                .any(|m| m.content.contains("1 finding held"))),
+            "the note result never reached the model"
+        );
+        // 3. A later request carries it in a digest turn, because the turn that
+        //    held it was compacted away.
+        let replayed = requests.iter().any(|request| {
+            request.messages.iter().any(|m| {
+                crate::context::is_digest(m) && m.content.contains(finding) && m.role == Role::User
+            })
+        });
+        assert!(replayed, "the finding did not survive a compaction");
+        let dropped_it = requests.iter().any(|request| {
+            !request.messages.iter().any(|m| {
+                m.tool_call_id.as_deref() == Some("call_note") && m.content.contains("held")
+            })
+        });
+        assert!(
+            dropped_it,
+            "fixture: the note's own turn was never compacted, so this proves nothing"
+        );
+        // 4. Nothing is ever appended after the conversation. The only place the
+        //    notebook may appear in a non-tool message is the digest turn.
+        for request in &requests {
+            let last = request.messages.last().expect("a request has messages");
+            assert!(
+                !crate::context::is_digest(last),
+                "a request ended on the digest: {}",
+                last.content
+            );
+            if last.role != Role::Tool {
+                assert!(
+                    !last.content.contains(finding) && !last.content.contains("notebook:"),
+                    "the notebook leaked outside the digest: {}",
+                    last.content
+                );
+            }
+        }
     }
 }
 

@@ -11,6 +11,29 @@ pub trait Hooks: Send + Sync {
         Vec::new()
     }
 
+    /// Text blocks appended to the system prompt, with the user turn being
+    /// answered.
+    ///
+    /// `turn` is the text of the user message this run is answering, or `None`
+    /// when the run was started without one. It exists so a source can retrieve
+    /// *against the question* instead of memoising one block per session: a
+    /// knowledge-graph recall that cannot see the turn can only ever return the
+    /// same static notes.
+    ///
+    /// Defaults to [`Hooks::before_prompt`], so a source that does not care -
+    /// and every existing implementation - behaves exactly as before. Callers
+    /// call this method, not `before_prompt`, so an override here is honoured
+    /// without changing the older signature.
+    async fn before_prompt_for_turn(
+        &self,
+        session_id: &str,
+        workspace: &str,
+        turn: Option<&str>,
+    ) -> Vec<String> {
+        let _ = turn;
+        self.before_prompt(session_id, workspace).await
+    }
+
     async fn on_run_end(&self, session_id: &str, run_id: &str, status: &str) {
         let _ = (session_id, run_id, status);
     }

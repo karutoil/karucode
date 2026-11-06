@@ -557,6 +557,192 @@ async fn read_file_output_is_capped_by_the_tool_limit() {
     );
 }
 
+/// The measured failure at the tool boundary: a file over
+/// `limits.max_file_read_bytes` must still be readable past the byte cap, so the
+/// model does not shell out to `sed -n` for one window.
+#[tokio::test]
+async fn read_file_reaches_a_line_past_the_byte_cap() {
+    let env = env("read-past-cap");
+    let lines = 30_000usize;
+    let body: String = (1..=lines).map(|i| format!("row {i}\n")).collect();
+    assert!(body.len() > 200_000);
+    env.tmp.write("big.txt", &body);
+
+    let out = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"path": "big.txt", "offset": 28_000, "limit": 3}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(
+        out.content
+            .starts_with("big.txt — lines 28000-28002 of 30000"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains("28000\trow 28000"), "{}", out.content);
+    assert!(!out.content.contains("raise limits.max_file_read_bytes"));
+    let meta = out.meta.unwrap();
+    assert_eq!(meta["lines_total"], json!(lines));
+    assert_eq!(meta["byte_limited"], json!(false));
+}
+
+/// Several windows of one file in a single call: the shape the model used to
+/// build with `sed -n '1,40p;800,840p'`.
+#[tokio::test]
+async fn read_file_reads_several_ranges_in_one_call() {
+    let env = env("read-ranges");
+    let body: String = (1..=100).map(|i| format!("line{i}\n")).collect();
+    env.tmp.write("a.txt", &body);
+
+    let out = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"path": "a.txt", "ranges": [{"offset": 1, "limit": 2}, {"offset": 50, "limit": 1}]}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.contains("--- a.txt ---"), "{}", out.content);
+    assert!(out.content.contains("lines 1-2 of 100"), "{}", out.content);
+    assert!(out.content.contains("    1\tline1"), "{}", out.content);
+    assert!(
+        out.content.contains("lines 50-50 of 100"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains("   50\tline50"), "{}", out.content);
+    assert!(!out.content.contains("line3"), "{}", out.content);
+    let meta = out.meta.unwrap();
+    assert_eq!(meta["read_count"], json!(2));
+    assert_eq!(meta["failed_count"], json!(0));
+    assert_eq!(meta["reads"][1]["lines_from"], json!(50));
+
+    // A malformed range keeps its place and does not discard the good one.
+    let out = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"path": "a.txt", "ranges": [{"offset": 5, "limit": 1}, {"offset": 9, "bogus": 1}, "nope"]}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.contains("    5\tline5"), "{}", out.content);
+    assert!(
+        out.content.contains("[error:") && out.content.contains("unknown key `bogus`"),
+        "{}",
+        out.content
+    );
+    let meta = out.meta.unwrap();
+    assert_eq!(meta["read_count"], json!(3));
+    assert_eq!(meta["failed_count"], json!(2));
+}
+
+/// Several files in one call, where one path is bad: the good reads still come
+/// back and the failure is reported in its own place.
+#[tokio::test]
+async fn read_file_reads_several_paths_and_reports_one_missing_inline() {
+    let env = env("read-paths");
+    env.tmp.write("a.txt", "alpha\nbeta\n");
+    env.tmp.write("b.txt", "gamma\n");
+
+    let out = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"paths": ["a.txt", "missing.txt", "b.txt"]}),
+    )
+    .await;
+    assert!(
+        out.ok,
+        "one bad path must not discard the good ones: {}",
+        out.content
+    );
+    assert!(out.content.contains("--- a.txt ---"), "{}", out.content);
+    assert!(out.content.contains("    1\talpha"), "{}", out.content);
+    assert!(out.content.contains("--- b.txt ---"), "{}", out.content);
+    assert!(out.content.contains("    1\tgamma"), "{}", out.content);
+    assert!(
+        out.content.contains("--- missing.txt ---"),
+        "the bad path keeps its place: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("[error:") && out.content.contains("does not exist"),
+        "{}",
+        out.content
+    );
+    let meta = out.meta.unwrap();
+    assert_eq!(meta["read_count"], json!(3));
+    assert_eq!(meta["failed_count"], json!(1));
+    assert_eq!(meta["reads"][1]["path"], json!("missing.txt"));
+    assert!(meta["reads"][1]["error"].is_string());
+
+    // Every read failing is a failed call, not a success full of notes.
+    let out = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"paths": ["nope1.txt", "nope2.txt"]}),
+    )
+    .await;
+    assert!(!out.ok, "{}", out.content);
+}
+
+/// A batch still obeys the per-call output cap: it degrades, it is not refused,
+/// and every path is represented.
+#[tokio::test]
+async fn a_wide_batch_is_shaped_by_the_tool_output_cap() {
+    let limits = Limits {
+        max_tool_output_bytes: 4_000,
+        ..Default::default()
+    };
+    let env = env_with("read-batch-cap", ask(), limits, ApprovalDecision::AllowOnce);
+    let body: String = (1..=400).map(|i| format!("row {i}\n")).collect();
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        env.tmp.write(name, &body);
+    }
+
+    let out = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"paths": ["a.txt", "b.txt", "c.txt", "d.txt"]}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.len() <= 4_000, "{} bytes", out.content.len());
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        assert!(
+            out.content.contains(&format!("--- {name} ---")),
+            "{name} must keep its section: {}",
+            out.content
+        );
+    }
+    assert!(out.truncated, "a capped batch reports truncation");
+}
+
+/// The top-level shapes cannot be mixed: that is a usage failure with a
+/// copyable example, not a half-performed batch.
+#[tokio::test]
+async fn read_file_refuses_mixed_shapes() {
+    let env = env("read-mixed");
+    env.tmp.write("a.txt", "alpha\n");
+
+    let out = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"path": "a.txt", "paths": ["a.txt"]}),
+    )
+    .await;
+    assert!(!out.ok, "{}", out.content);
+    assert!(out.content.contains("not both"), "{}", out.content);
+
+    let out = call(&ReadFile, &env.ctx, json!({"ranges": [{"offset": 1}]})).await;
+    assert!(!out.ok, "{}", out.content);
+    assert!(
+        out.content.contains("`ranges` applies to one file"),
+        "{}",
+        out.content
+    );
+}
+
 #[tokio::test]
 async fn read_file_rejects_directory_and_missing_path() {
     let env = env("read-shape");
@@ -573,8 +759,8 @@ async fn read_file_rejects_directory_and_missing_path() {
     let out = call(&ReadFile, &env.ctx, json!({})).await;
     assert!(!out.ok);
     assert!(
-        out.content.contains("missing string argument `path`"),
-        "{}",
+        out.content.contains("read_file needs `path`"),
+        "the refusal must name the accepted shapes: {}",
         out.content
     );
 }
@@ -1858,6 +2044,90 @@ async fn search_files_caps_results() {
     assert!(out.truncated);
 }
 
+/// The arguments the shell was being used for: `grep -C` context, `grep -l`
+/// file lists, and a per-file cap so one noisy file cannot spend the budget.
+#[tokio::test]
+async fn search_files_context_files_only_and_per_file_cap() {
+    let env = env("search-shapes");
+    env.tmp.write(
+        "a.txt",
+        "line1\nMATCH one\nline3\nline4\nline5\nMATCH two\nline7\n",
+    );
+    env.tmp.write("b.txt", "MATCH b\n");
+    env.tmp.write("clean.txt", "nothing\n");
+
+    // Context is marked with `-` so a context line is not read as the match.
+    let out = call(
+        &SearchFiles,
+        &env.ctx,
+        json!({"pattern": "MATCH", "path": "a.txt", "context": 1}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.contains("2 match(es)"), "{}", out.content);
+    assert!(
+        out.content.contains("1 line(s) of context"),
+        "{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("a.txt:2: MATCH one"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains("a.txt:1- line1"), "{}", out.content);
+    assert!(out.content.contains("a.txt:3- line3"), "{}", out.content);
+    let meta = out.meta.unwrap();
+    assert_eq!(meta["matches"], json!(2), "context lines are not matches");
+    assert_eq!(meta["context"], json!(1));
+
+    // files_only: one path per line, no line numbers, and no matches on `:`.
+    let out = call(
+        &SearchFiles,
+        &env.ctx,
+        json!({"pattern": "MATCH", "files_only": true}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.contains("2 file(s)"), "{}", out.content);
+    let body: Vec<&str> = out
+        .content
+        .lines()
+        .skip(2)
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(body.len(), 2, "{}", out.content);
+    for line in &body {
+        assert!(!line.contains(':'), "a files-only body is paths: {line}");
+    }
+    assert!(body.contains(&"a.txt"), "{:?}", body);
+    assert!(body.contains(&"b.txt"), "{:?}", body);
+    assert_eq!(out.meta.unwrap()["files"], json!(2));
+
+    // A per-file cap keeps the second file reachable with a small global cap.
+    let out = call(
+        &SearchFiles,
+        &env.ctx,
+        json!({"pattern": "MATCH", "max_results": 3, "max_matches_per_file": 1}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(
+        out.content.contains("max 1 match(es) per file"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains("a.txt:2:"), "{}", out.content);
+    assert!(
+        out.content.contains("b.txt:1:"),
+        "the quiet file must still appear: {}",
+        out.content
+    );
+    assert!(!out.content.contains("a.txt:6:"), "{}", out.content);
+    assert_eq!(out.meta.as_ref().unwrap()["max_matches_per_file"], json!(1));
+    assert_eq!(out.meta.unwrap()["matches"], json!(2));
+}
+
 #[tokio::test]
 async fn search_fallback_walks_gitignore_and_globs() {
     let env = env("search-fallback");
@@ -1872,6 +2142,9 @@ async fn search_fallback_walks_gitignore_and_globs() {
         glob: Some("*.rs".into()),
         case_insensitive: true,
         max_results: 10,
+        context: 0,
+        files_only: false,
+        max_matches_per_file: 0,
     };
     let result = search::search_fallback(&env.ws, &query).await.unwrap();
     assert_eq!(result.engine, SearchEngine::Builtin);
@@ -1908,6 +2181,9 @@ async fn search_falls_back_when_ripgrep_is_missing() {
         glob: None,
         case_insensitive: false,
         max_results: 10,
+        context: 0,
+        files_only: false,
+        max_matches_per_file: 0,
     };
     let cancel = CancellationToken::new();
 
@@ -1937,9 +2213,89 @@ async fn search_fallback_reports_invalid_regex() {
         glob: None,
         case_insensitive: false,
         max_results: 10,
+        context: 0,
+        files_only: false,
+        max_matches_per_file: 0,
     };
     let err = search::search_fallback(&env.ws, &query).await.unwrap_err();
     assert!(err.to_string().contains("invalid regex"), "{err}");
+}
+
+// --------------------------------------------------------------------- glob ---
+
+#[tokio::test]
+async fn glob_finds_names_honours_gitignore_and_marks_directories() {
+    let env = env("glob-basic");
+    env.tmp.write("src/a.rs", "fn a() {}\n");
+    env.tmp.write("src/nested/b.rs", "fn b() {}\n");
+    env.tmp.write(".gitignore", "ignored/\n");
+    env.tmp.write("ignored/c.rs", "fn c() {}\n");
+
+    let out = call(&Glob, &env.ctx, json!({"pattern": "*.rs"})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.contains("src/a.rs"), "{}", out.content);
+    assert!(out.content.contains("src/nested/b.rs"), "{}", out.content);
+    assert!(
+        !out.content.contains("ignored/"),
+        "the walk must honour .gitignore: {}",
+        out.content
+    );
+    assert_eq!(out.meta.as_ref().unwrap()["matches"], json!(2));
+
+    // A path-shaped pattern is matched as well as a bare name.
+    let out = call(&Glob, &env.ctx, json!({"pattern": "src/**/*.rs"})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.contains("src/nested/b.rs"), "{}", out.content);
+
+    // Directories carry a trailing "/".
+    let out = call(&Glob, &env.ctx, json!({"pattern": "nested"})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.contains("src/nested/"), "{}", out.content);
+
+    // The search root can be narrowed.
+    let out = call(&Glob, &env.ctx, json!({"pattern": "*.rs", "path": "src"})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.contains("src/a.rs"), "{}", out.content);
+
+    // A file is not a directory to walk.
+    let out = call(
+        &Glob,
+        &env.ctx,
+        json!({"pattern": "*.rs", "path": "src/a.rs"}),
+    )
+    .await;
+    assert!(!out.ok, "{}", out.content);
+}
+
+#[tokio::test]
+async fn glob_stops_at_the_cap_and_says_so() {
+    let env = env("glob-cap");
+    for i in 0..40 {
+        env.tmp.write(&format!("f{i:02}.txt"), "x\n");
+    }
+
+    let out = call(
+        &Glob,
+        &env.ctx,
+        json!({"pattern": "*.txt", "max_results": 5}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    let meta = out.meta.as_ref().unwrap();
+    assert_eq!(meta["capped"], json!(true));
+    assert_eq!(meta["shown"], json!(5));
+    assert!(out.truncated);
+    assert!(
+        out.content.contains("[truncated:"),
+        "the cap must be visible: {}",
+        out.content
+    );
+    assert_eq!(
+        out.content.lines().filter(|l| l.starts_with("f")).count(),
+        5,
+        "{}",
+        out.content
+    );
 }
 
 // --------------------------------------------------------------------- git ---
@@ -1982,6 +2338,125 @@ async fn git_status_reports_non_repo() {
     assert!(out.ok, "{}", out.content);
     assert!(out.content.contains("is_repo: false"), "{}", out.content);
     assert_eq!(out.meta.unwrap()["is_repo"], json!(false));
+
+    // `git_log` says the same thing instead of failing the call.
+    let out = call(&GitLog, &env.ctx, json!({})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.contains("is_repo: false"), "{}", out.content);
+    assert_eq!(out.meta.unwrap()["is_repo"], json!(false));
+}
+
+#[tokio::test]
+async fn git_log_is_bounded_ordered_and_confined() {
+    if !git_available() {
+        eprintln!("git not installed; skipping");
+        return;
+    }
+    let env = env("git-log");
+    env.tmp.write("tracked.txt", "one\n");
+    git(env.tmp.path(), &["init", "-q", "-b", "main"]);
+    git(env.tmp.path(), &["add", "."]);
+    git(env.tmp.path(), &["commit", "-qm", "first commit"]);
+    for i in 2..=5 {
+        env.tmp.write("tracked.txt", &format!("{i}\n"));
+        git(env.tmp.path(), &["add", "."]);
+        git(env.tmp.path(), &["commit", "-qm", &format!("commit {i}")]);
+    }
+
+    // Default: every commit, newest first, one line each.
+    let out = call(&GitLog, &env.ctx, json!({})).await;
+    assert!(out.ok, "{}", out.content);
+    let meta = out.meta.as_ref().unwrap();
+    assert_eq!(meta["commits"], json!(5));
+    assert_eq!(meta["capped"], json!(false));
+    assert!(!out.truncated);
+    let body: Vec<&str> = out
+        .content
+        .lines()
+        .filter(|line| !line.starts_with("is_repo") && !line.starts_with("commits"))
+        .collect();
+    assert_eq!(body.len(), 5, "{}", out.content);
+    assert!(body[0].ends_with("commit 5"), "newest first: {}", body[0]);
+    assert!(
+        body[4].ends_with("first commit"),
+        "oldest last: {}",
+        body[4]
+    );
+    // `sha date subject`: a sha, an ISO date, then the subject.
+    let mut parts = body[0].split(' ');
+    assert!(!parts.next().unwrap().is_empty());
+    let date = parts.next().unwrap();
+    assert_eq!(date.len(), 10, "date is YYYY-MM-DD: {date}");
+    assert!(date.as_bytes()[4] == b'-');
+
+    // Bounded: `max_count` cuts the list and says that it did.
+    let out = call(&GitLog, &env.ctx, json!({"max_count": 2})).await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(out.meta.as_ref().unwrap()["commits"], json!(2));
+    assert_eq!(out.meta.as_ref().unwrap()["capped"], json!(true));
+    assert!(out.truncated);
+    assert!(
+        out.content.contains("showing the latest 2 commits"),
+        "{}",
+        out.content
+    );
+
+    // A path narrows the history to commits that touch it.
+    env.tmp.write("other.txt", "unrelated\n");
+    git(env.tmp.path(), &["add", "."]);
+    git(env.tmp.path(), &["commit", "-qm", "only other"]);
+    let out = call(&GitLog, &env.ctx, json!({"path": "tracked.txt"})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(
+        !out.content.contains("only other"),
+        "a path narrows the log: {}",
+        out.content
+    );
+    assert!(out.content.contains("commit 5"), "{}", out.content);
+
+    // The ceiling is hard, not a suggestion.
+    let out = call(&GitLog, &env.ctx, json!({"max_count": 100_000})).await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(out.meta.as_ref().unwrap()["commits"], json!(6));
+}
+
+#[tokio::test]
+async fn git_log_does_not_leak_the_enclosing_repository() {
+    if !git_available() {
+        eprintln!("git not installed; skipping");
+        return;
+    }
+    // `<outer>/` is the repository; `<outer>/inner/` is the workspace.
+    let outer = TempWorkspace::new("git-log-nested");
+    git(outer.path(), &["init", "-q", "-b", "main"]);
+    outer.write("sibling.txt", "SIBLING-SECRET\n");
+    outer.write("inner/tracked.txt", "inner one\n");
+    git(outer.path(), &["add", "."]);
+    git(outer.path(), &["commit", "-qm", "init both"]);
+    outer.write("sibling.txt", "SIBLING-SECRET two\n");
+    git(outer.path(), &["add", "."]);
+    git(outer.path(), &["commit", "-qm", "OUTSIDE-ONLY subject"]);
+    outer.write("inner/tracked.txt", "inner two\n");
+    git(outer.path(), &["add", "."]);
+    git(outer.path(), &["commit", "-qm", "INSIDE-ONLY subject"]);
+
+    let inner_root = outer.path().join("inner");
+    let ws = Workspace::new(&inner_root).unwrap();
+    let ctx = ctx_for(&ws);
+
+    let log = call(&GitLog, &ctx, json!({})).await;
+    assert!(log.ok, "{}", log.content);
+    assert!(
+        !log.content.contains("OUTSIDE-ONLY"),
+        "a commit that touches nothing inside the workspace must not be listed:\n{}",
+        log.content
+    );
+    assert!(
+        log.content.contains("INSIDE-ONLY"),
+        "the workspace's own commit must still be listed:\n{}",
+        log.content
+    );
+    assert_eq!(log.meta.as_ref().unwrap()["confined"], json!(true));
 }
 
 #[tokio::test]
@@ -2197,7 +2672,7 @@ async fn git_tools_in_a_plain_repo_are_unchanged() {
 #[tokio::test]
 async fn builtin_tools_are_complete_and_read_only_by_default() {
     let tools = builtin_tools();
-    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.len(), 11);
     let names: Vec<String> = tools.iter().map(|t| t.spec().name).collect();
     assert_eq!(
         names,
@@ -2205,11 +2680,13 @@ async fn builtin_tools_are_complete_and_read_only_by_default() {
             "read_file",
             "list_dir",
             "search_files",
+            "glob",
             "write_file",
             "edit_file",
             "run_command",
             "git_status",
             "git_diff",
+            "git_log",
             "karucode_docs"
         ]
     );
@@ -2221,6 +2698,15 @@ async fn builtin_tools_are_complete_and_read_only_by_default() {
             spec.name
         );
         assert_eq!(spec.parameters["type"], json!("object"));
+        // A usage failure is answered with the call the model should have written,
+        // built from the schema; a tool with no usable example gives no hint.
+        assert!(
+            spec.example_arguments()
+                .as_object()
+                .is_some_and(|o| !o.is_empty()),
+            "{} needs at least one argument in its usage hint",
+            spec.name
+        );
     }
     let get = |n: &str| tools.iter().find(|t| t.spec().name == n).unwrap().class();
     assert_eq!(get("read_file"), kc_core::tool::ToolClass::ReadOnly);

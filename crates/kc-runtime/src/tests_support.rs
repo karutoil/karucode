@@ -2165,6 +2165,249 @@ impl Tool for PanicTool {
     }
 }
 
+/// A tool that reports whether it was called at the same time as its siblings.
+///
+/// `{"sleep_ms": N}` controls how long the call takes, so a test can make later
+/// calls *finish first* and then assert the transcript is still in call order.
+/// `peak` is the largest number of invocations in flight at once: 1 on the
+/// sequential path, more than 1 only when the batch really ran concurrently.
+pub(crate) struct ProbeTool {
+    pub name: String,
+    class: ToolClass,
+    in_flight: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    started: Arc<Mutex<Vec<String>>>,
+}
+
+impl ProbeTool {
+    pub(crate) fn read_only(name: &str) -> Self {
+        Self::new(name, ToolClass::ReadOnly)
+    }
+
+    /// The same probe, declaring a class the runtime must not run concurrently.
+    pub(crate) fn mutating(name: &str) -> Self {
+        Self::new(name, ToolClass::Mutating)
+    }
+
+    fn new(name: &str, class: ToolClass) -> Self {
+        Self {
+            name: name.to_string(),
+            class,
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+            started: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn boxed(self) -> Arc<dyn Tool> {
+        Arc::new(self)
+    }
+
+    /// The most calls this tool ever had in flight at once.
+    pub(crate) fn peak(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.peak)
+    }
+
+    /// The arguments of the calls, in the order their invocations started.
+    pub(crate) fn started(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.started)
+    }
+}
+
+#[async_trait]
+impl Tool for ProbeTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Report how many probe calls are in flight at once.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "sleep_ms": { "type": "integer" }, "tag": { "type": "string" } }
+            }),
+            origin: kc_core::tool::ToolOrigin::Builtin,
+        }
+    }
+
+    fn class(&self) -> ToolClass {
+        self.class
+    }
+
+    fn requires_approval(&self) -> bool {
+        false
+    }
+
+    async fn invoke(&self, request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        let tag = request
+            .arguments
+            .get("tag")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?")
+            .to_string();
+        self.started.lock().expect("started lock").push(tag.clone());
+        let sleep_ms = request
+            .arguments
+            .get("sleep_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(50);
+        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        ToolOutcome::ok(format!("probe:{tag}"))
+    }
+}
+
+/// A tool that always fails, without panicking.
+///
+/// Distinct from [`PanicTool`]: a failing call is an ordinary tool result, and a
+/// batch must keep the results of the calls around it.
+pub(crate) struct FailingTool {
+    pub name: String,
+}
+
+impl FailingTool {
+    pub(crate) fn boxed(name: &str) -> Arc<dyn Tool> {
+        Arc::new(Self {
+            name: name.to_string(),
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for FailingTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Fail on purpose.".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            origin: kc_core::tool::ToolOrigin::Builtin,
+        }
+    }
+
+    async fn invoke(&self, _request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+        ToolOutcome::err("this call failed on purpose")
+    }
+}
+
+/// A hook source written the way every embedding was before
+/// `before_prompt_for_turn` existed: it implements only `before_prompt`.
+///
+/// The runtime must still deliver its notes, which is what proves the new
+/// method's default really delegates instead of dropping the source.
+pub(crate) struct LegacyPromptHook {
+    calls: Arc<AtomicUsize>,
+}
+
+impl LegacyPromptHook {
+    pub(crate) fn new() -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub(crate) fn calls(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.calls)
+    }
+}
+
+#[async_trait]
+impl Hooks for LegacyPromptHook {
+    async fn before_prompt(&self, _session_id: &str, _workspace: &str) -> Vec<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        vec!["legacy hook note".to_string()]
+    }
+}
+
+/// A hook source that overrides `before_prompt_for_turn` and records every turn
+/// it was given, so a test can assert the runtime passes the real user message.
+/// One observed hook call: the workspace label and the turn it was given.
+type SeenTurn = (String, Option<String>);
+
+#[derive(Clone, Default)]
+pub(crate) struct TurnRecordingHook {
+    seen: Arc<Mutex<Vec<SeenTurn>>>,
+}
+
+impl TurnRecordingHook {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// `(workspace, turn)` for every call the runtime made, in order.
+    pub(crate) fn seen(&self) -> Vec<SeenTurn> {
+        self.seen.lock().expect("seen lock").clone()
+    }
+}
+
+#[async_trait]
+impl Hooks for TurnRecordingHook {
+    async fn before_prompt(&self, _session_id: &str, _workspace: &str) -> Vec<String> {
+        // Should never be reached when `before_prompt_for_turn` is called.
+        vec!["WRONG HOOK: before_prompt instead of before_prompt_for_turn".to_string()]
+    }
+
+    async fn before_prompt_for_turn(
+        &self,
+        _session_id: &str,
+        workspace: &str,
+        turn: Option<&str>,
+    ) -> Vec<String> {
+        self.seen
+            .lock()
+            .expect("seen lock")
+            .push((workspace.to_string(), turn.map(str::to_string)));
+        Vec::new()
+    }
+}
+
+/// A built-in tool that writes a file inside the workspace.
+///
+/// Used where a test needs the workspace to change *while a run is working* -
+/// rewriting `AGENTS.md` mid-run, for instance, to prove the run kept the copy it
+/// read at its start.
+pub(crate) struct WriteWorkspaceFileTool {
+    pub name: String,
+    pub rel: String,
+    pub content: String,
+}
+
+impl WriteWorkspaceFileTool {
+    pub(crate) fn boxed(name: &str, rel: &str, content: &str) -> Arc<dyn Tool> {
+        Arc::new(Self {
+            name: name.to_string(),
+            rel: rel.to_string(),
+            content: content.to_string(),
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for WriteWorkspaceFileTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Rewrite one file in the workspace.".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            origin: kc_core::tool::ToolOrigin::Builtin,
+        }
+    }
+
+    fn class(&self) -> ToolClass {
+        ToolClass::Mutating
+    }
+
+    fn requires_approval(&self) -> bool {
+        false
+    }
+
+    async fn invoke(&self, _request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        match std::fs::write(ctx.workspace.root().join(&self.rel), &self.content) {
+            Ok(()) => ToolOutcome::ok(format!("wrote {}", self.rel)),
+            Err(e) => ToolOutcome::err(format!("could not write {}: {e}", self.rel)),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------

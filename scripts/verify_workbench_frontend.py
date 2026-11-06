@@ -156,6 +156,11 @@ def main() -> int:
           bodyLeft:body.getBoundingClientRect().left,
           resultLeft:result.getBoundingClientRect().left,
           chatRight:chat.getBoundingClientRect().right,
+          transcriptWidth:chat.querySelector('.chat-inner').getBoundingClientRect().width,
+          composerWidth:chat.querySelector('.composer-inner').getBoundingClientRect().width,
+          composerBoxWidth:chat.querySelector('.composer').getBoundingClientRect().width,
+          transcriptMaxWidth:getComputedStyle(chat.querySelector('.chat-inner')).maxWidth,
+          composerMaxWidth:getComputedStyle(chat.querySelector('.composer-inner')).maxWidth,
           separatorLeft:box.left,
           transitionProperty:getComputedStyle(result).transitionProperty,
           gridColumns:getComputedStyle(body).gridTemplateColumns,
@@ -301,7 +306,11 @@ def main() -> int:
         session._send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
         session._send("Emulation.setTouchEmulationEnabled", {"enabled": False})
         after_touch = result_metrics()
-        check("touch drag shrinks the real result pane", after_touch["resultWidth"] < before["resultWidth"] - 40 and
+        released = before["resultWidth"] - after_touch["resultWidth"]
+        check("touch drag transfers all released Results width to Conversation",
+              after_touch["resultWidth"] < before["resultWidth"] - 40 and
+              abs(after_touch["chatWidth"] - before["chatWidth"] - released) <= 1 and
+              abs(after_touch["chatRight"] - after_touch["separatorLeft"]) <= 1 and
               abs(after_touch["resultRight"] - after_touch["bodyRight"]) <= 1)
         wait_project_width(after_touch["value"])
 
@@ -314,8 +323,21 @@ def main() -> int:
               abs(at_end["resultRight"] - at_end["bodyRight"]) <= 1)
         press_key("Home", "Home", 36)
         at_home = result_metrics()
-        check("keyboard Home reaches the accessible result minimum", at_home["value"] == 280 and
-              abs(at_home["resultWidth"] - 280) <= 1 and abs(at_home["resultRight"] - at_home["bodyRight"]) <= 1)
+        check("minimum Results width leaves the full remainder to Conversation",
+              at_home["value"] == 280 and abs(at_home["resultWidth"] - 280) <= 1 and
+              abs(at_home["chatWidth"] + at_home["width"] + at_home["resultWidth"] - at_home["bodyWidth"]) <= 1 and
+              abs(at_home["chatRight"] - at_home["separatorLeft"]) <= 1 and
+              abs(at_home["resultRight"] - at_home["bodyRight"]) <= 1)
+        # The fixed reading-width cap must not strand a wide conversation again.
+        session._send("Emulation.setDeviceMetricsOverride", {"width": 1920, "height": 1000, "deviceScaleFactor": 1, "mobile": False})
+        wide_home = result_metrics()
+        check("wide transcript matches the composer box without filling Conversation",
+              wide_home["value"] == 280 and wide_home["transcriptWidth"] >= wide_home["chatWidth"] * 0.5 - 1 and
+              wide_home["composerWidth"] >= wide_home["chatWidth"] * 0.5 - 1 and
+              abs(wide_home["transcriptWidth"] - wide_home["composerBoxWidth"]) <= 1 and
+              wide_home["transcriptWidth"] < wide_home["chatWidth"] - 100)
+        session.screenshot(out / "workbench-wide-minimum-results.png")
+        session._send("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 1000, "deviceScaleFactor": 1, "mobile": False})
         for _ in range(6):
             press_key("ArrowLeft", "ArrowLeft", 37, shift=True)
         chosen = result_metrics()
@@ -327,6 +349,7 @@ def main() -> int:
             "touch_during": during_touch,
             "keyboard_end": at_end,
             "keyboard_home": at_home,
+            "wide_keyboard_home": wide_home,
             "chosen": chosen,
         }, indent=2))
         session.screenshot(out / "workbench-resized.png")
@@ -361,6 +384,73 @@ def main() -> int:
         check("completed tool details are expandable", evaluate("return [...document.querySelectorAll('.tool-row-head,.tool-expand,.command-summary')].some(e => e.getBoundingClientRect().width>0);"))
         evaluate("const detail=document.querySelector('.tool-row-head,.tool-expand,.command-summary'); detail.click(); return true;")
         check("expanded real tool output is visible", evaluate("return document.querySelectorAll('.tool-body').length > 0;"))
+
+        # Read the complete populated transcript in the wide, minimum-Results split.
+        session._send("Emulation.setDeviceMetricsOverride", {"width": 1920, "height": 1000, "deviceScaleFactor": 1, "mobile": False})
+        evaluate("document.querySelector('.result-resizer').focus(); return true;")
+        press_key("Home", "Home", 36)
+        tool_alignment = evaluate("""
+        const rect = selector => {
+          const element=document.querySelector(selector);
+          if(!element)return null;
+          const box=element.getBoundingClientRect();
+          return {left:box.left,right:box.right,width:box.width};
+        };
+        return {chat:rect('.chat-panel'),inner:rect('.chat-inner'),transcript:rect('.transcript'),
+          composer:rect('.composer'),user:rect('.msg-user'),
+          userText:rect('.user-question'),assistant:rect('.msg-assistant'),assistantBody:rect('.msg-assistant .msg-body'),
+          toolGroup:rect('.tool-group'),toolRow:rect('.tool-row'),toolBody:rect('.tool-body'),
+          transcriptPadding:parseFloat(getComputedStyle(document.querySelector('.chat-inner')).paddingLeft)};
+        """)
+        check("transcript matches the composer, with tools left and the user message right",
+              abs(tool_alignment["inner"]["width"] - tool_alignment["composer"]["width"]) <= 1 and
+              tool_alignment["transcript"]["left"] > tool_alignment["chat"]["left"] + tool_alignment["transcriptPadding"] + 1 and
+              abs(tool_alignment["user"]["right"] - tool_alignment["transcript"]["right"]) <= 1 and
+              tool_alignment["toolGroup"]["left"] < tool_alignment["user"]["left"] and
+              abs(tool_alignment["toolGroup"]["left"] - tool_alignment["assistantBody"]["left"]) <= 1 and
+              tool_alignment["toolBody"]["left"] >= tool_alignment["toolRow"]["left"])
+        (out / "tool-alignment.json").write_text(json.dumps(tool_alignment, indent=2))
+        session.screenshot(out / "workbench-tool-alignment.png")
+        for _ in range(6):
+            press_key("ArrowLeft", "ArrowLeft", 37, shift=True)
+        wait_project_width(580)
+        session._send("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 1000, "deviceScaleFactor": 1, "mobile": False})
+
+        # A real command turn, then open its completed-work fold and the command
+        # row. Compact rows historically nested .cmd-output and .command-scroll.
+        folds_before = evaluate("return document.querySelectorAll('.process-fold').length;")
+        evaluate("""
+        const input = document.querySelector('#composer-input');
+        const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        set.call(input, '[tool:run] Inspect the disposable command output.');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+        """)
+        click_button("Send message (Command or Control + Enter)")
+        until = time.time() + 12
+        while time.time() < until and evaluate("return document.querySelectorAll('.process-fold').length;") <= folds_before:
+            time.sleep(0.1)
+        evaluate("[...document.querySelectorAll('.process-fold')].filter(e=>e.getBoundingClientRect().width>0).at(-1)?.click(); return true;")
+        until = time.time() + 10
+        while time.time() < until and not evaluate("return !!document.querySelector('.command-row-head');"):
+            time.sleep(0.1)
+        evaluate("const row=[...document.querySelectorAll('.command-row-head')].at(-1); if(row && row.getAttribute('aria-expanded')!=='true')row.click(); return true;")
+        command_scroll = evaluate("""
+        const outer=document.querySelector('.command-row[data-open="true"] > .cmd-output');
+        const inner=outer?.querySelector('.command-scroll');
+        const pre=inner?.querySelector('.output-pre');
+        if(!outer||!inner||!pre)return null;
+        return {outerOverflow:getComputedStyle(outer).overflowY,outerMaxHeight:getComputedStyle(outer).maxHeight,
+          innerOverflow:getComputedStyle(inner).overflowY,innerMaxHeight:getComputedStyle(inner).maxHeight,
+          preOverflow:getComputedStyle(pre).overflowY,preMaxHeight:getComputedStyle(pre).maxHeight};
+        """)
+        (out / "command-scroll.json").write_text(json.dumps(command_scroll, indent=2))
+        check("expanded command output has exactly one bounded scroller",
+              command_scroll is not None and command_scroll["outerOverflow"] == "visible" and
+              command_scroll["outerMaxHeight"] == "none" and command_scroll["innerOverflow"] == "auto" and
+              command_scroll["innerMaxHeight"] != "none" and command_scroll["preOverflow"] == "visible" and
+              command_scroll["preMaxHeight"] == "none")
+        session.screenshot(out / "workbench-command-scroll.png")
 
         # The real project/workspace link, not a synthetic context fixture.
         evaluate("document.querySelector('.context-header-btn').click(); return true;")

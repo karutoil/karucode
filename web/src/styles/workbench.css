@@ -320,6 +320,19 @@
     min-width: 330px;
   }
 
+  .chat-main.is-workbench .center-body.has-result[style*='--workbench-result-w'] > .chat-panel {
+    /* Fractional grow would leave part of a resized Results pane's width to the
+     * separator's auto margin; Conversation must consume the entire remainder. */
+    flex: 1 1 0;
+  }
+
+  .chat-main.is-workbench .center-body.has-result[style*='--workbench-result-w'] .chat-inner,
+  .chat-main.is-workbench .center-body.has-result[style*='--workbench-result-w'] .composer-inner {
+    /* Match the transcript to the actual .composer box rather than filling the
+     * free pane. Assistant/tools stay left-anchored; user bubbles still bias right. */
+    max-width: var(--content-max);
+  }
+
   .chat-main.is-workbench .center-body.has-result > .inspector {
     flex: 1.35 1 0;
     width: auto;

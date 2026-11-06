@@ -122,6 +122,7 @@ pub const REQUIRED_SLUGS: &[&str] = &[
     "missions",
     "notifications",
     "plugins",
+    "project-instructions",
     "projects",
     "provider-profiles",
     "prompt-cache",

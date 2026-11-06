@@ -7,21 +7,23 @@
 
 - **Slug:** `builtin-tools`
 - **Tags:** tools, agent, files, search, shell, git
-- **Applies to:** `tool:read_file`, `tool:list_dir`, `tool:search_files`, `tool:write_file`, `tool:edit_file`, `tool:run_command`, `tool:git_status`, `tool:git_diff`, `tool:karucode_docs`, `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `route:POST /api/sessions/:id/rewind`, `config:[limits]`, `config:allow_temp_dir`, `env:KARUCODE_ALLOW_TEMP_DIR`, `config:[model]`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`
+- **Applies to:** `tool:read_file`, `tool:list_dir`, `tool:search_files`, `tool:glob`, `tool:write_file`, `tool:edit_file`, `tool:run_command`, `tool:git_status`, `tool:git_diff`, `tool:git_log`, `tool:karucode_docs`, `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `route:POST /api/sessions/:id/rewind`, `config:[limits]`, `config:limits.max_file_read_bytes`, `config:limits.search_max_results`, `config:limits.max_tool_output_bytes`, `config:allow_temp_dir`, `env:KARUCODE_ALLOW_TEMP_DIR`, `config:[model]`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`
 - **Source:** `crates/kc-tools/src/lib.rs:7`
 
 ---
 
 | Tool | Class | Approval | What it does |
 | --- | --- | --- | --- |
-| `read_file` | read_only | none | UTF-8 text with numbered lines and a `path - lines A-B of N` header; `offset`/`limit` (default 400, max 2000 lines). `N` is the real line count of the whole file, even when `limits.max_file_read_bytes` cut the read short. A PNG/JPEG/GIF/WebP is attached as an image for a model that takes image input; a text-only model gets a refusal it can pass on |
+| `read_file` | read_only | none | UTF-8 text with numbered lines and a `path - lines A-B of N` header; `offset`/`limit` (default 400, max 2000 lines). One call reads one file (`path`), several files (`paths`) or several windows of one file (`ranges`); a bad path or range is reported inline and the other reads still return. `limits.max_file_read_bytes` bounds the bytes one read *returns*, not the offsets it can reach, so any line of a huge file is readable. A PNG/JPEG/GIF/WebP given as `path` is attached as an image for a model that takes image input; a text-only model gets a refusal it can pass on |
 | `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries; the walk stops at the cap and a truncated listing reports the total as a lower bound (`500+`) |
-| `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`. The result cap is global across files, and long matching lines keep their first 300 characters in both engines |
+| `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`, plus `path:line- text` context lines with `context`, or one path per line with `files_only`. The result cap is global across files, `max_matches_per_file` stops one noisy file spending it, and long matching lines keep their first 300 characters in both engines |
+| `glob` | read_only | none | name-based finder (not a content search): a glob over the same `.gitignore`-aware walker the search fallback uses. Directories carry a trailing `/`; bounded at 200 paths and a truncated walk says so |
 | `write_file` | mutating | policy | create/overwrite atomically, max 2 MiB per call; journals the previous bytes for a rewind |
 | `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff; revalidates the file after approval and journals the previous bytes |
 | `run_command` | shell | policy | `/bin/sh -c` in the workspace, incrementally UTF-8-decoded streamed output, timeout, own process group. On timeout or cancellation the whole group gets SIGTERM, then SIGKILL after a grace period, so a child that ignores SIGTERM cannot survive |
 | `git_status` | read_only | none | branch + porcelain status for the workspace or a subdirectory, **confined to the workspace** |
 | `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref, **confined to the workspace** (paths are workspace-relative) |
+| `git_log` | read_only | none | bounded commit history: one line per commit (`sha date subject`), `max_count` default 20 and hard-capped at 200, optional `path` narrowing, **confined to the workspace** |
 | `karucode_docs` | read_only | none | search and read karucode's own documentation (this system) |
 
 The delegate family - `spawn_agent`, `spawn_agents`, `send_message`,
@@ -39,7 +41,13 @@ surface. Plugin tools are namespaced `plugin__<plugin>__<tool>` and MCP tools
 
 ```json
 {"name": "read_file", "arguments": {"path": "src/main.rs", "offset": 120, "limit": 40}}
+{"name": "read_file", "arguments": {"paths": ["Cargo.toml", "README.md"]}}
+{"name": "read_file", "arguments": {"path": "src/lib.rs", "ranges": [{"offset": 1, "limit": 40}, {"offset": 900, "limit": 40}]}}
 {"name": "search_files", "arguments": {"pattern": "fn main", "glob": "*.rs"}}
+{"name": "search_files", "arguments": {"pattern": "spawn_agent", "context": 2, "max_matches_per_file": 5}}
+{"name": "search_files", "arguments": {"pattern": "TODO", "files_only": true}}
+{"name": "glob", "arguments": {"pattern": "*.toml"}}
+{"name": "git_log", "arguments": {"path": "crates/kc-tools", "max_count": 10}}
 {"name": "edit_file", "arguments": {"path": "a.txt", "old_string": "old", "new_string": "new"}}
 ```
 
@@ -82,28 +90,60 @@ result header are previewed at 512 characters (metadata still has the command).
   fallback walks lazily, observes cancellation during walking/reads, and skips
   files over 4 MiB; bounded reads cannot grow past that cap during the scan.
 * `search_files` caps results globally, not per file, and both engines agree on
-  the cap. A match on a very long line keeps its first 300 **characters** rather
-  than being replaced by a placeholder; the cap is counted in characters, not
-  bytes, so a line of multi-byte text is cut in the same place by both engines
-  (ripgrep's own `--max-columns` counts bytes, so it is set wide enough that our
-  character cap is the one that decides). A path containing `:` is reported
-  correctly: ripgrep is asked for `--null` records.
+  the cap. `max_matches_per_file` adds a per-file cap on top, so one noisy file
+  cannot spend the whole global budget; `0` (the default) leaves only the
+  global cap. `context` (N lines before *and* after each match, like `grep -C`)
+  is reported as `path:line- text` so a context line is never mistaken for the
+  matching line, and it is capped at 10 lines. `files_only` returns the
+  distinct paths that matched, one per line, like `grep -l`; `context` has no
+  meaning there and is ignored. Both engines produce the **same shape** for
+  all three - the crate's promise is that the model cannot tell them apart
+  except by the engine label in the header.
+* `search_files` keeps the first 300 **characters** of a very long matching
+  line rather than replacing it with a placeholder; the cap is counted in
+  characters, not bytes, so a line of multi-byte text is cut in the same place
+  by both engines (ripgrep's own `--max-columns` counts bytes, so it is set
+  wide enough that our character cap is the one that decides). A path
+  containing `:` is reported correctly: ripgrep is asked for `--null` records.
+* `glob` matches an entry's file name, its path relative to `path` and its
+  workspace-relative path, so `*.rs`, `src/**/*.rs` and `crates/*/src/lib.rs`
+  all work. It lists directories too, with a trailing `/`, and its walk stops
+  at 200 paths (the note says the cap cut it). Read-only, no approval.
 * `run_command` reports a **success** when the command exits 0 and leaves a
   child running in the background (`build & exit 0`) instead of waiting for that
   child to close the output pipes. The result says the output may be incomplete
   and `background_output` is set in the metadata.
 * On Unix, backslashes in filenames are literal characters, including in tool
   metadata and rewind checkpoint keys; they are not rewritten as `/` separators.
-* A narrowed `git_status`/`git_diff` path also accepts a deleted tracked file
-  (or one whose parent directory was deleted). The path is checked lexically and
-  through its deepest existing ancestor, so symlink escapes are still refused.
+* A narrowed `git_status`/`git_diff`/`git_log` path also accepts a deleted
+  tracked file (or one whose parent directory was deleted). The path is checked
+  lexically and through its deepest existing ancestor, so symlink escapes are
+  still refused.
 * `read_file` reports the file's real line count in its header even when the
-  byte cap truncated the content; when the byte cap (not the line window) ended
-  the read, there is no "continue with offset" hint, because those lines cannot
-  be reached without raising `limits.max_file_read_bytes`.
+  byte cap truncated the content. The cap bounds the bytes *returned* by one
+  read, not the offsets that can be asked for: an `offset` past what
+  `limits.max_file_read_bytes` covers is reached by streaming forward to that
+  window (bounded work, cancellable), so a 400 KB file is readable at line 9 000
+  without raising the limit or shelling out to `sed`. A window cut by the byte
+  cap - not by `limit` and not by the end of the file - carries the cap note and
+  no "continue with offset" hint, because that hint would promise lines the same
+  cap cannot return; ask for the next window explicitly instead.
+* A batched `read_file` (`paths` or `ranges`) divides `limits.max_tool_output_bytes`
+  across its sections, so a wide batch still shows every file's header and first
+  lines instead of returning one file in full. Up to 32 reads are attempted per
+  call; a larger request is cut and says how many were dropped. A failed entry
+  keeps its place in the result as `[error: ...]` and the others still return -
+  `ok: false` is reported only when *every* read failed. Images are only
+  attached for a single `path`, so read an image on its own.
 * Binary files are refused by `read_file` instead of being rendered as noise:
-  the check covers the whole window that would be returned, so a NUL deep in a
-  large file cannot reach the model as U+0000.
+  the check covers the whole window that would be returned, and the offset in
+  the message is the byte offset in the file, even for a far window; so a NUL
+  deep in a large file cannot reach the model as U+0000.
+* `git_log` runs with the same hardened config as `git_status`/`git_diff` and
+  additionally disables signature display, because showing a signature runs the
+  repository's own `gpg` program. It prints `sha date subject` per commit and
+  requests one extra commit so a "showing the latest N" note is a fact rather
+  than a guess.
 
 ## Scratch space: the temp directory
 

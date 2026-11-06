@@ -20,62 +20,37 @@ const ERROR_EXCERPT_CHARS: usize = 480;
 /// to tell a permanent 400 from a transient 502. The tag is a *suffix* so the
 /// human-readable head stays first, and it is bracketed so it cannot be confused
 /// with a status code quoted from an upstream body.
-pub(crate) const HTTP_STATUS_TAG: &str = "[http ";
+pub(crate) const HTTP_STATUS_TAG: &str = kc_core::error::HTTP_STATUS_TAG;
 
 /// Stable tag marking a failure as "the prompt did not fit the context window".
 ///
-/// `kc_core::Error` has no dedicated variant for this, so the classification
-/// travels in the message. The runtime should match this tag (or, better, a real
-/// `Error::ContextOverflow` variant) and compact-and-retry once instead of
-/// failing the turn.
-pub const CONTEXT_OVERFLOW_TAG: &str = "[context-overflow]";
-
-/// Phrases providers use for a prompt that overflows the context window. Covers
-/// OpenAI (`maximum context length`, `context_length_exceeded`), Anthropic
-/// (`prompt is too long`), vLLM/TGI (`too many tokens`), Gemini (`reduce the
-/// length`) and the generic gateway wording.
-const CONTEXT_OVERFLOW_MARKERS: [&str; 6] = [
-    "context length",
-    "maximum context",
-    "too many tokens",
-    "context_length_exceeded",
-    "reduce the length",
-    "prompt is too long",
-];
+/// The definition, and the whole phrase list, live in
+/// [`kc_core::error::is_context_overflow`]: `kc-core` has no dependency on an
+/// HTTP client, and the runtime (which does the compact-and-retry) depends only
+/// on `kc-core`. This is the re-export the provider layer and its callers use.
+pub use kc_core::error::CONTEXT_OVERFLOW_TAG;
 
 /// The HTTP status carried by a provider error message, when it has one.
+///
+/// Delegates to [`kc_core::error::http_status_of`] so the tag is parsed in
+/// exactly one place.
 pub(crate) fn http_status_of(message: &str) -> Option<u16> {
-    let start = message.find(HTTP_STATUS_TAG)? + HTTP_STATUS_TAG.len();
-    let rest = &message[start..];
-    let end = rest.find(']')?;
-    rest[..end].trim().parse().ok()
+    kc_core::error::http_status_of(message)
 }
 
 /// Does this message describe a prompt that overflowed the model's window?
 ///
-/// Deliberately a substring test over the lowercased text: providers word this
-/// differently and a gateway may wrap the upstream message in its own prose.
+/// A thin delegate to [`kc_core::error::is_context_overflow`], which owns the
+/// phrase list and the authoritative-transient-status rule. The runtime calls
+/// the `kc-core` function directly (it does not depend on this crate); this
+/// re-export is what the provider's own tagging path and its callers use.
 pub fn is_context_overflow(message: &str) -> bool {
-    // A retryable HTTP status is authoritative even after retries are exhausted;
-    // otherwise the quoted upstream wording could relabel the final failure.
-    if http_status_of(message).is_some_and(|status| crate::retry::status_retryable(status, false)) {
-        return false;
-    }
-    if message.contains(CONTEXT_OVERFLOW_TAG) {
-        return true;
-    }
-    let lower = message.to_ascii_lowercase();
-    CONTEXT_OVERFLOW_MARKERS
-        .iter()
-        .any(|marker| lower.contains(marker))
+    kc_core::error::is_context_overflow(message)
 }
 
 /// [`is_context_overflow`] for a whole error value.
 pub fn is_context_overflow_error(err: &Error) -> bool {
-    match err {
-        Error::Provider(message) => is_context_overflow(message),
-        _ => false,
-    }
+    kc_core::error::is_context_overflow_error(err)
 }
 
 /// Map a transport-level failure. Timeouts become [`Error::Timeout`]; everything

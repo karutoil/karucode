@@ -2373,3 +2373,212 @@ async fn unexpected_idle_stdout_eof_fails_reaps_and_restarts_the_plugin() {
     host.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ---------------------------------------------------------------------------
+// The turn in the `before_prompt` payload
+// ---------------------------------------------------------------------------
+
+/// Inline plugin that reports what the `before_prompt` payload carried.
+///
+/// It answers `turn=<first 60 chars>|len=<chars>` when the field is present and
+/// `turn=<absent>|len=0` when it is not, so a test can assert both the text and
+/// the cap without depending on the fixture's wording.
+const TURN_ECHO_PLUGIN: &str = r#"
+import json, sys
+
+NAME = "turnecho"
+MANIFEST = {"name": NAME, "version": "0.1.0", "protocol": "1",
+            "capabilities": ["hooks"], "permissions": [], "hooks": ["before_prompt"]}
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": MANIFEST})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": []}})
+    elif method == "hooks/run":
+        hook = req.get("params", {}).get("hook", "")
+        payload = req.get("params", {}).get("payload") or {}
+        if hook == "before_prompt":
+            turn = payload.get("turn")
+            if turn is None:
+                out = "turn=<absent>|tail=|len=0"
+            else:
+                out = "turn=%s|tail=%s|len=%d" % (
+                    turn[:60].replace("\n", " "),
+                    turn[-24:].replace("\n", " "),
+                    len(turn),
+                )
+            send({"jsonrpc": "2.0", "id": rid, "result": {"output": out}})
+        else:
+            send({"jsonrpc": "2.0", "id": rid, "result": {"output": None}})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": rid, "result": None})
+        break
+    elif rid is not None:
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "unknown"}})
+"#;
+
+/// Register [`TURN_ECHO_PLUGIN`] under `name` and start it.
+async fn turn_echo_host(dir: &std::path::Path, name: &str) -> PluginHost {
+    let script = dir.join(format!("{name}.py"));
+    std::fs::write(&script, TURN_ECHO_PLUGIN).unwrap();
+    let cfg = PluginConfig {
+        name: name.to_string(),
+        enabled: true,
+        command: vec!["python3".to_string(), script.to_string_lossy().into_owned()],
+        env: BTreeMap::new(),
+        permissions: Vec::new(),
+        settings: BTreeMap::new(),
+    };
+    let mut host = PluginHost::discover(&[cfg], dir);
+    host.start_all().await;
+    host
+}
+
+#[tokio::test]
+async fn a_plugin_that_ignores_the_turn_behaves_exactly_as_before() {
+    // Two fixture plugins, whose `before_prompt` reads only the session id. Adding
+    // a `turn` field must change neither their output nor its order.
+    let dir = temp_dir("turn-ignored");
+    let mut host = PluginHost::discover(
+        &[plugin("fake-a", "fake-a"), plugin("fake-b", "fake-b")],
+        &dir,
+    );
+    host.start_all().await;
+
+    let without = host.before_prompt("s_1", "/w").await;
+    let with_turn = host
+        .before_prompt_for_turn("s_1", "/w", Some("what is this repository?"))
+        .await;
+    assert_eq!(without.len(), 2, "{without:?}");
+    assert_eq!(
+        without, with_turn,
+        "a plugin that ignores the turn must produce identical notes"
+    );
+    assert!(with_turn[0].contains("fake-a"), "{with_turn:?}");
+    assert!(with_turn[1].contains("fake-b"), "{with_turn:?}");
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn the_turn_reaches_the_plugin_payload() {
+    let dir = temp_dir("turn-payload");
+    let mut host = turn_echo_host(&dir, "turnecho").await;
+
+    let notes = host
+        .before_prompt_for_turn("s_1", "/w", Some("where is the journal written?"))
+        .await;
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("turn=where is the journal written?"),
+        "the plugin did not see the turn: {}",
+        notes[0]
+    );
+    assert_eq!(
+        notes[0].rsplit("len=").next(),
+        Some("29"),
+        "the plugin must see every byte of a short turn: {}",
+        notes[0]
+    );
+    // Stable across calls: the text goes into the system prompt, so the same turn
+    // must produce the same bytes (that is what keeps the prefix cacheable).
+    for _ in 0..3 {
+        assert_eq!(
+            host.before_prompt_for_turn("s_1", "/w", Some("where is the journal written?"))
+                .await,
+            notes
+        );
+    }
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn a_huge_turn_is_bounded_and_an_absent_turn_still_answers() {
+    let dir = temp_dir("turn-huge");
+    let mut host = turn_echo_host(&dir, "turnecho").await;
+
+    // 200 KiB of "the user pasted a log": the hook must still answer, and what it
+    // sees must be bounded, because it runs on every model call of the run.
+    let huge = "x".repeat(200 * 1024);
+    let notes = host.before_prompt_for_turn("s_1", "/w", Some(&huge)).await;
+    assert_eq!(
+        notes.len(),
+        1,
+        "a big turn must not break the hook: {notes:?}"
+    );
+    let len: usize = notes[0]
+        .rsplit("len=")
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("the plugin reports the length it saw");
+    assert!(
+        (4096..=4096 + 32).contains(&len),
+        "the forwarded turn must be capped at 4 KiB, got {len} bytes"
+    );
+    assert!(
+        notes[0].contains("truncated"),
+        "the cut must be visible to the plugin, not silent: {}",
+        notes[0]
+    );
+
+    // No turn at all (a continuation): the field is absent, the hook still runs.
+    let notes = host.before_prompt_for_turn("s_1", "/w", None).await;
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("turn=<absent>"),
+        "an absent turn must not be invented: {}",
+        notes[0]
+    );
+
+    // The same through the cheap live handle the server actually holds.
+    let hooks: Arc<dyn Hooks> = Arc::new(host.hooks_handle());
+    let via_handle = hooks.before_prompt_for_turn("s_1", "/w", None).await;
+    assert_eq!(via_handle.len(), 1, "{via_handle:?}");
+    assert!(via_handle[0].contains("turn=<absent>"), "{via_handle:?}");
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn the_turn_does_not_reorder_two_plugins_contributions() {
+    // Order comes from discovery, never from who answered first - the notes are
+    // joined into message 0, so a reorder would break the provider's prefix cache
+    // on every turn.
+    let dir = temp_dir("turn-order");
+    // Two separate processes answering independently: `fan_out` joins them by
+    // discovery index, so the notes must never swap places however the two
+    // processes are scheduled.
+    let configs = vec![plugin("fake-a", "fake-a"), plugin("fake-b", "fake-b")];
+    let mut host = PluginHost::discover(&configs, &dir);
+    host.start_all().await;
+
+    let mut first: Option<Vec<String>> = None;
+    for _ in 0..8 {
+        let notes = host
+            .before_prompt_for_turn("s_1", "/w", Some("same question every time"))
+            .await;
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[0].contains("fake-a"), "{notes:?}");
+        assert!(notes[1].contains("fake-b"), "{notes:?}");
+        match &first {
+            Some(previous) => assert_eq!(previous, &notes, "plugin order moved"),
+            None => first = Some(notes),
+        }
+    }
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}

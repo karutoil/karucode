@@ -274,6 +274,11 @@ Agents tab).
   name → path → subsequence, keyboard-navigable), attachments from the picker,
   drag-and-drop or paste, inline/upload chips with per-file status, and a send
   that is blocked while a file is still reading or uploading.
+- Composer: the model and reasoning pills are mounted whenever a session is
+  open, not whenever a session list happens to hold that session. The open
+  session's pin lives in `state/store.ts` (`openSessionModel`), so a control
+  chat, a project-less session and a session-list refresh in flight cannot make
+  the pills blink out — a control that comes and goes is not a control.
 - Themes: eight built-in palettes, live editing of 18 colours, dark/light mode,
   three densities, interface/code fonts, corner radius, custom CSS, contrast
   readout, save/delete/import/export and per-browser persistence.

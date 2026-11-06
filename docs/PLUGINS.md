@@ -330,7 +330,7 @@ Result: a [`PluginToolResult`](../crates/kc-core/src/plugin.rs):
 ### 4.4 `hooks/run` (host → plugin)
 
 ```json
-{"jsonrpc":"2.0","id":4,"method":"hooks/run","params":{"hook":"before_prompt","payload":{"session_id":"s_1","workspace":"/w"}}}
+{"jsonrpc":"2.0","id":4,"method":"hooks/run","params":{"hook":"before_prompt","payload":{"session_id":"s_1","workspace":"/w","turn":"where is the journal written?"}}}
 ```
 
 ```json
@@ -340,6 +340,13 @@ Result: a [`PluginToolResult`](../crates/kc-core/src/plugin.rs):
 `output` may be a string, an object with a `text` field, or any JSON value; a
 `null`/missing output means "no contribution". Timeout: **5 s**; failures are
 logged and ignored. See §7.
+
+For `before_prompt` the payload also carries `turn`: the text of the user message
+the run is answering, so a plugin can retrieve against the actual question instead
+of memoising one block per session. It is capped at 4 KiB (cut with the usual
+`[… truncated]` marker) and the field is **absent** when the run was started
+without a user turn, such as a continuation. Ignoring it is fully backwards
+compatible.
 
 ### 4.5 `shutdown` (host → plugin)
 
@@ -526,7 +533,7 @@ non-null `output` values. A failing hook never fails a run.
 
 | Hook | Status | Payload | Output |
 | --- | --- | --- | --- |
-| `before_prompt` | **implemented** | `{session_id, workspace}` | text appended to the system prompt |
+| `before_prompt` | **implemented** | `{session_id, workspace, turn}` | text appended to the system prompt |
 | `on_run_end` | **implemented** | `{session_id, run_id, status}` | ignored |
 | `on_tool_result` | **implemented** | `{session_id, tool, ok}` | ignored |
 | `on_notify` | **implemented** | `{session_id, run_id, kind, title, body, source}` | ignored |

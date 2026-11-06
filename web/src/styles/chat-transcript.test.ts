@@ -66,6 +66,10 @@ describe('transcript mock layout contract', () => {
     expect(rule('.cmd-output')).toContain('color: var(--text-secondary);');
     expect(rule('.cmd-output[hidden]')).toContain('display: none;');
     expect(rule('.command-scroll')).toContain('overflow-y: auto;');
+    // A compact command row wraps that scroller. The wrapper must not be a
+    // second bounded scroller, or an expanded command shows two scroll wheels.
+    expect(rule('.command-row > .cmd-output')).not.toContain('overflow: auto;');
+    expect(rule('.command-row > .cmd-output')).not.toContain('max-height:');
     expect(css).toMatch(/@media \(max-width: 640px\)[\s\S]*?\.tool-card,\s*\.command-card\s*\{[^}]*margin: var\(--space-6\) 0 var\(--space-6\);/);
     expect(css).toMatch(/@media \(max-width: 640px\)[\s\S]*?\.tool-head,\s*\.command-summary\s*\{[^}]*min-height: 38px;/);
   });

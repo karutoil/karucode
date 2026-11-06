@@ -21,6 +21,12 @@ use tokio_util::sync::CancellationToken;
 
 /// Lines longer than this are cut so a minified bundle cannot flood the prompt.
 pub const MAX_MATCH_COLUMNS: usize = 300;
+/// Largest `context` the search will honour, in lines before and after a match.
+///
+/// `-C 5000` would turn one match into ten thousand lines of prompt, and the
+/// runtime cap would then chop the result arbitrarily instead of the search
+/// returning something shaped.
+pub const MAX_CONTEXT_LINES: usize = 10;
 const MAX_FALLBACK_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const RG_TIMEOUT: Duration = Duration::from_secs(120);
 /// Safety valve for the streaming reader: a single record longer than this is
@@ -51,37 +57,75 @@ pub struct SearchQuery {
     pub glob: Option<String>,
     pub case_insensitive: bool,
     pub max_results: usize,
+    /// Lines of context before *and* after each match (`grep -C N`). `0` = off.
+    pub context: usize,
+    /// Return the distinct paths that matched instead of the matching lines.
+    pub files_only: bool,
+    /// Cap on reported matches *per file*, so one noisy file cannot spend the
+    /// global result cap on its own. `0` = no per-file cap.
+    pub max_matches_per_file: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct SearchMatch {
     /// Workspace-relative path.
     pub path: String,
+    /// 1-based line number; `0` in `files_only` mode, where an entry is a path.
     pub line: u64,
     pub text: String,
+    /// A context line (`-C N`) rather than the matching line itself.
+    pub is_context: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub engine: SearchEngine,
+    /// Reported entries in file/line order: matching lines and their context
+    /// lines, or one entry per path in `files_only` mode.
     pub matches: Vec<SearchMatch>,
+    /// How many entries in `matches` are matches (or paths), not context lines.
+    pub matched: usize,
+    /// `matches` holds paths, not lines.
+    pub files_only: bool,
     pub hit_limit: bool,
     /// Non-fatal problem worth surfacing (partial read errors, rg warnings).
     pub warning: Option<String>,
 }
 
 impl SearchResult {
-    /// `path:line: text` lines, or a short "no matches" body.
+    /// Distinct matching paths, in the order they first matched.
+    pub fn files(&self) -> Vec<&str> {
+        let mut seen: Vec<&str> = Vec::new();
+        for m in &self.matches {
+            if !seen.contains(&m.path.as_str()) {
+                seen.push(m.path.as_str());
+            }
+        }
+        seen
+    }
+
+    /// `path:line: text` for a match and `path:line- text` for a context line -
+    /// the same shape grep uses, and the same shape from both engines. In
+    /// `files_only` mode it is one path per line.
     pub fn body(&self) -> String {
         if self.matches.is_empty() {
             return "no matches".to_string();
+        }
+        if self.files_only {
+            return self.files().join("\n");
         }
         let mut out = String::new();
         for (i, m) in self.matches.iter().enumerate() {
             if i > 0 {
                 out.push('\n');
             }
-            out.push_str(&format!("{}:{}: {}", m.path, m.line, m.text));
+            out.push_str(&format!(
+                "{}:{}{} {}",
+                m.path,
+                m.line,
+                if m.is_context { '-' } else { ':' },
+                m.text
+            ));
         }
         out
     }
@@ -123,6 +167,15 @@ pub async fn search_with_rg(
 ) -> Result<Option<SearchResult>> {
     let base = ws.resolve_existing(&query.path)?;
     let max_results = query.max_results.max(1);
+    // `--max-count` is ripgrep's *per-file* cap and ours was the global one, so
+    // the per-file cap is what it is now asked for; the global cap stays in the
+    // streaming reader below. Without a per-file cap, `max_results` remains the
+    // safety valve it always was.
+    let per_file = if query.max_matches_per_file > 0 {
+        query.max_matches_per_file.min(max_results)
+    } else {
+        max_results
+    };
 
     let mut cmd = tokio::process::Command::new(program);
     cmd.arg("--line-number")
@@ -149,11 +202,8 @@ pub async fn search_with_rg(
         // text `[Omitted long matching line]`, so a match on a minified bundle
         // arrives with no content at all.
         .arg("--max-columns-preview")
-        // `--max-count` is *per file*, not global: it is only a per-file safety
-        // valve here. The global cap is enforced by the streaming reader below,
-        // which stops at `max_results` matches and kills the child.
         .arg("--max-count")
-        .arg(max_results.to_string())
+        .arg(per_file.to_string())
         // Honor .gitignore even outside a git repository, matching the fallback
         // walker (ripgrep requires a repo by default).
         .arg("--no-require-git");
@@ -162,6 +212,19 @@ pub async fn search_with_rg(
     }
     if let Some(glob) = &query.glob {
         cmd.arg("-g").arg(glob);
+    }
+    if query.context > 0 && !query.files_only {
+        // Both sides, the way `grep -C` reads. Group separators (`--`) are
+        // dropped by the parser: the fallback emits none, and the line numbers
+        // already say where a group resumes.
+        cmd.arg("--before-context")
+            .arg(query.context.min(MAX_CONTEXT_LINES).to_string())
+            .arg("--after-context")
+            .arg(query.context.min(MAX_CONTEXT_LINES).to_string());
+    }
+    if query.files_only {
+        // `-l`: one path per file, and no line records at all.
+        cmd.arg("--files-with-matches");
     }
     cmd.arg("--")
         .arg(&query.pattern)
@@ -199,12 +262,18 @@ pub async fn search_with_rg(
             // `read_matches` takes ownership of the pipe so it is closed the
             // moment the cap is reached; otherwise ripgrep would block writing
             // to a full pipe while we wait for it to exit.
-            let ((matches, hit_limit), stderr) = tokio::join!(
-                read_matches(stdout_pipe.take(), ws, &base, max_results),
+            let (found, stderr) = tokio::join!(
+                async {
+                    if query.files_only {
+                        read_match_paths(stdout_pipe.take(), ws, &base, max_results).await
+                    } else {
+                        read_matches(stdout_pipe.take(), ws, &base, max_results).await
+                    }
+                },
                 read_pipe(&mut stderr_pipe)
             );
             let status = child.wait().await;
-            (matches, hit_limit, stderr, status)
+            (found, stderr, status)
         } => res,
         _ = tokio::time::sleep(RG_TIMEOUT) => {
             let _ = child.start_kill();
@@ -217,7 +286,8 @@ pub async fn search_with_rg(
         }
     };
 
-    let (matches, hit_limit, stderr, status) = outcome;
+    let (found, stderr, status) = outcome;
+    let (matches, matched, hit_limit) = found;
     let status = status.map_err(|e| Error::Tool(format!("failed to wait for ripgrep: {e}")))?;
     let code = status.code();
     let stderr_text = String::from_utf8_lossy(&stderr).trim().to_string();
@@ -261,6 +331,8 @@ pub async fn search_with_rg(
     Ok(Some(SearchResult {
         engine: SearchEngine::Ripgrep,
         matches,
+        matched,
+        files_only: query.files_only,
         hit_limit,
         warning,
     }))
@@ -275,16 +347,20 @@ pub async fn search_with_rg(
 /// holds more than one record, so memory is bounded by [`MAX_RG_RECORD_BYTES`]
 /// rather than by the size of the output.
 ///
-/// Returns the matches and whether the cap was reached.
+/// Returns `(entries, matched, hit the cap)`. `entries` interleaves matching
+/// lines and their context lines exactly as ripgrep emitted them, minus the `--`
+/// group separators (the built-in walker emits none, and the line numbers already
+/// say where a group resumes).
 async fn read_matches<R: tokio::io::AsyncRead + Unpin>(
     pipe: Option<R>,
     ws: &Workspace,
     base: &Path,
     max_results: usize,
-) -> (Vec<SearchMatch>, bool) {
+) -> (Vec<SearchMatch>, usize, bool) {
     let mut matches: Vec<SearchMatch> = Vec::new();
+    let mut matched = 0usize;
     let Some(pipe) = pipe else {
-        return (matches, false);
+        return (matches, matched, false);
     };
     let mut reader = tokio::io::BufReader::new(pipe);
     let mut record: Vec<u8> = Vec::new();
@@ -299,10 +375,11 @@ async fn read_matches<R: tokio::io::AsyncRead + Unpin>(
         let mut rest = &chunk[..n];
         while let Some(nl) = rest.iter().position(|b| *b == b'\n') {
             record.extend_from_slice(&rest[..nl]);
-            if let Some(m) = parse_rg_record(ws, base, &record) {
-                matches.push(m);
-                if matches.len() >= max_results {
-                    return (matches, true);
+            if let Some(found) = parse_rg_record(ws, base, &record) {
+                matched += usize::from(!found.is_context);
+                matches.push(found);
+                if matched >= max_results {
+                    return (matches, matched, true);
                 }
             }
             record.clear();
@@ -315,31 +392,88 @@ async fn read_matches<R: tokio::io::AsyncRead + Unpin>(
         }
     }
     if !record.is_empty() {
-        if let Some(m) = parse_rg_record(ws, base, &record) {
-            matches.push(m);
+        if let Some(found) = parse_rg_record(ws, base, &record) {
+            matched += usize::from(!found.is_context);
+            matches.push(found);
         }
     }
-    let hit_limit = matches.len() >= max_results;
-    (matches, hit_limit)
+    let hit_limit = matched >= max_results;
+    (matches, matched, hit_limit)
 }
 
-async fn read_pipe<R: tokio::io::AsyncRead + Unpin>(pipe: &mut Option<R>) -> Vec<u8> {
-    let Some(pipe) = pipe.as_mut() else {
-        return Vec::new();
+/// Read `--files-with-matches --null` output: a NUL-terminated path per file.
+///
+/// Paths are NUL-separated, not newline-separated, so this cannot reuse
+/// [`read_matches`]. Stops at the cap and drops the pipe, which kills ripgrep.
+async fn read_match_paths<R: tokio::io::AsyncRead + Unpin>(
+    pipe: Option<R>,
+    ws: &Workspace,
+    base: &Path,
+    max_results: usize,
+) -> (Vec<SearchMatch>, usize, bool) {
+    let mut matches: Vec<SearchMatch> = Vec::new();
+    let Some(pipe) = pipe else {
+        return (matches, 0, false);
     };
-    const STDERR_LIMIT: usize = 64 * 1024;
-    match crate::bounded_pipe::read(pipe, STDERR_LIMIT).await {
-        Ok((mut buf, truncated)) => {
-            if truncated {
-                buf.extend_from_slice(b"\n[ripgrep stderr truncated]");
+    let mut reader = tokio::io::BufReader::new(pipe);
+    let mut record: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; 8192];
+    loop {
+        let n = match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let mut rest = &chunk[..n];
+        while let Some(nul) = rest.iter().position(|b| *b == 0) {
+            record.extend_from_slice(&rest[..nul]);
+            if let Some(found) = path_entry(ws, base, &record) {
+                matches.push(found);
+                if matches.len() >= max_results {
+                    let matched = matches.len();
+                    return (matches, matched, true);
+                }
             }
-            buf
+            record.clear();
+            rest = &rest[nul + 1..];
         }
-        Err(_) => Vec::new(),
+        record.extend_from_slice(rest);
+        if record.len() > MAX_RG_RECORD_BYTES {
+            record.clear();
+        }
     }
+    if !record.is_empty() {
+        if let Some(found) = path_entry(ws, base, &record) {
+            matches.push(found);
+        }
+    }
+    let matched = matches.len();
+    (matches, matched, matched >= max_results)
 }
 
-/// Parse one `--null` record: `path\0line:text`.
+/// One `files_only` entry: an absolute or base-relative path from ripgrep.
+fn path_entry(ws: &Workspace, base: &Path, raw: &[u8]) -> Option<SearchMatch> {
+    if raw.is_empty() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(raw).into_owned();
+    let path = Path::new(&raw);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    Some(SearchMatch {
+        path: ws.relative(&abs),
+        line: 0,
+        text: String::new(),
+        is_context: false,
+    })
+}
+
+/// Parse one `--null` record: `path\0line:text` for a match and `path\0line-text`
+/// for a context line (`-C N`).
 ///
 /// The filename is delimited by a **NUL**, not by `:` - that is what `--null`
 /// buys. Splitting the record on `:` instead (the previous parser) lost every
@@ -354,12 +488,15 @@ fn parse_rg_record(ws: &Workspace, base: &Path, record: &[u8]) -> Option<SearchM
         None => (&record[..0], record),
     };
     let rest = String::from_utf8_lossy(rest);
-    // `line:text`; the line number cannot contain a colon, and the text may.
-    let (raw_line, text) = match rest.split_once(':') {
-        Some((line, text)) => (line, text),
-        None => return None,
-    };
+    // `line:text` or `line-text`; the line number cannot contain either, and the
+    // text may contain both.
+    let split = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .filter(|i| *i > 0)?;
+    let (raw_line, tail) = rest.split_at(split);
     let line: u64 = raw_line.parse().ok()?;
+    let is_context = tail.starts_with('-');
+    let text = tail.get(1..)?;
 
     let abs: PathBuf = if path_bytes.is_empty() {
         base.to_path_buf()
@@ -376,7 +513,24 @@ fn parse_rg_record(ws: &Workspace, base: &Path, record: &[u8]) -> Option<SearchM
         path: ws.relative(&abs),
         line,
         text: normalise_match_text(text),
+        is_context,
     })
+}
+
+async fn read_pipe<R: tokio::io::AsyncRead + Unpin>(pipe: &mut Option<R>) -> Vec<u8> {
+    let Some(pipe) = pipe.as_mut() else {
+        return Vec::new();
+    };
+    const STDERR_LIMIT: usize = 64 * 1024;
+    match crate::bounded_pipe::read(pipe, STDERR_LIMIT).await {
+        Ok((mut buf, truncated)) => {
+            if truncated {
+                buf.extend_from_slice(b"\n[ripgrep stderr truncated]");
+            }
+            buf
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Cap a match's text at [`MAX_MATCH_COLUMNS`] **characters**, adding an ellipsis.
@@ -447,20 +601,26 @@ fn search_fallback_sync_with_cancel(
         None => None,
     };
 
-    let mut matches: Vec<SearchMatch> = Vec::new();
-    let mut walk_errors = 0usize;
+    let mut scan = Scan {
+        ws,
+        regex: &regex,
+        globset: globset.as_ref(),
+        max_results,
+        context: if query.files_only {
+            0
+        } else {
+            query.context.min(MAX_CONTEXT_LINES)
+        },
+        per_file_cap: query.max_matches_per_file,
+        files_only: query.files_only,
+        cancel,
+        matches: Vec::new(),
+        matched: 0,
+        walk_errors: 0,
+    };
 
     let hit_limit = if base.is_file() {
-        scan_fallback_entries(
-            std::iter::once(Ok(Some(base.clone()))),
-            ws,
-            &regex,
-            globset.as_ref(),
-            max_results,
-            &mut matches,
-            &mut walk_errors,
-            cancel,
-        )?
+        scan.entries(std::iter::once(Ok(Some(base.clone()))))?
     } else {
         // Do not materialise the tree. A matching early file can reach the global
         // cap and stop this iterator before later directories are opened at all.
@@ -478,136 +638,173 @@ fn search_fallback_sync_with_cancel(
             Ok(_) => Ok(None),
             Err(_) => Err(()),
         });
-        scan_fallback_entries(
-            entries,
-            ws,
-            &regex,
-            globset.as_ref(),
-            max_results,
-            &mut matches,
-            &mut walk_errors,
-            cancel,
-        )?
+        scan.entries(entries)?
     };
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    Ok(fallback_result(matches, hit_limit, walk_errors))
+    Ok(fallback_result(scan, hit_limit))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn scan_fallback_entries(
-    entries: impl IntoIterator<Item = std::result::Result<Option<PathBuf>, ()>>,
-    ws: &Workspace,
-    regex: &regex::Regex,
-    globset: Option<&GlobSet>,
+/// One fallback search in progress: the walk feeds it files, it accumulates the
+/// same entries the ripgrep path parses.
+struct Scan<'a> {
+    ws: &'a Workspace,
+    regex: &'a regex::Regex,
+    globset: Option<&'a GlobSet>,
     max_results: usize,
-    matches: &mut Vec<SearchMatch>,
-    walk_errors: &mut usize,
-    cancel: &CancellationToken,
-) -> Result<bool> {
-    for entry in entries {
-        if cancel.is_cancelled() {
+    context: usize,
+    per_file_cap: usize,
+    files_only: bool,
+    cancel: &'a CancellationToken,
+    matches: Vec<SearchMatch>,
+    matched: usize,
+    walk_errors: usize,
+}
+
+impl Scan<'_> {
+    /// Walk `entries`, returning true as soon as the shared result cap is hit.
+    fn entries(
+        &mut self,
+        entries: impl IntoIterator<Item = std::result::Result<Option<PathBuf>, ()>>,
+    ) -> Result<bool> {
+        for entry in entries {
+            if self.cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let file = match entry {
+                Ok(Some(file)) => file,
+                Ok(None) => continue,
+                Err(()) => {
+                    self.walk_errors += 1;
+                    continue;
+                }
+            };
+            if self.file(&file)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Scan one file immediately. Only this file's bounded bytes and the returned
+    /// entries are live.
+    fn file(&mut self, file: &Path) -> Result<bool> {
+        if self.cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let file = match entry {
-            Ok(Some(file)) => file,
-            Ok(None) => continue,
-            Err(()) => {
-                *walk_errors += 1;
-                continue;
+        if let Some(set) = self.globset {
+            let rel = self.ws.relative(file);
+            let name = file
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !set.is_match(&rel) && !set.is_match(&name) {
+                return Ok(false);
+            }
+        }
+
+        let bytes = match read_fallback_file(file, self.cancel) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(false),
+            Err(Error::Cancelled) => return Err(Error::Cancelled),
+            Err(_) => {
+                self.walk_errors += 1;
+                return Ok(false);
             }
         };
-        if scan_fallback_file(
-            ws,
-            &file,
-            regex,
-            globset,
-            max_results,
-            matches,
-            walk_errors,
-            cancel,
-        )? {
-            return Ok(true);
+        if bytes.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0) {
+            return Ok(false);
         }
+        let text = String::from_utf8_lossy(&bytes);
+        let rel = self.ws.relative(file);
+
+        // Collect (at most `per_file_cap + 1`) matching line numbers first: the
+        // context window needs neighbours, and one extra hit is what proves the
+        // per-file cap actually cut something.
+        let per_file_limit = if self.per_file_cap == 0 {
+            usize::MAX
+        } else {
+            self.per_file_cap
+        };
+        // Nothing beyond the remaining global budget can be reported, so a noisy
+        // file is not read to its end for hits nobody will see.
+        let still_useful = self.max_results.saturating_sub(self.matched).max(1);
+        let collect = per_file_limit
+            .saturating_add(1)
+            .min(still_useful.saturating_add(1));
+        let mut hits: Vec<usize> = Vec::new();
+        for (idx, line) in text.lines().enumerate() {
+            if self.cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            if !self.regex.is_match(line) {
+                continue;
+            }
+            hits.push(idx);
+            if hits.len() >= collect {
+                break;
+            }
+        }
+        hits.truncate(per_file_limit);
+
+        if self.files_only {
+            if hits.is_empty() {
+                return Ok(false);
+            }
+            self.matches.push(SearchMatch {
+                path: rel,
+                line: 0,
+                text: String::new(),
+                is_context: false,
+            });
+            self.matched += 1;
+            return Ok(self.matched >= self.max_results);
+        }
+
+        let lines: Vec<&str> = text.lines().collect();
+        // Hits are ascending, so each context window only overlaps the previous
+        // one: `next` is the first line not yet printed, and overlapping lines are
+        // printed once, in line order - exactly what ripgrep does.
+        let mut next = 0usize;
+        for &hit in &hits {
+            if self.matched >= self.max_results {
+                return Ok(true);
+            }
+            let from = hit.saturating_sub(self.context).max(next);
+            let to = (hit + self.context).min(lines.len().saturating_sub(1));
+            for (idx, line) in lines.iter().enumerate().take(to + 1).skip(from) {
+                self.matches.push(SearchMatch {
+                    path: rel.clone(),
+                    line: idx as u64 + 1,
+                    text: truncate_columns(line, MAX_MATCH_COLUMNS),
+                    is_context: idx != hit,
+                });
+            }
+            next = to.saturating_add(1);
+            self.matched += 1;
+        }
+        Ok(self.matched >= self.max_results)
     }
-    Ok(false)
 }
 
-fn fallback_result(matches: Vec<SearchMatch>, hit_limit: bool, walk_errors: usize) -> SearchResult {
-    let warning = if walk_errors > 0 {
+fn fallback_result(scan: Scan<'_>, hit_limit: bool) -> SearchResult {
+    let warning = if scan.walk_errors > 0 {
         Some(format!(
-            "{walk_errors} paths could not be read and were skipped"
+            "{} paths could not be read and were skipped",
+            scan.walk_errors
         ))
     } else {
         None
     };
     SearchResult {
         engine: SearchEngine::Builtin,
-        matches,
+        matches: scan.matches,
+        matched: scan.matched,
+        files_only: scan.files_only,
         hit_limit,
         warning,
     }
-}
-
-/// Scan one file immediately, returning true as soon as the shared result cap is
-/// reached. Only this file's bounded bytes and the returned matches are live.
-#[allow(clippy::too_many_arguments)]
-fn scan_fallback_file(
-    ws: &Workspace,
-    file: &Path,
-    regex: &regex::Regex,
-    globset: Option<&GlobSet>,
-    max_results: usize,
-    matches: &mut Vec<SearchMatch>,
-    walk_errors: &mut usize,
-    cancel: &CancellationToken,
-) -> Result<bool> {
-    if cancel.is_cancelled() {
-        return Err(Error::Cancelled);
-    }
-    if let Some(set) = globset {
-        let rel = ws.relative(file);
-        let name = file
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if !set.is_match(&rel) && !set.is_match(&name) {
-            return Ok(false);
-        }
-    }
-
-    let bytes = match read_fallback_file(file, cancel) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return Ok(false),
-        Err(Error::Cancelled) => return Err(Error::Cancelled),
-        Err(_) => {
-            *walk_errors += 1;
-            return Ok(false);
-        }
-    };
-    if bytes.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0) {
-        return Ok(false);
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    let rel = ws.relative(file);
-    for (idx, line) in text.lines().enumerate() {
-        if cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        if !regex.is_match(line) {
-            continue;
-        }
-        matches.push(SearchMatch {
-            path: rel.clone(),
-            line: idx as u64 + 1,
-            text: truncate_columns(line, MAX_MATCH_COLUMNS),
-        });
-        if matches.len() >= max_results {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Read a regular file through the cap even if it grows after metadata.
@@ -744,6 +941,9 @@ mod tests {
             glob: None,
             case_insensitive: false,
             max_results,
+            context: 0,
+            files_only: false,
+            max_matches_per_file: 0,
         }
     }
 
@@ -1066,22 +1266,181 @@ mod tests {
             Ok::<Option<PathBuf>, ()>(Some(path))
         });
         let regex = RegexBuilder::new("needle").build().unwrap();
-        let mut matches = Vec::new();
-        let mut errors = 0usize;
-        let hit = scan_fallback_entries(
-            entries,
-            &ws,
-            &regex,
-            None,
-            1,
-            &mut matches,
-            &mut errors,
-            &CancellationToken::new(),
-        )
-        .unwrap();
+        let cancel = CancellationToken::new();
+        let mut scan = Scan {
+            ws: &ws,
+            regex: &regex,
+            globset: None,
+            max_results: 1,
+            context: 0,
+            per_file_cap: 0,
+            files_only: false,
+            cancel: &cancel,
+            matches: Vec::new(),
+            matched: 0,
+            walk_errors: 0,
+        };
+        let hit = scan.entries(entries).unwrap();
         assert!(hit);
-        assert_eq!(matches.len(), 1);
+        assert_eq!(scan.matched, 1, "one match fills the cap");
+        assert_eq!(scan.matches.len(), 1);
         assert_eq!(visited.get(), 1, "the second path must never be yielded");
-        assert_eq!(errors, 0);
+        assert_eq!(scan.walk_errors, 0);
+    }
+
+    /// A `-C N` record: `path\0line-text`. The separator between the line number
+    /// and the text is `-`, not `:`.
+    #[test]
+    fn a_context_record_parses_as_context() {
+        let tmp = TempWs::new("parse-context");
+        tmp.write("one.txt", "alpha\n");
+        let ws = tmp.ws();
+        let base = ws.resolve_existing(".").unwrap();
+
+        let context =
+            parse_rg_record(&ws, &base, b"one.txt\x003-alpha above").expect("context record");
+        assert_eq!(context.path, "one.txt");
+        assert_eq!(context.line, 3);
+        assert_eq!(context.text, "alpha above");
+        assert!(context.is_context);
+
+        let hit = parse_rg_record(&ws, &base, b"one.txt\x004:alpha").expect("match record");
+        assert!(!hit.is_context);
+
+        // The group separator ripgrep inserts between non-adjacent windows is not
+        // a match and must not become one.
+        assert!(parse_rg_record(&ws, &base, b"--").is_none());
+    }
+
+    /// `-C N` from both engines: same lines, same markers, no `--` separators.
+    /// The model must not be able to tell which engine served the result.
+    #[tokio::test]
+    async fn both_engines_return_the_same_context_lines() {
+        let tmp = TempWs::new("context-parity");
+        tmp.write(
+            "a.txt",
+            "line1\nMATCH one\nline3\nline4\nline5\nMATCH two\nline7\n",
+        );
+        let ws = tmp.ws();
+        let mut q = query("MATCH", "a.txt", 10);
+        q.context = 1;
+        let cancel = CancellationToken::new();
+
+        let builtin = search_fallback(&ws, &q).await.unwrap();
+        let expected = "a.txt:1- line1\n\
+                        a.txt:2: MATCH one\n\
+                        a.txt:3- line3\n\
+                        a.txt:5- line5\n\
+                        a.txt:6: MATCH two\n\
+                        a.txt:7- line7";
+        assert_eq!(builtin.body(), expected, "builtin context body");
+        assert_eq!(builtin.matched, 2, "context lines are not matches");
+        assert_eq!(builtin.matches.len(), 6);
+
+        if !rg_available() {
+            return;
+        }
+        let rg = search_with_rg("rg", &ws, &q, &cancel)
+            .await
+            .unwrap()
+            .expect("rg is installed");
+        assert_eq!(rg.body(), expected, "rg context body");
+        assert_eq!(rg.matched, builtin.matched);
+        assert!(
+            !rg.body().contains("--"),
+            "no group separator: {}",
+            rg.body()
+        );
+    }
+
+    /// `files_only` from both engines: the same distinct paths, one per line.
+    #[tokio::test]
+    async fn both_engines_agree_on_files_only() {
+        let tmp = TempWs::new("files-only-parity");
+        tmp.write("a.txt", "needle one\nneedle two\n");
+        tmp.write("b.txt", "needle three\n");
+        tmp.write("c.txt", "nothing here\n");
+        let ws = tmp.ws();
+        let mut q = query("needle", ".", 10);
+        q.files_only = true;
+        // Context is meaningless for a path list; neither engine may emit it.
+        q.context = 2;
+        let cancel = CancellationToken::new();
+
+        let builtin = search_fallback(&ws, &q).await.unwrap();
+        assert!(builtin.files_only);
+        assert_eq!(builtin.matched, 2, "one entry per file, not per match");
+        let mut builtin_files = builtin.files();
+        builtin_files.sort_unstable();
+        assert_eq!(builtin_files, vec!["a.txt", "b.txt"]);
+        assert_eq!(builtin.body().lines().count(), 2, "{}", builtin.body());
+        assert!(!builtin.body().contains("nothing here"));
+
+        if !rg_available() {
+            return;
+        }
+        let rg = search_with_rg("rg", &ws, &q, &cancel)
+            .await
+            .unwrap()
+            .expect("rg is installed");
+        let mut rg_files = rg.files();
+        rg_files.sort_unstable();
+        assert_eq!(rg_files, builtin_files, "both engines list the same files");
+        assert_eq!(rg.matched, builtin.matched);
+        // The shape is one path per line; walk order and rg order need not agree
+        // (they never did), so compare the sorted sets, not the raw body.
+        let rg_body = rg.body();
+        let mut body_lines: Vec<&str> = rg_body.lines().collect();
+        body_lines.sort_unstable();
+        assert_eq!(body_lines, builtin_files, "rg body: {rg_body}");
+        assert!(
+            !rg_body.contains(':'),
+            "a files-only body is paths, not `path:line`: {rg_body}"
+        );
+    }
+
+    /// A per-file cap stops one noisy file from spending the global budget: the
+    /// quiet file after it still appears, in both engines.
+    #[tokio::test]
+    async fn both_engines_apply_the_per_file_cap() {
+        let tmp = TempWs::new("per-file-cap");
+        let noisy: String = (1..=50).map(|i| format!("needle {i}\n")).collect();
+        tmp.write("a.txt", &noisy);
+        tmp.write("b.txt", "needle b1\nneedle b2\nneedle b3\n");
+        let ws = tmp.ws();
+        let mut q = query("needle", ".", 10);
+        q.max_matches_per_file = 2;
+        let cancel = CancellationToken::new();
+
+        let builtin = search_fallback(&ws, &q).await.unwrap();
+        assert_eq!(
+            builtin.matched, 4,
+            "two from each file: {:?}",
+            builtin.matches
+        );
+        let mut files = builtin.files();
+        files.sort_unstable();
+        assert_eq!(
+            files,
+            vec!["a.txt", "b.txt"],
+            "the noisy file must not consume the whole cap"
+        );
+        assert!(!builtin.hit_limit, "the global cap was not reached");
+
+        if !rg_available() {
+            return;
+        }
+        let rg = search_with_rg("rg", &ws, &q, &cancel)
+            .await
+            .unwrap()
+            .expect("rg is installed");
+        assert_eq!(
+            rg.matched, builtin.matched,
+            "engines disagree on the per-file cap: rg {:?}",
+            rg.matches
+        );
+        let mut rg_files = rg.files();
+        rg_files.sort_unstable();
+        assert_eq!(rg_files, files);
     }
 }

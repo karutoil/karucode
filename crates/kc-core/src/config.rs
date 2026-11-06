@@ -579,6 +579,26 @@ pub struct Limits {
     /// what the model can actually take).
     #[serde(default = "d_context_chars")]
     pub context_max_chars: usize,
+    /// Ceiling on the number of **messages** one request may carry.
+    ///
+    /// The character budget above counts how much text is sent; this counts how
+    /// many separate messages that text is spread across. A gateway in front of
+    /// the model can cap the second one on its own - this machine's caps input
+    /// **items** at 1,000 - and a session of many short turns then dies of
+    /// "conversation history exceeds the limit on input items" while sitting far
+    /// under any character budget. Seven sessions on one install were already
+    /// un-resumable that way at 2 M characters <`context_max_chars`.
+    ///
+    /// The count is exactly what the request carries: the system prompt, any
+    /// compaction digest, every tool result and every conversation turn, with
+    /// the compaction digest that replaces the dropped turns counted too.
+    ///
+    /// **`900` is the default**, deliberately under the 1,000-item ceiling with
+    /// room for the ten-odd messages a turn adds. `0` disables the ceiling
+    /// entirely - only do that for a provider with no item limit, because a
+    /// window over an unknown ceiling fails the turn instead of compacting.
+    #[serde(default = "d_context_messages")]
+    pub max_context_messages: usize,
     /// Maximum number of tool calls executed from a single assistant message.
     /// Calls beyond this are skipped with a placeholder result, so the cap is a
     /// safety valve against a runaway batch, not a work budget: leave it high.
@@ -634,6 +654,11 @@ fn d_context_chars() -> usize {
     // 0 = derive the budget from the resolved model's context window.
     0
 }
+fn d_context_messages() -> usize {
+    // Under the 1,000-item ceiling a gateway in front of the model commonly
+    // enforces, with room for a turn's worth of tool results.
+    900
+}
 fn d_parallel_calls() -> usize {
     32
 }
@@ -653,6 +678,7 @@ impl Default for Limits {
             max_image_read_bytes: d_image_read(),
             search_max_results: d_search(),
             context_max_chars: d_context_chars(),
+            max_context_messages: d_context_messages(),
             max_tool_calls_per_turn: d_parallel_calls(),
             command_env_passthrough: Vec::new(),
         }
@@ -2330,6 +2356,9 @@ mod tests {
         assert!(l.max_tool_calls_per_turn >= 8);
         assert!(l.command_timeout_secs > 0);
         assert!(l.max_tool_output_bytes > 0);
+        // The item ceiling sits under the 1,000-item limit a gateway in front of
+        // the model commonly enforces (see `max_context_messages`).
+        assert_eq!(l.max_context_messages, 900);
         let s = SubagentConfig::default();
         assert!(!s.allow_recursive);
         assert!(s.max_concurrent >= 1);
@@ -2841,8 +2870,17 @@ retry_max_stream_restarts = 0
         assert!(parsed.reasoning_effort.is_none());
     }
 
+    /// Hold the environment lock for the duration of a test.
+    ///
+    /// A poisoned lock only means another holder panicked; the environment was
+    /// still restored by its `Drop`, so carry on.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn the_plugin_watcher_interval_is_clamped_to_the_documented_range() {
+        let _env = env_lock();
         // 0 would busy-loop over the plugin directory; a day would make a "hot"
         // reload indistinguishable from not having one.
         let file = ConfigFile {
@@ -3009,6 +3047,7 @@ retry_max_stream_restarts = 0
 
     #[test]
     fn the_notifications_section_parses_from_toml_with_the_documented_defaults() {
+        let _env = env_lock();
         let file: ConfigFile = toml::from_str(
             r#"
             [notifications]
@@ -3026,8 +3065,26 @@ retry_max_stream_restarts = 0
         assert!(cfg.notifications.plugin);
     }
 
+    /// The new `[limits]` key is readable from the config file, and a file that
+    /// omits it keeps the 900 default - the item ceiling that keeps a session
+    /// under a gateway's 1,000-item limit.
+    #[test]
+    fn the_context_message_ceiling_is_read_from_the_limits_section() {
+        let _env = env_lock();
+        let file: ConfigFile = toml::from_str("[limits]\nmax_context_messages = 250\n").unwrap();
+        let cfg = Config::from_parts(file, None).unwrap();
+        assert_eq!(cfg.limits.max_context_messages, 250);
+        // The character budget is untouched: the two are independent.
+        assert_eq!(cfg.limits.context_max_chars, 0);
+
+        let file: ConfigFile = toml::from_str("[limits]\nmax_iterations = 5\n").unwrap();
+        let cfg = Config::from_parts(file, None).unwrap();
+        assert_eq!(cfg.limits.max_context_messages, 900);
+    }
+
     #[test]
     fn a_config_file_without_a_notifications_section_keeps_the_defaults() {
+        let _env = env_lock();
         let file: ConfigFile = toml::from_str("[limits]\nmax_iterations = 5\n").unwrap();
         let cfg = Config::from_parts(file, None).unwrap();
         assert!(cfg.notifications.enabled);
@@ -3087,6 +3144,7 @@ retry_max_stream_restarts = 0
     /// or `x` gated nothing: a one-character secret is a formality.
     #[test]
     fn a_short_admin_token_is_rejected_at_load() {
+        let _env = env_lock();
         let file = ConfigFile {
             admin_token: Some("short".into()),
             ..ConfigFile::default()
@@ -3108,6 +3166,7 @@ retry_max_stream_restarts = 0
     /// placeholder that `.env.example` used to suggest.
     #[test]
     fn a_short_or_placeholder_auth_token_is_rejected_at_load() {
+        let _env = env_lock();
         for (token, expected) in [
             ("short", "at least 16"),
             ("change-me-to-16-plus-chars", "placeholder"),

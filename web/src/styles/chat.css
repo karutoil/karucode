@@ -1423,12 +1423,12 @@
 /* The opened output sits in from the row, under the glyph, exactly like a tool
    row's: it reads as belonging to the line above it rather than as a new card. */
 .command-row > .cmd-output {
+  /* `.command-scroll` is the row's sole bounded scroller. This wrapper only adds
+   * output chrome; giving it its own clamp nested a second scroll wheel inside. */
   margin: var(--space-1) 0 var(--space-3) var(--space-9);
-  max-height: 240px;
   padding: var(--space-5) var(--space-6);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  overflow: auto;
 }
 
 /* ---------- tool groups (a folded run of calls) ----------
@@ -1735,6 +1735,8 @@
 
 .cmd-output .output-pre {
   max-height: none;
+  /* The bounded `.command-scroll` above owns the scrollbar. */
+  overflow: visible;
   font-size: inherit;
   line-height: inherit;
 }

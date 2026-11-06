@@ -10,9 +10,10 @@ use kc_core::message::ImageAttachment;
 use kc_core::paths::Workspace;
 use kc_core::{Error, Result};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio_util::sync::CancellationToken;
 
 pub const DEFAULT_READ_LINES: usize = 400;
 pub const MAX_READ_LINES: usize = 2000;
@@ -61,12 +62,37 @@ pub struct Rendered {
 
 /// Read a UTF-8 file, rendering a `path — lines A-B of N (bytes)` header and
 /// `%5d\t` numbered lines.
+///
+/// `max_bytes` bounds what is *returned*, not what is *reachable*: when the
+/// requested `offset` starts past the bytes a prefix read could cover, the file
+/// is streamed forward to the window instead of that window being unreachable
+/// (see [`read_window`]).
 pub fn read_file(
     ws: &Workspace,
     path: &str,
     offset: Option<u64>,
     limit: Option<u64>,
     max_bytes: usize,
+) -> Result<Rendered> {
+    read_file_cancellable(
+        ws,
+        path,
+        offset,
+        limit,
+        max_bytes,
+        &CancellationToken::new(),
+    )
+}
+
+/// [`read_file`] with a cancellation token, so a scan for a far window or a line
+/// count can stop when the run is cancelled instead of finishing its IO first.
+pub fn read_file_cancellable(
+    ws: &Workspace,
+    path: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+    max_bytes: usize,
+    cancel: &CancellationToken,
 ) -> Result<Rendered> {
     let abs = ws.resolve_existing(path)?;
     let rel = ws.relative(&abs);
@@ -82,6 +108,18 @@ pub fn read_file(
         )));
     }
     let size = meta.len();
+    let offset = offset.unwrap_or(1).max(1) as usize;
+    let limit = limit
+        .unwrap_or(DEFAULT_READ_LINES as u64)
+        .clamp(1, MAX_READ_LINES as u64) as usize;
+
+    // A window that starts beyond the byte cap used to be unreachable: the read
+    // took `max_bytes` from byte 0 and then reported that the offset was "beyond
+    // the lines that fit in the first N bytes". The cap bounds bytes *returned*,
+    // so a later window is streamed to (bounded, cancellable) instead of refused.
+    if offset > 1 && size > max_bytes as u64 {
+        return read_window(&abs, &rel, size, offset, limit, max_bytes, cancel);
+    }
 
     // One open, one pass. The prefix is read first (that is what gets returned);
     // when the byte cap cut it short, the *same* handle keeps reading to count the
@@ -126,10 +164,6 @@ pub fn read_file(
         (available, false)
     };
 
-    let offset = offset.unwrap_or(1).max(1) as usize;
-    let limit = limit
-        .unwrap_or(DEFAULT_READ_LINES as u64)
-        .clamp(1, MAX_READ_LINES as u64) as usize;
     let start = offset - 1;
     let end = if start >= total {
         start
@@ -219,6 +253,275 @@ pub fn read_file(
     })
 }
 
+/// Bytes read per step when a file is streamed rather than read whole.
+const SCAN_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Read the line window `offset..offset + limit` of a file too large to read
+/// from byte 0, by streaming forward to it.
+///
+/// The prefix is never buffered: the scan counts newlines and keeps only the
+/// chunk bytes that follow the window's first line, so memory is bounded by
+/// [`SCAN_CHUNK_BYTES`] plus the returned window (at most `max_bytes`).
+///
+/// Everything the prefix path reports is reported here too: the same header, the
+/// real `lines_total`, the byte-cap note when the cap (not `limit`) ended the
+/// window, the "past the end of the file" note, the absolute NUL offset of the
+/// binary sniff, and the same `meta` keys.
+fn read_window(
+    abs: &Path,
+    rel: &str,
+    size: u64,
+    offset: usize,
+    limit: usize,
+    max_bytes: usize,
+    cancel: &CancellationToken,
+) -> Result<Rendered> {
+    let mut file = std::fs::File::open(abs).map_err(|e| Error::io(abs, e))?;
+    let mut chunk = vec![0u8; SCAN_CHUNK_BYTES];
+    let need = offset - 1;
+
+    // Phase 1: skip `offset - 1` whole lines, retaining nothing but the tail of
+    // the chunk that carried the last newline of the prefix.
+    let mut skipped = 0usize;
+    let mut window_start = 0u64;
+    let mut carry: Vec<u8> = Vec::new();
+    let mut last_byte: Option<u8> = None;
+    let mut reached = need == 0;
+    while !reached {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let n = match read_chunk(&mut file, &mut chunk, abs)? {
+            Some(n) => n,
+            None => break,
+        };
+        last_byte = Some(chunk[n - 1]);
+        let slice = &chunk[..n];
+        let mut seen = 0usize;
+        let mut cut = n;
+        for (i, byte) in slice.iter().enumerate() {
+            if *byte != b'\n' {
+                continue;
+            }
+            seen += 1;
+            if skipped + seen == need {
+                cut = i + 1;
+                reached = true;
+                break;
+            }
+        }
+        skipped += seen;
+        window_start += cut as u64;
+        if reached {
+            carry.extend_from_slice(&slice[cut..]);
+        }
+    }
+
+    if !reached {
+        // The file ended before the requested line: the same note and shape the
+        // prefix path produces for an offset past the end.
+        let total = skipped + usize::from(last_byte.is_some_and(|b| b != b'\n'));
+        return Ok(Rendered {
+            text: past_end_text(rel, size, total, offset),
+            truncated: false,
+            meta: serde_json::json!({
+                "path": rel,
+                "lines_total": total,
+                "lines_total_is_lower_bound": false,
+                "lines_from": total,
+                "lines_to": total,
+                "bytes": size,
+                "byte_limited": false,
+                "offset": offset,
+                "limit": limit,
+            }),
+        });
+    }
+
+    // Phase 2: the window itself, bounded by `limit` lines and by `max_bytes`
+    // returned bytes. Both bounds land on a line boundary where they can, so the
+    // window is always a whole number of lines plus, at worst, one partial line
+    // when the byte cap falls inside it.
+    //
+    // `carry` can be as large as one read step, so it is bounded here before it is
+    // counted: nothing beyond `max_bytes` is ever returned.
+    let mut buf = carry;
+    buf.truncate(max_bytes);
+    let mut window_newlines = buf.iter().filter(|b| **b == b'\n').count();
+    let mut ended_at_eof = false;
+    let mut line_limited = false;
+    loop {
+        if window_newlines >= limit {
+            cut_after_newlines(&mut buf, limit);
+            line_limited = true;
+            break;
+        }
+        if buf.len() >= max_bytes {
+            break;
+        }
+        let want = (max_bytes - buf.len()).min(chunk.len());
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let n = match read_chunk(&mut file, &mut chunk[..want], abs)? {
+            Some(n) => n,
+            None => {
+                ended_at_eof = true;
+                break;
+            }
+        };
+        last_byte = Some(chunk[n - 1]);
+        window_newlines += chunk[..n].iter().filter(|b| **b == b'\n').count();
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    // `window_newlines` above counts the bytes that were read; only `buf` is
+    // returned, and `cut_after_newlines` may have shortened it.
+    let window_newlines = buf.iter().filter(|b| **b == b'\n').count();
+
+    // Sniff the window that is actually returned. The offset reported to the
+    // model is the byte offset in the *file*, not in the window.
+    if let Some(pos) = buf.iter().position(|b| *b == 0) {
+        return Err(Error::BadRequest(format!(
+            "`{rel}` looks like a binary file (NUL byte at offset {}); read_file only returns UTF-8 text. \
+             Use run_command with `file`/`xxd` if you need to inspect it.",
+            window_start + pos as u64
+        )));
+    }
+
+    // Phase 3: count the rest of the file, bounded by `MAX_COUNTED_LINES`. The
+    // read steps ran past the window (a whole chunk at a time), so the count
+    // resumes from the window's end, not from the handle's position.
+    let window_end = window_start + buf.len() as u64;
+    let (tail_newlines, tail_last, capped) = if ended_at_eof || window_end >= size {
+        (0usize, None, false)
+    } else {
+        file.seek(std::io::SeekFrom::Start(window_end))
+            .map_err(|e| Error::io(abs, e))?;
+        drain_counting(&mut file, abs, cancel)?
+    };
+    if let Some(byte) = tail_last {
+        last_byte = Some(byte);
+    }
+    let total_newlines = skipped + window_newlines + tail_newlines;
+    let total_capped = capped;
+    // `str::lines` semantics: a trailing newline does not open a new line, and an
+    // empty file has none.
+    let unterminated = size > 0 && last_byte.is_some_and(|b| b != b'\n');
+    let total = total_newlines + usize::from(unterminated && !capped);
+
+    let text = String::from_utf8_lossy(&buf);
+    let lines: Vec<&str> = text.lines().collect();
+    let available = lines.len();
+    // The cap, not `limit` and not the end of the file, ended this window.
+    let byte_limited =
+        !line_limited && !ended_at_eof && window_end < size && buf.len() >= max_bytes;
+
+    let start = offset - 1;
+    let end = (start + limit).min(total);
+    let (first, last) = if available == 0 {
+        (total, total)
+    } else {
+        (offset, offset + available - 1)
+    };
+
+    let mut out = String::new();
+    let total_label = if total_capped {
+        format!("{total}+")
+    } else {
+        total.to_string()
+    };
+    out.push_str(&format!(
+        "{rel} — lines {first}-{last} of {total_label} ({size} bytes)"
+    ));
+    if byte_limited {
+        out.push_str(&format!(
+            "\n[note: only the first {max_bytes} of {size} bytes were read \
+             (limits.max_file_read_bytes); raise the limit to see the rest]"
+        ));
+    }
+    if total_capped {
+        out.push_str(&format!(
+            "\n[note: the line count stopped at {MAX_COUNTED_LINES} lines, so `{total}+` is a \
+             lower bound]"
+        ));
+    }
+
+    if total == 0 {
+        out.push_str("\n[file is empty]");
+    } else if available == 0 {
+        out.push_str(&format!(
+            "\n[offset {offset} is past the end of the file ({total} lines); start at or before {total}]"
+        ));
+    } else {
+        for (i, line) in lines.iter().enumerate() {
+            out.push_str(&format!("\n{:>5}\t{}", offset + i, line));
+        }
+        // Only offer "continue with offset" when the window was not cut short by
+        // the byte cap; otherwise the note above already explains the limit.
+        if last < total && last == end {
+            out.push_str(&format!(
+                "\n[next {} lines omitted; continue with offset={}]",
+                total - last,
+                last + 1
+            ));
+        }
+    }
+
+    Ok(Rendered {
+        text: out,
+        truncated: byte_limited || end < total,
+        meta: serde_json::json!({
+            "path": rel,
+            "lines_total": total,
+            "lines_total_is_lower_bound": total_capped,
+            "lines_from": first,
+            "lines_to": last,
+            "bytes": size,
+            "byte_limited": byte_limited,
+            "offset": offset,
+            "limit": limit,
+        }),
+    })
+}
+
+/// Cut `buf` to just after its `limit`-th newline, so a 64 KiB read step cannot
+/// return more lines than the caller asked for.
+fn cut_after_newlines(buf: &mut Vec<u8>, limit: usize) {
+    let mut seen = 0usize;
+    let mut cut = buf.len();
+    for (i, byte) in buf.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        seen += 1;
+        if seen == limit {
+            cut = i + 1;
+            break;
+        }
+    }
+    buf.truncate(cut);
+}
+
+/// The `[offset N is past the end]` body the prefix path renders.
+fn past_end_text(rel: &str, size: u64, total: usize, offset: usize) -> String {
+    format!(
+        "{rel} — lines {total}-{total} of {total} ({size} bytes)\n\
+         [offset {offset} is past the end of the file ({total} lines); start at or before {total}]"
+    )
+}
+
+/// One bounded read, treating end of file as `None` and retrying a signal.
+fn read_chunk(file: &mut std::fs::File, buf: &mut [u8], path: &Path) -> Result<Option<usize>> {
+    loop {
+        match file.read(buf) {
+            Ok(0) => return Ok(None),
+            Ok(n) => return Ok(Some(n)),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(Error::io(path, e)),
+        }
+    }
+}
+
 /// Keep reading `file` from where the byte-capped prefix left off and return the
 /// whole file's line count, plus whether the count stopped at the cap.
 ///
@@ -233,30 +536,51 @@ pub fn read_file(
 ///
 /// Matches `str::lines` semantics: a trailing newline does not start a new line,
 /// and an empty file has zero lines.
-fn continue_counting(file: &mut std::fs::File, prefix: &[u8]) -> std::io::Result<(usize, bool)> {
+fn continue_counting(file: &mut std::fs::File, prefix: &[u8]) -> Result<(usize, bool)> {
     let mut newlines = prefix.iter().filter(|b| **b == b'\n').count();
     let mut last_byte = prefix.last().copied();
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut capped = false;
-    loop {
-        let n = match file.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
-        newlines += buf[..n].iter().filter(|b| **b == b'\n').count();
-        last_byte = Some(buf[n - 1]);
-        if newlines > MAX_COUNTED_LINES {
-            capped = true;
-            break;
-        }
+    let (tail, tail_last, capped) =
+        drain_counting(file, Path::new("<file>"), &CancellationToken::new())?;
+    newlines += tail;
+    if let Some(byte) = tail_last {
+        last_byte = Some(byte);
     }
     // A file that does not end in a newline has one more (partial) line.
     if !capped && last_byte.is_some() && last_byte != Some(b'\n') {
         newlines += 1;
     }
     Ok((newlines, capped))
+}
+
+/// Count the newlines from the handle's current position to end of file.
+///
+/// Returns `(newlines, last byte read, stopped at the cap)`. The cap bounds the
+/// work: a count is a nicety, and a 2 GiB log should not be read twice for one.
+fn drain_counting(
+    file: &mut std::fs::File,
+    path: &Path,
+    cancel: &CancellationToken,
+) -> Result<(usize, Option<u8>, bool)> {
+    let mut newlines = 0usize;
+    let mut last = None;
+    let mut buf = vec![0u8; SCAN_CHUNK_BYTES];
+    let mut capped = false;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let n = match read_chunk(file, &mut buf, path)? {
+            Some(n) => n,
+            None => break,
+        };
+        newlines += buf[..n].iter().filter(|b| **b == b'\n').count();
+        last = Some(buf[n - 1]);
+        if newlines > MAX_COUNTED_LINES {
+            capped = true;
+            break;
+        }
+    }
+    Ok((newlines, last, capped))
 }
 
 /// What a file turned out to be, as far as the vision APIs are concerned.
@@ -550,6 +874,146 @@ pub fn list_dir(ws: &Workspace, path: &str, depth: u32, max_entries: usize) -> R
 
 fn is_skipped_dir(name: &std::ffi::OsStr) -> bool {
     name == ".git" || name == "node_modules"
+}
+
+/// Cap on the paths one `glob` call returns.
+pub const MAX_GLOB_ENTRIES: usize = 200;
+
+/// Find files and directories by *name* with a glob, `.gitignore`-aware.
+///
+/// The walker is the one [`list_dir`] and the search fallback already use, so
+/// ignored build output is not listed and `.git`/`node_modules` are skipped. The
+/// pattern is matched against an entry's file name, its path relative to `path`
+/// and its workspace-relative path, so `*.rs`, `src/**/*.rs` and
+/// `crates/*/src/lib.rs` all mean what a reader expects.
+///
+/// The walk stops at `max_entries + 1` entries: the extra one is what proves the
+/// cap cut something, so the note can say so instead of implying that is all
+/// there was.
+pub fn glob(ws: &Workspace, pattern: &str, path: &str, max_entries: usize) -> Result<Rendered> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return Err(Error::BadRequest(
+            "glob needs a `pattern`, e.g. \"*.rs\" or \"src/**/*.toml\"".into(),
+        ));
+    }
+    let set = globset::Glob::new(pattern)
+        .map_err(|e| Error::BadRequest(format!("invalid glob {pattern:?}: {e}")))
+        .and_then(|glob| {
+            let mut builder = globset::GlobSetBuilder::new();
+            builder.add(glob);
+            builder
+                .build()
+                .map_err(|e| Error::BadRequest(format!("invalid glob {pattern:?}: {e}")))
+        })?;
+
+    let abs = ws.resolve_existing(path)?;
+    let rel_root = ws.relative(&abs);
+    let meta = std::fs::metadata(&abs).map_err(|e| Error::io(&abs, e))?;
+    if !meta.is_dir() {
+        return Err(Error::BadRequest(format!(
+            "`{rel_root}` is a file; glob matches names under a directory, so pass its parent \
+             (or use read_file / search_files for one file)"
+        )));
+    }
+    let max_entries = max_entries.max(1);
+
+    let walker = ignore::WalkBuilder::new(&abs)
+        .hidden(false)
+        .require_git(false)
+        .git_global(false)
+        .follow_links(false)
+        .filter_entry(|entry| !is_skipped_dir(entry.file_name()))
+        .build();
+
+    struct Found {
+        is_dir: bool,
+        rel: String,
+    }
+    let mut found: Vec<Found> = Vec::new();
+    let mut walk_errors = 0usize;
+    let mut capped = false;
+    for entry in walker {
+        if found.len() > max_entries {
+            capped = true;
+            break;
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                walk_errors += 1;
+                continue;
+            }
+        };
+        if entry.depth() == 0 {
+            continue;
+        }
+        let rel = ws.relative(entry.path());
+        let name = entry.file_name().to_string_lossy().to_string();
+        let under_root = rel
+            .strip_prefix(rel_root.trim_end_matches('/'))
+            .map(|rest| rest.trim_start_matches('/'))
+            .unwrap_or(rel.as_str())
+            .to_string();
+        if !set.is_match(&name) && !set.is_match(&under_root) && !set.is_match(&rel) {
+            continue;
+        }
+        found.push(Found {
+            is_dir: entry.file_type().map(|t| t.is_dir()).unwrap_or(false),
+            rel,
+        });
+    }
+    if found.len() > max_entries {
+        capped = true;
+    }
+    found.sort_by(|a, b| a.rel.cmp(&b.rel));
+    let total = found.len();
+    found.truncate(max_entries);
+
+    let mut out = format!(
+        "{rel_root}: {} path(s) matching `{pattern}`",
+        if capped {
+            format!("{}+", max_entries)
+        } else {
+            total.to_string()
+        }
+    );
+    if found.is_empty() {
+        out.push_str(
+            "\n[no path matches this glob; the pattern is matched against names and paths]",
+        );
+    }
+    for item in &found {
+        if item.is_dir {
+            out.push_str(&format!("\n{}/", item.rel));
+        } else {
+            out.push_str(&format!("\n{}", item.rel));
+        }
+    }
+    if capped {
+        out.push_str(&format!(
+            "\n[truncated: showing the first {max_entries} of {max_entries}+ matching paths; \
+             narrow the pattern or the path]"
+        ));
+    }
+    if walk_errors > 0 {
+        out.push_str(&format!(
+            "\n[{walk_errors} paths could not be read and were skipped]"
+        ));
+    }
+
+    Ok(Rendered {
+        text: out,
+        truncated: capped,
+        meta: serde_json::json!({
+            "pattern": pattern,
+            "path": rel_root,
+            "matches": total,
+            "shown": found.len(),
+            "capped": capped,
+            "errors": walk_errors,
+        }),
+    })
 }
 
 /// Human-readable byte count, kept short so listings stay scannable.
@@ -1112,6 +1576,181 @@ mod tests {
         let bytes = read_bounded(std::io::repeat(b'x'), 32).unwrap();
         assert_eq!(bytes.len(), 33);
         assert_eq!(read_bounded(&b"short"[..], 5).unwrap(), b"short");
+    }
+
+    /// The measured failure: a file over `max_file_read_bytes` could never be read
+    /// past the lines that fit in the first 200 000 bytes, so a 9 774-line file was
+    /// unreachable past line 4 334 and the model fell back to `sed -n`.
+    #[test]
+    fn a_window_past_the_byte_cap_returns_the_real_lines() {
+        let tmp = TempWs::new("window-past-cap");
+        let lines = 30_000usize;
+        let body: String = (1..=lines).map(|i| format!("row {i}\n")).collect();
+        tmp.write("big.txt", &body);
+        let size = body.len();
+        assert!(size > 200_000, "the fixture must exceed the default cap");
+        let ws = tmp.ws();
+
+        let rendered = read_file(&ws, "big.txt", Some(25_000), Some(3), 200_000).unwrap();
+        assert_eq!(rendered.meta["lines_total"].as_u64().unwrap(), lines as u64);
+        assert_eq!(rendered.meta["lines_from"].as_u64().unwrap(), 25_000);
+        assert_eq!(rendered.meta["lines_to"].as_u64().unwrap(), 25_002);
+        assert!(
+            !rendered.meta["byte_limited"].as_bool().unwrap(),
+            "the cap must bound the bytes returned, not what is reachable"
+        );
+        assert!(
+            rendered.text.starts_with(&format!(
+                "big.txt — lines 25000-25002 of {lines} ({size} bytes)"
+            )),
+            "header: {:?}",
+            rendered.text.lines().next()
+        );
+        assert!(
+            rendered.text.contains("25000\trow 25000"),
+            "{}",
+            rendered.text
+        );
+        assert!(
+            rendered.text.contains("25002\trow 25002"),
+            "{}",
+            rendered.text
+        );
+        assert!(!rendered.text.contains("row 24999"), "{}", rendered.text);
+        assert!(!rendered.text.contains("row 25003"), "{}", rendered.text);
+        // 25 000 lines remain, so the next-window hint points at the real line.
+        assert!(
+            rendered.text.contains(&format!(
+                "[next {} lines omitted; continue with offset=25003]",
+                lines - 25_002
+            )),
+            "{:?}",
+            rendered.text.lines().last()
+        );
+    }
+
+    /// A window that *starts* inside the byte cap and runs past it still ends where
+    /// either the line window or the byte cap says, with the cap note attached.
+    #[test]
+    fn a_window_inside_the_cap_still_obeys_the_byte_cap() {
+        let tmp = TempWs::new("window-byte-cap");
+        let lines = 30_000usize;
+        let body: String = (1..=lines).map(|i| format!("row {i}\n")).collect();
+        tmp.write("big.txt", &body);
+        let ws = tmp.ws();
+
+        // 1 000 bytes of returned window cannot hold the 2 000 lines asked for.
+        let rendered = read_file(&ws, "big.txt", Some(100), Some(2000), 1000).unwrap();
+        assert!(rendered.meta["byte_limited"].as_bool().unwrap());
+        assert_eq!(rendered.meta["lines_from"].as_u64().unwrap(), 100);
+        let shown = rendered.meta["lines_to"].as_u64().unwrap();
+        assert!(
+            shown > 100 && shown < 1099,
+            "byte cap cut the window: {shown}"
+        );
+        assert_eq!(rendered.meta["lines_total"].as_u64().unwrap(), lines as u64);
+        assert!(rendered.text.contains("max_file_read_bytes"));
+        assert!(!rendered.text.contains("continue with offset="));
+
+        // The next window is still reachable, one call later.
+        let next = read_file(&ws, "big.txt", Some(shown + 1), Some(2), 200_000).unwrap();
+        assert_eq!(
+            next.meta["lines_from"].as_u64().unwrap(),
+            shown + 1,
+            "{}",
+            next.text
+        );
+    }
+
+    /// Past the end is a note, not a panic and not a wrong line number, whichever
+    /// path produced it.
+    #[test]
+    fn a_window_past_the_end_reports_the_real_total() {
+        let tmp = TempWs::new("window-past-end");
+        let lines = 30_000usize;
+        let body: String = (1..=lines).map(|i| format!("row {i}\n")).collect();
+        tmp.write("big.txt", &body);
+        let ws = tmp.ws();
+
+        let rendered = read_file(&ws, "big.txt", Some(lines as u64 + 10), None, 200_000).unwrap();
+        assert_eq!(rendered.meta["lines_total"].as_u64().unwrap(), lines as u64);
+        assert_eq!(rendered.meta["lines_from"].as_u64().unwrap(), lines as u64);
+        assert_eq!(rendered.meta["lines_to"].as_u64().unwrap(), lines as u64);
+        assert!(
+            rendered.text.contains(&format!(
+                "[offset {} is past the end of the file ({lines} lines); start at or before {lines}]",
+                lines + 10
+            )),
+            "{}",
+            rendered.text
+        );
+        assert!(!rendered.truncated);
+    }
+
+    /// A file with no trailing newline still counts, and reads, its last line.
+    #[test]
+    fn a_window_reaches_an_unterminated_last_line() {
+        let tmp = TempWs::new("window-unterminated");
+        let lines = 30_000usize;
+        let mut body: String = (1..lines).map(|i| format!("row {i}\n")).collect();
+        body.push_str("last row");
+        tmp.write("big.txt", &body);
+        let ws = tmp.ws();
+
+        let rendered = read_file(&ws, "big.txt", Some(lines as u64), Some(5), 200_000).unwrap();
+        assert_eq!(rendered.meta["lines_total"].as_u64().unwrap(), lines as u64);
+        assert_eq!(rendered.meta["lines_from"].as_u64().unwrap(), lines as u64);
+        assert!(rendered.text.contains("last row"), "{}", rendered.text);
+    }
+
+    /// The binary sniff must report the offset in the *file*, even when the window
+    /// starts deep inside it: an offset relative to the window would point the model
+    /// (and a later `xxd`) at the wrong byte.
+    #[test]
+    fn a_nul_in_a_far_window_is_reported_at_its_file_offset() {
+        let tmp = TempWs::new("window-nul");
+        let mut body: Vec<u8> = Vec::new();
+        for i in 1..=30_000 {
+            body.extend_from_slice(format!("row {i}\n").as_bytes());
+        }
+        let nul_at = body.len() as u64;
+        body.push(0);
+        body.extend_from_slice(b"end\n");
+        tmp.write_bytes("big.bin", &body);
+        let ws = tmp.ws();
+
+        let err = read_file(&ws, "big.bin", Some(29_999), Some(10), 200_000).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("NUL byte at offset {nul_at}")),
+            "{err}"
+        );
+    }
+
+    /// The window is a *window*: the byte cap cannot be used to return more lines
+    /// than `limit` just because the read step is 64 KiB wide.
+    #[test]
+    fn a_window_never_returns_more_lines_than_limit() {
+        let tmp = TempWs::new("window-limit");
+        let lines = 60_000usize;
+        let body: String = (1..=lines).map(|i| format!("row {i}\n")).collect();
+        tmp.write("big.txt", &body);
+        let ws = tmp.ws();
+
+        let rendered = read_file(&ws, "big.txt", Some(2000), Some(5), 200_000).unwrap();
+        assert_eq!(rendered.meta["lines_from"].as_u64().unwrap(), 2000);
+        assert_eq!(rendered.meta["lines_to"].as_u64().unwrap(), 2004);
+        let numbered = rendered
+            .text
+            .lines()
+            .filter(|line| line.contains("\trow 20"))
+            .count();
+        assert_eq!(
+            numbered, 5,
+            "exactly five numbered lines: {:?}",
+            rendered.text
+        );
+        assert!(!rendered.text.contains("row 2005"), "{}", rendered.text);
     }
 
     #[test]

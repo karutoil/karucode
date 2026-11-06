@@ -280,6 +280,10 @@ pub fn diff_args(staged: bool, base: Option<&str>, pathspec: Option<&str>) -> Ve
 /// a real branch name, short enough that a ref cannot be used as a payload.
 pub const MAX_REF_CHARS: usize = 120;
 
+/// Default and hard ceiling for `git_log` commits.
+pub const DEFAULT_LOG_COUNT: usize = 20;
+pub const MAX_LOG_COUNT: usize = 200;
+
 /// Validate a *revision* argument (a `base=`, a start point, a commit range):
 /// the conservative `^[A-Za-z0-9._/~^-]{1,120}$` grammar the read-only diff
 /// endpoint has always used, because a ref is the one string that ends up in a
@@ -758,6 +762,184 @@ pub async fn diff(
     }
 
     Ok(DiffReport { text, empty: false })
+}
+
+/// One commit, as `git log` rendered it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit {
+    pub sha: String,
+    pub date: String,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogReport {
+    pub text: String,
+    pub is_repo: bool,
+    pub commits: Vec<Commit>,
+    /// The requested count was reached, so the log may go further back.
+    pub capped: bool,
+    pub confined: bool,
+}
+
+/// `git log -n <count> -- <path>`, confined to the workspace (see [`Scope`]).
+///
+/// One line per commit: `sha date subject`. The command is read-only and runs
+/// with the same [`SAFE_CONFIG`]/[`safe_env`] every other git tool uses, plus
+/// `log.showSignature=false`: a repository can configure signature display, and
+/// that shells out to `gpg` - a program the repository also names.
+///
+/// The count is requested as `count + 1` so the extra commit is *proof* that the
+/// log continues, rather than a report that quietly stops at the ceiling.
+pub async fn log(
+    ws: &Workspace,
+    path: Option<&str>,
+    max_count: Option<usize>,
+) -> Result<LogReport> {
+    let count = max_count
+        .unwrap_or(DEFAULT_LOG_COUNT)
+        .clamp(1, MAX_LOG_COUNT);
+    let Some(scope) = repo_scope(ws, path).await? else {
+        let rel = ws.relative(&resolve_git_target(ws, path)?);
+        return Ok(LogReport {
+            text: format!(
+                "is_repo: false — `{rel}` is not inside a git repository (or git is not \
+                 initialised). No history is available."
+            ),
+            is_repo: false,
+            commits: Vec::new(),
+            capped: false,
+            confined: false,
+        });
+    };
+
+    // `-c` before the subcommand: a global option, so it applies to `log` only
+    // and does not leak into the other tools that share `SAFE_CONFIG`.
+    let mut args: Vec<String> = [
+        "-c",
+        "log.showSignature=false",
+        "log",
+        "--no-color",
+        // A stable, parseable shape: abbreviated sha, committer date, subject,
+        // tab-separated. `%s` cannot contain a newline, so one commit is one line.
+        "--format=%h%x09%cs%x09%s",
+        "-n",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.push((count + 1).to_string());
+    args.push("--".to_string());
+    args.push(scope.pathspec.clone());
+    let run = git_with_env(ws.root(), &args, &literal_pathspec_env()).await?;
+
+    let not_a_repo = is_not_a_repo(&run);
+    let no_commits_yet = run.code != Some(0)
+        && (run.stderr.contains("does not have any commits yet")
+            || run.stderr.contains("your current branch")
+            || run.stderr.contains("bad default revision"));
+    if not_a_repo || no_commits_yet {
+        return Ok(LogReport {
+            text: if not_a_repo {
+                format!(
+                    "is_repo: false — `{}` is not inside a git repository (or git is not \
+                     initialised). No history is available.",
+                    scope.target_rel
+                )
+            } else {
+                format!(
+                    "no commits yet in `{}`; the repository has no history to show",
+                    scope.target_rel
+                )
+            },
+            is_repo: !not_a_repo,
+            commits: Vec::new(),
+            capped: false,
+            confined: scope.confined(),
+        });
+    }
+    if run.code != Some(0) {
+        return Err(Error::Tool(format!(
+            "`git log -- {}` failed in `{}` (exit {}): {}",
+            scope.pathspec,
+            scope.target_rel,
+            run.code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into()),
+            if run.stderr.is_empty() {
+                "no output".to_string()
+            } else {
+                run.stderr
+            }
+        )));
+    }
+    if run.stdout_truncated {
+        return Err(Error::Tool(
+            "git log exceeded its output limit; ask for fewer commits or narrow the path".into(),
+        ));
+    }
+
+    let mut commits: Vec<Commit> = Vec::new();
+    for line in run.stdout.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(3, '\t');
+        let (Some(sha), Some(date), Some(subject)) = (parts.next(), parts.next(), parts.next())
+        else {
+            // Not a record we wrote: keep the raw line rather than dropping a
+            // commit from the history without saying so.
+            commits.push(Commit {
+                sha: String::new(),
+                date: String::new(),
+                subject: line.to_string(),
+            });
+            continue;
+        };
+        commits.push(Commit {
+            sha: sha.to_string(),
+            date: date.to_string(),
+            subject: subject.to_string(),
+        });
+    }
+    let capped = commits.len() > count;
+    commits.truncate(count);
+
+    let mut text = format!("is_repo: true\ncommits ({})", commits.len());
+    if commits.is_empty() {
+        text.push_str(&format!(
+            "\n[no commits touching `{}` in this workspace]",
+            scope.target_rel
+        ));
+    }
+    for commit in &commits {
+        text.push_str(&format!(
+            "\n{} {} {}",
+            commit.sha, commit.date, commit.subject
+        ));
+    }
+    if capped {
+        text.push_str(&format!(
+            "\n[showing the latest {count} commits; raise max_count (max {MAX_LOG_COUNT}) or pass \
+             `path` to narrow]"
+        ));
+    }
+    if scope.confined() {
+        text.push_str(&format!(
+            "\n[confined to this workspace, a subdirectory of the git repository at {}: commits \
+             that touch nothing inside it are not listed]",
+            scope.toplevel
+        ));
+    }
+
+    Ok(LogReport {
+        text,
+        is_repo: true,
+        capped,
+        confined: scope.confined(),
+        commits,
+    })
 }
 
 #[cfg(test)]

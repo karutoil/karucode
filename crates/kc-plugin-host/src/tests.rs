@@ -253,6 +253,11 @@ fn the_hook_budget_is_smaller_than_a_context_window() {
     assert_eq!(MAX_HOOK_NOTE_BYTES, 4 * 1024);
     assert_eq!(MAX_HOOK_NOTES_BYTES, 16 * 1024);
     const { assert!(MAX_HOOK_NOTE_BYTES <= MAX_HOOK_NOTES_BYTES) };
+    // The turn forwarded to the hook is capped like one contribution: it is sent
+    // on every model call of the run, so it must not be able to dominate the
+    // payload.
+    assert_eq!(MAX_HOOK_TURN_BYTES, 4 * 1024);
+    const { assert!(MAX_HOOK_TURN_BYTES <= MAX_HOOK_NOTE_BYTES) };
 }
 
 #[test]

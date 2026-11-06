@@ -8,9 +8,10 @@
 use crate::approvals::{ApprovalRegistry, RuntimeApprovalGate};
 use crate::subagent::SPAWN_AGENT_TOOL;
 use crate::tests_support::{
-    test_inner_with_settings, ApprovalTool, BigOutputTool, EchoTool, ExternalTool, FakeSettings,
-    FollowUpTool, GateTool, Harness, HarnessBuilder, ImageTool, PanicTool, RequiredArgsTool,
-    Script, ScriptedFactory, SlowCancelTool, SteerTool,
+    test_inner_with_settings, ApprovalTool, BigOutputTool, EchoTool, ExternalTool, FailingTool,
+    FakeSettings, FollowUpTool, GateTool, Harness, HarnessBuilder, ImageTool, LegacyPromptHook,
+    PanicTool, ProbeTool, RequiredArgsTool, Script, ScriptedFactory, SlowCancelTool, SteerTool,
+    TurnRecordingHook, WriteWorkspaceFileTool,
 };
 use crate::{ActiveRun, QueuedInput, QueuedKind, RecoveryReport, Runtime, RuntimeDeps};
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, ApprovalRequest};
@@ -1116,7 +1117,7 @@ async fn a_turn_cannot_exceed_its_byte_share() {
 }
 
 #[tokio::test]
-async fn multiple_tool_calls_run_sequentially_and_in_order() {
+async fn multiple_tool_calls_run_and_persist_in_call_order() {
     let mut h = HarnessBuilder::new(vec![
         Script::call(&[
             ("call_a", "echo", "{\"n\":1}"),
@@ -1151,6 +1152,467 @@ async fn multiple_tool_calls_run_sequentially_and_in_order() {
     );
     assert_eq!(messages[2].content, "echoed:{\"n\":1}");
     assert_eq!(messages[3].content, "echoed:{\"n\":2}");
+}
+
+// ---------------------------------------------------------------------------
+// read-only concurrency
+// ---------------------------------------------------------------------------
+
+/// Ids of every `ToolCallStarted`, in the order the UI saw them.
+fn tool_started(events: &[EventEnvelope]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::ToolCallStarted { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_read_only_turn_runs_concurrently_but_persists_in_call_order() {
+    let probe = ProbeTool::read_only("probe");
+    let peak = probe.peak();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            // The first call is deliberately the slowest, so completion order
+            // (b, c, a) differs from call order (a, b, c).
+            ("call_a", "probe", "{\"sleep_ms\":120,\"tag\":\"a\"}"),
+            ("call_b", "probe", "{\"sleep_ms\":0,\"tag\":\"b\"}"),
+            ("call_c", "probe", "{\"sleep_ms\":0,\"tag\":\"c\"}"),
+        ]),
+        Script::text("done"),
+    ])
+    .tool(probe.boxed())
+    .build()
+    .await;
+
+    let events = h.run_to_finish("three independent reads").await;
+    assert_eq!(finished_status(&events), "completed");
+
+    // 1. They really overlapped: a strictly sequential turn never has more than
+    //    one invocation in flight.
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        3,
+        "the three read-only calls never ran at the same time"
+    );
+
+    // 2. The same set of events as the sequential path, one pair per call id,
+    //    with the started events in call order.
+    assert_eq!(
+        tool_started(&events),
+        vec![
+            "call_a".to_string(),
+            "call_b".to_string(),
+            "call_c".to_string()
+        ]
+    );
+    let finished = tool_finished(&events);
+    assert_eq!(finished.len(), 3, "every call must finish exactly once");
+    let mut finished_ids: Vec<&str> = finished.iter().map(|f| f.0.as_str()).collect();
+    finished_ids.sort();
+    assert_eq!(finished_ids, vec!["call_a", "call_b", "call_c"]);
+    assert!(finished.iter().all(|f| f.1), "all three calls succeeded");
+    // The interleaving is completion order - the slow call reports last - which
+    // is fine because the two events are paired by id.
+    assert_eq!(
+        finished.last().map(|f| f.0.as_str()),
+        Some("call_a"),
+        "the 200ms call should have finished last: {finished:?}"
+    );
+
+    // 3. ...but the transcript is in CALL order, not completion order, and the
+    //    next request is built from exactly those turns.
+    let messages = h.session_messages().await;
+    let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(
+        roles,
+        vec!["user", "assistant", "tool", "tool", "tool", "assistant"]
+    );
+    assert_eq!(
+        messages[2].content, "probe:a",
+        "history must be folded in call order: {messages:?}"
+    );
+    assert_eq!(messages[3].content, "probe:b");
+    assert_eq!(messages[4].content, "probe:c");
+    for (index, id) in ["call_a", "call_b", "call_c"].iter().enumerate() {
+        assert_eq!(messages[2 + index].tool_call_id.as_deref(), Some(*id));
+    }
+
+    let requests = h.factory.requests();
+    let second = requests.last().expect("a second request").clone();
+    let carried: Vec<&str> = second
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(
+        carried,
+        vec!["probe:a", "probe:b", "probe:c"],
+        "the next request must replay the results in call order"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_with_one_mutating_call_stays_sequential() {
+    let read = ProbeTool::read_only("probe");
+    let write = ProbeTool::mutating("write_probe");
+    let read_peak = read.peak();
+    let write_peak = write.peak();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            ("call_a", "probe", "{\"sleep_ms\":50,\"tag\":\"a\"}"),
+            ("call_b", "probe", "{\"sleep_ms\":20,\"tag\":\"b\"}"),
+            ("call_w", "write_probe", "{\"sleep_ms\":0,\"tag\":\"w\"}"),
+        ]),
+        Script::text("done"),
+    ])
+    .tool(read.boxed())
+    .tool(write.boxed())
+    .build()
+    .await;
+
+    let events = h.run_to_finish("read two, write one").await;
+    assert_eq!(finished_status(&events), "completed");
+
+    // One mutating call in the turn and nothing overlaps: the sequential path.
+    assert_eq!(
+        read_peak.load(Ordering::SeqCst),
+        1,
+        "a turn carrying a mutating call must not run its reads concurrently"
+    );
+    assert_eq!(write_peak.load(Ordering::SeqCst), 1);
+
+    // And the old guarantees still hold.
+    assert_eq!(
+        tool_started(&events),
+        vec![
+            "call_a".to_string(),
+            "call_b".to_string(),
+            "call_w".to_string()
+        ]
+    );
+    let finished: Vec<String> = tool_finished(&events).into_iter().map(|f| f.0).collect();
+    assert_eq!(
+        finished,
+        vec![
+            "call_a".to_string(),
+            "call_b".to_string(),
+            "call_w".to_string()
+        ],
+        "the sequential path still finishes in call order"
+    );
+    let messages = h.session_messages().await;
+    assert_eq!(messages[2].content, "probe:a");
+    assert_eq!(messages[3].content, "probe:b");
+    assert_eq!(messages[4].content, "probe:w");
+}
+
+#[tokio::test]
+async fn a_failing_call_does_not_cost_its_siblings_their_results() {
+    let probe = ProbeTool::read_only("probe");
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            ("call_a", "probe", "{\"sleep_ms\":10,\"tag\":\"a\"}"),
+            ("call_boom", "boom", "{}"),
+            ("call_panic", "panicky", "{}"),
+            ("call_d", "probe", "{\"sleep_ms\":10,\"tag\":\"d\"}"),
+        ]),
+        Script::text("recovered"),
+    ])
+    .tool(probe.boxed())
+    .tool(FailingTool::boxed("boom"))
+    .tool(PanicTool::boxed("panicky"))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("four reads, two of them broken").await;
+    assert_eq!(
+        finished_status(&events),
+        "completed",
+        "a broken call must not fail the run"
+    );
+
+    // Every call answered, in call order, and the healthy ones kept their result.
+    let messages = h.session_messages().await;
+    let tools: Vec<&kc_core::store::StoredMessage> =
+        messages.iter().filter(|m| m.role == "tool").collect();
+    assert_eq!(tools.len(), 4, "all four calls need a result: {messages:?}");
+    assert_eq!(tools[0].content, "probe:a");
+    assert!(
+        tools[1].content.contains("this call failed on purpose"),
+        "{}",
+        tools[1].content
+    );
+    assert!(
+        tools[2].content.contains("panicked"),
+        "a panic is that call's error result: {}",
+        tools[2].content
+    );
+    assert_eq!(
+        tools[3].content, "probe:d",
+        "a sibling of a failing call keeps its result"
+    );
+    let ids: Vec<&str> = tools
+        .iter()
+        .map(|m| m.tool_call_id.as_deref().unwrap_or_default())
+        .collect();
+    assert_eq!(ids, vec!["call_a", "call_boom", "call_panic", "call_d"]);
+
+    let finished = tool_finished(&events);
+    let ok: std::collections::HashMap<&str, bool> = finished
+        .iter()
+        .map(|(id, ok, _, _)| (id.as_str(), *ok))
+        .collect();
+    assert_eq!(ok.get("call_a"), Some(&true));
+    assert_eq!(ok.get("call_boom"), Some(&false));
+    assert_eq!(ok.get("call_panic"), Some(&false));
+    assert_eq!(ok.get("call_d"), Some(&true));
+    // The request built after that turn is valid: every tool result still
+    // answers the assistant's tool call, in call order.
+    let requests = h.factory.requests();
+    let follow_up = requests.last().expect("a second request");
+    assert_no_orphan_tool_messages(&follow_up.messages);
+}
+
+#[tokio::test]
+async fn a_turn_with_a_blocked_repeat_stays_sequential() {
+    // Three identical reads first: the third answer earns the warning, and from
+    // then on the same call is refused. A turn carrying that refusal must take the
+    // sequential path - a `[blocked: ...]` result is a decision, and decisions are
+    // made in call order before anything is spawned.
+    let repeated = ProbeTool::read_only("probe_repeat");
+    let fresh = ProbeTool::read_only("probe_fresh");
+    let fresh_peak = fresh.peak();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            ("r1", "probe_repeat", "{\"sleep_ms\":0,\"tag\":\"same\"}"),
+            ("r2", "probe_repeat", "{\"sleep_ms\":0,\"tag\":\"same\"}"),
+        ]),
+        Script::call(&[("r3", "probe_repeat", "{\"sleep_ms\":0,\"tag\":\"same\"}")]),
+        Script::call(&[
+            ("r4", "probe_repeat", "{\"sleep_ms\":0,\"tag\":\"same\"}"),
+            ("b1", "probe_fresh", "{\"sleep_ms\":20,\"tag\":\"x\"}"),
+            ("b2", "probe_fresh", "{\"sleep_ms\":20,\"tag\":\"y\"}"),
+        ]),
+        Script::text("done"),
+    ])
+    .tool(repeated.boxed())
+    .tool(fresh.boxed())
+    .build()
+    .await;
+
+    let events = h
+        .run_to_finish("read the same thing twice, then again")
+        .await;
+    assert_eq!(finished_status(&events), "completed");
+    // The fourth identical read was refused...
+    let blocked = tool_finished(&events)
+        .into_iter()
+        .find(|(id, _, _, _)| id == "r4")
+        .expect("r4 answered");
+    assert!(!blocked.1, "the fourth identical read must be refused");
+    assert!(blocked.2.contains("[blocked:"), "{}", blocked.2);
+    // ...and because it was, the two fresh reads in that turn did not overlap.
+    assert_eq!(
+        fresh_peak.load(Ordering::SeqCst),
+        1,
+        "a turn with a repeat-blocked call must not run its other reads concurrently"
+    );
+    let messages = h.session_messages().await;
+    let tools: Vec<&kc_core::store::StoredMessage> =
+        messages.iter().filter(|m| m.role == "tool").collect();
+    let ids: Vec<&str> = tools
+        .iter()
+        .map(|m| m.tool_call_id.as_deref().unwrap_or_default())
+        .collect();
+    assert_eq!(ids, vec!["r1", "r2", "r3", "r4", "b1", "b2"]);
+}
+
+#[tokio::test]
+async fn cancelling_during_a_parallel_batch_still_ends_the_turn() {
+    let a = SlowCancelTool::new("slow_a");
+    let b = SlowCancelTool::new("slow_b");
+    let a_started = a.started();
+    let b_started = b.started();
+    let mut h = HarnessBuilder::new(vec![Script::call(&[
+        ("call_a", "slow_a", "{}"),
+        ("call_b", "slow_b", "{}"),
+    ])])
+    .tool(Arc::new(a))
+    .tool(Arc::new(b))
+    .build()
+    .await;
+
+    h.submit("wait on two calls").await;
+    // Both calls in flight at once before the cancel: neither tool can finish on
+    // its own, so this only happens on the concurrent path. Events are drained
+    // while waiting so the broadcast receiver cannot fall behind.
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while a_started.load(Ordering::SeqCst) < 1 || b_started.load(Ordering::SeqCst) < 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both parallel calls should have started"
+        );
+        while let Ok(event) = h.events.try_recv() {
+            seen.push(event);
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(h.runtime.cancel(h.session()), "cancel should find the run");
+    seen.extend(h.collect_until_finished().await);
+
+    assert_eq!(finished_status(&seen), "cancelled");
+    assert_eq!(count(&seen, "run_cancelled"), 1);
+    // The turn ended promptly even though two tools were in flight, and the
+    // transcript is still valid: every tool_call has its result.
+    let messages = h.session_messages().await;
+    let tools: Vec<&kc_core::store::StoredMessage> =
+        messages.iter().filter(|m| m.role == "tool").collect();
+    assert_eq!(tools.len(), 2, "both cancelled calls answer their call");
+    assert!(h.wait_idle().await.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// the workspace's instructions
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_workspace_instructions_are_read_once_and_sent_on_every_request() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "rewrite", "{}")]),
+        Script::text("done"),
+    ])
+    .tool(WriteWorkspaceFileTool::boxed(
+        "rewrite",
+        "AGENTS.md",
+        "# AGENTS.md\nCHANGED MID-RUN: this must not reach the prompt.\n",
+    ))
+    .build()
+    .await;
+    std::fs::write(
+        h.workspace_dir.join("AGENTS.md"),
+        "# AGENTS.md\nORIGINAL RULE: run the tests before reporting.\n",
+    )
+    .expect("seed the instructions file");
+
+    h.run_to_finish("follow the house rules").await;
+
+    let requests = h.factory.requests();
+    assert!(requests.len() >= 2, "the run should take two model turns");
+    for (index, request) in requests.iter().enumerate() {
+        let system = &request.messages[0];
+        assert_eq!(system.role, Role::System, "message 0 must be the prompt");
+        assert!(
+            system
+                .content
+                .contains("ORIGINAL RULE: run the tests before reporting."),
+            "request {index} lost the project's instructions"
+        );
+        assert!(
+            system.content.contains("`AGENTS.md`"),
+            "the block must name the file it came from"
+        );
+        assert!(
+            !system.content.contains("CHANGED MID-RUN"),
+            "request {index} re-read the file instead of reusing the run's copy"
+        );
+    }
+    // Byte-identical, not merely equivalent: the cached prefix must not move.
+    assert_eq!(
+        requests[0].messages[0].content, requests[1].messages[0].content,
+        "the instructions block changed between turns of one run"
+    );
+    // And the file on disk really did change, or the assertion above is vacuous.
+    let on_disk = std::fs::read_to_string(h.workspace_dir.join("AGENTS.md")).unwrap();
+    assert!(on_disk.contains("CHANGED MID-RUN"));
+}
+
+#[tokio::test]
+async fn a_workspace_without_instructions_sends_no_instructions_block() {
+    let mut h = HarnessBuilder::new(vec![Script::text("hi")]).build().await;
+    h.run_to_finish("hello").await;
+    let requests = h.factory.requests();
+    assert!(
+        !requests[0].messages[0]
+            .content
+            .contains("Project instructions:"),
+        "an empty workspace grew an instructions block"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the prompt hook and the turn it answers
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_legacy_prompt_hook_still_contributes_its_notes() {
+    // A source that only implements `before_prompt`, as every embedding did
+    // before `before_prompt_for_turn` existed: the default must delegate to it.
+    let hook = LegacyPromptHook::new();
+    let calls = hook.calls();
+    let mut h = HarnessBuilder::new(vec![Script::text("hi")])
+        .hooks(Arc::new(hook))
+        .build()
+        .await;
+
+    h.run_to_finish("legacy question").await;
+    let requests = h.factory.requests();
+    assert!(
+        requests[0].messages[0].content.contains("legacy hook note"),
+        "the default before_prompt_for_turn dropped the legacy source's note"
+    );
+    assert!(
+        calls.load(Ordering::SeqCst) >= 1,
+        "the runtime must call the hook, not bypass it"
+    );
+}
+
+#[tokio::test]
+async fn the_prompt_hook_sees_the_turn_it_is_answering() {
+    let hook = TurnRecordingHook::new();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "echo", "{\"n\":1}")]),
+        Script::text("done"),
+    ])
+    .tool(EchoTool::boxed("echo"))
+    .hooks(Arc::new(hook.clone()))
+    .build()
+    .await;
+
+    h.run_to_finish("what changed in the git log?").await;
+
+    let requests = h.factory.requests();
+    assert!(requests.len() >= 2);
+    let canonical_workspace = std::fs::canonicalize(&h.workspace_dir)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .to_string();
+    let seen = hook.seen();
+    assert_eq!(
+        seen.len(),
+        requests.len(),
+        "the hook must run once per model call"
+    );
+    for (index, (workspace, turn)) in seen.iter().enumerate() {
+        assert_eq!(
+            turn.as_deref(),
+            Some("what changed in the git log?"),
+            "call {index} did not receive the user's turn"
+        );
+        assert_eq!(
+            workspace, &canonical_workspace,
+            "the workspace label must still be passed"
+        );
+    }
+    // The old method must not have been used as a fallback by the runtime.
+    assert!(
+        !requests[0].messages[0].content.contains("WRONG HOOK"),
+        "the runtime called before_prompt instead of before_prompt_for_turn"
+    );
 }
 
 #[tokio::test]
@@ -2408,20 +2870,205 @@ async fn mid_stream_restarts_are_bounded_and_the_last_error_is_reported() {
 
 #[tokio::test]
 async fn a_rejected_request_is_not_restarted() {
-    // A request-level error chunk (context too long, unsupported model) cannot
-    // be fixed by asking again, so the restart budget must stay untouched.
+    // A request-level error chunk (an unsupported option, an unknown model)
+    // cannot be fixed by asking again, so the restart budget must stay
+    // untouched. A *context overflow* is deliberately not this case any more:
+    // it is recovered by compacting the window once (see
+    // `an_overflowing_request_is_compacted_and_retried_once`), which is a change
+    // to the request rather than a repeat of it.
     let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![ProviderChunk::Error {
-        message: "provider error: this model's maximum context length is 4096 tokens".into(),
+        message: "provider error: unsupported parameter: max_completion_tokens".into(),
         retryable: false,
     }])])
     .model(restarts(3))
     .build()
     .await;
 
-    let events = h.run_to_finish("too much context").await;
+    let events = h.run_to_finish("this endpoint refuses the request").await;
     assert_eq!(finished_status(&events), "failed");
     assert_eq!(count(&events, "stream_retry"), 0);
     assert_eq!(h.factory.requests().len(), 1, "no second request");
+}
+
+/// The failure that started this work, verbatim from a real gateway: a session
+/// whose history outgrew the item ceiling is refused even though it sits far
+/// under any character budget.
+const ITEM_CEILING_REFUSAL: &str = "provider error: [400]: [code=context_length_exceeded] \
+     Input is too long: conversation history exceeds the limit on input items \
+     (1002 > 1000 items). Compact the conversation and retry. If compaction also \
+     exceeds the limit, shorten the history or start a new session.";
+
+#[tokio::test]
+async fn an_overflowing_request_is_compacted_and_retried_once() {
+    // Two scripts: the first request is refused for size, the second (a
+    // re-compacted window, same conversation) answers. The run must reach
+    // `completed`, the user must be told why, and exactly one retry must be
+    // issued.
+    let mut h = HarnessBuilder::new(vec![
+        Script::Chunks(vec![ProviderChunk::Error {
+            message: ITEM_CEILING_REFUSAL.into(),
+            retryable: false,
+        }]),
+        Script::text("recovered"),
+    ])
+    .model(restarts(3))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("keep working").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(count(&events, "error"), 0, "an overflow is not a run error");
+
+    // The notice names the reason and the setting that decided it.
+    let notices: Vec<String> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::Notice { level, message } if level == "warn" => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notices.iter().any(|message| message.contains("too large")
+            && message.contains("limits.context_max_chars")
+            && message.contains("limits.max_context_messages")),
+        "the forced compaction must be visible and name the setting: {notices:?}"
+    );
+
+    // Exactly one retry, of a request no larger than the first one.
+    let requests = h.factory.requests();
+    assert_eq!(requests.len(), 2, "one forced retry, not a loop");
+    assert!(
+        requests[1].messages.len() <= requests[0].messages.len(),
+        "the retried window must not be bigger than the refused one"
+    );
+
+    // No duplicated assistant turn: the refused attempt persisted nothing, so
+    // the transcript holds the retried answer once.
+    let assistants: Vec<_> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|m| m.role == "assistant")
+        .collect();
+    assert_eq!(assistants.len(), 1, "{assistants:?}");
+    assert_eq!(assistants[0].content, "recovered");
+}
+
+#[tokio::test]
+async fn an_overflow_that_repeats_fails_the_run_without_a_third_request() {
+    // The cut did not help: the second request is refused too. That is a real
+    // failure - the run must say a forced compaction was already attempted, and
+    // must not keep re-issuing the same refusal.
+    let mut h = HarnessBuilder::new(vec![
+        Script::Chunks(vec![ProviderChunk::Error {
+            message: ITEM_CEILING_REFUSAL.into(),
+            retryable: false,
+        }]),
+        Script::Chunks(vec![ProviderChunk::Error {
+            message: ITEM_CEILING_REFUSAL.into(),
+            retryable: false,
+        }]),
+        Script::text("a third answer that must never be asked for"),
+    ])
+    .model(restarts(3))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("keep working").await;
+    assert_eq!(finished_status(&events), "failed");
+    assert_eq!(h.factory.requests().len(), 2, "never a third request");
+
+    let error = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::Error { message, kind } => Some((message.clone(), kind.clone())),
+            _ => None,
+        })
+        .expect("an error event");
+    assert_eq!(error.1.as_deref(), Some("provider"));
+    // The provider's own message survives, and the run admits what it already
+    // tried instead of hiding it.
+    assert!(error.0.contains("input items"), "{}", error.0);
+    assert!(
+        error.0.contains("forced compaction") && error.0.contains("already attempted"),
+        "{}",
+        error.0
+    );
+    assert_eq!(h.store.runs()[0].status, "failed");
+}
+
+#[tokio::test]
+async fn an_overflow_on_a_later_turn_is_not_retried_a_second_time() {
+    // One forced compaction per *run*, not per turn: the first turn spends it,
+    // the second turn's refusal fails the run rather than silently re-cutting
+    // the conversation every time the gateway says no.
+    let mut h = HarnessBuilder::new(vec![
+        // turn 1: refused for size, then answered with a tool call.
+        Script::Chunks(vec![ProviderChunk::Error {
+            message: ITEM_CEILING_REFUSAL.into(),
+            retryable: false,
+        }]),
+        Script::call(&[("call_1", "echo", "{\"n\":1}")]),
+        // turn 2: refused again. There is no second forced retry left.
+        Script::Chunks(vec![ProviderChunk::Error {
+            message: ITEM_CEILING_REFUSAL.into(),
+            retryable: false,
+        }]),
+    ])
+    .model(restarts(3))
+    .tool(EchoTool::boxed("echo"))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("keep working").await;
+    assert_eq!(finished_status(&events), "failed");
+    assert_eq!(
+        h.factory.requests().len(),
+        3,
+        "two requests for turn 1, one for turn 2 - never a loop"
+    );
+    let error = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("an error event");
+    assert!(error.contains("already"), "{error}");
+}
+
+#[tokio::test]
+async fn a_partial_answer_before_an_overflow_is_not_persisted_twice() {
+    // A gateway can stream a little and *then* reject; nothing was persisted for
+    // that attempt, so the retry must not leave the partial text in the
+    // transcript next to the real answer.
+    let mut h = HarnessBuilder::new(vec![
+        Script::Chunks(vec![
+            ProviderChunk::Text("half an answer".into()),
+            ProviderChunk::Error {
+                message: ITEM_CEILING_REFUSAL.into(),
+                retryable: false,
+            },
+        ]),
+        Script::text("the whole answer"),
+    ])
+    .model(restarts(3))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("keep working").await;
+    assert_eq!(finished_status(&events), "completed");
+    // The client is told to drop what it rendered.
+    assert_eq!(count(&events, "stream_retry"), 1);
+
+    let assistants: Vec<_> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|m| m.role == "assistant")
+        .collect();
+    assert_eq!(assistants.len(), 1, "{assistants:?}");
+    assert_eq!(assistants[0].content, "the whole answer");
 }
 
 #[tokio::test]

@@ -313,6 +313,9 @@ export function resetAppState(): void {
   store.sessions.value = [];
   store.sessionsLoading.value = true;
   store.currentSessionId.value = null;
+  // The open session's model pin lives outside every list, so it has to be
+  // cleared here too - otherwise a test would inherit the previous one's pin.
+  store.openSessionModel.value = null;
   // The notification log backs the unread badges, the project counters and the
   // centre, so a test that leaks entries would leak counts into the next one.
   store.notifications.value = [];

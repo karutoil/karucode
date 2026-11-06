@@ -7,7 +7,7 @@
 
 - **Slug:** `plugins`
 - **Tags:** plugins, extension, sdk, tools, hooks, jsonrpc, panels, notifications
-- **Applies to:** `config:[[plugins]]`, `file:~/.local/share/karucode/plugins/<name>/plugin.toml`, `dir:plugins/example-hello`, `tool:plugin__<plugin>__<tool>`, `cmd:cargo build -p example-hello`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin sdk --check`, `file:src/sdk.rs`, `file:src/protocol.rs`, `doc:docs/PLUGINS.md`, `env:KARUCODE_PLUGIN_NAME`, `env:KARUCODE_PLUGIN_PROTOCOL`, `env:KARUCODE_PLUGIN_PERMISSIONS`, `env:KARUCODE_PLUGIN_SETTINGS`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `config:panels`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:notifications.plugin`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `method:notify`, `hook:on_notify`, `fn:PluginBuilder::panel`, `fn:PluginBuilder::on_notify`, `fn:notify`
+- **Applies to:** `config:[[plugins]]`, `file:~/.local/share/karucode/plugins/<name>/plugin.toml`, `dir:plugins/example-hello`, `tool:plugin__<plugin>__<tool>`, `cmd:cargo build -p example-hello`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin sdk --check`, `file:src/sdk.rs`, `file:src/protocol.rs`, `doc:docs/PLUGINS.md`, `env:KARUCODE_PLUGIN_NAME`, `env:KARUCODE_PLUGIN_PROTOCOL`, `env:KARUCODE_PLUGIN_PERMISSIONS`, `env:KARUCODE_PLUGIN_SETTINGS`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `config:panels`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:notifications.plugin`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `method:notify`, `hook:on_notify`, `hook:before_prompt`, `fn:PluginBuilder::panel`, `fn:PluginBuilder::on_notify`, `fn:notify`
 - **Source:** `crates/kc-plugin-sdk/src/lib.rs:49`
 
 ---
@@ -295,5 +295,14 @@ scripts.
   or random value there changes message 0 and makes the provider re-bill the
   whole context instead of reading it from the prompt cache. Notes from several
   plugins are joined in plugin order, not in the order the processes answer.
+* The `before_prompt` payload is `{session_id, workspace, turn}`. `turn` is the
+  text of the user message the run is answering, so a plugin can retrieve
+  against the actual question instead of memoising one static block per
+  session. It is capped at 4 KiB (cut with the same `[… truncated]` marker) and
+  the field is **absent** when the run was started without a user turn - a
+  continuation, for instance. A plugin written before this field existed keeps
+  working unchanged; ignore it if you do not need it. The handler is still
+  called once per model call under the same budget, and its output is still
+  best-effort: a slow or failing plugin is skipped, never fatal.
 
 Full reference: `docs/PLUGINS.md` (wire protocol, hooks, timeouts, error codes).
