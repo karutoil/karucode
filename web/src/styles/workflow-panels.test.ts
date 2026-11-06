@@ -27,13 +27,16 @@ const read = (name: string): string => readFileSync(new URL(name, import.meta.ur
 
 const git = read('./git.css');
 const todo = read('./todo.css');
-// The control plane's sheet is three region sheets now; `sessionControl` is all
-// of them joined, so a whole-file assertion still reads every rule while the
-// phone-width tier below is read from the sheet that owns the session header.
+// The control plane's sheet is split by region, with a fourth holding what the
+// regions share (the status word, the project glyph) and the shell (the plane's
+// root, its banners); `sessionControl` is all of them joined, so a whole-file
+// assertion still reads every rule. The phone-width tier below is read from the
+// sheet that owns the session header.
+const controlShared = read('./control-shared.css');
 const controlRail = read('./control-rail.css');
 const controlOverview = read('./control-overview.css');
 const controlSession = read('./control-session.css');
-const sessionControl = [controlRail, controlOverview, controlSession].join('\n');
+const sessionControl = [controlShared, controlRail, controlOverview, controlSession].join('\n');
 const inspector = read('./inspector.css');
 const tokensCss = read('./tokens.css');
 

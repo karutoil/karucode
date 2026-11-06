@@ -1,0 +1,252 @@
+/* The control plane's shell and the vocabulary all three of its regions share.
+ *
+ * Split out from `control-rail.css` so the three region sheets
+ * (`control-rail`, `control-overview`, `control-session`) each own exactly the
+ * rules their own markup uses and never have to reach into one another. What
+ * lives here is what none of them own: the plane's root element, its banners,
+ * and the spinner and quiet-note text any region may show.
+ *
+ * The regions' *own* shared roles (a status word, a section kicker, a project
+ * glyph, a text link, an accent spark) are deliberately NOT here. §5A of
+ * `docs/internal/DESIGN-SYSTEM.md` retires them in favour of the workbench's
+ * shared primitives - `.status-dot` / `.session-state-<tone>`, `.eyebrow`,
+ * `.rail-avatar`, `.link-button` and `SparkIcon` - so a class that is about to
+ * stop existing is not given a new home first.
+ */
+
+/* The rail's k. button: a plain button that inherits the brand mark's paint. */
+.control-plane-trigger { border: 0; background: transparent; cursor: pointer; }
+.control-plane-trigger:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: var(--focus-ring-offset); }
+
+.control-plane.cp {
+  display: flex;
+  /* Fill the workspace: without this the plane collapses to its content on a wide
+     monitor and leaves the rest of the window blank. */
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  background: var(--theme-bg);
+
+  /* The plane answers its own width, exactly as the workbench does
+     (`workbench.css:6-7`), because it is embedded in the same window beside the
+     same project rail. A viewport `@media` breakpoint fires on the *window*, so
+     the plane and the workbench disagreed about when to re-stack at every
+     intermediate size - at 1280px the workbench was still two-up while the plane
+     had already put its inspector under the composer. Regions query this
+     container with `@container control-plane (…)`, not `@media`.
+     Named, so a region's query cannot accidentally match an ancestor container.
+     Safe here: nothing inside the plane is `position: fixed` (dialogs portal to
+     `document.body`, so they are outside it entirely), and the one absolutely
+     positioned element - the row's kebab menu - is positioned against
+     `.cp-row-item`, which is `position: relative`. */
+  container-type: inline-size;
+  container-name: control-plane;
+}
+
+/* ---------------------------------------------------------------- banners */
+
+.cp-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin: var(--space-4) var(--space-6) 0;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+  font-size: var(--fs-tiny);
+}
+.cp-error button { color: inherit; text-decoration: underline; }
+
+/* A failed snapshot read keeps the last good one on screen and says that it is
+ * old: "nothing is running anywhere" would be a different and wrong answer. */
+.cp-stale {
+  margin: var(--space-4) var(--space-6) 0;
+  padding: var(--space-3) var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--theme-surface);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+}
+
+/* ------------------------------------------------------------- quiet text */
+
+.cp-note { padding: var(--space-6) var(--space-5); color: var(--muted); font-size: var(--fs-tiny); line-height: 1.6; }
+
+.cp-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-8) var(--space-6);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+}
+
+.cp-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--accent-fill);
+  border-radius: 50%;
+  animation: cp-spin 0.7s linear infinite;
+}
+
+@keyframes cp-spin { to { transform: rotate(360deg); } }
+
+/* ------------------------------------------------------- shared roles
+ *
+ * These roles are drawn by more than one region, so no region sheet may own
+ * them: the rail, the overview and the session view all render a project
+ * glyph, a status word, a quiet note, a text link and a section kicker.
+ *
+ * TEMPORARY HOME. §5A of `docs/internal/DESIGN-SYSTEM.md` retires most of
+ * these in favour of the workbench's shared primitives - `.status-dot` and
+ * `.session-state-<tone>` for the status, `.eyebrow` for the kicker,
+ * `.rail-avatar` for the glyph, `.link-button` for the link, `SparkIcon` for
+ * the spark. They are gathered here so the three regions can be converted
+ * independently without one region deleting a rule another still needs; this
+ * file should be empty and deleted when the last of them is adopted.
+ */
+
+.cp-glyph.control {
+  color: var(--theme-accent-hi);
+  border-color: var(--theme-accent-line);
+  background: var(--theme-accent-bg);
+}
+
+.cp-glyph {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--theme-raised);
+  color: var(--theme-text-secondary);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.cp-glyph.small { width: 24px; height: 24px; font-size: var(--fs-micro); border-radius: var(--radius-sm); }
+
+.cp-glyph[data-tone='1'] {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
+  background: color-mix(in srgb, var(--success) 14%, var(--theme-surface));
+}
+
+.cp-glyph[data-tone='2'] {
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 40%, transparent);
+  background: color-mix(in srgb, var(--info) 14%, var(--theme-surface));
+}
+
+.cp-glyph[data-tone='3'] {
+  /* Project initials are text. `--accent` is tuned against the canvas, so on the
+   * accent tint it measured 3.61:1 in Daybreak; `--accent-on-tint` is the AA role
+   * for accent ink on an accent tint (§4.8). */
+  color: var(--accent-on-tint);
+  border-color: var(--accent-line);
+  background: var(--accent-bg);
+}
+
+.cp-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  white-space: nowrap;
+}
+
+.cp-state i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+.cp-state.ok,
+.cp-state.muted {
+  color: var(--muted);
+}
+
+.cp-state.running { color: var(--theme-success); }
+
+.cp-state.danger { color: var(--theme-danger); }
+
+.cp-state.warn { color: var(--theme-warn); }
+
+.cp-state.running i { animation: cp-pulse 2s ease-out infinite; }
+
+.cp-note { padding: var(--space-6) var(--space-5); color: var(--muted); font-size: var(--fs-tiny); line-height: 1.6; }
+
+.cp-eyebrow {
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 720;
+  letter-spacing: 0.125em;
+  text-transform: uppercase;
+}
+
+.cp-spark {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: var(--radius-md);
+  background: var(--theme-accent-bg);
+  color: var(--theme-accent);
+  font-size: var(--fs-lead);
+}
+
+.cp-chev { color: var(--theme-accent); font-size: var(--fs-body); }
+
+.cp-link { color: var(--accent-fill); font-size: var(--fs-tiny); }
+
+.cp-link { min-height: 24px; padding: var(--space-1) var(--space-2); border-radius: var(--radius); }
+
+.cp-link:hover { color: var(--theme-accent-hi); }
+
+.cp-agent-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--theme-success); }
+
+.cp-agent-dot.paused { background: var(--theme-warn); }
+
+.cp-control-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  width: 100%;
+  margin-bottom: var(--space-5);
+  padding: var(--space-5);
+  text-align: left;
+  border: 1px solid var(--theme-accent-line);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, var(--theme-accent-bg), transparent 85%), var(--theme-surface);
+}
+
+.cp-control-entry:hover { border-color: var(--theme-accent); }
+
+.cp-control-entry.selected { box-shadow: inset 0 0 0 1px var(--theme-accent-line); }
+
+.cp-control-copy { min-width: 0; flex: 1; }
+
+.cp-control-copy strong { display: block; font-size: var(--fs-label); }
+
+.cp-control-copy small { display: block; margin-top: var(--space-1); font-size: var(--fs-tiny); color: var(--muted); }
+
+/* ------------------------------------------------------------- responsive */
+
+/* Phone width: the shell stacks, and the rail and the pane take turns. These are
+ * genuine viewport concerns (a whole-window layout and `dvh`), so they stay
+ * `@media` - §5A allows that; it is the *regions'* internal layout that must be
+ * container-driven. */
+@media (max-width: 900px) {
+  .control-plane.cp { display: block; overflow: auto; }
+
+  /* With a chat open the rail is behind the conversation, so it is dropped
+     rather than squeezed: one column at a time, with Back to return. */
+  .control-plane.cp.detail-open .cp-browser { display: none; }
+}

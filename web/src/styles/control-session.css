@@ -9,25 +9,6 @@
   background: var(--theme-bg);
 }
 
-.cp-control-entry {
-  display: flex;
-  align-items: center;
-  gap: var(--space-5);
-  width: 100%;
-  margin-bottom: var(--space-5);
-  padding: var(--space-5);
-  text-align: left;
-  border: 1px solid var(--theme-accent-line);
-  border-radius: var(--radius);
-  background: linear-gradient(135deg, var(--theme-accent-bg), transparent 85%), var(--theme-surface);
-}
-.cp-control-entry:hover { border-color: var(--theme-accent); }
-.cp-control-entry.selected { box-shadow: inset 0 0 0 1px var(--theme-accent-line); }
-
-.cp-control-copy { min-width: 0; flex: 1; }
-.cp-control-copy strong { display: block; font-size: var(--fs-label); }
-.cp-control-copy small { display: block; margin-top: var(--space-1); font-size: var(--fs-tiny); color: var(--muted); }
-
 /* The control chat's own first-run state, drawn inside the transcript area.
  *
  * It has to fit over the composer: the transcript pane is the one that scrolls,

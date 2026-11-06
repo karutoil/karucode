@@ -26,14 +26,6 @@
 .cp-hero h1 span { color: var(--accent-fill); }
 .cp-hero p { max-width: 540px; margin: 0; color: var(--muted); font-size: var(--fs-body); line-height: 1.65; }
 
-.cp-eyebrow {
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  font-weight: 720;
-  letter-spacing: 0.125em;
-  text-transform: uppercase;
-}
-
 /* A run parked on an approval question is the one thing on this page that cannot
  * make progress without a person, so it is said in words above the dashboard
  * rather than left to a count in a corner. */
@@ -145,19 +137,6 @@
 
 .cp-launch-hint { margin: var(--space-5) 0 0; color: var(--muted); font-size: var(--fs-tiny); line-height: 1.5; }
 
-.cp-spark {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  flex: none;
-  border-radius: var(--radius-md);
-  background: var(--theme-accent-bg);
-  color: var(--theme-accent);
-  font-size: var(--fs-lead);
-}
-.cp-chev { color: var(--theme-accent); font-size: var(--fs-body); }
-
 .cp-section { margin-top: var(--space-9); }
 
 /* Two columns of dashboard from 1400px up: live work on the left, the things
@@ -181,12 +160,10 @@
   font-variant-numeric: tabular-nums;
 }
 .cp-section-head .cp-link { margin-left: auto; }
-.cp-link { color: var(--accent-fill); font-size: var(--fs-tiny); }
+
 /* The inline links ("Copy", "Details", "→") are the smallest targets in the
    plane; 17 px tall is below the floor, and a padding-only change keeps the
    type size and the layout. */
-.cp-link { min-height: 24px; padding: var(--space-1) var(--space-2); border-radius: var(--radius); }
-.cp-link:hover { color: var(--theme-accent-hi); }
 
 .cp-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: var(--space-5); }
 @media (min-width: 1700px) {
@@ -231,8 +208,7 @@
   font-size: var(--fs-small);
 }
 .cp-agents li + li { border-top: 1px solid var(--line-soft); }
-.cp-agent-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--theme-success); }
-.cp-agent-dot.paused { background: var(--theme-warn); }
+
 .cp-agent-name { min-width: 92px; font-weight: 600; }
 .cp-agent-task {
   flex: 1;

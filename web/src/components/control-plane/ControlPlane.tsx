@@ -14,6 +14,11 @@ import {
   loadControlOverview,
 } from '../../state/controlPlane';
 import { Dialog } from '../Dialog';
+/* The shell's sheet, imported before the regions below so their CSS lands after
+ * it: the shared vocabulary is the base a region sheet may override, and with
+ * equal specificity the later sheet wins. The regions import their own sheets, so
+ * this is the one place the order is decided. */
+import '../../styles/control-shared.css';
 import { ControlRail } from './ControlRail';
 import { ControlOverview, modelChoices } from './ControlOverview';
 import { ControlSession } from './ControlSession';

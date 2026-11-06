@@ -1,24 +1,3 @@
-/* Session-focused control plane.
- *
- * A browser of every session on the server on the left, and one place to act on
- * it on the right: the overview when nothing is selected, that session's real
- * conversation once it is. Everything here reads existing theme tokens. */
-
-/* The rail's k. button: a plain button that inherits the brand mark's paint. */
-.control-plane-trigger { border: 0; background: transparent; cursor: pointer; }
-.control-plane-trigger:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: var(--focus-ring-offset); }
-
-.control-plane.cp {
-  display: flex;
-  /* Fill the workspace: without this the plane collapses to its content on a wide
-     monitor and leaves the rest of the window blank. */
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 100%;
-  min-height: 0;
-  background: var(--theme-bg);
-}
-
 /* ---------------------------------------------------------------- browser */
 
 .cp-browser {
@@ -145,11 +124,7 @@
   text-transform: none;
 }
 .cp-new-chat:hover { border-color: var(--theme-accent); }
-.cp-glyph.control {
-  color: var(--theme-accent-hi);
-  border-color: var(--theme-accent-line);
-  background: var(--theme-accent-bg);
-}
+
 .cp-group {
   display: flex;
   align-items: center;
@@ -204,40 +179,8 @@
   border-color: var(--theme-accent-line);
 }
 
-.cp-glyph {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  flex: none;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-md);
-  background: var(--theme-raised);
-  color: var(--theme-text-secondary);
-  font-size: var(--fs-micro);
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-.cp-glyph.small { width: 24px; height: 24px; font-size: var(--fs-micro); border-radius: var(--radius-sm); }
 /* Four quiet project tones: enough to tell projects apart at a glance. */
-.cp-glyph[data-tone='1'] {
-  color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 40%, transparent);
-  background: color-mix(in srgb, var(--success) 14%, var(--theme-surface));
-}
-.cp-glyph[data-tone='2'] {
-  color: var(--info);
-  border-color: color-mix(in srgb, var(--info) 40%, transparent);
-  background: color-mix(in srgb, var(--info) 14%, var(--theme-surface));
-}
-.cp-glyph[data-tone='3'] {
-  /* Project initials are text. `--accent` is tuned against the canvas, so on the
-   * accent tint it measured 3.61:1 in Daybreak; `--accent-on-tint` is the AA role
-   * for accent ink on an accent tint (§4.8). */
-  color: var(--accent-on-tint);
-  border-color: var(--accent-line);
-  background: var(--accent-bg);
-}
+
 .cp-row.selected .cp-glyph { color: var(--theme-accent-hi); border-color: var(--theme-accent-line); }
 
 .cp-row-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: var(--space-1); }
@@ -299,16 +242,6 @@
 }
 .cp-badge-agents { font-variant-numeric: tabular-nums; }
 
-.cp-state {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: none;
-  color: var(--muted);
-  font-size: var(--fs-tiny);
-  white-space: nowrap;
-}
-.cp-state i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 /* Every state keeps its word. "Finished", "Cancelled" and "No runs" are three
  * different answers, and a bare dot told them apart only by colour - which also
  * erased the quiet ones for a screen reader's neighbours and for anyone who
@@ -318,22 +251,12 @@
  * The tone names are the app's `StatusTone` vocabulary (`state/selectors.ts`),
  * not a private one: the same word paints `status-dot status-<tone>` in the rail
  * and the workbench, so the plane cannot drift from them. */
-.cp-state.ok,
-.cp-state.muted {
-  color: var(--muted);
-}
-.cp-state.running { color: var(--theme-success); }
-.cp-state.danger { color: var(--theme-danger); }
-.cp-state.warn { color: var(--theme-warn); }
-.cp-state.running i { animation: cp-pulse 2s ease-out infinite; }
 
 @keyframes cp-pulse {
   0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 38%, transparent); }
   70% { box-shadow: 0 0 0 4px transparent; }
   100% { box-shadow: 0 0 0 0 transparent; }
 }
-
-.cp-note { padding: var(--space-6) var(--space-5); color: var(--muted); font-size: var(--fs-tiny); line-height: 1.6; }
 
 .cp-browser-foot {
   display: flex;
@@ -354,46 +277,6 @@
 }
 .cp-foot-projects { color: var(--muted); }
 .cp-browser-foot button { margin-left: auto; color: var(--accent-fill); font-size: var(--fs-tiny); }
-.cp-error {
-  margin: var(--space-6) var(--space-8) 0;
-  padding: var(--space-4) var(--space-6);
-  border: 1px solid var(--theme-danger);
-  border-radius: var(--radius-md);
-  background: var(--theme-danger-bg);
-  color: var(--theme-danger);
-  font-size: var(--fs-small);
-}
-.cp-error button { margin-left: var(--space-4); text-decoration: underline; color: inherit; }
-
-/* A failed snapshot read: the previous overview stays on screen and is marked
- * stale, because an empty dashboard ("nothing is running anywhere") would be a
- * different and wrong answer. Warn marks the edge; the word carries the meaning. */
-.cp-stale {
-  margin: var(--space-6) var(--space-8) 0;
-  padding: var(--space-3) var(--space-6);
-  border: 1px solid var(--theme-warn);
-  border-radius: var(--radius-md);
-  background: var(--theme-raised);
-  color: var(--text);
-  font-size: var(--fs-tiny);
-}
-.cp-loading {
-  display: flex;
-  align-items: center;
-  gap: var(--space-5);
-  padding: var(--space-8);
-  color: var(--muted);
-  font-size: var(--fs-label);
-}
-.cp-spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--line-strong);
-  border-top-color: var(--theme-accent);
-  border-radius: 50%;
-  animation: cp-spin 0.8s linear infinite;
-}
-@keyframes cp-spin { to { transform: rotate(360deg); } }
 
 /* ------------------------------------------------------------- responsive */
 
@@ -404,12 +287,4 @@
 
 @media (max-width: 1180px) {
   .cp-browser { flex-basis: 300px; width: 300px; }
-}
-
-@media (max-width: 900px) {
-  /* One column: the session list on top (its own short scroll), then the
-     overview below it, so the dashboard is reachable on a phone too. */
-  .control-plane.cp { display: block; overflow: auto; }
-  .cp-browser { width: 100%; height: 58dvh; border-right: 0; border-bottom: 1px solid var(--line); }
-  .control-plane.cp.detail-open .cp-browser { display: none; }
 }

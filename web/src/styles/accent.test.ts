@@ -89,7 +89,7 @@ describe('accent fill: a primary action is readable in every theme', () => {
     // the accent tints for an accent-coloured ink.
     const tints = /background(-color)?:\s*var\(--(accent-bg|accent-surface|row-accent-bg|row-selected-bg|btn-accent-bg|btn-accent-bg-hover|theme-accent-bg)\)/;
     const offenders: string[] = [];
-    for (const name of ['chat.css', 'composer.css', 'git.css', 'inspector.css', 'layout.css', 'overlays.css', 'rail.css', 'settings.css', 'goals.css', 'todo.css', 'control-rail.css', 'control-overview.css', 'control-session.css']) {
+    for (const name of ['chat.css', 'composer.css', 'git.css', 'inspector.css', 'layout.css', 'overlays.css', 'rail.css', 'settings.css', 'goals.css', 'todo.css', 'control-shared.css', 'control-rail.css', 'control-overview.css', 'control-session.css']) {
       const css = read(`./${name}`);
       for (const match of css.matchAll(/\{[^{}]*\}/g)) {
         const body = match[0];
@@ -113,7 +113,8 @@ describe('accent fill: a primary action is readable in every theme', () => {
     // accent tile, and its initials were `--accent` on `--accent-bg`: 3.61:1 in
     // Daybreak. Initials are text, so they take the same role as every other
     // accent label on a tint.
-    const glyph = ruleBody(read('./control-rail.css'), ".cp-glyph[data-tone='3']");
+    // The glyph is shared by all three regions, so it lives in the shared sheet.
+    const glyph = ruleBody(read('./control-shared.css'), ".cp-glyph[data-tone='3']");
     expect(glyph).toContain('color: var(--accent-on-tint);');
     expect(glyph).not.toMatch(/color:\s*var\(--accent\);/);
   });
