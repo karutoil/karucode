@@ -19,8 +19,8 @@ import {
   controlStarter,
   initials,
   sessionStatus,
-  shortAgo,
 } from './controlModel';
+import { relativeTime } from '../../lib/format';
 
 vi.mock('../../api/client', () => ({
   apiRequest: vi.fn(),
@@ -739,7 +739,7 @@ describe('control plane formatting', () => {
 
   it('reports honest status labels', () => {
     expect(sessionStatus({ running: true }).label).toBe('Running');
-    expect(sessionStatus({ running: false, last_run_status: 'failed' })).toEqual({ label: 'Failed', tone: 'bad' });
+    expect(sessionStatus({ running: false, last_run_status: 'failed' })).toEqual({ label: 'Failed', tone: 'danger' });
     expect(sessionStatus({ running: false }).label).toBe('No runs');
   });
 
@@ -762,8 +762,8 @@ describe('control plane formatting', () => {
 
   it('formats recent times', () => {
     const now = 1_000_000_000;
-    expect(shortAgo(now - 10_000, now)).toBe('just now');
-    expect(shortAgo(now - 120_000, now)).toBe('2m ago');
-    expect(shortAgo(now - 7_200_000, now)).toBe('2h ago');
+    expect(relativeTime(now - 10_000, now)).toBe('just now');
+    expect(relativeTime(now - 120_000, now)).toBe('2m ago');
+    expect(relativeTime(now - 7_200_000, now)).toBe('2h ago');
   });
 });

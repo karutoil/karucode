@@ -313,15 +313,19 @@
  * different answers, and a bare dot told them apart only by colour - which also
  * erased the quiet ones for a screen reader's neighbours and for anyone who
  * cannot separate the hues. The dot stays as the colour cue; the word says what
- * happened. Only the phone-width session header (below) is too narrow for both. */
-.cp-state.good,
-.cp-state.idle {
+ * happened. Only the phone-width session header (below) is too narrow for both.
+ *
+ * The tone names are the app's `StatusTone` vocabulary (`state/selectors.ts`),
+ * not a private one: the same word paints `status-dot status-<tone>` in the rail
+ * and the workbench, so the plane cannot drift from them. */
+.cp-state.ok,
+.cp-state.muted {
   color: var(--muted);
 }
-.cp-state.live { color: var(--theme-success); }
-.cp-state.bad { color: var(--theme-danger); }
+.cp-state.running { color: var(--theme-success); }
+.cp-state.danger { color: var(--theme-danger); }
 .cp-state.warn { color: var(--theme-warn); }
-.cp-state.live i { animation: cp-pulse 2s ease-out infinite; }
+.cp-state.running i { animation: cp-pulse 2s ease-out infinite; }
 
 @keyframes cp-pulse {
   0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 38%, transparent); }

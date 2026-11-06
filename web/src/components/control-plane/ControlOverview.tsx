@@ -6,7 +6,8 @@ import type {
   Project,
 } from '../../api/types';
 import * as store from '../../state/store';
-import { type ModelChoice, initials, sessionStatus, shortAgo, shortMoment, tone } from './controlModel';
+import { absoluteTime, relativeTime } from '../../lib/format';
+import { type ModelChoice, initials, sessionStatus, tone } from './controlModel';
 import '../../styles/control-overview.css';
 
 /**
@@ -218,10 +219,10 @@ export function ControlOverview({
               >
                 <span class="cp-card-top">
                   <span class="cp-glyph" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
-                  <span class="cp-state live"><i aria-hidden="true" />Running</span>
+                  <span class="cp-state running"><i aria-hidden="true" />Running</span>
                 </span>
                 <strong>{session.title}</strong>
-                <span class="cp-card-meta">{projectName(session.project_id)} · {shortAgo(session.updated_at)} · {session.message_count.toLocaleString()} msgs</span>
+                <span class="cp-card-meta">{projectName(session.project_id)} · {relativeTime(session.updated_at)} · {session.message_count.toLocaleString()} msgs</span>
                 <span class="cp-card-action">Open conversation →</span>
               </button>)}</div>}
         </section>
@@ -253,7 +254,7 @@ export function ControlOverview({
                       <strong>{session.title}</strong>
                     </span>
                     <span class="cp-table-cell" role="cell">{projectName(session.project_id)}</span>
-                    <span class="cp-table-cell" role="cell">{shortAgo(session.updated_at)}</span>
+                    <span class="cp-table-cell" role="cell">{relativeTime(session.updated_at)}</span>
                     <span class="cp-table-cell num" role="cell">{session.message_count.toLocaleString()}</span>
                     <span class={`cp-state ${status.tone} cp-table-state-cell`} role="cell"><i aria-hidden="true" />{status.label}</span>
                   </button>;
@@ -268,7 +269,7 @@ export function ControlOverview({
           <ul class="cp-recent">{waitingList.slice(0, 6).map((session) => <li key={session.id}>
             <button type="button" title={session.title} onClick={() => onNavigate(session)}>
               <span class="cp-glyph small" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
-              <span class="cp-recent-main"><strong>{session.title}</strong><small>{projectName(session.project_id)} · {shortMoment(session.updated_at)}</small></span>
+              <span class="cp-recent-main"><strong>{session.title}</strong><small>{projectName(session.project_id)} · {absoluteTime(session.updated_at)}</small></span>
               <span class="cp-state warn"><i aria-hidden="true" />Needs you</span>
             </button>
           </li>)}</ul>
@@ -281,7 +282,7 @@ export function ControlOverview({
             return <li key={session.id}>
               <button type="button" title={session.title} onClick={() => onNavigate(session)}>
                 <span class="cp-glyph small" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
-                <span class="cp-recent-main"><strong>{session.title}</strong><small>{projectName(session.project_id)} · {shortMoment(session.updated_at)}</small></span>
+                <span class="cp-recent-main"><strong>{session.title}</strong><small>{projectName(session.project_id)} · {absoluteTime(session.updated_at)}</small></span>
                 <span class={`cp-state ${status.tone}`}><i aria-hidden="true" />{status.label}</span>
               </button>
             </li>;

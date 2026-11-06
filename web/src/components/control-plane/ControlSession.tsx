@@ -3,6 +3,7 @@ import type { AgentSummary, ControlChatSummary, Project, SessionSummary } from '
 import * as actions from '../../state/actions';
 import * as store from '../../state/store';
 import { copyText } from '../../lib/clipboard';
+import { absoluteTime } from '../../lib/format';
 import { agentsForControlChat } from '../../state/controlPlane';
 import { ChatView } from '../ChatView';
 import {
@@ -11,7 +12,6 @@ import {
   controlStarter,
   initials,
   sessionStatus,
-  shortMoment,
 } from './controlModel';
 import '../../styles/control-session.css';
 
@@ -95,7 +95,7 @@ function SessionFacts({ session, control, projects, onOpenInProject }: {
         <dd>{status ? <span class={`cp-state ${status.tone}`}><i aria-hidden="true" />{status.label}</span> : 'Unknown'}</dd>
       </div>
       <div><dt>Messages</dt><dd>{session ? session.message_count.toLocaleString() : '—'}</dd></div>
-      <div><dt>Last activity</dt><dd>{session ? shortMoment(session.updated_at) : '—'}</dd></div>
+      <div><dt>Last activity</dt><dd>{session ? absoluteTime(session.updated_at) : '—'}</dd></div>
       <div>
         <dt>Session id</dt>
         <dd class="cp-facts-id"><span>{session?.id ?? '—'}</span>

@@ -1,6 +1,7 @@
 import type { JSX, RefObject } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { ControlChatSummary, SessionSummary } from '../../api/types';
+import { relativeTime } from '../../lib/format';
 import { KebabIcon } from '../icons';
 import {
   type Filter,
@@ -8,7 +9,6 @@ import {
   chatTitle,
   initials,
   sessionStatus,
-  shortAgo,
   tone,
 } from './controlModel';
 import '../../styles/control-rail.css';
@@ -182,7 +182,7 @@ export function ControlRail({
           <span class="cp-row-meta">
             <span>{project}</span>
             <span class="cp-dot">·</span>
-            <span>{shortAgo(session.updated_at)}</span>
+            <span>{relativeTime(session.updated_at)}</span>
             <span class="cp-dot">·</span>
             <span>{session.message_count.toLocaleString()} msgs</span>
           </span>
@@ -223,7 +223,7 @@ export function ControlRail({
               class="cp-badge cp-badge-agents"
               title={agentBadgeTitle(chat.agents)}
             >{chat.agents.live}/{chat.agents.total} agents</span> : null}
-            <span class="cp-row-time">{shortAgo(chat.updated_at)}</span>
+            <span class="cp-row-time">{relativeTime(chat.updated_at)}</span>
           </span>
         </span>
         <span class={`cp-state ${status.tone}`} title={`Latest state: ${status.label}`}>

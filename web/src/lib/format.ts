@@ -48,6 +48,27 @@ export function clockTime(at: number): string {
   return new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+/**
+ * The precise moment: date *and* clock time, e.g. `Nov 6, 2:15 PM` — the
+ * canonical "when exactly" formatter for a fact panel, a recent-activity row or
+ * anything a user might want to correlate with a log.
+ *
+ * `relativeTime` answers "how long ago" and `clockTime` answers "what time"; this
+ * is the one that answers both, so a view that used to write its own
+ * `toLocaleString` reads this instead and cannot disagree with the transcript
+ * about how a timestamp is spelled. Empty — never `Invalid Date` — when the
+ * caller has no usable timestamp.
+ */
+export function absoluteTime(at: number): string {
+  if (!Number.isFinite(at) || at <= 0) return '';
+  return new Date(at).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 export function formatDuration(ms: number | null): string {
   if (ms === null || !Number.isFinite(ms)) return '';
   // Sub-millisecond work (a small file read) reads as "0ms", which looks like a

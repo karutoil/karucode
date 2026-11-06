@@ -172,9 +172,9 @@ describe('todo panel: ids, accent ink and disclosure targets', () => {
 
 describe('control plane: status words survive, actions keep names', () => {
   it('keeps a word for every tone outside the phone-width header', () => {
-    // The good/idle rule used to set `font-size: 0`, so "Finished", "Cancelled"
+    // The ok/muted rule used to set `font-size: 0`, so "Finished", "Cancelled"
     // and "No runs" were three identical dots at every width.
-    const quiet = ruleBody(sessionControl, '.cp-state.good,\n.cp-state.idle');
+    const quiet = ruleBody(sessionControl, '.cp-state.ok,\n.cp-state.muted');
     expect(quiet).not.toContain('font-size: 0');
     expect(quiet).toContain('color: var(--muted)');
   });
