@@ -9,13 +9,18 @@ import type { TreeLoader } from '../lib/mentions';
 import { getGitStatus } from '../api/endpoints';
 import * as actions from '../state/actions';
 import * as terminalState from '../state/terminals';
-import { totalUsage } from '../state/selectors';
+import { contextUsage, formatContextPercent, totalUsage } from '../state/selectors';
 import * as store from '../state/store';
+import * as workbench from '../state/workbench';
 import { GitManager } from './git/GitManager';
 import { ChatTranscript } from './ChatTranscript';
 import { Composer } from './Composer';
 import { EmptyState } from './EmptyState';
 import { ErrorBoundary } from './ErrorBoundary';
+import { Inspector } from './Inspector';
+import { ResultResizer } from './ResultResizer';
+import { ContextDrawer } from './ContextDrawer';
+import { WorkbenchTaskMenu } from './WorkbenchTaskMenu';
 import { LiveAnnouncer } from './LiveAnnouncer';
 import { Tabs, type TabItem } from './Tabs';
 import { TerminalTab } from './TerminalTab';
@@ -25,18 +30,12 @@ import {
   BranchIcon,
   ChatIcon,
   ChevronDownIcon,
-  CircleCheckIcon,
-  CopyIcon,
   GitIcon,
   MenuIcon,
-  PaletteIcon,
-  PanelIcon,
   RefreshIcon,
   SearchIcon,
   TerminalIcon,
 } from './icons';
-import { activeThemeName } from '../theme/engine';
-
 /**
  * The centre-pane views of the workspace (the mock's workspace tabs).
  *
@@ -196,10 +195,14 @@ function ChatSkeleton(): JSX.Element {
 
 function SessionHeader({
   view,
+  onShowChanges,
   onSelectView,
+  controlPlane,
 }: {
   view: WorkspaceView;
+  onShowChanges: () => void;
   onSelectView: (next: WorkspaceView) => void;
+  controlPlane: boolean;
 }): JSX.Element {
   const session = store.activeSession.value;
   const activity = store.activity.value;
@@ -209,9 +212,8 @@ function SessionHeader({
   /** The same derived count the tab title carries; see `store.unreadTotal`. */
   const unreadNotifications = store.unreadTotal.value;
   const railExpanded = narrow ? store.mobileSheet.value === 'sessions' : !store.railCollapsed.value;
-  const inspectorExpanded = narrow
-    ? store.mobileSheet.value === 'inspector'
-    : !store.inspectorCollapsed.value;
+  const contextExpanded = workbench.contextOpen.value;
+  const usage = contextUsage(store.chat.value, store.activeContextWindow.value);
 
   const title =
     view === 'changes'
@@ -261,8 +263,10 @@ function SessionHeader({
         <span class={`head-activity status-${activity.kind}`}>{activityWord}</span>
       </div>
 
+      <WorkspaceTabs view={view} onChange={onSelectView} />
+
       <div class="header-buttons">
-        <BranchChip onShowChanges={() => onSelectView('changes')} />
+        <BranchChip onShowChanges={onShowChanges} />
         {/* The notification centre's way in. It lives in the header rather than on
          * the project rail because it is the one place a bell is reachable in every
          * layout: the rail is collapsed by Ctrl+B on a desktop and hidden entirely
@@ -292,56 +296,48 @@ function SessionHeader({
             </span>
           ) : null}
         </button>
+        {!controlPlane ? (
+          <button
+            type="button"
+            class="head-btn context-header-btn"
+            onClick={() => workbench.openContext('now')}
+            aria-label={usage ? `Session context — ${formatContextPercent(usage.fraction)} of the window used` : 'Session context'}
+            aria-expanded={contextExpanded}
+            aria-haspopup={narrow ? 'dialog' : undefined}
+            aria-controls="workbench-context"
+            title={`Session context, usage and access — ${modKey()}+J`}
+          >
+            {usage ? (
+              <span class="context-header-meter" aria-hidden="true">
+                <span style={{ width: `${Math.max(2, usage.fraction * 100)}%` }} />
+              </span>
+            ) : null}
+            <span class="context-header-label">Context</span>
+            {usage ? <span class="context-header-value">{formatContextPercent(usage.fraction)}</span> : null}
+          </button>
+        ) : null}
         <button
           type="button"
-          class="head-btn theme-header-btn"
-          onClick={actions.openThemeStudio}
-          aria-haspopup="dialog"
-          aria-keyshortcuts="Control+Shift+T Meta+Shift+T"
-          title={`Theme studio — ${modKey()}+Shift+T`}
-        >
-          <PaletteIcon size={13} />
-          <span class="theme-header-name">{activeThemeName.value}</span>
-        </button>
-        <button
-          type="button"
-          class="head-btn command-head-btn"
+          class="head-btn head-icon command-head-btn"
           onClick={actions.togglePalette}
+          aria-label="Command palette"
           aria-haspopup="dialog"
           aria-keyshortcuts="Control+K Meta+K"
           title={`Command palette — ${modKey()}+K`}
         >
-          <SearchIcon size={13} />
-          <span>Commands</span>
-          <span class="keycap">{modKey()} K</span>
+          <SearchIcon size={15} />
         </button>
-        <button
-          type="button"
-          class="head-btn accent-head"
-          onClick={() => void copyConversation()}
-          disabled={store.chat.value.items.length === 0 || view !== 'chat'}
-          title="Copy this conversation as Markdown"
-        >
-          <CopyIcon size={13} />
-          <span class="head-btn-label">Copy</span>
-        </button>
-        <button
-          type="button"
-          class="head-btn head-icon"
-          onClick={actions.toggleInspector}
-          aria-label="Toggle workspace inspector"
-          aria-expanded={inspectorExpanded}
-          title={`Inspector — ${modKey()}+J`}
-        >
-          <PanelIcon size={15} />
-        </button>
+        <WorkbenchTaskMenu
+          canCopy={store.chat.value.items.length > 0 && view === 'chat'}
+          onCopy={copyConversation}
+          controlPlane={controlPlane}
+        />
       </div>
     </header>
   );
 }
 
 function WorkspaceTabs({ view, onChange }: { view: WorkspaceView; onChange: (next: WorkspaceView) => void }): JSX.Element {
-  const activity = store.activity.value;
   const changeCount = useChangeCount();
   const items: TabItem<WorkspaceView>[] = [
     { id: 'chat', label: 'Conversation', icon: <ChatIcon size={15} /> },
@@ -362,27 +358,16 @@ function WorkspaceTabs({ view, onChange }: { view: WorkspaceView; onChange: (nex
       count: terminalState.terminals.value.length || undefined,
     });
   }
-  const note = activity.kind === 'idle' ? 'Ready to work' : activity.label;
 
   return (
-    <div class="workspace-tabbar">
-      <Tabs
-        items={items}
-        active={view}
-        onChange={onChange}
-        label="Workspace views"
-        idPrefix="workspace"
-        variant="workspace"
-      />
-      <p class="tab-note">
-        {activity.kind === 'idle' ? (
-          <CircleCheckIcon size={13} />
-        ) : (
-          <span class={`status-dot status-${activity.kind}`} aria-hidden="true" />
-        )}
-        {note}
-      </p>
-    </div>
+    <Tabs
+      items={items}
+      active={view}
+      onChange={onChange}
+      label="Workspace views"
+      idPrefix="workspace"
+      variant="workspace"
+    />
   );
 }
 
@@ -425,6 +410,8 @@ export interface ChatViewProps {
    * projects instead. Passing this switches the mention index and its label.
    */
   mentionProjects?: { id: string; name: string }[];
+  /** Control-plane chats omit project-scoped tools and result/context surfaces. */
+  mode?: 'workspace' | 'control-plane';
 }
 
 /** `@` in the control chat: registered projects, not a workspace file index. */
@@ -440,8 +427,8 @@ export function projectMentionLoader(projects: { id: string; name: string }[]): 
   });
 }
 
-export function ChatView({ emptyContent, mentionProjects }: ChatViewProps = {}): JSX.Element {
-  const session = store.activeSession.value;
+export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: ChatViewProps = {}): JSX.Element {
+  const isWorkbench = mode === 'workspace';
   const currentId = store.currentSessionId.value;
   const chat = store.chat.value;
   const [view, setView] = useState<WorkspaceView>('chat');
@@ -454,6 +441,23 @@ export function ChatView({ emptyContent, mentionProjects }: ChatViewProps = {}):
     },
     [],
   );
+  const showResult = useCallback((tab: store.InspectorTab): void => {
+    setView('chat');
+    workbench.closeContext();
+    actions.selectInspectorTab(tab);
+    if (store.narrowViewport.value) {
+      if (store.mobileSheet.value !== 'inspector') actions.toggleInspector();
+    } else if (store.inspectorCollapsed.value) {
+      actions.toggleInspector();
+    }
+  }, []);
+  const showChanges = useCallback((): void => {
+    showResult('changes');
+  }, [showResult]);
+  const showConversation = useCallback((): void => {
+    setView('chat');
+    workbench.closeContext();
+  }, []);
   // Lazy panel: Changes mounts its git probe only after the user asks for it.
   const [changesMounted, setChangesMounted] = useState(false);
   // The terminal list is needed to decide whether the tab exists at all, so it
@@ -466,6 +470,7 @@ export function ChatView({ emptyContent, mentionProjects }: ChatViewProps = {}):
 
   const selectView = (next: WorkspaceView): void => {
     setView(next);
+    workbench.closeContext();
     if (next === 'changes') setChangesMounted(true);
     if (next === 'terminal') setTerminalMounted(true);
   };
@@ -491,24 +496,22 @@ export function ChatView({ emptyContent, mentionProjects }: ChatViewProps = {}):
   // The dock floats over the transcript, so the scroller reserves its real
   // height: measured, because the box grows with the draft and the chip row.
   const panelRef = useRef<HTMLDivElement>(null);
+  const centerBodyRef = useRef<HTMLDivElement>(null);
   const dockRef = useRef<HTMLDivElement>(null);
   useHeightVariable({ ref: dockRef, target: panelRef, name: 'composer-h' });
 
   const showLoading = store.chatLoading.value && currentId !== null;
   const hasItems = chat.items.length > 0;
-  const workspace =
-    session?.workspace ??
-    store.currentProject.value?.path ??
-    store.health.value?.workspace ??
-    store.config.value?.workspace ??
-    '';
-
   return (
-    <main class="chat-main" id="chat-main" aria-label="Workspace" tabIndex={-1}>
-      <SessionHeader view={view} onSelectView={selectView} />
-      <WorkspaceTabs view={view} onChange={selectView} />
+    <main class={`chat-main${isWorkbench ? ' is-workbench' : ''}`} id="chat-main" aria-label="Workspace" tabIndex={-1} data-workspace-mode={mode}>
+      <SessionHeader view={view} onShowChanges={showChanges} onSelectView={selectView} controlPlane={!isWorkbench} />
 
-      <div class="center-body">
+      <div
+        ref={centerBodyRef}
+        class={`center-body${isWorkbench && view === 'chat' && !store.inspectorCollapsed.value ? ' has-result' : ''}`}
+        data-view={view}
+        data-workspace-mode={mode}
+      >
         <div
           class="center-panel chat-panel"
           id="workspace-panel-chat"
@@ -516,9 +519,8 @@ export function ChatView({ emptyContent, mentionProjects }: ChatViewProps = {}):
           aria-labelledby="workspace-tab-chat"
           hidden={view !== 'chat'}
           ref={panelRef}
-          /* Scrolled into history: the dock thins out so the transcript shows
-           * through it. Typing (focus inside the box) restores it in CSS. */
-          data-translucent={scroller.scrolledAway ? 'true' : 'false'}
+          /* History is a reading state, not a reason to put text behind controls. */
+          data-reading-history={scroller.scrolledAway ? 'true' : 'false'}
         >
           <div class="chat-body">
             {scroller.showJump ? (
@@ -587,11 +589,7 @@ export function ChatView({ emptyContent, mentionProjects }: ChatViewProps = {}):
 
                 <RunErrorBanner />
 
-                {session && hasItems && workspace ? (
-                  <p class="transcript-foot">
-                    Working in <span title={workspace}>{workspace}</span>
-                  </p>
-                ) : null}
+
               </div>
             </div>
           </div>
@@ -613,6 +611,7 @@ export function ChatView({ emptyContent, mentionProjects }: ChatViewProps = {}):
                 focusTick={store.composerFocusTick.value}
                 usageLabel={totalUsage(chat)}
                 loadMentionTree={mentionProjects ? projectMentionLoader(mentionProjects) : undefined}
+                onOpenUsage={isWorkbench ? () => workbench.openContext('usage') : undefined}
                 mentionLabel={mentionProjects ? 'projects' : undefined}
               />
             </div>
@@ -647,6 +646,23 @@ export function ChatView({ emptyContent, mentionProjects }: ChatViewProps = {}):
           </div>
         ) : null}
 
+        {isWorkbench ? (
+          <>
+            {view === 'chat' && !store.inspectorCollapsed.value ? (
+              <ResultResizer
+                containerRef={centerBodyRef}
+                projectId={store.currentProject.value?.id ?? null}
+                preferredWidth={store.currentProject.value?.result_panel_width}
+              />
+            ) : null}
+            <ErrorBoundary scope="The inspector">
+              <Inspector />
+            </ErrorBoundary>
+            <ErrorBoundary scope="Workspace context">
+              <ContextDrawer onRevealResult={showResult} onShowConversation={showConversation} />
+            </ErrorBoundary>
+          </>
+        ) : null}
       </div>
     </main>
   );

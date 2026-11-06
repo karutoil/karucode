@@ -113,6 +113,16 @@ function renderTranscript(
 }
 
 describe('ChatTranscript', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    resetTheme();
+    // These are component-structure tests, not default-preference tests. Keep
+    // their cards/no-grouping fixture explicit as the built-in default evolves.
+    act(() => updateTheme({ toolStyle: 'cards', grouping: 'none' }));
+  });
+
+  afterEach(() => resetTheme());
+
   it('renders one assistant row per turn, with the cards inside its body', () => {
     renderTranscript([user(), message(), tool(), message({ id: 'm2', content: 'Changes are ready.' })]);
 
@@ -161,9 +171,13 @@ describe('ChatTranscript', () => {
     expect(markers.some((text) => text.startsWith('Yesterday ·'))).toBe(true);
   });
 
-  it('marks a completed turn with the mock tag', () => {
+  it('leaves routine completed metadata out of the reading flow', () => {
     renderTranscript([user(), message()]);
-    expect(document.querySelector('.msg-assistant .tag')?.textContent).toContain('Completed');
+    const top = document.querySelector('.msg-assistant .msg-top');
+    expect(top?.textContent).toBe('karucode');
+    expect(top?.querySelector('.model-pill')).toBeNull();
+    expect(top?.querySelector('.msg-time')).toBeNull();
+    expect(top?.querySelector('.tag')).toBeNull();
   });
 
   it('marks a live turn as Working', () => {
@@ -171,6 +185,7 @@ describe('ChatTranscript', () => {
     const tag = document.querySelector('.msg-assistant .tag');
     expect(tag?.textContent).toContain('Working');
     expect(tag?.className).toContain('tag-live');
+    expect(document.querySelector('.msg-assistant .msg-time')).not.toBeNull();
     expect(document.querySelector('.stream-caret')).not.toBeNull();
   });
 
@@ -281,6 +296,7 @@ describe('ChatTranscript view options', () => {
   beforeEach(() => {
     localStorage.clear();
     resetTheme();
+    act(() => updateTheme({ toolStyle: 'cards', grouping: 'none' }));
   });
 
   afterEach(() => {
@@ -293,10 +309,26 @@ describe('ChatTranscript view options', () => {
     });
   }
 
-  it('draws tool calls as cards by default', () => {
-    renderTranscript([user(), tool()]);
-    expect(document.querySelector('.msg-body .tool-card')).not.toBeNull();
-    expect(document.querySelector('.tool-row')).toBeNull();
+  it('uses compact rows and completed-turn grouping as the built-in default', () => {
+    act(() => resetTheme());
+    renderTranscript([
+      user(),
+      message({ id: 'n1', content: 'Reading the config.' }),
+      tool(),
+      message({ id: 'fin', content: 'The pool size is 16.' }),
+    ]);
+
+    expect(document.documentElement.dataset.toolStyle).toBe('rows');
+    expect(document.documentElement.dataset.grouping).toBe('turns');
+    expect(screen.getByText('The pool size is 16.')).not.toBeNull();
+    expect(screen.queryByText('Reading the config.')).toBeNull();
+    const fold = document.querySelector('.process-fold');
+    expect(fold?.getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(fold as Element);
+    expect(document.querySelector('.msg-body .tool-row')).not.toBeNull();
+    expect(document.querySelector('.tool-card')).toBeNull();
+    expect(screen.getByText('Reading the config.')).not.toBeNull();
   });
 
   it('draws tool calls as compact rows when the theme asks for it', () => {
@@ -438,6 +470,7 @@ describe('ChatTranscript option matrix', () => {
   beforeEach(() => {
     localStorage.clear();
     resetTheme();
+    act(() => updateTheme({ toolStyle: 'cards', grouping: 'none' }));
   });
 
   afterEach(() => {

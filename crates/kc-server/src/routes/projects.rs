@@ -46,6 +46,10 @@ use std::path::PathBuf;
 /// and `GET /api/projects` stays a cheap document.
 const MAX_PROJECTS: usize = 64;
 const MAX_NAME_CHARS: usize = 80;
+/// Absolute server limits. The frontend applies a tighter available-space bound
+/// so the conversation never disappears; these reject corrupt/off contract writes.
+const MIN_RESULT_PANEL_WIDTH: u32 = 280;
+const MAX_RESULT_PANEL_WIDTH: u32 = 1600;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -60,6 +64,15 @@ struct CreateBody {
 #[serde(deny_unknown_fields)]
 struct RenameBody {
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectPreferencesBody {
+    /// Preferred Workbench results width in CSS pixels. This is deliberately a
+    /// required integer: `{}`, `null`, fractions and strings are client errors,
+    /// never an accidental reset to the default layout.
+    result_panel_width: u32,
 }
 
 pub async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -126,6 +139,33 @@ pub async fn rename_project(
             ..project
         }
     })))
+}
+
+/// `PATCH /api/projects/:id/preferences` saves UI choices that must work in a
+/// fresh browser profile or on another device. Preferences never change the
+/// project's path, provider/model configuration, sessions or terminal processes.
+pub async fn update_project_preferences(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let body: ProjectPreferencesBody =
+        parse_required(&body, "PATCH /api/projects/:id/preferences")?;
+    if !(MIN_RESULT_PANEL_WIDTH..=MAX_RESULT_PANEL_WIDTH).contains(&body.result_panel_width) {
+        return Err(ApiError::bad_request(format!(
+            "result_panel_width must be an integer from {MIN_RESULT_PANEL_WIDTH} to {MAX_RESULT_PANEL_WIDTH} pixels"
+        )));
+    }
+    state
+        .store()
+        .set_project_result_panel_width(&id, body.result_panel_width)
+        .await?;
+    let project = state
+        .store()
+        .get_project(&id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("no project with id `{id}`")))?;
+    Ok(Json(json!({ "project": project })))
 }
 
 pub async fn delete_project(

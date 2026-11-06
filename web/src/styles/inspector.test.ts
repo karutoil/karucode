@@ -94,6 +94,24 @@ describe('changes panel stylesheet', () => {
   });
 });
 
+describe('Workbench result and Context surfaces', () => {
+  it('responds to the result dock width for the full source-control layout', () => {
+    expect(cssDeclarations('.result-git')['container-type']).toBe('inline-size');
+    expect(cssDeclarations('#inspector-panel-changes')['overflow']).toBe('hidden');
+    expect(cssSource).toContain('@container (max-width: 700px)');
+    expect(cssSource).toMatch(/@container \(max-width: 700px\)[\s\S]*?\.result-git \.gitm-body\s*\{[^}]*display: block/);
+  });
+
+  it('uses a tokenized sibling overlay instead of hiding result contents', () => {
+    const drawer = cssDeclarations('.context-drawer');
+    expect(drawer['position']).toBe('fixed');
+    expect(drawer['background']).toBe('var(--surface)');
+    expect(drawer['overflow']).toBe('hidden');
+    expect(cssDeclarations('.context-run-rail')['background']).toBe('var(--bg)');
+    expect(cssSource).toContain(".inspector[data-context-open='true'] .inspector-inner");
+  });
+});
+
 describe('session-info panel stylesheet', () => {
   /* `session-` belongs to the sessions rail.
    *

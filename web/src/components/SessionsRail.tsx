@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useEffect, useId, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import { useFocusTrap } from '../lib/dom';
 import { copyText } from '../lib/clipboard';
@@ -20,11 +20,21 @@ import * as railPeek from '../state/railPeek';
 import {
   AddProjectDialog,
   DeleteProjectDialog,
+  ProjectGlyph,
   RenameProjectDialog,
-  SessionGlyph,
-  projectInitials,
+  unreadLabel,
 } from './ProjectRail';
-import { CloseIcon, FolderIcon, KebabIcon, PanelIcon, PlusIcon, SearchIcon, SettingsIcon } from './icons';
+import {
+  ChevronDownIcon,
+  CloseIcon,
+  FolderIcon,
+  KebabIcon,
+  PanelIcon,
+  PlusIcon,
+  SearchIcon,
+  SettingsIcon,
+} from './icons';
+import '../styles/workbench-navigation.css';
 
 const DAY = 86_400_000;
 
@@ -176,12 +186,27 @@ function SessionRow({
   ]
     .filter(Boolean)
     .join(' ');
-  const glyphs = facts?.tools ?? [];
   const turns = facts ? facts.turns : null;
+  const statusLabel = session.running
+    ? 'Running'
+    : session.last_run_status === 'failed'
+      ? 'Failed'
+      : session.last_run_status === 'interrupted'
+        ? 'Interrupted'
+        : null;
+  // Tool names and turn/call counts stay discoverable without making every row
+  // repeat the same fingerprint. The visible line is reserved for state, recency
+  // and the server's message count.
+  const details = [
+    `${session.message_count} messages`,
+    turns !== null && turns > 0 ? `${turns} ${turns === 1 ? 'turn' : 'turns'}` : null,
+    facts && facts.calls !== null ? `${facts.calls} ${facts.calls === 1 ? 'tool call' : 'tool calls'}` : null,
+    facts && facts.tools.length > 0 ? `Tools: ${facts.tools.join(', ')}` : null,
+  ].filter((detail): detail is string => detail !== null).join(' · ');
 
   return (
     <li
-      class={`session-row${active ? ' is-active' : ''}${rowState ? ` ${rowState}` : ''}`}
+      class={`session-row session-row-quiet${active ? ' is-active' : ''}${rowState ? ` ${rowState}` : ''}`}
       data-session-id={session.id}
     >
       {editing ? (
@@ -218,16 +243,10 @@ function SessionRow({
           onClick={() => onSelect(session.id)}
           onDblClick={startRename}
           aria-current={active ? 'true' : undefined}
+          title={details}
         >
           <span class="session-head">
             <span class="session-title">{session.title || 'Untitled session'}</span>
-            {glyphs.length > 0 ? (
-              <span class="session-glyphs" aria-hidden="true">
-                {glyphs.map((kind) => (
-                  <SessionGlyph key={kind} kind={kind} />
-                ))}
-              </span>
-            ) : null}
             {unreadCount > 0 ? (
               <span
                 class="session-unread"
@@ -241,20 +260,15 @@ function SessionRow({
           </span>
           <span class="session-meta">
             {session.running ? <span class="sr-only">Running. </span> : null}
+            {statusLabel ? (
+              <>
+                <span class={`session-state session-state-${statusTone}`}>{statusLabel}</span>
+                <span class="meta-dot" aria-hidden="true" />
+              </>
+            ) : null}
             <span>{relativeTime(session.updated_at, now)}</span>
             <span class="meta-dot" aria-hidden="true" />
             <span title={`${session.message_count} messages`}>{formatCount(session.message_count)}</span>
-            {/* The mock's second line is the session's fingerprint. Ours is the
-             * one aggregate the server reports per session: how many turns it
-             * took, and how many tool calls it made to get there. A session the
-             * server has not described yet shows neither rather than a zero. */}
-            {turns !== null && turns > 0 ? (
-              <span class="session-turns">{turns === 1 ? '1 turn' : `${turns} turns`}</span>
-            ) : facts && facts.calls !== null ? (
-              <span class="session-turns">
-                {facts.calls === 1 ? '1 call' : `${facts.calls} calls`}
-              </span>
-            ) : null}
             {session.last_run_status === 'failed' ? <span class="sr-only">Last run failed.</span> : null}
             {session.last_run_status === 'interrupted' ? (
               <span class="sr-only">Last run interrupted.</span>
@@ -499,28 +513,45 @@ export function SessionList({
 }
 
 /**
- * The project switcher, rendered inside the sessions sheet on a phone.
+ * One project switcher for both navigation layouts.
  *
- * On desktop the far-left rail owns this: one square per project, plus add and
- * the project menu. On a phone that rail cost 56 of 440px of every screen to
- * show two glyphs, so it is hidden and this horizontal strip takes over — the
- * same projects, the same dialogs, the same actions, in a row instead of a
- * column. It is not rendered at all above 1023px (CSS hides it there too, so the
- * DOM and the layout agree).
+ * The ordinary wide Workbench uses a compact active-project disclosure in this
+ * column; the collapsed desktop mode still uses ProjectRail's real tiles and
+ * RailPeek anchors. A phone keeps the existing full horizontal project list in
+ * the sessions sheet. Both modes share the store, dialogs and actual commands.
  */
-function ProjectSwitcher(): JSX.Element {
+interface ProjectSwitcherProps {
+  /** Wide view: a compact disclosure in the one navigation column. */
+  desktop?: boolean;
+}
+
+function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element {
   const projects = store.projects.value;
   const activeId = store.currentProjectId.value;
   const activeProject = store.currentProject.value;
+  const unreadByProject = store.unreadByProject.value;
   const [dialog, setDialog] = useState<'add' | 'rename' | 'delete' | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [projectsOpen, setProjectsOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
   const menuWrapRef = useRef<HTMLDivElement>(null);
   const optionsRef = useRef<HTMLButtonElement>(null);
+  const disclosureRef = useRef<HTMLButtonElement>(null);
+  const disclosureId = useId();
 
   /** Close the menu, optionally returning focus to the ⋯ that opened it. */
   const closeMenu = (restoreFocus = true): void => {
     setMenuOpen(false);
     if (restoreFocus) window.setTimeout(() => optionsRef.current?.focus(), 0);
+  };
+
+  const closeProjects = (restoreFocus = true): void => {
+    setProjectsOpen(false);
+    if (restoreFocus) {
+      window.setTimeout(() => {
+        if (disclosureRef.current?.isConnected) disclosureRef.current.focus();
+      }, 0);
+    }
   };
 
   useEffect(() => {
@@ -547,6 +578,37 @@ function ProjectSwitcher(): JSX.Element {
     };
   }, [menuOpen]);
 
+  useEffect(() => {
+    if (!desktop || !projectsOpen) return;
+    const onPointerDown = (event: MouseEvent): void => {
+      if (!rootRef.current?.contains(event.target as Node)) closeProjects(false);
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      // The nested options menu owns its Escape first. Only once that is closed
+      // does the next Escape dismiss the projects disclosure.
+      if (event.key === 'Escape' && !menuOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeProjects();
+      }
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [desktop, projectsOpen, menuOpen]);
+
+  useEffect(() => {
+    if (!desktop || !projectsOpen) return;
+    const active = rootRef.current?.querySelector<HTMLButtonElement>(
+      '.project-switcher-item[aria-current="true"]',
+    );
+    const first = rootRef.current?.querySelector<HTMLButtonElement>('.project-switcher-item');
+    (active ?? first)?.focus();
+  }, [desktop, projectsOpen]);
+
   // A project that disappears (deleted elsewhere) must not leave the menu open
   // pointing at nothing.
   useEffect(() => {
@@ -563,11 +625,43 @@ function ProjectSwitcher(): JSX.Element {
     );
   };
 
+  const activeUnread = activeProject ? unreadByProject[activeProject.id] ?? 0 : 0;
+
   return (
-    <div class="project-switcher">
-      <div class="project-switcher-head">
-        <p class="eyebrow">Projects</p>
-        <div class="project-switcher-actions">
+    <div
+      ref={rootRef}
+      class={`project-switcher${desktop ? ' project-switcher-desktop' : ''}`}
+    >
+      <div class={`project-switcher-head${desktop ? ' project-heading' : ''}`}>
+        {desktop ? (
+          <button
+            ref={disclosureRef}
+            type="button"
+            class="workbench-project-disclosure project-title"
+            aria-label={`Projects: ${activeProject?.name ?? 'none selected'}${
+              activeUnread > 0 ? `, ${unreadLabel(activeUnread)}` : ''
+            }`}
+            aria-expanded={projectsOpen}
+            aria-controls={disclosureId}
+            title={activeProject?.path ?? 'Choose a project'}
+            onClick={() => (projectsOpen ? closeProjects(false) : setProjectsOpen(true))}
+          >
+            {activeProject ? <ProjectGlyph project={activeProject} /> : null}
+            <span class="workbench-project-copy">
+              <span class="project-title-text">{activeProject?.name ?? 'Choose a project'}</span>
+              <span class="path-hint">{activeProject?.path ?? 'No project selected'}</span>
+            </span>
+            {activeUnread > 0 ? (
+              <span class="workbench-project-unread" aria-hidden="true">
+                {activeUnread > 99 ? '99+' : activeUnread}
+              </span>
+            ) : null}
+            <ChevronDownIcon size={13} />
+          </button>
+        ) : (
+          <p class="eyebrow">Projects</p>
+        )}
+        <div class={desktop ? 'side-head-actions' : 'project-switcher-actions'}>
           <button
             type="button"
             class="side-mini-btn"
@@ -686,42 +780,83 @@ function ProjectSwitcher(): JSX.Element {
               </div>
             ) : null}
           </div>
-          <button
-            type="button"
-            class="side-mini-btn"
-            aria-label="Close sessions panel"
-            data-autofocus
-            onClick={actions.closeSheets}
-          >
-            <CloseIcon size={15} />
-          </button>
+          {!desktop || projectsOpen ? (
+            <button
+              type="button"
+              class="side-mini-btn"
+              aria-label={desktop ? 'Close project switcher' : 'Close sessions panel'}
+              data-autofocus={desktop ? undefined : true}
+              onClick={desktop ? () => closeProjects() : actions.closeSheets}
+            >
+              <CloseIcon size={15} />
+            </button>
+          ) : null}
         </div>
       </div>
 
-      <ul class="project-switcher-list">
-        {projects.map((item) => {
-          const active = item.id === activeId;
-          return (
-            <li key={item.id}>
-              <button
-                type="button"
-                class={`project-switcher-item${active ? ' is-active' : ''}`}
-                aria-label={`Switch to ${item.name} (${item.path})`}
-                aria-current={active ? 'true' : undefined}
-                title={item.path}
-                onClick={() => {
-                  if (!active) void actions.switchProject(item.id);
-                }}
-              >
-                <span class="project-switcher-initials" aria-hidden="true">
-                  {projectInitials(item.name, item.path)}
-                </span>
-                <span class="project-switcher-name">{item.name}</span>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
+      {!desktop || projectsOpen ? (
+        <div
+          id={desktop ? disclosureId : undefined}
+          class={desktop ? 'workbench-projects-disclosure' : undefined}
+          aria-label={desktop ? 'Available projects' : undefined}
+          data-escape-local={desktop ? true : undefined}
+        >
+          <ul class="project-switcher-list">
+            {projects.map((item) => {
+              const active = item.id === activeId;
+              const unread = unreadByProject[item.id] ?? 0;
+              const unreadNote = unread > 0 ? `, ${unreadLabel(unread)}` : '';
+              return (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    class={`project-switcher-item${active ? ' is-active' : ''}`}
+                    aria-label={`Switch to ${item.name} (${item.path})${unreadNote}`}
+                    aria-current={active ? 'true' : undefined}
+                    title={`${item.path}${
+                      item.session_count > 0
+                        ? `\n${item.session_count} ${item.session_count === 1 ? 'session' : 'sessions'}`
+                        : ''
+                    }${unread > 0 ? `\n${unreadLabel(unread)}` : ''}`}
+                    onClick={() => {
+                      controlPlaneOpen.value = false;
+                      if (desktop) closeProjects();
+                      if (!active) void actions.switchProject(item.id);
+                    }}
+                  >
+                    <ProjectGlyph project={item} />
+                    <span class="project-switcher-name">{item.name}</span>
+                    {unread > 0 ? (
+                      <span class="workbench-project-unread" aria-hidden="true">
+                        {unread > 99 ? '99+' : unread}
+                      </span>
+                    ) : null}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          {desktop && projects.length === 0 ? (
+            <p class="workbench-projects-empty">No projects yet. Use + to add one.</p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {desktop ? (
+        <button
+          type="button"
+          class="workbench-control-plane"
+          aria-label="Open control plane"
+          aria-pressed={controlPlaneOpen.value}
+          onClick={() => {
+            closeProjects(false);
+            controlPlaneOpen.value = true;
+          }}
+        >
+          <span class="workbench-control-mark" aria-hidden="true">k.</span>
+          <span>Control plane</span>
+        </button>
+      ) : null}
 
       <AddProjectDialog open={dialog === 'add'} onClose={() => setDialog(null)} />
       <RenameProjectDialog
@@ -746,11 +881,6 @@ function connectionTone(): string {
   if (value.stream === 'open') return 'ok';
   if (value.api === 'online') return 'ok';
   return 'muted';
-}
-
-interface ProjectMenuState {
-  top: number;
-  left: number;
 }
 
 /**
@@ -954,11 +1084,8 @@ export function SessionsRail(): JSX.Element {
   const project = store.currentProject.value;
   const railRef = useRef<HTMLElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const optionsRef = useRef<HTMLButtonElement>(null);
   const [query, setQuery] = useState('');
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>('all');
-  const [menu, setMenu] = useState<ProjectMenuState | null>(null);
   useFocusTrap(railRef, isNarrow && isSheetOpen, actions.closeSheets);
   const unread = store.unread.value;
 
@@ -1024,54 +1151,6 @@ export function SessionsRail(): JSX.Element {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isNarrow]);
 
-  const closeMenu = (restoreFocus = true): void => {
-    setMenu(null);
-    if (restoreFocus) {
-      window.setTimeout(() => optionsRef.current?.focus(), 0);
-    }
-  };
-
-  useEffect(() => {
-    if (!menu) return;
-    const first = menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]');
-    first?.focus();
-    const onPointerDown = (event: MouseEvent): void => {
-      const target = event.target as Node | null;
-      if (menuRef.current?.contains(target)) return;
-      setMenu(null);
-    };
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        closeMenu();
-      }
-    };
-    document.addEventListener('mousedown', onPointerDown);
-    document.addEventListener('keydown', onKeyDown);
-    const onResize = (): void => setMenu(null);
-    window.addEventListener('resize', onResize);
-    return () => {
-      document.removeEventListener('mousedown', onPointerDown);
-      document.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('resize', onResize);
-    };
-  }, [menu]);
-
-  const openProjectMenu = (): void => {
-    const rect = optionsRef.current?.getBoundingClientRect();
-    setMenu({
-      top: rect && rect.height > 0 ? rect.bottom + 6 : 60,
-      left: rect && rect.width > 0 ? rect.left : 16,
-    });
-  };
-
-  const copyPath = async (): Promise<void> => {
-    const path = project?.path ?? '';
-    if (path === '') return;
-    const copied = await copyText(path);
-    store.pushToast(copied ? 'Project path copied.' : 'Could not copy the path.', copied ? 'success' : 'error');
-  };
-
   const contextUsageValue = contextUsage(store.chat.value, store.activeContextWindow.value);
   const contextPercent = contextUsageValue
     ? Math.round(contextUsageValue.fraction * 100)
@@ -1098,36 +1177,27 @@ export function SessionsRail(): JSX.Element {
       aria-modal={isSheetOpen ? 'true' : undefined}
     >
       <div class="rail-inner">
-        {isNarrow ? <><ProjectSwitcher /><button type="button" class="new-session" onClick={() => { actions.closeSheets(); controlPlaneOpen.value = true; }}>Control plane</button></> : null}
-        {/* The switcher above owns the project story on a phone — name, every
-         * project, the add button, the project menu — so this head is a duplicate
-         * there. It is not rendered at all rather than hidden in CSS, so the
-         * sheet has one `Project options` button rather than two. */}
+        {/* One switcher owns project navigation and management in both layouts.
+         * Wide screens get a compact disclosure; the phone sheet keeps the full
+         * horizontal list and its existing close/control-plane actions. */}
+        {isNarrow ? (
+          <>
+            <ProjectSwitcher />
+            <button
+              type="button"
+              class="new-session"
+              onClick={() => {
+                actions.closeSheets();
+                controlPlaneOpen.value = true;
+              }}
+            >
+              Control plane
+            </button>
+          </>
+        ) : null}
         {isNarrow ? null : (
           <div class="side-head">
-            <div class="project-heading">
-              <span class="project-title-glyph" aria-hidden="true">
-                {(project?.name ?? 'k').trim().slice(0, 1).toLowerCase() || 'k'}
-              </span>
-              <h2 class="project-title" title={project?.path ?? 'No project'}>
-                <span class="project-title-text">{project?.name ?? 'No project'}</span>
-                <span class="path-hint">{project?.path ?? 'No project selected'}</span>
-              </h2>
-              <div class="side-head-actions">
-                <button
-                  ref={optionsRef}
-                  type="button"
-                  class="side-mini-btn"
-                  aria-label="Project options"
-                  aria-haspopup="menu"
-                  aria-expanded={menu !== null}
-                  title="Project options"
-                  onClick={() => (menu ? closeMenu(false) : openProjectMenu())}
-                >
-                  <KebabIcon size={15} />
-                </button>
-              </div>
-            </div>
+            <ProjectSwitcher desktop />
           </div>
         )}
 
@@ -1275,71 +1345,6 @@ export function SessionsRail(): JSX.Element {
         </div>
       </div>
 
-      {menu ? (
-        <div
-          ref={menuRef}
-          class="rail-menu"
-          role="menu"
-          data-escape-local
-          aria-label={`Project options for ${project?.name ?? 'this project'}`}
-          style={{ top: `${menu.top}px`, left: `${menu.left}px` }}
-          onKeyDown={(event) => {
-            const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
-            if (items.length === 0) return;
-            const index = items.indexOf(document.activeElement as HTMLButtonElement);
-            let next = index;
-            if (event.key === 'ArrowDown') next = (index + 1) % items.length;
-            else if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length;
-            else if (event.key === 'Home') next = 0;
-            else if (event.key === 'End') next = items.length - 1;
-            else if (event.key === 'Tab') {
-              setMenu(null);
-              return;
-            } else return;
-            event.preventDefault();
-            items[next]?.focus();
-          }}
-        >
-          <div class="rail-menu-meta">
-            <span class="rail-menu-name">{project?.name ?? 'No project'}</span>
-            <span class="rail-menu-path">{project?.path ?? ''}</span>
-          </div>
-          <button
-            type="button"
-            role="menuitem"
-            class="menu-item"
-            onClick={() => {
-              closeMenu(false);
-              void copyPath();
-            }}
-          >
-            Copy project path
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            class="menu-item"
-            onClick={() => {
-              closeMenu(false);
-              void actions.refreshSessions();
-            }}
-          >
-            Refresh sessions
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            class="menu-item"
-            onClick={() => {
-              optionsRef.current?.focus();
-              closeMenu(false);
-              actions.openSettings();
-            }}
-          >
-            Project settings…
-          </button>
-        </div>
-      ) : null}
     </aside>
   );
 }

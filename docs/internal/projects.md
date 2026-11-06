@@ -7,7 +7,7 @@
 
 - **Slug:** `projects`
 - **Tags:** projects, sessions, workspace, directories
-- **Applies to:** `route:GET /api/projects`, `route:POST /api/projects`, `route:PATCH /api/projects/:id`, `route:DELETE /api/projects/:id`, `route:GET /api/projects/:id/favicon`, `route:GET /api/sessions`, `route:PATCH /api/sessions/:id/model`, `config:workspace`, `env:KARUCODE_WORKSPACE`, `cmd:--workspace`, `ui:ProjectRail`, `concept:session workspace`, `concept:favicon.ico`
+- **Applies to:** `route:GET /api/projects`, `route:POST /api/projects`, `route:PATCH /api/projects/:id`, `route:PATCH /api/projects/:id/preferences`, `route:DELETE /api/projects/:id`, `route:GET /api/projects/:id/favicon`, `route:GET /api/sessions`, `route:PATCH /api/sessions/:id/model`, `config:workspace`, `env:KARUCODE_WORKSPACE`, `cmd:--workspace`, `ui:ProjectRail`, `concept:session workspace`, `concept:favicon.ico`
 - **Source:** `crates/kc-server/src/state.rs:6`
 
 ---
@@ -63,6 +63,14 @@ Pin the list with `project_roots` (`KARUCODE_PROJECT_ROOTS`, colon-separated)
 when the server is reachable by more than one person, or when you want the API
 unable to register a directory outside your projects. Paths are compared
 component-wise on canonical paths, so `/srv/app-evil` is not inside `/srv/app`.
+
+## The Workbench result preference
+
+The wide Workbench result divider stores its chosen pixel width on the project,
+via `PATCH /api/projects/:id/preferences` with `{"result_panel_width":580}`.
+`None`/an omitted field retains automatic sizing. The value is in the ordinary
+project list, not browser storage, so other devices and fresh profiles restore it.
+This preference never changes confinement, sessions or terminal state.
 
 ## The project rail icon
 

@@ -173,6 +173,18 @@ export function renameProject(
   }).then((r) => r.project);
 }
 
+export function updateProjectResultPanelWidth(
+  id: string,
+  width: number,
+  options: CallOptions = {},
+): Promise<Project> {
+  return apiRequest<{ project: Project }>(`/api/projects/${encodeURIComponent(id)}/preferences`, {
+    ...options,
+    method: 'PATCH',
+    body: { result_panel_width: Math.round(width) },
+  }).then((r) => r.project);
+}
+
 export function deleteProject(
   id: string,
   force = false,

@@ -184,6 +184,10 @@ pub struct Project {
     /// Number of sessions in this project (computed by `list_projects`).
     #[serde(default)]
     pub session_count: i64,
+    /// The Workbench result pane's preferred desktop width in pixels. `None`
+    /// uses the frontend default; the HTTP preferences route owns validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_panel_width: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -896,6 +900,9 @@ pub trait Store: Send + Sync {
     async fn list_projects(&self) -> Result<Vec<Project>>;
     async fn get_project(&self, id: &str) -> Result<Option<Project>>;
     async fn rename_project(&self, id: &str, name: &str) -> Result<()>;
+    /// Save the project-scoped Workbench result width. The route validates the
+    /// public bounds; stores persist the value without touching session state.
+    async fn set_project_result_panel_width(&self, id: &str, width: u32) -> Result<()>;
     async fn delete_project(&self, id: &str) -> Result<()>;
 
     async fn append_message(&self, message: &NewMessage) -> Result<i64>;

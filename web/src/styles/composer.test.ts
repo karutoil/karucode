@@ -9,13 +9,13 @@
  *
  *   - the composer paints *over* the transcript instead of taking a flex row, so
  *     the pane keeps its full height;
- *   - it is translucent when the reader is scrolled into history, which is what
- *     lets the conversation show through it, and opaque when they are in it;
+ *   - the dock stays opaque while reading history or typing, so neither its text
+ *     nor the conversation has to be read through another layer;
  *   - the transcript reserves the dock's real height, so nothing hides behind it
- *     at rest.
+ *     at rest or at the phone breakpoints.
  *
- * The wiring for the last two points (measuring the dock, flipping the attribute)
- * is covered by `ChatView.test.tsx` and `dockHeight.test.ts`.
+ * The measured-height wiring is covered by `ChatView.test.tsx` and
+ * `dockHeight.test.ts`; these assertions pin the corresponding visual contract.
  */
 
 import { readFileSync } from 'node:fs';
@@ -97,7 +97,9 @@ describe('composer dock: layout', () => {
 describe('composer dock: the box stays compact', () => {
   it('starts on one line and grows with the draft', () => {
     const input = declarations(composerCss, '.composer-input');
-    expect(input['min-height']).toBe('35px');
+    // A modest rest height avoids clipping the 16px phone line; scrollHeight
+    // still expands it after the first line, with the same real cap.
+    expect(input['min-height']).toBe('44px');
     // The cap is a custom property so the phone tier can shrink it without a
     // second magic number in the component; the default is the mock's 170px.
     expect(input['--compose-input-max']).toBe('170px');
@@ -128,81 +130,110 @@ describe('composer dock: the box stays compact', () => {
     expect(declarations(composerCss, '.composer')['--radius-composer']).toBe('var(--radius)');
   });
 
-  it('keeps one row on a phone', () => {
-    // At 390px the pills plus Send did not fit, so the row wrapped and the box
-    // stood 129px tall - 15% of an 844px screen. The controls may not wrap and
-    // the pills give up width first.
+  it('keeps idle controls quiet while preserving phone typing and Settings access', () => {
     const narrow = /@media \(max-width: 800px\) \{([\s\S]*?)\n\}/.exec(composerCss);
     expect(narrow, 'the 800px tier exists').toBeTruthy();
     expect(narrow![1]).toMatch(/\.composer-controls \{[^}]*flex-wrap: nowrap/);
+    // The button's cap may never exceed its actual wrapper: otherwise adjacent
+    // model/reasoning targets overlap once flex gives the wrapper less width.
+    expect(narrow![1]).toContain('max-width: min(145px, 100%)');
 
     const phone = /@media \(max-width: 640px\) \{([\s\S]*?)\n\}/.exec(composerCss);
     expect(phone, 'the phone tier exists').toBeTruthy();
     const body = phone![1] ?? '';
     // The label caps alone leave the pill too wide: `padding + chevron + label`.
-    expect(body).toMatch(/\.model-switcher-button \{[^}]*max-width: 108px/);
-    // A wrapped footnote floated two lines of shortcuts over the transcript.
-    expect(body).toMatch(/\.composer-hint,\s*\n\s*\.compose-approvals \{\s*\n\s*display: none/);
+    expect(body).toContain('max-width: min(108px, 100%)');
+    expect(body).toContain('max-width: min(92px, 100%)');
+    // Hints can yield, but the status-to-Settings entry may not disappear.
+    expect(body).toMatch(/\.composer-hint \{\s*\n\s*display: none/);
+    expect(body).not.toMatch(/\.compose-approvals\s*\{[^}]*display:\s*none/);
+    const input = /\.composer-input \{([^}]*)\}/.exec(body)?.[1] ?? '';
+    expect(input).toContain('font-size: var(--fs-title)');
+    expect(input).toContain('--compose-input-max: min(112px, 22vh)');
+    expect(input).not.toContain('min-height:');
+  });
+
+  it('uses explicit two-row running areas only at the phone tier', () => {
+    // Outside the media query these wrappers are transparent, preserving the
+    // existing one-line desktop/idle composition and menu positioning.
+    expect(composerCss).toMatch(
+      /\.compose-configuration,\s*\n\.compose-run-actions \{\s*\n\s*display: contents/,
+    );
+
+    const phone = /@media \(max-width: 640px\) \{([\s\S]*?)\n\}/.exec(composerCss);
+    const body = phone?.[1] ?? '';
+    expect(body).toMatch(/\.compose-bottom\.is-running \{[^}]*display: grid/);
+    expect(body).toMatch(/grid-template-rows: auto auto/);
+    expect(body).toMatch(/\.is-running > \.button-stop \{[^}]*grid-row: 1/);
+    expect(body).toMatch(/\.is-running > \.button-stop \{[^}]*grid-column: 2/);
+    expect(body).toMatch(/\.is-running \.compose-run-actions \{[^}]*grid-row: 2/);
+    expect(body).toMatch(/\.is-running \.compose-run-actions \{[^}]*grid-column: 1 \/ -1/);
+    expect(body).toMatch(/\.is-running \.compose-run-actions \{[^}]*flex-wrap: nowrap/);
+    // The layout may add the real second row, but may never hide waiting work.
+    expect(composerCss).not.toMatch(/\.queued-(?:panel|list|row)[^{]*\{[^}]*display:\s*none/);
+  });
+
+  it('never shrinks composer actions below a 24px target', () => {
+    const selectors = [
+      '.compose-plus',
+      '.queue-mode-option',
+      '.queued-recall',
+      '.attachment-chip-remove',
+      '.context-pill',
+      '.compose-approvals',
+    ];
+    for (const selector of selectors) {
+      const rule = declarations(composerCss, selector);
+      const minimum = Number.parseFloat(rule['min-height'] ?? rule['height'] ?? '0');
+      expect(minimum, `${selector} target height`).toBeGreaterThanOrEqual(24);
+    }
+    expect(declarations(composerCss, '.compose-plus')['width']).toBe('24px');
+    expect(declarations(composerCss, '.button-send')['min-width']).toBe('28px');
+    expect(declarations(composerCss, '.compose-bottom .button-stop')['min-width']).toBe('28px');
+    expect(declarations(composerCss, '.compose-bottom .button-queue')['min-width']).toBe('28px');
+    expect(declarations(composerCss, '.compose-bottom .model-switcher-button')).toMatchObject({
+      'min-width': '24px',
+      'min-height': '24px',
+    });
   });
 });
 
-describe('composer dock: see-through while scrolled', () => {
+describe('composer dock: opaque and legible in every reading state', () => {
   const composer = declarations(composerCss, '.composer');
-  const scrolled = declarations(composerCss, ".chat-panel[data-translucent='true'] .composer");
 
-  it('paints from a token, never a raw colour', () => {
-    // Theme Studio repaints every surface; a literal hex here would stay dark in
-    // a light theme.
-    // The dock floats over the transcript, so its fill is the rung that is
-    // nearer than the canvas in both modes: `--surface` (Ember 8.8 points off
-    // the canvas, Daybreak #ffffff on #f6f4f1). `--surface-input` is 1.4 points
-    // off a Daybreak canvas, which read as part of the page.
-    expect(composer['background']).toContain('var(--surface)');
-    expect(composer['background']).toContain('--dock-opacity');
+  it('paints the semantic surface, never a raw colour or alpha mix', () => {
+    expect(composer['background']).toBe('var(--surface)');
     expect(composer['background']).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    expect(composer['background']).not.toContain('transparent');
+    expect(composer['background']).not.toContain('color-mix');
   });
 
-  it('is fully opaque at rest', () => {
-    // The fallback in the `color-mix` is 100%, so an unset knob is opaque.
-    expect(composer['background']).toContain('var(--dock-opacity, 100)');
-  });
-
-  it('goes translucent and blurs what is behind it when scrolled away', () => {
-    expect(scrolled['--dock-opacity']).toBe('42');
-    expect(scrolled['backdrop-filter']).toContain('blur(var(--dock-blur))');
-    // 42% of the input surface still leaves the draft text legible on top.
-    expect(Number(scrolled['--dock-opacity'])).toBeGreaterThanOrEqual(35);
-    expect(Number(scrolled['--dock-opacity'])).toBeLessThanOrEqual(60);
-    // Low enough to read the conversation through it; a heavy blur turns the
-    // text behind into mush, which is the opposite of the point.
-    expect(Number(scrolled['--dock-blur']?.replace('px', ''))).toBeLessThanOrEqual(4);
-  });
-
-  it('comes back to a near-solid surface while the reader is typing in it', () => {
-    const focused = declarations(
-      composerCss,
-      ".chat-panel[data-translucent='true'] .composer:focus-within",
-    );
-    expect(Number(focused['--dock-opacity'])).toBeGreaterThan(Number(scrolled['--dock-opacity']));
-    expect(Number(focused['--dock-opacity'])).toBeGreaterThanOrEqual(85);
-  });
-
-  it('moves the footnote aside only while the box is not in use', () => {
-    // `:not(:focus-within)` matters: hiding the status line while the reader is
-    // typing hid the very hint the footnote exists to give them.
-    expect(composerCss).toMatch(
-      /\.chat-panel\[data-translucent='true'\] \.composer-wrap:not\(:focus-within\) \.compose-foot \{/,
-    );
-    expect(composerCss).not.toMatch(
-      /\.chat-panel\[data-translucent='true'\] \.compose-foot \{/,
-    );
-  });
-
-  it('never makes the box a stacking context at rest', () => {
-    // A `backdrop-filter` on the base rule would trap the `@`-mention popover and
-    // the dropup model menus, which escape the box by z-index today.
+  it('never brings back the 42% history surface or backdrop/filter tricks', () => {
+    expect(composerCss).not.toMatch(/--dock-opacity|--dock-blur/);
+    expect(composerCss).not.toMatch(/data-translucent/);
+    expect(composerCss).not.toMatch(/backdrop-filter\s*:/);
+    expect(composerCss).not.toMatch(/^\s*filter\s*:/m);
+    // Avoid stacking-context filters around the mention/model popovers too.
     expect(composer['backdrop-filter']).toBeUndefined();
     expect(composer['filter']).toBeUndefined();
+  });
+
+  it('keeps draft text, live status and approvals visible while reading history', () => {
+    const input = declarations(composerCss, '.composer-input');
+    expect(input['color']).toBe('var(--text)');
+    expect(composerCss).not.toMatch(/\.compose-foot[^{]*\{[^}]*(?:opacity:\s*0|visibility:\s*hidden)/);
+    expect(composerCss).not.toMatch(/\.compose-approvals[^{]*\{[^}]*display:\s*none/);
+  });
+
+  it('retains line, focus ring and shadows without fading to focus', () => {
+    const focused = declarations(composerCss, '.composer:focus-within');
+    expect(composer['border']).toBe('1px solid var(--line-strong)');
+    const composerBlock = /\.composer \{([^}]*)\}/.exec(composerCss)?.[1] ?? '';
+    expect(composerBlock).toContain('var(--shadow-composer)');
+    expect(composerBlock).toContain('var(--shadow-dock)');
+    expect(focused['border-color']).toBe('var(--focus-input)');
+    expect(focused['outline']).toBe('var(--focus-ring-width) solid var(--focus-ring)');
+    expect(focused['--dock-opacity']).toBeUndefined();
   });
 
   it('honours reduced motion', () => {
@@ -218,12 +249,12 @@ describe('context window pill', () => {
   const pill = declarations(composerCss, '.context-pill');
   const fill = declarations(composerCss, '.context-pill-fill');
 
-  it('lives in the bottom row without growing it', () => {
-    // The row is 34px tall and `min-height: 34px` on a phone; a taller pill would
-    // wrap Send onto a second line at 390px.
+  it('is a compact, explicit Usage action in the dock', () => {
     expect(pill['height']).toBe('26px');
+    expect(pill['min-height']).toBe('26px');
     expect(pill['flex']).toBe('0 0 auto');
     expect(pill['white-space']).toBe('nowrap');
+    expect(pill['cursor']).toBe('pointer');
   });
 
   it('paints from tokens so every theme repaints it', () => {
@@ -246,6 +277,7 @@ describe('context window pill', () => {
       .join('\n');
     expect(phone).toMatch(/\.context-pill-meter \{\s*\n\s*display: none/);
     expect(phone).not.toMatch(/\.context-pill-text \{\s*\n\s*display: none/);
+    expect(phone).not.toMatch(/\.context-pill-label \{\s*\n\s*display: none/);
   });
 
   it('gives the spacer up before the buttons on a phone', () => {

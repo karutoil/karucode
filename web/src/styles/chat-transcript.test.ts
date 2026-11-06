@@ -40,6 +40,18 @@ describe('transcript mock layout contract', () => {
     expect(css).toContain(".date-marker::after {");
   });
 
+  it('right-biases compact prompts without disturbing the assistant reading column', () => {
+    const user = rule('.msg-user');
+    expect(user).toContain('width: fit-content;');
+    expect(user).toContain('max-width: min(88%, 640px);');
+    expect(user).toContain('margin-left: auto;');
+    expect(rule('.msg-user .msg-avatar')).toContain('order: 2;');
+    expect(rule('.msg-user .msg-col')).toContain('flex: 0 1 auto;');
+    expect(rule('.user-question')).toContain('padding: var(--space-5) var(--space-6);');
+    expect(rule('.user-question')).toContain('background: var(--surface-raised);');
+    expect(rule('.msg-assistant .markdown')).toContain('font-size: var(--fs-body);');
+  });
+
   it('shares themed card chrome and header sizing for tools and commands', () => {
     const cards = rule('.tool-card,\n.command-card');
     expect(cards).toContain('margin: var(--space-8) 0 var(--space-7);');
@@ -89,21 +101,14 @@ describe('phone and density contract', () => {
     expect(rule('.msg')).toContain('padding: 0;');
   });
 
-  it('shrinks a long model id without losing the status chip or the rewind', () => {
-    // 320-390px: an unbounded model id pushed the tag, the throughput badge and
-    // the rewind button off the metadata row.
+  it('keeps live status and rewind reachable on a narrow transcript', () => {
     const top = phoneRule('.msg-assistant .msg-top');
     expect(top).toContain('flex-wrap: wrap;');
     expect(top).toContain('height: auto;');
-    const pill = phoneRule('.msg-assistant .model-pill');
-    expect(pill).toContain('min-width: 0;');
-    expect(pill).toContain('overflow: hidden;');
-    expect(pill).toContain('text-overflow: ellipsis;');
-    expect(pill).toContain('white-space: nowrap;');
-    // Nothing in the metadata is hidden to make room...
+    // Nothing in the live metadata is hidden to make room...
     expect(phoneSection()).not.toMatch(/\.msg-(?:top|author|time)\b[^{]*\{[^}]*display:\s*none/);
-    // ...and on a phone the rewind control is not left at desktop's hover-only
-    // opacity, because there is no hover.
+    // ...and rewind never becomes hover-only on a touch device. The compact
+    // right-biased prompt uses the same control rather than removing it.
     expect(css).toMatch(/@media \(hover: none\)[\s\S]*?\.rewind-button \{[^}]*opacity: 1;/);
   });
 });

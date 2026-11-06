@@ -53,6 +53,8 @@ export interface Project {
   created_at: number;
   updated_at: number;
   session_count: number;
+  /** Workbench result-pane width; absent means the product default. */
+  result_panel_width?: number;
 }
 
 export interface ProjectListResponse {

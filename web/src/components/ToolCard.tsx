@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useId, useState } from 'preact/hooks';
+import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import type { ImageAttachment } from '../api/types';
 import { formatDuration, jsonSummary } from '../lib/format';
 import { imageDataUrl, imageLabel } from '../lib/images';
@@ -120,8 +120,9 @@ function ToolImages({ images, tool }: { images: ImageAttachment[]; tool: string 
 }
 
 /**
- * The output body shared by both variants: numbered lines, clamped by CSS to the
- * 112px preview, with the "no output"/"waiting" states spelled out.
+ * The output body shared by both variants: bounded numbered lines with the
+ * "no output"/"waiting" states spelled out. It is mounted by disclosure;
+ * a running card is the one live-preview exception.
  */
 function ToolOutput({
   item,
@@ -170,9 +171,11 @@ function ToolOutput({
 }
 
 /**
- * A tool call in the assistant column: header (symbol, call, outcome), a
- * line-numbered output preview clamped to the mock's 112px, and a footer with
- * the duration and the Show output disclosure.
+ * A tool call in the assistant column: header (symbol, call, outcome) and a
+ * footer with the duration and Show output disclosure. Successful output is
+ * mounted only after expansion, so a settled call does not spend 112px on a raw
+ * preview. Images stay visible outside that disclosure; failures open to their
+ * explanation. Running cards retain their live output preview.
  *
  * With `variant="row"` the whole call is one line — symbol, name, arguments,
  * outcome and duration — and the same output opens beneath it. That is the
@@ -180,8 +183,19 @@ function ToolOutput({
  * twenty blocks, while every byte of output is still one click away.
  */
 export function ToolCard({ item, defaultOpen = false, variant = 'card' }: ToolCardProps): JSX.Element {
-  const [open, setOpen] = useState(defaultOpen);
+  const [open, setOpen] = useState(defaultOpen || item.status === 'error');
+  const previousStatus = useRef(item.status);
   const bodyId = useId();
+
+  // A failure carries its own explanation: open it on arrival instead of
+  // reducing it to a generic status word. A deliberate manual close stays
+  // closed until a different call state transitions into a new failure.
+  useEffect(() => {
+    const previous = previousStatus.current;
+    previousStatus.current = item.status;
+    if (item.status === 'error' && previous !== 'error') setOpen(true);
+  }, [item.status]);
+
   const detail = typeof item.args === 'string' ? item.args : JSON.stringify(item.args);
   const summary = jsonSummary(item.args, variant === 'row' ? 90 : 110);
   const duration = formatDuration(item.durationMs);
@@ -268,7 +282,9 @@ export function ToolCard({ item, defaultOpen = false, variant = 'card' }: ToolCa
         <ToolImages images={item.images} tool={item.name} />
       ) : null}
 
-      <ToolOutput item={item} open={open} bodyId={bodyId} />
+      {open || item.status === 'running' ? (
+        <ToolOutput item={item} open={open} bodyId={bodyId} />
+      ) : null}
 
       <div class="tool-foot">
         <span class="tool-duration">{footerNote(item, duration)}</span>

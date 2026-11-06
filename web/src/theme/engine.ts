@@ -29,8 +29,8 @@
 //   radius. Code uses the bundled JetBrains Mono by default; the other two
 //   choices are the operating system's own mono stack and Courier New.
 // * **Transcript** — how much of the agent's work the conversation shows at
-//   once. See below; the defaults reproduce the original look, so nothing
-//   changes until you choose.
+//   once. Built-in themes start with compact rows and completed-turn grouping;
+//   full cards and no grouping remain available below.
 // * **Advanced** — custom CSS applied live after the application stylesheet, for
 //   effects the controls do not cover.
 //
@@ -43,16 +43,18 @@
 // applied as `data-tool-style`, `data-grouping` and `data-thinking` on `<html>`
 // next to `data-density`:
 //
-// * **Tool calls** — `cards` (default) draws the full card: symbol, arguments,
-//   a 112 px output preview and a footer with the duration. `rows` draws one
-//   quiet ~26 px line per call (symbol, name, arguments, duration, status) that
-//   expands into exactly the same numbered output. A turn with twenty calls
-//   reads as a list instead of twenty blocks.
-// * **Grouping** — `none` (default) shows every call where it happened. `tools`
-//   folds a run of *consecutive* calls into one summary line ("read_file, grep
-//   +1 more · 3 calls · 1.2 s") that opens to the individual calls. `turns` also
-//   folds a finished turn's working steps behind a "Show the working · N tool
-//   calls" line, leaving the narration and the answer.
+// * **Tool calls** — `rows` (built-in default) draws one quiet ~26 px line per
+//   call (symbol, name, arguments, duration, status) that expands into numbered
+//   output. `cards` draws the full card with a footer disclosure instead. Neither
+//   successful variant spends space on raw output while closed; running cards
+//   retain their live preview, returned images stay visible, and failures open to
+//   their explanation. A turn with twenty calls reads as a list instead of twenty
+//   blocks.
+// * **Grouping** — `turns` (built-in default) folds a finished turn's working
+//   steps behind a "Show the working · N tool calls" line, leaving the answer and
+//   actionable notices. `tools` folds only a run of *consecutive* calls into one
+//   summary line ("read_file, grep +1 more · 3 calls · 1.2 s"). `none` shows every
+//   call where it happened.
 // * **Reasoning** — `collapsed` (default) is a `Thought` chip that opens to the
 //   reasoning. `preview` adds the first line of the thought, in italics, so a
 //   glance shows what the agent was working out. `expanded` shows it in full,
@@ -75,6 +77,10 @@
 // `localStorage` under `karucode.theme-studio.v3`. That is per browser profile:
 // themes are not stored in the karucode config, do not follow you to another
 // machine and are not shared between browsers. Up to 60 custom themes are kept.
+// Stored `cards` / `rows`, grouping and reasoning values always win over the new
+// built-in defaults. A saved custom theme or imported file from before those
+// fields existed keeps the legacy `cards` + `none` fallback; only built-ins move
+// to `rows` + `turns`.
 //
 // * **Save as new** stores the current draft under a name you type.
 // * **Export** downloads `karucode-theme.json` (`format: "karucode-theme"`,

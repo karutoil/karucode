@@ -7,7 +7,7 @@
 
 - **Slug:** `http-api`
 - **Tags:** api, http, rest, sse, curl, endpoints
-- **Applies to:** `route:GET /api/health`, `route:GET /api/config`, `route:PATCH /api/config`, `route:POST /api/provider/test`, `route:GET /api/models/catalog`, `route:GET /api/models/lookup`, `route:GET /api/stats`, `route:GET /api/projects`, `route:POST /api/projects`, `route:GET /api/projects/:id/favicon`, `route:GET /api/sessions`, `route:POST /api/sessions`, `route:GET /api/sessions/:id`, `route:GET /api/sessions/:id/info`, `route:PATCH /api/sessions/:id`, `route:PATCH /api/sessions/:id/model`, `route:POST /api/sessions/:id/messages`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `route:POST /api/sessions/:id/cancel`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `route:GET /api/approvals`, `route:POST /api/approvals/:id`, `route:GET /api/workspace/tree`, `route:GET /api/workspace/file`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `route:POST /api/artifacts`, `route:GET /api/artifacts/:id`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `route:GET /api/mcp`, `config:plugin_panels`, `route:GET /api/events`, `event:notification`, `event:queued_messages`, `event:session_rewound`, `config:[notifications]`, `header:X-Karucode-Client`, `env:KARUCODE_AUTH_TOKEN`, `doc:docs/API.md`
+- **Applies to:** `route:GET /api/health`, `route:GET /api/config`, `route:PATCH /api/config`, `route:POST /api/provider/test`, `route:GET /api/models/catalog`, `route:GET /api/models/lookup`, `route:GET /api/stats`, `route:GET /api/projects`, `route:POST /api/projects`, `route:PATCH /api/projects/:id/preferences`, `route:GET /api/projects/:id/favicon`, `route:GET /api/sessions`, `route:POST /api/sessions`, `route:GET /api/sessions/:id`, `route:GET /api/sessions/:id/info`, `route:PATCH /api/sessions/:id`, `route:PATCH /api/sessions/:id/model`, `route:POST /api/sessions/:id/messages`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `route:POST /api/sessions/:id/cancel`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `route:GET /api/approvals`, `route:POST /api/approvals/:id`, `route:GET /api/workspace/tree`, `route:GET /api/workspace/file`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `route:POST /api/artifacts`, `route:GET /api/artifacts/:id`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `route:GET /api/mcp`, `config:plugin_panels`, `route:GET /api/events`, `event:notification`, `event:queued_messages`, `event:session_rewound`, `config:[notifications]`, `header:X-Karucode-Client`, `env:KARUCODE_AUTH_TOKEN`, `doc:docs/API.md`
 - **Source:** `crates/kc-server/src/lib.rs:21`
 
 ---
@@ -39,7 +39,7 @@ curl -s -X POST localhost:8787/api/sessions/abc/messages \
 | `GET`/`PATCH /api/config` | effective settings; validated, hot-swapped patches |
 | `POST /api/provider/test` | live probe of a profile, base_url or model |
 | `GET /api/models/catalog`, `/api/models/lookup` | models.dev metadata, cached |
-| `GET`/`POST /api/projects` | list and create projects; `GET /api/projects/:id/favicon` serves the project's own `favicon.ico` as `image/*` (`204` when it has none) |
+| `GET`/`POST /api/projects` | list and create projects; `PATCH /api/projects/:id/preferences` stores the Workbench result width; `GET /api/projects/:id/favicon` serves the project's own `favicon.ico` (`204` when it has none) |
 | `GET`/`POST /api/sessions` | list, create, load sessions |
 | `GET /api/sessions/:id` | one session with its transcript (`?messages=N`, default 5000, max 50000) |
 | `GET /api/sessions/:id/info` | the session's counts and token totals: messages, turns, tool calls, working time, per-agent usage, window fill |
@@ -257,6 +257,21 @@ on `/api/events` also receives `session_rewound`.
 Session, workspace, git and stats routes accept `?project=<id>`. Without it they
 answer for the default workspace. `/api/health` and `/api/config` are
 install-wide.
+
+## Project preferences
+
+`PATCH /api/projects/:id/preferences` with
+`{"result_panel_width":580}` stores the Workbench result width for that project;
+`GET /api/projects` returns it to every fresh browser or device. It accepts an
+integer from 280 through 1600 pixels and never changes model/run configuration,
+sessions or terminals. The browser can temporarily clamp a width to its viewport
+without persisting that clamp. See `docs/API.md` for malformed-input responses.
+
+```bash
+curl -X PATCH localhost:8787/api/projects/p_ab12/preferences \
+  -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+  -d '{"result_panel_width":580}'
+```
 
 ## Project icons
 

@@ -1,0 +1,432 @@
+/* Workbench application shell. This is a structural layer, not a new palette.
+ * Existing tokens own colors, typography, focus, elevation and density. */
+
+.chat-main.is-workbench {
+  position: relative;
+  container-type: inline-size;
+  container-name: workbench;
+  background-image: none;
+}
+
+.chat-main.is-workbench .main-head {
+  height: var(--workbench-header-h);
+  min-height: var(--workbench-header-h);
+  gap: var(--space-5);
+  padding: 0 var(--space-8);
+  background: var(--bg);
+}
+
+.chat-main.is-workbench .breadcrumb {
+  display: grid;
+  grid-template-columns: minmax(0, auto) max-content;
+  align-items: center;
+  gap: var(--space-1) var(--space-4);
+  color: var(--muted);
+}
+
+.chat-main.is-workbench .breadcrumb > strong {
+  grid-column: 1 / -1;
+  max-width: 100%;
+  font-family: var(--font-ui);
+  font-size: var(--fs-tiny);
+  font-weight: 400;
+  line-height: 1.3;
+}
+
+.chat-main.is-workbench .breadcrumb > .crumb-sep {
+  display: none;
+}
+
+.chat-main.is-workbench .main-title {
+  grid-column: 1;
+  max-width: min(360px, 100%);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.chat-main.is-workbench .head-activity {
+  grid-column: 2;
+  grid-row: 2;
+  align-self: center;
+  margin-left: 0;
+  color: var(--success);
+  font-family: var(--font-ui);
+  font-size: var(--fs-tiny);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.chat-main.is-workbench .head-activity.status-idle {
+  color: var(--muted);
+}
+
+.chat-main.is-workbench .header-buttons {
+  gap: var(--space-3);
+}
+
+.chat-main.is-workbench .header-buttons > .head-btn {
+  min-height: 30px;
+}
+
+.chat-main.is-workbench .command-head-btn,
+.chat-main.is-workbench .command-head-btn.head-icon {
+  display: inline-flex;
+  padding: 0;
+  color: var(--icon-quiet);
+}
+
+.chat-main.is-workbench .context-header-btn {
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border-color: var(--line);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--fs-tiny);
+}
+
+.chat-main.is-workbench .context-header-btn:hover,
+.chat-main.is-workbench .context-header-btn[aria-expanded='true'] {
+  border-color: var(--line-strong);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.context-header-meter {
+  width: var(--space-9);
+  height: var(--space-2);
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--line);
+}
+
+.context-header-meter > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.context-header-value {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A secondary menu is not another permanent rail. */
+.workbench-task-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.workbench-task-menu-popover {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + var(--space-3));
+  right: 0;
+  width: 224px;
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-overlay);
+}
+
+.workbench-task-menu-popover > [role='menuitem'] {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 32px;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--fs-label);
+  text-align: left;
+}
+
+.workbench-task-menu-popover > [role='menuitem']:hover,
+.workbench-task-menu-popover > [role='menuitem']:focus-visible {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.workbench-task-menu-popover > [role='menuitem'] > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.workbench-task-menu-popover > [role='menuitem'] > kbd {
+  margin-left: auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 400;
+}
+
+.workbench-task-menu-rule {
+  display: block;
+  height: var(--hairline);
+  margin: var(--space-2) var(--space-3);
+  background: var(--line);
+}
+
+/* Workspace views share the task header, not a second application strip. */
+.chat-main.is-workbench .main-head > .workspace-tabs {
+  flex: 0 1 auto;
+  align-self: stretch;
+  height: 100%;
+  margin-left: 0;
+  gap: var(--space-4);
+  scroll-padding-inline: var(--space-2);
+}
+
+.chat-main.is-workbench .workspace-tab {
+  font-size: var(--fs-small);
+}
+
+/* The result dock and conversation are peers, not a chat + an extra inspector. */
+.chat-main.is-workbench .center-body.has-result {
+  /* A real right dock: flexible conversation, fixed separator, right-anchored
+   * results. No intrinsic grid sizing is involved in the drag feedback. */
+  display: flex;
+  flex-direction: row;
+  background: var(--bg);
+}
+
+.chat-main.is-workbench .result-resizer {
+  position: relative;
+  z-index: 12;
+  flex: 0 0 var(--workbench-resizer-w);
+  margin-inline-start: auto;
+  width: var(--workbench-resizer-w);
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: var(--bg);
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.chat-main.is-workbench .result-resizer::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(50% - (var(--hairline) / 2));
+  width: var(--hairline);
+  background: var(--line);
+  transition: background-color var(--transition-fast), width var(--transition-fast), left var(--transition-fast);
+}
+
+.chat-main.is-workbench .result-resizer:hover::before,
+.chat-main.is-workbench .result-resizer:focus-visible::before,
+.chat-main.is-workbench .result-resizer[data-dragging='true']::before {
+  left: calc(50% - var(--space-1));
+  width: var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
+.chat-main.is-workbench .result-resizer:focus-visible {
+  outline-offset: calc(-1 * var(--focus-ring-offset));
+}
+
+.chat-main.is-workbench .center-body.has-result > .inspector {
+  flex-basis: auto;
+  width: 100%;
+  height: 100%;
+  border-left-color: var(--line);
+  background: var(--inspector);
+}
+
+.chat-main.is-workbench .center-body .inspector-top {
+  height: var(--workbench-result-bar-h);
+  min-height: var(--workbench-result-bar-h);
+  padding: 0 var(--space-4);
+  background: var(--bg);
+}
+
+.chat-main.is-workbench .center-body .inspector-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.chat-main.is-workbench .inspector-context-button {
+  color: var(--text-secondary);
+}
+
+/* A full source-control or terminal screen never leaves a second result stack. */
+.chat-main.is-workbench .center-body:not([data-view='chat']) > .inspector {
+  display: none;
+}
+
+.chat-main.is-workbench .center-body:not(.has-result) {
+  container-type: inline-size;
+}
+
+/* Use a readable conversation measure, never cap diffs, artifacts or terminals. */
+.chat-main.is-workbench .chat-inner,
+.chat-main.is-workbench .composer-inner {
+  max-width: calc(var(--workbench-reading-w) + var(--space-10) + var(--space-10));
+}
+
+.chat-main.is-workbench .msg-body {
+  font-size: var(--fs-body);
+}
+
+/* Keep every action mounted when the header is constrained: only the workspace
+ * tablist wraps, to a second row that still belongs to the same <header>. */
+@container workbench (max-width: 1000px) {
+  .chat-main.is-workbench .main-head {
+    flex-wrap: wrap;
+    column-gap: var(--space-3);
+    row-gap: 0;
+    height: auto;
+    min-height: calc(var(--workbench-header-h) + var(--workbench-result-bar-h));
+  }
+
+  .chat-main.is-workbench .main-head > .breadcrumb {
+    flex: 1 1 12ch;
+    min-height: var(--workbench-header-h);
+  }
+
+  .chat-main.is-workbench .main-head > .header-buttons {
+    min-height: var(--workbench-header-h);
+  }
+
+  .chat-main.is-workbench .main-head > .workspace-tabs {
+    order: 5;
+    flex: 1 0 100%;
+    width: 100%;
+    height: var(--workbench-result-bar-h);
+    min-height: var(--workbench-result-bar-h);
+  }
+}
+
+/* A drag changes the row: the conversation takes the remaining space and the
+ * Results track stays at its right edge. Never animate the Inspector width within
+ * that track. Apply this only to an actual desktop split; phone transforms and
+ * sheets keep their existing transition contracts. */
+@container workbench (min-width: 1100.01px) {
+  .chat-main.is-workbench .center-body.has-result > .chat-panel {
+    flex: 0.72 1 0;
+    width: 0;
+    min-width: 330px;
+  }
+
+  .chat-main.is-workbench .center-body.has-result > .inspector {
+    flex: 1.35 1 0;
+    width: auto;
+    max-width: var(--workbench-result-w, none);
+    transition-property: border-color, visibility;
+  }
+
+  .chat-main.is-workbench .center-body.has-result[style*='--workbench-result-w'] > .inspector {
+    flex: 0 0 var(--workbench-result-w);
+  }
+}
+
+/* A chosen result becomes a bounded overlay before a split stops being useful. */
+@container workbench (max-width: 1100px) {
+  .chat-main.is-workbench .center-body.has-result {
+    display: flex;
+    container-type: inline-size;
+  }
+
+  .chat-main.is-workbench .center-body.has-result > .result-resizer {
+    display: none;
+  }
+
+  .chat-main.is-workbench .center-body.has-result > .inspector {
+    position: absolute;
+    z-index: 24;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(var(--workbench-overlay-w), calc(100% - var(--space-9)));
+    height: auto;
+    background: var(--inspector);
+    box-shadow: -16px 0 42px var(--shadow-lg);
+  }
+}
+
+@container workbench (max-width: 780px) {
+  .chat-main.is-workbench .breadcrumb > strong,
+  .chat-main.is-workbench .head-activity {
+    display: none;
+  }
+
+  .chat-main.is-workbench .context-header-label {
+    display: none;
+  }
+}
+
+@media (max-width: 1023px) {
+  /* Keep the real slide-over sheet, including its width, transform and trap. */
+  .chat-main.is-workbench .center-body.has-result {
+    display: flex;
+  }
+
+  .chat-main.is-workbench .center-body.has-result > .result-resizer {
+    display: none;
+  }
+
+  .chat-main.is-workbench .center-body.has-result > .inspector {
+    display: flex;
+  }
+
+  .chat-main.is-workbench .center-body.has-result > .inspector {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    flex-basis: auto;
+    width: min(380px, 92vw);
+    height: auto;
+  }
+
+  .chat-main.is-workbench .center-body.has-result > .inspector.is-open,
+  .chat-main.is-workbench .center-body.has-result > .inspector[data-context-open='true'] {
+    transform: none;
+    visibility: visible;
+  }
+}
+
+@media (max-width: 640px) {
+  .chat-main.is-workbench .main-head {
+    column-gap: var(--space-2);
+    row-gap: 0;
+    padding: 0 var(--space-5);
+  }
+
+  .chat-main.is-workbench .breadcrumb {
+    display: block;
+    flex: 1 1 auto;
+  }
+
+  .chat-main.is-workbench .main-title {
+    max-width: 100%;
+    font-size: var(--fs-body);
+  }
+
+  .chat-main.is-workbench .header-buttons {
+    gap: var(--space-2);
+  }
+
+  .chat-main.is-workbench .context-header-button,
+  .chat-main.is-workbench .context-header-btn {
+    min-width: 30px;
+    padding: var(--space-2);
+  }
+
+  .workbench-task-menu-popover {
+    right: 0;
+    width: min(224px, calc(100vw - var(--space-10)));
+  }
+}

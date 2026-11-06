@@ -38,6 +38,7 @@ import { controlPlaneOpen } from './controlPlane';
 import * as railPeek from './railPeek';
 import * as notifyWiring from './notifyWiring';
 import * as promptTokens from './promptTokens';
+import * as workbench from './workbench';
 import { summaryFromDetail } from './selectors';
 import * as store from './store';
 
@@ -66,6 +67,8 @@ let sendInFlight = false;
 const recallingQueued = new Set<string>();
 let handoffToken = 0;
 let rewindGeneration = 0;
+let resultPanelWidthWriteGeneration = 0;
+const resultPanelWidthWrites = new Map<string, number>();
 
 function nextHandoffToken(): number {
   handoffToken += 1;
@@ -98,6 +101,7 @@ function replaceOverlay(next: ReplaceableOverlay | null): void {
   if (next !== 'rewind' && store.rewindTarget.value !== null) rewindGeneration += 1;
   if (next !== 'rewind') store.rewindTarget.value = null;
   store.mobileSheet.value = null;
+  workbench.closeContext();
   // The rail's fly-out is a hover affordance, not a modal surface.
   railPeek.closePeek();
 }
@@ -1399,6 +1403,36 @@ export async function renameProjectById(id: string, name: string): Promise<boole
   }
 }
 
+/**
+ * Persist only the project preference; the separator owns its immediate local
+ * preview. A failed/offline write therefore never snaps the open pane back or
+ * discards session state. Late responses cannot overwrite a newer drag.
+ */
+export async function saveProjectResultPanelWidth(id: string, width: number): Promise<boolean> {
+  if (!store.projects.value.some((project) => project.id === id)) return false;
+  const generation = ++resultPanelWidthWriteGeneration;
+  resultPanelWidthWrites.set(id, generation);
+  try {
+    const saved = await api.updateProjectResultPanelWidth(id, width);
+    if (resultPanelWidthWrites.get(id) === generation) {
+      store.projects.value = store.projects.value.map((candidate) =>
+        candidate.id === id ? { ...candidate, ...saved } : candidate,
+      );
+    }
+    return true;
+  } catch (error) {
+    if (isUnauthorized(error)) enterAuthState();
+    else if (resultPanelWidthWrites.get(id) === generation) {
+      store.pushToast(
+        `Result width is kept for this window, but could not be saved: ${toErrorMessage(error)}`,
+        'error',
+        0,
+      );
+    }
+    return false;
+  }
+}
+
 export async function deleteProjectById(id: string, force = false): Promise<boolean> {
   try {
     const result = await api.deleteProject(id, force);
@@ -1762,6 +1796,7 @@ export function toggleInspector(): void {
 }
 
 export function closeSheets(): void {
+  workbench.closeContext();
   store.mobileSheet.value = null;
 }
 
@@ -2169,6 +2204,8 @@ export function resetRuntimeForTests(): void {
   projectGeneration += 1;
   agentDetailGeneration += 1;
   rewindGeneration += 1;
+  resultPanelWidthWriteGeneration += 1;
+  resultPanelWidthWrites.clear();
   sessionListReadGeneration += 1;
   agentListReadGeneration += 1;
   sendInFlight = false;

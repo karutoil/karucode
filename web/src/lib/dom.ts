@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'preact/hooks';
+import { useLayoutEffect, useRef } from 'preact/hooks';
 import type { RefObject } from 'preact';
 
 const activeTraps: symbol[] = [];
@@ -135,6 +135,11 @@ export function focusableWithin(container: HTMLElement): HTMLElement[] {
  * Traps focus inside a dialog, closes on Escape, locks page scrolling and
  * restores focus to the previously active element on unmount. Dialogs are only
  * rendered while open, so `active` is an explicit escape hatch for tests.
+ *
+ * The listener and stack entry must be installed in the same commit as the
+ * visible surface. A passive effect leaves a frame-sized gap in which trusted
+ * Escape reaches the application shortcut handler, which ignores open dialogs,
+ * and the key is lost.
  */
 export function useFocusTrap(
   ref: RefObject<HTMLElement>,
@@ -144,7 +149,7 @@ export function useFocusTrap(
   const escapeRef = useRef(onEscape);
   escapeRef.current = onEscape;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!active) return;
     const container = ref.current;
     if (!container) return;

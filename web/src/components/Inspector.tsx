@@ -7,6 +7,7 @@ import { pluralise } from '../lib/format';
 import * as actions from '../state/actions';
 import type { InspectorTab } from '../state/store';
 import * as store from '../state/store';
+import * as workbench from '../state/workbench';
 import { TabPanel, Tabs, type TabItem } from './Tabs';
 import { WorkspaceTab } from './WorkspaceTab';
 import { GitManager } from './git/GitManager';
@@ -14,7 +15,7 @@ import { changeCounts } from './git/gitModel';
 import { SessionInfoTab, sessionInfoTooltip } from './SessionInfoTab';
 import { AgentsTab } from './AgentsTab';
 import { PluginPanelView } from './PluginPanelView';
-import { BranchIcon, CircleCheckIcon, CloseIcon, PanelIcon, pluginPanelIcon } from './icons';
+import { BranchIcon, CircleCheckIcon, CloseIcon, LayersIcon, PanelIcon, pluginPanelIcon } from './icons';
 
 /**
  * Refresh a plugin panel when the user asks for it. Kept next to the tabs so the
@@ -94,14 +95,18 @@ export function Inspector(): JSX.Element {
   const isSheetOpen = store.mobileSheet.value === 'inspector';
   const isNarrow = store.narrowViewport.value;
   const inspectorRef = useRef<HTMLElement>(null);
-  useFocusTrap(inspectorRef, isNarrow && isSheetOpen, actions.closeSheets);
+  const contextOpen = workbench.contextOpen.value;
+  const contextSuppressesSheet = isNarrow && isSheetOpen && contextOpen;
+  // Context is the top phone surface. The result sheet remains mounted, but must
+  // not run a second focus trap or expose its controls behind the drawer.
+  useFocusTrap(inspectorRef, isNarrow && isSheetOpen && !contextOpen, actions.closeSheets);
   const pluginTabs = store.pluginPanelTabs.value;
   const items: TabItem<InspectorTab>[] = [
     { id: 'workspace', label: 'Files' },
     { id: 'changes', label: 'Git', title: 'Source control — stage, commit, branches, history' },
     // The session's own numbers, not a second place to read commands: the
     // transcript already renders every command card inline, with its output.
-    { id: 'session', label: 'Session', title: sessionInfoTooltip(store.sessionInfo.value) },
+    { id: 'session', label: 'Session usage', title: sessionInfoTooltip(store.sessionInfo.value) },
     { id: 'agents', label: 'Agents', count: store.runningAgents.value },
     // One tab per panel a plugin declared. The plugin supplies a data payload,
     // never markup: see `pluginPanels.ts` for why that matters.
@@ -124,27 +129,43 @@ export function Inspector(): JSX.Element {
   return (
     <aside
       ref={inspectorRef}
+      id="workbench-results"
       class={`inspector${isSheetOpen ? ' is-open' : ''}`}
       aria-label="Workspace inspector"
+      aria-hidden={contextSuppressesSheet ? 'true' : undefined}
+      inert={contextSuppressesSheet ? true : undefined}
       role={isSheetOpen ? 'dialog' : undefined}
-      aria-modal={isSheetOpen ? 'true' : undefined}
+      aria-modal={isSheetOpen && !contextOpen ? 'true' : undefined}
+      data-context-open={contextOpen ? 'true' : 'false'}
     >
       <div class="inspector-inner">
         <div class="inspector-top">
           <div class="inspector-head">
-            <span class="inspector-label">Inspector</span>
-            <span class="inspector-subtitle">Project context, always in reach</span>
+            <span class="inspector-label">Results</span>
           </div>
-          <button
-            type="button"
-            class="icon-button inspector-quick"
-            onClick={actions.toggleInspector}
-            aria-label={isNarrow ? 'Close inspector' : 'Collapse inspector'}
-            title="Toggle inspector — Cmd/Ctrl+J"
-            data-autofocus={isNarrow && isSheetOpen ? true : undefined}
-          >
-            {store.narrowViewport.value ? <CloseIcon /> : <PanelIcon />}
-          </button>
+          <div class="inspector-head-actions">
+            <button
+              type="button"
+              class="button button-small inspector-context-button"
+              onClick={() => workbench.openContext('now')}
+              aria-haspopup="dialog"
+              aria-expanded={contextOpen}
+              title="Current workspace, session, usage and access"
+            >
+              <LayersIcon size={13} />
+              <span>Context</span>
+            </button>
+            <button
+              type="button"
+              class="icon-button inspector-quick"
+              onClick={actions.toggleInspector}
+              aria-label={isNarrow ? 'Close inspector' : 'Collapse inspector'}
+              title={isNarrow ? 'Close the results sheet' : 'Show or hide the results dock'}
+              data-autofocus={isNarrow && isSheetOpen && !contextOpen ? true : undefined}
+            >
+              {isNarrow ? <CloseIcon /> : <PanelIcon />}
+            </button>
+          </div>
         </div>
 
         <Tabs
@@ -159,7 +180,9 @@ export function Inspector(): JSX.Element {
           <WorkspaceTab />
         </TabPanel>
         <TabPanel idPrefix="inspector" id="changes" active={active === 'changes'}>
-          <GitManager variant="panel" />
+          <div class="result-git">
+            <GitManager variant="page" />
+          </div>
         </TabPanel>
         <TabPanel idPrefix="inspector" id="session" active={active === 'session'}>
           <SessionInfoTab />

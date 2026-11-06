@@ -154,26 +154,26 @@ describe('editing a draft', () => {
 
   it('applies and persists the transcript view options', () => {
     initTheme();
-    expect(root().dataset.toolStyle).toBe('cards');
-    expect(root().dataset.grouping).toBe('none');
-    expect(root().dataset.thinking).toBe('collapsed');
-
-    setToolStyle('rows');
-    setGrouping('turns');
-    setThinking('preview');
-
     expect(root().dataset.toolStyle).toBe('rows');
     expect(root().dataset.grouping).toBe('turns');
+    expect(root().dataset.thinking).toBe('collapsed');
+
+    setToolStyle('cards');
+    setGrouping('none');
+    setThinking('preview');
+
+    expect(root().dataset.toolStyle).toBe('cards');
+    expect(root().dataset.grouping).toBe('none');
     expect(root().dataset.thinking).toBe('preview');
     expect(persisted()?.draft).toMatchObject({
-      toolStyle: 'rows',
-      grouping: 'turns',
+      toolStyle: 'cards',
+      grouping: 'none',
       thinking: 'preview',
     });
   });
 
-  it('keeps a theme saved before the view options working', () => {
-    // A stored selection with no view options must load and paint the defaults.
+  it('uses the new defaults for a stored built-in with no explicit view options', () => {
+    // Only the selection id was stored; there is no user view choice to override.
     localStorage.setItem(
       THEME_STORAGE_KEY,
       JSON.stringify({
@@ -186,9 +186,35 @@ describe('editing a draft', () => {
     );
     initTheme();
     expect(root().dataset.theme).toBe('forest');
+    expect(root().dataset.toolStyle).toBe('rows');
+    expect(root().dataset.grouping).toBe('turns');
+    expect(root().dataset.thinking).toBe('collapsed');
+  });
+
+  it('restores an explicitly stored cards/no-grouping preference', () => {
+    const fullActivity = {
+      ...getTheme('forest'),
+      id: 'custom-full-activity',
+      name: 'Full activity',
+      toolStyle: 'cards' as const,
+      grouping: 'none' as const,
+    };
+    localStorage.setItem(
+      THEME_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        selected: fullActivity.id,
+        baseId: fullActivity.id,
+        custom: [fullActivity],
+        draft: null,
+      }),
+    );
+
+    initTheme();
+    expect(activeTheme.value.toolStyle).toBe('cards');
+    expect(activeTheme.value.grouping).toBe('none');
     expect(root().dataset.toolStyle).toBe('cards');
     expect(root().dataset.grouping).toBe('none');
-    expect(root().dataset.thinking).toBe('collapsed');
   });
 
   it('re-bases the palette when the mode flips but keeps the accent', () => {

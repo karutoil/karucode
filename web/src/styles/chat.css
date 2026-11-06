@@ -164,6 +164,29 @@
   min-width: 0;
 }
 
+/* A prompt is a compact instruction, not another full-width answer. Let its
+ * content determine the width and bias the whole row right; the avatar moves to
+ * the trailing edge without changing DOM order or the keyboard-focus order. */
+.msg-user {
+  width: fit-content;
+  max-width: min(88%, 640px);
+  margin-left: auto;
+  gap: var(--space-4);
+}
+
+.msg-user .msg-avatar {
+  order: 2;
+}
+
+.msg-user .msg-col {
+  flex: 0 1 auto;
+}
+
+.msg-user .msg-top {
+  justify-content: flex-end;
+  margin-bottom: var(--space-2);
+}
+
 /* The mock's `.msg-meta`: 10.5px, a min-height so rows without a chip still
  * align, and a 4px gap under it. */
 .msg-top {
@@ -193,17 +216,18 @@
   line-height: 1.72;
 }
 
-/* The mock's `.body-card`: the user's question in a raised, inset-lit card. */
+/* The prompt keeps a raised semantic surface, but with compact spacing and a
+ * tighter measure than the assistant's open, primary-text reading column. */
 .user-question {
-  margin-top: var(--space-2);
-  padding: var(--space-7) var(--space-8);
+  margin-top: 0;
+  padding: var(--space-5) var(--space-6);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: var(--surface);
+  background: var(--surface-raised);
   box-shadow: inset 0 1px 0 var(--line-soft);
   color: var(--text-secondary);
   font-size: var(--fs-message);
-  line-height: 1.72;
+  line-height: 1.6;
 }
 
 .user-text {
@@ -930,7 +954,7 @@
   overflow-wrap: anywhere;
 }
 
-/* ---------- tool cards (mock: head · 112px body · footer) ---------- */
+/* ---------- tool cards (header · disclosed output · footer) ---------- */
 
 .tool-card,
 .command-card {
@@ -2512,12 +2536,10 @@
 
 /* ---------- phones ----------
  *
- * Measured at 440x956 (iPhone 16 Pro Max): a tool card was 191px — 44px head +
- * a 112px output preview + 33px footer — so two finished calls filled a whole
- * screen and the answer they produced was below the fold. The card keeps its
- * shape and every line stays one click away in "Show output"; what it gives up
- * is the padding and the preview depth, which bought nothing on a column this
- * narrow.
+ * Measured at 440x956 (iPhone 16 Pro Max): a tool card was 191px with its old
+ * 112px output preview, so two finished calls filled a whole screen. Successful
+ * output is no longer mounted until "Show output"; a running card's live preview
+ * uses a shallower clamp on this narrow column.
  */
 
 @media (max-width: 640px) {
@@ -2544,12 +2566,9 @@
     margin-bottom: var(--space-3);
   }
 
-  /* Assistant metadata is a single fixed-height line at desktop width. A model
-   * id is arbitrary text ("anthropic/claude-sonnet-4-5-20250929") and at 320-390px
-   * it pushed the status chip, the throughput badge and the rewind button off the
-   * row - the three things a reader acts on. The pill now shrinks and ellipsises
-   * with the full id in its tooltip, and the line wraps rather than losing what
-   * does not fit. */
+  /* Live state, throughput and rewind stay reachable at phone width by wrapping
+   * instead of squeezing one fixed-height metadata line. Routine completed turns
+   * no longer carry a current-model pill or a redundant Completed chip. */
   .msg-assistant .msg-top {
     flex-wrap: wrap;
     height: auto;
@@ -2557,17 +2576,8 @@
     row-gap: var(--space-2);
   }
 
-  .msg-assistant .model-pill {
-    flex: 0 1 auto;
-    min-width: 0;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   .user-question {
-    padding: var(--space-6) var(--space-7);
+    padding: var(--space-4) var(--space-5);
   }
 
   .tool-card,
@@ -2595,8 +2605,8 @@
   }
 
   .tool-body {
-    /* One and a bit lines of context, not 112px of preview: the "Show output"
-     * disclosure is the way to read the rest, and it is right below. */
+    /* A live running preview gets only a little context on the phone; opened
+     * output has the larger scroll region below. Settled output is not mounted. */
     max-height: 74px;
     padding: var(--space-4) var(--space-5);
     font-size: var(--fs-tiny);

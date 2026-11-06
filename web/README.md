@@ -67,16 +67,17 @@ UI and API are same-origin.
 ```
 src/
   api/        typed client, endpoint functions, fetch-based SSE stream, API types
-  state/      signals store, pure event reducer, session→transcript seeding, actions
-  components/ rail, sidebar, transcript, cards, inspector tabs, composer,
-              Theme Studio, settings, dialogs, states; git/ is the source-control
-              manager
+  state/      signals store, transient Workbench Context, pure event reducer,
+              session→transcript seeding and actions
+  components/ task rail, transcript, rows/cards, Results Inspector, Context,
+              composer, Task actions, Theme Studio, settings, dialogs and states;
+              git/ is the real source-control manager
   theme/      theme engine, built-in palettes, colour maths, storage/import/export
   lib/        markdown+DOMPurify, highlight.js registry, diff parser, format, focus,
               @-mention index and ranking, attachment classification/formatting,
               dock-height measuring for the floating composer
   styles/     tokens, base, layout, rail, chat, composer, inspector, git,
-              overlays, settings, theme-studio
+              overlays, settings, theme-studio, workbench and workbench-navigation
   test/       jsdom setup, fixtures, smoke render
 ```
 
@@ -90,10 +91,10 @@ the frame metrics (`--rail-w`, `--header-h`, `--content-max`, …).
 `data-thinking` on `<html>`, so every component repaints from CSS custom
 properties with no React/Preact re-render.
 
-Theme Studio (project-rail palette button, header theme button,
-`Ctrl/Cmd+Shift+T`, or Settings → General → Appearance) ships eight built-in
-themes and edits 18 palette colours, mode, density, fonts, corner radius, the
-transcript view options and custom CSS. The selection, saved custom themes and
+Theme Studio (Task actions → Theme studio, the project-rail palette button where
+that rail is present, `Ctrl/Cmd+Shift+T`, or Settings → General → Appearance) ships
+eight built-in themes and edits 18 palette colours, mode, density, fonts, corner
+radius, the transcript view options and custom CSS. The selection, saved custom themes and
 the unsigned draft persist in `localStorage` under `karucode.theme-studio.v3`; a
 theme exports as `karucode-theme` version 1 JSON and imports back through a
 validating parser (150 KB cap, hex/mode/density/font checks). See the `themes`
@@ -115,10 +116,13 @@ rules live in `src/state/transcriptLayout.ts` as pure functions over
 `foldTurn`), so they are unit-tested without a DOM and `ChatTranscript.tsx` only
 renders what they return.
 
+Built-in themes start with `toolStyle: "rows"`, `grouping: "turns"` and collapsed
+reasoning. Explicitly stored transcript preferences remain authoritative.
+
 | Option | Values | Effect |
 | --- | --- | --- |
-| `toolStyle` | `cards` (default), `rows` | `rows` is one ~26px line per call (`ToolCard variant="row"`) that expands into the same numbered output. |
-| `grouping` | `none` (default), `tools`, `turns` | `tools` folds a run of *consecutive* calls into one summary line (`ToolGroup`); `turns` also folds a finished turn's steps behind a `.process-fold` button. |
+| `toolStyle` | `rows` (built-in default), `cards` | `rows` is one quiet line per call (`ToolCard variant="row"`) that expands into numbered tool output or command stdout/stderr. `cards` retains the full card treatment. |
+| `grouping` | `turns` (built-in default), `tools`, `none` | `turns` folds a completed turn's working steps behind **Show the working**; `tools` folds only a run of *consecutive* calls (`ToolGroup`); `none` is the explicit full-activity option with every call where it happened. |
 | `thinking` | `collapsed` (default), `preview`, `expanded` | `preview` shows the first line of reasoning under a `Thought` label; `expanded` renders it open. A streaming model is always open. |
 
 The invariant that makes folding safe is enforced in `turnFoldable` and
@@ -202,20 +206,70 @@ stream is a standalone function so reconnect/dedupe can be tested with a fake
 types, other sessions' events, and subagent text/tool deltas (those belong to the
 Agents tab).
 
+## Workbench layout
+
+- **Shell ownership:** `App` renders global overlays and either the control plane or
+  the ordinary `SessionsRail` + `ChatView`. `ProjectRail` is mounted only for the
+  control plane or an intentionally collapsed desktop task rail, where its project
+  tiles retain session peeking. The expanded ordinary Workbench puts project
+  selection and management in the task rail. There is no App-level duplicate
+  Inspector.
+- **Workspace composition:** `ChatView` owns `SessionHeader`, Conversation and its
+  Composer, the full Source control and Terminal views (Terminal only when enabled),
+  the one Results Inspector, and the sibling Context drawer. The main header includes
+  the Conversation / Source control / Terminal tabs with real counts; there is no
+  duplicate second strip. Source control and Terminal mount on first use and then
+  stay mounted but hidden across workspace-view changes. Context never replaces or
+  unmounts the results underneath it.
+- **Control-plane mode:** the embedded `ChatView mode="control-plane"` does not
+  mount project result drawers or Context. Its Composer still renders real Usage
+  telemetry when available, but receives no Usage-opening callback, so that pill is
+  read-only rather than a button to an unavailable destination.
+- **Real secondary actions:** Task actions owns Copy conversation, Session context,
+  Commands, Theme studio, Settings and All tasks through the existing copier and
+  application actions. Arrow keys and Home/End navigate its enabled menu items;
+  Escape and Tab dismiss it. Context's Files, Source control, Session usage, Agents
+  and plugin links operate on the real `store.inspectorTab` selection.
+- **Resizable results:** the wide split's 24px separator accepts mouse/touch drags
+  and keyboard Left/Right (10px), Shift+Left/Right (50px) and Home/End (safe bounds).
+  Pointer release and quiet keyboard bursts save `result_panel_width` using
+  `PATCH /api/projects/:id/preferences`; fresh profiles and other devices read it in
+  the ordinary project list. Constraint clamping is local to the current viewport,
+  and failed writes keep the selected width in the open view with a visible warning.
+  The separator and pane stay flush at the right edge during a drag, with no width
+  transition leaving a trailing gap.
+- **Context:** `Ctrl/Cmd+J` toggles transient Now / Usage / Access state from
+  `state/workbench.ts`. Now shows the actual session/model pin and separates the
+  tool-reachable workspace from deliberately composed message content and
+  attachments. Usage reuses server-backed `SessionInfoTab`; Access reuses the exact
+  shared approval-policy copy and opens Settings. Results stay mounted across
+  Context, and the existing result selection and persisted Inspector collapse
+  preference remain independent of that transient drawer.
+- **Shortcuts and responsive structure:** `Ctrl/Cmd+B` preserves the task-rail
+  toggle and collapsed-desktop project peeking. Escape is handled locally first.
+  `styles/workbench.css` makes Conversation and Results a split view in wide
+  containers, a bounded result overlay at intermediate widths, and the existing
+  full-height sheets on phones. The result separator is hidden outside the split,
+  while workspace tabs wrap inside the task header on constrained containers rather
+  than hiding actions. Phone Context is a focused sheet which restores the previous
+  underlying sheet when merely dismissed.
+
 ## Included behaviour
 
 - Sessions: create, inline rename, delete confirm, running/failure dots, message
   counts, relative time, empty state, Cmd/Ctrl+N (ignored while the focus is in an
   input, textarea or contenteditable, so it never steals a text-editing key).
 - Chat: streamed Markdown (raw HTML off + DOMPurify), code labels/copy/highlighting,
-  collapsed reasoning, tool cards with durations/truncation, streaming command
-  cards with stdout/stderr/exit codes, blocking approval cards, per-run error
-  banners, interrupted notices.
-- Composer: auto-grow, Cmd/Ctrl+Enter send, Stop/Esc, disabled explanations,
-  character counter after 4000, live activity status. It is a floating dock over
-  the transcript (one line at rest, translucent and footnote-less while you read
-  history), reserving its measured height via `--composer-h` — see
-  `lib/dockHeight.ts` and `styles/composer.css`.
+  collapsed reasoning, compact tool/command rows with durations/truncation,
+  expandable raw output and separate stdout/stderr/exit codes, blocking approval
+  cards, per-run error banners and interrupted notices. Completed turns fold by
+  default in built-in themes; errors, approvals, running work and notices remain
+  discoverable, and full cards/ungrouped activity stay available explicitly.
+- Composer: auto-grow and resize re-measurement, Cmd/Ctrl+Enter send, Stop/Esc,
+  disabled explanations, character counter after 4000 and live activity status. It
+  is an opaque floating dock over the transcript, including while reading history,
+  and reserves its measured height via `--composer-h` — see `lib/dockHeight.ts` and
+  `styles/composer.css`. Running phone controls retain Usage, Stop and queue/steer.
 - Composer: `@`-mentions over a real workspace index (files only, ranked by
   name → path → subsequence, keyboard-navigable), attachments from the picker,
   drag-and-drop or paste, inline/upload chips with per-file status, and a send
@@ -223,13 +277,16 @@ Agents tab).
 - Themes: eight built-in palettes, live editing of 18 colours, dark/light mode,
   three densities, interface/code fonts, corner radius, custom CSS, contrast
   readout, save/delete/import/export and per-browser persistence.
-- Workspace tabs: Conversation, Source control (the git manager, full width) and
-  Terminal when the server enables it.
+- Workspace views: Conversation, Source control (the real git manager, full width)
+  and Terminal when the server enables it. Once opened, Source control and Terminal
+  stay mounted across view changes; Context can overlay them without discarding
+  their state.
 - Sessions: client-side session search (`/`), sessions grouped by day, running
   and failure state.
-- Source control: the git manager in two shapes — the full-width workspace tab
-  (change list beside the patch, history below it) and the inspector's Git tab
-  (one column, patch inline). Files are grouped into Merge changes / Staged /
+- Source control: the same real git manager in the full-width workspace view and
+  Results → Git. The page layout puts the change list beside the patch with history
+  below it; `.result-git` adapts the result pane to its actual container width.
+  Files are grouped into Merge changes / Staged /
   Changes / Untracked, each row and each group stages, unstages and discards, the
   commit box commits or amends (`Ctrl/Cmd+Enter`, `stage_all` when nothing is
   staged), the branch chip opens a filter/create/switch/delete dialog, and the
@@ -238,8 +295,9 @@ Agents tab).
   fetch/pull/push stay in the terminal. `components/git/` holds the pieces
   (`GitManager`, `GitChanges`, `GitCommitBox`, `GitHistory`, `GitDiffPane`,
   `GitBranchDialog`, `useGitRepo`, pure `gitModel`), styled by `styles/git.css`.
-- Inspector: Files / Git / Session / Agents tabs, lazy file tree, and the
-  file viewer (below), a Session tab with
+- Results Inspector: Files / Git / Session usage / Agents plus enabled plugin-panel
+  tabs, a lazy file tree and the file viewer (below). Context overlays rather than
+  replaces this tree. Session usage reads
   the session's counts and token totals (context fill, input/output/cached with
   a cache hit rate, prompts vs turns vs model calls vs tool calls, runs and
   working time, per-subagent usage, recent runs), and an Agents console
@@ -358,9 +416,9 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
 - Markdown sanitisation (`<script>`, `<img onerror>`, `javascript:` links) and
   fenced-code labels/copy/highlighting;
 - composer send/stop/disabled/counter/live-region behaviour, plus the floating
-  dock: it sits over the transcript rather than in its own row, goes translucent
-  when you scroll into history and solid again on focus, and publishes its
-  measured height so the transcript reserves room for it (`styles/composer.test.ts`,
+  dock: it stays opaque over the transcript in history, re-grows on draft/viewport
+  changes, retains running phone controls, and publishes its measured height so the
+  transcript reserves room for it (`styles/composer.test.ts`,
   `lib/dockHeight.test.tsx`, `components/ChatView.test.tsx`);
 - approval decisions and resolved/expired states;
 - session list rendering, inline rename, delete confirmation and empty/loading
@@ -377,12 +435,29 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
 - a JSDOM smoke render of the whole app against mocked documented endpoints, which
   asserts zero `console.error`/`console.warn` output.
 
-Latest production build (gzip):
+### Focused real-browser Workbench check
 
-- JS: ~158 KB
-- CSS: ~23 KB
+Build the frontend and the debug server binary first, then run the harness from the
+repository root:
 
-The growth over the previous build is the Theme Studio (8 palettes, colour maths,
-import/export), the 114-role fidelity layer that keeps the UI pixel-identical to
-its design mock across all eight themes, the mention index and the attachment
-pipeline; no runtime dependency was added.
+```bash
+(cd web && npm run build)
+cargo build -p kc-server --bin karucode
+python3 scripts/verify_workbench_frontend.py
+```
+
+The command uses the existing `target/debug/karucode` binary and built `web/dist`,
+and requires Chromium. It starts a temporary mock provider and real debug server,
+then drives Chromium against a disposable git project and temporary data/home
+directories. It does not open or mutate a live workspace. The fixture checks
+mouse/touch/trusted-keyboard result resizing with right-edge anchoring, the unified
+  desktop/phone header,
+real transcript disclosures, Context Now/Usage/Access, the source-control result
+link and file editing, terminal attachment and retention under Context, task/global
+actions, collapsed-project peeking and phone draft preservation. It then launches a
+second, separate browser profile and verifies the server-backed 580px preference
+survives there before checking its phone fallback. Screenshots and reports go to the
+artifact directory.
+
+This is a focused visual/integration harness, not a replacement for `npm test`,
+`npm run typecheck`, the production build, or the product and backend test suites.

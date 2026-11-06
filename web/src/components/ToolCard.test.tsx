@@ -53,19 +53,23 @@ describe('ToolCard', () => {
     expect(toggle().getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('clamps the output preview and expands from the footer button', () => {
+  it('mounts successful output only while expanded from the footer button', () => {
     render(<ToolCard item={tool()} />);
     expect(card().getAttribute('data-open')).toBe('false');
-    // The preview itself is visible; the footer button opens the full output.
-    expect(screen.getByText('fn main() {}')).not.toBeNull();
+    // A closed successful card has no 112px raw-output preview to lay out.
+    expect(document.querySelector('.tool-body')).toBeNull();
+    expect(screen.queryByText('fn main() {}')).toBeNull();
 
     fireEvent.click(toggle());
     expect(card().getAttribute('data-open')).toBe('true');
     expect(toggle().getAttribute('aria-expanded')).toBe('true');
     expect(toggle().textContent).toContain('Show less');
+    expect(document.querySelector('.tool-body')).not.toBeNull();
+    expect(screen.getByText('fn main() {}')).not.toBeNull();
 
     fireEvent.click(toggle());
     expect(card().getAttribute('data-open')).toBe('false');
+    expect(document.querySelector('.tool-body')).toBeNull();
   });
 
   it('numbers every output line like the mock', () => {
@@ -74,9 +78,14 @@ describe('ToolCard', () => {
     expect(numbers).toEqual(['01', '02', '03']);
   });
 
-  it('wires the disclosure button to the output region', () => {
+  it('wires the disclosure button to the output region it mounts', () => {
     render(<ToolCard item={tool()} />);
-    const body = document.getElementById(toggle().getAttribute('aria-controls') ?? '');
+    const bodyId = toggle().getAttribute('aria-controls');
+    expect(bodyId).toBeTruthy();
+    expect(document.getElementById(bodyId ?? '')).toBeNull();
+
+    fireEvent.click(toggle());
+    const body = document.getElementById(bodyId ?? '');
     expect(body).not.toBeNull();
     expect(body?.getAttribute('aria-label')).toBe('read_file output');
   });
@@ -86,17 +95,20 @@ describe('ToolCard', () => {
     expect(card().getAttribute('data-open')).toBe('true');
   });
 
-  it('says it is waiting while the tool is still running', () => {
-    render(<ToolCard item={tool({ status: 'running', output: '', durationMs: null })} defaultOpen />);
+  it('keeps the live waiting preview while the tool is still running', () => {
+    render(<ToolCard item={tool({ status: 'running', output: '', durationMs: null })} />);
+    expect(card().getAttribute('data-open')).toBe('false');
     expect(screen.getByText('Waiting for output…')).not.toBeNull();
     expect(screen.getByText('Running')).not.toBeNull();
     expect(document.querySelector('.tool-foot')?.textContent).toContain('Running…');
   });
 
-  it('reports a finished tool with no output instead of an empty block', () => {
+  it('reports a finished tool with no output when its details are opened', () => {
     render(<ToolCard item={tool({ output: '' })} />);
-    expect(document.querySelector('.tool-body')?.textContent).toContain('No output.');
+    expect(document.querySelector('.tool-body')).toBeNull();
     expect(document.querySelector('.tool-expand')?.textContent).toContain('Show details');
+    fireEvent.click(toggle());
+    expect(document.querySelector('.tool-body')?.textContent).toContain('No output.');
   });
 
   it('marks a truncated result', () => {
@@ -105,11 +117,27 @@ describe('ToolCard', () => {
     expect(card().getAttribute('data-status')).toBe('ok');
   });
 
-  it('shows failures with the error tone and label', () => {
+  it('opens failures to the reason instead of showing only a status label', () => {
     render(<ToolCard item={tool({ status: 'error', output: 'permission denied' })} />);
     expect(card().getAttribute('data-status')).toBe('error');
+    expect(card().getAttribute('data-open')).toBe('true');
     expect(screen.getByText('Failed')).not.toBeNull();
+    expect(screen.getByText('permission denied')).not.toBeNull();
     expect(document.querySelector('.tool-foot')?.textContent).toContain('Failed in 12ms');
+  });
+
+  it('opens a card when an existing call fails, but respects a manual close', () => {
+    const view = render(<ToolCard item={tool()} />);
+    expect(document.querySelector('.tool-body')).toBeNull();
+
+    view.rerender(<ToolCard item={tool({ status: 'error', output: 'permission denied' })} />);
+    expect(card().getAttribute('data-open')).toBe('true');
+    expect(screen.getByText('permission denied')).not.toBeNull();
+
+    fireEvent.click(toggle());
+    expect(document.querySelector('.tool-body')).toBeNull();
+    view.rerender(<ToolCard item={tool({ status: 'error', output: 'still denied' })} />);
+    expect(document.querySelector('.tool-body')).toBeNull();
   });
 
   it('shows a stopped tool without pretending it finished', () => {
@@ -136,9 +164,14 @@ describe('ToolCard', () => {
     const preview = screen.getByTestId('tool-image') as HTMLImageElement;
     expect(preview.getAttribute('src')).toBe('data:image/png;base64,iVBORw0KGgo=');
     expect(preview.getAttribute('alt')).toBe('shot.png · 8 B');
-    // The preview is visible without expanding the (clamped) output.
+    // The thumbnail stays visible without expanding the text output.
     expect(card().getAttribute('data-open')).toBe('false');
     expect(screen.getByText('shot.png · 8 B')).not.toBeNull();
+    expect(document.querySelector('.tool-body')).toBeNull();
+
+    fireEvent.click(toggle());
+    expect(screen.getByTestId('tool-image')).toBe(preview);
+    expect(screen.getByText('shot.png — image/png (8 B)')).not.toBeNull();
   });
 
   it('opens a lightbox with the full image and closes it again', () => {
@@ -231,7 +264,9 @@ describe('ToolCard row variant', () => {
   it('reports failure and a running call in the row itself', () => {
     render(<ToolCard item={tool({ status: 'error', output: 'nope' })} variant="row" />);
     expect(row().getAttribute('data-status')).toBe('error');
+    expect(row().getAttribute('data-open')).toBe('true');
     expect(row().querySelector('.tool-row-status')?.className).toContain('tool-success-error');
+    expect(row().querySelector('.tool-body')?.textContent).toContain('nope');
 
     cleanup();
     render(<ToolCard item={tool({ status: 'running', output: '', durationMs: null })} variant="row" />);

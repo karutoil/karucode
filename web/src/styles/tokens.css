@@ -347,7 +347,7 @@
   /* Mock reference (karucode-v3-themes.html line 19):
    * --railw:64px; --sidew:258px; --rightw:342px; */
   --rail-w: 64px;
-  --sidebar-w: 258px;
+  --sidebar-w: var(--workbench-sidebar-w);
   --inspector-w: 342px;
   --header-h: 66px; /* .main-head{height:66px;min-height:66px} */
   --tabs-h: 44px; /* .workspace-tabs{height:44px;min-height:44px} */
@@ -396,6 +396,20 @@
   --header-h: 76px;
   --tabs-h: 51px;
 }
+
+/* Static Workbench structure. These are geometry tokens, not a second palette. */
+:root {
+  --workbench-sidebar-w: 232px;
+  --workbench-header-h: 58px;
+  --workbench-reading-w: 70ch;
+  --workbench-context-w: 410px;
+  --workbench-overlay-w: 460px;
+  --workbench-result-bar-h: 45px;
+  --workbench-resizer-w: 24px;
+}
+
+:root[data-density='compact'] { --workbench-header-h: 50px; }
+:root[data-density='spacious'] { --workbench-header-h: 68px; }
 
 @media (max-width: 1350px) {
   :root {

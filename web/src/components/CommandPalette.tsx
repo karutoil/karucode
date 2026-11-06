@@ -63,12 +63,12 @@ export function CommandPalette(): JSX.Element | null {
       {
         id: 'toggle-inspector',
         label: narrow
-          ? 'Open inspector panel'
+          ? 'Open workspace results'
           : store.inspectorCollapsed.value
-            ? 'Show inspector'
-            : 'Hide inspector',
+            ? 'Show workspace results'
+            : 'Hide workspace results',
         group: 'Actions',
-        hint: 'Cmd/Ctrl+J',
+        hint: 'Results',
         icon: <PanelIcon size={15} />,
         run: actions.toggleInspector,
       },

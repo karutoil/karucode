@@ -13,6 +13,7 @@ import { emptyChatState } from '../state/chat';
 import { resetProjectIcons } from '../state/projectIcons';
 import { resetPromptTokens } from '../state/promptTokens';
 import * as store from '../state/store';
+import * as workbench from '../state/workbench';
 
 export const NOW = 1_710_000_100_000;
 
@@ -297,6 +298,8 @@ export function omitFields<T extends object>(row: T, ...keys: string[]): T {
 }
 
 export function resetAppState(): void {
+  workbench.closeContext();
+  workbench.selectContextSection('now');
   actions.resetRuntimeForTests();
   resetProjectIcons();
   setAuthToken(null);

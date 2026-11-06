@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Current schema version. Bump together with a new arm in [`SqliteStore::migrate`].
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 22;
 
 /// Advisory lock file that makes a data directory single-instance.
 const LOCK_FILE_NAME: &str = "karucode.lock";
@@ -350,6 +350,11 @@ const MIGRATION_21: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_checkpoints_content_id ON checkpoints(content_id);
 "#;
 
+/// Schema v22: the Workbench result width belongs to a project, not a browser.
+/// The nullable column lives in [`ADDED_COLUMNS`]; existing projects use the
+/// frontend default until their operator chooses a size.
+const MIGRATION_22: &str = "";
+
 const MIGRATION_12: &str = r#"
 CREATE TABLE IF NOT EXISTS missions (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -461,6 +466,7 @@ const ADDED_COLUMNS: &[(i64, &str, &str, &str)] = &[
         "TEXT NOT NULL DEFAULT 'active'",
     ),
     (20, "sessions", "control", "INTEGER NOT NULL DEFAULT 0"),
+    (22, "projects", "result_panel_width", "INTEGER"),
 ];
 
 pub struct SqliteStore {
@@ -701,6 +707,11 @@ fn map_project(row: &Row<'_>) -> rusqlite::Result<Project> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         session_count: row.get("session_count")?,
+        // A hand-edited negative or oversized SQLite value is an absent cosmetic
+        // preference, not a reason to make every project disappear from the UI.
+        result_panel_width: row
+            .get::<_, Option<i64>>("result_panel_width")?
+            .and_then(|width| u32::try_from(width).ok()),
     })
 }
 
@@ -1260,6 +1271,7 @@ impl SqliteStore {
                     19 => MIGRATION_19,
                     20 => MIGRATION_20,
                     21 => MIGRATION_21,
+                    22 => MIGRATION_22,
                     other => {
                         return Err(Error::Store(format!("missing migration v{other}")));
                     }
@@ -2299,7 +2311,7 @@ impl Store for SqliteStore {
             )
             .map_err(|e| db_err("create_project", e))?;
             conn.query_row(
-                "SELECT p.id, p.name, p.path, p.created_at, p.updated_at,
+                "SELECT p.id, p.name, p.path, p.created_at, p.updated_at, p.result_panel_width,
                         (SELECT COUNT(*) FROM sessions s WHERE s.project_id = p.id) AS session_count
                    FROM projects p WHERE p.id = ?1",
                 params![id],
@@ -2314,7 +2326,7 @@ impl Store for SqliteStore {
         self.read(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT p.id, p.name, p.path, p.created_at, p.updated_at,
+                    "SELECT p.id, p.name, p.path, p.created_at, p.updated_at, p.result_panel_width,
                             (SELECT COUNT(*) FROM sessions s WHERE s.project_id = p.id) AS session_count
                        FROM projects p
                       ORDER BY p.created_at ASC, p.id ASC",
@@ -2334,7 +2346,7 @@ impl Store for SqliteStore {
         self.read(move |conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT p.id, p.name, p.path, p.created_at, p.updated_at,
+                    "SELECT p.id, p.name, p.path, p.created_at, p.updated_at, p.result_panel_width,
                             (SELECT COUNT(*) FROM sessions s WHERE s.project_id = p.id) AS session_count
                        FROM projects p WHERE p.id = ?1",
                 )
@@ -2361,6 +2373,23 @@ impl Store for SqliteStore {
                     params![id, name, now],
                 )
                 .map_err(|e| db_err("rename_project", e))?;
+            if updated == 0 {
+                return Err(Error::NotFound(format!("project {id}")));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn set_project_result_panel_width(&self, id: &str, width: u32) -> Result<()> {
+        let id = id.to_string();
+        self.with(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE projects SET result_panel_width = ?2 WHERE id = ?1",
+                    params![id, width],
+                )
+                .map_err(|e| db_err("set_project_result_panel_width", e))?;
             if updated == 0 {
                 return Err(Error::NotFound(format!("project {id}")));
             }
@@ -4394,6 +4423,7 @@ mod tests {
                 19 => MIGRATION_19,
                 20 => MIGRATION_20,
                 21 => MIGRATION_21,
+                22 => MIGRATION_22,
                 other => panic!("no batch for v{other}"),
             };
             for (_, table, column, decl) in ADDED_COLUMNS
@@ -9770,5 +9800,59 @@ mod project_tests {
             "sessions survive a project delete but lose the reference"
         );
         assert!(store.list_projects().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn project_result_panel_width_is_scoped_and_survives_reopen() {
+        let db = TempDb::new("project-result-width");
+        {
+            let store = db.open().await;
+            let first = store
+                .create_project("p_1", "One", "/tmp/one")
+                .await
+                .expect("first project");
+            store
+                .create_project("p_2", "Two", "/tmp/two")
+                .await
+                .expect("second project");
+            assert_eq!(first.result_panel_width, None);
+
+            store
+                .set_project_result_panel_width("p_1", 640)
+                .await
+                .expect("save width");
+            assert_eq!(
+                store
+                    .get_project("p_1")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .result_panel_width,
+                Some(640)
+            );
+            assert_eq!(
+                store
+                    .get_project("p_2")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .result_panel_width,
+                None
+            );
+            assert!(store
+                .set_project_result_panel_width("p_missing", 640)
+                .await
+                .is_err());
+        }
+
+        let reopened = db.open().await;
+        assert_eq!(
+            reopened
+                .list_projects()
+                .await
+                .expect("projects after reopen")[0]
+                .result_panel_width,
+            Some(640)
+        );
     }
 }

@@ -6,6 +6,8 @@ import type { WorkspaceTree } from '../api/types';
 import { configFixture, resetAppState } from '../test/fixtures';
 import { emptyChatState } from '../state/chat';
 import * as store from '../state/store';
+import * as workbench from '../state/workbench';
+import { describeApprovals } from '../lib/approvalCopy';
 
 const idle: Activity = { kind: 'idle', label: 'Ready' };
 
@@ -101,6 +103,30 @@ describe('Composer', () => {
     expect(textarea.value).toBe('Keep me');
   });
 
+  it('retains draft-driven auto-grow and re-measures wrapping after a resize', async () => {
+    const { textarea } = renderComposer();
+    let measuredHeight = 44;
+    Object.defineProperty(textarea, 'scrollHeight', {
+      configurable: true,
+      get: () => measuredHeight,
+    });
+
+    measuredHeight = 92;
+    fireEvent.input(textarea, { target: { value: 'first line\nsecond line' } });
+    await waitFor(() => expect(textarea.style.height).toBe('92px'));
+
+    // A narrower viewport can wrap the unchanged draft onto another line. Do not
+    // retain a stale inline height just because the draft dependency did not change.
+    measuredHeight = 108;
+    fireEvent(window, new Event('resize'));
+    await waitFor(() => expect(textarea.style.height).toBe('108px'));
+    expect(textarea.value).toBe('first line\nsecond line');
+
+    measuredHeight = 44;
+    fireEvent.input(textarea, { target: { value: 'one line' } });
+    await waitFor(() => expect(textarea.style.height).toBe('44px'));
+  });
+
   it('sends with the Send button and trims only for the emptiness check', async () => {
     const { props, textarea } = renderComposer();
     fireEvent.input(textarea, { target: { value: '  hello  ' } });
@@ -157,6 +183,7 @@ describe('Composer', () => {
 
   describe('mock fidelity', () => {
     afterEach(() => {
+      workbench.closeContext();
       store.config.value = null;
       resetAppState();
     });
@@ -191,13 +218,22 @@ describe('Composer', () => {
       expect(container.querySelector('.compose-top')).toBeNull();
     });
 
-    it('reads the approval policy into the right-hand footnote zone', () => {
+    it('shares approval copy and opens Settings without adding an inline editor', () => {
       store.config.value = configFixture;
-      renderComposer();
-      const approvals = document.querySelector('.compose-approvals') as HTMLElement;
+      const { props } = renderComposer();
+      const approvals = document.querySelector('.compose-approvals') as HTMLButtonElement;
+      const shared = describeApprovals(configFixture);
       expect(approvals).not.toBeNull();
-      expect(approvals.textContent).toContain('Approvals: ask');
+      expect(shared).not.toBeNull();
+      expect(approvals.tagName).toBe('BUTTON');
+      expect(approvals.type).toBe('button');
+      expect(approvals.textContent).toBe(`Approvals: ${shared!.label}`);
+      expect(approvals.getAttribute('title')).toBe(shared!.title);
       expect(approvals.getAttribute('title')).toContain('1 allowlisted command');
+      expect(approvals.querySelector('input, select')).toBeNull();
+
+      fireEvent.click(approvals);
+      expect(props.onOpenSettings).toHaveBeenCalledTimes(1);
     });
 
     it('keeps the token usage reachable when it leaves the footnote', () => {
@@ -220,15 +256,53 @@ describe('Composer', () => {
         const pill = container.querySelector('.context-pill') as HTMLElement;
         expect(pill).not.toBeNull();
         // configFixture's model declares context_window: 128_000.
-        expect(pill.textContent).toBe('25.0%');
+        expect(pill.querySelector('.context-pill-text')?.textContent).toBe('25.0%');
+        expect(pill.textContent).toContain('Usage');
         expect(pill.getAttribute('title')).toContain('32,000 of 128,000 context tokens');
         expect(pill.getAttribute('aria-label')).toContain('25.0% full');
       });
 
-      it('renders nothing before the first call, rather than 0%', () => {
+      it('invokes exactly the caller-owned Usage action with the reported reading intact', () => {
+        store.config.value = configFixture;
+        withUsage(32_000);
+        const onOpenUsage = vi.fn();
+        renderComposer({ onOpenUsage });
+        expect(workbench.contextOpen.value).toBe(false);
+
+        fireEvent.click(
+          screen.getByRole('button', { name: /Usage: context window 25\.0% full.*Open session usage/ }),
+        );
+        expect(onOpenUsage).toHaveBeenCalledExactlyOnceWith();
+        // The workspace callback decides whether and how to open its drawer.
+        expect(workbench.contextOpen.value).toBe(false);
+      });
+
+      it('keeps Usage as read-only telemetry without a destination, including on a narrow control plane', () => {
+        store.config.value = configFixture;
+        withUsage(32_000);
+        store.narrowViewport.value = true;
+        store.mobileSheet.value = 'sessions';
+        const { container } = renderComposer();
+
+        const pill = container.querySelector('.context-pill') as HTMLElement;
+        expect(pill.tagName).toBe('SPAN');
+        expect(pill.getAttribute('aria-label')).toBe(
+          'Usage: context window 25.0% full, 32,000 of 128,000 tokens. Open session usage',
+        );
+        expect(pill.getAttribute('title')).toContain('32,000 of 128,000 context tokens used (25.0%)');
+        expect(pill.querySelector('.context-pill-text')?.textContent).toBe('25.0%');
+        expect(screen.queryByRole('button', { name: /Usage: context window/ })).toBeNull();
+
+        fireEvent.click(pill);
+        expect(workbench.contextOpen.value).toBe(false);
+        expect(store.mobileSheet.value).toBe('sessions');
+      });
+
+      it('renders nothing before the first call, even with a draft, rather than estimating 0%', () => {
         store.config.value = configFixture;
         withUsage(null);
-        const { container } = renderComposer();
+        const { container, textarea } = renderComposer();
+        fireEvent.input(textarea, { target: { value: 'This unsubmitted draft is not provider usage.' } });
         expect(container.querySelector('.context-pill')).toBeNull();
       });
 
@@ -278,7 +352,7 @@ describe('Composer', () => {
         store.currentSessionId.value = 's_ab12';
         withUsage(250_000);
         const { container } = renderComposer();
-        expect(container.querySelector('.context-pill')?.textContent).toBe('25.0%');
+        expect(container.querySelector('.context-pill-text')?.textContent).toBe('25.0%');
       });
 
       it('warns before the window is exhausted', () => {
@@ -297,7 +371,7 @@ describe('Composer', () => {
     it('writes the shortcut hint as plain text, not keycaps', () => {
       const { container } = renderComposer();
       const hint = container.querySelector('.composer-hint') as HTMLElement;
-      expect(hint.textContent?.replace(/\s+/g, ' ').trim()).toBe('Ctrl Enter to send·@ mention files');
+      expect(hint.textContent?.replace(/\s+/g, ' ').trim()).toBe('Ctrl Enter to send·@ reference files');
       expect(hint.querySelector('kbd')).toBeNull();
     });
 
@@ -789,6 +863,48 @@ describe('Composer', () => {
       // refuses: there is no Send button while the agent works.
       expect(screen.queryByRole('button', { name: /Send message/ })).toBeNull();
       expect(screen.getByRole('button', { name: /steer the running turn/ })).not.toBeNull();
+    });
+
+    it('separates configuration/Stop from send mode/send without dropping controls', async () => {
+      const { container, textarea } = renderRunning({
+        queued: [
+          {
+            id: 'still-visible',
+            kind: 'steer',
+            content: 'already queued',
+            draft: 'already queued',
+            accepted_at: 1,
+          },
+        ],
+        onRecall: vi.fn(async () => true),
+      });
+      const bar = container.querySelector('.compose-bottom.is-running') as HTMLElement;
+      const configuration = bar.querySelector('.compose-configuration') as HTMLElement;
+      const actions = bar.querySelector('.compose-run-actions') as HTMLElement;
+      const stop = screen.getByRole('button', { name: /Stop run/ });
+      const send = screen.getByRole('button', { name: /steer the running turn/i });
+
+      expect(bar).not.toBeNull();
+      expect(configuration).not.toBeNull();
+      expect(actions).not.toBeNull();
+      expect(configuration.contains(screen.getByRole('button', { name: 'Attach files' }))).toBe(true);
+      expect(
+        within(configuration).getByRole('group', {
+          name: 'Model and reasoning pins for subsequent runs in this session',
+        }),
+      ).not.toBeNull();
+      // They are sibling grid areas on a phone, not nested controls that can hide
+      // Stop when the second row wraps or the mode toggle appears.
+      expect(stop.parentElement).toBe(bar);
+      expect(configuration.contains(stop)).toBe(false);
+      expect(actions.contains(stop)).toBe(false);
+      expect(actions.contains(send)).toBe(true);
+      expect(configuration.contains(send)).toBe(false);
+
+      fireEvent.input(textarea, { target: { value: 'choose the next queue explicitly' } });
+      await waitFor(() => expect(actions.contains(screen.getByRole('radiogroup'))).toBe(true));
+      expect(screen.getByRole('button', { name: /Stop run/ })).toBe(stop);
+      expect(screen.getByRole('region', { name: 'Queued messages' })).not.toBeNull();
     });
 
     it('queues the draft as a steer on Ctrl+Enter', async () => {

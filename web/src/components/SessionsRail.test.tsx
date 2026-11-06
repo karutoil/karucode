@@ -7,6 +7,7 @@ import * as actions from '../state/actions';
 import * as store from '../state/store';
 import * as sessionFacts from '../state/sessionFacts';
 import * as railPeek from '../state/railPeek';
+import { controlPlaneOpen } from '../state/controlPlane';
 
 function renderList(overrides: Partial<SessionListProps> = {}) {
   const props: SessionListProps = {
@@ -52,6 +53,22 @@ describe('SessionList', () => {
     });
     expect(container.querySelector('.status-dot.status-running')).not.toBeNull();
     expect(screen.getByText('Running.')).not.toBeNull();
+  });
+
+  it('keeps working details discoverable without repeating tool glyphs in every row', () => {
+    sessionFacts.sessionFacts.value = {
+      [summaryFixture.id]: { turns: 4, calls: 7, tools: ['run_command', 'edit_file'] },
+    };
+    const { container } = renderList({ sessions: [summaryFixture] });
+    const open = container.querySelector<HTMLButtonElement>('.session-open');
+
+    expect(open?.title).toContain('4 turns');
+    expect(open?.title).toContain('7 tool calls');
+    expect(open?.title).toContain('Tools: run_command, edit_file');
+    expect(container.querySelector('.session-glyphs')).toBeNull();
+    expect(container.querySelector('.session-turns')).toBeNull();
+    expect(screen.getByText('12 messages')).not.toBeNull();
+    sessionFacts.sessionFacts.value = {};
   });
 
   it('selects a session when clicked', () => {
@@ -314,6 +331,243 @@ describe('SessionsRail shell', () => {
   });
 });
 
+describe('SessionsRail desktop project navigation', () => {
+  const docsProject = {
+    id: 'p_docs',
+    name: 'Docs Site',
+    path: '/home/me/docs',
+    created_at: NOW,
+    updated_at: NOW,
+    session_count: 3,
+  };
+
+  beforeEach(() => {
+    store.sessions.value = [summaryFixture, secondSummaryFixture];
+    store.sessionsLoading.value = false;
+    store.currentSessionId.value = summaryFixture.id;
+    store.currentProjectId.value = 'p_karucode';
+    store.projects.value = [
+      {
+        id: 'p_karucode',
+        name: 'KaruCode',
+        path: '/home/me/karucode',
+        created_at: NOW,
+        updated_at: NOW,
+        session_count: 2,
+      },
+      docsProject,
+    ];
+    store.clock.value = NOW;
+    store.narrowViewport.value = false;
+    store.mobileSheet.value = null;
+    store.railCollapsed.value = false;
+    store.notifications.value = [];
+    store.projectIcons.value = {};
+    controlPlaneOpen.value = false;
+  });
+
+  it('switches projects through the disclosure and retains favicons and unread indicators', async () => {
+    const switchProject = vi.spyOn(actions, 'switchProject').mockResolvedValue(undefined);
+    store.projectIcons.value = { p_karucode: 'blob:project-icon' };
+    store.notifications.value = [
+      {
+        id: 'docs-one',
+        kind: 'run_finished',
+        title: 'Docs finished',
+        body: '',
+        sessionId: 's_docs_one',
+        sessionTitle: 'Docs',
+        projectId: 'p_docs',
+        source: 'runtime',
+        at: NOW,
+        read: false,
+      },
+      {
+        id: 'docs-two',
+        kind: 'needs_input',
+        title: 'Docs needs input',
+        body: '',
+        sessionId: 's_docs_two',
+        sessionTitle: 'Docs',
+        projectId: 'p_docs',
+        source: 'runtime',
+        at: NOW,
+        read: false,
+      },
+    ];
+    const { container } = render(<SessionsRail />);
+    const disclosure = screen.getByRole('button', { name: 'Projects: KaruCode' });
+
+    expect(disclosure.querySelector('img.project-rail-icon')?.getAttribute('src')).toBe(
+      'blob:project-icon',
+    );
+    expect(container.querySelector('.project-switcher-list')).toBeNull();
+    fireEvent.click(disclosure);
+
+    const docs = screen.getByRole('button', {
+      name: 'Switch to Docs Site (/home/me/docs), 2 unread notifications',
+    });
+    expect(within(docs).getByText('2')).not.toBeNull();
+    await vi.waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole('button', { name: 'Switch to KaruCode (/home/me/karucode)' }),
+      ),
+    );
+    fireEvent.click(docs);
+
+    expect(switchProject).toHaveBeenCalledWith('p_docs');
+    expect(screen.queryByLabelText('Available projects')).toBeNull();
+    await vi.waitFor(() => expect(document.activeElement).toBe(disclosure));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open control plane' }));
+    expect(controlPlaneOpen.value).toBe(true);
+    switchProject.mockRestore();
+  });
+
+  it('offers every retained project command in the desktop options menu', async () => {
+    const refresh = vi.spyOn(actions, 'refreshSessions').mockResolvedValue(undefined);
+    const settings = vi.spyOn(actions, 'openSettings').mockImplementation(() => undefined);
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined);
+    render(<SessionsRail />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project options' }));
+    const menu = screen.getByRole('menu', { name: 'Project options for KaruCode' });
+    for (const label of [
+      'Copy project path',
+      'Refresh sessions',
+      'Project settings…',
+      'Rename…',
+      'Delete project…',
+    ]) {
+      expect(within(menu).getByRole('menuitem', { name: label })).not.toBeNull();
+    }
+
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy project path' }));
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('/home/me/karucode'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Refresh sessions' }));
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Project settings…' }));
+    expect(settings).toHaveBeenCalledTimes(1);
+    writeText.mockRestore();
+    refresh.mockRestore();
+    settings.mockRestore();
+  });
+
+  it('uses the real add, rename and delete dialogs and actions on desktop', async () => {
+    const create = vi.spyOn(actions, 'createProject').mockResolvedValue({
+      ...docsProject,
+      id: 'p_new',
+      name: 'New Project',
+      path: '/tmp/new-project',
+      session_count: 0,
+    });
+    const rename = vi.spyOn(actions, 'renameProjectById').mockResolvedValue(true);
+    const remove = vi.spyOn(actions, 'deleteProjectById').mockResolvedValue(true);
+    render(<SessionsRail />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add project' }));
+    const addDialog = screen.getByRole('dialog', { name: 'Add project' });
+    fireEvent.input(within(addDialog).getByLabelText('Project path'), {
+      target: { value: '/tmp/new-project' },
+    });
+    fireEvent.input(within(addDialog).getByLabelText('Display name (optional)'), {
+      target: { value: 'New Project' },
+    });
+    fireEvent.click(within(addDialog).getByRole('button', { name: 'Add project' }));
+    await vi.waitFor(() => expect(create).toHaveBeenCalledWith('New Project', '/tmp/new-project'));
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Add project' })).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename…' }));
+    const renameDialog = screen.getByRole('dialog', { name: 'Rename project' });
+    fireEvent.input(within(renameDialog).getByLabelText('Project name'), {
+      target: { value: 'KaruCode Workbench' },
+    });
+    fireEvent.click(within(renameDialog).getByRole('button', { name: 'Save name' }));
+    await vi.waitFor(() =>
+      expect(rename).toHaveBeenCalledWith('p_karucode', 'KaruCode Workbench'),
+    );
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename project' })).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project options' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete project…' }));
+    const deleteDialog = screen.getByRole('dialog', { name: 'Delete project?' });
+    fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete project' }));
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledWith('p_karucode', true));
+
+    create.mockRestore();
+    rename.mockRestore();
+    remove.mockRestore();
+  });
+
+  it('makes Close dismiss the desktop disclosure without invoking the mobile action', async () => {
+    const closeSheets = vi.spyOn(actions, 'closeSheets').mockImplementation(() => undefined);
+    render(<SessionsRail />);
+    const disclosure = screen.getByRole('button', { name: 'Projects: KaruCode' });
+    fireEvent.click(disclosure);
+    fireEvent.click(screen.getByRole('button', { name: 'Close project switcher' }));
+
+    expect(screen.queryByLabelText('Available projects')).toBeNull();
+    expect(closeSheets).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(document.activeElement).toBe(disclosure));
+    closeSheets.mockRestore();
+  });
+
+  it('contains disclosure Escape before global run shortcuts and handles a nested menu first', async () => {
+    const globalEscape = vi.fn();
+    const onWindowKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') globalEscape();
+    };
+    window.addEventListener('keydown', onWindowKeyDown);
+    render(<SessionsRail />);
+    const disclosure = screen.getByRole('button', { name: 'Projects: KaruCode' });
+
+    fireEvent.click(disclosure);
+    const active = screen.getByRole('button', { name: 'Switch to KaruCode (/home/me/karucode)' });
+    await vi.waitFor(() => expect(document.activeElement).toBe(active));
+    fireEvent.keyDown(active, { key: 'Escape' });
+    expect(screen.queryByLabelText('Available projects')).toBeNull();
+    expect(globalEscape).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(document.activeElement).toBe(disclosure));
+
+    fireEvent.click(disclosure);
+    fireEvent.click(screen.getByRole('button', { name: 'Project options' }));
+    const first = within(screen.getByRole('menu', { name: 'Project options for KaruCode' }))
+      .getAllByRole('menuitem')[0]!;
+    await vi.waitFor(() => expect(document.activeElement).toBe(first));
+    fireEvent.keyDown(first, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(screen.getByLabelText('Available projects')).not.toBeNull();
+    expect(globalEscape).not.toHaveBeenCalled();
+
+    const options = screen.getByRole('button', { name: 'Project options' });
+    await vi.waitFor(() => expect(document.activeElement).toBe(options));
+    fireEvent.keyDown(options, { key: 'Escape' });
+    expect(screen.queryByLabelText('Available projects')).toBeNull();
+    expect(globalEscape).not.toHaveBeenCalled();
+    window.removeEventListener('keydown', onWindowKeyDown);
+  });
+
+  it('closes on outside pointer-down but not on a pointer inside the disclosure', () => {
+    render(
+      <>
+        <SessionsRail />
+        <button type="button">Outside</button>
+      </>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Projects: KaruCode' }));
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'Switch to Docs Site (/home/me/docs)' }));
+    expect(screen.getByLabelText('Available projects')).not.toBeNull();
+
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'Outside' }));
+    expect(screen.queryByLabelText('Available projects')).toBeNull();
+  });
+});
+
 describe('SessionsRail project switcher (phones)', () => {
   function seedProjects(): void {
     store.sessions.value = [summaryFixture];
@@ -363,11 +617,15 @@ describe('SessionsRail project switcher (phones)', () => {
     expect(items[1]?.getAttribute('aria-current')).toBeNull();
   });
 
-  it('is not rendered on a wide viewport, where the rail does the job', () => {
+  it('keeps the phone list out of the wide DOM until its desktop disclosure opens', () => {
     store.narrowViewport.value = false;
     store.mobileSheet.value = null;
     const { container } = render(<SessionsRail />);
-    expect(container.querySelector('.project-switcher')).toBeNull();
+    expect(container.querySelector('.project-switcher-desktop')).not.toBeNull();
+    expect(container.querySelector('.project-switcher-list')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Projects: KaruCode' }));
+    expect(container.querySelectorAll('.project-switcher-item')).toHaveLength(2);
   });
 
   it('switches project from a pill and ignores a click on the active one', () => {

@@ -303,6 +303,35 @@ describe('GitManager — full-width source control view', () => {
     expect(posts(calls, '/api/git/stage')[0]?.body).toEqual({ paths: ['tests/plugin_lifecycle.rs'] });
   });
 
+  it('gives coexisting page managers independent commit labels and drafts', async () => {
+    installFetch();
+    const { container } = render(
+      <>
+        <GitManager variant="page" />
+        <GitManager variant="page" />
+      </>,
+    );
+
+    expect(await screen.findAllByRole('region', { name: 'Staged' })).toHaveLength(2);
+    const forms = Array.from(container.querySelectorAll<HTMLFormElement>('form.gitm-commit'));
+    const messages = forms.map((form) => form.querySelector<HTMLTextAreaElement>('.gitm-message'));
+    const labels = forms.map((form) => form.querySelector<HTMLLabelElement>('label[for]'));
+    expect(forms).toHaveLength(2);
+    expect(screen.getAllByRole('textbox', { name: 'Commit message' })).toHaveLength(2);
+
+    expect(new Set(messages.map((message) => message?.id)).size).toBe(2);
+    messages.forEach((message, index) => {
+      expect(message?.id).not.toBe('');
+      expect(labels[index]?.getAttribute('for')).toBe(message?.id);
+      expect(labels[index]?.control).toBe(message);
+      expect(document.getElementById(message!.id)).toBe(message);
+    });
+
+    fireEvent.input(messages[0]!, { target: { value: 'feat: only the first manager' } });
+    expect(messages[0]?.value).toBe('feat: only the first manager');
+    expect(messages[1]?.value).toBe('');
+  });
+
   it('commits the staged files with the typed message', async () => {
     const calls = installFetch({ statusAfter: { ...STATUS, files: [] } });
     render(<GitManager variant="page" />);

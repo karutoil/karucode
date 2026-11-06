@@ -126,12 +126,12 @@ function isStreamingPart(part: ChatItem): boolean {
 }
 
 /**
- * The status chip after the author name — the mock's "Completed" tag.
+ * The status chip after the author name. Ordinary completion needs no badge;
+ * only live, failed and interrupted turns add a state to the reading flow.
  *
  * It uses the same "is this turn still doing something" test as the throughput
  * badge and the fold: a turn whose prose has finished but whose tool call is
- * still running is *working*, not completed, and claiming otherwise put a
- * "Completed" chip beside a live token counter.
+ * still running is *working*, not completed.
  */
 function turnTag(parts: readonly ChatItem[]): JSX.Element | null {
   const turn: Turn = { key: 'tag', at: 0, parts: [...parts] };
@@ -149,12 +149,7 @@ function turnTag(parts: readonly ChatItem[]): JSX.Element | null {
   if (parts.some((part) => part.kind === 'interrupted')) {
     return <span class="tag tag-stopped">Interrupted</span>;
   }
-  return (
-    <span class="tag">
-      <span class="tag-dot tag-dot-idle" aria-hidden="true" />
-      Completed
-    </span>
-  );
+  return null;
 }
 
 function MessageBodyImpl({ item, options }: { item: MessageItem; options: ViewOptions }): JSX.Element {
@@ -592,7 +587,7 @@ function buildEntries(items: readonly ChatItem[], previous: readonly Entry[] = [
 }
 
 /**
- * One assistant row: avatar, author line (time, status chip, throughput, rewind)
+ * One assistant row: avatar, author line (live state, throughput, rewind)
  * and the turn body.
  *
  * Memoised so the header work (`turnTag`, `turnOutputChars`, `turnWorking`) and
@@ -625,10 +620,7 @@ function AssistantRow({
   const answer = entry.parts.find(
     (part) => part.kind === 'message' && part.role === 'assistant',
   ) as MessageItem | undefined;
-  // The mock names the model on every assistant turn. Ours reads the live
-  // selection once per render (a signal read, not a prop) and shows the bare
-  // model id - the same string the composer pill names.
-  const model = store.activeModelLabel.value;
+  const working = turnWorking(turn);
   return (
     <article
       class={`msg msg-assistant${streaming ? ' is-streaming' : ''}`}
@@ -640,14 +632,13 @@ function AssistantRow({
       <div class="msg-col">
         <div class="msg-top">
           <span class="msg-author">karucode</span>
-          {model ? <span class="model-pill" title={`Model: ${model}`}>{model}</span> : null}
-          {validAt(entry.at) ? (
+          {working && validAt(entry.at) ? (
             <time class="msg-time" dateTime={new Date(entry.at).toISOString()}>
               {clockTime(entry.at)}
             </time>
           ) : null}
           {turnTag(entry.parts)}
-          <TpsBadge chars={turnOutputChars(turn)} working={turnWorking(turn)} />
+          <TpsBadge chars={turnOutputChars(turn)} working={working} />
           {answer ? <RewindButton item={answer} isAssistant onRewind={onRewind} /> : null}
         </div>
         <MemoAssistantTurn

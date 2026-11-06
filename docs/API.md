@@ -340,11 +340,12 @@ uses.
 ```json
 { "projects": [ { "id": "p_ab12", "name": "karucode", "path": "/home/me/karucode",
                   "created_at": 1710000000000, "updated_at": 1710000000000,
-                  "session_count": 3 } ],
+                  "session_count": 3, "result_panel_width": 580 } ],
   "workspace": "/home/me/project" }
 ```
 `workspace` is the default workspace root, not a project path. `path` is the
-canonical directory and is unique across projects.
+canonical directory and is unique across projects. `result_panel_width` is omitted
+until the Workbench result pane has an explicit pixel preference.
 
 `POST /api/projects` body `{ "name": "optional", "path": "/abs/dir" }` →
 `{ "project": Project }` (`200`)
@@ -370,6 +371,15 @@ canonical directory and is unique across projects.
 `PATCH /api/projects/:id` body `{ "name": "..." }` → `{ "project": Project }`  
 `404 not_found` for an unknown id; `400 bad_request` when the name is empty,
 longer than 80 characters or contains control characters.
+
+`PATCH /api/projects/:id/preferences` body `{ "result_panel_width": 580 }` →
+`{ "project": Project }` (`200`). This stores only the desktop Workbench result-pane
+width for the project, so fresh browser profiles and other devices read it back from
+`GET /api/projects`. The integer must be between **280** and **1600** pixels,
+inclusive. Missing/fractional/null/string values, unknown fields and out-of-range
+widths are `400 bad_request`; an unknown project is `404 not_found`. The current
+viewport may show a tighter clamp without persisting that temporary constraint.
+Renaming a project leaves this preference unchanged.
 
 `DELETE /api/projects/:id[?force=true]` →
 `{ "deleted": true, "deleted_sessions": 2 }`

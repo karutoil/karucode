@@ -48,7 +48,7 @@ export function projectInitials(name: string, path = ''): string {
  * decorative either way: the button around it carries the accessible name, so the
  * image is `aria-hidden`.
  */
-function ProjectGlyph({ project }: { project: Project }): JSX.Element {
+export function ProjectGlyph({ project }: { project: Project }): JSX.Element {
   const iconUrl = store.projectIcons.value[project.id];
   const initials = projectInitials(project.name, project.path);
   if (!iconUrl) {

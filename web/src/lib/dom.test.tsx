@@ -16,7 +16,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, waitFor } from '@testing-library/preact';
-import type { ComponentChildren } from 'preact';
+import { render as renderPreact, type ComponentChildren } from 'preact';
 import { useRef } from 'preact/hooks';
 import { focusableWithin, useFocusTrap } from './dom';
 
@@ -237,6 +237,55 @@ describe('useFocusTrap: Escape belongs to the control before the surface', () =>
 
     fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
     expect(document.activeElement).toBe(last);
+  });
+
+  it('arms Escape in the same commit that exposes a new surface', () => {
+    // Raw Preact rendering deliberately does not flush passive effects. Chromium
+    // can deliver a trusted Escape in that gap: the dialog is already visible but
+    // a useEffect-based trap has not installed its document listener yet.
+    const mount = host('');
+    const onEscape = vi.fn();
+    try {
+      renderPreact(
+        <Trap label="settings" onEscape={onEscape}>
+          <button>Close dialog</button>
+        </Trap>,
+        mount,
+      );
+
+      fireEvent.keyDown(mount.querySelector('button')!, { key: 'Escape' });
+      expect(onEscape).toHaveBeenCalledTimes(1);
+    } finally {
+      renderPreact(null, mount);
+    }
+  });
+
+  it('hands Escape to a replacement surface without a passive-effect gap', async () => {
+    const mount = host('');
+    const outer = vi.fn();
+    const inner = vi.fn();
+    try {
+      renderPreact(
+        <Trap key="outer" label="outer" onEscape={outer}>
+          <button>Outer</button>
+        </Trap>,
+        mount,
+      );
+      await waitFor(() => expect(document.activeElement?.textContent).toBe('Outer'));
+
+      renderPreact(
+        <Trap key="inner" label="inner" onEscape={inner}>
+          <button>Inner</button>
+        </Trap>,
+        mount,
+      );
+      fireEvent.keyDown(mount.querySelector('button')!, { key: 'Escape' });
+
+      expect(inner).toHaveBeenCalledTimes(1);
+      expect(outer).not.toHaveBeenCalled();
+    } finally {
+      renderPreact(null, mount);
+    }
   });
 });
 

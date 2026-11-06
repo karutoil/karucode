@@ -344,6 +344,7 @@ export function ControlPlane(): JSX.Element {
         {store.currentSessionId.value === selected
           ? <div class="cp-session-body">
               <div class="cp-chat"><ChatView
+                mode="control-plane"
                 emptyContent={isControl ? <ControlChatIntro onStart={(project) => actions.fillComposer(controlStarter(project))} /> : undefined}
                 mentionProjects={isControl ? store.projects.value.map((project) => ({ id: project.id, name: project.name })) : undefined}
               /></div>

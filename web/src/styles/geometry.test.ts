@@ -42,9 +42,13 @@ function rule(css: string, selector: string): string {
 }
 
 describe('frame metrics are declared once, in tokens.css', () => {
+  it('maps the task sidebar onto the Workbench measure', () => {
+    expect(tokens).toMatch(/--sidebar-w:\s*var\(--workbench-sidebar-w\)/);
+  });
+
   it.each([
     ['--rail-w', '64px'],
-    ['--sidebar-w', '258px'],
+    ['--workbench-sidebar-w', '232px'],
     ['--inspector-w', '342px'],
     ['--content-max', '820px'],
     ['--header-h', '66px'],

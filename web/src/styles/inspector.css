@@ -28,12 +28,13 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-5);
+  gap: var(--space-4);
   flex: 0 0 auto;
-  height: 66px;
-  min-height: 66px;
-  padding: 0 var(--space-8);
+  height: var(--header-h);
+  min-height: var(--header-h);
+  padding: 0 var(--space-6);
   border-bottom: 1px solid var(--line-soft);
+  background: var(--inspector);
 }
 
 .inspector-head {
@@ -44,23 +45,26 @@
 }
 
 .inspector-label {
-  color: var(--text-caption);
-  font-size: var(--fs-micro);
-  font-weight: 720;
-  letter-spacing: 1.3px;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  font-weight: 660;
+  letter-spacing: 0;
   line-height: 1.2;
-  text-transform: uppercase;
+  text-transform: none;
 }
 
-.inspector-subtitle {
-  overflow: hidden;
-  /* §4: `--faint` and the roles cut from it are decoration only. This is the
-   * panel's subtitle — a sentence a user reads — so it uses the readable quiet
-   * voice. It measured 3.02:1 in Daybreak. */
-  color: var(--muted);
-  font-size: var(--fs-tiny);
-  line-height: 1.3;
-  text-overflow: ellipsis;
+.inspector-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.inspector-context-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-secondary);
   white-space: nowrap;
 }
 
@@ -2234,5 +2238,348 @@
      readable, and the values wrap mid-token. */
   .si-agent-meta {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ---------- Workbench results and Context ------------------------------- */
+
+.inspector[data-context-open='true'] .inspector-inner {
+  /* Context never unmounts this tree. On the phone the inert attribute also
+   * removes it from focus and pointer interaction while the overlay owns input. */
+  background: var(--inspector);
+}
+
+#inspector-panel-changes {
+  overflow: hidden;
+}
+
+.result-git {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  container-type: inline-size;
+}
+
+.result-git .gitm-head {
+  padding: var(--space-6);
+}
+
+/* Source control follows the dock's real resized width, not the viewport. */
+@container (max-width: 700px) {
+  .result-git .gitm-body {
+    display: block;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .result-git .gitm-side {
+    border-right: 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .result-git .gitm-side-scroll,
+  .result-git .gitm-main {
+    overflow: visible;
+  }
+
+  .result-git .gitm-head {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-4);
+  }
+
+  .result-git .gitm-chips {
+    display: none;
+  }
+}
+
+.context-drawer {
+  position: fixed;
+  top: var(--space-6);
+  right: var(--space-6);
+  bottom: var(--space-6);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  width: min(420px, calc(100vw - var(--space-10)));
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-overlay);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-overlay);
+}
+
+.context-drawer-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: var(--header-h);
+  padding: var(--space-3) var(--space-6);
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--surface-raised);
+}
+
+.context-drawer-head h2 {
+  margin-top: var(--space-1);
+  font-size: var(--fs-title);
+}
+
+.context-kicker {
+  display: block;
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.context-close {
+  flex: 0 0 auto;
+  width: var(--space-10);
+  height: var(--space-10);
+  color: var(--text-secondary);
+}
+
+.context-drawer > .tabs {
+  padding: 0 var(--space-4);
+  border-bottom-color: var(--line-soft);
+  background: var(--surface);
+}
+
+.context-drawer > .tab-panel {
+  background: var(--surface);
+}
+
+.context-run-rail {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg);
+}
+
+.context-run-state,
+.context-run-state > span:last-child,
+.context-run-links,
+.context-conversation-link {
+  display: flex;
+  align-items: center;
+}
+
+.context-run-state {
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.context-run-state > span:last-child {
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.context-run-state strong {
+  color: var(--text);
+  font-size: var(--fs-label);
+}
+
+.context-run-detail {
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+}
+
+.context-run-links {
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+.context-conversation-link,
+.context-session-link {
+  gap: var(--space-2);
+  color: var(--accent-fill);
+  font-size: var(--fs-label);
+}
+
+.context-conversation-link.is-pending {
+  color: var(--warn);
+}
+
+.context-conversation-link.is-error {
+  color: var(--danger);
+}
+
+.context-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--space-4);
+}
+
+.context-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--space-5);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.context-section-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.context-section-heading h3,
+.context-card > h3 {
+  min-width: 0;
+  color: var(--text);
+  font-size: var(--fs-body);
+}
+
+.context-section-heading > svg {
+  color: var(--muted);
+}
+
+.context-badge {
+  margin-left: auto;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--text-secondary);
+  font-size: var(--fs-tiny);
+  white-space: nowrap;
+}
+
+.context-facts {
+  display: grid;
+  margin: 0;
+}
+
+.context-fact {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.context-fact > dt {
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--fs-label);
+}
+
+.context-fact > dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: var(--fs-label);
+}
+
+.context-note,
+.context-policy {
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  line-height: var(--lh-body);
+}
+
+.context-policy {
+  color: var(--text);
+}
+
+.context-session-link,
+.context-settings-link {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+}
+
+.context-result-links {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.context-result-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: var(--fs-label);
+  text-align: left;
+}
+
+.context-result-link > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-result-link:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.context-usage {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.context-usage-note {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--surface-raised);
+}
+
+.context-usage > .inspector-section {
+  flex: 1 1 auto;
+}
+
+@media (max-width: 1023px) {
+  .context-drawer {
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: auto;
+    width: min(420px, 100vw);
+    border-top: 0;
+    border-right: 0;
+    border-bottom: 0;
+    border-radius: 0;
+    box-shadow: var(--shadow-lg);
+  }
+}
+
+@media (max-width: 460px) {
+  .context-fact {
+    display: block;
+  }
+
+  .context-fact > dd {
+    margin-top: var(--space-1);
+  }
+
+  .context-result-links {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

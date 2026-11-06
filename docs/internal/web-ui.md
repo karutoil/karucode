@@ -6,22 +6,27 @@
 > Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary.
 
 - **Slug:** `web-ui`
-- **Tags:** ui, web, frontend, panels, shortcuts, preact
-- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:RailPeek`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:notification-bell`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `config:providers.models.context_window`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/state/railPeek.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/components/SessionsRail.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `fn:registerPluginPanelRenderer`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`, `ui:GitManager`, `ui:GitChanges`, `ui:GitCommitBox`, `ui:GitBranchDialog`, `ui:GitHistory`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `file:web/src/components/git/GitManager.tsx`, `file:web/src/styles/git.css`
+- **Tags:** ui, web, frontend, workbench, panels, context, shortcuts, preact
+- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:RailPeek`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:ResultResizer`, `route:PATCH /api/projects/:id/preferences`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:notification-bell`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `config:providers.models.context_window`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/state/railPeek.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/components/SessionsRail.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `fn:registerPluginPanelRenderer`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`, `ui:GitManager`, `ui:GitChanges`, `ui:GitCommitBox`, `ui:GitBranchDialog`, `ui:GitHistory`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `file:web/src/components/git/GitManager.tsx`, `file:web/src/styles/git.css`, `ui:WorkbenchTaskMenu`, `ui:ContextDrawer`, `file:web/src/components/WorkbenchTaskMenu.tsx`, `file:web/src/components/ContextDrawer.tsx`, `file:web/src/state/workbench.ts`, `file:web/src/lib/approvalCopy.ts`, `file:web/src/styles/workbench.css`, `file:web/src/styles/workbench-navigation.css`, `file:scripts/verify_workbench_frontend.py`, `cmd:python3 scripts/verify_workbench_frontend.py`
 - **Source:** `web/src/app.tsx:1`
 
 ---
 
 ## Layout
 
-* **Project rail** (left, 64 px): projects drawn as the project's own
-  `favicon.ico` when it ships one and as initials when it does not, a **Theme
-  studio** button, the **command palette** button and a settings shortcut.
-  Collapses to an icon column with `Ctrl/Cmd+B` on the session rail. Below
-  1024 px it is hidden entirely and the sessions sheet carries a **project
-  switcher** instead (see **Mobile**). The **k.** button opens the control
-  plane. On narrow screens the sessions sheet's **Control plane** button
-  opens the same view.
+* **Workbench ownership**: `App` mounts either the control plane or the ordinary
+  `SessionsRail` + `ChatView`, together with global overlays. In the ordinary
+  workspace `ChatView` owns the session header, workspace views, conversation,
+  Composer, the one `Inspector` results dock and its sibling `ContextDrawer`.
+  There is no second App-level inspector. Full Source control and Terminal are
+  mounted on first use and then hidden rather than remounted as views change.
+* **Project rail** (64 px where shown): projects use their real `favicon.ico`
+  or initials, with **Theme studio**, command-palette and settings shortcuts.
+  App mounts it only for the control plane or for an intentionally collapsed
+  desktop task rail, where it keeps compact project switching and RailPeek.
+  The expanded ordinary Workbench instead puts project switching, management
+  and the control-plane link in `SessionsRail`. On an ordinary narrow layout
+  the sessions sheet carries those project controls (see **Mobile**).
 * **Control plane**: browse sessions across projects (search, status filters,
   running first), select one to switch to its project and open its ordinary
   chat, or open a **control chat**. Control chats are their own unlimited set,
@@ -35,14 +40,20 @@
   conversation gains a facts panel (where, state, messages, session id, and
   *Open in project* / *Stop this run*) from 1400px. The list refreshes every five
   seconds and **Project workspace** exits the plane. See `central-control` for the
-  tools, dispatch and approval semantics.
-* **Sessions rail**: the current project, a session search (`/`), sessions
-  grouped by last activity, newest first, with running indicators; create one
-  with `Ctrl/Cmd+N`. On a phone it is a full-height sheet, headed by the
-  project switcher and a **Close** button.
-* **Peeking at the collapsed rail**: `Ctrl/Cmd+B` gives the rail zero width, so
-  hovering a project tile in the project rail shows *that project's* sessions as
-  a fly-out beside the rail — same rows, same rename/delete menus, no need to
+  tools, dispatch and approval semantics. Its embedded conversation is a real
+  `ChatView` with `mode="control-plane"`: that mode does not mount the
+  project-scoped Inspector or Context drawer. Composer still shows reported
+  Usage telemetry, but without a Usage callback it is read-only, not a link to a
+  project drawer.
+* **Sessions rail**: the current project's disclosure and management actions,
+  session search (`/`), available status filters and sessions grouped by last
+  activity with running/failure indicators. Create a session with
+  `Ctrl/Cmd+N`. On a phone it is a full-height sheet, headed by the project
+  switcher and including **Control plane** and **Settings**.
+* **Peeking at the collapsed rail**: `Ctrl/Cmd+B` gives the sessions rail zero
+  width and mounts the compact project rail. Hovering a project tile shows *that
+  project's* sessions as a fly-out beside it — same rows, same rename/delete
+  menus, no need to
   restore the rail to open a session. It is `position: fixed` against the project
   rail so the conversation never resizes to make room, it closes when the pointer
   leaves (after a ~260 ms grace period) or on Escape, and it never appears while
@@ -57,16 +68,19 @@
   looking at is visible without opening anything. The number is in the tile's
   accessible name and tooltip as well as in the pill, it is capped at `99+`, and
   it clears when the notifications behind it are read.
-* **Chat**: streaming Markdown, tool cards whose footer carries the duration
-  and a **Show output** disclosure, command output, diff cards with a review
-  footer, approval cards, thinking blocks, and the composer with a model
-  switcher, @-file mentions and local-file attachments. An empty session
-  offers three starter prompts that put a whole instruction in the composer.
-  A tool card whose result carried images (the agent reading a screenshot with
-  a vision model) shows them as thumbnails above the output - visible without
-  expanding the card - and clicking one opens a lightbox with the full image.
-  The bytes come from `tool_call_finished.images` live and from the stored
-  `messages.images` on reload, so a preview never disappears after a refresh.
+* **Conversation and progressive disclosure**: streaming Markdown, the model /
+  reasoning selectors, @-file mentions, attachments, diff review and approval
+  controls remain real. Built-in themes start with compact tool/command **rows**
+  and **completed-turn grouping**. **Show the working** opens a finished turn,
+  an expanded call group reveals its rows, and a row opens its actual tool output
+  or separate command stdout/stderr. Tool failures open to their explanation;
+  running work, pending approvals, errors, interruptions and notices remain
+  discoverable rather than disappearing into a fold. Full activity remains an
+  explicit **Grouping → None** option; **Cards** remains the alternate presentation
+  in Settings → General → Transcript or Theme Studio.
+  Returned images stay visible above the output disclosure and open in the real
+  lightbox; their bytes come from `tool_call_finished.images` live and stored
+  `messages.images` after reload.
 * **Rewind**: every persisted user message and every assistant turn carries a
   **Rewind** button in its header (hover or keyboard focus reveals it). It
   opens a dialog that hides the conversation from that message onwards and
@@ -86,15 +100,15 @@
   (optimistic sends, live placeholders). The `http-api` topic documents the
   request shapes.
 * **Composer dock**: the composer *floats* over the bottom of the transcript
-  instead of taking a band of its own, so the conversation keeps the full
-  height of the pane. It starts on one line and grows with the draft. While you
-  are scrolled into history it turns see-through - 42% of the input surface,
-  plus a 3px backdrop blur - so the messages behind it stay readable, and the
-  status footnote slides away; clicking into the box (or sending) restores the
-  solid surface and the footnote. The gutter either side of the box is not a
-  hit target, so a wheel or drag there still scrolls the transcript. The
-  transcript reserves the dock's measured height, so nothing hides behind it at
-  rest, and **Jump to latest** sits above it rather than under it.
+  instead of taking a band of its own, so the conversation keeps the full height
+  of the pane. Its input surface and status stay opaque while reading history:
+  `data-reading-history` never turns the draft into a translucent overlay. The
+  input grows with the draft to its responsive cap, and the transcript reserves
+  the dock's measured height (`--composer-h`), so the last message and **Jump to
+  latest** stay clear of the controls. The gutter either side is not a hit target,
+  so a wheel or drag there still scrolls the transcript. On a running phone the
+  model controls and Stop keep one row while Usage and the explicit queue/steer
+  controls keep another; neither Stop nor the pending-work controls disappear.
 * **Auto-follow**: while you are at the newest message the transcript keeps up
   with everything that lands - streamed text, Markdown that renders late, tool
   cards, command output, approval cards - however much arrives at once. Scroll
@@ -107,16 +121,62 @@
   viewport and treats a gap no wider than the content that has arrived since
   then as its own to close. Any movement of the scroll position is yours, and
   is never overridden.
-* **Workspace tabs** (above the transcript): *Conversation*, *Source control*
-  and *Terminal* (when the server enables terminals). *Source control* is the
-  git manager below; the composer only shows on *Conversation*. In a strip of
-  terminal tabs, **Left/Right** switch with wraparound, **Home/End** jump to the
-  first/last tab, and the selected tab scrolls into view. Changing the theme,
-  density or code font updates the existing terminal without losing its buffer.
-* **Inspector** (right): tabs for files, **Git** (the same source-control
-  manager, in one column), the session's own numbers and agents, plus one tab
-  per **plugin panel** (see below). Click a file to open the viewer.
-* **Source control** (workspace tab and inspector tab): a git manager, not a
+* **Workspace views**: *Conversation*, full-width *Source control* and
+  *Terminal* when the server enables terminals, all inside the main task header
+  with their real changed-file/terminal counts. The standalone workspace strip is
+  gone; when the container is constrained, the same tablist wraps to a second row
+  inside that header without dropping branch, notification, Context, command or
+  task actions. ChatView mounts Source control and Terminal on demand, then keeps
+  an established view mounted while it is hidden, so switching views does not
+  discard old work. Composer belongs to the Conversation view. Tab keys wrap with
+  **Left/Right**, jump with **Home/End**, and scroll the selected tab into view;
+  theme/font changes update the existing terminal without losing its buffer.
+* **Task actions menu**: the session header's kebab owns **Copy conversation**,
+  **Session context**, **Commands**, **Theme studio**, **Settings** and **All
+  tasks**, wired to the existing transcript copier and application actions rather
+  than placeholders. Control-plane chat omits the project Context and All tasks
+  entries. ArrowUp/ArrowDown and Home/End move through enabled items; Escape and
+  Tab dismiss the menu, with Tab restoring the trigger rather than leaking focus
+  into a disappeared menu.
+* **Results dock** (`Inspector`, owned by ChatView): **Files**, **Git**, **Session
+  usage**, **Agents** and one tab per enabled **plugin panel**. File rows open the
+  real viewer; Context's result links select these same tabs through
+  `store.inspectorTab`. The selected result and the desktop collapse preference
+  (`karucode.inspectorCollapsed`) survive opening and closing Context; collapse /
+  reveal uses the existing `toggleInspector` action and persisted preference.
+* **Result resizing**: the wide split has a focusable 24px separator. Drag with a
+  mouse or touch; **Left/Right** resize by 10px, **Shift+Left/Right** by 50px and
+  **Home/End** choose the safe bounds. The preference is a project property saved
+  with `PATCH /api/projects/:id/preferences`, so a fresh browser/device restores
+  it through `GET /api/projects`. Dragging writes on release and keyboard bursts
+  coalesce. A narrower viewport gets a temporary clamp without saving that clamp;
+  failed writes retain the local choice and explain that it was not saved. In a
+  wide split the fixed separator and Results stay flush with the workspace's
+  right edge during the gesture; no width animation can leave a trailing gap.
+* **Context drawer** (`Ctrl/Cmd+J`): a transient sibling overlay driven by
+  `state/workbench.ts`, with **Now**, **Usage** and **Access**. It does not replace
+  or unmount the Inspector, conversation, full Git or terminal below it. **Now**
+  reports the actual project/session/workspaces, connection and activity, labels
+  the next run's model as a session pin or install default, and distinguishes the
+  tool-reachable workspace from prompt input: opening a panel attaches neither its
+  contents nor a UI snapshot. Only the composed message and deliberately added
+  attachments or @ paths become message input. Its Files / Source control /
+  Session usage / Agents / plugin links reveal the real result selection.
+* **Context Usage and Access**: Usage reuses the server-backed `SessionInfoTab`
+  (not transcript arithmetic), while Access renders the Composer's shared
+  `describeApprovals` copy for the install's real mode and allowlist counts.
+  **Open approval settings** closes Context and opens the existing Settings sheet;
+  Access never becomes a second policy editor. A run rail above all three sections
+  keeps activity, pending approvals and errors linked back to the real
+  conversation controls.
+* **Responsive results**: `styles/workbench.css` splits Conversation and Results
+  in wide Workbench containers, turns Results into a bounded overlay at
+  intermediate container widths, and reuses the existing full-height inspector
+  sheet below 1024px. The separator is absent from both non-split modes. Context
+  is likewise a bounded desktop drawer and a trapped
+  full-height phone sheet. Closing phone Context restores the sheet beneath it;
+  selecting a result or Conversation deliberately navigates to that real view.
+* **Source control** (full workspace view and Results → Git): a git manager, not a
   read-only diff list. Changed files are grouped into **Merge changes**,
   **Staged**, **Changes** and **Untracked** - a path with both a staged and a
   working-tree side appears in both groups, which is git's own model - and
@@ -126,10 +186,11 @@
   commits) with an **Amend** toggle; with nothing staged, **Commit** stages
   every change first and says so under the box. The branch chip opens a dialog
   that filters, switches, creates (optionally switching) and deletes local
-  branches. The workspace tab shows the selected file's patch beside the list
-  and the commit history below it, with one commit's files and patch on click;
-  the inspector tab puts the patch inline under the list and loads the history
-  only when that section is opened. Only **local** operations are offered -
+  branches. The full workspace view and Results → Git both use the real
+  `GitManager`: the page layout puts the selected file's patch beside the list,
+  with commit history and one commit's files and patch on click. `.result-git`
+  adapts that manager to the result dock's actual container width instead of
+  substituting a read-only diff. Only **local** operations are offered -
   staging, commits, branches, stashes; fetch/pull/push need credentials and a
   prompt, so they stay in the Terminal tab. Discarding changes, deleting an
   unmerged branch and dropping a stash ask for confirmation first: discarding
@@ -191,9 +252,11 @@
   invisible controls are skipped, and a sheet's search, rename field or menu
   can handle its own Escape before the sheet closes. Dialogs mount only while
   open.
-* **Theme studio** (right drawer, `Ctrl/Cmd+Shift+T`): built-in themes,
-  per-token colours, density and custom CSS, persisted in the browser. The
-  `themes` topic covers the storage key and the shareable export format.
+* **Theme studio** (right drawer, `Ctrl/Cmd+Shift+T`, **Task actions → Theme
+  studio**, or the project-rail palette button when that rail is present):
+  built-in themes, per-token colours, density, transcript options and custom
+  CSS, persisted in the browser. The `themes` topic covers the storage key and
+  the shareable export format.
 * **Settings sheet** (modal): five tabs, split by who owns the setting —
   **General** (appearance: theme, density, colour mode, transcript layout, and
   a door into the Theme studio), **Models** (provider profiles, their model
@@ -253,10 +316,10 @@ and report "limited" where a mobile browser would need a service worker.
 The box floats over the transcript as a *dock* instead of occupying its own
 row (see **Composer dock** above). What that means in practice:
 
-* it is translucent while you read history, so the messages behind it stay
-  visible; clicking into it, or scrolling back to the newest message, brings
-  the solid surface back;
-* it starts one line tall and grows with the draft up to 150px, then scrolls;
+* the input and status stay opaque while you read history; scrolling away does
+  not put transcript text behind a translucent control;
+* it starts one line tall, grows with the draft and on resize, then scrolls at
+  the responsive `--compose-input-max` cap;
 * the transcript reserves the dock's measured height
   (`--composer-h`, published by `lib/dockHeight.ts`), so the last message is
   never hidden under it.
@@ -267,7 +330,7 @@ Attach context three ways, all of which end up in the message the model reads:
   `node_modules`, `.git`, `target`, `dist` and similar noise directories are
   filtered out). Up/Down move, Enter or Tab inserts, Escape dismisses; a path
   with spaces is inserted quoted (`@"docs/my plan.md"`);
-* press the `+` button to pick files;
+* press **Attach files** (the paperclip) to pick files;
 * drag files onto the composer, or paste them — a dashed overlay marks the drop
   target.
 
@@ -322,23 +385,22 @@ speed. The badge is mounted only while the turn works, so it cannot outlive the
 run, and the **Completed** chip uses the same rule — a turn whose prose finished
 but whose call is still running is **Working**, not **Completed**.
 
-**Context pill.** The composer's bottom row shows `35.9%` over a hairline meter:
-the prompt size the provider reported for the newest call (`usage.input_tokens`)
-divided by the selected model's `context_window`. Both numbers are the real ones
-— the count from the provider, the window from the model entry the composer's
-own model switcher names (the session pin wins over the install default) — so
-the pill renders nothing at all when either is missing, instead of a
-plausible-looking guess. The session's total `input_tokens` is deliberately not
-used: that is a running cost across every call, and on a long run it sums well
-past the window. `usage` is live-only server state, so the last reported figure
-is cached per session in `localStorage` (`karucode.lastPromptTokens`,
-`src/state/promptTokens.ts`) — otherwise a reload would blank the pill until the
-next call finished. It turns amber at 70% and red at 90%, around where
-compaction starts and where the next large tool result may not fit.
+**Usage / context pill.** The composer shows the provider-reported newest prompt
+(`usage.input_tokens`) over the selected model's declared `context_window`, with
+a `Usage` label, percentage and (where it fits) hairline meter. The session model
+pin wins over the install default. Missing provider counts or window metadata
+produce no percentage, never a plausible-looking guess, and unreported metrics
+in Usage stay unknown rather than zero. Session `input_tokens` totals are
+cumulative across calls and are not substituted for prompt fill. The last live
+provider report is cached per session in `karucode.lastPromptTokens` by
+`state/promptTokens.ts`, so a reload can retain that reported figure until the
+next call. The meter turns amber at 70% and red at 90%.
 
-On a phone the rate and the meter are dropped and the number keeps its place;
-the composer row stays one line, which is why the spacer collapses before the
-buttons do.
+In the ordinary Workbench this pill opens Context → **Usage**. In control-plane
+mode no `onOpenUsage` callback is supplied, so the same real telemetry remains a
+read-only element rather than a control targeting a project drawer that is not
+mounted. At the ≤640px phone tier the decorative meter yields first; the running layout keeps
+Usage with queue/steer while model controls and Stop retain their own row.
 
 ## Plugin panels
 
@@ -388,48 +450,37 @@ mounting, no asset serving and no script execution. A panel is a tab whose
 | --- | --- |
 | `Ctrl/Cmd+K` | command palette |
 | `Ctrl/Cmd+N` | new session |
-| `Ctrl/Cmd+B` | toggle the sessions rail |
-| `Ctrl/Cmd+J` | toggle the inspector |
+| `Ctrl/Cmd+B` | collapse/restore the task rail; collapsed desktop keeps project peeking |
+| `Ctrl/Cmd+J` | open/close Workbench Context (Now / Usage / Access), outside the control plane |
 | `Ctrl/Cmd+Shift+T` | open or close the Theme studio |
 | `/` | focus the session search |
 | `Up`/`Down` | move through the `@`-mention suggestions |
 | `Enter`/`Tab` | insert the highlighted mention |
-| `Escape` | stop the running turn (or close the top-most sheet/menu) |
+| `Escape` | dismiss the local editor, menu, drawer or sheet first; only otherwise stop a running turn |
 
 ## Mobile
 
-Below 1024 px the rails become full-height sheets, opened from the two header
-icons at the top. `Escape` closes the open sheet first and stops the run only
-when nothing else is open.
+Below 1024 px Sessions and Results retain their full-height slide-over sheets.
+There is no bottom toolbar or ordinary-layout project rail: the sessions sheet
+carries project selection/management, New session, Control plane and Settings;
+the session header retains Sessions, Context, notifications, commands and Task
+actions. Results are also reachable from the command palette and Context's real
+result links. A narrow Source control or Terminal view uses the available
+workspace rather than leaving another result stack beside it.
 
-The phone layout is a space budget, and it is measured at 440x956 (an iPhone
-16 Pro Max in CSS pixels). A conversation is the only thing the screen is for,
-so the frame above it is deliberately small:
+Context becomes the top full-height dialog, traps focus and makes the mounted
+result sheet inert behind it. Closing it restores the sheet that was underneath
+for that open/close pair instead of inventing a Results selection. Conversation
+and result links explicitly navigate to their destination. Local Escape handlers
+dismiss search/menu/editor state first, then Context or the open sheet; stopping
+a run is not the first effect of dismissing those controls.
 
-* **No bottom toolbar.** There used to be a fixed 57 px tab bar with Sessions,
-  New, Inspector and Settings. Every one of those is reachable without it —
-  sessions and inspector are the header icons, new session and settings are in
-  the sessions sheet — so it was 6% of the screen spent on duplicates.
-* **No project rail.** The far-left column held 56 of 440 px (13% of the width)
-  to draw two glyphs. It is hidden on a phone and the sessions sheet carries a
-  **project switcher** instead: one pill per project, plus the add button and
-  the project menu (copy path, refresh, project settings, rename, delete) that
-  used to live only on the rail.
-* **A 52 px header and a 38 px tab strip.** The breadcrumb's
-  project → sessions → activity line is dropped: the title alone answers it.
-  Together with the toolbar this took the frame from 167 px to 90 px, so the
-  transcript went from 82% of the viewport to about 91%.
-* **Safe areas are honoured.** `index.html` sets `viewport-fit=cover`, so the
-  header insets itself by `env(safe-area-inset-top)` and the chat column
-  reserves `env(safe-area-inset-bottom)` for the home indicator.
-* **Tool cards are compact.** The avatar column is hidden (26 px plus a gap is
-  a fifth of a 390 px row), cards stop indenting to line up under it, and the
-  output preview is 74 px instead of 112 px. A finished call was 191 px — two
-  of them filled a screen — and is now about 157 px. Every line is still one
-  tap away in **Show output**; opening a card shows up to 320 px.
-
-Keyboard hints (`Ctrl N`, `/`) are hidden in the sheet, because a phone has no
-keyboard.
+The composer remains opaque and measured above the transcript. Its input uses a
+viewport-aware cap and re-grows after resize; at the ≤640px tier its 16px text
+avoids iOS focus zoom. Running controls split deliberately rather than dropping Usage,
+Stop or queue/steer. `viewport-fit=cover` plus the safe-area insets keeps the
+frame clear of the phone status bar and home indicator. Shortcut hint prose and
+decorative meters yield before visible actions and accessible labels.
 
 ## Development loop
 
@@ -446,6 +497,19 @@ Run the backend separately (`cargo run -p kc-server`) while `npm run dev` proxie
 HTTP, SSE and the terminal WebSocket to it (the preview proxy does the same). To
 serve your build without rebuilding the binary, start the server with
 `KARUCODE_WEB_DIR=web/dist`.
+
+For the focused real-browser Workbench check, first run `npm run build` in `web/`
+and build `target/debug/karucode` with `cargo build -p kc-server --bin karucode`.
+Then, from the repository root, run:
+
+```bash
+python3 scripts/verify_workbench_frontend.py
+```
+
+It drives Chromium against the built UI and a real debug server with a temporary
+mock provider, disposable git project/data directory and browser profile, not a
+live workspace. This supplements rather than replaces the frontend checks and
+product/backend suites; `web/README.md` lists the coverage and prerequisites.
 
 The UI ships its own type: `web/public/fonts/` carries Inter regular/bold and
 JetBrains Mono, declared with `@font-face` in `styles/base.css` and pointed at

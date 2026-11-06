@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/preact';
+import { cleanup, fireEvent, render, screen } from '@testing-library/preact';
 import { ToolCard } from './ToolCard';
 import type { ToolItem } from '../state/chat';
 import { NOW } from '../test/fixtures';
@@ -12,7 +12,7 @@ import { NOW } from '../test/fixtures';
  * - .tool-card: border 1px solid var(--theme-313436), border-radius 10px
  * - .tool-head: height 44px (exact, not min-height)
  * - .tool-symbol: 26x26px, border-radius 7px
- * - .tool-body: max-height 112px
+ * - .tool-body: mounted by the disclosure, not as a closed 112px preview
  * - .tool-expand:hover: color var(--gold) / var(--accent)
  *
  * State colors:
@@ -64,8 +64,11 @@ describe('ToolCard design contract', () => {
     expect(symbol?.querySelector('svg')).not.toBeNull();
   });
 
-  it('renders .tool-body (max-height 112px defined in CSS)', () => {
+  it('mounts .tool-body only after the output disclosure', () => {
     render(<ToolCard item={tool()} />);
+    expect(document.querySelector('.tool-body')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show output' }));
     const body = document.querySelector('.tool-body');
     expect(body).not.toBeNull();
     expect(body?.hasAttribute('role')).toBe(true);
@@ -110,11 +113,14 @@ describe('ToolCard design contract', () => {
     expect(stopped).not.toBeNull();
   });
 
-  it('wires the expand button to the tool-body with aria-controls', () => {
+  it('wires the expand button to the mounted tool-body with aria-controls', () => {
     render(<ToolCard item={tool()} />);
     const button = screen.getByRole('button', { name: /Show (output|less|details)/ });
     const bodyId = button.getAttribute('aria-controls');
     expect(bodyId).toBeTruthy();
+    expect(document.getElementById(bodyId!)).toBeNull();
+
+    fireEvent.click(button);
     const body = document.getElementById(bodyId!);
     expect(body?.classList.contains('tool-body')).toBe(true);
   });

@@ -108,10 +108,11 @@ function builtin(spec: BuiltinSpec): Theme {
     rounding: 10,
     colors: completeColors(spec.colors, spec.mode),
     customCSS: '',
-    // The mock's own transcript: full cards, every call in place, a quiet
-    // reasoning chip. The view options exist so a long session can be folded.
-    toolStyle: 'cards',
-    grouping: 'none',
+    // Workbench reading density is the built-in starting point: compact calls,
+    // completed work folded by turn, and a quiet reasoning chip. Full cards and
+    // no grouping remain explicit theme options; stored choices are not changed.
+    toolStyle: 'rows',
+    grouping: 'turns',
     thinking: 'collapsed',
   };
 }

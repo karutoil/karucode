@@ -433,6 +433,7 @@ impl Store for FakeStore {
             created_at: now,
             updated_at: now,
             session_count: 0,
+            result_panel_width: None,
         };
         db.projects.push(project.clone());
         Ok(project)
@@ -464,6 +465,17 @@ impl Store for FakeStore {
             Some(project) => {
                 project.name = name.to_string();
                 project.updated_at = now_ms();
+                Ok(())
+            }
+            None => Err(Error::NotFound(format!("project {id}"))),
+        }
+    }
+
+    async fn set_project_result_panel_width(&self, id: &str, width: u32) -> Result<()> {
+        let mut db = self.db();
+        match db.projects.iter_mut().find(|p| p.id == id) {
+            Some(project) => {
+                project.result_panel_width = Some(width);
                 Ok(())
             }
             None => Err(Error::NotFound(format!("project {id}"))),

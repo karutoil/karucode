@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { ChatView, projectMentionLoader } from './ChatView';
 import type { ChatItem } from '../state/chat';
 import * as store from '../state/store';
+import * as terminalState from '../state/terminals';
 import { configFixture, resetAppState } from '../test/fixtures';
 
 /* ------------------------------------------------------------------ *
@@ -370,12 +371,14 @@ describe('ChatView sticky bottom', () => {
 describe('ChatView workspace tabs', () => {
   beforeEach(() => {
     resetAppState();
+    terminalState.resetTerminalState();
     ResizeObserverStub.reset();
     vi.stubGlobal('ResizeObserver', ResizeObserverStub);
   });
 
   afterEach(() => {
     resetAppState();
+    terminalState.resetTerminalState();
     ResizeObserverStub.reset();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -386,8 +389,12 @@ describe('ChatView workspace tabs', () => {
     return found;
   }
 
-  it('marks the conversation tab selected and keeps the other panes unloaded', () => {
-    renderChat();
+  it('places views in the one main header and keeps the other panes unloaded', () => {
+    const { container } = renderChat();
+    const header = container.querySelector('header.main-head');
+    expect(header?.querySelector('[role="tablist"][aria-label="Workspace views"]')).not.toBeNull();
+    expect(header?.querySelector('.header-buttons')).not.toBeNull();
+    expect(container.querySelector('.workspace-tabbar')).toBeNull();
 
     expect(tab(/^Conversation/).getAttribute('aria-selected')).toBe('true');
     expect(tab(/^Source control/).getAttribute('aria-selected')).toBe('false');
@@ -403,7 +410,11 @@ describe('ChatView workspace tabs', () => {
     expect(screen.queryByRole('tab', { name: /terminal/i })).toBeNull();
     expect(document.getElementById('workspace-panel-terminal')).toBeNull();
     // Command output lives in the transcript itself.
-    expect(screen.getAllByRole('tab').map((element) => element.textContent?.trim())).toEqual([
+    expect(
+      within(screen.getByRole('tablist', { name: 'Workspace views' }))
+        .getAllByRole('tab')
+        .map((element) => element.textContent?.trim()),
+    ).toEqual([
       'Conversation',
       'Source control',
     ]);
@@ -456,7 +467,8 @@ describe('ChatView workspace tabs', () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
     renderChat();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Task actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy conversation' }));
 
     await vi.waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
     const copied = writeText.mock.calls[0]?.[0] ?? '';
@@ -469,7 +481,8 @@ describe('ChatView workspace tabs', () => {
 
   it('disables the copy action when the session has no transcript', () => {
     renderChat([]);
-    const copy = screen.getByRole('button', { name: 'Copy' }) as HTMLButtonElement;
+    fireEvent.click(screen.getByRole('button', { name: 'Task actions' }));
+    const copy = screen.getByRole('menuitem', { name: 'Copy conversation' }) as HTMLButtonElement;
     expect(copy.disabled).toBe(true);
   });
 
@@ -508,6 +521,32 @@ describe('ChatView workspace tabs', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'Fix login bug' })).not.toBeNull();
   });
 
+  it('hydrates the server-backed project width at the real result separator', () => {
+    store.projects.value = [
+      {
+        id: 'p_karucode',
+        name: 'KaruCode',
+        path: '/home/me/project',
+        created_at: 1,
+        updated_at: 1,
+        session_count: 1,
+        result_panel_width: 640,
+      },
+    ];
+    store.currentProjectId.value = 'p_karucode';
+    const { container } = renderChat();
+
+    const separator = screen.getByRole('separator', { name: 'Resize results panel' });
+    expect(separator.getAttribute('aria-valuenow')).toBe('640');
+    expect(separator.getAttribute('aria-controls')).toBe('workbench-results');
+    expect(container.querySelector<HTMLElement>('.center-body')?.style.getPropertyValue('--workbench-result-w')).toBe('640px');
+    expect(document.getElementById('workbench-results')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse inspector' }));
+    expect(screen.queryByRole('separator', { name: 'Resize results panel' })).toBeNull();
+    expect(container.querySelector<HTMLElement>('.center-body')?.style.getPropertyValue('--workbench-result-w')).toBe('');
+  });
+
   it('gives every workspace tab a 15px glyph and shows the changed-file count', async () => {
     vi.stubGlobal(
       'fetch',
@@ -539,12 +578,27 @@ describe('ChatView workspace tabs', () => {
     );
   });
 
-  it('marks an idle run with the mock\'s circle-check instead of a faint dot', () => {
+  it('keeps activity in the main header after removing the second strip', () => {
     renderChat();
-    const note = document.querySelector('.tab-note');
-    expect(note?.textContent).toBe('Ready to work');
-    expect(note?.querySelector('svg')).not.toBeNull();
-    expect(note?.querySelector('.status-dot')).toBeNull();
+    const activity = document.querySelector('.main-head .head-activity');
+    expect(activity?.textContent).toBe('ready');
+    expect(document.querySelector('.tab-note')).toBeNull();
+    expect(document.querySelector('.main-head .header-buttons')).not.toBeNull();
+  });
+
+  it('retains terminal availability and the server-owned tab count in the header', () => {
+    vi.spyOn(terminalState, 'loadTerminals').mockResolvedValue();
+    terminalState.terminalsEnabled.value = true;
+    terminalState.terminals.value = [{
+      id: 't_one', title: 'shell', cwd: '/tmp/one', project: 'p_one', position: 0,
+      created_at: 1, updated_at: 1, last_used_at: 1, running: true, pid: 123, attached: 0,
+    }];
+    renderChat();
+
+    const terminal = tab(/^Terminal 1$/);
+    expect(terminal.getAttribute('aria-selected')).toBe('false');
+    expect(terminal.closest('.main-head')).not.toBeNull();
+    expect(terminal.querySelector('.tab-count')?.textContent).toBe('1');
   });
 
   it('gives a long branch chip a label and a title that survive truncation', async () => {
@@ -623,7 +677,7 @@ describe('ChatView composer dock', () => {
     element.scrollTop = 1600 - VIEWPORT;
     fireEvent.scroll(element);
 
-    expect(panel().getAttribute('data-translucent')).toBe('false');
+    expect(panel().getAttribute('data-reading-history')).toBe('false');
   });
 
   it('goes translucent when the reader scrolls into history', async () => {
@@ -634,7 +688,7 @@ describe('ChatView composer dock', () => {
 
     // This attribute is what `.composer` keys its 42%-opacity + backdrop-blur
     // state off (styles/composer.test.ts pins the CSS side).
-    expect(panel().getAttribute('data-translucent')).toBe('true');
+    expect(panel().getAttribute('data-reading-history')).toBe('true');
   });
 
   it('turns opaque again when the reader returns to the bottom', async () => {
@@ -643,10 +697,10 @@ describe('ChatView composer dock', () => {
     fakeScrollBox(element, box);
 
     await scrollTo(element, 200);
-    expect(panel().getAttribute('data-translucent')).toBe('true');
+    expect(panel().getAttribute('data-reading-history')).toBe('true');
 
     await scrollTo(element, box.scrollHeight - box.clientHeight);
-    expect(panel().getAttribute('data-translucent')).toBe('false');
+    expect(panel().getAttribute('data-reading-history')).toBe('false');
   });
 
   it('reports the dock height so the transcript can reserve room for it', async () => {
@@ -681,7 +735,7 @@ describe('ChatView composer dock', () => {
 
     // The two states share a condition: a reader in history gets both the
     // see-through dock and the way back to the newest message.
-    expect(panel().getAttribute('data-translucent')).toBe('true');
+    expect(panel().getAttribute('data-reading-history')).toBe('true');
     expect(jumpButton()).not.toBeNull();
   });
 });

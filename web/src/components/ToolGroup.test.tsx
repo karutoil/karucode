@@ -206,11 +206,11 @@ describe('ToolGroup', () => {
       expect(head().getAttribute('aria-expanded')).toBe('true');
       expect(group().getAttribute('data-tone')).toBe('is-error');
       expect(screen.getByText('1 failed')).not.toBeNull();
-      // The failure is on screen, and its output is one click away rather than
-      // hidden behind the group disclosure as well.
+      // The failure is on screen and the failed row opens to its actual reason,
+      // rather than hiding the explanation behind a second disclosure.
       const failedRow = screen.getByRole('button', { name: /^grep/ });
       expect(failedRow.closest('.tool-row')?.getAttribute('data-status')).toBe('error');
-      fireEvent.click(failedRow);
+      expect(failedRow.getAttribute('aria-expanded')).toBe('true');
       expect(document.querySelector('.tool-row[data-status="error"] .tool-body')?.textContent).toContain(
         'permission denied',
       );

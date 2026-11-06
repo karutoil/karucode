@@ -1,24 +1,18 @@
-/* Composer. Owned by the composer feature: layout, attachments, mentions.
+/* Composer dock: layout, attachments, mentions, queues and session controls.
  *
- * Structure — mirrors the v3 mock exactly, including the footnote being a
- * *sibling* of the box (mock: `.composer-region > (.composer + .compose-foot)`):
+ *   .composer-region      the measured floating dock
+ *     .queued-panel       waiting Steer/Follow-up messages, when present
+ *     .composer           opaque input surface; upward popovers escape it
+ *       .mention-popover  @ path-reference autocomplete
+ *       .compose-field    auto-growing textarea
+ *       .composer-attachments
+ *       .compose-bottom   transparent layout wrappers on wide/idle layouts,
+ *                         explicit configuration/send-action rows on phones
+ *       .composer-drop    opaque overlay while dragging files
+ *     .compose-foot       live status + hints + read-only approval Settings entry
  *
- *   .composer-inner        max-width:820px, centred (layout.css)
- *     .composer            the bordered input box (q. position:relative so the
- *                          popovers and the drop overlay can escape the corners)
- *       .mention-popover   @-autocomplete, opens upward
- *       .compose-top       [+ attach] [textarea]
- *       .composer-attachments  chips, only when files are attached
- *       .compose-bottom    [model | reasoning pills] ... [counter] [Send/Stop]
- *       .composer-drop     overlay while dragging files
- *     .compose-foot        status + hints ......... approvals
- *
- * The mock's `.pill-divider` (1×16 `#3c3e3d`, `margin:0 3px`) is drawn as
- * `.reasoning-selector::before` rather than as a node, so it disappears together
- * with the reasoning pill when the active model cannot reason.
- *
- * Colours come from the fidelity role layer (`styles/tokens.css` +
- * `theme/roles.ts`) — never from the palette, never hardcoded.
+ * Colours come from the semantic role layer (`styles/tokens.css` +
+ * `theme/roles.ts`), never raw palette values.
  */
 
 /* ---------- the box ---------- */
@@ -33,14 +27,10 @@
    * composer; the value itself is the scale's card radius (§3.4). */
   --radius-composer: var(--radius);
   border-radius: var(--radius-composer);
-  /* Translucent so the transcript stays readable underneath. The fill is the
-   * ladder rung that is *nearer than the canvas* in both modes — `--surface`
-   * (Ember 12.9% vs a 5.5% canvas, Daybreak #ffffff vs #f6f4f1) — because this
-   * is a dock floating over the transcript, not a field painted on it. The input
-   * role it used before sits 8.8 points off the canvas in Ember but only 1.4 in
-   * Daybreak, where the box read as part of the page. `--dock-opacity` is the
-   * knob the scrolled state turns down (see below). */
-  background: color-mix(in srgb, var(--surface) calc(var(--dock-opacity, 100) * 1%), transparent);
+  /* An opaque floating surface keeps both the draft and transcript legible. The
+   * transcript reserves the measured dock height; history never has to shine
+   * through the control to remain readable. */
+  background: var(--surface);
   box-shadow:
     var(--shadow-composer),
     var(--shadow-dock),
@@ -61,42 +51,9 @@
   outline-offset: var(--focus-ring-offset);
 }
 
-/* ---------- scrolled away: step back so the text behind shows through ----------
- *
- * `data-translucent` is put on `.chat-panel` by ChatView while the reader is
- * reading history rather than following the run. The dock then thins out, blurs
- * what is behind it, and the footnote — chrome, not content — steps aside, so
- * what is left over the transcript is one pale box. Focus inside it brings the
- * real surface back: a control in use is never see-through.
- *
- * `backdrop-filter` is declared only here, never on the base rule: a filter makes
- * the box a stacking context, and the `@`-mention popover and the dropup model
- * menus escape the box by `z-index` today.
- */
-.chat-panel[data-translucent='true'] .composer {
-  --dock-opacity: 42;
-  --dock-blur: 3px;
-  backdrop-filter: blur(var(--dock-blur)) saturate(140%);
-}
-
-.chat-panel[data-translucent='true'] .composer:focus-within {
-  --dock-opacity: 92;
-  --dock-blur: 2px;
-}
-
-/* The footnote steps aside only while the reader is *not* in the box: the moment
- * they click into it, the status line and the shortcut hints are part of the
- * control they are using and come back with the surface. */
-.chat-panel[data-translucent='true'] .composer-wrap:not(:focus-within) .compose-foot {
-  opacity: 0;
-  visibility: hidden;
-  transform: translateY(3px);
-  /* Hide only *after* the fade, so the out-transition runs with the dock. */
-  transition:
-    opacity var(--transition),
-    transform var(--transition),
-    visibility 0s linear var(--transition);
-}
+/* Reading history is intentionally quieter, never translucent: ChatView keeps
+ * its measured spacer and Jump-to-latest placement, while this surface and its
+ * live status stay opaque and legible in every scroll and focus state. */
 
 /* ---------- input ---------- */
 
@@ -114,7 +71,9 @@
   /* Grows with the draft (Composer.tsx measures scrollHeight); the cap is a
    * custom property so the phone tier can lower it without a second constant. */
   --compose-input-max: 170px;
-  min-height: 35px;
+  /* One comfortable line at rest; the measured inline height still grows from
+   * here and remains bounded by the desktop/phone cap below. */
+  min-height: 44px;
   max-height: var(--compose-input-max);
   padding: var(--space-6) var(--space-6) var(--space-2);
   overflow-y: auto;
@@ -221,8 +180,10 @@
   display: grid;
   flex: 0 0 auto;
   place-items: center;
-  width: 16px;
-  height: 16px;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
   padding: 0;
   border: 0;
   border-radius: var(--radius-xs);
@@ -350,6 +311,8 @@
 
 .queued-recall {
   flex: 0 0 auto;
+  min-width: 24px;
+  min-height: 24px;
   padding: var(--space-1) var(--space-4);
   border: 1px solid var(--chip-line);
   border-radius: var(--radius-xs);
@@ -385,7 +348,8 @@
   flex: 0 0 auto;
   align-items: center;
   gap: var(--space-1);
-  height: 29px;
+  height: 30px;
+  min-height: 30px;
   padding: var(--space-1);
   border: 1px solid var(--chip-line);
   border-radius: var(--radius-sm);
@@ -393,7 +357,8 @@
 }
 
 .queue-mode-option {
-  height: 23px;
+  height: 24px;
+  min-height: 24px;
   padding: 0 var(--space-4);
   border: 0;
   border-radius: var(--radius-xs);
@@ -429,6 +394,24 @@
   gap: var(--space-2);
   min-height: 39px;
   padding: var(--space-2) var(--space-4) var(--space-4) var(--space-4);
+}
+
+/* Wrappers are transparent on wide layouts. The phone running state turns them
+ * into real grid/flex rows without duplicating or removing any control. */
+.compose-configuration,
+.compose-run-actions {
+  display: contents;
+}
+
+.composer-session-pins {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  min-width: 0;
+}
+
+.composer-session-pins:empty {
+  display: none;
 }
 
 /* `.cbar-left`: a tight cluster that clips before the right-hand controls. */
@@ -489,7 +472,8 @@
    * without this the button kept its full width inside a narrower box and spilled
    * out of `.compose-bar-left`'s clip. */
   max-width: min(230px, 100%);
-  height: 23px;
+  height: 24px;
+  min-height: 24px;
   padding: 0 var(--space-4);
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
@@ -501,9 +485,9 @@
    * narrow for both pills. A flex item defaults to `min-width: auto`, so without
    * this the pills refuse to shrink and `.compose-bar-left`'s `overflow: hidden`
    * silently cuts the reasoning pill off — a control that exists, is clickable
-   * by tab order, and cannot be seen. Letting them shrink turns that into an
-   * ellipsised label on a control that is still there. */
-  min-width: 0;
+   * by tab order, and cannot be seen. Labels ellipsise down to a real target
+   * floor instead of letting min-content force a neighbour out of the dock. */
+  min-width: 24px;
   overflow: hidden;
 }
 
@@ -633,9 +617,11 @@
 }
 
 .compose-bottom .button-queue {
-  min-width: 0;
+  flex: 0 0 auto;
+  min-width: 28px;
   width: auto;
   height: 28px;
+  min-height: 28px;
   padding: 0 var(--space-5);
   font-size: var(--fs-tiny);
   font-weight: 700;
@@ -671,21 +657,34 @@
   flex: 0 0 auto;
   align-items: center;
   gap: var(--space-2);
+  min-width: 24px;
   height: 26px;
+  min-height: 26px;
   padding: 0 var(--space-2);
+  border: 0;
   border-radius: var(--radius-xs);
+  background: transparent;
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  cursor: default;
+  cursor: pointer;
+}
+
+.context-pill-label {
+  font-family: var(--font-ui);
 }
 
 .context-pill:hover {
   background: var(--surface-hover);
   color: var(--text-2);
+}
+
+.context-pill:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: 0;
 }
 
 /* A 3px track, 34px long: a gauge, not a bar chart. The fill width is set inline
@@ -734,8 +733,9 @@
   position: static;
   /* Both pill wrappers are flex items in `.composer-controls`; `min-width: auto`
   * would forbid them shrinking below their label, so the last pill in the row was
-  * clipped by `.compose-bar-left` instead of ellipsising. */
-  min-width: 0;
+  * clipped by `.compose-bar-left` instead of ellipsising. The 24px floor preserves
+  * a pointer target while still allowing long model names to shrink. */
+  min-width: 24px;
 }
 
 .compose-bottom .model-switcher-menu.dropup {
@@ -875,6 +875,8 @@
 }
 
 .composer-status .link-button {
+  min-width: 24px;
+  min-height: 24px;
   padding: 0;
   font-size: var(--fs-micro);
   color: var(--accent-text);
@@ -902,9 +904,27 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-3);
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
   color: var(--muted);
+  font-family: var(--font-mono);
   font-size: var(--fs-micro);
   white-space: nowrap;
+  cursor: pointer;
+}
+
+.compose-approvals:hover {
+  background: var(--surface-hover);
+  color: var(--text-2);
+}
+
+.compose-approvals:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: 0;
 }
 
 /* ---------- drop target ---------- */
@@ -917,8 +937,7 @@
   place-items: center;
   border: 1px dashed var(--focus-input);
   border-radius: var(--radius);
-  background: color-mix(in srgb, var(--row-accent-bg) 78%, transparent);
-  backdrop-filter: blur(2px);
+  background: var(--surface);
   pointer-events: none;
 }
 
@@ -1144,12 +1163,12 @@
   }
 
   .compose-bottom .model-switcher-button {
-    max-width: 145px;
+    max-width: min(145px, 100%);
     overflow: hidden;
   }
 
   .compose-bottom .reasoning-selector .model-switcher-button {
-    max-width: 124px;
+    max-width: min(124px, 100%);
   }
 
   .compose-bottom .model-switcher-model {
@@ -1184,6 +1203,69 @@
  * desktop-only. This lives here because composer.css loads after layout.css and
  * wins over the shared `.composer-input` guard there. */
 @media (max-width: 640px) {
+  /* A running phone dock has two deliberate rows: model/session configuration
+   * and always-available Stop above, then Usage plus the explicit send mode and
+   * send action below. Idle keeps the ordinary one-row bar wherever it fits. */
+  .compose-bottom.is-running {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+  }
+
+  .is-running .compose-configuration {
+    display: flex;
+    grid-row: 1;
+    grid-column: 1;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+
+  .is-running .compose-configuration .compose-bar-left {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .is-running .compose-configuration .composer-spacer {
+    display: none;
+  }
+
+  .is-running > .button-stop {
+    grid-row: 1;
+    grid-column: 2;
+  }
+
+  .is-running .compose-run-actions {
+    display: flex;
+    grid-row: 2;
+    grid-column: 1 / -1;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+
+  .is-running .compose-run-actions .context-pill {
+    margin-right: auto;
+  }
+
+  .is-running .compose-run-actions .char-count,
+  .is-running .compose-run-actions .queue-mode,
+  .is-running .compose-run-actions .button-queue {
+    order: 0;
+  }
+
+  .is-running .queue-mode-option {
+    padding: 0 var(--space-3);
+  }
+
+  .is-running .button-queue {
+    padding: 0 var(--space-4);
+  }
+
   .composer-input {
     /* 16px is the floor that stops iOS zooming the page on focus; it is the
      * scale's `--fs-title`. */
@@ -1195,24 +1277,20 @@
     --compose-input-max: min(112px, 22vh);
   }
 
-  /* A narrow dock has no room for a wrapped footnote: the status line, the
-   * shortcut hints and the approval policy used to stack into a two-line block
-   * that floated over the transcript. Keep the live status (it is the only place
-   * a blocked or failing composer explains itself) and drop the rest, which are
-   * shortcuts and a policy reminder already in Settings → Approvals. */
-  .composer-hint,
-  .compose-approvals {
+  /* Shortcut prose yields on a phone. Live status and the read-only Approvals
+   * entry stay available; the latter opens the real Settings surface. */
+  .composer-hint {
     display: none;
   }
 
   /* Squeeze the pills before the row wraps: the pill is `padding + chevron +
    * label`, so the label cap alone is not enough. */
   .compose-bottom .model-switcher-button {
-    max-width: 108px;
+    max-width: min(108px, 100%);
   }
 
   .compose-bottom .reasoning-selector .model-switcher-button {
-    max-width: 92px;
+    max-width: min(92px, 100%);
   }
 
   .compose-bottom .model-switcher-model {
@@ -1225,8 +1303,8 @@
     max-width: 54px;
   }
 
-  /* The meter is the first thing to go on a phone: the number still says
-   * everything, and the row has to stay one line (see the pill caps above). */
+  /* The decorative meter yields before the Usage label or the real percentage.
+   * Idle keeps one line where it fits; running uses the explicit rows above. */
   .context-pill {
     padding: 0 var(--space-2);
   }
@@ -1235,14 +1313,9 @@
     display: none;
   }
 
-  /* The context pill is the newest tenant in this row, so it is the one that has
-   * to give way when the pills, the number and Send cannot share a line. It was
-   * measured pushing the row from 36px to 66px at 390px - two lines of dock over
-   * the transcript, which is exactly what the caps above exist to prevent.
-   *
-   * The spacer is what has to yield first: at 390px it was still taking 32-236px
-   * of flex, and the row only wraps once it is gone. Then the pill shrinks, and
-   * the buttons keep enough width for their labels. */
+  /* Flexible space yields before visible controls. In the running state the
+   * spacer is absent from the first grid row and Usage joins the second row;
+   * in idle its collapse lets Send remain on the existing quiet line. */
   .compose-bottom .composer-spacer {
     flex: 0 1 0;
     min-width: 0;
@@ -1266,7 +1339,7 @@
 
   .context-pill {
     flex: 0 1 auto;
-    min-width: 0;
+    min-width: 24px;
     overflow: hidden;
   }
 }
@@ -1277,8 +1350,7 @@
   .compose-foot,
   .attachment-chip-remove,
   .composer-input,
-  .context-pill-fill,
-  .chat-panel[data-translucent='true'] .composer-wrap:not(:focus-within) .compose-foot {
+  .context-pill-fill {
     transition: none;
   }
 

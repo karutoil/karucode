@@ -15,7 +15,7 @@ export type ThemeMono = 'default' | 'system' | 'classic';
 /**
  * How a tool call is drawn in the transcript.
  *
- * `cards` is the roomy card (icon, arguments, 112px output preview, footer);
+ * `cards` is the roomy card (icon, arguments, output disclosure and footer);
  * `rows` is a single quiet line per call that expands into the same output, so a
  * turn with twenty calls reads as a list instead of twenty blocks.
  */
@@ -23,8 +23,8 @@ export type ThemeToolStyle = 'cards' | 'rows';
 /**
  * What gets folded in the transcript. `none` shows every call, `tools` folds
  * runs of consecutive tool calls into one summary line, and `turns` also folds
- * the intermediate work of a finished turn behind a "worked for …" line, so a
- * long run leaves its narration and its answer.
+ * the intermediate work of a finished turn behind a "Show the working" line, so
+ * a long run leaves its answer and any actionable notices.
  *
  * Nothing is ever folded away while it can still change what you must do: a
  * running call, a pending approval, an error, a notice and the last answer of a
@@ -60,7 +60,7 @@ export interface ThemeChoice<T extends string> {
  * treatment and the docs cannot drift apart.
  */
 export const THEME_TOOL_STYLE_CHOICES: readonly ThemeChoice<ThemeToolStyle>[] = [
-  { value: 'cards', label: 'Cards', hint: 'The full card: arguments, output preview and footer.' },
+  { value: 'cards', label: 'Cards', hint: 'The full card: arguments, output disclosure and footer.' },
   { value: 'rows', label: 'Rows', hint: 'One quiet line per call; the same output on demand.' },
 ];
 

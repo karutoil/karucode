@@ -1,0 +1,195 @@
+/* Workbench navigation additions. Imported by SessionsRail so the ordinary
+ * navigation column owns its project disclosure even when ProjectRail is absent.
+ * All selectors are component-scoped; layout.css keeps the shell geometry. */
+
+.rail .side-head:has(> .project-switcher-desktop) {
+  padding: 0;
+}
+
+.rail .project-switcher.project-switcher-desktop {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5) var(--space-2);
+}
+
+.rail .workbench-project-disclosure {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.rail .workbench-project-disclosure:hover,
+.rail .workbench-project-disclosure[aria-expanded='true'] {
+  border-color: var(--line);
+  background: var(--surface-hover);
+}
+
+.rail .workbench-project-disclosure > .project-rail-avatar {
+  --project-rail-glyph: 30px;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.workbench-project-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.workbench-project-copy .project-title-text,
+.workbench-project-copy .path-hint {
+  width: 100%;
+}
+
+.workbench-project-disclosure > svg {
+  flex: 0 0 auto;
+  color: var(--icon-quiet);
+  transition: transform var(--transition-fast);
+}
+
+.workbench-project-disclosure[aria-expanded='true'] > svg {
+  transform: rotate(180deg);
+}
+
+.workbench-project-unread {
+  flex: 0 0 auto;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+  color: var(--danger-bg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+.rail .workbench-projects-disclosure {
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 var(--space-2) var(--space-6) var(--shadow-lg);
+}
+
+.rail .workbench-projects-disclosure .project-switcher-list {
+  flex-direction: column;
+  gap: var(--space-1);
+  max-height: min(280px, 40vh);
+  padding: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.rail .workbench-projects-disclosure .project-switcher-item {
+  width: 100%;
+  max-width: none;
+  min-height: 34px;
+  padding: var(--space-2);
+  border-color: transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+}
+
+.rail .workbench-projects-disclosure .project-switcher-item:hover {
+  border-color: var(--line);
+  background: var(--surface-hover);
+}
+
+.workbench-projects-disclosure .project-switcher-item .project-rail-avatar,
+.project-switcher:not(.project-switcher-desktop) .project-switcher-item .project-rail-avatar {
+  --project-rail-glyph: 22px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-micro);
+}
+
+.project-switcher .project-switcher-name {
+  min-width: 0;
+}
+
+.project-switcher .project-switcher-item.is-active .project-rail-avatar {
+  border-color: var(--accent-faint);
+  background: var(--btn-accent-bg-hover);
+  color: var(--accent-on-tint);
+}
+
+.workbench-projects-empty {
+  margin: 0;
+  padding: var(--space-3);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  line-height: 1.45;
+}
+
+.rail .workbench-control-plane {
+  display: flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: var(--space-2);
+  min-height: 26px;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  font-weight: 500;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.rail .workbench-control-plane:hover,
+.rail .workbench-control-plane:focus-visible,
+.rail .workbench-control-plane[aria-pressed='true'] {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.workbench-control-mark {
+  color: var(--accent-fill);
+  font-family: var(--font-mono);
+  font-weight: 800;
+}
+
+.session-row-quiet .session-state {
+  flex: 0 0 auto;
+  font-family: var(--font-ui);
+  font-size: var(--fs-tiny);
+  font-weight: 500;
+}
+
+.session-row-quiet .session-state-running {
+  color: var(--accent-fill);
+}
+
+.session-row-quiet .session-state-danger {
+  color: var(--danger);
+}
+
+.session-row-quiet .session-state-warn {
+  color: var(--warning);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workbench-project-disclosure > svg {
+    transition: none;
+  }
+}

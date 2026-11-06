@@ -102,6 +102,10 @@ pub fn api_router() -> Router<AppState> {
             "/projects/:id",
             axum::routing::patch(projects::rename_project).delete(projects::delete_project),
         )
+        .route(
+            "/projects/:id/preferences",
+            axum::routing::patch(projects::update_project_preferences),
+        )
         .route("/projects/:id/favicon", get(projects::project_favicon))
         .route("/missions", get(missions::list).post(missions::create))
         .route("/missions/:id", get(missions::get).delete(missions::delete))

@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import type { GitStatus } from '../../api/types';
 import { canCommit } from './gitModel';
 
@@ -35,6 +35,7 @@ export function GitCommitBox({
   busy,
   onCommit,
 }: GitCommitBoxProps): JSX.Element {
+  const messageId = useId();
   const [message, setMessage] = useState('');
   const [amend, setAmend] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -76,11 +77,11 @@ export function GitCommitBox({
         void submit();
       }}
     >
-      <label class="sr-only" for={`gitm-message-${variant}`}>
+      <label class="sr-only" for={messageId}>
         Commit message
       </label>
       <textarea
-        id={`gitm-message-${variant}`}
+        id={messageId}
         ref={textRef}
         class="gitm-message"
         rows={variant === 'page' ? 3 : 2}

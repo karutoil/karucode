@@ -1,10 +1,11 @@
 import type { JSX } from 'preact';
-import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { Activity } from '../state/selectors';
 import * as store from '../state/store';
 import * as api from '../api/endpoints';
 import { toErrorMessage } from '../api/client';
-import type { ApprovalMode, Config, QueuedAttachment, QueuedKind, QueuedMessage } from '../api/types';
+import type { QueuedAttachment, QueuedKind, QueuedMessage } from '../api/types';
+import { describeApprovals } from '../lib/approvalCopy';
 import {
   attachForQueue,
   attachmentSummary,
@@ -47,46 +48,6 @@ import {
   formatContextPercent,
   type ContextUsage,
 } from '../state/selectors';
-
-/** Short footnote label for the active approval policy. */
-const APPROVAL_FOOT_LABEL: Record<ApprovalMode, string> = {
-  ask: 'ask',
-  ask_commands: 'commands only',
-  auto: 'auto',
-  read_only: 'read only',
-};
-
-const APPROVAL_FOOT_TITLE: Record<ApprovalMode, string> = {
-  ask: 'Every mutating tool and shell command asks for approval.',
-  ask_commands: 'File writes inside the workspace are allowed; shell commands still ask.',
-  auto: 'No approval prompts: every tool call is allowed and recorded.',
-  read_only: 'Only read-only tools are allowed; writes and commands are refused.',
-};
-
-/**
- * The mock documents its right-hand footnote zone as `Approvals enabled`.
- * Ours says which policy is in force, derived from the live config, and explains
- * the counters in the tooltip.
- */
-function describeApprovals(config: Config | null): { label: string; title: string } | null {
-  const policy = config?.approvals;
-  if (!policy) return null;
-  const counts: string[] = [];
-  const commands = policy.allow_commands.length;
-  const paths = policy.auto_approve_paths.length;
-  if (commands > 0) counts.push(`${commands} allowlisted command${commands === 1 ? '' : 's'}`);
-  if (paths > 0) counts.push(`${paths} auto-approved path${paths === 1 ? '' : 's'}`);
-  return {
-    label: APPROVAL_FOOT_LABEL[policy.mode] ?? policy.mode,
-    title: [
-      APPROVAL_FOOT_TITLE[policy.mode] ?? `Approval mode: ${policy.mode}.`,
-      counts.length > 0 ? `${counts.join(', ')}.` : '',
-      'Change this in Settings → Approvals.',
-    ]
-      .filter(Boolean)
-      .join(' '),
-  };
-}
 
 export interface UploadContext {
   session: string | null;
@@ -268,34 +229,55 @@ function QueuedPanel({
 }
 
 /**
- * `57.4%` of the context window, with a hairline meter in its background.
- *
- * It sits in the composer because that is where the user decides what to send
- * next: the one moment "am I about to overflow this" is actionable is right
- * before typing another message. Both sides of the percentage are real numbers —
- * the provider's prompt tokens and the model's declared window — so the pill
- * renders nothing at all when either is missing rather than inventing a
- * plausible-looking figure.
+ * The provider-reported `57.4%` context-window reading is also the Usage entry
+ * point when the caller has a Usage destination. Without one, the same telemetry
+ * stays read-only; the composer never estimates usage from the unsubmitted draft.
  */
-function ContextPill({ usage }: { usage: ContextUsage }): JSX.Element {
+function ContextPill({
+  usage,
+  onOpenUsage,
+}: {
+  usage: ContextUsage;
+  onOpenUsage?: () => void;
+}): JSX.Element {
   const text = formatContextPercent(usage.fraction);
   const tone = contextTone(usage.fraction);
   const title =
     `${usage.tokens.toLocaleString()} of ${usage.window.toLocaleString()} context tokens used (${text}) — ` +
     'the prompt size the provider reported for the newest call. ' +
-    'karucode compacts the oldest turns when the request passes this model\'s window.';
-  return (
-    <span
-      class="context-pill"
-      data-tone={tone}
-      title={title}
-      aria-label={`Context window ${text} full: ${usage.tokens.toLocaleString()} of ${usage.window.toLocaleString()} tokens`}
-    >
-      <span class="context-pill-meter">
+    'karucode compacts the oldest turns when the request passes this model\'s window. ' +
+    'Open Usage for session details.';
+  const ariaLabel =
+    `Usage: context window ${text} full, ${usage.tokens.toLocaleString()} of ` +
+    `${usage.window.toLocaleString()} tokens. Open session usage`;
+  const content = (
+    <>
+      <span class="context-pill-label">Usage</span>
+      <span class="context-pill-meter" aria-hidden="true">
         <span class="context-pill-fill" style={{ width: `${Math.max(2, usage.fraction * 100)}%` }} />
       </span>
       <span class="context-pill-text">{text}</span>
-    </span>
+    </>
+  );
+
+  if (!onOpenUsage) {
+    return (
+      <span class="context-pill" data-tone={tone} title={title} aria-label={ariaLabel}>
+        {content}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      class="context-pill"
+      data-tone={tone}
+      title={title}
+      aria-label={ariaLabel}
+      onClick={() => onOpenUsage()}
+    >
+      {content}
+    </button>
   );
 }
 
@@ -325,6 +307,8 @@ export interface ComposerProps {
   recalling?: Record<string, boolean>;
   onStop: () => void;
   onOpenSettings: () => void;
+  /** Open Usage in this caller's workspace; omitted where no destination exists. */
+  onOpenUsage?: () => void;
   focusTick: number;
   usageLabel?: string;
   /** Override the workspace tree fetch behind `@` suggestions (tests). */
@@ -382,6 +366,7 @@ export function Composer({
   recalling,
   onStop,
   onOpenSettings,
+  onOpenUsage,
   focusTick,
   usageLabel,
   loadMentionTree,
@@ -693,16 +678,25 @@ export function Composer({
   };
 
   // ---- layout effects ---------------------------------------------------
-  useEffect(() => {
+  const growTextarea = useCallback((): void => {
     const element = textarea.current;
     if (!element) return;
     // Grow to fit the draft and let CSS clamp it: `max-height` is
-    // `var(--compose-input-max)`, and `max-height` wins over an inline `height`,
-    // so the phone tier can lower the cap — including while the on-screen
-    // keyboard is up — without this effect having to re-run on a resize.
+    // `var(--compose-input-max)`, and `max-height` wins over an inline `height`.
+    // Re-measuring on resize also matters: the same text wraps onto more lines
+    // on a phone, and retaining a desktop-height inline value would clip it.
     element.style.height = 'auto';
     element.style.height = `${element.scrollHeight}px`;
-  }, [draft]);
+  }, []);
+
+  useEffect(() => {
+    growTextarea();
+  }, [draft, growTextarea]);
+
+  useEffect(() => {
+    window.addEventListener('resize', growTextarea);
+    return () => window.removeEventListener('resize', growTextarea);
+  }, [growTextarea]);
 
   useEffect(() => {
     if (focusTick === 0) return;
@@ -827,6 +821,13 @@ export function Composer({
   // declares. Either side missing means no pill, because a percentage drawn from
   // a guess is worse than an empty slot.
   const context = contextUsage(store.chat.value, store.activeContextWindow.value);
+  const contextControl = context ? <ContextPill usage={context} onOpenUsage={onOpenUsage} /> : null;
+  const characterCounter =
+    draft.length > CHAR_COUNTER_THRESHOLD ? (
+      <span class={`char-count${draft.length > 12000 ? ' is-over' : ''}`}>
+        {draft.length.toLocaleString()} characters
+      </span>
+    ) : null;
 
   return (
     <>
@@ -1003,54 +1004,57 @@ export function Composer({
           </ul>
         ) : null}
 
-        <div class="compose-bottom">
-          <div class="composer-controls compose-bar-left">
-            <button
-              type="button"
-              class="compose-plus"
-              onClick={() => fileInput.current?.click()}
-              disabled={!canType}
-              aria-label="Attach files"
-              title={attachTitle}
-            >
-              <PaperclipIcon size={15} />
-            </button>
-            <ModelControls />
+        <div class={`compose-bottom${running ? ' is-running' : ''}`}>
+          <div class="compose-configuration">
+            <div class="composer-controls compose-bar-left">
+              <button
+                type="button"
+                class="compose-plus"
+                onClick={() => fileInput.current?.click()}
+                disabled={!canType}
+                aria-label="Attach files"
+                title={attachTitle}
+              >
+                <PaperclipIcon size={15} />
+              </button>
+              <div
+                class="composer-session-pins"
+                role="group"
+                aria-label="Model and reasoning pins for subsequent runs in this session"
+                title="Model and reasoning changes apply to subsequent runs, not a run already in flight."
+              >
+                <ModelControls />
+              </div>
+            </div>
+            <div class="composer-spacer" />
+            {running ? null : contextControl}
+            {running ? null : characterCounter}
           </div>
-          <div class="composer-spacer" />
-
-          {context ? <ContextPill usage={context} /> : null}
-
-          {draft.length > CHAR_COUNTER_THRESHOLD ? (
-            <span class={`char-count${draft.length > 12000 ? ' is-over' : ''}`}>
-              {draft.length.toLocaleString()} characters
-            </span>
-          ) : null}
 
           {running ? (
             <>
-              {/* Two buttons, two outcomes: Stop ends the run, Queue sends this
-               * message into it. They sit side by side because an empty box
-               * disables Queue rather than removing it, so the row does not jump
-               * while the user is typing.
-               *
-               * The mode toggle only appears once there is text: with an empty box
-               * it is a choice about nothing, and the dock is short. */}
-              {hasContent ? <QueueModeToggle mode={queueMode} onChange={setQueueMode} /> : null}
-              <button
-                type="submit"
-                class="button button-primary button-queue"
-                disabled={!canQueue}
-                aria-label={
-                  queueMode === 'steer'
-                    ? 'Queue this message and steer the running turn (Command or Control + Enter)'
-                    : 'Queue this follow-up for the next turn (Command or Control + Enter)'
-                }
-                title={QUEUE_TITLE[queueMode]}
-              >
-                <ArrowUpIcon size={13} />
-                {queueMode === 'steer' ? 'Steer' : 'Queue'}
-              </button>
+              <div class="compose-run-actions">
+                {contextControl}
+                {characterCounter}
+                {/* Stop ends the run; this group submits into its explicit queue.
+                 * Both stay visible with an empty draft. The mode choice appears
+                 * only once there is a message for it to describe. */}
+                {hasContent ? <QueueModeToggle mode={queueMode} onChange={setQueueMode} /> : null}
+                <button
+                  type="submit"
+                  class="button button-primary button-queue"
+                  disabled={!canQueue}
+                  aria-label={
+                    queueMode === 'steer'
+                      ? 'Queue this message and steer the running turn (Command or Control + Enter)'
+                      : 'Queue this follow-up for the next turn (Command or Control + Enter)'
+                  }
+                  title={QUEUE_TITLE[queueMode]}
+                >
+                  <ArrowUpIcon size={13} />
+                  {queueMode === 'steer' ? 'Steer' : 'Queue'}
+                </button>
+              </div>
               <button
                 type="button"
                 class="button button-stop"
@@ -1143,7 +1147,7 @@ export function Composer({
                 <>
                   <strong>Ctrl Enter</strong> to send
                   <span class="composer-hint-sep">·</span>
-                  <strong>@</strong> mention {mentionLabel ?? 'files'}
+                  <strong>@</strong> reference {mentionLabel ?? 'files'}
                 </>
               )}
             </span>
@@ -1151,10 +1155,16 @@ export function Composer({
         </span>
 
         {approvals ? (
-          <span class="compose-approvals" title={approvals.title}>
+          <button
+            type="button"
+            class="compose-approvals"
+            title={approvals.title}
+            aria-label={`Approvals: ${approvals.label}. Open Settings`}
+            onClick={onOpenSettings}
+          >
             Approvals: {approvals.label}
             <LockIcon size={11} />
-          </span>
+          </button>
         ) : null}
       </div>
     </>

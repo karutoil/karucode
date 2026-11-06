@@ -10,6 +10,7 @@ import {
 } from './fixtures';
 import type { Health } from '../api/types';
 import * as store from '../state/store';
+import { controlPlaneOpen } from '../state/controlPlane';
 
 const healthFixture: Health = {
   status: 'ok',
@@ -91,11 +92,16 @@ describe('App smoke render', () => {
     expect(await screen.findByText('The login handler is unfinished.')).not.toBeNull();
     expect(screen.getByText('I will read the auth module.')).not.toBeNull();
     expect(screen.getAllByText('read_file').length).toBeGreaterThan(0);
+    expect(screen.queryByText('fn login() { todo!() }')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /^read_file src\/auth\.rs\b/i }));
     expect(screen.getByText('fn login() { todo!() }')).not.toBeNull();
     expect(screen.getByText('Run cargo test')).not.toBeNull();
-    // Two tablists share the page now: the workspace views and the inspector.
+    // Two tablists share the page now: header workspace views and true results.
     const inspector = screen.getByRole('complementary', { name: 'Workspace inspector' });
     const workspace = screen.getByRole('main', { name: 'Workspace' });
+    const workspaceViews = within(workspace).getByRole('tablist', { name: 'Workspace views' });
+    expect(workspaceViews.closest('header.main-head')).not.toBeNull();
+    expect(workspace.querySelector('.workspace-tabbar')).toBeNull();
     expect(within(workspace).getByRole('tab', { name: 'Conversation' })).not.toBeNull();
     // The source-control tab may carry a changed-file count pill, hence the
     // prefix match.
@@ -128,6 +134,22 @@ describe('App smoke render', () => {
     render(<App />);
     expect(await screen.findByText('Authentication required')).not.toBeNull();
     expect(screen.getByLabelText('Access token')).not.toBeNull();
+  });
+  it('does not retain an ordinary Workbench beneath the Control Plane', async () => {
+    installFetch();
+    render(<App />);
+    await waitFor(() => expect(store.boot.value).toBe('ready'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Task actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'All tasks' }));
+    await waitFor(() => expect(controlPlaneOpen.value).toBe(true));
+    expect(document.querySelectorAll('#chat-main')).toHaveLength(0);
+    expect(document.querySelectorAll('#composer-input')).toHaveLength(0);
+
+    fireEvent.click(document.querySelector('.project-rail-item') as HTMLButtonElement);
+    await waitFor(() => expect(controlPlaneOpen.value).toBe(false));
+    expect(document.querySelectorAll('#chat-main')).toHaveLength(1);
+    expect(document.querySelectorAll('#composer-input')).toHaveLength(1);
   });
 });
 describe('App crash containment', () => {

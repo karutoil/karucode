@@ -386,8 +386,8 @@ describe('transcript settings', () => {
     renderOpen();
 
     for (const [testId, value] of [
-      ['theme-tool-style', 'cards'],
-      ['theme-grouping', 'none'],
+      ['theme-tool-style', 'rows'],
+      ['theme-grouping', 'turns'],
       ['theme-thinking', 'collapsed'],
     ] as const) {
       expect(screen.getByTestId(`${testId}-${value}`).getAttribute('aria-pressed')).toBe('true');
@@ -397,23 +397,23 @@ describe('transcript settings', () => {
   it('applies each option to <html>, the preview and storage', () => {
     renderOpen();
 
-    fireEvent.click(screen.getByTestId('theme-tool-style-rows'));
-    expect(document.documentElement.dataset.toolStyle).toBe('rows');
-    // The miniature follows: the one-line row is shown, the card is not.
-    expect((document.querySelector('.theme-preview-row') as HTMLElement).hidden).toBe(false);
-    expect((document.querySelector('.theme-preview-card') as HTMLElement).hidden).toBe(true);
+    fireEvent.click(screen.getByTestId('theme-tool-style-cards'));
+    expect(document.documentElement.dataset.toolStyle).toBe('cards');
+    // Full activity remains a real choice: the miniature swaps back to a card.
+    expect((document.querySelector('.theme-preview-row') as HTMLElement).hidden).toBe(true);
+    expect((document.querySelector('.theme-preview-card') as HTMLElement).hidden).toBe(false);
 
-    fireEvent.click(screen.getByTestId('theme-grouping-turns'));
-    expect(document.documentElement.dataset.grouping).toBe('turns');
-    expect(document.querySelector('.theme-preview-narration')?.getAttribute('data-on')).toBe('folded');
+    fireEvent.click(screen.getByTestId('theme-grouping-none'));
+    expect(document.documentElement.dataset.grouping).toBe('none');
+    expect(document.querySelector('.theme-preview-narration')?.getAttribute('data-on')).toBe('shown');
 
     fireEvent.click(screen.getByTestId('theme-thinking-preview'));
     expect(document.documentElement.dataset.thinking).toBe('preview');
     expect(document.querySelector('.theme-preview-thought')?.textContent).toContain('view options');
 
     expect(persisted().draft).toMatchObject({
-      toolStyle: 'rows',
-      grouping: 'turns',
+      toolStyle: 'cards',
+      grouping: 'none',
       thinking: 'preview',
     });
   });
@@ -425,8 +425,8 @@ describe('transcript settings', () => {
         .querySelector('[data-testid="theme-grouping"]')
         ?.parentElement?.querySelector('.theme-field-hint')?.textContent ?? '';
 
-    // "None" is selected by default, and says what none means.
-    expect(groupingHint()).toBe('Show every call where it happened.');
+    // Completed turns are folded by default, with the on-demand explanation.
+    expect(groupingHint()).toContain('finished turn');
 
     fireEvent.click(screen.getByTestId('theme-grouping-tools'));
     expect(groupingHint()).toContain('summary line');
