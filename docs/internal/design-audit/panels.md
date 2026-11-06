@@ -1,7 +1,18 @@
 # Panel and tool-surface audit
 
+> **Note on `session-control.css` line numbers.** This is a dated snapshot, and
+> its measurements are quoted as taken. After it was written, `session-control.css`
+> was split into `control-rail.css`, `control-overview.css` and `control-session.css`,
+> and `components/ControlPlane.tsx` into `components/control-plane/`, so every
+> `session-control.css:NNN` citation below points at a file that no longer exists.
+> The findings are not stale where they were fixed — most have been, and
+> `styles/workflow-panels.test.ts` now pins the status-word rules that M6 describes
+> — but the line numbers are. Read them as "in the control plane's stylesheet",
+> not as an address.
+
 **Domain:** `inspector.css`, `terminal.css`, `git.css`, `todo.css`, `goals.css`,
-`session-control.css` and the components they paint (Inspector, FileTree,
+`session-control.css` (since split into `control-rail.css` / `control-overview.css`
+/ `control-session.css`) and the components they paint (Inspector, FileTree,
 FileViewer, FilePreview, WorkspaceTab, SessionInfoTab, AgentsTab, ControlPlane,
 TerminalTab, TerminalSurface, TodoPanel, GoalsPanel, PluginPanelView,
 `components/git/*`).
