@@ -362,10 +362,15 @@ def main() -> int:
         wait("return !!document.querySelector('#composer-input');", 30)
 
         workbench: dict[str, dict] = {}
+        # `:not(.is-active)` everywhere: the workbench row just clicked is the
+        # active one and paints the accent tint, so pairing it with the plane's
+        # ordinary row would measure "selected versus not" and call the
+        # difference a design divergence. Both sides read an unselected row, and
+        # the selected pair is compared separately below.
         roles = {
-            "row": ".session-row",
-            "rowTitle": ".session-title",
-            "rowMeta": ".session-meta",
+            "row": ".session-row:not(.is-active)",
+            "rowTitle": ".session-row:not(.is-active) .session-title",
+            "rowMeta": ".session-row:not(.is-active) .session-meta",
             "iconButton": ".icon-button",
             "badge": ".badge",
             "eyebrow": ".eyebrow",
@@ -376,6 +381,7 @@ def main() -> int:
             "emptyTitle": ".empty-title",
             "button": ".button",
             "menuTrigger": ".session-menu-trigger",
+            "rowSelected": ".session-row.is-active",
         }
         for role, selector in roles.items():
             workbench[role] = measure(js, selector)
@@ -393,9 +399,9 @@ def main() -> int:
         # it has not, the selector names its private class so the comparison
         # still runs and the divergence is measured rather than assumed.
         plane_roles = {
-            "row": ".cp-browser .session-row, .cp-browser .cp-row",
-            "rowTitle": ".cp-browser .session-title, .cp-browser .cp-row-title-text",
-            "rowMeta": ".cp-browser .session-meta, .cp-browser .cp-row-meta",
+            "row": ".cp-browser .session-row:not(.is-active), .cp-browser .cp-row:not(.selected)",
+            "rowTitle": ".cp-browser .session-row:not(.is-active) .session-title, .cp-browser .cp-row:not(.selected) .cp-row-title-text",
+            "rowMeta": ".cp-browser .session-row:not(.is-active) .session-meta, .cp-browser .cp-row:not(.selected) .cp-row-meta",
             "iconButton": ".cp-browser .icon-button, .cp-browser .cp-icon",
             "badge": ".cp-browser .badge, .cp-browser .cp-badge",
             "eyebrow": ".cp-overview .eyebrow, .cp-overview .cp-eyebrow, .cp-browser .eyebrow, .cp-browser .cp-group-sub",
@@ -406,6 +412,7 @@ def main() -> int:
             "emptyTitle": ".cp-overview .empty-title, .cp-overview .cp-intro-empty",
             "button": ".cp-overview .button, .cp-overview .cp-primary, .cp-overview .cp-secondary",
             "menuTrigger": ".cp-browser .session-menu-trigger, .cp-browser .cp-row-menu-trigger",
+            "rowSelected": ".cp-browser .session-row.is-active, .cp-browser .cp-row.selected",
         }
         for role, selector in plane_roles.items():
             plane[role] = measure(js, selector)
