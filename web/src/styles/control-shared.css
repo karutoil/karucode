@@ -47,28 +47,25 @@
 /* ---------------------------------------------------------------- banners */
 
 .cp-error {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  margin: var(--space-4) var(--space-6) 0;
-  padding: var(--space-4) var(--space-5);
-  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  margin: var(--space-6) var(--space-8) 0;
+  padding: var(--space-4) var(--space-6);
+  border: 1px solid var(--theme-danger);
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
-  color: var(--danger);
-  font-size: var(--fs-tiny);
+  background: var(--theme-danger-bg);
+  color: var(--theme-danger);
+  font-size: var(--fs-small);
 }
-.cp-error button { color: inherit; text-decoration: underline; }
+.cp-error button { margin-left: var(--space-4); text-decoration: underline; color: inherit; }
 
 /* A failed snapshot read keeps the last good one on screen and says that it is
  * old: "nothing is running anywhere" would be a different and wrong answer. */
 .cp-stale {
-  margin: var(--space-4) var(--space-6) 0;
-  padding: var(--space-3) var(--space-5);
-  border: 1px solid var(--line);
+  margin: var(--space-6) var(--space-8) 0;
+  padding: var(--space-3) var(--space-6);
+  border: 1px solid var(--theme-warn);
   border-radius: var(--radius-md);
-  background: var(--theme-surface);
-  color: var(--muted);
+  background: var(--theme-raised);
+  color: var(--text);
   font-size: var(--fs-tiny);
 }
 
@@ -80,18 +77,18 @@
   display: flex;
   align-items: center;
   gap: var(--space-5);
-  padding: var(--space-8) var(--space-6);
+  padding: var(--space-8);
   color: var(--muted);
-  font-size: var(--fs-tiny);
+  font-size: var(--fs-label);
 }
 
 .cp-spinner {
   width: 12px;
   height: 12px;
   border: 2px solid var(--line-strong);
-  border-top-color: var(--accent-fill);
+  border-top-color: var(--theme-accent);
   border-radius: 50%;
-  animation: cp-spin 0.7s linear infinite;
+  animation: cp-spin 0.8s linear infinite;
 }
 
 @keyframes cp-spin { to { transform: rotate(360deg); } }

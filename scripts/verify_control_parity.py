@@ -180,6 +180,13 @@ return JSON.stringify(out);
 """
 
 
+#: Selector for the whole plane, and for its rail, by aria-label rather than by
+#: private class. `.control-plane.cp` is the plane's own root and stays; the rail's
+#: class does not, so the label is the only stable handle.
+PLANE = ".control-plane.cp"
+RAIL = '[aria-label="Sessions across projects"]'
+
+
 def measure(js, selector: str) -> dict:
     """Read one element's computed style. `present: false` when the role is absent."""
     raw = js(MEASURE % (json.dumps(selector), json.dumps(PROPS)))
@@ -423,22 +430,32 @@ def main() -> int:
         # uses is not adoption.
         adopted = js(
             """
+            // Scoped by the rail's aria-label, not by `.cp-browser`: the label is
+            // a contract (the unit tests and verify_control_plane.py both rely on
+            // it) while the private class is exactly what this work retires.
+            const rail = document.querySelector('[aria-label="Sessions across projects"]');
             const want = {
-              row: '.cp-browser .session-row',
-              iconButton: '.cp-browser .icon-button',
-              badge: '.cp-browser .badge',
-              statusDot: '.cp-browser .status-dot',
-              filterChip: '.cp-filters .filter-chip',
-              menuTrigger: '.cp-browser .session-menu-trigger',
+              row: '.session-row',
+              iconButton: '.icon-button',
+              badge: '.badge',
+              statusDot: '.status-dot',
+              filterChip: '.filter-chip',
+              menuTrigger: '.session-menu-trigger',
+              sideHead: '.side-head',
+              sideFooter: '.side-footer',
             };
-            const out = {};
-            for (const [k, sel] of Object.entries(want)) out[k] = !!document.querySelector(sel);
-            out.sideHead = !!document.querySelector('.cp-browser .side-head, .cp-browser-head.side-head');
-            out.sideFooter = !!document.querySelector('.cp-browser .side-footer, .cp-browser-foot.side-footer');
+            const out = { rail: !!rail };
+            for (const [k, sel] of Object.entries(want)) {
+              out[k] = !!(rail && rail.querySelector(sel));
+            }
             return JSON.stringify(out);
             """
         )
         adoption = json.loads(adopted)
+        # The rail itself is a precondition, not a primitive: if it is missing,
+        # every adoption answer below is meaningless, so say that instead of
+        # reporting eight absent classes.
+        check("the plane's rail is on screen", adoption.pop("rail", False))
         missing = sorted(k for k, v in adoption.items() if not v)
         check(
             "the rail adopts the workbench's shared primitives",
@@ -674,16 +691,29 @@ def main() -> int:
 
         session_adopted = js(
             """
-            const out = {};
-            out.factsSection = !!document.querySelector('.cp-inspector .inspector-section, .cp-pane .inspector-section');
-            out.metric = !!document.querySelector('.cp-inspector .metric, .cp-pane .metric');
-            out.button = !!document.querySelector('.cp-session-head .button, .cp-pane .cp-session-head .button');
-            out.iconButton = !!document.querySelector('.cp-session-head .icon-button');
-            out.emptyState = !!document.querySelector('.cp-pane .empty-state, .cp-pane .empty-title');
+            // The open chat's region is `[aria-label="Open session"]`; its facts
+            // column is `[aria-label="Chat details"]`. Both labels are contracts
+            // the unit tests rely on, so scoping by them survives the redesign.
+            //
+            // Shared selectors ONLY. An `|| .cp-facts` fallback would make this
+            // report "adopted" precisely while the private class is still the one
+            // being rendered - a false pass that inverts the check's meaning. The
+            // retirement check below is what tracks the private classes going away.
+            const pane = document.querySelector('[aria-label="Open session"]');
+            const q = (sel) => !!(pane && pane.querySelector(sel));
+            const out = { pane: !!pane };
+            out.factsSection = q('.inspector-section');
+            out.metric = q('.metric');
+            out.button = q('.button');
+            out.iconButton = q('.icon-button');
+            out.emptyState = q('.empty-state');
             return JSON.stringify(out);
             """
         )
         session_state = json.loads(session_adopted)
+        # `pane` is a precondition, not a primitive: without an open chat there is
+        # nothing here to adopt, and reporting four absent classes would hide it.
+        check("the open chat's region is on screen", session_state.pop("pane", False))
         session_missing = sorted(k for k, v in session_state.items() if not v and k != "emptyState")
         check(
             "the open chat adopts the workbench's section and button grammar",
