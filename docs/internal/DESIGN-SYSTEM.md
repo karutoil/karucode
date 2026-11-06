@@ -274,6 +274,85 @@ a bug in `roles.ts` or in the palette, not a reason to lower the floor.
 
 ---
 
+## 5A. One product, one vocabulary: the control plane parity rule
+
+The control plane was built as its own screen and grew a **private** vocabulary:
+112 `.cp-*` classes re-drawing rows, buttons, badges, agent cards, facts, empty
+states and a rail head/foot that the workbench already has as shared primitives.
+It is token-clean (§6 reports 0 colour violations), so the defect is not palette
+drift — it is that the same *role* is drawn twice, differently. Measured at
+1440×900 in Ember, a session row in the rail and the same session in the control
+plane disagree on title weight (500 vs 600), meta font (Inter vs mono), meta
+line-height (16.5px vs 11px), status treatment (dot + label vs label alone),
+row padding and height. A user flipping between the two sees two products.
+
+**The rule: a control-plane element that plays a role the workbench already has
+must use the workbench's class for that role.** `.cp-*` may remain only for what
+is genuinely control-plane-specific — the two-group rail, the launch box, the
+overview dashboard grid, the `k.` chat glyph.
+
+The mapping is the contract. Left is the private class, right is the shared one
+to adopt (owner file in parentheses):
+
+| Role | Private | Shared |
+| --- | --- | --- |
+| default button | `.cp-secondary` | `.button` (base.css) |
+| primary button | `.cp-primary` | `.button .button-primary` (base.css) |
+| small button | `.cp-small` | `.button .button-small` (base.css) |
+| destructive button | — | `.button-danger` / `.button-danger-ghost` (base.css) |
+| icon-only button | `.cp-icon`, `.cp-back` | `.icon-button` (base.css) |
+| text link | `.cp-link` | `.link-button` (base.css) |
+| filter pill | `.cp-filters button` | `.filter-chip` (+`.is-on`) (layout.css) |
+| search field | `.cp-search input` | `.side-search` / `.input` (layout.css, base.css) |
+| count badge | `.cp-badge`, `.cp-badge-agents` | `.badge` (+`-ok/-warn/-danger/-muted`) (base.css) |
+| status indicator | `.cp-state i`, `.cp-dot` | `.status-dot .status-<tone>` (base.css) |
+| section kicker | `.cp-eyebrow` | `.eyebrow` (base.css) |
+| session row | `.cp-row*` | `.session-row`/`.session-open`/`.session-head`/`.session-title`/`.session-meta`/`.session-state-<tone>` (layout.css) |
+| row kebab + menu | `.cp-row-menu*` | `.session-menu-wrap`/`.session-menu-trigger`/`.session-menu`/`.menu-item` (layout.css) |
+| rail head / foot | `.cp-browser-head`, `.cp-browser-foot` | `.side-head`, `.side-footer`/`.online-row` (layout.css) |
+| agent card | `.cp-agent*` | `.agent-card`/`.agent-head`/`.agent-name`/`.agent-role`/`.agent-task`/`.agent-note`/`.agent-progress` (inspector.css) |
+| facts / metrics | `.cp-facts dl` | `.inspector-section`/`.inspector-kicker`/`.metric`/`.metric-label`/`.metric-num` (inspector.css) |
+| empty state | `.cp-intro*` | `.empty-state`/`.empty-symbol`/`.empty-title`/`.empty-copy` (chat.css) |
+| brand mark | `.cp-brand-mark` | `.brand-mark` (rail.css) |
+| project avatar | `.cp-glyph` | `.rail-avatar` / `.project-rail-avatar` (rail.css) |
+| reason options | `.cp-launch-pick` (own copy) | `REASONING_OPTIONS` from `ModelSwitcher.tsx` — one list, not two |
+
+Same for logic, not just CSS. `shortAgo` → `relativeTime` (`lib/format.ts`);
+`initials` → `projectInitials` (`ProjectRail.tsx`); the inline
+`status === 'running' || status === 'paused'` → `isAgentLive` (`api/types.ts`);
+`agentStatusWord` → the exported agent status map; `sessionStatus` → the shared
+session-status view in `state/selectors.ts`. **One definition per fact**: if the
+workbench and the control plane can disagree about how "3 minutes ago" or
+"completed" is spelled, the helper is in the wrong place.
+
+Glyphs are not a vocabulary. `⟳ ⌕ ＋ → ✳ ↗ ←` are text characters with no
+consistent metrics, weight or baseline; `components/icons.tsx` publishes 51 icons
+that the rest of the app uses. Every hand-rolled glyph in the control plane
+becomes an icon component (add `ExternalIcon` for "open elsewhere" — it is the
+one role genuinely missing).
+
+**Ink must match the role, not the screen.** The control plane inks row titles
+with `--text` where the workbench uses `--text-secondary`, and kickers with
+`--muted` where the workbench uses `--text-kicker`. Individually invisible;
+together they make the plane read a step brighter. Use the same ink token for the
+same role.
+
+**Responsive strategy must match too.** The workbench answers its own width with
+container queries (`container-type: inline-size`, `container-name: workbench`,
+breakpoints at 780/1000/1100px). The control plane uses 13 viewport `@media`
+breakpoints, so at 1280px the workbench is still two-up while the plane has
+already stacked its inspector under the composer. A screen embedded in the same
+window must respond to the same width the workbench responds to: declare
+`container-type: inline-size` on `.control-plane.cp` and convert the layout
+breakpoints to `@container`. Phone-only concerns (`dvh`, safe-area) may stay
+`@media`.
+
+Finally, the plane's own header must not restate what the embedded conversation
+already says. `.cp-session-head` and the `ChatView` header both render the title
+and run state; pick one owner (§ shared rule 5, "one owner per fact").
+
+---
+
 ## 6. How this is verified
 
 - `node web/scripts/design-audit.mjs` — static: token-rule violations with
