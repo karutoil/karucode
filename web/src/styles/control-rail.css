@@ -158,3 +158,45 @@
     border-right: 0;
   }
 }
+
+/* The control-chat callout and the quiet helper text: this region's own chrome,
+ * moved here from control-shared.css once the rail became their only renderer. */
+
+.cp-note { padding: var(--space-6) var(--space-5); color: var(--muted); font-size: var(--fs-tiny); line-height: 1.6; }
+
+.cp-spark {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: var(--radius-md);
+  background: var(--theme-accent-bg);
+  color: var(--theme-accent);
+  font-size: var(--fs-lead);
+}
+
+.cp-chev { color: var(--theme-accent); font-size: var(--fs-body); }
+
+.cp-control-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  width: 100%;
+  margin-bottom: var(--space-5);
+  padding: var(--space-5);
+  text-align: left;
+  border: 1px solid var(--theme-accent-line);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, var(--theme-accent-bg), transparent 85%), var(--theme-surface);
+}
+
+.cp-control-entry:hover { border-color: var(--theme-accent); }
+
+.cp-control-entry.selected { box-shadow: inset 0 0 0 1px var(--theme-accent-line); }
+
+.cp-control-copy { min-width: 0; flex: 1; }
+
+.cp-control-copy strong { display: block; font-size: var(--fs-label); }
+
+.cp-control-copy small { display: block; margin-top: var(--space-1); font-size: var(--fs-tiny); color: var(--muted); }
