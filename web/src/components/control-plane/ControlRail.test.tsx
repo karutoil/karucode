@@ -14,7 +14,7 @@ import { resetControlPlane } from '../../state/controlPlane';
 import { apiRequest } from '../../api/client';
 import { getControlOverview, listAgents, listSessions } from '../../api/endpoints';
 import { ControlPlane } from './ControlPlane';
-import { chats, configWith, overviewWith, projectSession, sessions } from './controlPlaneFixtures';
+import { chats, configWith, controlChat, overviewWith, projectSession, sessions } from './controlPlaneFixtures';
 
 vi.mock('../../api/client', () => ({
   apiRequest: vi.fn(),
@@ -129,10 +129,11 @@ describe('the rail separates control chats from project sessions', () => {
     // not draw it: a chat's model is not part of its identity, and the composer
     // is the one place the model is named.
     expect(row.textContent).not.toContain('gpt-4o-mini');
-    expect(row.querySelector('.cp-badge-model')).toBeNull();
     expect(row.querySelector('[title^="Model:"]')).toBeNull();
 
-    const agents = row.querySelector('.cp-badge.cp-badge-agents');
+    // The count is the workbench's `.badge`, not a private pill: the rail must
+    // not draw a count in its own type or its own height.
+    const agents = row.querySelector('.badge');
     expect(agents?.textContent).toBe('1/2 agents');
     expect(agents?.getAttribute('title')).toBe('1 subagent running · 2 total');
   });
@@ -142,7 +143,7 @@ describe('the rail separates control chats from project sessions', () => {
     const group = await screen.findByLabelText('Control chats');
     const untitled = within(group).getByRole('button', { name: /^Untitled chat/ });
     // No subagents: a "0/0" chip would be noise, not information.
-    expect(untitled.querySelector('.cp-badge-agents')).toBeNull();
+    expect(untitled.querySelector('.badge')).toBeNull();
   });
 });
 
@@ -206,9 +207,11 @@ describe('session filters', () => {
   });
 
   it('keeps a distinct word on every state, not just a coloured dot', async () => {
-    // `.cp-state.good, .cp-state.idle` used to be `font-size: 0`, so "Finished",
-    // "Cancelled" and "No runs" all rendered as the same grey dot. The word is
-    // now always in the row, including the ≤520px session header.
+    // The plane's status word used to be a private `.cp-state` span that could be
+    // collapsed to `font-size: 0`, so "Finished", "Cancelled" and "No runs" all
+    // rendered as the same grey dot. The word is always in the row - for the
+    // settled states too, which the workbench's own rail leaves out - and it is
+    // the shared `.session-state` this sheet inks.
     const quiet = [
       projectSession({ id: 's_done', title: 'Done one', last_run_status: 'completed' }),
       projectSession({ id: 's_cancelled', title: 'Cancelled one', last_run_status: 'cancelled' }),
@@ -233,5 +236,269 @@ describe('session filters', () => {
     const controlGroup = await screen.findByLabelText('Control chats');
     fireEvent.click(within(controlGroup).getByRole('button', { name: /^Control chat/ }));
     expect(await screen.findByText('Mentions: One, Two')).toBeTruthy();
+  });
+});
+
+/* ------------------------------------------------- the workbench's vocabulary
+ *
+ * §5A of `docs/internal/DESIGN-SYSTEM.md`: a control-plane element that plays a
+ * role the workbench already has must use the workbench's class for that role.
+ * jsdom has no layout engine, so these tests check the *vocabulary* - the classes
+ * and the DOM order that `styles/layout.css` and `components/SessionsRail.tsx`
+ * define - and leave the measured pixels to `scripts/verify_control_parity.py`.
+ */
+
+/** The rail as rendered, with its rows. */
+async function mountedRail(): Promise<{
+  browser: HTMLElement;
+  rows: Element[];
+  controlGroup: HTMLElement;
+  projectGroup: HTMLElement;
+}> {
+  render(<ControlPlane />);
+  const browser = await screen.findByLabelText('Sessions across projects');
+  const rows = [...browser.querySelectorAll('.session-row')];
+  return {
+    browser,
+    rows,
+    controlGroup: within(browser).getByLabelText('Control chats'),
+    projectGroup: within(browser).getByLabelText('Sessions'),
+  };
+}
+
+describe('the rail speaks the workbench’s session-row grammar', () => {
+  it('draws every row with the shared classes, inside the shared list', async () => {
+    const { browser, rows } = await mountedRail();
+    // Two chats and two project sessions, all four in the shared row.
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(row.classList.contains('session-row')).toBe(true);
+      // The quiet variant is what inks `.session-state` for a row in a rail.
+      expect(row.classList.contains('session-row-quiet')).toBe(true);
+      // `.session-list` is the row's flex parent: without it the rows do not lay
+      // out at all, so a row outside one is a broken rail.
+      expect(row.parentElement?.classList.contains('session-list')).toBe(true);
+      expect(row.querySelector('.session-open')).toBeTruthy();
+      expect(row.querySelector('.session-open .session-title')?.textContent).not.toBe('');
+      expect(row.querySelector('.session-head .session-title')).toBeTruthy();
+      // The title comes first in the head: the accessible name of a row is its
+      // title, not its status.
+      expect(row.querySelector('.session-head')?.firstElementChild?.className).toBe('session-title');
+    }
+    // The rows are inside the workbench's scrolling list column, not a private one.
+    expect(browser.querySelector('.session-nav .session-list')).toBeTruthy();
+  });
+
+  it('adopts the workbench’s controls rather than re-drawing them', async () => {
+    const { browser } = await mountedRail();
+    for (const selector of [
+      '.side-head', // rail head
+      '.side-search', // search field
+      '.session-chips', // filter row
+      '.filter-chip', // filter pill
+      '.session-nav', // the scrolling list column
+      '.side-footer', // rail foot
+      '.online-row', // its live row
+      '.icon-button', // refresh + row kebab
+      '.status-dot', // the status colour cue
+      '.session-menu-wrap', // the row's kebab
+      '.session-menu-trigger',
+      '.badge', // the counts
+      '.rail-avatar', // the project tile
+      '.eyebrow', // the group kickers
+      '.button', // the New button
+    ]) {
+      expect(browser.querySelector(selector), selector).toBeTruthy();
+    }
+    // ...and the status dot carries the app's own tone vocabulary, which is what
+    // `.status-dot.status-<tone>` in `base.css` paints.
+    const dot = browser.querySelector('.status-dot');
+    expect(dot?.className).toMatch(/status-(running|ok|warn|danger|muted)/);
+  });
+
+  it('paints the status word with the shared tone classes, never an empty one', async () => {
+    const quietRows = [
+      projectSession({ id: 's_done', title: 'Done one', last_run_status: 'completed' }),
+      projectSession({ id: 's_failed', title: 'Failed one', last_run_status: 'failed' }),
+      projectSession({ id: 's_cancelled', title: 'Cancelled one', last_run_status: 'cancelled' }),
+      projectSession({ id: 's_never', title: 'Never ran' }),
+    ];
+    vi.mocked(listSessions).mockResolvedValue([...quietRows, ...sessions, ...chats] as never);
+    const { rows } = await mountedRail();
+
+    // Every tone the app has, spelled out: "Finished" (ok), "Failed" (danger),
+    // "Cancelled"/"No runs" (muted) and "Running" (running).
+    const tones = new Set(rows.map((row) =>
+      [...(row.querySelector('.session-state')?.classList ?? [])]
+        .find((name) => name.startsWith('session-state-'))));
+    expect(tones).toEqual(new Set([
+      'session-state-ok',
+      'session-state-danger',
+      'session-state-muted',
+      'session-state-running',
+    ]));
+
+    for (const row of rows) {
+      const word = row.querySelector('.session-state');
+      // Never font-size 0 and never an empty span: three states that differ only
+      // by colour are three states a reader cannot tell apart.
+      expect(word?.textContent?.trim()).not.toBe('');
+      expect(word?.getAttribute('title')).toMatch(/^Latest state: /);
+      // The word lives in the shared meta line, beside the meta dots.
+      expect(word?.closest('.session-meta')).toBeTruthy();
+    }
+  });
+
+  it('keeps the state word for a settled row, which the workbench rail omits', async () => {
+    // Deliberate divergence, and the reason the plane cannot copy the workbench
+    // row verbatim: across every project, "which of these needs me" is answered
+    // by the words, and a settled row that says nothing is noise.
+    const { projectGroup } = await mountedRail();
+    const second = within(projectGroup).getByRole('button', { name: /^Second/ });
+    expect(second.querySelector('.session-state')?.textContent).toBe('Finished');
+  });
+
+  it('marks the open row the way the workbench does', async () => {
+    const { browser } = await mountedRail();
+    fireEvent.click(within(browser).getByRole('button', { name: /^Second/ }));
+    await waitFor(() =>
+      expect(browser.querySelector('.session-row.is-active .session-title')?.textContent).toBe('Second'));
+    expect(browser.querySelector('.session-row.is-active .session-open')?.getAttribute('aria-current'))
+      .toBe('true');
+    expect(browser.querySelectorAll('.session-row.is-active')).toHaveLength(1);
+  });
+
+  it('turns the row’s status rail rose for a chat waiting on a person', async () => {
+    // `.session-row.needs::before` is the shared rule; the row state is the
+    // plane's own fact (a chat parked on an approval question).
+    vi.mocked(getControlOverview).mockResolvedValue(overviewWith({
+      control: [controlChat({ id: 'c_wait', title: 'Waiting chat', pending_approvals: 1 })],
+    }));
+    const { controlGroup } = await mountedRail();
+    const row = within(controlGroup).getByRole('button', { name: /^Waiting chat/ }).closest('li');
+    expect(row?.classList.contains('needs')).toBe(true);
+    expect(row?.querySelector('.session-state')?.textContent).toBe('Needs you');
+  });
+});
+
+/* ------------------------------------------------------- icons, not glyphs */
+
+/** Every character the old rail used as an icon. */
+const GLYPHS = ['⟳', '⌕', '＋', '→', '✳', '↗', '←', '✕', '◈', '◆', '▼', '▸', '↻'];
+
+describe('the rail draws icons, not text glyphs', () => {
+  it('renders no stand-in glyph character anywhere in the rail', async () => {
+    const { browser } = await mountedRail();
+    const text = browser.textContent ?? '';
+    for (const glyph of GLYPHS) expect(text, `${glyph} is a text glyph`).not.toContain(glyph);
+  });
+
+  it('renders no stand-in glyph in the empty-chat call to action either', async () => {
+    // The `✳` and `→` used to live on this card, which only renders with no chats.
+    vi.mocked(getControlOverview).mockResolvedValue(overviewWith({ control: [] }));
+    const { browser, controlGroup } = await mountedRail();
+    // Two controls offer a new chat: the group's New button and the card. The card
+    // is the one with the spark and the chevron.
+    const cta = within(controlGroup).getAllByRole('button', { name: /New control chat/ })
+      .find((button) => button.classList.contains('cp-control-entry'));
+    expect(cta).toBeTruthy();
+    expect(cta?.querySelectorAll('svg').length).toBeGreaterThanOrEqual(2);
+    const text = browser.textContent ?? '';
+    for (const glyph of GLYPHS) expect(text, `${glyph} is a text glyph`).not.toContain(glyph);
+  });
+
+  it('puts an icon component where each glyph used to be', async () => {
+    const { browser, rows } = await mountedRail();
+    // Refresh, the search magnifier, the New button and every row kebab.
+    expect(within(browser).getByRole('button', { name: 'Refresh sessions' })
+      .querySelector('svg')).toBeTruthy();
+    expect(browser.querySelector('.side-search svg')).toBeTruthy();
+    expect(within(browser).getByRole('button', { name: 'New control chat' })
+      .querySelector('svg')).toBeTruthy();
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(row.querySelector('.session-menu-trigger svg')).toBeTruthy();
+    }
+    // The control chat's tile is a mark, not an icon: `k.` is the plane's own.
+    expect(browser.querySelector('.cp-tile-control')?.textContent).toBe('k.');
+  });
+});
+
+/* ------------------------------------------------------------------ footer */
+
+describe('the rail foot', () => {
+  it('counts the projects in the workbench’s foot, with the count spelled out', async () => {
+    const { browser, projectGroup } = await mountedRail();
+    const foot = browser.querySelector('.side-footer');
+    expect(foot).toBeTruthy();
+    expect(foot?.querySelector('.online-row')?.textContent).toBe('Live2 projects');
+    expect(foot?.querySelector('.online-ind')?.className).toContain('status-ok');
+    // The count badge is the shared pill, not a bare number in a span.
+    expect(projectGroup.querySelector('.cp-group .badge')?.textContent).toBe('2');
+  });
+
+  it('pluralises one project instead of saying "1 projects"', async () => {
+    store.projects.value = [store.projects.value[0] as never];
+    const { browser } = await mountedRail();
+    expect(browser.querySelector('.online-row .right')?.textContent).toBe('1 project');
+  });
+
+  it('says the list is stale when the last read failed', async () => {
+    vi.mocked(listSessions).mockRejectedValue(new Error('offline'));
+    render(<ControlPlane />);
+    const browser = await screen.findByLabelText('Sessions across projects');
+    await waitFor(() =>
+      expect(browser.querySelector('.online-row .right')?.textContent).toBe('2 projects'));
+    expect(browser.querySelector('.online-row')?.textContent).toContain('Stale');
+    expect(browser.querySelector('.online-ind')?.className).toContain('status-warn');
+  });
+
+  it('keeps a route to Settings, which the plane had none of', async () => {
+    const { browser } = await mountedRail();
+    fireEvent.click(within(browser).getByRole('button', { name: 'Settings' }));
+    expect(actions.openSettings).toHaveBeenCalledTimes(1);
+  });
+});
+
+/* -------------------------------------------------------------- row actions */
+
+describe('the row menu keeps the rail’s keyboard contract', () => {
+  it('owns its Escape and gives focus back to the kebab', async () => {
+    const { browser } = await mountedRail();
+    const trigger = within(browser).getByRole('button', { name: 'Actions for Control chat' });
+    fireEvent.click(trigger);
+    const menu = await within(browser).findByRole('menu');
+    // The dialog layer defers to a control that owns Escape.
+    expect(menu.hasAttribute('data-escape-local')).toBe(true);
+    // Opening focuses the first item, as the workbench's menu does.
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Rename' }));
+
+    fireEvent.keyDown(menu, { key: 'Escape' });
+    expect(within(browser).queryByRole('menu')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('walks the items with the arrow keys', async () => {
+    const { browser } = await mountedRail();
+    fireEvent.click(within(browser).getByRole('button', { name: 'Actions for Control chat' }));
+    const menu = await within(browser).findByRole('menu');
+    const items = within(menu).getAllByRole('menuitem');
+    expect(items.map((item) => item.textContent)).toEqual(['Rename', 'Delete…']);
+
+    const move = (key: string): void => {
+      fireEvent.keyDown(document.activeElement ?? menu, { key });
+    };
+    // Down wraps forward, Up wraps back, Home/End jump — the same order the
+    // kebab on a workbench row uses.
+    move('ArrowDown');
+    expect(document.activeElement).toBe(items[1]);
+    move('ArrowDown');
+    expect(document.activeElement).toBe(items[0]);
+    move('ArrowUp');
+    expect(document.activeElement).toBe(items[1]);
+    move('Home');
+    expect(document.activeElement).toBe(items[0]);
+    move('End');
+    expect(document.activeElement).toBe(items[1]);
   });
 });

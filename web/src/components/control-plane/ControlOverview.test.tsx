@@ -14,6 +14,7 @@ import { resetControlPlane } from '../../state/controlPlane';
 import { apiRequest } from '../../api/client';
 import { getControlOverview, listAgents, listSessions } from '../../api/endpoints';
 import { ControlPlane } from './ControlPlane';
+import { REASONING_OPTIONS } from '../ModelSwitcher';
 import {
   agent,
   chats,
@@ -214,9 +215,9 @@ describe('the overview snapshot', () => {
     }));
     render(<ControlPlane />);
     const summary = await screen.findByLabelText('Workspace summary');
-    const counters = [...summary.querySelectorAll('div')].map((cell) => [
-      cell.querySelector('strong')?.textContent,
-      cell.querySelector('span')?.textContent,
+    const counters = [...summary.querySelectorAll('.metric')].map((cell) => [
+      cell.querySelector('.metric-num')?.textContent,
+      cell.querySelector('.metric-label')?.textContent,
     ]);
     expect(counters).toEqual([
       ['4', 'running'],
@@ -241,7 +242,9 @@ describe('the overview snapshot', () => {
     expect(await screen.findByText('Needs attention')).toBeTruthy();
     expect(screen.getByText('Broken build')).toBeTruthy();
     expect(screen.getByText('reading the diff')).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Control chat →/ })).toBeTruthy();
+    // The live agent is the workbench's own card, and its one action is the way
+    // back to the session it belongs to (`agent-card-open`, the 24px target).
+    expect(screen.getByRole('button', { name: 'Open Control chat' })).toBeTruthy();
   });
 
   it('calls out a run parked on an approval, rather than calling it running', async () => {
@@ -258,7 +261,11 @@ describe('the overview snapshot', () => {
 
     const waiting = screen.getByLabelText('Waiting on you');
     expect(within(waiting).getByText('Awaiting approval')).toBeTruthy();
-    expect(within(waiting).getByText('Needs you')).toBeTruthy();
+    // The row is the workbench's `.session-row` shape (a `.status-dot` plus a
+    // meta line), so the words live inside that line rather than a badge of their
+    // own - and a run parked on an approval still *says* it needs a person.
+    expect(within(waiting).getByText(/Needs you/)).toBeTruthy();
+    expect(waiting.querySelector('.session-row.needs .status-dot.status-warn')).toBeTruthy();
 
     // The chat's own row says the same thing instead of the misleading "Running".
     const row = within(screen.getByLabelText('Control chats')).getByRole('button', { name: /^Control chat/ });
@@ -268,13 +275,92 @@ describe('the overview snapshot', () => {
   it('marks a failed read stale without erasing the last snapshot', async () => {
     render(<ControlPlane />);
     const summary = await screen.findByLabelText('Workspace summary');
-    expect(summary.querySelector('strong')?.textContent).toBe('1');
+    expect(summary.querySelector('.metric-num')?.textContent).toBe('1');
 
     vi.mocked(getControlOverview).mockRejectedValue(new Error('HTTP 503'));
     fireEvent.click(screen.getByRole('button', { name: 'Refresh sessions' }));
     await waitFor(() => expect(screen.getByText(/stale · HTTP 503/)).toBeTruthy());
     // The numbers are still the last good read: "nothing is running" is a
     // different answer, and a wrong one.
-    expect(screen.getByLabelText('Workspace summary').querySelector('strong')?.textContent).toBe('1');
+    expect(screen.getByLabelText('Workspace summary').querySelector('.metric-num')?.textContent).toBe('1');
+  });
+});
+
+/* ------------------------------------------------------- shared vocabulary
+ *
+ * §5A of `docs/internal/DESIGN-SYSTEM.md`: an element that plays a role the
+ * workbench already has wears the workbench's class. jsdom cannot measure a
+ * contrast ratio or a layout, but it can prove *adoption* - that the shared class
+ * is the one the overview actually renders - and that was previously only checked
+ * by a browser script.
+ */
+
+describe('the overview speaks the product’s vocabulary', () => {
+  it('draws the hero counters with the workbench’s metric recipe', async () => {
+    render(<ControlPlane />);
+    const summary = await screen.findByLabelText('Workspace summary');
+    const cells = [...summary.querySelectorAll('.metric')];
+    expect(cells).toHaveLength(5);
+    for (const cell of cells) {
+      expect(cell.querySelector('.metric-num')?.textContent).toMatch(/^\d+$/);
+      expect(cell.querySelector('.metric-label')?.textContent?.trim()).not.toBe('');
+    }
+    // …and no private number-plus-label markup survives beside it: every child of
+    // the summary is a `.metric`, so the two cannot drift apart again.
+    expect([...summary.children].every((child) => child.classList.contains('metric'))).toBe(true);
+  });
+
+  it('offers exactly the reasoning efforts the composer offers', async () => {
+    render(<ControlPlane />);
+    const reasoning = await screen.findByLabelText('Reasoning for the new chat') as HTMLSelectElement;
+    // The launch box imports `REASONING_OPTIONS` rather than keeping its own
+    // table, so a new effort cannot reach the composer and miss the launch box
+    // (or the other way round). This asserts the source, not just the values.
+    expect([...reasoning.options].map((option) => [option.value, option.textContent])).toEqual(
+      REASONING_OPTIONS.map((option) => [option.value, option.label]),
+    );
+  });
+
+  it('draws icons, never a text glyph', async () => {
+    const { container } = render(<ControlPlane />);
+    await screen.findByLabelText('Workspace summary');
+    const overview = container.querySelector('.cp-overview');
+    expect(overview).toBeTruthy();
+    const text = overview?.textContent ?? '';
+    expect(text.length).toBeGreaterThan(0);
+    // The characters §5A retires: they have no consistent metrics, weight or
+    // baseline, and the icon set already publishes every one of these shapes.
+    for (const glyph of ['⟳', '⌕', '＋', '→', '✳', '↗', '←', '✕']) {
+      expect(text.includes(glyph), `${glyph} is still drawn as text`).toBe(false);
+    }
+    // The two marks the launch box and the cards do use are real icons.
+    expect(overview?.querySelectorAll('svg').length).toBeGreaterThan(0);
+  });
+
+  it('builds its controls, kickers, counts and avatars from the shared classes', async () => {
+    const { container } = render(<ControlPlane />);
+    await screen.findByLabelText('Workspace summary');
+    const overview = container.querySelector('.cp-overview') as HTMLElement;
+
+    // The launch box's submit is the product's primary button, and the launch
+    // field label is the product's kicker.
+    expect(screen.getByRole('button', { name: /Open chat|Continue/ }).className).toContain('button-primary');
+    expect(overview.querySelector('.cp-launch-label.eyebrow')?.textContent).toBe('Start something with control chat');
+    expect(overview.querySelectorAll('.cp-launch input.input').length).toBe(1);
+    expect(overview.querySelectorAll('.cp-launch select.input').length).toBe(3);
+
+    // Section heads are a kicker plus the shared count badge.
+    expect(overview.querySelectorAll('.cp-section-head > .eyebrow').length).toBeGreaterThan(0);
+    expect(overview.querySelectorAll('.cp-section-head > .badge').length).toBeGreaterThan(0);
+
+    // A project mark is the rail's avatar, and a card is the product's card.
+    expect(overview.querySelectorAll('.rail-avatar').length).toBeGreaterThan(0);
+    expect(overview.querySelectorAll('.cp-card.agent-card, .cp-project.agent-card').length).toBeGreaterThan(0);
+
+    // And none of the private re-implementations §5A retires is rendered here.
+    const retired = ['.cp-glyph', '.cp-primary', '.cp-secondary', '.cp-link', '.cp-eyebrow', '.cp-agent-dot'];
+    for (const selector of retired) {
+      expect(overview.querySelectorAll(selector).length, `${selector} is still rendered`).toBe(0);
+    }
   });
 });

@@ -33,6 +33,9 @@ const todo = read('./todo.css');
 // assertion still reads every rule. The phone-width tier below is read from the
 // sheet that owns the session header.
 const controlShared = read('./control-shared.css');
+// The status word's rule lives with the `.session-*` family it belongs to, and is
+// shared by the workbench rail and the control plane alike.
+const layoutCss = read('./layout.css');
 const controlRail = read('./control-rail.css');
 const controlOverview = read('./control-overview.css');
 const controlSession = read('./control-session.css');
@@ -175,18 +178,26 @@ describe('todo panel: ids, accent ink and disclosure targets', () => {
 
 describe('control plane: status words survive, actions keep names', () => {
   it('keeps a word for every tone outside the phone-width header', () => {
-    // The ok/muted rule used to set `font-size: 0`, so "Finished", "Cancelled"
-    // and "No runs" were three identical dots at every width.
-    const quiet = ruleBody(sessionControl, '.cp-state.ok,\n.cp-state.muted');
-    expect(quiet).not.toContain('font-size: 0');
-    expect(quiet).toContain('color: var(--muted)');
+    // The quiet-tone rule used to set `font-size: 0`, so "Finished", "Cancelled"
+    // and "No runs" were three identical dots at every width. The word is now the
+    // shared `.session-state`, so the floor is pinned on that one rule — which
+    // also means the workbench rail can never reintroduce it.
+    const word = ruleBody(layoutCss, '.session-state');
+    expect(word).not.toContain('font-size: 0');
+    expect(word).toContain('color: var(--muted)');
+    // A settled state is quiet, not invisible, and a live one is the accent.
+    expect(declarations(layoutCss, '.session-state-running')['color']).toBe('var(--accent-fill)');
+    expect(declarations(layoutCss, '.session-state-danger')['color']).toBe('var(--danger)');
+    expect(declarations(layoutCss, '.session-state-warn')['color']).toBe('var(--warning)');
   });
 
   it('keeps Finished, Cancelled and No runs readable in the ≤520px header', () => {
-    expect(sessionControl).not.toMatch(/\.cp-state[^{]*\{[^}]*font-size:\s*0/g);
+    // No sheet in the plane, and none in the shared family, may hide the word.
+    expect(sessionControl).not.toMatch(/\.(cp-state|session-state)[^{]*\{[^}]*font-size:\s*0/g);
+    expect(layoutCss).not.toMatch(/\.session-state[^{]*\{[^}]*font-size:\s*0/g);
     const phoneTier = controlSession.slice(controlSession.indexOf('@media (max-width: 520px)'));
     expect(phoneTier).toContain(
-      '.cp-session-actions .cp-state { font-size: var(--fs-tiny); gap: var(--space-2); }',
+      '.cp-session-actions .session-state { font-size: var(--fs-tiny); gap: var(--space-2); }',
     );
   });
 
@@ -201,10 +212,10 @@ describe('control plane: status words survive, actions keep names', () => {
   });
 
   it('sizes the state from the type scale', () => {
-    expect(declarations(sessionControl, '.cp-state')['font-size']).toBe('var(--fs-tiny)');
+    expect(declarations(layoutCss, '.session-state')['font-size']).toBe('var(--fs-tiny)');
     // The table row is a one-line rule; it keeps the same step.
     expect(sessionControl).toMatch(
-      /\.cp-table-row \.cp-state \{[^}]*font-size: var\(--fs-tiny\)/,
+      /\.cp-table-row \.session-state \{[^}]*font-size: var\(--fs-tiny\)/,
     );
   });
 });

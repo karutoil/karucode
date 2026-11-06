@@ -1,15 +1,25 @@
 import type { JSX, RefObject } from 'preact';
+import { Fragment } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { ControlChatSummary, SessionSummary } from '../../api/types';
-import { relativeTime } from '../../lib/format';
-import { KebabIcon } from '../icons';
+import { pluralise, relativeTime } from '../../lib/format';
+import * as actions from '../../state/actions';
+import {
+  ArrowRightIcon,
+  KebabIcon,
+  PlusIcon,
+  RefreshIcon,
+  SearchIcon,
+  SettingsIcon,
+  SparkIcon,
+} from '../icons';
 import {
   type Filter,
+  type SessionStatus,
   agentBadgeTitle,
   chatTitle,
   initials,
   sessionStatus,
-  tone,
 } from './controlModel';
 import '../../styles/control-rail.css';
 
@@ -50,7 +60,16 @@ interface RowActions {
   onDelete: (session: SessionSummary) => void;
 }
 
-/** The kebab on a row: rename and delete, without a trip into the project. */
+/**
+ * The kebab on a row: rename and delete, without a trip into the project.
+ *
+ * The wrapper, trigger and menu are the workbench's own (`.session-menu-wrap`,
+ * `.icon-button .session-menu-trigger`, `.session-menu`, `.menu-item`), including
+ * its keyboard contract: open focuses the first item, arrows/Home/End move, Tab
+ * leaves, Escape closes and returns focus to the trigger. `data-escape-local`
+ * marks the menu as the owner of its Escape, so the dialog layer's trap defers
+ * to it instead of closing the sheet underneath.
+ */
 function RowMenu({ session, title, onRename, onDelete }: {
   session: SessionSummary;
   title: string;
@@ -62,6 +81,7 @@ function RowMenu({ session, title, onRename, onDelete }: {
   const trigger = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!open) return;
+    root.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
     const onPointerDown = (event: PointerEvent): void => {
       const target = event.target;
       if (target instanceof Node && root.current && !root.current.contains(target)) setOpen(false);
@@ -80,11 +100,28 @@ function RowMenu({ session, title, onRename, onDelete }: {
       document.removeEventListener('keydown', onKeyDown);
     };
   }, [open]);
-  return <div class="cp-row-menu" ref={root}>
+  /** Arrow/Home/End walk the menu; Tab closes it and moves on. */
+  const onMenuKeyDown = (event: KeyboardEvent): void => {
+    const items = Array.from(root.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
+    if (items.length === 0) return;
+    const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    let next = index;
+    if (event.key === 'ArrowDown') next = (index + 1) % items.length;
+    else if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = items.length - 1;
+    else if (event.key === 'Tab') {
+      setOpen(false);
+      return;
+    } else return;
+    event.preventDefault();
+    items[next]?.focus();
+  };
+  return <div class="session-menu-wrap" ref={root}>
     <button
       type="button"
       ref={trigger}
-      class="cp-icon cp-row-menu-trigger"
+      class="icon-button session-menu-trigger"
       aria-label={`Actions for ${title}`}
       aria-haspopup="menu"
       aria-expanded={open}
@@ -92,7 +129,13 @@ function RowMenu({ session, title, onRename, onDelete }: {
     >
       <KebabIcon size={15} />
     </button>
-    {open ? <div class="session-menu cp-row-menu-list" role="menu" aria-label={`Actions for ${title}`}>
+    {open ? <div
+      class="session-menu"
+      role="menu"
+      data-escape-local
+      aria-label={`Actions for ${title}`}
+      onKeyDown={onMenuKeyDown}
+    >
       <button
         type="button"
         role="menuitem"
@@ -109,6 +152,99 @@ function RowMenu({ session, title, onRename, onDelete }: {
   </div>;
 }
 
+/** The project tile on a row: the workbench's `.rail-avatar`, at the rail's size. */
+function ProjectTile({ project }: { project: string }): JSX.Element {
+  return <span class="rail-avatar" aria-hidden="true">{initials(project)}</span>;
+}
+
+interface RailRowProps {
+  session: SessionSummary;
+  title: string;
+  active: boolean;
+  /** The shared word-and-tone pair (`controlModel.sessionStatus`). */
+  status: SessionStatus;
+  /** A run parked on an approval question: the row's rail turns rose. */
+  needsYou: boolean;
+  /** The avatar column: a project's initials, or a control chat's `k.`. */
+  tile: JSX.Element;
+  /** The facts between the status word and the age: project, messages. */
+  facts: JSX.Element[];
+  /** The agent-count pill, when the chat has delegated to anyone. */
+  badge: JSX.Element | null;
+  onOpen: () => void;
+  onRename: (session: SessionSummary) => void;
+  onDelete: (session: SessionSummary) => void;
+}
+
+/**
+ * One row, in the workbench's session-row grammar.
+ *
+ * The list row is `.session-row` + `.session-open` + `.session-head` /
+ * `.session-title` / `.session-meta` - the same classes, in the same order, as
+ * `components/SessionsRail.tsx`, so a row here and a row in the workspace draw
+ * the same 12px/400 secondary title, the same mono meta line and the same 2px
+ * status rail at the left edge. Nothing in this component re-inks or re-sizes
+ * those roles; the only plane-specific part is the avatar column
+ * (`.cp-row-body`), because this list mixes projects and the workbench's does not.
+ *
+ * Every row shows a *word* for its state, including settled ones ("Finished",
+ * "Cancelled", "No runs"), unlike the workbench rail which omits the quiet ones.
+ * That is deliberate: a list of every project is read by scanning for "which of
+ * these needs me", and three identical grey dots answer nothing.
+ */
+function RailRow({
+  session,
+  title,
+  active,
+  status,
+  needsYou,
+  tile,
+  facts,
+  badge,
+  onOpen,
+  onRename,
+  onDelete,
+}: RailRowProps): JSX.Element {
+  // The same class vocabulary that drives `.session-row::before`: a run in
+  // flight, a failure, and a row waiting on the reader each paint it differently.
+  const rowState = [
+    session.running ? 'running' : '',
+    session.last_run_status === 'failed' ? 'failed' : '',
+    needsYou ? 'needs' : '',
+  ].filter(Boolean).join(' ');
+  return <li class={`session-row session-row-quiet${active ? ' is-active' : ''}${rowState ? ` ${rowState}` : ''}`}>
+    <button
+      type="button"
+      class="session-open"
+      aria-current={active ? 'true' : undefined}
+      title={title}
+      onClick={onOpen}
+    >
+      <span class="cp-row-body">
+        {tile}
+        <span class="cp-row-text">
+          <span class="session-head">
+            <span class="session-title">{title}</span>
+            {badge}
+            <span class={`status-dot status-${status.tone}`} aria-hidden="true" />
+          </span>
+          <span class="session-meta">
+            <span
+              class={`session-state session-state-${status.tone}`}
+              title={`Latest state: ${status.label}`}
+            >{status.label}</span>
+            {facts.map((fact, index) => <Fragment key={index}>
+              <span class="meta-dot" aria-hidden="true" />
+              {fact}
+            </Fragment>)}
+          </span>
+        </span>
+      </span>
+    </button>
+    <RowMenu session={session} title={title} onRename={onRename} onDelete={onDelete} />
+  </li>;
+}
+
 /**
  * The rail: every conversation on the server, one browser column.
  *
@@ -117,6 +253,12 @@ function RowMenu({ session, title, onRename, onDelete }: {
  * **Sessions** are the ordinary project conversations, with search, filters and
  * running-first ordering. The two never overlap: a session the server marks
  * `control` is never drawn as a project row, whatever its id says.
+ *
+ * The chrome is the workbench's, not a private copy (§5A of
+ * `docs/internal/DESIGN-SYSTEM.md`): `.side-head` + `.side-search` +
+ * `.session-chips`/`.filter-chip` + `.session-nav` + `.side-footer`/`.online-row`,
+ * with `components/icons.tsx` for every glyph. What is genuinely the plane's own
+ * is the two-group list, its sub-headings, and the project avatar column.
  */
 export function ControlRail({
   railRef,
@@ -168,119 +310,135 @@ export function ControlRail({
     const status = sessionStatus(session);
     const project = projectName(session.project_id);
     const title = chatTitle(session);
-    return <li key={session.id} class="cp-row-item">
-      <button
-        type="button"
-        class={`cp-row${selected === session.id ? ' selected' : ''}${session.running ? ' is-running' : ''}`}
-        aria-pressed={selected === session.id}
-        title={title}
-        onClick={() => onNavigate(session)}
-      >
-        <span class="cp-glyph" data-tone={tone(session.project_id)} aria-hidden="true">{initials(project)}</span>
-        <span class="cp-row-main">
-          <span class="cp-row-title"><span class="cp-row-title-text">{title}</span></span>
-          <span class="cp-row-meta">
-            <span>{project}</span>
-            <span class="cp-dot">·</span>
-            <span>{relativeTime(session.updated_at)}</span>
-            <span class="cp-dot">·</span>
-            <span>{session.message_count.toLocaleString()} msgs</span>
-          </span>
-        </span>
-        <span class={`cp-state ${status.tone}`} title={`Latest state: ${status.label}`}>
-          <i aria-hidden="true" />{status.label}
-        </span>
-      </button>
-      <RowMenu session={session} title={title} {...rowActions} />
-    </li>;
+    return <RailRow
+      key={session.id}
+      session={session}
+      title={title}
+      active={selected === session.id}
+      status={status}
+      needsYou={false}
+      tile={<ProjectTile project={project} />}
+      badge={null}
+      // The project name is the fact this list has and the workbench's row does
+      // not; recency stays where the workbench reads it. The message count is
+      // last on purpose - when the mono line runs out of room, `overflow: hidden`
+      // cuts the tail, and losing "2 msgs" is a smaller loss than losing the age.
+      // Both spellings are `lib/format.ts`'s: abbreviated on the line, spelled
+      // out in its tooltip.
+      facts={[
+        <span key="project">{project}</span>,
+        <span key="age">{relativeTime(session.updated_at)}</span>,
+        <span key="messages" title={pluralise(session.message_count, 'message')}>
+          {pluralise(session.message_count, 'msg')}
+        </span>,
+      ]}
+      onOpen={() => onNavigate(session)}
+      {...rowActions}
+    />;
   };
 
   const controlRow = (chat: ControlChatSummary, rowActions: RowActions): JSX.Element => {
     // A chat whose run is parked on an approval question is not "Running" in any
     // useful sense: it is waiting on a person. The word says so.
-    const status = (chat.pending_approvals ?? 0) > 0
-      ? { label: 'Needs you', tone: 'warn' as const }
-      : sessionStatus(chat);
+    const needsYou = (chat.pending_approvals ?? 0) > 0;
+    const status: SessionStatus = needsYou ? { label: 'Needs you', tone: 'warn' } : sessionStatus(chat);
     const title = chatTitle(chat);
-    return <li key={chat.id} class="cp-row-item">
-      <button
-        type="button"
-        class={`cp-row${selected === chat.id ? ' selected' : ''}${chat.running ? ' is-running' : ''}`}
-        aria-pressed={selected === chat.id}
-        title={title}
-        onClick={() => onNavigate(chat)}
-      >
-        <span class="cp-glyph control" aria-hidden="true">k.</span>
-        <span class="cp-row-main">
-          {/* Only the name lives on the title line. A chat's model is not part of
-              its identity - the composer says which model will answer - so the
-              title gets the whole line and truncates on its own. */}
-          <span class="cp-row-title">
-            <span class="cp-row-title-text">{title}</span>
-          </span>
-          <span class="cp-row-meta">
-            {chat.agents.total > 0 ? <span
-              class="cp-badge cp-badge-agents"
-              title={agentBadgeTitle(chat.agents)}
-            >{chat.agents.live}/{chat.agents.total} agents</span> : null}
-            <span class="cp-row-time">{relativeTime(chat.updated_at)}</span>
-          </span>
-        </span>
-        <span class={`cp-state ${status.tone}`} title={`Latest state: ${status.label}`}>
-          <i aria-hidden="true" />{status.label}
-        </span>
-      </button>
-      <RowMenu session={chat} title={title} {...rowActions} />
-    </li>;
+    return <RailRow
+      key={chat.id}
+      session={chat}
+      title={title}
+      active={selected === chat.id}
+      status={status}
+      needsYou={needsYou}
+      // The one glyph that is the plane's own: `k.` marks a conversation that is
+      // not inside a project, painted like the workbench's `k.` mark.
+      tile={<span class="rail-avatar cp-tile-control" aria-hidden="true">k.</span>}
+      // Only the name lives on the title line. A chat's model is not part of its
+      // identity - the composer says which model will answer - so the title gets
+      // the whole line and truncates on its own. The agent count rides beside the
+      // title (a `.badge`, the workbench's count pill) rather than in the meta
+      // line, which is a single 12px row of mono text.
+      badge={chat.agents.total > 0 ? <span
+        class="badge"
+        title={agentBadgeTitle(chat.agents)}
+      >{chat.agents.live}/{chat.agents.total} agents</span> : null}
+      facts={[<span key="age">{relativeTime(chat.updated_at)}</span>]}
+      onOpen={() => onNavigate(chat)}
+      {...rowActions}
+    />;
   };
 
   const rowActions: RowActions = { onRename, onDelete };
 
+  // The footer's "live" is about *this list*, not about the server connection:
+  // the rail draws from a polled read, so a failed read is the one thing that
+  // makes it stale, and the word says so instead of an unexplained amber dot.
+  const live = listError === null;
+
   return <aside ref={railRef} class="cp-browser" aria-label="Sessions across projects" tabIndex={-1}>
-    <header class="cp-browser-head">
-      <div class="cp-brand">
-        <span class="cp-brand-mark" aria-hidden="true">k<i>.</i></span>
-        <div><h1>Control plane</h1><p>Every project, one view</p></div>
+    <header class="side-head cp-head">
+      <div class="cp-head-copy">
+        <h1 class="cp-head-title">Control plane</h1>
+        <p class="path-hint">Every project, one view</p>
       </div>
-      <button type="button" class="cp-icon" title="Refresh sessions" aria-label="Refresh sessions" onClick={onRefresh}>⟳</button>
+      <button
+        type="button"
+        class="icon-button"
+        title="Refresh sessions"
+        aria-label="Refresh sessions"
+        onClick={onRefresh}
+      ><RefreshIcon size={15} /></button>
     </header>
-    <div class="cp-search">
-      <span aria-hidden="true">⌕</span>
+    <label class="side-search">
+      <SearchIcon size={15} />
       <input
         type="search"
         value={query}
         placeholder="Search sessions or projects…"
         aria-label="Search sessions or projects"
+        autocomplete="off"
+        spellcheck={false}
+        data-escape-local
         onInput={(event) => onQuery(event.currentTarget.value)}
       />
-    </div>
-    <div class="cp-filters" role="group" aria-label="Filter sessions">
+    </label>
+    <div class="session-chips cp-filters" role="group" aria-label="Filter sessions">
       {FILTERS.map((item) => <button
         type="button"
         key={item.id}
+        class={`filter-chip${filter === item.id ? ' is-on' : ''}`}
         aria-pressed={filter === item.id}
         onClick={() => onFilter(item.id)}
-      >{item.label}<span>{counts[item.id]}</span></button>)}
+      >{item.label}<span class="filter-chip-count">{counts[item.id]}</span></button>)}
     </div>
-    <div class="cp-scroll">
+    <nav class="session-nav" aria-label="Session list">
       <section aria-label="Control chats">
-        <div class="cp-group cp-group-action">
-          <span>Control chats</span>
-          <button type="button" class="cp-new-chat" onClick={onNewChat} aria-label="New control chat">＋ New</button>
+        <div class="cp-group">
+          <span class="eyebrow">Control chats</span>
+          <button
+            type="button"
+            class="button button-small"
+            aria-label="New control chat"
+            title="New control chat"
+            onClick={onNewChat}
+          ><PlusIcon size={13} /> New</button>
         </div>
         {chats.length === 0
           ? <button type="button" class="cp-control-entry" onClick={onNewChat}>
-              <span class="cp-spark" aria-hidden="true">✳</span>
+              <span class="cp-spark" aria-hidden="true"><SparkIcon size={14} /></span>
               <span class="cp-control-copy"><strong>New control chat</strong><small>Act on any project from one place</small></span>
-              <span class="cp-chev" aria-hidden="true">→</span>
+              <span class="cp-chev" aria-hidden="true"><ArrowRightIcon size={14} /></span>
             </button>
-          : <ul class="cp-list">{chats.map((chat) => controlRow(chat, rowActions))}</ul>}
+          : <ul class="session-list">{chats.map((chat) => controlRow(chat, rowActions))}</ul>}
       </section>
       {loading && sessions.length === 0 ? <p class="cp-note">Loading sessions…</p> : null}
       {/* The project-session group keeps a stable name so a screen reader (and
           the browser verification script) can tell which group a row is in. */}
       <section aria-label="Sessions">
-        <div class="cp-group"><span>Sessions</span><span class="cp-group-count">{projectSessions.length}</span></div>
+        <div class="cp-group">
+          <span class="eyebrow">Sessions</span>
+          <span class="badge">{projectSessions.length}</span>
+        </div>
         {!loading && projectSessions.length === 0 && !listError
           ? <p class="cp-note">No sessions yet. Start one from control chat.</p>
           : null}
@@ -289,17 +447,42 @@ export function ControlRail({
               the outer "Sessions" count does not: one group with every session
               in it repeated the same number twice in a row. */}
           <div class="cp-group cp-group-sub">
-            <span>{group.label}</span>
-            {groups.length > 1 ? <span class="cp-group-count">{group.items.length}</span> : null}
+            <span class="eyebrow">{group.label}</span>
+            {groups.length > 1 ? <span class="badge">{group.items.length}</span> : null}
           </div>
-          <ul class="cp-list">{group.items.map((session) => row(session, rowActions))}</ul>
+          <ul class="session-list">{group.items.map((session) => row(session, rowActions))}</ul>
         </section>)}
         {!loading && filtered.length === 0 && query.trim() !== '' ? <p class="cp-note">No sessions match “{query}”.</p> : null}
       </section>
+    </nav>
+    {/* The workbench's foot, with the plane's own facts.
+     *
+     * It is not a copy of the workspace foot, because the plane is not
+     * project-scoped: there is no context meter (the meter is the open
+     * conversation's) and no provider chip (the launch box and the composer name
+     * the model where it is chosen). What it does carry is what a reader of *this*
+     * list needs: whether the list is live or stale, how many projects are in
+     * scope, and the way into Settings, which the plane had no route to at all.
+     *
+     * The count is pluralised: the old foot said "1 projects". */}
+    <div class="side-footer">
+      <div class="online-row">
+        <span class={`online-ind status-${live ? 'ok' : 'warn'}`} aria-hidden="true" />
+        <span>{live ? 'Live' : 'Stale'}</span>
+        <span class="right">{pluralise(projectCount, 'project')}</span>
+      </div>
+      <div class="settings-row">
+        {/* `focus()` before opening, as the workbench's own foot does: the sheet
+         * returns focus here when it closes, and the button is about to be the
+         * only thing under the pointer. */}
+        <button
+          type="button"
+          class="settings-btn"
+          onClick={(event) => { event.currentTarget.focus(); actions.openSettings(); }}
+        >
+          <SettingsIcon size={15} /> Settings
+        </button>
+      </div>
     </div>
-    <footer class="cp-browser-foot">
-      <span class="cp-live"><i aria-hidden="true" />Live</span>
-      <span class="cp-foot-projects">{projectCount} projects</span>
-    </footer>
   </aside>;
 }

@@ -169,25 +169,6 @@
   font-weight: 800;
 }
 
-.session-row-quiet .session-state {
-  flex: 0 0 auto;
-  font-family: var(--font-ui);
-  font-size: var(--fs-tiny);
-  font-weight: 500;
-}
-
-.session-row-quiet .session-state-running {
-  color: var(--accent-fill);
-}
-
-.session-row-quiet .session-state-danger {
-  color: var(--danger);
-}
-
-.session-row-quiet .session-state-warn {
-  color: var(--warning);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .workbench-project-disclosure > svg {
     transition: none;

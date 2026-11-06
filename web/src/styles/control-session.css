@@ -1,3 +1,30 @@
+/* The control plane's open-session region: one conversation, the facts beside it
+ * and the subagents behind it.
+ *
+ * This sheet draws almost nothing any more, and that is the point. §5A of
+ * `docs/internal/DESIGN-SYSTEM.md` says a control-plane element that plays a role
+ * the workbench already has must use the workbench's class for that role, so:
+ *
+ *   page header        `.main-head` / `.breadcrumb` / `.main-title`  (layout.css)
+ *   back control       `.icon-button` + `ChevronLeftIcon`            (base.css)
+ *   facts panel        `.inspector-section` / `.inspector-kicker` /  (inspector.css)
+ *                      `.inspector-kicker-row` / `.si-meta` /
+ *                      `.metric` / `.metric-num` / `.metric-label`
+ *   subagent card      `.agent-card` / `.agent-head` / `.agent-name` (inspector.css)
+ *                      / `.agent-role` / `.agent-live` / `.agent-task`
+ *                      / `.agent-note` / `.agent-progress` / `.agent-card-foot`
+ *                      / `.agent-card-open`, with `data-status`
+ *   empty control chat `.empty-state` / `.empty-symbol` / `.empty-title` (chat.css)
+ *                      / `.empty-copy`
+ *   buttons            `.button` / `.button-small` / `.button-danger-ghost` (base.css)
+ *   text link          `.link-button`                                (base.css)
+ *   "open elsewhere"   `ExternalIcon`                                (icons.tsx)
+ *
+ * What is left is composition - where those pieces sit - plus the two facts only
+ * this region can state: how to get back to the overview, and how to open the
+ * session in its own project.
+ */
+
 /* ------------------------------------------------------------------- pane */
 
 .cp-pane {
@@ -9,145 +36,110 @@
   background: var(--theme-bg);
 }
 
-/* The control chat's own first-run state, drawn inside the transcript area.
+.cp-session { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+/* --------------------------------------------------------------- the header
  *
- * It has to fit over the composer: the transcript pane is the one that scrolls,
- * so an intro taller than the pane hides its own "start in this project"
- * buttons below the fold (they were unreachable at 1024x768). The padding and
- * the mark are therefore compact, and the first child has no extra top margin. */
-.cp-intro {
-  max-width: 620px;
-  margin: 0 auto;
-  padding: var(--space-6) var(--space-8) var(--space-8);
-  text-align: center;
+ * One header, and it owns the session title.
+ *
+ * The `ChatView` this region embeds renders a `<header class="main-head">` of its
+ * own, naming the same session title and the same run state. Two headers naming
+ * one fact is the defect §5A calls out ("one owner per fact", shared rule 5), and
+ * measured at 1440px the plane showed the title twice in the DOM. The embedded one
+ * is suppressed below: it is the workbench's chrome (workspace tabs, notification
+ * bell, command palette) wrapped around a title this header already states, and
+ * this header is the only one that can also offer Back and "Open in project".
+ *
+ * So the plane's header is the workbench's header, not a copy of it: `.main-head`
+ * gives it the same height, padding, gap and hairline; `.breadcrumb` the same
+ * project-then-title line; `.main-title` the same weight and ellipsis. Only the
+ * pieces below are the plane's.
+ */
+
+/* The title yields first: it is the one element here that may be cut, because the
+ * project name and the state word are facts and the title is repeated by the
+ * conversation's own first message. Pinned by `workflow-panels.test.ts`. */
+.cp-session-id {
+  min-width: 0;
+  flex: 1;
 }
-.cp-intro-mark {
-  display: grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  margin: 0 auto var(--space-5);
-  border: 1px solid var(--theme-accent-line);
-  border-radius: var(--radius-lg);
-  background: var(--theme-accent-bg);
-  color: var(--theme-accent);
-  font-size: var(--fs-title);
+.cp-session-id h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.cp-intro h2 { margin: 0 0 var(--space-3); font-size: var(--fs-title); letter-spacing: -0.03em; }
-.cp-intro p { margin: 0 auto; max-width: 480px; color: var(--muted); font-size: var(--fs-small); line-height: 1.6; }
-/* A short window (a laptop with the browser chrome open) gets the tightest
-   version rather than a scroll position that starts mid-sentence. */
-@media (max-height: 820px) {
-  .cp-intro { padding-block: var(--space-4) var(--space-6); }
-  .cp-intro-mark { display: none; }
-  .cp-intro p { line-height: 1.5; }
-}
-.cp-chat .chat-inner { padding-top: 0; }
-.cp-intro-projects {
+
+.cp-session-actions {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  justify-content: center;
-  gap: var(--space-3);
-  margin: var(--space-8) 0 0;
+  gap: var(--space-5);
+  flex: 0 0 auto;
 }
-.cp-intro-projects .cp-eyebrow { width: 100%; margin-bottom: var(--space-2); }
-.cp-intro-projects button {
-  padding: var(--space-3) var(--space-5);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-pill);
-  background: var(--theme-surface);
-  color: var(--text);
-  font-size: var(--fs-tiny);
-}
-.cp-intro-projects button:hover { border-color: var(--theme-accent); color: var(--theme-accent-hi); }
-.cp-intro-empty { color: var(--muted); font-size: var(--fs-tiny); }
-.cp-intro-hint { margin-top: var(--space-8) !important; color: var(--muted) !important; font-size: var(--fs-tiny) !important; }
 
-.cp-primary {
-  height: 42px;
-  padding: 0 var(--space-7);
-  flex: none;
-  border-radius: var(--radius);
-  background: var(--accent-fill);
-  color: var(--on-accent);
-  font-size: var(--fs-label);
-  font-weight: 700;
-}
-.cp-primary:hover { background: var(--theme-accent-hi); }
+.cp-session-count { color: var(--muted); font-size: var(--fs-tiny); white-space: nowrap; }
 
-/* The inspector beside an open conversation, so a wide pane is not mostly empty.
+/* --------------------------------------------------------------- the column
  *
- * Below 1400px it stacks under the transcript instead of disappearing: a control
- * chat's subagents and session facts are the point of the panel, and a phone has
- * no room for a side column. The chat keeps `flex: 1` and its own composer, so
- * stacking never pushes the composer off the pane. */
+ * Stacked - the pane is narrower than the workbench's own breakpoint - the
+ * inspector is a panel under the transcript, capped so the conversation and its
+ * composer keep the larger half of the pane. Wide, it is the right-hand column
+ * the workbench draws its results in.
+ */
+
 .cp-session-body { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+
 .cp-inspector {
   display: flex;
   flex: 0 0 auto;
   flex-direction: column;
-  gap: var(--space-7);
   min-height: 0;
   /* Stacked, the inspector is a secondary panel: it scrolls inside a cap so the
      transcript and its composer stay the larger half of the pane. The cap is
      tall enough for the whole facts list plus one subagent row (a smaller one
-     clipped the session id and its Copy button with no visible scrollbar),
-     and `overscroll-behavior` keeps a wheel gesture inside it. */
+     clipped the session id and its Copy button with no visible scrollbar), and
+     `overscroll-behavior` keeps a wheel gesture inside it. */
   max-height: min(46dvh, 420px);
   overflow: auto;
   overscroll-behavior: contain;
-  padding: var(--space-7);
   border-top: 1px solid var(--line);
-  background: var(--panel-2);
+  /* The inspector rung of the surface ladder (§3.1), the same fill the workbench
+   * gives its results pane for this role. */
+  background: var(--inspector);
 }
-@media (min-width: 1400px) {
-  .cp-session-body { flex-direction: row; }
-  .cp-inspector {
-    flex: 0 0 300px;
-    max-height: none;
-    border-top: 0;
-    border-left: 1px solid var(--line);
-  }
-}
-.cp-facts { display: flex; flex-direction: column; gap: var(--space-7); }
-.cp-facts dl { display: grid; gap: var(--space-5); margin: 0; }
-.cp-facts dt {
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  font-weight: 720;
-  letter-spacing: 0.125em;
-  text-transform: uppercase;
-}
-.cp-facts-path { font-size: var(--fs-tiny); color: var(--muted); }
-.cp-facts dd {
-  margin: var(--space-1) 0 0;
-  overflow-wrap: anywhere;
-  color: var(--text);
-  font-size: var(--fs-small);
-}
+
+.cp-chat { flex: 1; min-width: 0; min-height: 0; display: flex; }
+.cp-chat .chat-main { flex: 1; min-width: 0; height: 100%; }
+/* The embedded conversation's own header. See "one header" above: the plane's
+ * header states the title, the project and the state, so this one would be the
+ * second owner of all three. */
+.cp-chat .main-head { display: none; }
+.cp-chat .center-body { min-height: 0; }
+.cp-chat .chat-inner { padding-top: 0; }
+
+/* ---------------------------------------------------------------- the facts */
+
+/* The session id and its Copy affordance on one line: the id shrinks and
+ * ellipsises, the action never does. */
 .cp-facts-id {
   display: flex;
   align-items: center;
-  gap: var(--space-4);
-  font-family: var(--mono, ui-monospace, monospace);
-  font-size: var(--fs-tiny);
+  gap: var(--space-3);
+  min-width: 0;
 }
-.cp-facts-id span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cp-facts-id .cp-link { flex: none; }
-.cp-facts-actions { display: flex; flex-direction: column; gap: var(--space-3); margin-top: auto; }
-.cp-facts-actions .cp-secondary { width: 100%; text-align: center; }
+.cp-facts-id > span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cp-facts-id .link-button { flex: none; }
+
+.cp-facts-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
 
 /* ------------------------------------------------------------- subagents */
 
-.cp-subagents { display: flex; flex-direction: column; gap: var(--space-4); }
-/* Stacked, the panel scrolls inside a short cap, so what is happening now comes
- * before the session's static facts: a chat that delegated work must show it
- * without a scroll. In the wide column the facts keep the top, where they read
- * as the header of the panel. */
-@media (max-width: 1399px) {
-  .cp-subagents { order: -1; }
-}
 .cp-agent-list {
   display: flex;
   flex-direction: column;
@@ -156,52 +148,45 @@
   padding: 0;
   list-style: none;
 }
-.cp-agent {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-5);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--theme-surface);
-}
-.cp-agent-head { display: flex; align-items: center; gap: var(--space-4); }
-.cp-agent-title { display: flex; flex: 1; flex-direction: column; gap: var(--space-1); min-width: 0; }
-.cp-agent-title strong {
-  overflow: hidden;
-  color: var(--text);
-  font-size: var(--fs-label);
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.cp-agent-title small { color: var(--muted); font-size: var(--fs-tiny); }
-.cp-agent-note { margin: 0; color: var(--text); font-size: var(--fs-tiny); line-height: 1.55; }
-.cp-agent-note.muted { color: var(--muted); }
-.cp-agent-detail {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--line-soft);
-}
-.cp-agent-message { display: flex; flex-direction: column; gap: var(--space-1); }
-.cp-agent-role {
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-.cp-agent-message p {
-  margin: 0;
-  overflow-wrap: anywhere;
-  color: var(--text);
-  font-size: var(--fs-tiny);
-  line-height: 1.55;
-  white-space: pre-wrap;
+
+/* -------------------------------------------------- the empty control chat */
+
+/* The intro has to fit over the composer: the transcript pane is the one that
+ * scrolls, so an intro taller than the pane hides its own "start in this project"
+ * buttons below the fold (they were unreachable at 1024x768). `.empty-state` is
+ * the workbench's 520px-tall centred block; at this pane's height that is too
+ * tall, so the height is capped and the padding trimmed. */
+.cp-chat .empty-state {
+  min-height: min(420px, 52vh);
+  padding-block: var(--space-6);
 }
 
-/* The rename dialog's one field. */
+/* The one row of this intro that is the plane's: a control chat has projects to
+ * start in, not files to explore. */
+.cp-intro-projects {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  margin: var(--space-8) 0 0;
+}
+.cp-intro-projects .eyebrow { width: 100%; justify-content: center; margin-bottom: var(--space-2); }
+.cp-intro-empty { color: var(--muted); font-size: var(--fs-small); }
+.cp-intro-hint { margin: var(--space-8) 0 0; color: var(--muted); font-size: var(--fs-small); line-height: 1.6; }
+
+/* --------------------------------------------------------------- the dialogs
+ *
+ * TEMPORARY - not this region's markup, and the only `.cp-*` pair left here.
+ *
+ * The rename dialog is rendered by `ControlPlane.tsx` (the shell), whose field
+ * still carries `class="cp-dialog-label"` / `class="cp-dialog-input"`. The
+ * product's field is `<label class="field-label">` + `<input class="input">`
+ * (`base.css` / `settings.css`), which is what every other dialog and the
+ * project rail use. Until that one line changes, these two rules keep the dialog
+ * looking the way it does today; delete both in the same commit that changes it.
+ */
+
 .cp-dialog-label {
   display: block;
   margin-bottom: var(--space-3);
@@ -211,6 +196,7 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+
 .cp-dialog-input {
   width: 100%;
   height: 34px;
@@ -221,99 +207,77 @@
   color: var(--text);
   font-size: var(--fs-label);
 }
+
 .cp-dialog-input:focus { border-color: var(--accent); }
 
-/* ---------------------------------------------------------- open session */
+/* --------------------------------------------------------------- responsive
+ *
+ * These are the pane's own widths, not the window's. The plane is a container
+ * (`container-type: inline-size` on `.control-plane.cp`, `control-shared.css`),
+ * because it is embedded in the same window as the workbench and must re-stack
+ * when the workbench does, at the same thresholds (780 / 1000 / 1100px).
+ *
+ * A viewport query fired at the wrong width for exactly this reason: at a 1280px
+ * window the workbench was still conversation-left / results-right while the
+ * plane had already dropped its inspector under the transcript, so the composer
+ * floated over a short transcript with the facts taking the bottom half of the
+ * screen.
+ */
 
-.cp-session { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-
-.cp-session-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-6);
-  min-height: 64px;
-  padding: var(--space-6) var(--space-8);
-  border-bottom: 1px solid var(--line);
-  background: var(--panel-2);
-}
-.cp-session-id { min-width: 0; flex: 1; }
-.cp-session-id h2 {
-  margin: var(--space-1) 0 0;
-  font-size: var(--fs-lead);
-  font-weight: 660;
-  letter-spacing: -0.01em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.cp-session-actions { display: flex; align-items: center; gap: var(--space-5); flex: none; }
-.cp-session-count { color: var(--muted); font-size: var(--fs-tiny); white-space: nowrap; }
-
-/* There is no model switcher in the header any more: the composer's own pills
- * are the one place the model and the reasoning effort are named and changed,
- * so there is no header copy to restyle. The `.model-switcher-menu.dropup`
- * override that used to live here (which opened the menu downward, because a
- * header is at the top of the pane) is gone with it - the composer's menu is
- * positioned by `composer.css`. */
-
-.cp-secondary {
-  padding: var(--space-3) var(--space-5);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-md);
-  background: var(--theme-surface);
-  color: var(--text);
-  font-size: var(--fs-tiny);
-  white-space: nowrap;
-}
-.cp-secondary:hover { border-color: var(--theme-accent-line); }
-
-.cp-back { display: none; width: 30px; height: 30px; place-items: center; border-radius: var(--radius-md); color: var(--muted); }
-.cp-back:hover { background: var(--theme-hover); color: var(--text); }
-
-.cp-chat { flex: 1; min-height: 0; display: flex; }
-.cp-chat .chat-main { flex: 1; min-width: 0; height: 100%; }
-/* The session's own header would repeat what this pane already says. */
-.cp-chat .main-head, .cp-chat .workspace-tabbar { display: none; }
-.cp-chat .center-body { min-height: 0; }
-
-.cp-control-note {
-  margin: 0;
-  padding: var(--space-4) var(--space-8);
-  border-bottom: 1px solid var(--theme-accent-line);
-  background: var(--theme-accent-bg);
-  color: var(--accent-on-tint);
-  font-size: var(--fs-tiny);
-  line-height: 1.5;
+/* Wide: the inspector is the right-hand column, beside the conversation, and the
+ * facts lead it - they read as the panel's head. */
+@container control-plane (min-width: 1100.01px) {
+  .cp-session-body { flex-direction: row; }
+  .cp-inspector {
+    flex: 0 0 320px;
+    max-height: none;
+    border-top: 0;
+    border-left: 1px solid var(--line);
+  }
+  .cp-subagents { order: 0; }
 }
 
-/* ------------------------------------------------------------- responsive */
+/* Stacked: what is happening now comes before the session's static facts. A chat
+ * that delegated work must show it without a scroll, and the capped panel is
+ * short. */
+@container control-plane (max-width: 1100px) {
+  .cp-subagents { order: -1; }
+}
 
 /* The header's actions (the state word, the message count, "Open in project")
- * need room beside the title. Below this the actions take their own row (the
- * title keeps the full width), and the message count steps aside —
- * `SessionFacts` still carries it. The model and reasoning pills are not here:
- * they live in the composer, which is below this breakpoint in any case. */
-@media (max-width: 1100px) {
-  .cp-session-head { flex-wrap: wrap; }
-  .cp-session-actions { flex: 1 0 100%; flex-wrap: wrap; gap: var(--space-4); }
-  .cp-session-count { display: none; }
+ * need room beside the title; below this they take their own row, as the
+ * workbench's tabs do at its own 1000px. */
+@container control-plane (max-width: 1000px) {
+  .cp-session-head {
+    flex-wrap: wrap;
+    row-gap: var(--space-3);
+    height: auto;
+    min-height: var(--header-h);
+    padding-block: var(--space-4);
+  }
+  .cp-session-actions { flex: 1 0 100%; }
 }
 
-@media (max-width: 900px) {
-  .cp-pane { display: flex; min-height: 0; }
-  .control-plane.cp.detail-open .cp-pane { min-height: calc(100dvh - 56px); }
-  .cp-back { display: grid; }
-  .cp-session-head { padding: var(--space-5) var(--space-6); gap: var(--space-4); }
+/* The message count steps aside; `SessionFacts` still carries it. The project name
+ * stays - the plane hides its rail at phone width, so the breadcrumb is the only
+ * place left that says which project this session belongs to. */
+@container control-plane (max-width: 780px) {
   .cp-session-count { display: none; }
-  .cp-inspector { max-height: 42dvh; }
+  .cp-session-head { padding-inline: var(--space-5); }
+}
+
+/* Phone: a whole-window fact, not a pane width. At 390px the plane *is* the
+ * window (the shell stacks at 900px, `control-shared.css`), so the pane must fill
+ * it - and this is the one tier the stylesheet contract pins, because the plane
+ * once hid a session's state behind a colour-only 6px dot here. */
+@media (max-width: 900px) {
+  .control-plane.cp.detail-open .cp-pane { min-height: calc(100dvh - 56px); }
 }
 
 @media (max-width: 520px) {
   /* A Finished/Cancelled/No runs word is meaningful content, even in the phone
-     header. The flexible, ellipsized session title yields instead. */
-  .cp-session-actions .cp-state { font-size: var(--fs-tiny); gap: var(--space-2); }
-  /* The accessible action name stays; only the duplicate words are visually
-     replaced by the arrow glyph below. */
-  .cp-session-actions .cp-secondary { font-size: var(--fs-hidden); padding: var(--space-3) var(--space-4); }
-  .cp-session-actions .cp-secondary::after { content: '↗'; font-size: var(--fs-body); }
+     header. The flexible, ellipsized session title yields instead.
+     Pinned by `styles/workflow-panels.test.ts`: keep the word at the tiny type
+     step and keep its gap, whatever else changes in this sheet. */
+  .cp-session-actions .session-state { font-size: var(--fs-tiny); gap: var(--space-2); }
 }

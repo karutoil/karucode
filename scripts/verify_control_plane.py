@@ -358,11 +358,25 @@ def main() -> int:
             "e.dispatchEvent(new Event('input',{bubbles:true}));return true;"
         )
         click('Send message')
-        named = api_wait(
-            f'{api}/api/sessions/{chat_id}',
-            lambda body: body['session']['title'] if body['session']['title'] else None,
-            what='a title on the new chat',
-        )
+        # Two titles land here, by design (see `@kc-doc: session-titles`): the
+        # deterministic one derived from the message the moment it is accepted,
+        # then the model's, written by a background turn. Polling for "any title"
+        # returns the first, so this check raced the titling turn and failed
+        # whenever the model's answer had not landed yet - two runs in three,
+        # measured. Wait for the title this check actually claims, and report the
+        # last one seen if it never arrives.
+        def model_title(body: dict):
+            title = body['session']['title']
+            return title if title == MODEL_TITLE else None
+
+        try:
+            named = api_wait(
+                f'{api}/api/sessions/{chat_id}',
+                model_title,
+                what=f'the model-written title {MODEL_TITLE!r}',
+            )
+        except AssertionError:
+            named = http_json(f'{api}/api/sessions/{chat_id}')['session']['title']
         check(
             'the chat is named from its first message',
             named == MODEL_TITLE,
@@ -394,7 +408,7 @@ def main() -> int:
             json.dumps({k: chat.get(k) for k in ('model_label', 'agents', 'control')}),
         )
         wait(
-            "return [...document.querySelectorAll('[aria-label=\"Control chats\"] .cp-row')]"
+            "return [...document.querySelectorAll('[aria-label=\"Control chats\"] .session-row')]"
             ".some(r => r.innerText.includes(" + json.dumps(MODEL_TITLE) + "));",
             30,
         )
@@ -403,7 +417,7 @@ def main() -> int:
         # The chat's model is NOT part of its name. The rail row carries no
         # model text at all; the composer is the one place the model is named.
         rail_text = js(
-            "const rows=[...document.querySelectorAll('[aria-label=\"Control chats\"] .cp-row')];"
+            "const rows=[...document.querySelectorAll('[aria-label=\"Control chats\"] .session-row')];"
             "const row=rows.find(r => r.innerText.includes(" + json.dumps(MODEL_TITLE) + "));"
             "return row ? row.innerText : null;"
         )
@@ -414,8 +428,8 @@ def main() -> int:
         )
         check(
             'the rail has no model badge at all',
-            js("return document.querySelector('.cp-badge-model') === null;") is True,
-            'no .cp-badge-model in the rail',
+            js("return document.querySelector('[title^=\"Model:\"]') === null;") is True,
+            'no element titled "Model: …" in the rail',
         )
         composer_text = js(
             "const pill=document.querySelector('.composer-session-pins')"
@@ -520,7 +534,7 @@ def main() -> int:
         )
         row_text = js(
             "const s=document.querySelector('[aria-label=\"Subagents of this chat\"]');"
-            "const row=s && s.querySelector('.cp-agent');"
+            "const row=s && s.querySelector('.agent-card');"
             "return row ? row.innerText : (s ? s.innerText : null);"
         )
         check(
@@ -539,7 +553,7 @@ def main() -> int:
             json.dumps(chat['agents']),
         )
         badge = js(
-            "const b=document.querySelector('.cp-row .cp-badge-agents');"
+            "const b=document.querySelector('.session-row .badge');"
             "return b ? (b.innerText + '|' + (b.getAttribute('title')||'')) : null;"
         )
         check('the chat row shows an agent badge', bool(badge), str(badge))
@@ -601,9 +615,10 @@ def main() -> int:
         viewport(390, 844, mobile=True)
         # The overview is on screen already; open the chat at this width, because
         # at 390 the rail is hidden once a chat is open.
-        wait("return !!document.querySelector('[aria-label=\"Control chats\"] .cp-row');")
+        wait("return !!document.querySelector('[aria-label=\"Control chats\"] .session-row');")
         js(
-            "const b=[...document.querySelectorAll('[aria-label=\"Control chats\"] .cp-row')][0];"
+            "const b=document.querySelector('[aria-label=\"Control chats\"] .session-row .session-open')"
+            "  || document.querySelector('[aria-label=\"Control chats\"] .session-row button');"
             "if(b) b.click();"
             "return true;"
         )
@@ -698,7 +713,7 @@ def main() -> int:
         inspector = js(
             "const i=document.querySelector('.cp-inspector');"
             "if(!i) return JSON.stringify({present:false});"
-            "const copy=i.querySelector('.cp-facts-id .cp-link');"
+            "const copy=i.querySelector('.cp-facts-id .link-button');"
             "i.scrollTop = i.scrollHeight;"
             "const ir=i.getBoundingClientRect();"
             "const cr=copy ? copy.getBoundingClientRect() : null;"
@@ -713,7 +728,7 @@ def main() -> int:
             inspector,
         )
         brand = js(
-            "const m=document.querySelector('.cp-brand-mark');"
+            "const m=document.querySelector('.cp-tile-control');"
             "return m ? JSON.stringify({scroll: m.scrollHeight, client: m.clientHeight}) : null;"
         )
         brand_metrics = json.loads(brand)

@@ -1,8 +1,38 @@
-/* ---------------------------------------------------------------- browser */
+/* The control plane's rail.
+ *
+ * The rail is the workbench's navigation column with a cross-project list in it,
+ * so the column, its head, its search field, its chips, its rows and its foot are
+ * the workbench's own classes (§5A of `docs/internal/DESIGN-SYSTEM.md`):
+ * `.side-head`, `.side-search`, `.session-chips`/`.filter-chip`, `.session-nav`,
+ * `.session-row`/`.session-open`/`.session-head`/`.session-title`/`.session-meta`,
+ * `.session-menu-wrap`/`.session-menu`, `.side-footer`/`.online-row`. They are
+ * drawn by `styles/base.css`, `styles/layout.css` and `styles/rail.css`, which
+ * this sheet does not restate.
+ *
+ * What is left here is what only this rail has:
+ *
+ *   1. the column itself (`.cp-browser`) and the shape it takes as the plane's
+ *      own width changes;
+ *   2. the row's avatar column (`.cp-row-body` / `.cp-row-text`) - this list
+ *      mixes projects, the workbench's does not;
+ *   3. the two-group list (`.cp-group`, and `.cp-filters` as a hook);
+ *   4. the `k.` tile's ink.
+ *
+ * Before this sheet was reduced it held 290 lines re-drawing the row, its title,
+ * its meta line, its status word, its dot, its badge, its icon button, its
+ * filter pill, its search field, its head and its foot. Every one of those had
+ * drifted from the workbench by 1-5px, a font weight or a font family, which is
+ * exactly the "two products" defect §5A names.
+ */
+
+/* ------------------------------------------------------------------- column */
 
 .cp-browser {
-  flex: 0 0 336px;
-  width: 336px;
+  /* A step wider than the workbench's `--sidebar-w` (232px), because a row here
+   * carries a project tile and a project name the workbench's row does not. The
+   * grammar is the same; only the fact count differs. */
+  flex: 0 0 300px;
+  width: 300px;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -10,281 +40,121 @@
   border-right: 1px solid var(--line);
 }
 
-.cp-browser-head {
+/* --------------------------------------------------------------------- head */
+
+/* `.side-head` owns the padding; the plane's head is a brand line plus one
+ * action, so it only needs the row arrangement. */
+.side-head.cp-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-5);
-  padding: var(--space-8) var(--space-7) var(--space-6);
-}
-
-.cp-brand { display: flex; align-items: center; gap: var(--space-5); min-width: 0; }
-
-.cp-brand-mark {
-  /* `inline-flex`, not `grid`: the mark is `k` plus a styled dot, and as grid
-     items they became two rows - the dot painted *outside* the badge. A single
-     baseline row keeps the mark inside its 34 px tile in every theme. */
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-1);
-  width: 34px;
-  height: 34px;
-  flex: none;
-  border-radius: var(--radius);
-  border: 1px solid var(--theme-accent-line);
-  background: var(--theme-accent-bg);
-  color: var(--theme-accent-hi);
-  font-size: var(--fs-heading);
-  font-weight: 720;
-  letter-spacing: -0.06em;
-  overflow: hidden;
-}
-
-.cp-brand-mark i { font-style: normal; color: var(--accent-fill); }
-
-.cp-brand h1 { margin: 0; font-size: var(--fs-lead); letter-spacing: -0.01em; }
-.cp-brand p { margin: var(--space-1) 0 0; font-size: var(--fs-tiny); color: var(--muted); }
-
-.cp-icon {
-  width: 30px;
-  height: 30px;
-  flex: none;
-  display: grid;
-  place-items: center;
-  border-radius: var(--radius-md);
-  color: var(--muted);
-  font-size: var(--fs-lead);
-}
-.cp-icon:hover { background: var(--theme-hover); color: var(--text); }
-
-.cp-search {
-  display: flex;
-  align-items: center;
   gap: var(--space-4);
-  height: 34px;
-  margin: 0 var(--space-6) var(--space-5);
-  padding: 0 var(--space-5);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--theme-surface);
-  /* `--theme-faint` on `--theme-surface` is 4.47:1 - just under AA for the
-     13 px magnifier. `--muted` is the same quiet tone and passes. */
-  color: var(--muted);
 }
-.cp-search:focus-within { border-color: var(--accent); }
-.cp-search input {
-  width: 100%;
+
+.cp-head-copy {
+  flex: 1 1 auto;
   min-width: 0;
-  border: 0;
-  background: none;
+}
+
+.cp-head-title {
+  margin: 0;
   color: var(--text);
-  font-size: var(--fs-label);
+  font-size: var(--fs-lead);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
 }
-.cp-search input::placeholder { color: var(--muted); }
 
-.cp-filters { display: flex; gap: var(--space-2); padding: 0 var(--space-6) var(--space-6); }
-.cp-filters button {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-4);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  font-size: var(--fs-tiny);
-}
-.cp-filters button:hover { color: var(--text); }
-.cp-filters button span {
-  font-size: var(--fs-micro);
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-.cp-filters button[aria-pressed='true'] {
-  background: var(--theme-raised);
-  border-color: var(--line-strong);
-  color: var(--text);
-}
-.cp-filters button[aria-pressed='true'] span { color: var(--accent-fill); }
+/* -------------------------------------------------------------- filter chips */
 
-.cp-scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 var(--space-4) var(--space-6); }
+/* `.cp-filters` is a hook, not a style: the plane's chip row carries it so
+ * `scripts/verify_control_parity.py` (`.cp-filters .filter-chip`) measures the
+ * pill this rail actually renders. The layout is `.session-chips` and the pill is
+ * `.filter-chip` - deliberately un-overridden, because an override is what made
+ * the plane's pill a 10px button instead of the workbench's 24px chip. */
 
-.cp-group-action { align-items: center; }
-.cp-new-chat {
-  /* A 23 px tall pill was under the 24 px hit-target floor the rest of the
-     shell keeps; the extra block padding is invisible at this size. */
-  min-height: 26px;
-  padding: var(--space-1) var(--space-5);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-pill);
-  background: var(--theme-surface);
-  color: var(--accent-fill);
-  font-size: var(--fs-tiny);
-  letter-spacing: 0;
-  text-transform: none;
-}
-.cp-new-chat:hover { border-color: var(--theme-accent); }
+/* ------------------------------------------------------------- group heads */
 
+/* The two-group list: "Control chats" above "Sessions", each with its count. The
+ * kicker is `.eyebrow` and the count is `.badge`; this rule is only the row. */
 .cp-group {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--space-6) var(--space-5) var(--space-3);
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  font-weight: 720;
-  letter-spacing: 0.125em;
-  text-transform: uppercase;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-3) var(--space-2);
 }
-.cp-group-count { font-variant-numeric: tabular-nums; }
-/* The running/recent split inside the Sessions group: a sub-heading, so it does
- * not compete with the two top-level group names. */
+
+/* The running/recent split inside the Sessions group: a sub-heading, so it
+ * starts closer to the rows above it than a top-level group does. */
 .cp-group-sub {
   padding-top: var(--space-5);
-  padding-bottom: var(--space-2);
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  letter-spacing: 0.08em;
 }
 
-.cp-list { list-style: none; margin: 0; padding: 0; }
+/* --------------------------------------------------------------------- rows */
 
-/* A rail row and its kebab share a wrapper so the menu never sits inside the
- * button (nested buttons are invalid, and the row's accessible name would
- * swallow "Rename"). */
-.cp-row-item { position: relative; }
-.cp-row-menu { position: absolute; top: var(--space-2); right: var(--space-2); }
-.cp-row-menu-trigger { width: 24px; height: 24px; opacity: 0; transition: opacity var(--transition-fast); }
-.cp-row-item:hover .cp-row-menu-trigger,
-.cp-row-item:focus-within .cp-row-menu-trigger,
-.cp-row-menu-trigger[aria-expanded='true'] { opacity: 1; }
-.cp-row-menu-list { top: 28px; right: 0; }
-/* The kebab sits over the row's right edge, so the row yields that corner: the
- * status word is `flex: none`, which is what used to push the menu off-row. */
-.cp-row-item .cp-row { padding-right: calc(var(--space-9) + var(--space-2)); }
-
-.cp-row {
+/* The avatar column. `.session-open` stacks its children vertically, so the tile
+ * and the two text lines sit in one child that stays below the height the
+ * workbench's row needs: 26px tile against a 31px text column, which keeps the
+ * row at the workbench's 41px instead of growing it. */
+.cp-row-body {
   display: flex;
   align-items: center;
-  gap: var(--space-5);
-  width: 100%;
-  padding: var(--space-4) var(--space-5);
-  text-align: left;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-}
-.cp-row:hover { background: var(--theme-hover); }
-.cp-row.selected {
-  background: var(--theme-accent-bg);
-  border-color: var(--theme-accent-line);
-}
-
-/* Four quiet project tones: enough to tell projects apart at a glance. */
-
-.cp-row.selected .cp-glyph { color: var(--theme-accent-hi); border-color: var(--theme-accent-line); }
-
-.cp-row-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: var(--space-1); }
-.cp-row-title {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-4);
   min-width: 0;
-  font-size: var(--fs-label);
-  font-weight: 600;
-  color: var(--text);
 }
-.cp-row-title-text {
+
+.cp-row-text {
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--hairline);
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
-.cp-row-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  column-gap: var(--space-2);
-  row-gap: var(--space-1);
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  color: var(--muted);
-  font-size: var(--fs-tiny);
-}
-.cp-dot { color: var(--muted); }
 
-/* The agent-count pill on a control-chat row.
+/* A control chat's tile is the plane's own mark: the same `k.` the workbench
+ * paints in `.workbench-control-mark`, in the same neutral tile every project
+ * gets, so the two kinds of row read as one list. The mono face matters: `k.` is
+ * a mark, not an initial. */
+.cp-row-body .cp-tile-control {
+  color: var(--accent-fill);
+  font-family: var(--font-mono);
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+/* -------------------------------------------------------------- responsive
  *
- * A chip of one short fact, so it reads on the muted/raised pair in every theme:
- * no colour carries meaning here, only the words do. `--text` on
- * `--theme-raised` is the AA pair DESIGN-SYSTEM.md §4.8 defines, so Daybreak and
- * the dark themes both pass.
- *
- * There is no model pill here any more: a chat's model is not part of its
- * identity, and the composer is where the model is named and changed. */
-.cp-badge {
-  display: inline-block;
-  flex: 0 0 auto;
-  max-width: 100%;
-  min-width: 0;
-  overflow: hidden;
-  padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-pill);
-  background: var(--theme-raised);
-  color: var(--text);
-  font-size: var(--fs-tiny);
-  line-height: 1.45;
-  text-overflow: ellipsis;
-  vertical-align: bottom;
-  white-space: nowrap;
-}
-.cp-badge-agents { font-variant-numeric: tabular-nums; }
+ * The rail answers the *plane's* width, not the window's, because the plane is
+ * embedded in a window that also holds the project rail: a viewport query fires
+ * on a width the rail does not have. The breakpoints are the workbench's own
+ * (`styles/workbench.css`: 780 / 1000 / 1100), so the two columns re-arrange at
+ * the same size on screen. The phone tier is the container too: `.control-plane.cp`
+ * is stacked by the shared sheet, and the rail is then the whole column. */
 
-/* Every state keeps its word. "Finished", "Cancelled" and "No runs" are three
- * different answers, and a bare dot told them apart only by colour - which also
- * erased the quiet ones for a screen reader's neighbours and for anyone who
- * cannot separate the hues. The dot stays as the colour cue; the word says what
- * happened. Only the phone-width session header (below) is too narrow for both.
- *
- * The tone names are the app's `StatusTone` vocabulary (`state/selectors.ts`),
- * not a private one: the same word paints `status-dot status-<tone>` in the rail
- * and the workbench, so the plane cannot drift from them. */
-
-@keyframes cp-pulse {
-  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 38%, transparent); }
-  70% { box-shadow: 0 0 0 4px transparent; }
-  100% { box-shadow: 0 0 0 0 transparent; }
+/* A wide plane can afford the project name and the age unabridged. */
+@container control-plane (min-width: 1400px) {
+  .cp-browser {
+    flex-basis: 340px;
+    width: 340px;
+  }
 }
 
-.cp-browser-foot {
-  display: flex;
-  align-items: center;
-  gap: var(--space-5);
-  padding: var(--space-5) var(--space-7);
-  border-top: 1px solid var(--line);
-  color: var(--muted);
-  font-size: var(--fs-tiny);
-}
-.cp-live { display: inline-flex; align-items: center; gap: var(--space-3); color: var(--theme-success); }
-.cp-live i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  animation: cp-pulse 2s ease-out infinite;
-}
-.cp-foot-projects { color: var(--muted); }
-.cp-browser-foot button { margin-left: auto; color: var(--accent-fill); font-size: var(--fs-tiny); }
-
-/* ------------------------------------------------------------- responsive */
-
-/* Phone-width shell: one column, the rail on top with its own short scroll. */
-@media (min-width: 1900px) {
-  .cp-browser { flex-basis: 380px; width: 380px; }
+/* A narrower plane hands the room to the conversation: the rail is navigation,
+ * the pane is the work. */
+@container control-plane (max-width: 1100px) {
+  .cp-browser {
+    flex-basis: 268px;
+    width: 268px;
+  }
 }
 
-@media (max-width: 1180px) {
-  .cp-browser { flex-basis: 300px; width: 300px; }
+/* One column: the shared sheet has already stacked the plane, so the rail fills
+ * it and does not keep a divider against nothing. */
+@container control-plane (max-width: 780px) {
+  .cp-browser {
+    flex-basis: 100%;
+    width: 100%;
+    border-right: 0;
+  }
 }

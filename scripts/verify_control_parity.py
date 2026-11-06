@@ -141,6 +141,42 @@ class Provider(BaseHTTPRequestHandler):
 
 # ------------------------------------------------------- style-measurement glue
 
+#: Shared classes the plane adopts. A control-plane sheet may scope one inside its
+#: own layout (`.cp-table-row .session-state`), but may not redefine the bare
+#: class: that is a second recipe for one role, which is the defect §5A exists to
+#: prevent. Kept as a literal set because it is the contract, not a derivation.
+SHARED_PRIMITIVES = frozenset({
+    ".button",
+    ".button-primary",
+    ".button-small",
+    ".button-danger",
+    ".icon-button",
+    ".link-button",
+    ".input",
+    ".badge",
+    ".chip",
+    ".status-dot",
+    ".eyebrow",
+    ".session-row",
+    ".session-open",
+    ".session-head",
+    ".session-title",
+    ".session-meta",
+    ".session-state",
+    ".session-list",
+    ".session-menu-trigger",
+    ".filter-chip",
+    ".side-head",
+    ".side-footer",
+    ".online-row",
+    ".rail-avatar",
+    ".agent-card",
+    ".metric",
+    ".inspector-section",
+    ".empty-state",
+    ".empty-title",
+})
+
 #: The computed properties a matched pair must agree on. Chosen because these are
 #: exactly the ones the recon pass found diverging; adding more makes the check
 #: stricter, and a property that legitimately differs per surface must be argued
@@ -168,16 +204,50 @@ PROPS = [
 
 MEASURE = """
 const sel = %s;
-const el = document.querySelector(sel);
-if (!el) return JSON.stringify({present: false, sel});
+const required = %s;
+const props = %s;
+const candidates = [...document.querySelectorAll(sel)];
+if (candidates.length === 0) return JSON.stringify({present: false, sel});
+
+// Compare the BASE recipe, not whichever variant happens to come first.
+//
+// The workbench's first `.icon-button` on screen is an inspector variant
+// (`inspector-quick`, 29px, dimmer ink); its first `.button-primary` is the
+// composer's send button, which is *disabled* while the draft is empty and so
+// paints the muted rung instead of the accent. Measuring those against the
+// plane's base `.icon-button` and its enabled launch button reported two
+// variants of one class as a design divergence. So: prefer an element that
+// carries exactly the required classes and is enabled; fall back only if the
+// surface genuinely has nothing else, and say which happened.
+const classes = (el) => [...el.classList];
+const exact = (el) => {
+  const list = classes(el);
+  return required.every((c) => list.includes(c)) && list.length === required.length;
+};
+const enabled = (el) => !el.disabled;
+let how = 'exact';
+let el = candidates.find((x) => exact(x) && enabled(x));
+if (!el) { how = 'enabled-variant'; el = candidates.find(enabled); }
+if (!el) { how = 'variant'; el = candidates[0]; }
+
 const s = getComputedStyle(el);
-const out = {present: true, sel};
-for (const p of %s) out[p] = s[p];
+const out = {present: true, sel, how, cls: classes(el).join(' '), disabled: !!el.disabled};
+for (const p of props) out[p] = s[p];
 const r = el.getBoundingClientRect();
 out._w = Math.round(r.width);
 out._h = Math.round(r.height);
 return JSON.stringify(out);
 """
+
+
+def required_classes(selector: str) -> list[str]:
+    """The class names a selector demands, so `measure` can prefer the base recipe.
+
+    Only the class terms of the first compound are used; pseudo-classes and
+    descendant combinators are not part of the recipe being compared.
+    """
+    first = selector.split(',')[0].strip()
+    return re.findall(r"\.([A-Za-z][\w-]*)", first)
 
 
 #: Selector for the whole plane, and for its rail, by aria-label rather than by
@@ -188,8 +258,12 @@ RAIL = '[aria-label="Sessions across projects"]'
 
 
 def measure(js, selector: str) -> dict:
-    """Read one element's computed style. `present: false` when the role is absent."""
-    raw = js(MEASURE % (json.dumps(selector), json.dumps(PROPS)))
+    """Read one element's computed style, preferring the class's base recipe.
+
+    `present: false` when the role is absent from that surface, which makes the
+    comparison skip the role rather than pair it against nothing.
+    """
+    raw = js(MEASURE % (json.dumps(selector), json.dumps(required_classes(selector)), json.dumps(PROPS)))
     return json.loads(raw) if raw else {"present": False, "sel": selector}
 
 
@@ -200,6 +274,12 @@ TOLERANCE = {
     # Width is the surface's business: a rail row fills a 320px column, a
     # workbench row fills a different one. Height and padding are the contract.
     "_w": None,
+    # What the harness matched, not a style: recorded so a failure names its cause.
+    "how": None,
+    "cls": None,
+    "disabled": None,
+    "sel": None,
+    "present": None,
     # `height` resolves to `auto` for block-ish containers and to a px value for
     # a fixed-height control; compare only when both are numeric.
     "height": "numeric-or-auto",
@@ -374,19 +454,31 @@ def main() -> int:
         # ordinary row would measure "selected versus not" and call the
         # difference a design divergence. Both sides read an unselected row, and
         # the selected pair is compared separately below.
+        # A role is only comparable if BOTH sides name the same variant. The first
+        # `.icon-button` in the workbench is a `.session-menu-trigger`, which
+        # layout.css:664 deliberately sizes to 24px; the first `.button` is the
+        # composer's `.button-primary.button-send`, which composer.css:572 also
+        # overrides. Pairing those against the plane's *base* `.icon-button` and a
+        # plain `.button-small` measured two different variants and reported the
+        # difference as a design divergence. Each selector below therefore names
+        # the variant it means, on both sides, and `.status-dot` is scoped into a
+        # row so its inherited font and colour come from the same context (a 6px
+        # circle has no text of its own; what it inherits says nothing about it).
         roles = {
             "row": ".session-row:not(.is-active)",
             "rowTitle": ".session-row:not(.is-active) .session-title",
             "rowMeta": ".session-row:not(.is-active) .session-meta",
-            "iconButton": ".icon-button",
+            "stateWord": ".session-row:not(.is-active) .session-state",
+            "iconButton": ".icon-button:not(.session-menu-trigger)",
             "badge": ".badge",
             "eyebrow": ".eyebrow",
-            "statusDot": ".status-dot",
+            "statusDot": ".session-row .status-dot",
             "filterChip": ".filter-chip",
-            "sideHead": ".side-head",
             "sideFooter": ".side-footer",
             "emptyTitle": ".empty-title",
-            "button": ".button",
+            "button": ".button:not(.button-primary):not(.button-send)",
+            "buttonPrimary": ".button.button-primary",
+            "buttonSmall": ".button.button-small",
             "menuTrigger": ".session-menu-trigger",
             "rowSelected": ".session-row.is-active",
         }
@@ -405,21 +497,27 @@ def main() -> int:
         # adopted the shared class these are identical to the workbench's; where
         # it has not, the selector names its private class so the comparison
         # still runs and the divergence is measured rather than assumed.
+        # Scoped by aria-label, not by the private classes this work retires, and
+        # variant-exact to match `roles` above. Each entry lists the shared
+        # selector first and the private one second, so the same run measures the
+        # plane before and after adoption and the diff is the work.
         plane_roles = {
-            "row": ".cp-browser .session-row:not(.is-active), .cp-browser .cp-row:not(.selected)",
-            "rowTitle": ".cp-browser .session-row:not(.is-active) .session-title, .cp-browser .cp-row:not(.selected) .cp-row-title-text",
-            "rowMeta": ".cp-browser .session-row:not(.is-active) .session-meta, .cp-browser .cp-row:not(.selected) .cp-row-meta",
-            "iconButton": ".cp-browser .icon-button, .cp-browser .cp-icon",
-            "badge": ".cp-browser .badge, .cp-browser .cp-badge",
-            "eyebrow": ".cp-overview .eyebrow, .cp-overview .cp-eyebrow, .cp-browser .eyebrow, .cp-browser .cp-group-sub",
-            "statusDot": ".cp-browser .status-dot, .cp-browser .cp-dot",
-            "filterChip": ".cp-filters .filter-chip, .cp-filters button",
-            "sideHead": ".cp-browser-head, .cp-browser .side-head",
-            "sideFooter": ".cp-browser-foot, .cp-browser .side-footer",
-            "emptyTitle": ".cp-overview .empty-title, .cp-overview .cp-intro-empty",
-            "button": ".cp-overview .button, .cp-overview .cp-primary, .cp-overview .cp-secondary",
-            "menuTrigger": ".cp-browser .session-menu-trigger, .cp-browser .cp-row-menu-trigger",
-            "rowSelected": ".cp-browser .session-row.is-active, .cp-browser .cp-row.selected",
+            "row": RAIL + " .session-row:not(.is-active), " + RAIL + " .cp-row:not(.selected)",
+            "rowTitle": RAIL + " .session-row:not(.is-active) .session-title, " + RAIL + " .cp-row-title-text",
+            "rowMeta": RAIL + " .session-row:not(.is-active) .session-meta, " + RAIL + " .cp-row-meta",
+            "stateWord": RAIL + " .session-state, " + PLANE + " .cp-state",
+            "iconButton": RAIL + " .icon-button:not(.session-menu-trigger), " + RAIL + " .cp-icon",
+            "badge": RAIL + " .badge, " + RAIL + " .cp-badge",
+            "eyebrow": PLANE + " .eyebrow, " + PLANE + " .cp-eyebrow",
+            "statusDot": RAIL + " .session-row .status-dot, " + RAIL + " .cp-dot",
+            "filterChip": RAIL + " .filter-chip, " + RAIL + " .cp-filters button",
+            "sideFooter": RAIL + " .side-footer, " + RAIL + " .cp-browser-foot",
+            "emptyTitle": PLANE + " .empty-title, " + PLANE + " .cp-intro-empty",
+            "button": PLANE + " .button:not(.button-primary), " + PLANE + " .cp-secondary",
+            "buttonPrimary": PLANE + " .button.button-primary, " + PLANE + " .cp-primary",
+            "buttonSmall": PLANE + " .button.button-small",
+            "menuTrigger": RAIL + " .session-menu-trigger, " + RAIL + " .cp-row-menu-trigger",
+            "rowSelected": RAIL + " .session-row.is-active, " + RAIL + " .cp-row.selected",
         }
         for role, selector in plane_roles.items():
             plane[role] = measure(js, selector)
@@ -516,20 +614,122 @@ def main() -> int:
         # ----------------------------------------------------------- 3. parity
         # For every role present on both sides, the computed styles must agree.
         # This is the check that catches "adopted the class, then overrode it".
+        # Compare only a *variant-matched* pair. The workbench never renders a
+        # bare `.button` or a bare `.icon-button`: every instance it draws carries
+        # a modifier (`inspector-quick`, `inspector-context-button`, `button-send`,
+        # and the send button is disabled while the draft is empty). Pairing one of
+        # those against the plane's base element reported two variants of one class
+        # as a design divergence, so such a pair is recorded and excluded - the
+        # shadowing check below is what proves the plane did not re-tune the shared
+        # recipe it adopted.
         diverged: list[str] = []
+        variant_mismatch: list[str] = []
         compared = 0
         for role in roles:
             w, p = workbench.get(role, {}), plane.get(role, {})
             if not w.get("present") or not p.get("present"):
                 continue
+            if w.get("cls") != p.get("cls"):
+                variant_mismatch.append(f"{role}: '{w.get('cls')}' vs '{p.get('cls')}'")
+                continue
             compared += 1
             agreed, diffs = compare(w, p, role)
             if not agreed:
-                diverged.append(f"{role}: " + "; ".join(diffs[:4]))
+                diverged.append(f"{role} [{w.get('cls')}]: " + "; ".join(diffs[:4]))
         check(
-            "matched roles compute to the same style in both surfaces",
+            "variant-matched roles compute to the same style in both surfaces",
             not diverged and compared >= 4,
-            f"{compared} roles compared" + ("" if not diverged else " | " + " || ".join(diverged[:6])),
+            f"{compared} roles compared at the same variant"
+            + (f" | DIVERGED: " + " || ".join(diverged[:6]) if diverged else "")
+            + ("" if compared >= 4 else " — too few variant-matched pairs to be a real check"),
+        )
+        if variant_mismatch:
+            print(
+                "       (not comparable, different variants on each side: "
+                + "; ".join(variant_mismatch)
+                + ")"
+            )
+
+        # The check that actually proves recipe parity for the variants above: the
+        # plane must not redefine a shared primitive's properties. Adoption plus
+        # "no shadowing" is the real claim; a variant-by-variant pixel diff cannot
+        # make it, because the two surfaces legitimately mount different variants.
+        # The shared recipe each primitive's own sheet declares, so a plane-local
+        # modifier can be judged by *overlap* rather than by shape. A modifier that
+        # adds properties the base never sets is adapting the primitive to new
+        # content - exactly what `.side-head.cp-head` does, adding flex layout for a
+        # brand line plus actions where the base only sets `flex` and `padding`. A
+        # modifier that re-sets a property the base owns is a second recipe for one
+        # role, which is the defect this check exists for.
+        base_css = ""
+        for base_sheet in ("layout.css", "base.css", "rail.css", "inspector.css", "chat.css"):
+            base_path = ROOT / "web" / "src" / "styles" / base_sheet
+            if base_path.exists():
+                base_css += re.sub(r"/\*.*?\*/", "", base_path.read_text(encoding="utf-8"), flags=re.S)
+
+        def recipe_props(selector: str) -> set[str]:
+            """Properties the shared sheets set for one bare primitive."""
+            out: set[str] = set()
+            for match in re.finditer(re.escape(selector) + r"\s*\{([^}]*)\}", base_css):
+                out |= set(re.findall(r"([\w-]+)\s*:", match.group(1)))
+            return out
+
+        shadowed = []
+        for sheet in ("control-shared.css", "control-rail.css", "control-overview.css", "control-session.css"):
+            path = ROOT / "web" / "src" / "styles" / sheet
+            if not path.exists():
+                continue
+            css = path.read_text(encoding="utf-8")
+            css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+            for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
+                selector = " ".join(match.group(1).split())
+                body = " ".join(match.group(2).split())
+                if not body:
+                    continue
+                # A shadow is a rule that restates a primitive's recipe *as* that
+                # primitive - `.session-title { … }`, `.button.button-primary { … }`
+                # - with no ancestor scoping it. What is NOT a shadow, and must not
+                # be reported: an override scoped inside the plane's own layout,
+                # `.cp-table-row .session-state { … }`. The workbench does the same
+                # thing to its own primitives (`.session-meta .status-dot`,
+                # `.rail .side-head:has(> .project-switcher-desktop)`), and
+                # `styles/workflow-panels.test.ts` positively *requires* the
+                # phone-width `.cp-session-actions .session-state` override so the
+                # status word stays readable. Flagging those would invert the check.
+                for part in selector.split(","):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    # A combinator (descendant or child) to the left of the
+                    # primitive means the rule is scoped, so it adapts the recipe
+                    # to one context rather than redefining it.
+                    tokens = part.split()
+                    last = tokens[-1]
+                    root = re.match(r"^(\.[A-Za-z][\w-]*)", last)
+                    if not root:
+                        continue
+                    primitive = root.group(1)
+                    if primitive not in SHARED_PRIMITIVES:
+                        continue
+                    # Scoped inside the plane's own layout: adapts the primitive to
+                    # one context. The workbench does this to its own primitives and
+                    # the phone-width tier is *required* by a style contract.
+                    if len(tokens) > 1:
+                        continue
+                    sets = set(re.findall(r"([\w-]+)\s*:", body))
+                    owned = recipe_props(primitive)
+                    # A bare restatement of the primitive, or a modifier that
+                    # re-sets a property the shared recipe owns, is a shadow.
+                    if not (set(last.split(".")) - {primitive}) or (sets & owned):
+                        shadowed.append(
+                            f"{sheet}: `{part} {{ {body[:60]} }}`"
+                            + (f" (re-sets {sorted(sets & owned)})" if sets & owned else "")
+                        )
+                        break
+        check(
+            "the plane does not redefine a shared primitive's recipe",
+            not shadowed,
+            "; ".join(shadowed[:8]) if shadowed else "no bare shared-class rule in any control-plane sheet",
         )
 
         # ------------------------------------------------------- 4. no glyphs
@@ -675,9 +875,21 @@ def main() -> int:
         # The plane's own header and the embedded ChatView header both naming the
         # session is duplicate narration - the workbench rule is one owner per
         # fact. Only measurable now that a chat is open.
+        # Only *visible* headers count. The plane suppresses the embedded
+        # conversation's header with `.cp-chat .main-head { display: none }` so the
+        # title has exactly one owner; an element that renders nothing states
+        # nothing twice, and counting it would fail a region that fixed the defect
+        # by suppression rather than by deletion.
         owners = js(
             """
-            const heads = [...document.querySelectorAll('.cp-session-head, .cp-pane .main-head')];
+            const visible = (el) => {
+              const s = getComputedStyle(el);
+              if (s.display === 'none' || s.visibility === 'hidden') return false;
+              const r = el.getBoundingClientRect();
+              return r.width > 0 && r.height > 0;
+            };
+            const heads = [...document.querySelectorAll('.cp-session-head, .cp-pane .main-head')]
+              .filter(visible);
             const titles = heads.map(h => (h.innerText || '').trim().split('\\n')[0]).filter(Boolean);
             return JSON.stringify({headCount: heads.length, titles: titles.slice(0, 4)});
             """

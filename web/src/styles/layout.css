@@ -594,6 +594,55 @@
   height: 5px;
 }
 
+/* The status word, and the colour that goes with it.
+ *
+ * It used to be scoped `.session-row-quiet .session-state` in
+ * `workbench-navigation.css`, which made it available to exactly one list. A
+ * status is one role with one spelling — the word comes from `sessionStatusView`
+ * and the tone is the app's `StatusTone` — so the rule lives with the rest of the
+ * `.session-*` family and any surface can use it: the workbench rail and the
+ * control plane both render `session-state session-state-<tone>`, and neither can
+ * now drift from the other.
+ *
+ * The word is never optional. The plane once hid it at phone width and left a
+ * 6px dot, so "Finished", "Cancelled" and "No runs" were three identical dots —
+ * a colour-only cue, which fails WCAG 1.4.1 and tells nobody anything.
+ * `styles/workflow-panels.test.ts` pins that.
+ */
+.session-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-tiny);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* A dot may sit inside the word — the control plane pairs them in a card and in a
+ * table cell, where the rail keeps the dot up in the row's head. One class does
+ * the whole role either way, so the two cannot disagree about a status. With text
+ * only (the rail) the extra properties are inert: `gap` has nothing to separate
+ * and `align-items` has one line to centre. */
+.session-state .status-dot {
+  width: 5px;
+  height: 5px;
+}
+
+.session-state-running {
+  color: var(--accent-fill);
+}
+
+.session-state-danger {
+  color: var(--danger);
+}
+
+.session-state-warn {
+  color: var(--warning);
+}
+
 /* The mock's `.s-turns`: the turn count, right-aligned and dimmed. */
 .session-turns {
   margin-left: auto;

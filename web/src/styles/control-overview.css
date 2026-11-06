@@ -1,6 +1,28 @@
-/* --------------------------------------------------------------- overview */
+/* --------------------------------------------------------------- overview
+ *
+ * The overview is a dashboard, so it owns a grid, a launch box and a table - and
+ * nothing else (see the table on `ControlOverview` for the full mapping). §5A of
+ * `docs/internal/DESIGN-SYSTEM.md` is the rule this sheet implements: an element
+ * that plays a role the workbench already has uses the workbench's class, so a
+ * card, a kicker, a metric, a button, an empty state and a session row look the
+ * same here as they do one screen over.
+ *
+ * That is why there is no `.cp-eyebrow`, `.cp-stats strong/span`, `.cp-primary`, a
+ * `.cp-link`, a `.cp-glyph`, a `.cp-agent-*` row or a `.cp-card` chrome rule any
+ * more. What remains below answers one of three questions: where does this block
+ * sit on the dashboard, how does the plane's own table work, and which of the
+ * plane's genuinely own facts (the launch box, the approval callout, a project
+ * avatar's tint) has no shared equivalent.
+ *
+ * Responsive: `@container control-plane (…)`, never `@media`. The plane is
+ * embedded beside the workbench and answers its own width (§5A, "Responsive
+ * strategy must match too"), at the workbench's own tiers - 780 / 1000 / 1100px
+ * from `workbench.css`. Nothing in this sheet is a whole-window concern (the
+ * phone shell, `dvh` and safe areas belong to `control-shared.css`), so it has
+ * no `@media` block at all.
+ */
 
-.cp-overview { flex: 1; min-height: 0; overflow: auto; padding: var(--space-10) clamp(22px, 3.4vw, 54px) var(--space-10); }
+.cp-overview { flex: 1; min-height: 0; overflow: auto; padding: var(--space-9) var(--space-9) var(--space-10); }
 
 /* The three top-level blocks share one measure, so the plane is a page rather
    than a narrow column stranded on the left of a 4K screen. */
@@ -10,12 +32,13 @@
   margin-inline: auto;
 }
 
-.cp-hero {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-10);
-}
+/* ---------------------------------------------------------------- the hero */
+
+/* Base = stacked, and the `@container` tier below puts the counters beside the
+   copy. Stacked is the honest default: it is the layout that cannot clip, so a
+   reader on a narrow plane (or a browser without container queries) still gets
+   one column with nothing truncated. */
+.cp-hero-copy { min-width: 0; }
 .cp-hero h1 {
   margin: var(--space-3) 0 var(--space-4);
   font-size: var(--fs-hero);
@@ -23,92 +46,64 @@
   letter-spacing: -0.035em;
   line-height: 1.15;
 }
-.cp-hero h1 span { color: var(--accent-fill); }
-.cp-hero p { max-width: 540px; margin: 0; color: var(--muted); font-size: var(--fs-body); line-height: 1.65; }
+/* The full stop is the brand's period, not a glyph standing in for an icon. */
+.cp-hero h1 span { color: var(--accent-text); }
+.cp-hero-line { max-width: 540px; margin: 0; color: var(--muted); font-size: var(--fs-body); line-height: 1.65; }
+
+/* Five counters in the workbench's own number-over-label recipe (`.metric`).
+ *
+ * One row of five at every width the dashboard is a dashboard: exactly five
+ * tracks, so the counters can never become the 2x3 block that pushed the launch
+ * box below the fold at 1024px. Only the narrow tier below lets them wrap - and it
+ * switches the track count deliberately, because `auto-fit` here would report
+ * eight tracks (five filled, three collapsed) and a row count that lies. */
+.cp-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-7);
+  min-width: 0;
+}
 
 /* A run parked on an approval question is the one thing on this page that cannot
  * make progress without a person, so it is said in words above the dashboard
- * rather than left to a count in a corner. */
+ * rather than left to a count in a corner. Warn, not accent: the accent belongs
+ * to the primary action (§2), and "needs you" is a status. */
 .cp-pending {
   margin: var(--space-6) auto 0;
-  padding: var(--space-4) var(--space-6);
+  padding: var(--space-5) var(--space-6);
   max-width: 1880px;
-  border: 1px solid var(--theme-accent-line);
-  border-radius: var(--radius);
-  background: var(--theme-accent-bg);
-  color: var(--accent-on-tint);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--warn);
   font-size: var(--fs-small);
 }
-.cp-pending strong { color: var(--accent-on-tint); }
 
-.cp-stats { display: grid; grid-template-columns: repeat(2, 92px); gap: var(--space-4); flex: none; }
-/* Three columns is the widest that still fits beside the hero copy from 900 px;
-   five counters in two columns turned the headline row into a 2x3 block that
-   pushed the launch box off the fold at 1024. One row from 1100 px. */
-@media (min-width: 900px) {
-  .cp-stats { grid-template-columns: repeat(3, minmax(84px, 1fr)); }
-  .cp-stats div { min-width: 84px; }
-}
-@media (min-width: 1100px) {
-  .cp-stats { grid-template-columns: repeat(5, minmax(84px, 1fr)); gap: var(--space-4); }
-  .cp-stats div { min-width: 84px; }
-}
-.cp-stats div {
-  padding: var(--space-5) var(--space-6);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--theme-surface);
-}
-.cp-stats strong { display: block; font-size: var(--fs-display); letter-spacing: -0.02em; line-height: 1.2; }
-.cp-stats span {
-  display: block;
-  margin-top: var(--space-1);
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  font-weight: 720;
-  letter-spacing: 0.125em;
-  text-transform: uppercase;
-}
-
+/* -------------------------------------------------------------- launch box
+ *
+ * Genuinely the plane's own surface - the workbench has no "start work in any
+ * project" form - so the box remains, but every control in it is a product
+ * control: `.eyebrow` labels, `.input` fields, `.button .button-primary` submit,
+ * and the two icons. This sheet only says where they sit and how wide they may
+ * grow.
+ */
 .cp-launch {
   margin: var(--space-9) auto var(--space-2);
   padding: var(--space-7);
-  border: 1px solid var(--theme-accent-line);
+  border: 1px solid var(--accent-line);
   border-radius: var(--radius-lg);
-  background:
-    linear-gradient(180deg, var(--theme-accent-bg), transparent 78%),
-    var(--theme-surface);
+  background: var(--surface);
 }
-.cp-launch-label { color: var(--accent-fill); font-size: var(--fs-tiny); font-weight: 660; }
-.cp-launch-row { display: flex; align-items: center; gap: var(--space-5); margin-top: var(--space-5); }
-.cp-launch-row input {
-  flex: 1;
-  min-width: 0;
-  height: 42px;
-  padding: 0 var(--space-6);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--theme-bg);
-  color: var(--text);
-  font-size: var(--fs-body);
-}
-.cp-launch-row input::placeholder { color: var(--muted); }
-.cp-launch-row input:focus { border-color: var(--accent); }
-.cp-launch-project {
-  flex: none;
-  height: 42px;
-  max-width: 168px;
-  padding: 0 var(--space-4);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--theme-bg);
-  color: var(--theme-text-secondary);
-  font-size: var(--fs-label);
-}
-.cp-launch-project:focus { border-color: var(--accent); }
+.cp-launch-label { margin-bottom: var(--space-5); }
+.cp-launch-row { display: flex; align-items: center; gap: var(--space-5); min-width: 0; }
+.cp-launch-spark { flex: none; color: var(--accent-text); }
+.cp-launch-input { flex: 1 1 auto; width: auto; min-width: 0; }
+.cp-launch-project { flex: 0 1 auto; width: auto; max-width: 180px; min-width: 0; }
+.cp-launch-submit { flex: none; }
 
 /* The launch box's model + reasoning choice: the chat does not exist yet, so
- * these are plain selects rather than the composer's session-pin popovers. */
+ * these are native selects rather than the composer's session-pin popovers. */
 .cp-launch-model {
   display: flex;
   flex-wrap: wrap;
@@ -116,227 +111,206 @@
   margin-top: var(--space-5);
 }
 .cp-launch-pick { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
-.cp-launch-mini {
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  font-weight: 720;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-.cp-launch-pick select {
-  max-width: 100%;
-  height: 34px;
-  padding: 0 var(--space-4);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--theme-bg);
-  color: var(--theme-text-secondary);
-  font-size: var(--fs-label);
-}
-.cp-launch-pick select:focus { border-color: var(--accent); }
+.cp-launch-select { flex: 0 1 auto; width: auto; max-width: min(280px, 100%); min-width: 0; }
+.cp-launch-hint { margin-top: var(--space-5); }
 
-.cp-launch-hint { margin: var(--space-5) 0 0; color: var(--muted); font-size: var(--fs-tiny); line-height: 1.5; }
+/* ------------------------------------------------------------- the dashboard */
 
 .cp-section { margin-top: var(--space-9); }
-
-/* Two columns of dashboard from 1400px up: live work on the left, the things
-   that need a human on the right. Below that it is one column, unchanged. */
 .cp-dash { display: grid; gap: var(--space-9); margin-top: var(--space-10); }
 .cp-dash-main, .cp-dash-side { min-width: 0; }
 .cp-dash-main > .cp-section:first-child, .cp-dash-side > .cp-section:first-child { margin-top: 0; }
-@media (min-width: 1560px) {
-  .cp-dash { grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); align-items: start; }
-  .cp-dash-side { position: sticky; top: 0; }
-}
+
+/* A section head is a kicker and a count: `.eyebrow` + the `.badge` the rest of
+   the app counts with. No fourth micro-label definition. */
 .cp-section-head { display: flex; align-items: center; gap: var(--space-5); margin-bottom: var(--space-6); }
-.cp-section-head h3 { margin: 0; font-size: var(--fs-body); letter-spacing: -0.01em; }
-.cp-section-head > span {
-  padding: var(--hairline) var(--space-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-pill);
-  background: var(--theme-raised);
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  font-variant-numeric: tabular-nums;
-}
-.cp-section-head .cp-link { margin-left: auto; }
 
-/* The inline links ("Copy", "Details", "→") are the smallest targets in the
-   plane; 17 px tall is below the floor, and a padding-only change keeps the
-   type size and the layout. */
-
+/* ----------------------------------------------------------- running now
+ *
+ * A running session is a card, and the product has one card: `.agent-card`
+ * supplies the padding, the hairline, the radius, the fill and the hover. What
+ * this sheet adds is the tile's layout - a column whose action sits at the
+ * bottom - so the plane cannot drift into being a fourth card design.
+ */
 .cp-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: var(--space-5); }
-@media (min-width: 1700px) {
-  .cp-cards { grid-template-columns: repeat(auto-fill, minmax(252px, 1fr)); gap: var(--space-6); }
-}
 .cp-card {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-6);
+  min-width: 0;
   text-align: left;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--theme-surface);
-  transition: border-color 0.15s ease, transform 0.15s ease;
 }
-.cp-card:hover { border-color: var(--theme-accent-line); transform: translateY(-1px); }
-.cp-card-top { display: flex; align-items: center; justify-content: space-between; }
-.cp-card strong {
-  font-size: var(--fs-message);
+/* Both tiles below are buttons: `.agent-card`'s own hover is a border change,
+   which is right for an `article` and thin for something you press. */
+.cp-card:hover, .cp-project:hover { background: var(--surface-hover); }
+.cp-card-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
+.cp-card-title {
   overflow: hidden;
+  font-size: var(--fs-message);
+  font-weight: 660;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .cp-card-meta { color: var(--muted); font-size: var(--fs-tiny); }
-.cp-card-action { margin-top: auto; padding-top: var(--space-2); color: var(--accent-fill); font-size: var(--fs-tiny); }
-
-.cp-agents {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--theme-surface);
-}
-.cp-agents li {
-  display: flex;
+.cp-card-action {
+  display: inline-flex;
   align-items: center;
-  gap: var(--space-5);
-  padding: var(--space-4) var(--space-6);
-  font-size: var(--fs-small);
-}
-.cp-agents li + li { border-top: 1px solid var(--line-soft); }
-
-.cp-agent-name { min-width: 92px; font-weight: 600; }
-.cp-agent-task {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted);
+  gap: var(--space-2);
+  margin-top: auto;
+  padding-top: var(--space-2);
+  color: var(--accent-text);
+  font-size: var(--fs-tiny);
 }
 
-.cp-recent {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--theme-surface);
-}
-.cp-recent li + li { border-top: 1px solid var(--line-soft); }
-.cp-recent button {
-  display: flex;
-  align-items: center;
-  gap: var(--space-5);
-  width: 100%;
-  padding: var(--space-5) var(--space-6);
-  text-align: left;
-}
-.cp-recent button:hover { background: var(--theme-hover); }
+/* The plane's project avatars: the rail's avatar, tinted per project.
+ *
+ * The tint is the plane's own fact (`tone()` in `controlModel.ts`): this is the
+ * one screen that lists every project at once, and a colour per project is what
+ * makes that list scannable. `.rail-avatar` ships one neutral ink, so the tint is
+ * an ink change only - the shape, fill and border stay the product's - and it
+ * uses roles the palette already has. No new hue, no new surface.
+ */
+.cp-overview .rail-avatar[data-tone='1'] { color: var(--success); }
+.cp-overview .rail-avatar[data-tone='2'] { color: var(--info); }
+.cp-overview .rail-avatar[data-tone='3'] { color: var(--accent-on-tint); }
 
-.cp-table { overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: var(--theme-surface); }
+/* -------------------------------------------------------- recent sessions
+ *
+ * DELIBERATELY A TABLE, and the one `.cp-*` block that is not a renamed shared
+ * role. The workbench's `.session-row` is one project's vertical list: a title, a
+ * meta line and a dot, read top to bottom. This block answers a different
+ * question - compare a dozen sessions across every project - and the aligned
+ * columns *are* the answer: scanning the State column for failures, or the Msgs
+ * column for the heavy session, only works because the columns line up. Building
+ * it from `.session-row`s would either lose that comparison (every value becomes
+ * a fragment of a run-on meta line) or rebuild this same grid inside every row.
+ *
+ * So it keeps its own structure, but not its own vocabulary: tokens for
+ * type/spacing/radius, `.eyebrow` for the head, the shared status word that all
+ * three regions draw (`control-shared.css`) for the state, and `.rail-avatar` for
+ * the project mark.
+ */
+.cp-table { overflow: hidden; border: 1px solid var(--line-card); border-radius: var(--radius); background: var(--surface); }
 .cp-table-head, .cp-table-row {
   display: grid;
-  grid-template-columns: minmax(0, 2.4fr) minmax(0, 1fr) 110px 62px 104px;
+  grid-template-columns: minmax(0, 2.4fr) minmax(0, 1fr) 104px 62px 104px;
   gap: var(--space-6);
   align-items: center;
   padding: var(--space-4) var(--space-6);
   text-align: left;
 }
+/* `.eyebrow` sets `display: flex` and `width: fit-content`; a column header row
+   is a grid that fills the table, so both are put back. Everything else about
+   the head - 10px, weight 720, 0.125em, uppercase, `--meta-text` - is the one
+   kerning the product has for a kicker. */
 .cp-table-head {
+  width: auto;
   border-bottom: 1px solid var(--line);
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  font-weight: 720;
-  letter-spacing: 0.125em;
-  text-transform: uppercase;
 }
 .cp-table-row { width: 100%; font-size: var(--fs-small); }
 .cp-table-row + .cp-table-row { border-top: 1px solid var(--line-soft); }
-.cp-table-row:hover { background: var(--theme-hover); }
+.cp-table-row:hover { background: var(--surface-hover); }
 .cp-table-session { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
-.cp-table-session strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+/* The same ink as a row title anywhere else in the product (§5A, "ink must match
+   the role, not the screen"). */
+.cp-table-title {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--fs-label);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .cp-table-cell { overflow: hidden; color: var(--muted); font-size: var(--fs-tiny); text-overflow: ellipsis; white-space: nowrap; }
 .cp-table-cell.num { font-variant-numeric: tabular-nums; text-align: right; }
 /* In its own column a state is words, not a bare dot: the row has the space and
    "Interrupted" vs "Finished" is the reason to read the column. */
-.cp-table-row .cp-state { gap: var(--space-2); font-size: var(--fs-tiny); }
-@media (max-width: 1100px) {
-  .cp-table-head, .cp-table-row { grid-template-columns: minmax(0, 2.4fr) 104px; }
-  .cp-table-head span:nth-child(2), .cp-table-row .cp-table-cell:not(.cp-table-state-cell),
-  .cp-table-head span:nth-child(3), .cp-table-head span:nth-child(4) { display: none; }
-}
+.cp-table-row .session-state { gap: var(--space-2); font-size: var(--fs-tiny); }
 
+/* ------------------------------------------------- waiting / attention rows
+ *
+ * These are the workbench's session rows - `.session-list` + `.session-row` +
+ * `.session-open` + `.session-title` + `.session-meta` - because they are the
+ * same role: a session, its project and its age, read as a list. The one thing
+ * the rail's row reserves space for and these do not is the kebab menu, so the
+ * trailing 26px comes back to the text. Two classes, not one: the densities'
+ * `:root[data-density] .session-open` rules would otherwise out-specify it.
+ */
+.cp-dash .cp-side-row { padding-right: var(--space-6); }
+
+/* ------------------------------------------------------------- live agents
+ *
+ * The workbench's agent cards in its own `.agent-list` stack (`inspector.css`):
+ * `AgentsTab` draws the same classes, so a card is a card here too, and this
+ * sheet writes no rule for them. The overview only omits what identifies one on
+ * a dashboard and keeps the way back to its session.
+ */
+
+/* ----------------------------------------------------------------- projects */
 .cp-projects { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: var(--space-4); }
 .cp-project {
   display: flex;
   align-items: center;
   gap: var(--space-5);
-  padding: var(--space-5);
+  min-width: 0;
   text-align: left;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--theme-surface);
 }
-.cp-project:hover { border-color: var(--theme-accent-line); }
-.cp-project-copy { min-width: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.cp-project-copy { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 .cp-project-copy strong {
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-size: var(--fs-label);
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .cp-project-copy small { color: var(--muted); font-size: var(--fs-tiny); }
-.cp-recent-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: var(--space-1); }
-.cp-recent-main strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--fs-label);
-  font-weight: 600;
-}
-.cp-recent-main small { color: var(--muted); font-size: var(--fs-tiny); }
 
-/* ------------------------------------------------------------- responsive */
+/* ----------------------------------------------------------- empty sections
+ *
+ * `.empty-state` is the product's "nothing here" (chat.css); the section is not
+ * a whole screen, so the container's screen-sized minimum goes and the sentence
+ * keeps the shared `.empty-copy` voice untouched. */
+.cp-empty { min-height: 0; padding: var(--space-9) var(--space-6); }
+.cp-empty .empty-copy { margin: 0; }
 
-@media (max-width: 1180px) {
-  /* Five counters in two columns turned the headline row into a 2x3 block at
-     1024 and pushed the launch box below the fold. They stay one row, with the
-     quieter type a narrow hero can afford. */
-  .cp-stats { grid-template-columns: repeat(5, minmax(64px, 1fr)); gap: var(--space-3); }
-  .cp-stats div { min-width: 0; padding: var(--space-4); }
-  .cp-stats strong { font-size: var(--fs-title); }
-  /* Beside a 540 px headline there is no room left for five counters, and the
-     flex row spent the shortage wrapping the copy to five lines (283 px tall).
-     Stacking the headline above its counters is the same information in a third
-     of the height, and keeps the launch box above the fold. */
-  .cp-hero { display: block; }
-  .cp-hero p { max-width: 62ch; }
-  .cp-stats { margin-top: var(--space-6); }
+/* ------------------------------------------------------------- responsive
+ *
+ * Container widths, not window widths: the plane's container is the plane. The
+ * tiers are the workbench's own (780 / 1000 / 1100px), so the two surfaces
+ * re-stack at the same moment instead of disagreeing at every intermediate size.
+ */
+@container control-plane (min-width: 1100.01px) {
+  /* Wide: the counters sit beside the headline, and the dashboard splits into
+     live work on the left and the things that need a human on the right. */
+  .cp-hero { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-10); }
+  .cp-stats { flex: 0 1 560px; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: 0; }
+  .cp-dash { grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); align-items: start; }
+  .cp-dash-side { position: sticky; top: 0; }
 }
 
-@media (max-width: 900px) {
+@container control-plane (max-width: 1000px) {
+  /* One column of dashboard, but still a page: only the gap between sections
+     tightens, so the lists stay readable before the narrow tier folds them. */
+  .cp-dash { gap: var(--space-8); }
+}
+
+@container control-plane (max-width: 780px) {
+  /* Narrow: one column everywhere, and the launch box stacks so the prompt keeps
+     the full width instead of competing with the project picker for it. */
   .cp-overview { padding: var(--space-9) var(--space-7) var(--space-10); }
-  .cp-hero { display: block; }
-  .cp-hero h1 { font-size: var(--fs-hero); }
-  .cp-stats { grid-template-columns: repeat(3, 1fr); gap: var(--space-3); margin-top: var(--space-7); }
-  .cp-stats div { padding: var(--space-4); }
-  .cp-stats strong { font-size: var(--fs-title); }
+  .cp-hero-line { max-width: 62ch; }
+  /* Below the narrow tier five 96px cells no longer fit on a phone; a wrapped
+     grid is the honest answer there, and nothing else is checked for a row. The
+     floor drops to 88px so the five counters wrap 3+2 rather than 2+2+1 - the
+     label ("sessions" at 11px, plus the cell's own padding) still fits at 88. */
+  .cp-stats { grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); }
+  .cp-cards, .cp-projects { grid-template-columns: minmax(0, 1fr); }
   .cp-launch-row { flex-wrap: wrap; }
-  .cp-launch-row .cp-spark { display: none; }
-  .cp-launch-row input { flex-basis: 100%; }
-  .cp-launch-project { width: 100%; max-width: none; }
-  .cp-launch-row .cp-primary { width: 100%; }
-  .cp-cards { grid-template-columns: 1fr; }
-  .cp-agent-name { min-width: 70px; }
-}
-
-@media (max-width: 520px) {
-  .cp-recent-main small { font-size: var(--fs-micro); }
+  .cp-launch-spark { display: none; }
+  .cp-launch-input { flex-basis: 100%; }
+  .cp-launch-project, .cp-launch-submit { width: 100%; max-width: none; }
+  /* The three comparison columns stop being an asset and become three 60px
+     slivers: the title and the state are what a narrow row is for. */
+  .cp-table-head, .cp-table-row { grid-template-columns: minmax(0, 1fr) 104px; }
+  .cp-table-head > .cp-col-meta, .cp-table-row > .cp-col-meta { display: none; }
 }

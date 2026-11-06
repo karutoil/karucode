@@ -112,9 +112,9 @@ def main():
         assert target_session and target_session['project_id'] == target['id'], target_session
         assert target_session['id'] != central['session_id']
         print('PASS control chat dispatched target in second project', flush=True)
-        wait("return [...document.querySelectorAll('.cp-row')].some(b=>b.innerText.includes('Browser target session') && b.innerText.includes('Second project'));", 40)
+        wait("return [...document.querySelectorAll('.session-row')].some(b=>b.innerText.includes('Browser target session') && b.innerText.includes('Second project'));", 40)
         print('PASS global session list shows second-project session', flush=True)
-        wait("const b=[...document.querySelectorAll('.cp-row')].find(b=>b.innerText.includes('Browser target session')); if(!b)return false; b.click(); return true;")
+        wait("const r=[...document.querySelectorAll('.session-row')].find(b=>b.innerText.includes('Browser target session')); if(!r)return false; const b=r.querySelector('.session-open')||r.querySelector('button'); if(!b)return false; b.click(); return true;")
         wait("return document.body.innerText.includes('TARGET-RUN') && !!document.querySelector('.button-queue');", 40)
         print('PASS navigation opened running target conversation', flush=True)
         assert js("""const e=document.querySelector('#composer-input'); e.value='STEER-FROM-CONTROL'; e.dispatchEvent(new Event('input',{bubbles:true})); await new Promise(r=>setTimeout(r,200)); const radio=[...document.querySelectorAll('.queue-mode-option')].find(x=>x.textContent.trim()==='Steer'); if(radio)radio.click(); await new Promise(r=>setTimeout(r,200)); const b=[...document.querySelectorAll('button')].find(x=>(x.getAttribute('aria-label')||'').includes('steer the running turn')); if(!b||b.disabled)return false; b.click(); return true;""")
@@ -130,11 +130,11 @@ def main():
         # hidden by title after a reload).
         extra = http_json(api + '/api/control/sessions', 'POST', {})
         assert extra['session_id'] != central['session_id']
-        wait('return document.querySelectorAll(\'[aria-label="Control chats"] .cp-row\').length >= 2;', 15)
+        wait('return document.querySelectorAll(\'[aria-label="Control chats"] .session-row\').length >= 2;', 15)
         session.cdp('Page.navigate', {'url': api + '/'})
         click('Open control plane')
-        wait('return document.querySelectorAll(\'[aria-label="Control chats"] .cp-row\').length >= 2;', 15)
-        wait('const rows=[...document.querySelectorAll(\'[aria-label="Control chats"] .cp-row\')]; if(!rows.length)return false; rows[0].click(); return true;')
+        wait('return document.querySelectorAll(\'[aria-label="Control chats"] .session-row\').length >= 2;', 15)
+        wait('const rows=[...document.querySelectorAll(\'[aria-label="Control chats"] .session-row\')]; if(!rows.length)return false; const b=rows[0].querySelector(\'.session-open\')||rows[0].querySelector(\'button\'); if(!b)return false; b.click(); return true;')
         wait("return !!document.querySelector('#composer-input');", 15)
         print('PASS several control chats survive a refresh and each opens', flush=True)
         # Restart: the control chat is durable, stays project-free, and its private

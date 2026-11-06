@@ -152,30 +152,6 @@
   background: var(--accent-bg);
 }
 
-.cp-state {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: none;
-  color: var(--muted);
-  font-size: var(--fs-tiny);
-  white-space: nowrap;
-}
-
-.cp-state i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-
-.cp-state.ok,
-.cp-state.muted {
-  color: var(--muted);
-}
-
-.cp-state.running { color: var(--theme-success); }
-
-.cp-state.danger { color: var(--theme-danger); }
-
-.cp-state.warn { color: var(--theme-warn); }
-
-.cp-state.running i { animation: cp-pulse 2s ease-out infinite; }
 
 .cp-note { padding: var(--space-6) var(--space-5); color: var(--muted); font-size: var(--fs-tiny); line-height: 1.6; }
 
