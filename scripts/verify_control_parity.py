@@ -85,6 +85,11 @@ base_url = "{base}"
 provider = "openai_compatible"
 model = "stub"
 api_key = "sk-test"
+# The failed-run seed below must settle as failed *now*, not after an exponential
+# retry walk: with the default 50 attempts the session stays "running" for minutes
+# and every state this harness seeds is a coin flip. Zero retries makes a 500 a
+# failure on the first attempt, which is the state being measured.
+retry_max_retries = 0
 [approvals]
 mode = "auto"
 [[providers]]
