@@ -388,6 +388,7 @@ export function ControlPlane(): JSX.Element {
         onLaunch={(event) => void launch(event)}
         projectName={projectName}
         onNavigate={navigate}
+        onOpenInProject={(session) => navigate(session, true)}
         onFilterProject={(name) => { setFilter('all'); setQuery(name); }}
       />}
     </main>

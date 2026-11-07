@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import { useFocusTrap } from '../lib/dom';
-import { Menu, MenuItem, useMenu } from '../lib/menu';
+import { contextMenuProps, Menu, MenuItem, useMenu } from '../lib/menu';
 import { copyText } from '../lib/clipboard';
 import { modKey } from '../lib/platform';
 import type { SessionSummary } from '../api/types';
@@ -124,6 +124,15 @@ function SessionRow({
     if (!editing) setDraft(session.title);
   }, [session.title, editing]);
 
+  /** The title is selectable text, so the native menu could copy it; ours must
+   *  not be a regression, and the row's own spelling is the one worth keeping. */
+  const copyTitle = async (): Promise<void> => {
+    const title = session.title || 'Untitled session';
+    const copied = await copyText(title);
+    store.pushToast(copied ? 'Session title copied.' : 'Could not copy the title.',
+      copied ? 'success' : 'error');
+  };
+
   const startRename = (): void => {
     skipBlur.current = false;
     menu.close();
@@ -176,6 +185,7 @@ function SessionRow({
     <li
       class={`session-row session-row-quiet${active ? ' is-active' : ''}${rowState ? ` ${rowState}` : ''}`}
       data-session-id={session.id}
+      {...contextMenuProps(menu, () => !editing, () => menu.triggerRef.current)}
     >
       {editing ? (
         <form
@@ -255,8 +265,15 @@ function SessionRow({
           >
             <KebabIcon size={15} />
           </button>
-          <Menu menu={menu} label={`Session actions for ${session.title}`} class="session-menu">
+          <Menu
+            menu={menu}
+            label={`Session actions for ${session.title}`}
+            float={Boolean(menu.pointer)}
+            class={menu.pointer ? undefined : 'session-menu'}
+          >
             <MenuItem menu={menu} action={{ label: 'Rename', onSelect: startRename }} />
+            <MenuItem menu={menu} action={{ label: 'Copy title', onSelect: () => void copyTitle() }} />
+            <MenuItem menu={menu} action={{ label: 'Copy title', onSelect: () => void copyTitle() }} />
             <MenuItem
               menu={menu}
               action={{

@@ -1,7 +1,10 @@
 import type { JSX, RefObject } from 'preact';
 import { Fragment } from 'preact';
 import { useMemo } from 'preact/hooks';
-import { Menu, MenuItem, useMenu } from '../../lib/menu';
+import { contextMenuProps, Menu, MenuItem, useMenu } from '../../lib/menu';
+import type { MenuController } from '../../lib/menu';
+import { copyText } from '../../lib/clipboard';
+import * as store from '../../state/store';
 import type { ControlChatSummary, SessionSummary } from '../../api/types';
 import { pluralise, relativeTime } from '../../lib/format';
 import * as actions from '../../state/actions';
@@ -72,13 +75,20 @@ interface RowActions {
  * with every other menu in the product. The row also answers a right-click with
  * the same two actions, anchored at the pointer.
  */
-function RowMenu({ session, title, onRename, onDelete }: {
+function RowMenu({ menu, session, title, onRename, onDelete }: {
+  menu: MenuController;
   session: SessionSummary;
   title: string;
   onRename: (session: SessionSummary) => void;
   onDelete: (session: SessionSummary) => void;
 }): JSX.Element {
-  const menu = useMenu();
+  /** The row's title is selectable, so the native menu could copy a selection;
+   *  ours copies the row's own spelling, which is the fact worth keeping. */
+  const copyTitle = async (): Promise<void> => {
+    const copied = await copyText(title);
+    store.pushToast(copied ? 'Session title copied.' : 'Could not copy the title.',
+      copied ? 'success' : 'error');
+  };
   return <div class="session-menu-wrap">
     <button
       type="button"
@@ -88,8 +98,14 @@ function RowMenu({ session, title, onRename, onDelete }: {
     >
       <KebabIcon size={15} />
     </button>
-    <Menu menu={menu} label={`Session actions for ${title}`} class="session-menu">
+    <Menu
+        menu={menu}
+        label={`Session actions for ${title}`}
+        float={Boolean(menu.pointer)}
+        class={menu.pointer ? undefined : 'session-menu'}
+      >
       <MenuItem menu={menu} action={{ label: 'Rename', onSelect: () => onRename(session) }} />
+      <MenuItem menu={menu} action={{ label: 'Copy title', onSelect: () => void copyTitle() }} />
       <MenuItem menu={menu} action={{ label: 'Delete…', danger: true, onSelect: () => onDelete(session) }} />
     </Menu>
   </div>;
@@ -160,7 +176,12 @@ function RailRow({
     session.last_run_status === 'failed' ? 'failed' : '',
     needsYou ? 'needs' : '',
   ].filter(Boolean).join(' ');
-  return <li class={`session-row session-row-quiet${active ? ' is-active' : ''}${rowState ? ` ${rowState}` : ''}`}>
+  const menu = useMenu();
+
+  return <li
+    class={`session-row session-row-quiet${active ? ' is-active' : ''}${rowState ? ` ${rowState}` : ''}`}
+    {...contextMenuProps(menu, () => true, () => menu.triggerRef.current)}
+  >
     <button
       type="button"
       class="session-open"
@@ -189,7 +210,7 @@ function RailRow({
         </span>
       </span>
     </button>
-    <RowMenu session={session} title={title} onRename={onRename} onDelete={onDelete} />
+    <RowMenu menu={menu} session={session} title={title} onRename={onRename} onDelete={onDelete} />
   </li>;
 }
 

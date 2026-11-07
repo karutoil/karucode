@@ -361,6 +361,10 @@ export function MenuItem({
 export function contextMenuProps(
   menu: MenuController,
   allow?: () => boolean,
+  /** Where focus returns on close. Defaults to the right-clicked element; a row
+   *  usually wants its kebab, which is the trigger a keyboard user would have
+   *  used and the element the row's own menu restores focus to. */
+  trigger?: () => HTMLElement | null,
 ): { onContextMenu: (event: MouseEvent) => void } {
   return {
     onContextMenu: (event: MouseEvent) => {
@@ -368,9 +372,11 @@ export function contextMenuProps(
       // native menu's Copy and spellcheck are the affordance there.
       const target = event.target;
       if (target instanceof HTMLElement
-        && target.closest('input, textarea, select, [contenteditable="true"]')) return;
+        && target.closest('input, textarea, select, [contenteditable="true"], [role="menu"]')) return;
       if (allow && !allow()) return;
-      menu.openAtPointer(event);
+      event.preventDefault();
+      const anchor = trigger?.() ?? null;
+      menu.openAt(event.clientX, event.clientY, anchor ?? (event.currentTarget instanceof HTMLElement ? event.currentTarget : null));
     },
   };
 }

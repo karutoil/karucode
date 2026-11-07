@@ -380,6 +380,72 @@ Three things keep it true rather than merely done:
 
 ---
 
+## 5B. One menu, one layer: popups and the right-click rule
+
+A popup menu is a **layer**, not a decoration on the element that opened it. Every
+menu in the product is the same box on the same layer with the same keyboard
+contract, and `lib/menu.tsx` is the only implementation of it. Five hand-rolled
+copies drifted within a month (one filtered disabled items, one restored focus on
+a timer, one leaked focus to `<body>` when an item opened a dialog, none could
+keep itself on screen), so a sixth is a defect, not a choice.
+
+**The box.** `.session-menu`, `.rail-menu`, `.menu-float` and
+`.workbench-task-menu-popover` share one recipe in `layout.css`: the raised
+surface, `--line-strong`, `var(--radius)`, and **`--shadow-menu`** — the menu
+shadow, per §5 rule 5. A surface-specific class may change a *width* or an
+*anchor*; it may not re-author the box. Items are `.menu-item` (+
+`.menu-item-danger`), and the meta block at the top of a project menu is the
+`.rail-menu-meta`/`-name`/`-path`/`-count` family.
+
+**The layer.**
+
+| layer | z | what lives there |
+| --- | --- | --- |
+| app chrome | 5–80 | rails, the composer's own popover, inline row menus |
+| `.menu-layer` | 90 | a pointer-anchored (right-click) menu |
+| dialogs, theme studio | 100 | modal layers |
+| toasts | 130 | always readable over a dialog |
+| skip link | 200 | always reachable |
+
+A right-click menu sits **above the chrome and below the dialogs**, because it can
+be opened from inside either and must be dismissed by either. It is portalled into
+`<body>`: a rail's `overflow: hidden` must not clip it, and no row may need
+`position: relative` to host one.
+
+**Placement is computed, never guessed.** A pointer-anchored menu is measured
+after mount and clamped to the viewport (flipped up when it would overflow the
+bottom, pulled left at the right edge, never off-edge). It closes on `scroll` and
+on `resize`, because its anchor is a snapshot of where the pointer was.
+
+**The keyboard contract**, implemented once: open focuses the first *enabled*
+item; ArrowDown/ArrowUp wrap and Home/End jump over enabled items; exactly one
+item is in the Tab order (roving `tabIndex`, disabled items included); Escape and
+Tab close and return focus to the trigger; `role="menu"` **and**
+`data-escape-local` are both mandatory, so the dialog layer's focus trap defers to
+the menu instead of closing the sheet underneath it. An item runs through
+`invoke()`, which focuses the trigger *before* closing, so a dialog opened from a
+menu always records a connected return target.
+
+**Right-click rules.** A row may answer a right-click with the actions it already
+offers elsewhere, anchored at the pointer:
+
+1. **Never the only path.** Touch has no right-click and the phone sheet has no
+   hover, so every action in a context menu must also be reachable by a visible
+   control. A right-click menu is a shortcut, not a feature.
+2. **Never steal the native menu where it is the better one.** Text-heavy surfaces
+   — the transcript, the file viewer, a diff — must keep Copy. So must every
+   `input`, `textarea`, `select` and `[contenteditable]`, and the terminal, whose
+   right-click belongs to the emulator. `contextMenuProps` refuses all of these by
+   default, as it refuses a right-click that lands on an open menu.
+3. **Nothing the native menu offered may be lost.** A row whose text is selectable
+   gets a Copy item for it, because suppressing the browser's Copy without
+   replacing it is a regression the user notices as "I can't copy that any more".
+4. **Focus returns somewhere sensible.** A right-click has no trigger of its own,
+   so the menu is anchored to the row's primary control — the element a keyboard
+   user would have activated to reach the same actions.
+
+---
+
 ## 6. How this is verified
 
 - `node web/scripts/design-audit.mjs` — static: token-rule violations with

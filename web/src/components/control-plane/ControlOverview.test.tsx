@@ -14,6 +14,7 @@ import * as actions from '../../state/actions';
 import { resetControlPlane } from '../../state/controlPlane';
 import { apiRequest } from '../../api/client';
 import { getControlOverview, listAgents, listSessions } from '../../api/endpoints';
+import { copyText } from '../../lib/clipboard';
 import { ControlPlane } from './ControlPlane';
 import { REASONING_OPTIONS } from '../ModelSwitcher';
 import {
@@ -25,6 +26,8 @@ import {
   projectSession,
   sessions,
 } from './controlPlaneFixtures';
+
+vi.mock('../../lib/clipboard', () => ({ copyText: vi.fn().mockResolvedValue(true) }));
 
 vi.mock('../../api/client', () => ({
   apiRequest: vi.fn(),
@@ -231,6 +234,76 @@ describe('the overview snapshot', () => {
     const projects = screen.getByLabelText('Projects');
     expect(within(projects).getByText('4 sessions · 3 running')).toBeTruthy();
     expect(within(projects).getByText('0 sessions')).toBeTruthy();
+  });
+
+  it('answers a right-click on a dashboard row with the session’s actions', async () => {
+    // A right-click menu that suppresses the native one must not lose anything the
+    // native one offered, and must reach the same places the row already does:
+    // the plane's own conversation, and the session's project workspace.
+    const waiting = projectSession({ id: 's_wait', title: 'Waiting on approval', project_id: 'p1' });
+    vi.mocked(getControlOverview).mockResolvedValue(overviewWith({ waiting: [waiting] }));
+    render(<ControlPlane />);
+
+    const row = (await screen.findByText('Waiting on approval')).closest('.session-row') as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 200, clientY: 300 });
+    const menu = await screen.findByRole('menu', { name: 'Session actions for Waiting on approval' });
+    expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent))
+      .toEqual(['Open conversation', 'Open in project', 'Copy title']);
+    // Portalled out of the row, so no scroller can clip it.
+    expect(menu.closest('.menu-layer')?.parentElement).toBe(document.body);
+
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy title' }));
+    expect(vi.mocked(copyText)).toHaveBeenCalledWith('Waiting on approval');
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('gives the running card and the table row the same right-click menu', async () => {
+    vi.mocked(getControlOverview).mockResolvedValue(overviewWith({
+      running: [sessions[0] as never],
+      recent: [sessions[1] as never],
+    }));
+    render(<ControlPlane />);
+    // The counters render zeros while the snapshot is in flight, so wait for the
+    // rows themselves rather than for the section to exist.
+    const card = await waitFor(() => {
+      const el = document.querySelector('section[aria-label="Running now"] .cp-card');
+      if (!el) throw new Error('no running card yet');
+      return el as HTMLElement;
+    });
+    fireEvent.contextMenu(card);
+    let menu = await screen.findByRole('menu', { name: 'Session actions for First' });
+    expect(within(menu).getByRole('menuitem', { name: 'Open conversation' })).toBeTruthy();
+    fireEvent.keyDown(menu, { key: 'Escape' });
+
+    const row = await waitFor(() => {
+      const el = document.querySelector('section[aria-label="Recent sessions"] .cp-table-row');
+      if (!el) throw new Error('no recent row yet');
+      return el as HTMLElement;
+    });
+    fireEvent.contextMenu(row);
+    menu = await screen.findByRole('menu', { name: 'Session actions for Second' });
+    expect(within(menu).getAllByRole('menuitem')).toHaveLength(3);
+    // Escape returns focus to the row itself, which is the element a keyboard user
+    // would have activated.
+    fireEvent.keyDown(menu, { key: 'Escape' });
+    expect(document.activeElement).toBe(row);
+  });
+
+  it('omits "Open in project" for a session that has no project', async () => {
+    const orphan = projectSession({ id: 's_orphan', title: 'No project', project_id: null });
+    vi.mocked(getControlOverview).mockResolvedValue(overviewWith({
+      waiting: [orphan],
+    }));
+    render(<ControlPlane />);
+    const row = await waitFor(() => {
+      const el = document.querySelector('section[aria-label="Waiting on you"] .session-row');
+      if (!el) throw new Error('no waiting row yet');
+      return el as HTMLElement;
+    });
+    fireEvent.contextMenu(row);
+    const menu = await screen.findByRole('menu', { name: 'Session actions for No project' });
+    expect(within(menu).queryByRole('menuitem', { name: 'Open in project' })).toBeNull();
+    expect(within(menu).getAllByRole('menuitem')).toHaveLength(2);
   });
 
   it('lists the snapshot’s attention, running, recent and live agents', async () => {

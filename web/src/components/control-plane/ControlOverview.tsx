@@ -1,4 +1,5 @@
 import type { JSX } from 'preact';
+import type { SessionSummary } from '../../api/types';
 import { useMemo } from 'preact/hooks';
 import type {
   Config,
@@ -10,6 +11,9 @@ import { absoluteTime, relativeTime, truncate } from '../../lib/format';
 import { REASONING_OPTIONS } from '../ModelSwitcher';
 import { AgentsIcon, ArrowRightIcon, SparkIcon } from '../icons';
 import { agentStatusWord, type ModelChoice, initials, sessionStatus, tone } from './controlModel';
+import type { SessionStatus } from './controlModel';
+import { contextMenuProps, Menu, MenuItem, useMenu } from '../../lib/menu';
+import { copyText } from '../../lib/clipboard';
 import '../../styles/control-overview.css';
 
 export function modelChoices(config: Config | null): ModelChoice[] {
@@ -102,8 +106,167 @@ export interface ControlOverviewProps {
   /** A session's project name, or "No project". */
   projectName: (id: string | null | undefined) => string;
   onNavigate: (session: { id: string; project_id: string | null }) => void;
+  /** A row's "Open in project": the plane's own jump, for project sessions only. */
+  onOpenInProject?: (session: { id: string; project_id: string | null }) => void;
   /** A project tile filters the rail down to that project's name. */
   onFilterProject: (name: string) => void;
+}
+
+/**
+ * The "Running now" card. The card is one button, so its right-click menu is
+ * portalled (the float layer) rather than nested inside it: a `<div role="menu">`
+ * cannot be a button's child.
+ */
+function RunningCard({ session, projectName, onNavigate, onOpenInProject }: {
+  session: SessionSummary;
+  projectName: (id: string | null | undefined) => string;
+  onNavigate: (session: { id: string; project_id: string | null }) => void;
+  onOpenInProject?: (session: { id: string; project_id: string | null }) => void;
+}): JSX.Element {
+  const menu = useMenu();
+  const title = session.title || 'Untitled session';
+  return <>
+    <button
+      type="button"
+      class="cp-card agent-card"
+      onClick={() => onNavigate(session)}
+      aria-haspopup="menu"
+      ref={(el) => { menu.triggerRef.current = el; }}
+      {...contextMenuProps(menu, () => true, () => menu.triggerRef.current)}
+    >
+      <span class="cp-card-top">
+        <span class="rail-avatar" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
+        <span class="session-state session-state-running"><span class="status-dot status-running" aria-hidden="true" />Running</span>
+      </span>
+      <strong class="cp-card-title">{title}</strong>
+      <span class="cp-card-meta">{projectName(session.project_id)} · {relativeTime(session.updated_at)} · {session.message_count.toLocaleString()} msgs</span>
+      <span class="cp-card-action">Open conversation<ArrowRightIcon size={12} /></span>
+    </button>
+    <Menu menu={menu} float label={`Session actions for ${title}`}>
+      <MenuItem menu={menu} action={{ label: 'Open conversation', onSelect: () => onNavigate(session) }} />
+      {onOpenInProject && session.project_id
+        ? <MenuItem menu={menu} action={{ label: 'Open in project', onSelect: () => onOpenInProject(session) }} />
+        : null}
+      <MenuItem menu={menu} action={{ label: 'Copy title', onSelect: () => void copyTitle(title) }} />
+    </Menu>
+  </>;
+}
+
+/** One row of the "Recent sessions" table, for the same reason. */
+function RecentRow({ session, projectName, onNavigate, onOpenInProject }: {
+  session: SessionSummary;
+  projectName: (id: string | null | undefined) => string;
+  onNavigate: (session: { id: string; project_id: string | null }) => void;
+  onOpenInProject?: (session: { id: string; project_id: string | null }) => void;
+}): JSX.Element {
+  const menu = useMenu();
+  const status = sessionStatus(session);
+  const title = session.title || 'Untitled session';
+  return <>
+    <button
+      type="button"
+      role="row"
+      class="cp-table-row"
+      title={title}
+      aria-haspopup="menu"
+      ref={(el) => { menu.triggerRef.current = el; }}
+      onClick={() => onNavigate(session)}
+      {...contextMenuProps(menu, () => true, () => menu.triggerRef.current)}
+    >
+      <span class="cp-table-session" role="cell">
+        <span class="rail-avatar" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
+        <strong class="cp-table-title">{title}</strong>
+      </span>
+      <span class="cp-table-cell cp-col-meta" role="cell">{projectName(session.project_id)}</span>
+      <span class="cp-table-cell cp-col-meta" role="cell">{relativeTime(session.updated_at)}</span>
+      <span class="cp-table-cell cp-col-meta num" role="cell">{session.message_count.toLocaleString()}</span>
+      <span class={`session-state session-state-${status.tone}`} role="cell">{status.label}</span>
+    </button>
+    <Menu menu={menu} float label={`Session actions for ${title}`}>
+      <MenuItem menu={menu} action={{ label: 'Open conversation', onSelect: () => onNavigate(session) }} />
+      {onOpenInProject && session.project_id
+        ? <MenuItem menu={menu} action={{ label: 'Open in project', onSelect: () => onOpenInProject(session) }} />
+        : null}
+      <MenuItem menu={menu} action={{ label: 'Copy title', onSelect: () => void copyTitle(title) }} />
+    </Menu>
+  </>;
+}
+
+/** One copy-title action, shared by every dashboard row: same label, same toast. */
+async function copyTitle(title: string): Promise<void> {
+  const copied = await copyText(title);
+  store.pushToast(copied ? 'Session title copied.' : 'Could not copy the title.',
+    copied ? 'success' : 'error');
+}
+
+/**
+ * A session row on the dashboard: the workbench's row grammar, with the avatar in
+ * its own column so the row keeps the product's 41px height instead of
+ * stretching to fit a tile inside the title line.
+ *
+ * The row answers a right-click with the actions that otherwise live only on the
+ * open session's header - open it, open it in its own project, copy its title.
+ * `onOpenInProject` is optional because a control chat has no project to go to.
+ */
+function SessionRowCard({ session, rowClass, projectName, onNavigate, onOpenInProject, statusWord }: {
+  session: SessionSummary;
+  rowClass: string;
+  projectName: (id: string | null | undefined) => string;
+  onNavigate: (session: { id: string; project_id: string | null }) => void;
+  onOpenInProject?: (session: { id: string; project_id: string | null }) => void;
+  statusWord?: SessionStatus;
+}): JSX.Element {
+  const menu = useMenu();
+  const title = session.title || 'Untitled session';
+  const copyTitle = async (): Promise<void> => {
+    const copied = await copyText(title);
+    store.pushToast(copied ? 'Session title copied.' : 'Could not copy the title.',
+      copied ? 'success' : 'error');
+  };
+  const label = `Session actions for ${title}`;
+  return <li
+    class={rowClass}
+    data-session-id={session.id}
+    {...contextMenuProps(menu, () => true, () => menu.triggerRef.current)}
+  >
+    <button
+      type="button"
+      ref={(el) => { menu.triggerRef.current = el; }}
+      class="session-open cp-side-row"
+      title={title}
+      aria-haspopup="menu"
+      onClick={() => onNavigate(session)}
+    >
+      <span class="cp-row-body">
+        <span class="rail-avatar" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
+        <span class="cp-row-text">
+          <span class="session-head">
+            <span class="session-title">{title}</span>
+          </span>
+          <span class="session-meta">
+            {statusWord
+              ? <span class={`session-state session-state-${statusWord.tone}`}>
+                  <span class={`status-dot status-${statusWord.tone}`} aria-hidden="true" />{statusWord.label}
+                </span>
+              : <span class="session-state session-state-warn">
+                  <span class="status-dot status-warn" aria-hidden="true" />Needs you
+                </span>}
+            <span class="meta-dot" aria-hidden="true" />
+            <span>{projectName(session.project_id)}</span>
+            <span class="meta-dot" aria-hidden="true" />
+            <span>{absoluteTime(session.updated_at)}</span>
+          </span>
+        </span>
+      </span>
+    </button>
+    <Menu menu={menu} float label={label}>
+      <MenuItem menu={menu} action={{ label: 'Open conversation', onSelect: () => onNavigate(session) }} />
+      {onOpenInProject && session.project_id
+        ? <MenuItem menu={menu} action={{ label: 'Open in project', onSelect: () => onOpenInProject(session) }} />
+        : null}
+      <MenuItem menu={menu} action={{ label: 'Copy title', onSelect: () => void copyTitle() }} />
+    </Menu>
+  </li>;
 }
 
 /**
@@ -153,6 +316,7 @@ export function ControlOverview({
   onLaunch,
   projectName,
   onNavigate,
+  onOpenInProject,
   onFilterProject,
 }: ControlOverviewProps): JSX.Element {
   const runningList = overview?.running ?? [];
@@ -257,20 +421,15 @@ export function ControlOverview({
           <div class="cp-section-head"><h2 class="eyebrow">Running now</h2><span class="badge">{runningList.length}</span></div>
           {runningList.length === 0
             ? <div class="empty-state cp-empty"><p class="empty-copy">No active runs. Recently active sessions are listed below.</p></div>
-            : <div class="cp-cards">{runningList.slice(0, 8).map((session) => <button
-                type="button"
-                key={session.id}
-                class="cp-card agent-card"
-                onClick={() => onNavigate(session)}
-              >
-                <span class="cp-card-top">
-                  <span class="rail-avatar" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
-                  <span class="session-state session-state-running"><span class="status-dot status-running" aria-hidden="true" />Running</span>
-                </span>
-                <strong class="cp-card-title">{session.title}</strong>
-                <span class="cp-card-meta">{projectName(session.project_id)} · {relativeTime(session.updated_at)} · {session.message_count.toLocaleString()} msgs</span>
-                <span class="cp-card-action">Open conversation<ArrowRightIcon size={12} /></span>
-              </button>)}</div>}
+            : <div class="cp-cards">{runningList.slice(0, 8).map((session) => (
+                <RunningCard
+                  key={session.id}
+                  session={session}
+                  projectName={projectName}
+                  onNavigate={onNavigate}
+                  onOpenInProject={onOpenInProject}
+                />
+              ))}</div>}
         </section>
 
         <section class="cp-section" aria-label="Recent sessions">
@@ -296,26 +455,15 @@ export function ControlOverview({
                   <span role="columnheader" class="cp-col-meta">Msgs</span>
                   <span role="columnheader">State</span>
                 </div>
-                {recentList.slice(0, 12).map((session) => {
-                  const status = sessionStatus(session);
-                  return <button
-                    type="button"
-                    role="row"
+                {recentList.slice(0, 12).map((session) => (
+                  <RecentRow
                     key={session.id}
-                    class="cp-table-row"
-                    title={session.title}
-                    onClick={() => onNavigate(session)}
-                  >
-                    <span class="cp-table-session" role="cell">
-                      <span class="rail-avatar" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
-                      <strong class="cp-table-title">{session.title}</strong>
-                    </span>
-                    <span class="cp-table-cell cp-col-meta" role="cell">{projectName(session.project_id)}</span>
-                    <span class="cp-table-cell cp-col-meta" role="cell">{relativeTime(session.updated_at)}</span>
-                    <span class="cp-table-cell cp-col-meta num" role="cell">{session.message_count.toLocaleString()}</span>
-                    <span class={`session-state session-state-${status.tone}`} role="cell">{status.label}</span>
-                  </button>;
-                })}
+                    session={session}
+                    projectName={projectName}
+                    onNavigate={onNavigate}
+                    onOpenInProject={onOpenInProject}
+                  />
+                ))}
               </div>}
         </section>
       </div>
@@ -324,30 +472,16 @@ export function ControlOverview({
         {waitingList.length > 0 ? <section class="cp-section" aria-label="Waiting on you">
           <div class="cp-section-head"><h2 class="eyebrow">Waiting on you</h2><span class="badge">{waitingList.length}</span></div>
           <ul class="session-list">
-            {waitingList.slice(0, 6).map((session) => <li class="session-row needs" key={session.id}>
-              <button
-                type="button"
-                class="session-open cp-side-row"
-                title={session.title}
-                onClick={() => onNavigate(session)}
-              >
-                <span class="cp-row-body">
-                  <span class="rail-avatar" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
-                  <span class="cp-row-text">
-                <span class="session-head">
-                  <span class="session-title">{session.title}</span>
-                </span>
-                <span class="session-meta">
-                  <span class="session-state session-state-warn"><span class="status-dot status-warn" aria-hidden="true" />Needs you</span>
-                  <span class="meta-dot" aria-hidden="true" />
-                  <span>{projectName(session.project_id)}</span>
-                  <span class="meta-dot" aria-hidden="true" />
-                  <span>{absoluteTime(session.updated_at)}</span>
-                </span>
-                  </span>
-                </span>
-              </button>
-            </li>)}
+            {waitingList.slice(0, 6).map((session) => (
+              <SessionRowCard
+                key={session.id}
+                session={session}
+                rowClass="session-row needs"
+                projectName={projectName}
+                onNavigate={onNavigate}
+                onOpenInProject={onOpenInProject}
+              />
+            ))}
           </ul>
         </section> : null}
 
@@ -356,23 +490,15 @@ export function ControlOverview({
           <ul class="session-list">
             {attentionList.slice(0, 6).map((session) => {
               const status = sessionStatus(session);
-              return <li class={`session-row ${status.tone === 'danger' ? 'failed' : 'needs'}`} key={session.id}>
-                <button
-                  type="button"
-                  class="session-open cp-side-row"
-                  title={session.title}
-                  onClick={() => onNavigate(session)}
-                >
-                  <span class="session-head">
-                    <span class="rail-avatar" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
-                    <span class="session-title">{session.title}</span>
-                  </span>
-                  <span class="session-meta">
-                    <span class={`status-dot status-${status.tone}`} aria-hidden="true" />
-                    <span>{status.label} · {projectName(session.project_id)} · {absoluteTime(session.updated_at)}</span>
-                  </span>
-                </button>
-              </li>;
+              return <SessionRowCard
+                key={session.id}
+                session={session}
+                rowClass={`session-row ${status.tone === 'danger' ? 'failed' : 'needs'}`}
+                projectName={projectName}
+                onNavigate={onNavigate}
+                onOpenInProject={onOpenInProject}
+                statusWord={status}
+              />;
             })}
           </ul>
         </section> : null}
