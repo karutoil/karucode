@@ -1,6 +1,7 @@
 import type { JSX, RefObject } from 'preact';
 import { Fragment } from 'preact';
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useMemo } from 'preact/hooks';
+import { Menu, MenuItem, useMenu } from '../../lib/menu';
 import type { ControlChatSummary, SessionSummary } from '../../api/types';
 import { pluralise, relativeTime } from '../../lib/format';
 import * as actions from '../../state/actions';
@@ -65,11 +66,11 @@ interface RowActions {
  * The kebab on a row: rename and delete, without a trip into the project.
  *
  * The wrapper, trigger and menu are the workbench's own (`.session-menu-wrap`,
- * `.icon-button .session-menu-trigger`, `.session-menu`, `.menu-item`), including
- * its keyboard contract: open focuses the first item, arrows/Home/End move, Tab
- * leaves, Escape closes and returns focus to the trigger. `data-escape-local`
- * marks the menu as the owner of its Escape, so the dialog layer's trap defers
- * to it instead of closing the sheet underneath.
+ * `.icon-button .session-menu-trigger`, `.session-menu`, `.menu-item`), and the
+ * behaviour - open focuses the first item, arrows/Home/End move, Tab leaves,
+ * Escape closes and returns focus to the trigger - is `lib/menu.tsx`'s, shared
+ * with every other menu in the product. The row also answers a right-click with
+ * the same two actions, anchored at the pointer.
  */
 function RowMenu({ session, title, onRename, onDelete }: {
   session: SessionSummary;
@@ -77,79 +78,20 @@ function RowMenu({ session, title, onRename, onDelete }: {
   onRename: (session: SessionSummary) => void;
   onDelete: (session: SessionSummary) => void;
 }): JSX.Element {
-  const [open, setOpen] = useState(false);
-  const root = useRef<HTMLDivElement>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    root.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
-    const onPointerDown = (event: PointerEvent): void => {
-      const target = event.target;
-      if (target instanceof Node && root.current && !root.current.contains(target)) setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        setOpen(false);
-        trigger.current?.focus();
-      }
-    };
-    document.addEventListener('pointerdown', onPointerDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [open]);
-  /** Arrow/Home/End walk the menu; Tab closes it and moves on. */
-  const onMenuKeyDown = (event: KeyboardEvent): void => {
-    const items = Array.from(root.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
-    if (items.length === 0) return;
-    const index = items.indexOf(document.activeElement as HTMLButtonElement);
-    let next = index;
-    if (event.key === 'ArrowDown') next = (index + 1) % items.length;
-    else if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length;
-    else if (event.key === 'Home') next = 0;
-    else if (event.key === 'End') next = items.length - 1;
-    else if (event.key === 'Tab') {
-      setOpen(false);
-      return;
-    } else return;
-    event.preventDefault();
-    items[next]?.focus();
-  };
-  return <div class="session-menu-wrap" ref={root}>
+  const menu = useMenu();
+  return <div class="session-menu-wrap">
     <button
       type="button"
-      ref={trigger}
       class="icon-button session-menu-trigger"
       aria-label={`Actions for ${title}`}
-      aria-haspopup="menu"
-      aria-expanded={open}
-      onClick={() => setOpen((value) => !value)}
+      {...menu.triggerProps}
     >
       <KebabIcon size={15} />
     </button>
-    {open ? <div
-      class="session-menu"
-      role="menu"
-      data-escape-local
-      aria-label={`Actions for ${title}`}
-      onKeyDown={onMenuKeyDown}
-    >
-      <button
-        type="button"
-        role="menuitem"
-        class="menu-item"
-        onClick={() => { setOpen(false); onRename(session); }}
-      >Rename</button>
-      <button
-        type="button"
-        role="menuitem"
-        class="menu-item menu-item-danger"
-        onClick={() => { setOpen(false); onDelete(session); }}
-      >Delete…</button>
-    </div> : null}
+    <Menu menu={menu} label={`Session actions for ${title}`} class="session-menu">
+      <MenuItem menu={menu} action={{ label: 'Rename', onSelect: () => onRename(session) }} />
+      <MenuItem menu={menu} action={{ label: 'Delete…', danger: true, onSelect: () => onDelete(session) }} />
+    </Menu>
   </div>;
 }
 

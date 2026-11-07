@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import { useFocusTrap } from '../lib/dom';
+import { Menu, MenuItem, useMenu } from '../lib/menu';
 import { copyText } from '../lib/clipboard';
 import { modKey } from '../lib/platform';
 import type { SessionSummary } from '../api/types';
@@ -108,10 +109,8 @@ function SessionRow({
 }: SessionRowProps): JSX.Element {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.title);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const menu = useMenu();
   const inputRef = useRef<HTMLInputElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
   const skipBlur = useRef(false);
 
   useEffect(() => {
@@ -122,33 +121,12 @@ function SessionRow({
   }, [editing]);
 
   useEffect(() => {
-    if (!menuOpen) return;
-    const first = menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]');
-    first?.focus();
-    const onDocumentClick = (event: MouseEvent): void => {
-      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        setMenuOpen(false);
-        triggerRef.current?.focus();
-      }
-    };
-    document.addEventListener('mousedown', onDocumentClick);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onDocumentClick);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [menuOpen]);
-
-  useEffect(() => {
     if (!editing) setDraft(session.title);
   }, [session.title, editing]);
 
   const startRename = (): void => {
     skipBlur.current = false;
-    setMenuOpen(false);
+    menu.close();
     setDraft(session.title);
     setEditing(true);
   };
@@ -268,60 +246,26 @@ function SessionRow({
       )}
 
       {!editing ? (
-        <div class="session-menu-wrap" ref={menuRef}>
+        <div class="session-menu-wrap">
           <button
             type="button"
-            ref={triggerRef}
             class="icon-button session-menu-trigger"
             aria-label={`Actions for ${session.title || 'untitled session'}`}
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((open) => !open)}
+            {...menu.triggerProps}
           >
             <KebabIcon size={15} />
           </button>
-          {menuOpen ? (
-            <div
-              class="session-menu"
-              role="menu"
-              data-escape-local
-              aria-label={`Session actions for ${session.title}`}
-              onKeyDown={(event) => {
-                const items = Array.from(
-                  menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [],
-                );
-                if (items.length === 0) return;
-                const index = items.indexOf(document.activeElement as HTMLButtonElement);
-                let next = index;
-                if (event.key === 'ArrowDown') next = (index + 1) % items.length;
-                else if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length;
-                else if (event.key === 'Home') next = 0;
-                else if (event.key === 'End') next = items.length - 1;
-                else if (event.key === 'Tab') {
-                  setMenuOpen(false);
-                  return;
-                } else return;
-                event.preventDefault();
-                items[next]?.focus();
+          <Menu menu={menu} label={`Session actions for ${session.title}`} class="session-menu">
+            <MenuItem menu={menu} action={{ label: 'Rename', onSelect: startRename }} />
+            <MenuItem
+              menu={menu}
+              action={{
+                label: 'Delete…',
+                danger: true,
+                onSelect: () => onRequestDelete(session, menu.triggerRef.current),
               }}
-            >
-              <button type="button" role="menuitem" class="menu-item" onClick={startRename}>
-                Rename
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                class="menu-item menu-item-danger"
-                onClick={() => {
-                  triggerRef.current?.focus();
-                  setMenuOpen(false);
-                  onRequestDelete(session, triggerRef.current);
-                }}
-              >
-                Delete…
-              </button>
-            </div>
-          ) : null}
+            />
+          </Menu>
         </div>
       ) : null}
     </li>
@@ -521,19 +465,11 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
   const activeProject = store.currentProject.value;
   const unreadByProject = store.unreadByProject.value;
   const [dialog, setDialog] = useState<'add' | 'rename' | 'delete' | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const menu = useMenu();
   const [projectsOpen, setProjectsOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const menuWrapRef = useRef<HTMLDivElement>(null);
-  const optionsRef = useRef<HTMLButtonElement>(null);
   const disclosureRef = useRef<HTMLButtonElement>(null);
   const disclosureId = useId();
-
-  /** Close the menu, optionally returning focus to the ⋯ that opened it. */
-  const closeMenu = (restoreFocus = true): void => {
-    setMenuOpen(false);
-    if (restoreFocus) window.setTimeout(() => optionsRef.current?.focus(), 0);
-  };
 
   const closeProjects = (restoreFocus = true): void => {
     setProjectsOpen(false);
@@ -545,30 +481,6 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
   };
 
   useEffect(() => {
-    if (!menuOpen) return;
-    // The desktop rail menu focuses its first item and owns Escape; a phone had
-    // neither, so the menu opened with focus on the trigger and Escape fell
-    // through to the sheet and closed everything. Same contract here.
-    const first = menuWrapRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]');
-    first?.focus();
-    const onPointerDown = (event: MouseEvent): void => {
-      if (!menuWrapRef.current?.contains(event.target as Node)) setMenuOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        closeMenu();
-      }
-    };
-    document.addEventListener('mousedown', onPointerDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onPointerDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [menuOpen]);
-
-  useEffect(() => {
     if (!desktop || !projectsOpen) return;
     const onPointerDown = (event: MouseEvent): void => {
       if (!rootRef.current?.contains(event.target as Node)) closeProjects(false);
@@ -576,7 +488,7 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
     const onKeyDown = (event: KeyboardEvent): void => {
       // The nested options menu owns its Escape first. Only once that is closed
       // does the next Escape dismiss the projects disclosure.
-      if (event.key === 'Escape' && !menuOpen) {
+      if (event.key === 'Escape' && !menu.open) {
         event.preventDefault();
         event.stopPropagation();
         closeProjects();
@@ -588,7 +500,7 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
       document.removeEventListener('mousedown', onPointerDown);
       document.removeEventListener('keydown', onKeyDown);
     };
-  }, [desktop, projectsOpen, menuOpen]);
+  }, [desktop, projectsOpen, menu.open]);
 
   useEffect(() => {
     if (!desktop || !projectsOpen) return;
@@ -602,7 +514,7 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
   // A project that disappears (deleted elsewhere) must not leave the menu open
   // pointing at nothing.
   useEffect(() => {
-    if (!activeProject) setMenuOpen(false);
+    if (!activeProject) menu.close();
   }, [activeProject]);
 
   const copyPath = async (): Promise<void> => {
@@ -661,113 +573,45 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
           >
             <PlusIcon size={15} />
           </button>
-          <div class="project-switcher-menu-wrap" ref={menuWrapRef}>
+          <div class="project-switcher-menu-wrap">
             <button
               type="button"
-              ref={optionsRef}
               class="side-mini-btn"
               aria-label="Project options"
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
               title="Project options"
               disabled={!activeProject}
-              onClick={() => (menuOpen ? closeMenu(false) : setMenuOpen(true))}
+              {...menu.triggerProps}
             >
               <KebabIcon size={15} />
             </button>
-            {menuOpen && activeProject ? (
-              <div
-                class="rail-menu project-switcher-menu"
-                role="menu"
-                data-escape-local
-                aria-label={`Project options for ${activeProject.name}`}
-                onKeyDown={(event) => {
-                  // Desktop's rail menu contract: arrows/Home/End move, Tab
-                  // leaves and closes. Escape is handled by the document listener
-                  // above (it must work wherever focus sits in the menu).
-                  const items = Array.from(
-                    menuWrapRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [],
-                  );
-                  if (items.length === 0) return;
-                  const index = items.indexOf(document.activeElement as HTMLButtonElement);
-                  let next = index;
-                  if (event.key === 'ArrowDown') next = (index + 1) % items.length;
-                  else if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length;
-                  else if (event.key === 'Home') next = 0;
-                  else if (event.key === 'End') next = items.length - 1;
-                  else if (event.key === 'Tab') {
-                    closeMenu(false);
-                    return;
-                  } else return;
-                  event.preventDefault();
-                  items[next]?.focus();
-                }}
-              >
+            {activeProject ? (
+              <Menu menu={menu} label={`Project options for ${activeProject.name}`} class="rail-menu project-switcher-menu">
                 <div class="rail-menu-meta">
                   <span class="rail-menu-name">{activeProject.name}</span>
                   <span class="rail-menu-path">{activeProject.path}</span>
                 </div>
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    void copyPath();
+                <MenuItem
+                  menu={menu}
+                  action={{
+                    label: 'Copy project path',
+                    disabled: !activeProject.path,
+                    onSelect: () => void copyPath(),
                   }}
-                >
-                  Copy project path
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    void actions.refreshSessions();
-                  }}
-                >
-                  Refresh sessions
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item"
-                  onClick={() => {
-                    optionsRef.current?.focus();
-                    setMenuOpen(false);
-                    actions.openSettings();
-                  }}
-                >
-                  Project settings…
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item"
-                  onClick={() => {
-                    // The focused menu item is about to unmount. Focus the stable
-                    // trigger before mounting the dialog so its trap restores here.
-                    optionsRef.current?.focus();
-                    setMenuOpen(false);
-                    setDialog('rename');
-                  }}
-                >
-                  Rename…
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item menu-item-danger"
-                  onClick={() => {
-                    optionsRef.current?.focus();
-                    setMenuOpen(false);
-                    setDialog('delete');
-                  }}
-                >
-                  Delete project…
-                </button>
-              </div>
+                />
+                <MenuItem
+                  menu={menu}
+                  action={{ label: 'Refresh sessions', onSelect: () => void actions.refreshSessions() }}
+                />
+                <MenuItem
+                  menu={menu}
+                  action={{ label: 'Project settings…', onSelect: actions.openSettings }}
+                />
+                <MenuItem menu={menu} action={{ label: 'Rename…', onSelect: () => setDialog('rename') }} />
+                <MenuItem
+                  menu={menu}
+                  action={{ label: 'Delete project…', danger: true, onSelect: () => setDialog('delete') }}
+                />
+              </Menu>
             ) : null}
           </div>
           {!desktop || projectsOpen ? (

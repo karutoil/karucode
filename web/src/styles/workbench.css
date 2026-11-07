@@ -132,18 +132,15 @@
   flex: 0 0 auto;
 }
 
+/* The task menu is the same box as every other menu (layout.css); only its
+ * width and its anchor under the header button are its own. */
 .workbench-task-menu-popover {
   position: absolute;
-  z-index: 30;
+  z-index: 60;
   top: calc(100% + var(--space-3));
   right: 0;
   width: 224px;
   min-width: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--surface-raised);
-  box-shadow: var(--shadow-overlay);
 }
 
 .workbench-task-menu-popover > [role='menuitem'] {

@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { Project } from '../api/types';
 import { modKey } from '../lib/platform';
+import { Menu, MenuItem, useMenu } from '../lib/menu';
 import * as actions from '../state/actions';
 import * as railPeek from '../state/railPeek';
 import * as store from '../state/store';
@@ -366,12 +367,6 @@ export function DeleteProjectDialog({ project, open, onClose }: DeleteProjectDia
 
 type DialogKind = 'add' | 'rename' | 'delete' | null;
 
-interface MenuState {
-  projectId: string;
-  top: number;
-  left: number;
-}
-
 /**
  * Far-left project switcher. Reads the store directly (no props) and renders
  * one square icon per project. Layout is a plain column: the surrounding
@@ -387,73 +382,42 @@ export function ProjectRail(): JSX.Element {
   const unreadByProject = store.unreadByProject.value;
 
   const [dialog, setDialog] = useState<DialogKind>(null);
-  const [menu, setMenu] = useState<MenuState | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const menuTriggerRef = useRef<HTMLElement | null>(null);
+  const menu = useMenu();
+  /** Which project the open menu (and the dialog it opened) is about. Kept
+   *  apart from `activeId` on purpose: a right-click on any tile must rename or
+   *  delete *that* project, and the menu closes before the dialog mounts, so the
+   *  subject has to survive the close. */
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [dialogTarget, setDialogTarget] = useState<string | null>(null);
   const activeButtonRef = useRef<HTMLButtonElement>(null);
 
-  const menuProject = menu ? projects.find((project) => project.id === menu.projectId) ?? null : null;
-  const renameProject = projects.find((project) => project.id === activeId) ?? null;
+  const menuProject = menuFor ? projects.find((project) => project.id === menuFor) ?? null : null;
+  const dialogProject = projects.find((project) => project.id === (dialogTarget ?? activeId)) ?? null;
 
-  const closeMenu = (restoreFocus = true): void => {
-    const trigger = menuTriggerRef.current;
-    setMenu(null);
-    if (restoreFocus && trigger) {
-      window.setTimeout(() => {
-        if (trigger.isConnected) trigger.focus();
-      }, 0);
-    }
-  };
+  useEffect(() => {
+    if (!menu.open) setMenuFor(null);
+  }, [menu.open]);
 
-  const openMenu = (project: Project, trigger: HTMLElement | null): void => {
+  /** Open the tile's menu at its kebab, or at the right-click pointer. */
+  const openTileMenu = (project: Project, trigger: HTMLElement | null): void => {
     const rect = trigger?.getBoundingClientRect();
-    menuTriggerRef.current = trigger;
-    setMenu({
-      projectId: project.id,
-      top: rect && rect.height > 0 ? rect.top : 12,
-      left: rect && rect.width > 0 ? rect.right + 8 : 68,
-    });
+    setMenuFor(project.id);
+    menu.openAt(
+      rect && rect.width > 0 ? rect.right + 8 : 68,
+      rect && rect.height > 0 ? rect.top : 12,
+      trigger,
+    );
   };
 
+  const openTileMenuAtPointer = (project: Project, event: MouseEvent): void => {
+    setMenuFor(project.id);
+    menu.openAtPointer(event);
+  };
+
+  // A deleted project must not leave its menu or dialog pointing at nothing.
   useEffect(() => {
-    if (!menu) return;
-    const first = menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]');
-    first?.focus();
-
-    const onPointerDown = (event: MouseEvent): void => {
-      const target = event.target as Node | null;
-      const trigger = menuTriggerRef.current;
-      // Clicking the trigger toggles the menu itself; leave it to the click handler.
-      if (trigger && target && trigger.contains(target)) return;
-      if (menuRef.current?.contains(target)) return;
-      const hadFocus = Boolean(menuRef.current?.contains(document.activeElement));
-      setMenu(null);
-      if (hadFocus && trigger && trigger.isConnected) trigger.focus();
-    };
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        closeMenu();
-      }
-    };
-    const onLoseAnchor = (): void => setMenu(null);
-
-    document.addEventListener('mousedown', onPointerDown);
-    document.addEventListener('keydown', onKeyDown);
-    window.addEventListener('resize', onLoseAnchor);
-    window.addEventListener('scroll', onLoseAnchor, true);
-    return () => {
-      document.removeEventListener('mousedown', onPointerDown);
-      document.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('resize', onLoseAnchor);
-      window.removeEventListener('scroll', onLoseAnchor, true);
-    };
-  }, [menu]);
-
-  // A deleted or switched-away project must not leave a stale menu open.
-  useEffect(() => {
-    if (menu && !projects.some((project) => project.id === menu.projectId)) setMenu(null);
-  }, [menu, projects]);
+    if (menuFor && !projects.some((project) => project.id === menuFor)) menu.close();
+  }, [menuFor, projects]);
 
   // Long project lists scroll; keep the current project's square in view.
   useEffect(() => {
@@ -531,11 +495,9 @@ export function ProjectRail(): JSX.Element {
                       // one for the project the reader just chose.
                       railPeek.openPeek(project.id);
                     }}
-                    onContextMenu={(event) => {
-                      if (!active) return;
-                      event.preventDefault();
-                      openMenu(project, event.currentTarget);
-                    }}
+                    // Every tile answers a right-click, not just the active one:
+                    // the menu's actions name the tile they opened from.
+                    onContextMenu={(event) => openTileMenuAtPointer(project, event)}
                   >
                     <ProjectGlyph project={project} />
                     {/* The iOS-style count: unread notifications in this project,
@@ -548,17 +510,21 @@ export function ProjectRail(): JSX.Element {
                     ) : null}
                   </button>
 
+                  {/* The strip is an icon column: one kebab, on the tile the
+                      reader is already in. Every tile answers a right-click with
+                      the same menu, so the actions are reachable without leaving
+                      the pointer where it is. */}
                   {active ? (
                     <button
                       type="button"
                       class="project-rail-kebab"
                       aria-label={`Project actions for ${project.name}`}
-                      aria-haspopup="menu"
-                      aria-expanded={menu?.projectId === project.id}
                       title={`Project actions for ${project.name}`}
+                      aria-haspopup="menu"
+                      aria-expanded={menu.open && menuFor === project.id}
                       onClick={(event) => {
-                        if (menu?.projectId === project.id) closeMenu(false);
-                        else openMenu(project, event.currentTarget);
+                        if (menu.open && menuFor === project.id) menu.close(false);
+                        else openTileMenu(project, event.currentTarget);
                       }}
                     >
                       <KebabIcon size={13} />
@@ -620,75 +586,45 @@ export function ProjectRail(): JSX.Element {
           </button>
         </div>
 
-        {menu && menuProject ? (
-          <div
-            ref={menuRef}
-            class="project-rail-menu"
-            role="menu"
-            data-escape-local
-            aria-label={`Project actions for ${menuProject.name}`}
-            style={{ top: `${menu.top}px`, left: `${menu.left}px` }}
-            onKeyDown={(event) => {
-              const items = Array.from(
-                menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [],
-              );
-              if (items.length === 0) return;
-              const index = items.indexOf(document.activeElement as HTMLButtonElement);
-              let next = index;
-              if (event.key === 'ArrowDown') next = (index + 1) % items.length;
-              else if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length;
-              else if (event.key === 'Home') next = 0;
-              else if (event.key === 'End') next = items.length - 1;
-              else if (event.key === 'Tab') {
-                closeMenu(false);
-                return;
-              } else return;
-              event.preventDefault();
-              items[next]?.focus();
-            }}
-          >
-            <div class="project-rail-menu-meta">
-              <span class="project-rail-menu-name">{menuProject.name}</span>
-              <span class="project-rail-menu-path">{menuProject.path}</span>
-              <span class="project-rail-menu-count">
-                {menuProject.session_count > 0 ? sessionLabel(menuProject.session_count) : 'No sessions'}
+        {menuProject ? (
+          <Menu menu={menu} float class="project-rail-menu" label={`Project actions for ${menuProject.name}`}>
+            <div class="rail-menu-meta">
+              <span class="rail-menu-name">{menuProject.name}</span>
+              <span class="rail-menu-path">{menuProject.path}</span>
+              <span class="rail-menu-count">
+                {menuProject.session_count > 0
+                  ? sessionLabel(menuProject.session_count)
+                  : 'No sessions'}
               </span>
             </div>
-            <button
-              type="button"
-              role="menuitem"
-              class="menu-item"
-              onClick={() => {
-                // The menu item unmounts before the dialog records its return
-                // target; synchronously restore the persistent trigger first.
-                menuTriggerRef.current?.focus();
-                closeMenu(false);
-                setDialog('rename');
+            <MenuItem
+              menu={menu}
+              action={{
+                label: 'Rename…',
+                onSelect: () => {
+                  setDialogTarget(menuProject.id);
+                  setDialog('rename');
+                },
               }}
-            >
-              Rename…
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              class="menu-item menu-item-danger"
-              onClick={() => {
-                // The menu item unmounts when the child opens. Give the dialog a
-                // connected return target before that happens.
-                menuTriggerRef.current?.focus();
-                closeMenu(false);
-                setDialog('delete');
+            />
+            <MenuItem
+              menu={menu}
+              action={{
+                label: 'Delete project…',
+                danger: true,
+                onSelect: () => {
+                  setDialogTarget(menuProject.id);
+                  setDialog('delete');
+                },
               }}
-            >
-              Delete project…
-            </button>
-          </div>
+            />
+          </Menu>
         ) : null}
       </nav>
 
       <AddProjectDialog open={dialog === 'add'} onClose={closeDialog} />
-      <RenameProjectDialog project={renameProject} open={dialog === 'rename'} onClose={closeDialog} />
-      <DeleteProjectDialog project={renameProject} open={dialog === 'delete'} onClose={closeDialog} />
+      <RenameProjectDialog project={dialogProject} open={dialog === 'rename'} onClose={closeDialog} />
+      <DeleteProjectDialog project={dialogProject} open={dialog === 'delete'} onClose={closeDialog} />
     </>
   );
 }

@@ -688,21 +688,43 @@
   opacity: 1;
 }
 
+/* The one menu box. Trigger-anchored menus (`.session-menu`, `.rail-menu`) are
+ * positioned by their own rules below; a pointer-anchored menu (right-click) is
+ * carried by `.menu-layer`, which owns the coordinates and the layer.
+ * `--shadow-menu` is the menu shadow (§5 rule 5): the family used to hand-author
+ * a third one. */
 .session-menu,
-.rail-menu {
-  position: absolute;
-  z-index: 60;
+.rail-menu,
+.menu-float,
+.workbench-task-menu-popover {
   min-width: 172px;
   padding: var(--space-2);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   background: var(--surface-raised);
-  box-shadow: 0 14px 34px var(--shadow-lg);
+  box-shadow: var(--shadow-menu);
 }
 
 .session-menu {
+  position: absolute;
+  z-index: 60;
   top: 28px;
   right: 0;
+}
+
+/* A right-click menu is portalled into <body> at the pointer, so it needs its
+ * own layer: above the app chrome and its inline menus, below the dialog layer
+ * (100) it can be opened from inside, and below toasts (130). The layer holds the
+ * clamped coordinates; the menu box inside it is static. See DESIGN-SYSTEM §5B. */
+.menu-layer {
+  position: fixed;
+  z-index: 90;
+}
+
+/* A right-click menu can land anywhere, including over a narrow rail, so it
+ * caps like the rail's own menus do. */
+.menu-float {
+  max-width: min(280px, calc(100vw - var(--space-9)));
 }
 
 .rail-menu {
@@ -724,6 +746,11 @@
   color: var(--text);
   font-size: var(--fs-small);
   font-weight: 600;
+}
+
+.rail-menu-count {
+  color: var(--muted);
+  font-size: var(--fs-tiny);
 }
 
 .rail-menu-path {

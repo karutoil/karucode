@@ -441,47 +441,10 @@
   opacity: 1;
 }
 
-/* Popover menu. Fixed so a scrolling rail never clips it; positioned from the
-   trigger's bounding box in JS. */
+/* The project menu is the shared float box (`.menu-float`, layout.css) with a
+   wider minimum: its meta block carries a name, a path and a count. */
 .project-rail-menu {
-  position: fixed;
-  z-index: 60;
   min-width: 216px;
-  max-width: min(280px, calc(100vw - 24px));
-  padding: var(--space-2);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--surface-raised);
-  box-shadow: 0 14px 34px var(--shadow-lg);
-}
-
-.project-rail-menu-meta {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  margin-bottom: var(--space-2);
-  padding: var(--space-3) var(--space-4) var(--space-4);
-  border-bottom: 1px solid var(--line);
-}
-
-.project-rail-menu-name {
-  overflow-wrap: anywhere;
-  color: var(--text);
-  font-size: var(--fs-small);
-  font-weight: 600;
-}
-
-.project-rail-menu-path {
-  overflow-wrap: anywhere;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  line-height: 1.45;
-}
-
-.project-rail-menu-count {
-  color: var(--muted);
-  font-size: var(--fs-tiny);
 }
 
 /* ---------- dialogs ---------- */
