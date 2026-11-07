@@ -63,6 +63,11 @@ pub(crate) fn map_reqwest_error(
 ) -> Error {
     let detail = err.to_string();
     let detail = redact(&detail, secrets);
+    if err.is_redirect() {
+        return permanent(Error::Provider(format!(
+            "provider at {url} attempted a redirect: {detail}; set model.base_url to the intended endpoint instead"
+        )));
+    }
     if err.is_timeout() {
         return Error::Timeout(format!(
             "provider at {url} did not respond within {}s: {detail}",
@@ -152,11 +157,13 @@ pub(crate) async fn http_status_error(
             "provider rate limit hit (429 Too Many Requests) at {url}: retry later, lower request concurrency, \
              or check the plan quota for model `{model}`"
         )),
-        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
-            return Error::Timeout(with_body(format!(
-                "provider did not answer in time ({status}) at {url}"
-            )));
-        }
+        // These are HTTP responses, not local clock expiry. Keep them as Provider
+        // errors so the status tag survives retry exhaustion and remains visible
+        // to the context-overflow classifier (`Error::Timeout` could carry no
+        // structured status at all).
+        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => with_body(format!(
+            "provider did not answer in time ({status}) at {url}"
+        )),
         s if s.is_server_error() => with_body(format!(
             "upstream provider error ({}) from {url}: the endpoint is failing; retry later",
             status_line(s)
@@ -176,7 +183,15 @@ pub(crate) async fn http_status_error(
         text.push(' ');
         text.push_str(CONTEXT_OVERFLOW_TAG);
     }
-    Error::Provider(redact(&text, secrets))
+    let error = Error::Provider(redact(&text, secrets));
+    if status.is_redirection() {
+        // Provider redirects are explicit configuration errors. Following or
+        // retrying them can repeat a billed POST and can carry credentials to a
+        // different endpoint; the operator must choose the new base URL.
+        permanent(error)
+    } else {
+        error
+    }
 }
 
 fn status_line(status: StatusCode) -> String {
@@ -264,7 +279,10 @@ async fn body_excerpt(mut resp: reqwest::Response) -> String {
     truncate_chars(&single_line, ERROR_EXCERPT_CHARS)
 }
 
-/// Replace every occurrence of a secret with `[redacted]`.
+/// Replace every occurrence of a secret with `[redacted]`. Full header values
+/// and the credential component of a Bearer value are both removed. HTTP auth
+/// schemes are case-insensitive, so an upstream echo of `bEaReR token` must not
+/// evade redaction merely because configuration stored `Bearer token`.
 pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
     let mut out = text.to_string();
     for secret in secrets {
@@ -272,23 +290,37 @@ pub(crate) fn redact(text: &str, secrets: &[String]) -> String {
         if secret.is_empty() {
             continue;
         }
-        if out.contains(secret) {
-            out = out.replace(secret, "[redacted]");
-        }
-        // `Authorization: Bearer <key>` echoes must not survive either.
-        if let Some(token) = secret.strip_prefix("Bearer ").map(str::trim) {
-            if !token.is_empty() && out.contains(token) {
-                out = out.replace(token, "[redacted]");
-            }
-        }
-        // A bare `Bearer <token>` header value is stored without the prefix by
-        // some callers; scrub the token part as well.
-        if let Some(token) = secret.strip_prefix("bearer ").map(str::trim) {
-            if !token.is_empty() && out.contains(token) {
-                out = out.replace(token, "[redacted]");
+        out = replace_ascii_case_insensitive(&out, secret);
+        if secret
+            .get(..7)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("bearer "))
+        {
+            let token = secret[7..].trim();
+            if !token.is_empty() {
+                out = replace_ascii_case_insensitive(&out, token);
             }
         }
     }
+    out
+}
+
+fn replace_ascii_case_insensitive(text: &str, needle: &str) -> String {
+    if needle.is_empty() {
+        return text.to_string();
+    }
+    // ASCII case folding does not change byte lengths or UTF-8 boundaries, so
+    // offsets in `lowered` are also valid slices of the original string.
+    let lowered = text.to_ascii_lowercase();
+    let needle = needle.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    while let Some(relative) = lowered[from..].find(&needle) {
+        let at = from + relative;
+        out.push_str(&text[from..at]);
+        out.push_str("[redacted]");
+        from = at + needle.len();
+    }
+    out.push_str(&text[from..]);
     out
 }
 
@@ -311,6 +343,23 @@ mod tests {
         let out = redact("bad key sk-secret in header Bearer sk-secret", &secrets);
         assert!(!out.contains("sk-secret"), "{out}");
         assert_eq!(out.matches("[redacted]").count(), 2);
+    }
+
+    #[test]
+    fn bearer_redaction_is_case_insensitive_for_scheme_and_component() {
+        let secrets = vec!["Bearer Sk-SeNsItIvE".to_string()];
+        let out = redact(
+            "echoed bEaReR Sk-SeNsItIvE then bare sK-sEnSiTiVe",
+            &secrets,
+        );
+        let lower = out.to_ascii_lowercase();
+        assert!(!lower.contains("sk-sensitive"), "{out}");
+        assert!(!lower.contains("bearer"), "{out}");
+        assert_eq!(out.matches("[redacted]").count(), 2, "{out}");
+
+        let lower_scheme = vec!["bEaReR other-secret".to_string()];
+        let out = redact("BEARER other-secret / OTHER-SECRET", &lower_scheme);
+        assert!(!out.to_ascii_lowercase().contains("other-secret"), "{out}");
     }
 
     #[test]

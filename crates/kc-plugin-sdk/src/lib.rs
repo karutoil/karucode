@@ -48,9 +48,9 @@
 
 // @kc-doc: plugins
 // @kc-title: Write and install a plugin
-// @kc-summary: Build an out-of-process plugin that adds tools, hooks and inspector panels, register it, and debug it when it fails to start.
-// @kc-tags: plugins, extension, sdk, tools, hooks, jsonrpc, panels, notifications
-// @kc-applies-to: config:[[plugins]], file:~/.local/share/karucode/plugins/<name>/plugin.toml, dir:plugins/example-hello, tool:plugin__<plugin>__<tool>, cmd:cargo build -p example-hello, cmd:karucode plugin init, cmd:karucode plugin sdk, cmd:karucode plugin sdk --check, file:src/sdk.rs, file:src/protocol.rs, doc:docs/PLUGINS.md, env:KARUCODE_PLUGIN_NAME, env:KARUCODE_PLUGIN_PROTOCOL, env:KARUCODE_PLUGIN_PERMISSIONS, env:KARUCODE_PLUGIN_SETTINGS, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, config:panels, config:plugins_watch, config:plugins_watch_secs, config:notifications.plugin, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, config:plugin_panels, method:notify, hook:on_notify, hook:before_prompt, fn:PluginBuilder::panel, fn:PluginBuilder::on_notify, fn:notify
+// @kc-summary: Build an out-of-process plugin that adds tools, hooks, inspector panels and UI controls (buttons, palette commands, keyboard shortcuts, hides), register it, and debug it when it fails to start.
+// @kc-tags: plugins, extension, sdk, tools, hooks, jsonrpc, panels, ui, buttons, commands, shortcuts, notifications
+// @kc-applies-to: config:[[plugins]], file:~/.local/share/karucode/plugins/<name>/plugin.toml, dir:plugins/example-hello, tool:plugin__<plugin>__<tool>, cmd:cargo build -p example-hello, cmd:karucode plugin init, cmd:karucode plugin sdk, cmd:karucode plugin sdk --check, file:src/sdk.rs, file:src/protocol.rs, doc:docs/PLUGINS.md, env:KARUCODE_PLUGIN_NAME, env:KARUCODE_PLUGIN_PROTOCOL, env:KARUCODE_PLUGIN_PERMISSIONS, env:KARUCODE_PLUGIN_SETTINGS, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, config:panels, config:ui, config:plugins_watch, config:plugins_watch_secs, config:notifications.plugin, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:POST /api/plugins/:name/ui/actions/:action, config:plugin_panels, config:plugin_ui, method:notify, method:ui/action, hook:on_notify, hook:before_prompt, fn:PluginBuilder::panel, fn:PluginBuilder::button, fn:PluginBuilder::message_button, fn:PluginBuilder::command, fn:PluginBuilder::message_command, fn:PluginBuilder::keybinding, fn:PluginBuilder::message_keybinding, fn:PluginBuilder::hide, fn:PluginBuilder::on_ui_action, fn:PluginBuilder::on_notify, fn:notify, fn:normalise_ui_keys
 //
 // A plugin is a separate executable that speaks newline-delimited JSON-RPC 2.0 on
 // stdin/stdout, protocol version `1`. It never links the harness, so it can be
@@ -100,6 +100,16 @@
 // `.permission(permissions::FILES_WRITE)`. After upgrading karucode, refresh the
 // vendored copy with `karucode plugin sdk <dir>`; `--check` exits non-zero when it
 // is stale, writes nothing and starts no server, so a plugin's CI can guard it.
+//
+// The text after `.tool(…)` is the tool's schema description: write it for the
+// model, because that exact text describes the tool on every model call. The host
+// no longer appends a repeated origin/trust/permission paragraph to each tool.
+// Instead the system prompt names the plugins whose tools are exposed (sorted and
+// deduplicated) and states once that plugin tools run out of process under host
+// supervision, return untrusted output and follow the approval policy. A plugin
+// with no tools gets no block. Version/manifest metadata is available from
+// `GET /api/plugins`; configured permissions decide the effective set. See
+// `docs/PLUGINS.md` §5 for the exposure rules and §6 for permissions.
 //
 // Inside this repository `plugins/example-hello` is a workspace member and uses
 // `kc-plugin-sdk` by relative path (`cargo build -p example-hello`). Copy its
@@ -171,9 +181,14 @@
 // starts as, not whether an existing one that you switched off comes back.
 //
 // Both reload routes rebuild the tool registry before they answer, so the model
-// sees the new tools on its very next call. A run that is already in flight keeps
-// the registry snapshot it started with; a call to a replaced plugin fails with
-// "was stopped" rather than hanging, and the next run is clean.
+// sees the new tools on its very next call. Tool objects are generation-scoped:
+// an old handle retained by an in-flight run is permanently retired when its
+// plugin is replaced, removed or shut down. Calling it fails without executing
+// or respawning the old process; it cannot revoke that tombstone. Existing
+// `hooks_handle()` / `panels_handle()` views instead follow the current shared
+// slot list across reload/rescan as well as enable/disable. Dropping a live
+// `PluginHost` synchronously signals the process groups, and their supervisors
+// reap the children.
 //
 // To skip the curl entirely, let the server watch its own sources:
 //
@@ -235,10 +250,12 @@
 // ```
 //
 // * the panel id is hosted as `plugin__<plugin>__<id>`, so it cannot collide with
-//   a built-in tab or another plugin's panel. Ids are lowercase `a-z`, `0-9`,
-//   `-`, `_`, `.`; anything else, a duplicate id, an unknown `source` or a `tool`
-//   the plugin does not advertise in `tools/list` fails the handshake and shows
-//   up in the plugin diagnostics;
+//   a built-in tab. The delimiter is not an encoding: `a` / `b__c` and `a__b` /
+//   `c` do collide. As with tools, the first plugin keeps the hosted id; later
+//   claimants are omitted from panel lists and reads are refused, with the reason
+//   in that plugin's diagnostics. Ids are lowercase `a-z`, `0-9`, `-`, `_`, `.`;
+//   anything else, a duplicate id within one plugin, an unknown `source` or a
+//   `tool` the plugin does not advertise in `tools/list` fails the handshake;
 // * `data` is any JSON. `title` is optional — the manifest's title is used when
 //   it is missing;
 // * `icon` is a *name* from the app's icon set (`check`, `list`, `eye`, `folder`,
@@ -250,11 +267,88 @@
 //   make the UI hammer the server;
 // * the payload is capped at 256 KiB when rendered. Do real work in a tool the
 //   agent calls, not in a panel handler that runs every few seconds.
+// * a payload with a `view` field is drawn as a **real view** instead of a JSON
+//   tree: `stat`, `list`, `bars`, `progress`, `clock`, `stack`. Every field is plain
+//   text or a number, each is clamped, and anything unrecognised keeps the JSON
+//   view — so this is additive and an older app still reads a newer panel:
+//
+// ```json
+// {"view": "stack", "views": [
+//   {"view": "clock", "label": "Writing", "remaining_secs": 932, "running": true},
+//   {"view": "stat", "label": "Words", "value": "12,408", "detail": "31 files", "tone": "ok"},
+//   {"view": "bars", "label": "By area", "bars": [{"label": "src", "value": 134413, "display": "131 kB"}]},
+//   {"view": "list", "title": "Touched", "items": [{"text": "README.md", "detail": "now"}]},
+//   {"view": "progress", "label": "Snapshots", "fraction": 0.3, "detail": "3 of 10"}
+// ]}
+// ```
+//
+//   With `refresh_ms` set, a `clock` really ticks: each poll is a fresh payload, and
+//   that is the only real-time surface a plugin has.
+//
+// Two complete demo plugins live in `plugins/demos/` (a writing desk that hides
+// chrome, and a workspace map with two panels and its own on-disk state). They are
+// single Python files — read them instead of guessing.
 //
 // The tab is listed in `GET /api/config` under `plugin_panels` and read over
 // `GET /api/plugins/:name/panels/:panel?project=&session=`; a plugin that
 // declares no panels changes nothing, which is why this is additive and did not
 // bump the protocol version.
+//
+// # UI controls: buttons, palette commands, shortcuts and hides
+//
+// The `ui` array adds the rest of the chrome without ever shipping markup, CSS or
+// script: the app draws every control itself from a name it already owns.
+//
+// ```rust
+// use sdk::{PluginBuilder, UiActionRequest, UiActionResult, UiActionResultExt};
+//
+// fn main() -> std::io::Result<()> {
+//     let greet = |_req: UiActionRequest| UiActionResult::ok("Hello");
+//     PluginBuilder::new("focus", "0.1.0")
+//         // A button in the composer's action row. Same id = same `ui/action`.
+//         .button("composer.toolbar", "focus", "Focus mode", greet)
+//         // The same action on a chord (Ctrl/Cmd + Shift + F).
+//         .keybinding("focus-key", "Focus mode", "mod+shift+f", greet)
+//         // A palette command that hands work to the agent instead.
+//         .message_command("plan", "Ask about the plan", "Summarise the plan.")
+//         // Ask the app not to draw a built-in control.
+//         .hide("inspector.tab.agents")
+//         .run()
+// }
+// ```
+//
+// * kinds are `button`, `command`, `keybinding` and `hide`; a control is activated
+//   either by `action` (the plugin answers `ui/action`) or by `message` (the text
+//   is posted as a user turn). Exactly one of the two, and two controls may share
+//   one action;
+// * slots are a closed list: `composer.toolbar` (the composer's action row),
+//   `inspector.header` (beside **Context**) and `session.header`. A button naming
+//   another slot is skipped with a note in the diagnostics;
+// * a `keybinding` needs a modifier — `mod` (Ctrl on Windows/Linux, Cmd on macOS),
+//   `ctrl` or `alt` — then one key. A bare key is typing, so it is refused; so is
+//   any chord the app already uses (`mod+k` palette, `mod+b` rail, `mod+n` new
+//   session, `mod+j` context, `mod+shift+t` theme studio, `mod+enter` send), and so
+//   is a chord another plugin bound first. A binding never fires while the caret is
+//   in a text field or while a dialog is open;
+// * a control is always attributed — it carries a dot and a tooltip naming the
+//   plugin — because a plugin must not be able to pass its button off as a
+//   built-in one;
+// * `ui/action` is **not** a tool call: it runs because a person clicked or typed a
+//   shortcut, so it does not go through the approval policy, never reaches the
+//   model and cannot change the tool registry. Its answer is a toast (`message`),
+//   panels to re-read (`refresh`) and at most one `http`/`https` URL to open
+//   (`open_url`);
+// * `hide` is an allowlist and app-wide: `composer.attach`, `inspector.tab.workspace`,
+//   `inspector.tab.changes`, `inspector.tab.session`, `inspector.tab.agents`,
+//   `inspector.context`. Anything else — including every control that stops a run
+//   or answers an approval — is refused, and the inspector will not hide its last
+//   remaining tab;
+// * the person on the other side has the last word: Settings → Plugins & MCP →
+//   **Controls in the interface** switches a contributed control off or puts a
+//   hidden built-in back, per browser, without disabling the plugin;
+// * contributions reach the browser as `GET /api/config`'s `plugin_ui`, and the
+//   click posts to `POST /api/plugins/:name/ui/actions/:action`. A plugin that
+//   declares no `ui` changes nothing.
 //
 // # The call context
 //
@@ -280,12 +374,15 @@
 // exempt itself by declaring `read_only`. To let a specific tool skip the prompt,
 // list it in the plugin's `settings.read_only_tools = ["tool", …]`.
 //
-// Those two keys, `trust` and `read_only_tools`, are **operator-only**: they are
-// honoured from the `[[plugins]]` entry in `config.toml` and ignored when a
-// `plugin.toml` in the plugin's own directory sets them. A plugin ships that file,
-// so letting it decide its own approval exemptions would defeat the policy; the
-// host logs the ignore and repeats it in the plugin's `error` field rather than
-// obeying it silently. Every other `settings` key still reaches the plugin.
+// The wildcard `permissions = ["*"]` and the two keys `trust` and
+// `read_only_tools` are **operator-only**: they are honoured from the `[[plugins]]`
+// entry in `config.toml` and ignored when a `plugin.toml` in the plugin's own
+// directory sets them. Narrow disk permissions such as `permissions = ["shell"]`
+// remain deliberate reviewed grants. A plugin ships its own manifest, so letting
+// it delegate all runtime-declared permissions or decide its own approval
+// exemptions would defeat the policy; the host logs the refusal and repeats it in
+// the plugin's `error` field rather than obeying it silently. Every other
+// `settings` key still reaches the plugin.
 //
 // # Tool names
 //
@@ -360,6 +457,14 @@ pub use embed::{
 // ---- BEGIN EMBEDDED SDK SOURCE ----
 pub use kc_core::plugin::*;
 
+/// Shorter names for the UI wire types, for plugin authors.
+///
+/// The host calls them `PluginUiContribution` / `PluginUiActionResult` because it
+/// also has plugins, panels and tools in scope; inside a plugin there is only one
+/// of each, so the `Plugin` prefix is noise.
+pub use kc_core::plugin::PluginUiActionResult as UiActionResult;
+pub use kc_core::plugin::PluginUiContribution as UiContribution;
+
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -428,6 +533,32 @@ pub struct PanelRequest {
     pub workspace: String,
 }
 
+/// One `ui/action` invocation handed to an action handler.
+///
+/// This runs because a person **activated a control this plugin contributed** —
+/// a button in the composer or the inspector header, or a command-palette entry.
+/// It is not a tool call: the model did not ask for it, it does not go through the
+/// approval policy, and its answer is a small validated result (a toast, panels
+/// to refresh, a URL to open), never markup or a new tool.
+///
+/// Treat it as a UI callback: do the one thing the button says, answer quickly,
+/// and use [`notify`] or the plugin's own tools for anything longer. The host
+/// waits only as long as one call timeout, and a click that takes 60 s is a click
+/// nobody makes twice.
+pub struct UiActionRequest {
+    /// The action id from the manifest (`run-check`).
+    pub action: String,
+    /// The contribution that was activated: its id, kind, label and slot.
+    pub contribution: String,
+    pub kind: String,
+    pub label: String,
+    pub slot: Option<String>,
+    pub session_id: String,
+    pub project: Option<String>,
+    /// Absolute path of the project root the click belongs to.
+    pub workspace: String,
+}
+
 /// Constructors for [`PluginToolResult`].
 ///
 /// `PluginToolResult` is a wire type shared with the host, so the ergonomic
@@ -477,8 +608,70 @@ impl PluginToolResultExt for PluginToolResult {
 type ToolHandler = Box<dyn Fn(ToolRequest) -> PluginToolResult + Send + Sync>;
 type HookHandler = Box<dyn Fn(Value) -> Value + Send + Sync>;
 type PanelHandler = Box<dyn Fn(PanelRequest) -> Value + Send + Sync>;
+type UiActionHandler = Box<dyn Fn(UiActionRequest) -> PluginUiActionResult + Send + Sync>;
+
+/// Constructors for [`PluginUiActionResult`], the answer to a `ui/action`.
+///
+/// The same wire type is shared with the host (where the fields are validated and
+/// capped), so the ergonomic constructors arrive as an extension trait:
+///
+/// ```no_run
+/// # use kc_plugin_sdk::{UiActionResult, UiActionResultExt};
+/// # let done = || {};
+/// let result = UiActionResult::ok("Checked 3 files").refresh("todo");
+/// let failed = UiActionResult::err("no plan file in this workspace");
+/// ```
+pub trait UiActionResultExt: Sized {
+    /// Succeed. The message is the toast the person sees; keep it to one line.
+    fn ok(message: impl Into<String>) -> Self;
+    /// Fail visibly: the UI shows the message as an error.
+    fn err(message: impl Into<String>) -> Self;
+    /// Re-read one panel of this plugin after the action.
+    fn refresh(self, panel: impl Into<String>) -> Self;
+    /// Open a URL in a new tab. Only absolute `http`/`https` survives the host.
+    fn open(self, url: impl Into<String>) -> Self;
+}
+
+impl UiActionResultExt for PluginUiActionResult {
+    fn ok(message: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            message: message.into(),
+            refresh: Vec::new(),
+            open_url: None,
+        }
+    }
+
+    fn err(message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            message: message.into(),
+            refresh: Vec::new(),
+            open_url: None,
+        }
+    }
+
+    fn refresh(mut self, panel: impl Into<String>) -> Self {
+        self.refresh.push(panel.into());
+        self
+    }
+
+    fn open(mut self, url: impl Into<String>) -> Self {
+        self.open_url = Some(url.into());
+        self
+    }
+}
 
 const INTERNAL_ERROR: i32 = -32603;
+
+/// Read one string field out of a JSON payload, or the empty string.
+fn string_of(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
 
 /// Isolate one user-authored callback. Plugin handlers are `dyn Fn`, so their
 /// unwind safety cannot be inferred; `AssertUnwindSafe` applies only to this one
@@ -631,6 +824,7 @@ pub struct Plugin {
     tools: BTreeMap<String, ToolEntry>,
     hooks: BTreeMap<String, HookHandler>,
     panels: BTreeMap<String, PanelHandler>,
+    ui_actions: BTreeMap<String, UiActionHandler>,
     shutdown: bool,
 }
 
@@ -761,6 +955,50 @@ impl Plugin {
                     None => Ok(json!({ "output": null })),
                 }
             }
+            methods::UI_ACTION => {
+                let action = params
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let contribution = params.get("contribution").cloned().unwrap_or(Value::Null);
+                match self.ui_actions.get(&action) {
+                    Some(handler) => {
+                        let request = UiActionRequest {
+                            action: action.clone(),
+                            contribution: string_of(&contribution, "id"),
+                            kind: string_of(&contribution, "kind"),
+                            label: string_of(&contribution, "label"),
+                            slot: contribution
+                                .get("slot")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string),
+                            session_id: string_of(&params, "session_id"),
+                            project: params
+                                .get("project")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
+                            workspace: string_of(&params, "workspace"),
+                        };
+                        match user_handler("ui action", &action, || handler(request)) {
+                            Ok(result) => serde_json::to_value(result).map_err(|e| {
+                                PluginError::new(
+                                    INTERNAL_ERROR,
+                                    format!("the `{action}` result could not be encoded: {e}"),
+                                )
+                            }),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    // The host only calls an action a contribution declared, so
+                    // this is a stale page or a hand-written caller.
+                    None => Err(PluginError::new(
+                        -32601,
+                        format!("this plugin declares no UI action `{action}`"),
+                    )),
+                }
+            }
             methods::SHUTDOWN => {
                 self.shutdown = true;
                 Ok(Value::Null)
@@ -825,6 +1063,7 @@ pub struct PluginBuilder {
     tools: BTreeMap<String, ToolEntry>,
     hooks: BTreeMap<String, HookHandler>,
     panels: BTreeMap<String, PanelHandler>,
+    ui_actions: BTreeMap<String, UiActionHandler>,
 }
 
 impl PluginBuilder {
@@ -843,10 +1082,12 @@ impl PluginBuilder {
                 hooks: Vec::new(),
                 tool_prefix: None,
                 panels: Vec::new(),
+                ui: Vec::new(),
             },
             tools: BTreeMap::new(),
             hooks: BTreeMap::new(),
             panels: BTreeMap::new(),
+            ui_actions: BTreeMap::new(),
         }
     }
 
@@ -1022,6 +1263,264 @@ impl PluginBuilder {
         self
     }
 
+    /// Add one UI contribution exactly as the manifest will carry it.
+    ///
+    /// The low-level entry point: everything else on this builder is sugar over
+    /// it. Nothing is validated here — the host validates at handshake time and
+    /// reports a refusal in the plugin's diagnostics — so spell the fields as the
+    /// documentation describes them.
+    ///
+    /// ```no_run
+    /// # use kc_plugin_sdk::{PluginBuilder, PluginUiContribution, UI_KIND_BUTTON};
+    /// # let builder = PluginBuilder::new("wordy", "0.1.0");
+    /// builder.ui(PluginUiContribution {
+    ///     kind: UI_KIND_BUTTON.to_string(),
+    ///     id: "count".into(),
+    ///     label: "Count words".into(),
+    ///     slot: Some("composer.toolbar".into()),
+    ///     icon: Some("bolt".into()),
+    ///     action: Some("count".into()),
+    ///     ..Default::default()
+    /// });
+    /// ```
+    pub fn ui(mut self, contribution: PluginUiContribution) -> Self {
+        // Declaring the same id twice replaces it: a builder is written in order
+        // and the last word should win, like `tool` and `panel` above.
+        if !contribution.id.is_empty() {
+            self.manifest.ui.retain(|c| c.id != contribution.id);
+        }
+        self.manifest.ui.push(contribution);
+        self.capability("ui")
+    }
+
+    /// Contribute a **button** to a named slot.
+    ///
+    /// The button runs `ui/action` with `id` as the action id, so pair it with
+    /// [`on_ui_action`](Self::on_ui_action) using the same name:
+    ///
+    /// ```no_run
+    /// # use kc_plugin_sdk::{PluginBuilder, UiActionRequest, UiActionResult, UiActionResultExt};
+    /// # let builder = PluginBuilder::new("wordy", "0.1.0");
+    /// builder.button("composer.toolbar", "count", "Count words", |_req: UiActionRequest| {
+    ///     UiActionResult::ok("Counted 12 words")
+    /// });
+    /// ```
+    ///
+    /// Slots this build owns: `composer.toolbar` (the composer's action row),
+    /// `inspector.header` (beside **Context**) and `session.header`. An unknown
+    /// slot is dropped by the host with a note in the plugin's diagnostics, so a
+    /// plugin written for a newer karucode degrades instead of failing.
+    pub fn button(
+        self,
+        slot: &str,
+        id: &str,
+        label: &str,
+        handler: impl Fn(UiActionRequest) -> PluginUiActionResult + Send + Sync + 'static,
+    ) -> Self {
+        self.button_with(slot, id, label, None, None, handler)
+    }
+
+    /// [`button`](Self::button) with an icon name and a tooltip.
+    ///
+    /// `icon` is a *name* from the app's icon set (`plus`, `bolt`, `check`,
+    /// `folder`, `terminal`, …); an unknown name draws a neutral glyph, because
+    /// the app decides what a name looks like and a plugin cannot ship an SVG.
+    pub fn button_with(
+        mut self,
+        slot: &str,
+        id: &str,
+        label: &str,
+        icon: Option<&str>,
+        title: Option<&str>,
+        handler: impl Fn(UiActionRequest) -> PluginUiActionResult + Send + Sync + 'static,
+    ) -> Self {
+        self.ui_actions.insert(id.to_string(), Box::new(handler));
+        self.ui(PluginUiContribution {
+            kind: UI_KIND_BUTTON.to_string(),
+            id: id.to_string(),
+            slot: Some(slot.to_string()),
+            label: label.to_string(),
+            title: title.map(str::to_string),
+            icon: icon.map(str::to_string),
+            action: Some(id.to_string()),
+            message: None,
+            keys: None,
+            target: None,
+        })
+    }
+
+    /// Contribute a button that **sends a user turn** instead of running code.
+    ///
+    /// The cheapest useful button: no handler, no `ui/action`, just a message the
+    /// person could have typed. Use it to hand work to the agent ("Summarise the
+    /// plan") from a control that is easier to find than the composer.
+    pub fn message_button(self, slot: &str, id: &str, label: &str, message: &str) -> Self {
+        self.ui(PluginUiContribution {
+            kind: UI_KIND_BUTTON.to_string(),
+            id: id.to_string(),
+            slot: Some(slot.to_string()),
+            label: label.to_string(),
+            title: Some(message.to_string()),
+            icon: None,
+            action: None,
+            message: Some(message.to_string()),
+            keys: None,
+            target: None,
+        })
+    }
+
+    /// Contribute a **command-palette** entry that runs `ui/action`.
+    ///
+    /// ```no_run
+    /// # use kc_plugin_sdk::{PluginBuilder, UiActionRequest, UiActionResult, UiActionResultExt};
+    /// # let builder = PluginBuilder::new("wordy", "0.1.0");
+    /// builder.command("count-workspace", "Wordy: count the workspace", |_req| {
+    ///     UiActionResult::ok("Counted")
+    /// });
+    /// ```
+    pub fn command(
+        self,
+        id: &str,
+        label: &str,
+        handler: impl Fn(UiActionRequest) -> PluginUiActionResult + Send + Sync + 'static,
+    ) -> Self {
+        self.command_with(id, label, None, None, handler)
+    }
+
+    /// [`command`](Self::command) with an icon name and a description.
+    pub fn command_with(
+        mut self,
+        id: &str,
+        label: &str,
+        icon: Option<&str>,
+        title: Option<&str>,
+        handler: impl Fn(UiActionRequest) -> PluginUiActionResult + Send + Sync + 'static,
+    ) -> Self {
+        self.ui_actions.insert(id.to_string(), Box::new(handler));
+        self.ui(PluginUiContribution {
+            kind: UI_KIND_COMMAND.to_string(),
+            id: id.to_string(),
+            slot: None,
+            label: label.to_string(),
+            title: title.map(str::to_string),
+            icon: icon.map(str::to_string),
+            action: Some(id.to_string()),
+            message: None,
+            keys: None,
+            target: None,
+        })
+    }
+
+    /// Contribute a command-palette entry that sends a user turn.
+    pub fn message_command(self, id: &str, label: &str, message: &str) -> Self {
+        self.ui(PluginUiContribution {
+            kind: UI_KIND_COMMAND.to_string(),
+            id: id.to_string(),
+            slot: None,
+            label: label.to_string(),
+            title: Some(message.to_string()),
+            icon: None,
+            action: None,
+            message: Some(message.to_string()),
+            keys: None,
+            target: None,
+        })
+    }
+
+    /// Contribute a **keyboard shortcut** that runs `ui/action`.
+    ///
+    /// `keys` is a `+`-joined chord with at least one of `mod` (Ctrl on
+    /// Windows/Linux, Cmd on macOS), `ctrl` or `alt`, then a single key — a letter,
+    /// a digit, or one of `enter`, `escape`, `space`, `/`, `[`, `]`, `,`, `.`, `-`.
+    /// The app canonicalises it, so `Shift+Mod+F` and `mod+shift+f` are the same
+    /// binding.
+    ///
+    /// ```no_run
+    /// # use kc_plugin_sdk::{PluginBuilder, UiActionRequest, UiActionResult, UiActionResultExt};
+    /// # let builder = PluginBuilder::new("focus", "0.1.0");
+    /// builder.keybinding("focus-key", "Focus mode", "mod+shift+f", |_req| {
+    ///     UiActionResult::ok("Focus mode is on")
+    /// });
+    /// ```
+    ///
+    /// Two things the app decides, not the plugin: a chord one of its own shortcuts
+    /// already uses (the command palette, the sessions rail, a new session, the
+    /// context drawer, the theme studio, send) is refused with a note in the
+    /// diagnostics, and a chord another plugin already bound stays with the first
+    /// plugin in discovery order. A bare key is never accepted — that is typing.
+    pub fn keybinding(
+        mut self,
+        id: &str,
+        label: &str,
+        keys: &str,
+        handler: impl Fn(UiActionRequest) -> PluginUiActionResult + Send + Sync + 'static,
+    ) -> Self {
+        self.ui_actions.insert(id.to_string(), Box::new(handler));
+        self.ui(PluginUiContribution {
+            kind: UI_KIND_KEYBINDING.to_string(),
+            id: id.to_string(),
+            slot: None,
+            label: label.to_string(),
+            title: None,
+            icon: None,
+            action: Some(id.to_string()),
+            message: None,
+            keys: Some(keys.to_string()),
+            target: None,
+        })
+    }
+
+    /// Contribute a keyboard shortcut that sends a user turn instead of running
+    /// code. Same `keys` rules as [`keybinding`](Self::keybinding).
+    pub fn message_keybinding(self, id: &str, label: &str, keys: &str, message: &str) -> Self {
+        self.ui(PluginUiContribution {
+            kind: UI_KIND_KEYBINDING.to_string(),
+            id: id.to_string(),
+            slot: None,
+            label: label.to_string(),
+            title: Some(message.to_string()),
+            icon: None,
+            action: None,
+            message: Some(message.to_string()),
+            keys: Some(keys.to_string()),
+            target: None,
+        })
+    }
+
+    /// Ask the app to **hide** one of its own controls.
+    ///
+    /// `target` must be one of the hideable names the app publishes (`composer.attach`,
+    /// `inspector.tab.agents`, `inspector.context`, …). Hiding is app-wide and is
+    /// applied wherever that control is drawn; a name this build does not have, or
+    /// one that is deliberately not hideable (a control that stops a run or
+    /// answers an approval), is dropped with a note in the diagnostics.
+    ///
+    /// Use it sparingly and say so in your plugin's description: a person who
+    /// cannot find a familiar button deserves to know which plugin took it.
+    pub fn hide(self, target: &str) -> Self {
+        self.ui(PluginUiContribution {
+            kind: UI_KIND_HIDE.to_string(),
+            target: Some(target.to_string()),
+            ..PluginUiContribution::default()
+        })
+    }
+
+    /// Register the handler for one `ui/action`, without adding a control.
+    ///
+    /// Two contributions may share one action (`button` and `command` over the
+    /// same code), and a hand-written manifest may name an action this builder
+    /// never declared. First registration for an id wins; registering again
+    /// replaces the handler.
+    pub fn on_ui_action(
+        mut self,
+        action: &str,
+        handler: impl Fn(UiActionRequest) -> PluginUiActionResult + Send + Sync + 'static,
+    ) -> Self {
+        self.ui_actions
+            .insert(action.to_string(), Box::new(handler));
+        self.capability("ui")
+    }
+
     /// Finish building without serving.
     pub fn build(self) -> Plugin {
         Plugin {
@@ -1029,6 +1528,7 @@ impl PluginBuilder {
             tools: self.tools,
             hooks: self.hooks,
             panels: self.panels,
+            ui_actions: self.ui_actions,
             shutdown: false,
         }
     }
@@ -1137,6 +1637,201 @@ mod tests {
             .handle_request(json!({"jsonrpc": "2.0", "id": 6, "method": "nope"}))
             .unwrap();
         assert_eq!(unknown_method["error"]["code"], json!(-32601));
+    }
+
+    #[test]
+    fn ui_contributions_are_declared_and_dispatched() {
+        let mut plugin = PluginBuilder::new("uidemo", "1.0.0")
+            .button_with(
+                "composer.toolbar",
+                "go",
+                "Go",
+                Some("bolt"),
+                Some("Run the check"),
+                |req: UiActionRequest| {
+                    // The host forwards the click's scope and the contribution.
+                    UiActionResult::ok(format!("{} in {}", req.action, req.workspace))
+                        .refresh("todo")
+                },
+            )
+            .message_command("ask", "Ask about the plan", "Summarise the plan.")
+            .hide("inspector.tab.agents")
+            .build();
+
+        let manifest = plugin.manifest();
+        assert_eq!(manifest.ui.len(), 3);
+        let button = &manifest.ui[0];
+        assert_eq!(button.kind, UI_KIND_BUTTON);
+        assert_eq!(button.id, "go");
+        assert_eq!(button.slot.as_deref(), Some("composer.toolbar"));
+        assert_eq!(button.icon.as_deref(), Some("bolt"));
+        assert_eq!(button.title.as_deref(), Some("Run the check"));
+        assert_eq!(button.action.as_deref(), Some("go"));
+        assert_eq!(manifest.ui[1].kind, UI_KIND_COMMAND);
+        assert_eq!(
+            manifest.ui[1].message.as_deref(),
+            Some("Summarise the plan.")
+        );
+        assert_eq!(manifest.ui[1].slot, None);
+        assert_eq!(manifest.ui[2].kind, UI_KIND_HIDE);
+        assert_eq!(
+            manifest.ui[2].target.as_deref(),
+            Some("inspector.tab.agents")
+        );
+        assert!(
+            manifest.capabilities.iter().any(|c| c == "ui"),
+            "declaring UI must advertise the capability"
+        );
+
+        let response = plugin
+            .handle_request(json!({
+                "jsonrpc": "2.0", "id": 9, "method": "ui/action",
+                "params": {"action": "go", "workspace": "/tmp/ws",
+                           "contribution": {"kind": "button", "id": "go", "label": "Go",
+                                            "slot": "composer.toolbar"}}
+            }))
+            .unwrap();
+        assert_eq!(response["result"]["ok"], json!(true));
+        assert_eq!(response["result"]["message"], json!("go in /tmp/ws"));
+        assert_eq!(response["result"]["refresh"], json!(["todo"]));
+
+        // An action nothing declared is a JSON-RPC method-not-found, not a panic.
+        let unknown = plugin
+            .handle_request(json!({"jsonrpc": "2.0", "id": 10, "method": "ui/action",
+                                   "params": {"action": "nope"}}))
+            .unwrap();
+        assert_eq!(unknown["error"]["code"], json!(-32601));
+        assert!(unknown["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("nope"));
+    }
+
+    #[test]
+    fn a_ui_action_that_panics_is_an_rpc_error_and_the_plugin_survives() {
+        let mut plugin = PluginBuilder::new("uidemo", "1.0.0")
+            .button("composer.toolbar", "bad", "Bad", |_req| panic!("boom"))
+            .button("composer.toolbar", "good", "Good", |_req| {
+                UiActionResult::ok("still here")
+            })
+            .build();
+
+        let panicked = plugin
+            .handle_request(json!({"jsonrpc": "2.0", "id": 20, "method": "ui/action",
+                                   "params": {"action": "bad"}}))
+            .unwrap();
+        assert_eq!(panicked["error"]["code"], json!(-32603));
+        assert!(panicked["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ui action `bad` panicked"));
+
+        let ok = plugin
+            .handle_request(json!({"jsonrpc": "2.0", "id": 21, "method": "ui/action",
+                                   "params": {"action": "good"}}))
+            .unwrap();
+        assert_eq!(ok["result"]["message"], json!("still here"));
+    }
+
+    #[test]
+    fn ui_result_helpers_build_the_wire_shape() {
+        let ok = UiActionResult::ok("done").refresh("todo").refresh("board");
+        assert!(ok.ok);
+        assert_eq!(ok.refresh, vec!["todo".to_string(), "board".to_string()]);
+        assert_eq!(ok.open_url, None);
+
+        let failed = UiActionResult::err("nope");
+        assert!(!failed.ok);
+
+        let opened = UiActionResult::ok("opened").open("https://example.com/x");
+        assert_eq!(opened.open_url.as_deref(), Some("https://example.com/x"));
+    }
+
+    #[test]
+    fn redeclaring_a_ui_contribution_replaces_it() {
+        // The builder is written in order; the last word wins, exactly like
+        // `tool` and `panel`.
+        let plugin = PluginBuilder::new("uidemo", "1.0.0")
+            .button("composer.toolbar", "go", "Go", |_req| {
+                UiActionResult::ok("a")
+            })
+            .button("session.header", "go", "Go again", |_req| {
+                UiActionResult::ok("b")
+            })
+            .build();
+        assert_eq!(plugin.manifest().ui.len(), 1);
+        assert_eq!(plugin.manifest().ui[0].label, "Go again");
+        assert_eq!(
+            plugin.manifest().ui[0].slot.as_deref(),
+            Some("session.header")
+        );
+    }
+
+    #[test]
+    fn an_on_ui_action_handler_can_serve_two_contributions() {
+        let mut plugin = PluginBuilder::new("uidemo", "1.0.0")
+            .ui(PluginUiContribution {
+                kind: UI_KIND_BUTTON.to_string(),
+                id: "count".into(),
+                label: "Count".into(),
+                slot: Some("composer.toolbar".into()),
+                action: Some("shared".into()),
+                ..Default::default()
+            })
+            .message_command("note", "Note", "Write a note.")
+            .on_ui_action("shared", |req| {
+                UiActionResult::ok(format!("{} via {}", req.label, req.kind))
+            })
+            .build();
+
+        let response = plugin
+            .handle_request(json!({"jsonrpc": "2.0", "id": 30, "method": "ui/action",
+                                   "params": {"action": "shared",
+                                              "contribution": {"kind": "button",
+                                                               "label": "Count"}}}))
+            .unwrap();
+        assert_eq!(response["result"]["message"], json!("Count via button"));
+    }
+
+    #[test]
+    fn a_keybinding_is_declared_with_its_chord_and_dispatches() {
+        let mut plugin = PluginBuilder::new("uidemo", "1.0.0")
+            .keybinding(
+                "focus",
+                "Focus mode",
+                "Mod+Shift+F",
+                |req: UiActionRequest| UiActionResult::ok(format!("{} from a shortcut", req.label)),
+            )
+            .message_keybinding(
+                "ask",
+                "Ask about the plan",
+                "mod+alt+p",
+                "Summarise the plan.",
+            )
+            .build();
+
+        let manifest = plugin.manifest();
+        assert_eq!(manifest.ui.len(), 2);
+        assert_eq!(manifest.ui[0].kind, UI_KIND_KEYBINDING);
+        assert_eq!(manifest.ui[0].keys.as_deref(), Some("Mod+Shift+F"));
+        assert_eq!(manifest.ui[0].action.as_deref(), Some("focus"));
+        assert_eq!(manifest.ui[0].slot, None, "a binding is not drawn");
+        assert_eq!(manifest.ui[1].keys.as_deref(), Some("mod+alt+p"));
+        assert_eq!(
+            manifest.ui[1].message.as_deref(),
+            Some("Summarise the plan.")
+        );
+
+        let response = plugin
+            .handle_request(json!({"jsonrpc": "2.0", "id": 40, "method": "ui/action",
+                                   "params": {"action": "focus",
+                                              "contribution": {"kind": "keybinding",
+                                                               "label": "Focus mode"}}}))
+            .unwrap();
+        assert_eq!(
+            response["result"]["message"],
+            json!("Focus mode from a shortcut")
+        );
     }
 
     #[test]

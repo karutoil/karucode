@@ -16,8 +16,9 @@
 //! * **the pragmas actually took effect** — `journal_mode=WAL` and
 //!   `foreign_keys=ON` are read back and a failure is fatal, because a silently
 //!   disabled `foreign_keys` turns `ON DELETE CASCADE` into orphaned rows;
-//! * **the file is readable** — `PRAGMA quick_check` runs before any migration,
-//!   so corruption is reported with a recovery command instead of a raw
+//! * **the file is consistent** — `PRAGMA quick_check` and a bounded
+//!   `foreign_key_check` run before any migration, so corruption or orphaned
+//!   references block startup with a recovery command rather than a raw
 //!   rusqlite string.
 
 use async_trait::async_trait;
@@ -50,6 +51,11 @@ const READ_POOL_SIZE: usize = 2;
 /// session that has been idle for longer than the retention window still has the
 /// context its next run needs.
 const RETENTION_KEEP_MESSAGES: usize = 100;
+
+/// Bound the number of diagnostic rows returned by a foreign-key sweep. Checking
+/// is capped per call; neither quick_check nor integrity_check normally finds FK
+/// violations on its own because neither runs foreign_key_check implicitly.
+const FOREIGN_KEY_CHECK_MAX_PROBLEMS: i64 = 100;
 
 /// Schema v1. Every statement is `IF NOT EXISTS` so a partially applied
 /// migration can be re-run safely; the whole batch runs in one transaction.
@@ -1044,10 +1050,43 @@ fn corruption_error(path: &Path, problems: &[String]) -> Error {
     let detail = problems.join("; ");
     Error::Store(format!(
         "database {shown} failed its integrity check: {detail}. Likely causes: the process \
-         was killed mid-write, the disk filled up, or the file was copied while in use. \
-         Recover with `sqlite3 {shown} \".recover\" | sqlite3 {shown}.recovered`, then move \
+         was killed mid-write, the disk filled up, the file was copied while in use, or a \
+         previous database was restored with inconsistent references. Recover with \
+         `sqlite3 {shown} \".recover\" | sqlite3 {shown}.recovered`, then move \
          {shown}.recovered over {shown} (keep a copy of the original first)."
     ))
+}
+
+/// Append at most `FOREIGN_KEY_CHECK_MAX_PROBLEMS` violations. SQLite's check
+/// returns one row per invalid reference even when foreign-key enforcement was
+/// previously disabled by another writer or a restored dump.
+fn append_foreign_key_problems(
+    conn: &rusqlite::Connection,
+    problems: &mut Vec<String>,
+) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT \"table\", \"rowid\", \"parent\", \"fkid\"
+               FROM pragma_foreign_key_check LIMIT ?1",
+        )
+        .map_err(|e| db_err("foreign_key_check prepare", e))?;
+    let rows = stmt
+        .query_map(params![FOREIGN_KEY_CHECK_MAX_PROBLEMS], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|e| db_err("foreign_key_check query", e))?;
+    for row in rows {
+        let (table, rowid, parent, fkid) = row.map_err(|e| db_err("foreign_key_check row", e))?;
+        problems.push(format!(
+            "foreign key violation: table={table} rowid={rowid:?} parent={parent} fkid={fkid}"
+        ));
+    }
+    Ok(())
 }
 
 /// Open the read-only connections used by the `list_*` / `get_*` paths.
@@ -1197,9 +1236,9 @@ impl SqliteStore {
         }
     }
 
-    /// `PRAGMA quick_check` before the first migration. Cheap (it skips the
-    /// index/row cross-checks) and enough to catch a truncated or overwritten
-    /// file before we write to it.
+    /// `PRAGMA quick_check` plus a bounded `foreign_key_check` before the first
+    /// migration. Structural corruption or orphaned references block startup:
+    /// migrating or accepting writes would make recovery less predictable.
     async fn check_integrity_on_open(&self) -> Result<()> {
         let path = self.path.clone();
         let result = self
@@ -1217,6 +1256,7 @@ impl SqliteStore {
                         problems.push(line);
                     }
                 }
+                append_foreign_key_problems(conn, &mut problems)?;
                 Ok(problems)
             })
             .await?;
@@ -2741,6 +2781,37 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn recover_interrupted_runs(&self) -> Result<Vec<(String, String)>> {
+        let instance_id = self.instance_id.clone();
+        self.with(move |conn| {
+            let now = now_ms();
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("recover_interrupted_runs begin", e))?;
+            let recovered = {
+                let mut stmt = tx
+                    .prepare(
+                        "UPDATE runs SET status = ?1, finished_at = ?2
+                          WHERE status = 'running' AND instance_id != ?3
+                         RETURNING session_id, id",
+                    )
+                    .map_err(|e| db_err("recover_interrupted_runs prepare", e))?;
+                let rows = stmt
+                    .query_map(
+                        params![RunStatus::Interrupted.as_str(), now, instance_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .map_err(|e| db_err("recover_interrupted_runs query", e))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(|e| db_err("recover_interrupted_runs rows", e))?
+            };
+            tx.commit()
+                .map_err(|e| db_err("recover_interrupted_runs commit", e))?;
+            Ok(recovered)
+        })
+        .await
+    }
+
     async fn list_runs(&self, session_id: &str, limit: usize) -> Result<Vec<RunRecord>> {
         let session_id = session_id.to_string();
         let limit = limit_i64(limit);
@@ -2766,11 +2837,18 @@ impl Store for SqliteStore {
     async fn rewind_point(&self, session_id: &str, message_id: i64) -> Result<RewindPoint> {
         let session_id = session_id.to_string();
         self.read(move |conn| {
-            let (row_session, role, content): (String, String, String) = conn
+            let (row_session, role, content, agent_id): (
+                String,
+                String,
+                String,
+                Option<String>,
+            ) = conn
                 .query_row(
-                    "SELECT session_id, role, content FROM messages WHERE id = ?1",
+                    "SELECT session_id, role, content, agent_id FROM messages WHERE id = ?1",
                     params![message_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    },
                 )
                 .map_err(|e| match e {
                     rusqlite::Error::QueryReturnedNoRows => {
@@ -2787,26 +2865,26 @@ impl Store for SqliteStore {
                 )));
             }
 
-            // Normalise to the user turn. An assistant message, a tool result or
-            // a steering note belongs to the prompt that started it, and rewinding
-            // to "some point inside a turn" would leave the model a transcript
-            // starting with a tool result.
-            let (user_id, prompt) = match role.as_str() {
-                "user" => (message_id, content),
-                _ => conn
-                    .query_row(
-                        "SELECT id, content FROM messages
-                          WHERE session_id = ?1 AND id < ?2 AND role = 'user'
-                          ORDER BY id DESC LIMIT 1",
-                        params![session_id, message_id],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-                    )
-                    .map_err(|e| match e {
-                        rusqlite::Error::QueryReturnedNoRows => Error::BadRequest(format!(
-                            "message {message_id} has no user message before it; there is nothing to rewind to"
-                        )),
-                        other => db_err("rewind_point user lookup", other),
-                    })?,
+            // Normalise to a *parent* user turn. A subagent has its own model
+            // context; its task/user row must never become the main session's
+            // retry prompt merely because its global id is newer.
+            let (user_id, prompt) = if role == "user" && agent_id.is_none() {
+                (message_id, content)
+            } else {
+                conn.query_row(
+                    "SELECT id, content FROM messages
+                      WHERE session_id = ?1 AND id < ?2 AND role = 'user'
+                        AND agent_id IS NULL
+                      ORDER BY id DESC LIMIT 1",
+                    params![session_id, message_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Error::BadRequest(format!(
+                        "message {message_id} has no user message before it; there is nothing to rewind to"
+                    )),
+                    other => db_err("rewind_point user lookup", other),
+                })?
             };
 
             // The next message after the chosen prompt is where the rewind cuts.
@@ -3215,6 +3293,28 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn update_agent_note(
+        &self,
+        id: &str,
+        note: &str,
+        progress: Option<f32>,
+        updated_at: i64,
+    ) -> Result<bool> {
+        let id = id.to_string();
+        let note = note.to_string();
+        self.with(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE agents SET note = ?2, progress = ?3, updated_at = ?4
+                      WHERE id = ?1",
+                    params![id, note, progress.map(f64::from), updated_at],
+                )
+                .map_err(|e| db_err("update_agent_note", e))?;
+            Ok(updated == 1)
+        })
+        .await
+    }
+
     async fn transition_agent_status(
         &self,
         id: &str,
@@ -3482,6 +3582,37 @@ impl Store for SqliteStore {
                 )
                 .map_err(|e| db_err("mark_interrupted_agents", e))?;
             Ok(n)
+        })
+        .await
+    }
+
+    async fn recover_interrupted_agents(&self) -> Result<Vec<(String, String)>> {
+        let instance_id = self.instance_id.clone();
+        self.with(move |conn| {
+            let now = now_ms();
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err("recover_interrupted_agents begin", e))?;
+            let recovered = {
+                let mut stmt = tx
+                    .prepare(
+                        "UPDATE agents SET status = ?1, updated_at = ?2, finished_at = ?2
+                          WHERE status IN ('running', 'paused') AND instance_id != ?3
+                         RETURNING session_id, id",
+                    )
+                    .map_err(|e| db_err("recover_interrupted_agents prepare", e))?;
+                let rows = stmt
+                    .query_map(
+                        params![AgentStatus::Interrupted.as_str(), now, instance_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .map_err(|e| db_err("recover_interrupted_agents query", e))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(|e| db_err("recover_interrupted_agents rows", e))?
+            };
+            tx.commit()
+                .map_err(|e| db_err("recover_interrupted_agents commit", e))?;
+            Ok(recovered)
         })
         .await
     }
@@ -3787,13 +3918,19 @@ impl Store for SqliteStore {
     async fn resolve_approval(&self, id: &str, decision: &str) -> Result<()> {
         let id = id.to_string();
         let decision = decision.to_string();
+        let status = if decision == "expired" {
+            "expired"
+        } else {
+            "resolved"
+        }
+        .to_string();
         self.with(move |conn| {
             let now = now_ms();
             let n = conn
                 .execute(
-                    "UPDATE approvals SET status = 'resolved', decision = ?2, resolved_at = ?3
+                    "UPDATE approvals SET status = ?2, decision = ?3, resolved_at = ?4
                       WHERE id = ?1 AND status = 'pending'",
-                    params![id, decision, now],
+                    params![id, status, decision, now],
                 )
                 .map_err(|e| db_err("resolve_approval", e))?;
             if n == 0 {
@@ -3801,6 +3938,37 @@ impl Store for SqliteStore {
                 return Err(Error::NotFound(format!("pending approval {id}")));
             }
             Ok(())
+        })
+        .await
+    }
+
+    async fn resolve_pending_approval(&self, id: &str, decision: &str) -> Result<bool> {
+        let decision = match decision.trim() {
+            "allow_once" => "allow_once",
+            "allow_session" => "allow_session",
+            "deny" => "deny",
+            "expired" => "expired",
+            other => {
+                return Err(Error::BadRequest(format!(
+                    "unknown approval decision `{other}`: expected allow_once, allow_session, deny or expired"
+                )));
+            }
+        };
+        let id = id.to_string();
+        let status = if decision == "expired" {
+            "expired"
+        } else {
+            "resolved"
+        };
+        self.with(move |conn| {
+            let n = conn
+                .execute(
+                    "UPDATE approvals SET status = ?2, decision = ?3, resolved_at = ?4
+                      WHERE id = ?1 AND status = 'pending'",
+                    params![id, status, decision, now_ms()],
+                )
+                .map_err(|e| db_err("resolve_pending_approval", e))?;
+            Ok(n == 1)
         })
         .await
     }
@@ -4181,24 +4349,40 @@ impl Store for SqliteStore {
         let keep = limit_i64(RETENTION_KEEP_MESSAGES);
         self.with(move |conn| {
             let tx = conn.transaction().map_err(|e| db_err("prune begin", e))?;
-            // Rank every message per session by id (insertion order) and delete
-            // the ones past the newest `keep` that are also older than the
-            // cutoff. The ranking deliberately covers *all* messages, not just
-            // the old ones: ranking only the old rows would keep the newest
-            // `keep` old messages and delete the recent ones.
+            // The parent keep-window is exactly the newest visible parent
+            // conversation: hidden and subagent rows never consume its slots.
+            // Each subagent separately keeps its own newest visible rows, so a
+            // short/one-row child transcript is not erased just because it aged.
+            // Hidden rows have their own age-only cleanup. Rank every full visible
+            // set, not only aged rows, so old rows cannot displace recent context.
             let messages = tx
                 .execute(
                     "DELETE FROM messages
                       WHERE created_at < ?1
-                        AND id IN (
-                            SELECT id FROM (
-                                SELECT id,
-                                       ROW_NUMBER() OVER (
-                                           PARTITION BY session_id ORDER BY id DESC
-                                       ) AS rn
-                                  FROM messages
-                            ) ranked
-                            WHERE ranked.rn > ?2
+                        AND (
+                            rewound_at IS NOT NULL
+                            OR id IN (
+                                SELECT id FROM (
+                                    SELECT id,
+                                           ROW_NUMBER() OVER (
+                                               PARTITION BY session_id ORDER BY id DESC
+                                           ) AS rn
+                                      FROM messages
+                                     WHERE agent_id IS NULL AND rewound_at IS NULL
+                                ) ranked
+                                WHERE ranked.rn > ?2
+                            )
+                            OR id IN (
+                                SELECT id FROM (
+                                    SELECT id,
+                                           ROW_NUMBER() OVER (
+                                               PARTITION BY session_id, agent_id ORDER BY id DESC
+                                           ) AS rn
+                                      FROM messages
+                                     WHERE agent_id IS NOT NULL AND rewound_at IS NULL
+                                ) ranked
+                                WHERE ranked.rn > ?2
+                            )
                         )",
                     params![cutoff, keep],
                 )
@@ -4258,17 +4442,19 @@ impl Store for SqliteStore {
             // An unbound row is preserved only while its run is still running.
             // Once its writer is gone there is no safe transcript position to
             // replay it at, so it is stale private state rather than an undo row.
-            tx.execute(
-                "DELETE FROM checkpoints
-                  WHERE (message_id > 0
-                    AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = checkpoints.message_id))
-                    OR (message_id = 0
-                    AND NOT EXISTS (SELECT 1 FROM runs r
-                                    WHERE r.id = checkpoints.run_id AND r.status = 'running'))",
-                [],
-            )
-            .map_err(|e| db_err("prune checkpoints", e))?;
-            sweep_orphaned_blobs(&tx).map_err(|e| db_err("prune checkpoint blobs", e))?;
+            let checkpoints = tx
+                .execute(
+                    "DELETE FROM checkpoints
+                      WHERE (message_id > 0
+                        AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = checkpoints.message_id))
+                        OR (message_id = 0
+                        AND NOT EXISTS (SELECT 1 FROM runs r
+                                        WHERE r.id = checkpoints.run_id AND r.status = 'running'))",
+                    [],
+                )
+                .map_err(|e| db_err("prune checkpoints", e))?;
+            let checkpoint_blobs =
+                sweep_orphaned_blobs(&tx).map_err(|e| db_err("prune checkpoint blobs", e))?;
             tx.commit().map_err(|e| db_err("prune commit", e))?;
 
             let report = PruneReport {
@@ -4276,6 +4462,9 @@ impl Store for SqliteStore {
                 runs,
                 agents,
                 approvals,
+                claims,
+                checkpoints,
+                checkpoint_blobs,
             };
             if !report.is_empty() {
                 tracing::info!(
@@ -4284,6 +4473,9 @@ impl Store for SqliteStore {
                     runs = report.runs,
                     agents = report.agents,
                     approvals = report.approvals,
+                    claims = report.claims,
+                    checkpoints = report.checkpoints,
+                    checkpoint_blobs = report.checkpoint_blobs,
                     "pruned old rows"
                 );
             }
@@ -4301,9 +4493,58 @@ impl Store for SqliteStore {
 
     async fn vacuum(&self) -> Result<()> {
         // VACUUM cannot run inside a transaction, and `with` does not open one.
-        // It rewrites the whole file, so it also converts an old database to
-        // auto_vacuum=INCREMENTAL (see `configure_connection`).
+        // SQLite refuses to change auto_vacuum while a legacy file is in WAL mode,
+        // so conversion temporarily uses DELETE, sets the mode *before* VACUUM,
+        // and restores WAL even when the rebuild fails.
         self.with(|conn| {
+            let auto_vacuum: i64 = conn
+                .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+                .map_err(|e| db_err("vacuum read auto_vacuum", e))?;
+            if auto_vacuum != 2 {
+                let mode: String = conn
+                    .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+                    .map_err(|e| db_err("vacuum leave WAL", e))?;
+                if !mode.eq_ignore_ascii_case("delete") {
+                    return Err(Error::Store(format!(
+                        "could not leave WAL to enable incremental vacuum: journal_mode is {mode:?}"
+                    )));
+                }
+
+                let conversion = (|| -> Result<()> {
+                    conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")
+                        .map_err(|e| db_err("vacuum enable auto_vacuum", e))?;
+                    conn.execute_batch("VACUUM")
+                        .map_err(|e| db_err("vacuum legacy database", e))
+                })();
+                let restore = (|| -> Result<()> {
+                    let mode: String = conn
+                        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+                        .map_err(|e| db_err("vacuum restore WAL", e))?;
+                    if !mode.eq_ignore_ascii_case("wal") {
+                        return Err(Error::Store(format!(
+                            "vacuum restored journal_mode={mode:?}, expected \"wal\""
+                        )));
+                    }
+                    let enabled: i64 = conn
+                        .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+                        .map_err(|e| db_err("vacuum verify auto_vacuum", e))?;
+                    if enabled != 2 {
+                        return Err(Error::Store(format!(
+                            "VACUUM left auto_vacuum={enabled}, expected 2 (INCREMENTAL)"
+                        )));
+                    }
+                    Ok(())
+                })();
+                match (conversion, restore) {
+                    (Ok(()), Ok(())) => return Ok(()),
+                    (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+                    (Err(error), Err(restore)) => {
+                        return Err(Error::Store(format!(
+                            "{error}; additionally, restoring WAL failed: {restore}"
+                        )));
+                    }
+                }
+            }
             conn.execute_batch("VACUUM")
                 .map_err(|e| db_err("vacuum", e))
         })
@@ -4347,6 +4588,7 @@ impl Store for SqliteStore {
                         problems.push(line);
                     }
                 }
+                append_foreign_key_problems(conn, &mut problems)?;
                 Ok(problems)
             })
             .await?;
@@ -4459,6 +4701,31 @@ mod tests {
             created_at: 0,
             resolved_at: None,
         }
+    }
+
+    async fn approval_state(
+        store: &SqliteStore,
+        id: &str,
+    ) -> (String, Option<String>, String, Option<i64>) {
+        let id = id.to_string();
+        store
+            .with(move |conn| {
+                conn.query_row(
+                    "SELECT status, decision, title, resolved_at FROM approvals WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                        ))
+                    },
+                )
+                .map_err(|e| db_err("read approval state", e))
+            })
+            .await
+            .expect("read approval state")
     }
 
     /// Write schema versions `1..=version` into a database the way a real
@@ -6852,6 +7119,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn updating_an_agent_note_cannot_rewrite_lifecycle_fields() {
+        let db = TempDb::new("agent-note-narrow-update");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        let mut original = agent("a_1", "s_1", "completed");
+        original.iterations = 9;
+        original.summary = "finished summary".into();
+        original.error = Some("existing warning".into());
+        original.finished_at = Some(123);
+        original.updated_at = 100;
+        original.note = "old note".into();
+        original.progress = Some(0.25);
+        original.background = true;
+        store.upsert_agent(&original).await.expect("agent");
+        store
+            .with(|conn| {
+                conn.execute(
+                    "UPDATE agents SET instance_id = 'original-instance' WHERE id = 'a_1'",
+                    [],
+                )
+                .map_err(|e| db_err("stamp original instance", e))
+            })
+            .await
+            .expect("stamp original instance");
+
+        assert!(store
+            .update_agent_note("a_1", "now reviewing", Some(0.75), 456)
+            .await
+            .expect("update note"));
+        let mut expected = original.clone();
+        expected.note = "now reviewing".into();
+        expected.progress = Some(0.75);
+        expected.updated_at = 456;
+        let actual = store
+            .get_agent("a_1")
+            .await
+            .expect("get")
+            .expect("agent exists")
+            .agent;
+        assert_eq!(actual.status, expected.status);
+        assert_eq!(actual.iterations, expected.iterations);
+        assert_eq!(actual.summary, expected.summary);
+        assert_eq!(actual.error, expected.error);
+        assert_eq!(actual.finished_at, expected.finished_at);
+        assert_eq!(actual.background, expected.background);
+        assert_eq!(actual.owned_paths, expected.owned_paths);
+        assert_eq!(actual.note, expected.note);
+        assert_eq!(actual.progress, expected.progress);
+        assert_eq!(actual.updated_at, expected.updated_at);
+        let instance: String = store
+            .with(|conn| {
+                conn.query_row(
+                    "SELECT instance_id FROM agents WHERE id = 'a_1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| db_err("read original instance", e))
+            })
+            .await
+            .expect("instance");
+        assert_eq!(instance, "original-instance");
+
+        assert!(!store
+            .update_agent_note("missing", "nobody", None, 789)
+            .await
+            .expect("missing agent"));
+        assert!(store.get_agent("missing").await.expect("missing").is_none());
+    }
+
+    #[tokio::test]
     async fn agents_list_workspace_wide_and_carry_session_context() {
         let db = TempDb::new("agents-all");
         let store = db.open().await;
@@ -7315,6 +7655,41 @@ mod tests {
         assert_eq!(resolved.1.as_deref(), Some("allow_once"));
         assert!(resolved.2.is_some());
 
+        // A per-id timeout is an expiration, not a resolution. Other decisions
+        // keep the ordinary `resolved` status asserted above.
+        store
+            .create_approval(&approval("ap_expired", "s_2", "r_2"))
+            .await
+            .expect("expiring approval");
+        store
+            .resolve_approval("ap_expired", "expired")
+            .await
+            .expect("expire one approval");
+        let expired = store
+            .with(|conn| {
+                conn.query_row(
+                    "SELECT status, decision, resolved_at FROM approvals WHERE id = 'ap_expired'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    },
+                )
+                .map_err(|e| db_err("read expired approval", e))
+            })
+            .await
+            .expect("expired approval");
+        assert_eq!(expired.0, "expired");
+        assert_eq!(expired.1.as_deref(), Some("expired"));
+        assert!(expired.2.is_some());
+        assert!(matches!(
+            store.resolve_approval("ap_expired", "expired").await,
+            Err(Error::NotFound(_))
+        ));
+
         // Resolving twice is a NotFound, not a panic.
         assert!(matches!(
             store.resolve_approval("ap_1", "deny").await,
@@ -7324,6 +7699,150 @@ mod tests {
             store.resolve_approval("ap_unknown", "deny").await,
             Err(Error::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn conditional_approval_resolution_distinguishes_stale_expiry() {
+        let db = TempDb::new("approvals-conditional-resolve");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        for id in [
+            "ap_human",
+            "ap_expiring",
+            "ap_denied",
+            "ap_allow_once",
+            "ap_allow_session",
+            "ap_invalid",
+        ] {
+            store
+                .create_approval(&approval(id, "s_1", "r_1"))
+                .await
+                .expect("create approval");
+        }
+
+        // The production race: the human decision commits, then an expiry worker
+        // resumes with a snapshot that still says the approval is pending.
+        store
+            .resolve_approval("ap_human", "allow_session")
+            .await
+            .expect("human allow");
+        let human_before = approval_state(&store, "ap_human").await;
+        assert!(!store
+            .resolve_pending_approval("ap_human", "expired")
+            .await
+            .expect("stale expiry is not a transition"));
+        assert_eq!(
+            approval_state(&store, "ap_human").await,
+            human_before,
+            "stale expiry must not overwrite the allow, its timestamp, or its title"
+        );
+        assert_eq!(human_before.0, "resolved");
+        assert_eq!(human_before.1.as_deref(), Some("allow_session"));
+        assert!(human_before.3.is_some());
+
+        for (id, input, normalized) in [
+            ("ap_denied", "deny", "deny"),
+            ("ap_allow_once", "allow_once", "allow_once"),
+            ("ap_allow_session", " allow_session ", "allow_session"),
+        ] {
+            assert!(store
+                .resolve_pending_approval(id, input)
+                .await
+                .expect("first pending resolution"));
+            let resolved = approval_state(&store, id).await;
+            assert_eq!(resolved.0, "resolved");
+            assert_eq!(resolved.1.as_deref(), Some(normalized));
+            assert_eq!(resolved.2, "Run cargo test");
+            assert!(resolved.3.is_some());
+            assert!(!store
+                .resolve_pending_approval(id, "expired")
+                .await
+                .expect("resolution followed by stale expiry"));
+            assert_eq!(approval_state(&store, id).await, resolved);
+        }
+
+        assert!(store
+            .resolve_pending_approval("ap_expiring", " expired ")
+            .await
+            .expect("a genuinely pending approval expires"));
+        let expired = approval_state(&store, "ap_expiring").await;
+        assert_eq!(expired.0, "expired");
+        assert_eq!(expired.1.as_deref(), Some("expired"));
+        assert_eq!(expired.2, "Run cargo test", "expiry preserves title");
+        assert!(expired.3.is_some());
+        assert!(!store
+            .resolve_pending_approval("ap_expiring", "expired")
+            .await
+            .expect("second expiry is a no-op"));
+        assert_eq!(approval_state(&store, "ap_expiring").await, expired);
+        assert!(!store
+            .resolve_pending_approval("ap_missing", "expired")
+            .await
+            .expect("unknown id is not a transition"));
+
+        let error = store
+            .resolve_pending_approval("ap_invalid", "allow-session")
+            .await
+            .expect_err("only established runtime decision spellings are accepted");
+        assert!(matches!(error, Error::BadRequest(_)));
+        assert_eq!(
+            approval_state(&store, "ap_invalid").await,
+            (
+                "pending".to_string(),
+                None,
+                "Run cargo test".to_string(),
+                None
+            ),
+            "an invalid decision cannot partially update the row"
+        );
+    }
+
+    #[tokio::test]
+    async fn competing_approval_decisions_have_exactly_one_transition() {
+        let db = TempDb::new("approvals-competing-resolve");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .create_approval(&approval("ap_race", "s_1", "r_1"))
+            .await
+            .expect("approval");
+
+        let (allowed, expired) = tokio::join!(
+            store.resolve_pending_approval("ap_race", "allow_session"),
+            store.resolve_pending_approval("ap_race", "expired"),
+        );
+        let allowed = allowed.expect("allow result");
+        let expired = expired.expect("expiry result");
+        assert_ne!(
+            allowed, expired,
+            "the conditional update must elect exactly one winner"
+        );
+
+        let state = approval_state(&store, "ap_race").await;
+        if allowed {
+            assert_eq!(state.0, "resolved");
+            assert_eq!(state.1.as_deref(), Some("allow_session"));
+        } else {
+            assert!(expired);
+            assert_eq!(state.0, "expired");
+            assert_eq!(state.1.as_deref(), Some("expired"));
+        }
+        assert_eq!(state.2, "Run cargo test");
+        assert!(!store
+            .resolve_pending_approval("ap_race", "expired")
+            .await
+            .expect("later stale expiry"));
+        assert!(!store
+            .resolve_pending_approval("ap_race", "allow_once")
+            .await
+            .expect("later stale allow"));
+        assert_eq!(approval_state(&store, "ap_race").await, state);
     }
 
     #[tokio::test]
@@ -7923,6 +8442,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retention_keeps_visible_parent_rows_independent_of_hidden_and_child_rows() {
+        let db = TempDb::new("prune-visible-parent-window");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        let keep = store.retention_keep_messages();
+
+        for index in 0..(keep + 5) {
+            store
+                .append_message(&new_message("s_1", "user", &format!("parent {index}")))
+                .await
+                .expect("parent");
+        }
+        // Every one of these newer rows used to consume a parent context slot.
+        for index in 0..(keep + 20) {
+            let mut child = new_message("s_1", "assistant", &format!("child {index}"));
+            child.agent_id = Some("a_child".into());
+            store.append_message(&child).await.expect("child");
+        }
+        for index in 0..7 {
+            store
+                .append_message(&new_message("s_1", "assistant", &format!("hidden {index}")))
+                .await
+                .expect("hidden");
+        }
+        age_messages(&store, "s_1", 30).await;
+        store
+            .with(|conn| {
+                conn.execute(
+                    "UPDATE messages SET rewound_at = 1 WHERE content LIKE 'hidden %'",
+                    [],
+                )
+                .map_err(|e| db_err("hide aged parents", e))?;
+                Ok(())
+            })
+            .await
+            .expect("hide aged parents");
+
+        // Nonvisible rows are cleaned by age too, but only when they are old.
+        let mut recent_child = new_message("s_1", "assistant", "recent child");
+        recent_child.agent_id = Some("a_child".into());
+        store
+            .append_message(&recent_child)
+            .await
+            .expect("recent child");
+        let recent_hidden = store
+            .append_message(&new_message("s_1", "assistant", "recent hidden"))
+            .await
+            .expect("recent hidden");
+        store
+            .with(move |conn| {
+                conn.execute(
+                    "UPDATE messages SET rewound_at = 1 WHERE id = ?1",
+                    params![recent_hidden],
+                )
+                .map_err(|e| db_err("hide recent parent", e))?;
+                Ok(())
+            })
+            .await
+            .expect("hide recent parent");
+
+        let report = store.prune_messages_older_than(30).await.expect("prune");
+        assert_eq!(
+            report.messages,
+            5 + 21 + 7,
+            "five parents and twenty-one child rows exceed their separate windows; \
+             the recent child correctly consumes one of the child's 100 slots"
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM messages
+                 WHERE session_id = 's_1' AND agent_id IS NULL AND rewound_at IS NULL",
+            )
+            .await,
+            keep as i64,
+            "the newest parent context survives even after many newer hidden/child rows"
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM messages WHERE agent_id = 'a_child'",
+            )
+            .await,
+            keep as i64,
+            "the child's own 100-row window survives independently, including its recent row"
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT COUNT(*) FROM messages
+                 WHERE session_id = 's_1' AND agent_id IS NULL AND rewound_at IS NOT NULL",
+            )
+            .await,
+            1,
+            "aged hidden history is cleaned; the recent hidden row remains"
+        );
+        assert_eq!(
+            store
+                .prune_messages_older_than(30)
+                .await
+                .expect("repeat")
+                .messages,
+            0,
+            "the second pass deletes neither protected context nor the recent auxiliary rows"
+        );
+    }
+
+    #[tokio::test]
     async fn pruning_with_zero_days_is_a_noop() {
         let db = TempDb::new("prune-zero");
         let store = db.open().await;
@@ -8077,6 +8707,13 @@ mod tests {
         // The agent has no transcript, so this pass prunes it.
         let report = store.prune_messages_older_than(30).await.expect("prune");
         assert_eq!(report.agents, 1, "the finished, transcript-less agent goes");
+        assert_eq!(report.claims, 1, "the orphaned claim is counted");
+        assert_eq!(
+            report.total(),
+            2,
+            "auxiliary-only cleanup makes the report nonempty"
+        );
+        assert!(!report.is_empty());
 
         let claims = store.list_claims("s_1").await.expect("claims");
         assert!(
@@ -8236,6 +8873,75 @@ mod tests {
         assert!(store.integrity_check().await.expect("check").ok);
     }
 
+    #[tokio::test]
+    async fn vacuum_converts_a_legacy_wal_database_to_incremental_auto_vacuum() {
+        let db = TempDb::new("vacuum-legacy-wal");
+        std::fs::create_dir_all(&db.dir).expect("data dir");
+        {
+            // A real non-empty legacy database: schema and row exist before
+            // karucode opens it and enables WAL, where auto_vacuum cannot change.
+            let conn = rusqlite::Connection::open(&db.path).expect("raw legacy db");
+            conn.pragma_update(None, "auto_vacuum", "NONE")
+                .expect("legacy auto_vacuum");
+            write_schema_to(&conn, SCHEMA_VERSION);
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+                .expect("legacy version");
+            conn.execute(
+                "INSERT INTO sessions (id, title, workspace, created_at, updated_at)
+                 VALUES ('s_legacy', 'Legacy', '/w', 1, 1)",
+                [],
+            )
+            .expect("legacy row");
+            assert_eq!(
+                conn.query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0))
+                    .expect("legacy mode"),
+                0
+            );
+        }
+
+        let store = db.open().await;
+        let before: (String, i64) = store
+            .with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT * FROM pragma_journal_mode),
+                            (SELECT * FROM pragma_auto_vacuum)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| db_err("legacy pragmas", e))
+            })
+            .await
+            .expect("before pragmas");
+        assert_eq!(before.0.to_ascii_lowercase(), "wal");
+        assert_eq!(before.1, 0);
+
+        store.vacuum().await.expect("convert and vacuum");
+        let after: (String, i64) = store
+            .with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT * FROM pragma_journal_mode),
+                            (SELECT * FROM pragma_auto_vacuum)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| db_err("converted pragmas", e))
+            })
+            .await
+            .expect("after pragmas");
+        assert_eq!(after.0.to_ascii_lowercase(), "wal", "WAL is restored");
+        assert_eq!(after.1, 2, "VACUUM applied INCREMENTAL");
+        assert_eq!(
+            store.list_sessions().await.expect("legacy sessions").len(),
+            1,
+            "conversion preserves the actual row"
+        );
+        store.incremental_vacuum().await.expect("now enabled");
+        store
+            .create_session("s_after", "After", "/w", None)
+            .await
+            .expect("writes still work after conversion");
+    }
+
     /// A panic inside a store closure must not brick the store.
     ///
     /// `with` runs caller-supplied code while holding the writer mutex. With
@@ -8347,8 +9053,26 @@ mod tests {
             .await
             .expect("seed foreign rows");
 
-        assert_eq!(store.mark_interrupted_runs().await.expect("runs"), 1);
-        assert_eq!(store.mark_interrupted_agents().await.expect("agents"), 1);
+        assert_eq!(
+            store.recover_interrupted_runs().await.expect("runs"),
+            vec![("s_1".to_string(), "r_theirs".to_string())],
+            "the API returns exactly the transitioned foreign run"
+        );
+        assert_eq!(
+            store.recover_interrupted_agents().await.expect("agents"),
+            vec![("s_1".to_string(), "a_theirs".to_string())],
+            "the API returns exactly the transitioned foreign agent"
+        );
+        assert!(store
+            .recover_interrupted_runs()
+            .await
+            .expect("second run recovery")
+            .is_empty());
+        assert!(store
+            .recover_interrupted_agents()
+            .await
+            .expect("second agent recovery")
+            .is_empty());
 
         let runs = store.list_runs("s_1", 10).await.expect("runs");
         let mine_run = runs.iter().find(|r| r.id == "r_mine").expect("r_mine");
@@ -8455,6 +9179,59 @@ mod tests {
         assert!(report.problems.is_empty());
         assert!(report.checked_at > 0);
         assert!(store.last_integrity_check().expect("stamp") >= report.checked_at);
+    }
+
+    #[tokio::test]
+    async fn foreign_key_violations_are_reported_and_block_reopening() {
+        let db = TempDb::new("integrity-foreign-keys");
+        let store = db.open().await;
+        store
+            .with(|conn| {
+                // Simulate a legacy/restored file whose writer bypassed enforcement.
+                conn.pragma_update(None, "foreign_keys", "OFF")
+                    .map_err(|e| db_err("disable test foreign keys", e))?;
+                for index in 0..(FOREIGN_KEY_CHECK_MAX_PROBLEMS + 3) {
+                    conn.execute(
+                        "INSERT INTO messages (session_id, role, content, created_at)
+                         VALUES ('missing-session', 'user', ?1, 1)",
+                        params![format!("orphan {index}")],
+                    )
+                    .map_err(|e| db_err("insert test orphan", e))?;
+                }
+                conn.pragma_update(None, "foreign_keys", "ON")
+                    .map_err(|e| db_err("restore test foreign keys", e))?;
+                Ok(())
+            })
+            .await
+            .expect("seed violations");
+
+        let report = store.integrity_check().await.expect("check completes");
+        assert!(
+            !report.ok,
+            "quick/integrity checks alone would miss these rows"
+        );
+        assert_eq!(
+            report.problems.len(),
+            FOREIGN_KEY_CHECK_MAX_PROBLEMS as usize,
+            "the diagnostic report is bounded: {report:?}"
+        );
+        assert!(
+            report
+                .problems
+                .iter()
+                .all(|problem| problem.contains("foreign key violation")
+                    && problem.contains("table=messages")),
+            "{report:?}"
+        );
+
+        drop(store);
+        let error = match SqliteStore::open(&db.path).await {
+            Ok(_) => panic!("startup must not migrate or serve a database with FK violations"),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        assert!(text.contains("foreign key violation"), "{text}");
+        assert!(text.contains("Recover with"), "{text}");
     }
 
     #[tokio::test]
@@ -8743,6 +9520,50 @@ mod tests {
             .expect("tool");
         let point = store.rewind_point("s_1", tool_id).await.expect("point");
         assert_eq!(point.user_message_id, ids[4], "the newest prompt owns it");
+    }
+
+    #[tokio::test]
+    async fn mixed_parent_and_subagent_rows_never_choose_a_subagent_rewind_prompt() {
+        let db = TempDb::new("rewind-parent-only");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+        store
+            .append_message(&new_message("s_1", "user", "parent zero"))
+            .await
+            .expect("parent zero");
+        let mut child = new_message("s_1", "user", "child task zero");
+        child.agent_id = Some("a_1".into());
+        store.append_message(&child).await.expect("child zero");
+        let parent = store
+            .append_message(&new_message("s_1", "user", "parent one"))
+            .await
+            .expect("parent one");
+        let mut newest_child = new_message("s_1", "user", "closest child task");
+        newest_child.agent_id = Some("a_1".into());
+        let child_id = store
+            .append_message(&newest_child)
+            .await
+            .expect("closest child");
+        let answer = store
+            .append_message(&new_message("s_1", "assistant", "parent answer"))
+            .await
+            .expect("parent answer");
+
+        let point = store.rewind_point("s_1", answer).await.expect("point");
+        assert_eq!(point.user_message_id, parent);
+        assert_eq!(point.prompt, "parent one");
+
+        // Even a forged request naming a child user row directly cannot turn the
+        // child's task into the main run's retry prompt.
+        let point = store
+            .rewind_point("s_1", child_id)
+            .await
+            .expect("child target normalizes to parent");
+        assert_eq!(point.user_message_id, parent);
+        assert_eq!(point.prompt, "parent one");
     }
 
     #[tokio::test]
@@ -9084,7 +9905,14 @@ mod tests {
             .expect("new checkpoint");
 
         age_messages(&store, "s_1", 30).await;
-        store.prune_messages_older_than(30).await.expect("prune");
+        let report = store.prune_messages_older_than(30).await.expect("prune");
+        assert_eq!(report.checkpoints, 1);
+        assert_eq!(report.checkpoint_blobs, 1);
+        assert_eq!(
+            report.total(),
+            report.messages + 2,
+            "journal and blob deletion participate in the retention result"
+        );
 
         let rows = store.list_checkpoints("s_1", 0).await.expect("list");
         assert_eq!(

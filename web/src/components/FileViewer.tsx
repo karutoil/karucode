@@ -29,9 +29,9 @@ function isConflict(cause: unknown): boolean {
  *
  * It renders what it can — Markdown, HTML, images and PDFs get a real preview,
  * everything textual gets highlighted source — and lets the user edit and save
- * any complete text file. Saves are optimistic-concurrency checked with the size
- * that was loaded, so a file the agent rewrote underneath the editor is refused
- * rather than silently clobbered.
+ * any complete text file. Saves are optimistic-concurrency checked with the full
+ * digest that was loaded (plus size for older servers), so a file the agent
+ * rewrote underneath the editor is refused rather than silently clobbered.
  */
 export function FileViewer(): JSX.Element | null {
   const path = store.fileViewerPath.value;
@@ -53,9 +53,16 @@ export function FileViewer(): JSX.Element | null {
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  // Keystrokes can arrive while a save is awaiting the server. The completion
+  // compares that request's snapshot with this live value before closing anything.
+  const latestDraft = useRef('');
+  // Loads and saves share one operation clock. Changing file/project invalidates
+  // every older completion, including its error toast and `finally` cleanup.
+  const operationGeneration = useRef(0);
 
   useEffect(() => {
-    if (!path) return;
+    const generation = ++operationGeneration.current;
+    if (!path) return undefined;
     const controller = new AbortController();
     setState('loading');
     setError(null);
@@ -63,13 +70,14 @@ export function FileViewer(): JSX.Element | null {
     setCopied(false);
     setEditing(false);
     setDraft('');
+    setSaving(false);
     setSaveError(null);
     setConflict(false);
     setConfirmDiscard(false);
     setSavedAt(null);
     getWorkspaceFile(path, projectId, { signal: controller.signal })
       .then((result) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || operationGeneration.current !== generation) return;
         setFile(result);
         setDraft(result.content);
         // Open on the rendered view when there is one; source is the fallback and
@@ -79,11 +87,14 @@ export function FileViewer(): JSX.Element | null {
         setState('ready');
       })
       .catch((cause: unknown) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || operationGeneration.current !== generation) return;
         setError(toErrorMessage(cause));
         setState('error');
       });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      operationGeneration.current += 1;
+    };
   }, [path, projectId, retryKey]);
 
   useEffect(() => {
@@ -134,37 +145,70 @@ export function FileViewer(): JSX.Element | null {
       );
       return;
     }
+
+    // Nothing after `await` may use the changing render closures. This snapshot is
+    // the exact project/path/version the PUT is allowed to report back into.
+    const snapshot = {
+      path,
+      projectId,
+      file,
+      draft,
+      capability,
+      generation: ++operationGeneration.current,
+    };
+    const isCurrent = (): boolean =>
+      operationGeneration.current === snapshot.generation &&
+      store.fileViewerPath.value === snapshot.path &&
+      store.currentProjectId.value === snapshot.projectId;
+
+    latestDraft.current = snapshot.draft;
     setSaving(true);
     setSaveError(null);
     setConflict(false);
     try {
-      const result = await saveWorkspaceFile(path, draft, {
-        project: projectId,
-        // Omitted on the force path: the user just told us the mismatch is fine.
-        expectedSize: force ? undefined : file.size,
+      const result = await saveWorkspaceFile(snapshot.path, snapshot.draft, {
+        project: snapshot.projectId,
+        // Digest catches same-length rewrites; size keeps older servers guarded.
+        expectedDigest: force ? undefined : snapshot.file.digest,
+        expectedSize: force ? undefined : snapshot.file.size,
         force,
       });
+      if (!isCurrent()) return;
       setFile({
-        ...file,
-        content: draft,
+        ...snapshot.file,
+        content: snapshot.draft,
         size: result.size,
+        // An older server's write has no fresh digest; never retain the stale one.
+        digest: result.digest,
         truncated: false,
-        language: result.language ?? file.language,
+        language: result.language ?? snapshot.file.language,
       });
       setSavedAt(Date.now());
-      setEditing(false);
+      const hasNewerDraft = latestDraft.current !== snapshot.draft;
+      // The PUT saved exactly the request snapshot. Anything typed afterwards is
+      // still a live, unsaved draft, with the response digest as its new base.
+      setEditing(hasNewerDraft);
       setConfirmDiscard(false);
       // Saving a Markdown or HTML file is almost always followed by "did that
-      // render right?", so return to the preview rather than staying on source.
-      if (capability && hasRichPreview(capability.render)) setMode('preview');
-      store.pushToast(`Saved ${result.path}`, 'success', 2600);
+      // render right?", but only when there is no newer draft still being edited.
+      if (!hasNewerDraft && snapshot.capability && hasRichPreview(snapshot.capability.render)) {
+        setMode('preview');
+      }
+      store.pushToast(
+        hasNewerDraft
+          ? `Saved ${result.path}; newer edits remain unsaved.`
+          : `Saved ${result.path}`,
+        'success',
+        2600,
+      );
       // The tree's sizes are now stale; a cheap bump keeps the explorer honest.
       actions.noteWorkspaceFileChanged(result.path);
     } catch (cause) {
+      if (!isCurrent()) return;
       setSaveError(toErrorMessage(cause));
       setConflict(isConflict(cause));
     } finally {
-      setSaving(false);
+      if (isCurrent()) setSaving(false);
     }
   };
 
@@ -391,7 +435,10 @@ export function FileViewer(): JSX.Element | null {
                 autocapitalize="off"
                 wrap="off"
                 value={draft}
-                onInput={(event) => setDraft(event.currentTarget.value)}
+                onInput={(event) => {
+                  latestDraft.current = event.currentTarget.value;
+                  setDraft(event.currentTarget.value);
+                }}
               />
             </>
           ) : activeMode === 'preview' && previewable ? (

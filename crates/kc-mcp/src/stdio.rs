@@ -18,6 +18,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -31,6 +32,9 @@ struct Inner {
     name: String,
     pending: Pending,
     state: Mutex<State>,
+    /// The values intentionally supplied to this server. Its stdout/stderr and
+    /// exit diagnostics are untrusted and may reflect any of them.
+    secrets: BTreeMap<String, String>,
     /// False once the child is gone; used for honest status reporting.
     alive: AtomicBool,
 }
@@ -39,6 +43,9 @@ struct Inner {
 struct State {
     out: Option<mpsc::Sender<String>>,
     kill: Option<oneshot::Sender<()>>,
+    /// Kept until `close` so an explicit shutdown can await the actual reap.
+    /// Dropping this handle would only detach the task, not reap its child.
+    supervisor: Option<JoinHandle<()>>,
     pid: Option<u32>,
     error: Option<String>,
 }
@@ -48,12 +55,37 @@ impl Inner {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn redact(&self, text: &str) -> String {
+        crate::rpc::redact_secrets(text, &self.secrets)
+    }
+
     fn exit_reason(&self) -> String {
         let st = self.lock();
         match &st.error {
-            Some(e) => e.clone(),
+            Some(e) => self.redact(e),
             None => format!("MCP server `{}` is not running", self.name),
         }
+    }
+
+    /// Immediately stop accepting writes and signal process-group teardown.
+    /// Synchronous by contract: public owner drop cannot wait for a Tokio task.
+    fn close_now(&self) {
+        self.alive.store(false, Ordering::SeqCst);
+        let (kill, pid) = {
+            let mut st = self.lock();
+            st.out = None;
+            (st.kill.take(), st.pid)
+        };
+        if let Some(pid) = pid {
+            // Do not rely solely on the scheduled supervisor: drop may be the last
+            // opportunity before the caller stops yielding to that runtime.
+            crate::procgroup::signal_group(pid, crate::procgroup::SIGKILL);
+        }
+        if let Some(tx) = kill {
+            let _ = tx.send(());
+        }
+        self.pending
+            .fail_all(&format!("MCP server `{}` was closed", self.name));
     }
 
     fn handle_line(&self, line: &str) {
@@ -67,7 +99,7 @@ impl Inner {
                 warn!(
                     server = %self.name,
                     "ignoring invalid JSON on MCP stdout ({}); servers must log to stderr",
-                    truncate(line, 200)
+                    truncate(&self.redact(line), 200)
                 );
                 return;
             }
@@ -78,7 +110,7 @@ impl Inner {
                 // client implements no server→client methods, so log at debug.
                 debug!(server = %self.name, method, "MCP inbound message");
             } else {
-                debug!(server = %self.name, "unrecognised MCP message: {}", truncate(line, 200));
+                debug!(server = %self.name, "unrecognised MCP message: {}", truncate(&self.redact(line), 200));
             }
             return;
         };
@@ -87,7 +119,7 @@ impl Inner {
             Some(Err(McpError::Remote { code, message })) => Reply::Remote { code, message },
             Some(Err(other)) => Reply::Transport(other.describe()),
             None => {
-                debug!(server = %self.name, "ignoring inbound MCP message: {}", truncate(line, 200));
+                debug!(server = %self.name, "ignoring inbound MCP message: {}", truncate(&self.redact(line), 200));
                 return;
             }
         };
@@ -199,6 +231,7 @@ impl StdioTransport {
                 name,
                 pending: Pending::new(),
                 state: Mutex::new(State::default()),
+                secrets: env.clone(),
                 alive: AtomicBool::new(false),
             }),
             command,
@@ -306,6 +339,7 @@ impl Transport for StdioTransport {
                 // read end used to make the server's next stderr write fail with
                 // `EPIPE` and take the whole process down.
                 let result = pump_lines(stderr, MAX_LOG_LINE, OverLong::Truncate, |line| {
+                    let line = inner.redact(line);
                     debug!(server = %inner.name, "stderr: {line}");
                 })
                 .await;
@@ -350,8 +384,8 @@ impl Transport for StdioTransport {
             });
         }
 
-        // supervisor: owns the child
-        {
+        // supervisor: owns and reaps the child
+        let supervisor = {
             let inner = Arc::clone(&self.inner);
             tokio::spawn(async move {
                 // Backstop: the group must not outlive this task either.
@@ -366,8 +400,9 @@ impl Transport for StdioTransport {
                     _ = kill_rx => crate::procgroup::terminate_group(&mut child, pid).await,
                 };
                 inner.on_exit(status);
-            });
-        }
+            })
+        };
+        self.inner.lock().supervisor = Some(supervisor);
         Ok(())
     }
 
@@ -408,6 +443,7 @@ impl Transport for StdioTransport {
             cancel,
         )
         .await
+        .map_err(|error| error.redacted(&self.env))
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
@@ -424,22 +460,17 @@ impl Transport for StdioTransport {
     }
 
     async fn close(&self) {
-        let (kill, had_process) = {
-            let mut st = self.inner.lock();
-            let had = st.out.take().is_some();
-            (st.kill.take(), had)
-        };
-        if let Some(tx) = kill {
-            let _ = tx.send(());
+        self.inner.close_now();
+        let supervisor = self.inner.lock().supervisor.take();
+        if let Some(handle) = supervisor {
+            // This is a real reap, not a timing assumption. The kill signal was
+            // synchronous above and terminate_group has its own bounded escalation.
+            let _ = handle.await;
         }
-        if had_process {
-            // Give the supervisor a moment to reap the child.
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        self.inner
-            .pending
-            .fail_all(&format!("MCP server `{}` was closed", self.inner.name));
-        self.inner.alive.store(false, Ordering::SeqCst);
+    }
+
+    fn close_now(&self) {
+        self.inner.close_now();
     }
 
     fn alive(&self) -> bool {

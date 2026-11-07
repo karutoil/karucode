@@ -77,14 +77,26 @@
 // Pausing works the same way: the agent finishes its current turn, then parks.
 // That is the only point where stopping is free. A paused agent still holds its
 // subagent slot, and `kill_agents` still works on it - a paused agent is never
-// unkillable.
+// unkillable. HTTP controls and the model's pause/resume tools share one per-agent
+// serialization guard through the live flag and store transition, so opposing
+// calls cannot leave the two states disagreeing. `report_status` updates only its
+// advisory note/progress fields and cannot resurrect or rewind a control state.
 //
 // **Ownership.** An agent may pause, resume, kill and inspect the agents it
-// spawned and everything *they* spawned. Messaging is open to everyone, including
-// upwards to the parent: a child reporting a blocker is the case this exists for.
-// Welcome but worth knowing: a child can therefore inject a turn into its
-// parent's conversation. That is by design, and it is why the injected turn is
-// labelled with who sent it.
+// spawned and everything *they* spawned. Messaging is open within the sender's
+// session, including between siblings and upwards to the parent: a child reporting
+// a blocker is the case this exists for. Explicit ids in another session/project
+// are rejected as not live, even though the process-wide hub can see them. A child
+// can therefore inject a turn into its parent's conversation, but never into an
+// unrelated session. The injected turn is labelled with who sent it.
+//
+// Agent and top-level run mailboxes accept at most 32 messages. The 32nd message
+// is queued; the 33rd returns `full` without emitting a queued event. Parent-run
+// mail is scoped to the exact session and run generation. Once that run finishes,
+// cleanup rejects an unwinding child's late message instead of creating a queue
+// its successor could read or persist; the tool result says nothing was queued.
+// A named, already-settled child passed to `wait_for_agents` is resolved from its
+// persisted row (including its real summary), not mistaken for an unknown live id.
 //
 // # Limits
 //
@@ -184,6 +196,12 @@
 // an explanatory message. A *background* agent has no such result to carry the
 // failure, so it notifies and leaves it in its row and its summary.
 //
+// Cancellation is also safe while a spawn is still preparing its persisted task.
+// If that preparation future is dropped after creating the running row but before
+// the child loop exists, a preparation guard records the agent as `cancelled`,
+// releases its path claims and emits the terminal event; no unsupervised running
+// row or concurrency slot is left behind.
+//
 // # Gotchas
 //
 // * **Subagents share the parent's live workspace**, including dirty and
@@ -223,7 +241,7 @@
 use crate::agent::{LoopOutcome, LoopSpec};
 use crate::approvals::RuntimeApprovalGate;
 use crate::events::now_ms;
-use crate::hub::{AgentMessage, ControlError, LiveAgent, MAX_MAILBOX};
+use crate::hub::{AgentMessage, ControlError, LiveAgent, MailboxDelivery, MAX_MAILBOX};
 use crate::RuntimeInner;
 use async_trait::async_trait;
 use futures_util::FutureExt;
@@ -1109,8 +1127,76 @@ fn first_line(text: &str) -> String {
     }
 }
 
+/// Owns a persisted child until its real loop is spawned.
+///
+/// Preparing the task message can await the store while the parent is cancelled.
+/// The caller may then drop the whole spawn future, so cleanup after that await is
+/// not sufficient. Dropping this guard transfers cancellation finalization and
+/// claim release to a small tokio cleanup task; normal startup disarms it only
+/// after the supervised child task exists.
+struct UnsupervisedChildGuard {
+    inner: Arc<RuntimeInner>,
+    record: Option<AgentRecord>,
+}
+
+impl UnsupervisedChildGuard {
+    fn new(inner: &Arc<RuntimeInner>, record: &AgentRecord) -> Self {
+        Self {
+            inner: Arc::clone(inner),
+            record: Some(record.clone()),
+        }
+    }
+
+    fn disarm(mut self) {
+        self.record = None;
+    }
+}
+
+impl Drop for UnsupervisedChildGuard {
+    fn drop(&mut self) {
+        let Some(mut record) = self.record.take() else {
+            return;
+        };
+        record.status = AgentStatus::Cancelled.as_str().to_string();
+        record.error = Some("cancelled before the subagent supervisor started".to_string());
+        record.updated_at = now_ms();
+        record.finished_at = Some(record.updated_at);
+        let inner = Arc::clone(&self.inner);
+        let agent_id = record.id.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(agent = %agent_id, "no tokio runtime available to finalize an unsupervised subagent");
+            return;
+        };
+        runtime.spawn(async move {
+            let store = inner.deps.store.clone();
+            let summary = record.summary.clone();
+            let error = record.error.clone();
+            if let Err(e) = store.upsert_agent(&record).await {
+                tracing::warn!(agent = %agent_id, error = %e, "could not finalize an unsupervised subagent");
+            }
+            if let Err(e) = store.release_claims(&agent_id).await {
+                tracing::warn!(agent = %agent_id, error = %e, "could not release an unsupervised subagent's claims");
+            }
+            crate::events::EmitCtx::new(
+                Arc::clone(&inner),
+                record.session_id.clone(),
+                record.parent_run_id.clone(),
+                Some(agent_id.clone()),
+            )
+            .emit(Event::AgentFinished {
+                agent_id,
+                status: AgentStatus::Cancelled.as_str().to_string(),
+                summary,
+                error,
+            });
+        });
+    }
+}
+
 /// Everything a child loop needs that does not depend on it being started yet.
 struct PreparedChild {
+    /// Present until `start_child` has spawned the loop that will finalize it.
+    supervisor: UnsupervisedChildGuard,
     record: AgentRecord,
     child_depth: u8,
     model: kc_core::config::ModelConfig,
@@ -1179,6 +1265,7 @@ async fn prepare_child(
         progress: None,
     };
     store.upsert_agent(&record).await?;
+    let supervisor = UnsupervisedChildGuard::new(inner, &record);
     ctx.emit(Event::AgentSpawned {
         agent_id: agent_id.0.clone(),
         name: name.clone(),
@@ -1235,6 +1322,7 @@ async fn prepare_child(
                 summary: String::new(),
                 error: record.error.clone(),
             });
+            supervisor.disarm();
         }
         return Err(e);
     }
@@ -1249,6 +1337,7 @@ async fn prepare_child(
 
     let _ = cfg;
     Ok(PreparedChild {
+        supervisor,
         record,
         child_depth,
         model,
@@ -1276,6 +1365,7 @@ async fn start_child(
     cfg: kc_core::config::SubagentConfig,
 ) -> Arc<LiveAgent> {
     let PreparedChild {
+        supervisor,
         record,
         child_depth,
         model,
@@ -1366,6 +1456,9 @@ async fn start_child(
         )
         .await;
     });
+    // From this point the loop owns terminal status and claim cleanup. Before
+    // this statement, dropping `prepared` would have finalized it instead.
+    supervisor.disarm();
     live
 }
 
@@ -1674,6 +1767,44 @@ fn caller_label(ctx: &ToolCtx) -> String {
     }
 }
 
+/// Whether a persisted row is in the caller's transitive ownership subtree.
+///
+/// Settled agents are no longer in the hub, so a named late wait has to walk the
+/// same parent links in SQLite instead of accidentally becoming able to inspect
+/// any historical row in the process. Cycles and missing ancestors fail closed.
+async fn owns_persisted_agent(
+    inner: &Arc<RuntimeInner>,
+    session_id: &str,
+    caller: Option<&str>,
+    record: &AgentRecord,
+) -> Result<bool> {
+    if record.session_id != session_id {
+        return Ok(false);
+    }
+    let Some(caller) = caller else {
+        return Ok(true);
+    };
+    let mut ancestor = record.parent_agent_id.clone();
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(record.id.clone());
+    while let Some(id) = ancestor {
+        if id == caller {
+            return Ok(true);
+        }
+        if !visited.insert(id.clone()) {
+            return Ok(false);
+        }
+        let Some(parent) = inner.deps.store.get_agent(&id).await? else {
+            return Ok(false);
+        };
+        if parent.agent.session_id != session_id {
+            return Ok(false);
+        }
+        ancestor = parent.agent.parent_agent_id;
+    }
+    Ok(false)
+}
+
 pub(crate) struct SendMessageTool {
     inner: Weak<RuntimeInner>,
 }
@@ -1683,8 +1814,8 @@ impl Tool for SendMessageTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: SEND_MESSAGE_TOOL.to_string(),
-            description: "Deliver a message to one or more other agents - a subagent you spawned, \
-                          a sibling, or your own parent - as their next turn. It does not interrupt \
+            description: "Deliver a message to one or more other agents in this session - a subagent \
+                          you spawned, a sibling, or your own parent - as their next turn. It does not interrupt \
                           them mid-turn: it is queued and they read it at the top of their next \
                           iteration. Omit `agents` to message your parent."
                 .to_string(),
@@ -1738,6 +1869,10 @@ impl Tool for SendMessageTool {
             None => "the main agent".to_string(),
         };
         let session_id = ctx.approvals.session_id.0.clone();
+        // The root run id is part of the mailbox address. An unwinding child keeps
+        // its old context even after a successor starts, and must still target the
+        // retired generation rather than whichever run now owns the session.
+        let run_id = ctx.approvals.run_id.0.clone();
         let envelope = |content: String| AgentMessage {
             from: from.clone(),
             from_name: from_name.clone(),
@@ -1759,8 +1894,12 @@ impl Tool for SendMessageTool {
                     .and_then(|live| live.parent_agent_id.clone())
             });
             match parent {
-                Some(parent) => match inner.hub.deliver(&parent, envelope(message.clone())) {
-                    Some(depth) if depth <= MAX_MAILBOX => {
+                Some(parent) => match inner.hub.deliver_in_session(
+                    &session_id,
+                    &parent,
+                    envelope(message.clone()),
+                ) {
+                    MailboxDelivery::Queued { depth } => {
                         delivered += 1;
                         ctx.emit(Event::AgentMessage {
                             from_agent_id: from.clone(),
@@ -1771,34 +1910,46 @@ impl Tool for SendMessageTool {
                             "queued for your parent `{parent}` ({depth} per iteration)"
                         ));
                     }
-                    _ => lines.push(format!(
+                    MailboxDelivery::Full { .. } => lines.push(format!(
+                        "your parent `{parent}` already has {MAX_MAILBOX} unread messages; nothing was queued"
+                    )),
+                    MailboxDelivery::NotLive => lines.push(format!(
                         "could not deliver to `{parent}`: that agent is no longer running"
                     )),
                 },
                 None => {
                     // Not spawned by an agent, so the parent is the session's run.
-                    let depth = inner
-                        .hub
-                        .deliver_to_run(&session_id, envelope(message.clone()));
-                    if depth >= MAX_MAILBOX {
-                        lines.push(format!(
-                            "the parent's mailbox is full ({MAX_MAILBOX} messages); it will drain on its next turn"
-                        ));
-                    } else {
-                        delivered += 1;
-                        ctx.emit(Event::AgentMessage {
-                            from_agent_id: from.clone(),
-                            to: format!("run:{}", ctx.approvals.run_id.0),
-                            state: "queued".to_string(),
-                        });
-                        lines.push("queued for the main agent's run".to_string());
+                    match inner.hub.deliver_to_run(
+                        &session_id,
+                        &run_id,
+                        envelope(message.clone()),
+                    ) {
+                        MailboxDelivery::Queued { .. } => {
+                            delivered += 1;
+                            ctx.emit(Event::AgentMessage {
+                                from_agent_id: from.clone(),
+                                to: format!("run:{run_id}"),
+                                state: "queued".to_string(),
+                            });
+                            lines.push("queued for the main agent's run".to_string());
+                        }
+                        MailboxDelivery::Full { .. } => lines.push(format!(
+                            "the parent's mailbox is full ({MAX_MAILBOX} messages); nothing was queued"
+                        )),
+                        MailboxDelivery::NotLive => lines.push(
+                            "could not deliver to the main agent: that run is no longer running; nothing was queued"
+                                .to_string(),
+                        ),
                     }
                 }
             }
         } else {
             for target in &targets {
-                match inner.hub.deliver(target, envelope(message.clone())) {
-                    Some(depth) if depth <= MAX_MAILBOX => {
+                match inner
+                    .hub
+                    .deliver_in_session(&session_id, target, envelope(message.clone()))
+                {
+                    MailboxDelivery::Queued { .. } => {
                         delivered += 1;
                         ctx.emit(Event::AgentMessage {
                             from_agent_id: from.clone(),
@@ -1807,10 +1958,12 @@ impl Tool for SendMessageTool {
                         });
                         lines.push(format!("queued for `{target}`"));
                     }
-                    Some(_) => lines.push(format!(
+                    MailboxDelivery::Full { .. } => lines.push(format!(
                         "`{target}` already has {MAX_MAILBOX} unread messages; nothing was queued"
                     )),
-                    None => lines.push(format!("`{target}` is not a live agent any more")),
+                    MailboxDelivery::NotLive => lines.push(format!(
+                        "`{target}` is not a live agent in this session; nothing was queued"
+                    )),
                 }
             }
         }
@@ -1885,45 +2038,116 @@ impl Tool for WaitForAgentsTool {
 
         let session_id = ctx.approvals.session_id.0.clone();
         let caller = caller_id(&ctx);
-        let targets = match resolve_targets(&inner, &session_id, caller.as_deref(), &requested) {
-            Ok(targets) => targets,
-            Err(e) => return ToolOutcome::err(e.message()),
-        };
-        if targets.is_empty() {
-            // A named id that already finished is not "unknown": the answer the
-            // caller wants is the status it settled with, which the hub kept for
-            // exactly this race.
-            let mut already: Vec<String> = requested
+        let store = inner.deps.store.clone();
+        let mut targets = Vec::new();
+        let mut finished: Vec<(String, AgentStatus, Option<AgentRecord>)> = Vec::new();
+
+        if requested.is_empty() {
+            targets = match resolve_targets(&inner, &session_id, caller.as_deref(), &requested) {
+                Ok(targets) => targets,
+                Err(e) => return ToolOutcome::err(e.message()),
+            };
+        } else {
+            // Resolve each named live target with the existing hub ownership rule.
+            // If its entry has already been removed, an owned terminal SQLite row
+            // is an equally valid result: the caller named it and needs its stored
+            // summary, not an `Unknown` error caused by the timing of the cleanup.
+            let owned: std::collections::HashSet<String> = inner
+                .hub
+                .descendants_of(&session_id, caller.as_deref())
                 .iter()
-                .filter_map(|id| {
-                    inner
-                        .hub
-                        .settled_status(id)
-                        .map(|status| format!("`{id}` — {}", status.as_str()))
-                })
+                .map(|agent| agent.id.0.clone())
                 .collect();
-            already.sort();
-            if already.is_empty() {
-                return ToolOutcome::ok(format!(
-                    "{} has no live subagents to wait for",
-                    caller_label(&ctx)
-                ));
+            for id in &requested {
+                if let Some(live) = inner.hub.get(id) {
+                    if live.session_id != session_id {
+                        return ToolOutcome::err(ControlError::Unknown(id.clone()).message());
+                    }
+                    if !owned.contains(id) {
+                        return ToolOutcome::err(
+                            ControlError::NotOwned {
+                                agent: id.clone(),
+                                owner: live
+                                    .parent_agent_id
+                                    .clone()
+                                    .map(|parent| format!("agent `{parent}`"))
+                                    .unwrap_or_else(|| "the main agent".to_string()),
+                            }
+                            .message(),
+                        );
+                    }
+                    targets.push(live);
+                    continue;
+                }
+
+                let summary = match store.get_agent(id).await {
+                    Ok(Some(summary)) => summary,
+                    Ok(None) => {
+                        return ToolOutcome::err(ControlError::Unknown(id.clone()).message())
+                    }
+                    Err(e) => return ToolOutcome::err(format!("could not read agent `{id}`: {e}")),
+                };
+                let record = summary.agent;
+                if record.session_id != session_id {
+                    return ToolOutcome::err(ControlError::Unknown(id.clone()).message());
+                }
+                let owned =
+                    match owns_persisted_agent(&inner, &session_id, caller.as_deref(), &record)
+                        .await
+                    {
+                        Ok(owned) => owned,
+                        Err(e) => {
+                            return ToolOutcome::err(format!(
+                                "could not verify ownership of agent `{id}`: {e}"
+                            ))
+                        }
+                    };
+                if !owned {
+                    return ToolOutcome::err(
+                        ControlError::NotOwned {
+                            agent: id.clone(),
+                            owner: record
+                                .parent_agent_id
+                                .as_ref()
+                                .map(|parent| format!("agent `{parent}`"))
+                                .unwrap_or_else(|| "the main agent".to_string()),
+                        }
+                        .message(),
+                    );
+                }
+                let Some(status) = AgentStatus::parse(&record.status) else {
+                    return ToolOutcome::err(format!(
+                        "agent `{id}` has unknown persisted status `{}`",
+                        record.status
+                    ));
+                };
+                if status.is_live() {
+                    return ToolOutcome::err(format!(
+                        "agent `{id}` has persisted status `{}` but no live supervisor",
+                        status.as_str()
+                    ));
+                }
+                finished.push((id.clone(), status, Some(record)));
             }
+        }
+
+        if targets.is_empty() && finished.is_empty() {
             return ToolOutcome::ok(format!(
-                "nothing to wait for; already finished:\n{}",
-                already.join("\n")
+                "{} has no live subagents to wait for",
+                caller_label(&ctx)
             ));
         }
 
         let deadline = Instant::now() + timeout;
-        let mut finished: Vec<(String, AgentStatus)> = Vec::new();
         let mut still_running: Vec<String> = Vec::new();
         for agent in &targets {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let status = crate::hub::wait_for_settled(agent, remaining, &ctx.cancel).await;
             match status {
-                Ok(status) => finished.push((agent.id.0.clone(), status)),
-                Err(Some(status)) => finished.push((agent.id.0.clone(), status)),
+                Ok(status) | Err(Some(status)) => {
+                    let record = store.get_agent(&agent.id.0).await.ok().flatten();
+                    finished.push((agent.id.0.clone(), status, record.map(|row| row.agent)));
+                }
                 Err(None) => still_running.push(agent.id.0.clone()),
             }
             if ctx.cancel.is_cancelled() {
@@ -1931,7 +2155,6 @@ impl Tool for WaitForAgentsTool {
             }
         }
 
-        let store = inner.deps.store.clone();
         let mut content = String::new();
         if !finished.is_empty() {
             content.push_str(&format!(
@@ -1939,17 +2162,16 @@ impl Tool for WaitForAgentsTool {
                 finished.len(),
                 if finished.len() == 1 { "" } else { "s" }
             ));
-            for (id, status) in &finished {
-                let record = store.get_agent(id).await.ok().flatten();
+            for (id, status, record) in &finished {
                 content.push_str(&format!("\n`{id}` — {}\n", status.as_str()));
                 if let Some(record) = record {
-                    if let Some(error) = &record.agent.error {
+                    if let Some(error) = &record.error {
                         content.push_str(&format!("error: {error}\n"));
                     }
-                    content.push_str(if record.agent.summary.trim().is_empty() {
+                    content.push_str(if record.summary.trim().is_empty() {
                         "(no summary produced)\n"
                     } else {
-                        &record.agent.summary
+                        &record.summary
                     });
                     content.push('\n');
                 }
@@ -1970,7 +2192,7 @@ impl Tool for WaitForAgentsTool {
             meta: Some(serde_json::json!({
                 "finished": finished
                     .iter()
-                    .map(|(id, status)| serde_json::json!({ "agent_id": id, "status": status.as_str() }))
+                    .map(|(id, status, _)| serde_json::json!({ "agent_id": id, "status": status.as_str() }))
                     .collect::<Vec<_>>(),
                 "still_running": still_running,
             })),
@@ -2307,13 +2529,24 @@ impl Tool for PauseAgentsTool {
             .unwrap_or_else(|| "the main agent".to_string());
         let mut lines = Vec::new();
         for agent in &targets {
+            // Keep one per-agent guard across the live flag, CAS, fallback read
+            // and event. Runtime::control_agent uses the same guard for HTTP, so
+            // opposing pause/resume calls cannot cross their store transitions.
+            let control = match inner.hub.control(&agent.id.0).await {
+                Ok(control) => control,
+                Err(e) => {
+                    lines.push(format!("`{}`: {}", agent.id.0, e.message()));
+                    continue;
+                }
+            };
             let result = if self.resume {
-                inner.hub.resume(&agent.id.0, &by)
+                control.resume(&by)
             } else {
-                inner.hub.pause(&agent.id.0, &by)
+                control.pause(&by)
             };
             match result {
-                Ok(status) => match mark_paused(&inner, agent, !self.resume, status).await {
+                Ok(status) => match mark_paused(&inner, control.live(), !self.resume, status).await
+                {
                     Ok(actual) => {
                         let requested = if self.resume {
                             AgentStatus::Running
@@ -2548,15 +2781,21 @@ impl Tool for ReportStatusTool {
 
         inner.hub.note(&agent_id, note.clone(), progress);
 
-        // Persist it too: the roster is live, but a note is exactly the kind of
-        // thing a human wants to find later on a finished agent's row.
-        if let Ok(Some(summary)) = inner.deps.store.get_agent(&agent_id).await {
-            let mut record = summary.agent;
-            record.note = note.clone();
-            record.progress = progress;
-            record.updated_at = now_ms();
-            if let Err(e) = inner.deps.store.upsert_agent(&record).await {
-                tracing::warn!(agent = %agent_id, error = %e, "could not persist a status note");
+        // Persist only the advisory fields. A full-row read/upsert could replay a
+        // stale running/paused state over a concurrent control or terminal write.
+        // The store's narrow UPDATE deliberately knows nothing about those fields.
+        match inner
+            .deps
+            .store
+            .update_agent_note(&agent_id, &note, progress, now_ms())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(agent = %agent_id, "could not persist a status note: agent row no longer exists")
+            }
+            Err(e) => {
+                tracing::warn!(agent = %agent_id, error = %e, "could not persist a status note")
             }
         }
 
@@ -2596,7 +2835,62 @@ pub fn child_timeout_secs(cfg: &kc_core::config::SubagentConfig) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kc_core::ids::{RunId, SessionId};
+    use kc_core::paths::Workspace;
+    use kc_core::store::Store as _;
     use std::path::Path;
+
+    fn control_test_ctx(
+        inner: &Arc<RuntimeInner>,
+        session_id: &str,
+        agent_id: Option<&str>,
+    ) -> (ToolCtx, Arc<Mutex<Vec<Event>>>) {
+        control_test_ctx_for_run(inner, session_id, "r_test", agent_id)
+    }
+
+    fn control_test_ctx_for_run(
+        inner: &Arc<RuntimeInner>,
+        session_id: &str,
+        run_id: &str,
+        agent_id: Option<&str>,
+    ) -> (ToolCtx, Arc<Mutex<Vec<Event>>>) {
+        let session = SessionId::from_string(session_id);
+        let run = RunId::from_string(run_id);
+        let agent = agent_id.map(|id| AgentId(id.to_string()));
+        let gate: Arc<dyn kc_core::tool::ApprovalGate> = Arc::new(RuntimeApprovalGate::new(
+            Arc::clone(inner),
+            session.clone(),
+            run.clone(),
+            agent.clone(),
+            CancellationToken::new(),
+            agent_id.map_or(0, |_| 1),
+        ));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&events);
+        (
+            ToolCtx {
+                workspace: Arc::new(Workspace::new(std::env::temp_dir()).expect("temp workspace")),
+                cancel: CancellationToken::new(),
+                approvals: kc_core::tool::ApprovalHandle::new(gate, session, run, agent),
+                events: Arc::new(move |event| {
+                    recorded.lock().expect("recorded events").push(event);
+                }),
+                settings: Arc::clone(&inner.deps.settings),
+                depth: agent_id.map_or(0, |_| 1),
+                supports_images: false,
+                checkpoints: None,
+            },
+            events,
+        )
+    }
+
+    fn tool_request(name: &str, arguments: serde_json::Value) -> ToolCallRequest {
+        ToolCallRequest {
+            call_id: "test-call".into(),
+            name: name.into(),
+            arguments,
+        }
+    }
 
     #[test]
     fn limiter_counts_and_releases() {
@@ -2925,6 +3219,714 @@ mod tests {
             note: String::new(),
             progress: None,
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_messages_stay_in_the_senders_session() {
+        let inner = crate::tests_support::test_inner();
+        for (id, session, parent) in [
+            ("a_parent", "s_status", None),
+            ("a_sender", "s_status", Some("a_parent")),
+            ("a_sibling", "s_status", Some("a_parent")),
+            ("a_foreign", "s_other", None),
+        ] {
+            let mut record = status_record(id, AgentStatus::Running);
+            record.session_id = session.into();
+            record.parent_agent_id = parent.map(str::to_string);
+            inner.deps.store.upsert_agent(&record).await.unwrap();
+            inner.hub.insert(
+                &record,
+                record.parent_run_id.clone(),
+                1,
+                CancellationToken::new(),
+            );
+        }
+        let (ctx, events) = control_test_ctx(&inner, "s_status", Some("a_sender"));
+        let tool = SendMessageTool {
+            inner: Arc::downgrade(&inner),
+        };
+
+        let rejected = tool
+            .invoke(
+                tool_request(
+                    SEND_MESSAGE_TOOL,
+                    serde_json::json!({"message": "cross-session prompt", "agents": ["a_foreign"]}),
+                ),
+                ctx.clone(),
+            )
+            .await;
+        assert!(!rejected.ok, "{}", rejected.content);
+        assert_eq!(rejected.meta.unwrap()["delivered"], 0);
+        assert_eq!(inner.hub.get("a_foreign").unwrap().queued_mail(), 0);
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "rejection emitted an event"
+        );
+
+        // Siblings and parents are intentionally still addressable in the same
+        // session; the boundary is the sender's ctx session, not an ownership ban
+        // on messaging.
+        let accepted = tool
+            .invoke(
+                tool_request(
+                    SEND_MESSAGE_TOOL,
+                    serde_json::json!({"message": "same session", "agents": ["a_sibling", "a_parent"]}),
+                ),
+                ctx.clone(),
+            )
+            .await;
+        assert!(accepted.ok, "{}", accepted.content);
+        assert_eq!(accepted.meta.unwrap()["delivered"], 2);
+        assert_eq!(inner.hub.get("a_sibling").unwrap().queued_mail(), 1);
+        assert_eq!(inner.hub.get("a_parent").unwrap().queued_mail(), 1);
+
+        // The omitted-target parent path remains compatible too.
+        let parent = tool
+            .invoke(
+                tool_request(
+                    SEND_MESSAGE_TOOL,
+                    serde_json::json!({"message": "implicit parent"}),
+                ),
+                ctx,
+            )
+            .await;
+        assert!(parent.ok, "{}", parent.content);
+        assert_eq!(inner.hub.get("a_parent").unwrap().queued_mail(), 2);
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(
+                    |event| matches!(event, Event::AgentMessage { state, .. } if state == "queued")
+                )
+                .count(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_never_counts_a_dropped_33rd_message() {
+        let inner = crate::tests_support::test_inner();
+        let record = status_record("a_full", AgentStatus::Running);
+        let live = inner.hub.insert(
+            &record,
+            record.parent_run_id.clone(),
+            1,
+            CancellationToken::new(),
+        );
+        let (ctx, events) = control_test_ctx(&inner, "s_status", None);
+        let tool = SendMessageTool {
+            inner: Arc::downgrade(&inner),
+        };
+        for index in 0..MAX_MAILBOX {
+            let outcome = tool
+                .invoke(
+                    tool_request(
+                        SEND_MESSAGE_TOOL,
+                        serde_json::json!({"message": format!("m{index}"), "agents": ["a_full"]}),
+                    ),
+                    ctx.clone(),
+                )
+                .await;
+            assert!(
+                outcome.ok,
+                "message {} failed: {}",
+                index + 1,
+                outcome.content
+            );
+            assert_eq!(outcome.meta.unwrap()["delivered"], 1);
+        }
+        assert_eq!(events.lock().unwrap().len(), MAX_MAILBOX);
+
+        let rejected = tool
+            .invoke(
+                tool_request(
+                    SEND_MESSAGE_TOOL,
+                    serde_json::json!({"message": "dropped-33", "agents": ["a_full"]}),
+                ),
+                ctx,
+            )
+            .await;
+        assert!(
+            !rejected.ok,
+            "a full mailbox was acknowledged: {}",
+            rejected.content
+        );
+        assert!(rejected.content.contains("nothing was queued"));
+        assert_eq!(rejected.meta.unwrap()["delivered"], 0);
+        assert_eq!(live.queued_mail(), MAX_MAILBOX);
+        assert_eq!(
+            events.lock().unwrap().len(),
+            MAX_MAILBOX,
+            "the dropped message emitted a false delivered/queued event"
+        );
+        assert!(live
+            .take_mail()
+            .iter()
+            .all(|mail| mail.content != "dropped-33"));
+    }
+
+    #[tokio::test]
+    async fn retired_child_mail_is_rejected_and_never_persisted_by_a_successor_run() {
+        use crate::tests_support::{HarnessBuilder, Script};
+
+        let mut h = HarnessBuilder::new(vec![
+            Script::text("first answer"),
+            Script::text("successor answer"),
+        ])
+        .build()
+        .await;
+        let inner = Arc::clone(h.runtime.shared());
+        let first = h.submit("first run").await;
+        let first_events = h.collect_until_finished().await;
+        assert!(first_events.iter().any(|event| matches!(
+            &event.event,
+            Event::RunFinished { run_id, status, .. }
+                if run_id == &first.run_id && status == "completed"
+        )));
+        assert!(h.wait_idle().await.is_empty());
+
+        // Keep the exact tool context an old child would still hold while it
+        // unwinds after the parent retired its run mailbox.
+        let (old_ctx, published) = control_test_ctx_for_run(
+            &inner,
+            h.session(),
+            &first.run_id,
+            Some("a_late_cancelled_child"),
+        );
+        let tool = SendMessageTool {
+            inner: Arc::downgrade(&inner),
+        };
+        let send_late = |content: &'static str| {
+            tool_request(SEND_MESSAGE_TOOL, serde_json::json!({"message": content}))
+        };
+        let after_cleanup = tool
+            .invoke(send_late("late-old canceled instruction"), old_ctx.clone())
+            .await;
+        assert!(!after_cleanup.ok, "{}", after_cleanup.content);
+        assert_eq!(after_cleanup.meta.unwrap()["delivered"], 0);
+        assert!(after_cleanup.content.contains("no longer running"));
+        assert!(after_cleanup.content.contains("nothing was queued"));
+
+        let successor = h.submit("successor run").await;
+        assert_ne!(successor.run_id, first.run_id);
+        // The session now has a different active generation. The same old sender
+        // still cannot address it implicitly, before or after its first drain.
+        let after_successor = tool
+            .invoke(
+                send_late("late-old instruction after successor start"),
+                old_ctx,
+            )
+            .await;
+        assert!(!after_successor.ok, "{}", after_successor.content);
+        assert_eq!(after_successor.meta.unwrap()["delivered"], 0);
+        let successor_events = h.collect_until_finished().await;
+        assert!(successor_events.iter().any(|event| matches!(
+            &event.event,
+            Event::RunFinished { run_id, status, .. }
+                if run_id == &successor.run_id && status == "completed"
+        )));
+        assert!(published.lock().expect("published").is_empty());
+
+        let messages = h.session_messages().await;
+        for forbidden in [
+            "late-old canceled instruction",
+            "late-old instruction after successor start",
+        ] {
+            assert!(
+                !messages
+                    .iter()
+                    .any(|message| message.content.contains(forbidden)),
+                "retired mail was persisted: {messages:?}"
+            );
+            assert!(
+                !h.factory.requests().iter().any(|request| request
+                    .messages
+                    .iter()
+                    .any(|message| message.content.contains(forbidden))),
+                "retired mail reached the successor's provider: {forbidden}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_named_settled_child_returns_its_persisted_summary_after_hub_removal() {
+        let inner = crate::tests_support::test_inner();
+        let mut record = status_record("a_done", AgentStatus::Completed);
+        record.summary = "the real persisted child summary".into();
+        record.finished_at = Some(100);
+        inner.deps.store.upsert_agent(&record).await.unwrap();
+        let live = inner.hub.insert(
+            &record,
+            record.parent_run_id.clone(),
+            1,
+            CancellationToken::new(),
+        );
+        crate::hub::AgentHub::mark_settled(&live, AgentStatus::Completed);
+        inner.hub.finish(&record.id, AgentStatus::Completed);
+        assert!(inner.hub.get(&record.id).is_none());
+
+        let (ctx, _) = control_test_ctx(&inner, "s_status", None);
+        let outcome = WaitForAgentsTool {
+            inner: Arc::downgrade(&inner),
+        }
+        .invoke(
+            tool_request(
+                WAIT_FOR_AGENTS_TOOL,
+                serde_json::json!({"agents": [record.id]}),
+            ),
+            ctx,
+        )
+        .await;
+        assert!(outcome.ok, "{}", outcome.content);
+        assert!(outcome.content.contains("a_done"));
+        assert!(outcome.content.contains("completed"));
+        assert!(outcome.content.contains("the real persisted child summary"));
+        assert_eq!(outcome.meta.unwrap()["finished"][0]["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn a_named_settled_wait_rejects_unknown_and_other_session_rows() {
+        let inner = crate::tests_support::test_inner();
+        let mut foreign = status_record("a_foreign_done", AgentStatus::Completed);
+        foreign.session_id = "s_other".into();
+        foreign.summary = "must never cross the session boundary".into();
+        inner.deps.store.upsert_agent(&foreign).await.unwrap();
+        let (ctx, _) = control_test_ctx(&inner, "s_status", None);
+        let tool = WaitForAgentsTool {
+            inner: Arc::downgrade(&inner),
+        };
+        for id in ["a_missing", "a_foreign_done"] {
+            let outcome = tool
+                .invoke(
+                    tool_request(
+                        WAIT_FOR_AGENTS_TOOL,
+                        serde_json::json!({"agents": [id], "timeout_secs": 1}),
+                    ),
+                    ctx.clone(),
+                )
+                .await;
+            assert!(!outcome.ok, "waiting for {id} unexpectedly succeeded");
+            assert!(outcome.content.contains("no agent"), "{}", outcome.content);
+            assert!(!outcome.content.contains("must never cross"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_named_settled_wait_enforces_persisted_ownership() {
+        let inner = crate::tests_support::test_inner();
+        for (id, parent, summary) in [
+            ("a_owner", None, "owner"),
+            ("a_owned_done", Some("a_owner"), "owned terminal summary"),
+            ("a_unowned_done", None, "unowned terminal summary"),
+        ] {
+            let mut record = status_record(id, AgentStatus::Completed);
+            record.parent_agent_id = parent.map(str::to_string);
+            record.summary = summary.into();
+            inner.deps.store.upsert_agent(&record).await.unwrap();
+        }
+        let (ctx, _) = control_test_ctx(&inner, "s_status", Some("a_owner"));
+        let tool = WaitForAgentsTool {
+            inner: Arc::downgrade(&inner),
+        };
+        let owned = tool
+            .invoke(
+                tool_request(
+                    WAIT_FOR_AGENTS_TOOL,
+                    serde_json::json!({"agents": ["a_owned_done"]}),
+                ),
+                ctx.clone(),
+            )
+            .await;
+        assert!(owned.ok, "{}", owned.content);
+        assert!(owned.content.contains("owned terminal summary"));
+
+        let unowned = tool
+            .invoke(
+                tool_request(
+                    WAIT_FOR_AGENTS_TOOL,
+                    serde_json::json!({"agents": ["a_unowned_done"]}),
+                ),
+                ctx,
+            )
+            .await;
+        assert!(!unowned.ok);
+        assert!(unowned.content.contains("not yours to control"));
+        assert!(!unowned.content.contains("unowned terminal summary"));
+    }
+
+    #[tokio::test]
+    async fn opposing_http_and_model_controls_keep_live_and_persisted_states_equal() {
+        use crate::tests_support::{HarnessBuilder, Script};
+
+        let h = HarnessBuilder::new(vec![Script::text("unused")])
+            .build()
+            .await;
+        let inner = Arc::clone(h.runtime.shared());
+        let mut record = status_record("a_shared_control", AgentStatus::Running);
+        record.session_id = h.session().into();
+        h.store.upsert_agent(&record).await.unwrap();
+        let live = inner.hub.insert(
+            &record,
+            record.parent_run_id.clone(),
+            1,
+            CancellationToken::new(),
+        );
+        let (model_ctx, _) = control_test_ctx(&inner, h.session(), None);
+
+        // HTTP wins the guard and parks its store write. The model resume must not
+        // set live=false and then CAS running before the paused write has landed.
+        let pause_gate = h.store.gate_next("transition_agent_status");
+        let pausing = {
+            let runtime = Arc::clone(&h.runtime);
+            tokio::spawn(async move {
+                runtime
+                    .control_agent("a_shared_control", crate::AgentAction::Pause)
+                    .await
+            })
+        };
+        pause_gate.wait_entered().await;
+        assert!(live.is_paused());
+        let resuming = {
+            let inner = Arc::downgrade(&inner);
+            let ctx = model_ctx.clone();
+            tokio::spawn(async move {
+                PauseAgentsTool {
+                    inner,
+                    resume: true,
+                }
+                .invoke(
+                    tool_request(
+                        RESUME_AGENTS_TOOL,
+                        serde_json::json!({"agents": ["a_shared_control"]}),
+                    ),
+                    ctx,
+                )
+                .await
+            })
+        };
+        tokio::task::yield_now().await;
+        pause_gate.release();
+        assert_eq!(pausing.await.unwrap().unwrap(), AgentStatus::Paused);
+        assert!(resuming.await.unwrap().ok);
+        assert!(!live.is_paused());
+        assert_eq!(
+            inner
+                .deps
+                .store
+                .get_agent(&record.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .agent
+                .status,
+            "running"
+        );
+
+        // Reverse the callers and directions: model pause enters first and HTTP
+        // resume waits behind its store write.
+        let pause_gate = h.store.gate_next("transition_agent_status");
+        let pausing = {
+            let inner = Arc::downgrade(&inner);
+            let ctx = model_ctx.clone();
+            tokio::spawn(async move {
+                PauseAgentsTool {
+                    inner,
+                    resume: false,
+                }
+                .invoke(
+                    tool_request(
+                        PAUSE_AGENTS_TOOL,
+                        serde_json::json!({"agents": ["a_shared_control"]}),
+                    ),
+                    ctx,
+                )
+                .await
+            })
+        };
+        pause_gate.wait_entered().await;
+        assert!(live.is_paused());
+        let http_resume = {
+            let runtime = Arc::clone(&h.runtime);
+            tokio::spawn(async move {
+                runtime
+                    .control_agent("a_shared_control", crate::AgentAction::Resume)
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        pause_gate.release();
+        assert!(pausing.await.unwrap().ok);
+        assert_eq!(http_resume.await.unwrap().unwrap(), AgentStatus::Running);
+        assert!(!live.is_paused());
+        assert_eq!(
+            inner
+                .deps
+                .store
+                .get_agent(&record.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .agent
+                .status,
+            "running"
+        );
+
+        // Start from paused, let HTTP resume enter first, then oppose it with a
+        // model pause. The final state must be paused in memory and in SQLite.
+        let pause = inner.hub.control(&record.id).await.unwrap();
+        pause.pause("test").unwrap();
+        mark_paused(&inner, pause.live(), true, AgentStatus::Paused)
+            .await
+            .unwrap();
+        drop(pause);
+        let resume_gate = h.store.gate_next("transition_agent_status");
+        let resuming = {
+            let runtime = Arc::clone(&h.runtime);
+            tokio::spawn(async move {
+                runtime
+                    .control_agent("a_shared_control", crate::AgentAction::Resume)
+                    .await
+            })
+        };
+        resume_gate.wait_entered().await;
+        assert!(!live.is_paused());
+        let pausing = {
+            let inner = Arc::downgrade(&inner);
+            let ctx = model_ctx.clone();
+            tokio::spawn(async move {
+                PauseAgentsTool {
+                    inner,
+                    resume: false,
+                }
+                .invoke(
+                    tool_request(
+                        PAUSE_AGENTS_TOOL,
+                        serde_json::json!({"agents": ["a_shared_control"]}),
+                    ),
+                    ctx,
+                )
+                .await
+            })
+        };
+        tokio::task::yield_now().await;
+        resume_gate.release();
+        assert_eq!(resuming.await.unwrap().unwrap(), AgentStatus::Running);
+        assert!(pausing.await.unwrap().ok);
+        assert!(live.is_paused());
+        assert_eq!(
+            inner
+                .deps
+                .store
+                .get_agent(&record.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .agent
+                .status,
+            "paused"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_status_fault_races_preserve_pause_resume_and_terminal_fields() {
+        use crate::tests_support::{HarnessBuilder, Script};
+
+        let h = HarnessBuilder::new(vec![Script::text("unused")])
+            .build()
+            .await;
+        let inner = Arc::clone(h.runtime.shared());
+        let mut record = status_record("a_note_race", AgentStatus::Running);
+        record.session_id = h.session().into();
+        h.store.upsert_agent(&record).await.unwrap();
+        inner.hub.insert(
+            &record,
+            record.parent_run_id.clone(),
+            1,
+            CancellationToken::new(),
+        );
+        let (ctx, _) = control_test_ctx(&inner, h.session(), Some("a_note_race"));
+
+        for (resume, expected, note, progress) in [
+            (false, AgentStatus::Paused, "pause race", Some(0.4)),
+            (true, AgentStatus::Running, "resume race", Some(0.8)),
+        ] {
+            let gate = h.store.gate_next("update_agent_note");
+            let reporting = {
+                let inner = Arc::downgrade(&inner);
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    ReportStatusTool { inner }
+                        .invoke(
+                            tool_request(
+                                REPORT_STATUS_TOOL,
+                                serde_json::json!({"note": note, "progress": progress}),
+                            ),
+                            ctx,
+                        )
+                        .await
+                })
+            };
+            gate.wait_entered().await;
+            let control = inner.hub.control("a_note_race").await.unwrap();
+            let status = if resume {
+                control.resume("test").unwrap()
+            } else {
+                control.pause("test").unwrap()
+            };
+            assert_eq!(
+                mark_paused(&inner, control.live(), !resume, status)
+                    .await
+                    .unwrap(),
+                expected
+            );
+            drop(control);
+            gate.release();
+            assert!(reporting.await.unwrap().ok);
+
+            let after = inner
+                .deps
+                .store
+                .get_agent("a_note_race")
+                .await
+                .unwrap()
+                .unwrap()
+                .agent;
+            assert_eq!(after.status, expected.as_str());
+            assert_eq!(after.note, note);
+            assert_eq!(after.progress, progress);
+            assert_eq!(after.summary, record.summary);
+            assert_eq!(after.iterations, record.iterations);
+            assert_eq!(after.finished_at, record.finished_at);
+        }
+
+        // The same narrow write also cannot replay stale iterations/summary or a
+        // live status over a terminal full-row finalization.
+        let gate = h.store.gate_next("update_agent_note");
+        let reporting = {
+            let inner = Arc::downgrade(&inner);
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                ReportStatusTool { inner }
+                    .invoke(
+                        tool_request(
+                            REPORT_STATUS_TOOL,
+                            serde_json::json!({"note": "terminal race", "progress": 1.0}),
+                        ),
+                        ctx,
+                    )
+                    .await
+            })
+        };
+        gate.wait_entered().await;
+        let mut terminal = h
+            .store
+            .get_agent("a_note_race")
+            .await
+            .unwrap()
+            .unwrap()
+            .agent;
+        terminal.status = AgentStatus::Completed.as_str().into();
+        terminal.iterations = 7;
+        terminal.summary = "terminal summary".into();
+        terminal.finished_at = Some(9_999);
+        h.store.upsert_agent(&terminal).await.unwrap();
+        gate.release();
+        assert!(reporting.await.unwrap().ok);
+        let after = h
+            .store
+            .get_agent("a_note_race")
+            .await
+            .unwrap()
+            .unwrap()
+            .agent;
+        assert_eq!(after.status, "completed");
+        assert_eq!(after.iterations, 7);
+        assert_eq!(after.summary, "terminal summary");
+        assert_eq!(after.finished_at, Some(9_999));
+        assert_eq!(after.note, "terminal race");
+        assert_eq!(after.progress, Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_delayed_task_append_finalizes_claims_without_a_loop() {
+        use crate::tests_support::{HarnessBuilder, Script};
+
+        let h = HarnessBuilder::new(vec![Script::text("unused")])
+            .build()
+            .await;
+        let inner = Arc::clone(h.runtime.shared());
+        let (mut ctx, _) = control_test_ctx(&inner, h.session(), None);
+        let cancel = CancellationToken::new();
+        ctx.cancel = cancel.clone();
+        let gate = h.store.gate_next("append_message");
+        let spawned = {
+            let inner = Arc::clone(&inner);
+            let task_cancel = cancel.clone();
+            tokio::spawn(async move {
+                let spawn = SpawnRequest {
+                    task: "cancel while preparing".into(),
+                    name: Some("delayed".into()),
+                    role: "worker".into(),
+                    owned_paths: vec!["delayed/file.txt".into()],
+                    model: None,
+                };
+                tokio::select! {
+                    biased;
+                    _ = task_cancel.cancelled() => None,
+                    outcome = spawn_batch(
+                        &inner,
+                        &ctx,
+                        vec![spawn],
+                        &SpawnOptions { background: false, wait: false },
+                        false,
+                    ) => Some(outcome),
+                }
+            })
+        };
+
+        gate.wait_entered().await;
+        let agents = h.store.agents();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].status, "running");
+        assert_eq!(h.store.claims().len(), 1);
+        assert!(
+            inner.hub.get(&agents[0].id).is_none(),
+            "preparation has no live supervisor yet"
+        );
+
+        cancel.cancel();
+        assert!(
+            spawned.await.unwrap().is_none(),
+            "the cancelled spawn future must be dropped"
+        );
+        gate.release();
+        let agent_id = agents[0].id.clone();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let agent = h.store.get_agent(&agent_id).await.unwrap().unwrap().agent;
+            if agent.status == "cancelled" && h.store.claims().is_empty() {
+                assert!(agent.finished_at.is_some());
+                assert!(agent
+                    .error
+                    .unwrap_or_default()
+                    .contains("before the subagent supervisor"));
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "unsupervised row/claims were not cleaned up"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(inner.hub.list_all().is_empty());
+        assert!(h.wait_idle().await.is_empty());
+        assert_eq!(
+            inner.subagents.active(),
+            0,
+            "the unspawned child's slot must be released"
+        );
     }
 
     #[tokio::test]

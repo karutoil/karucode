@@ -2055,6 +2055,71 @@ async fn workspace_file_can_be_saved_from_the_editor() {
 }
 
 #[tokio::test]
+async fn workspace_editor_digest_rejects_an_equal_length_replacement() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    std::fs::write(h.workspace_path().join("versioned.txt"), "alpha").unwrap();
+    let loaded = h.get("/api/workspace/file?path=versioned.txt").await;
+    assert_eq!(loaded.status, StatusCode::OK, "{}", loaded.text());
+    let snapshot = loaded.json();
+    let digest = snapshot["digest"].as_str().unwrap().to_string();
+    assert!(digest.starts_with("sha256:"));
+    assert_eq!(digest.len(), "sha256:".len() + 64);
+
+    // This replacement fits the old size check exactly; only content versioning
+    // can tell the editor's snapshot from the current bytes.
+    std::fs::write(h.workspace_path().join("versioned.txt"), "ALPHA").unwrap();
+    let stale = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file?path=versioned.txt",
+            Some(json!({
+                "content": "client edit",
+                "expected_size": snapshot["size"],
+                "expected_digest": digest,
+            })),
+            &[],
+        )
+        .await;
+    assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.text());
+    assert_eq!(
+        std::fs::read_to_string(h.workspace_path().join("versioned.txt")).unwrap(),
+        "ALPHA"
+    );
+
+    let reloaded = h.get("/api/workspace/file?path=versioned.txt").await.json();
+    let current_digest = reloaded["digest"].as_str().unwrap().to_string();
+    let saved = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file?path=versioned.txt",
+            Some(json!({
+                "content": "client edit",
+                "expected_digest": current_digest,
+            })),
+            &[],
+        )
+        .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.text());
+    assert!(saved.json()["digest"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("sha256:")));
+    assert_eq!(
+        std::fs::read_to_string(h.workspace_path().join("versioned.txt")).unwrap(),
+        "client edit"
+    );
+
+    let invalid = h
+        .send(
+            Method::PUT,
+            "/api/workspace/file?path=versioned.txt",
+            Some(json!({"content":"x", "expected_digest":"sha256:nope"})),
+            &[],
+        )
+        .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn mutations_require_the_csrf_header_and_a_matching_origin() {
     let h = HarnessBuilder::new(Vec::new()).build().await;
 
@@ -4306,6 +4371,163 @@ async fn controlling_an_agent_is_routed_and_refuses_what_it_cannot_do() {
 }
 
 // ---------------------------------------------------------------------------
+// Plugin-contributed UI (buttons, commands, hides, ui/action)
+// ---------------------------------------------------------------------------
+
+/// A plugin that contributes a button, a palette command and two hides — one
+/// allowed, one refused — and answers `ui/action`.
+const UI_PLUGIN: &str = r#"
+import json, sys
+
+MANIFEST = {
+    "name": "kc-ui", "version": "0.3.0", "protocol": "1",
+    "capabilities": ["tools", "ui"], "permissions": [], "hooks": [],
+    "ui": [
+        {"kind": "button", "id": "check", "label": "Run check", "icon": "bolt",
+         "slot": "composer.toolbar", "action": "check"},
+        {"kind": "command", "id": "plan", "label": "Ask about the plan",
+         "message": "Summarise the plan."},
+        {"kind": "command", "id": "fail", "label": "Fail on purpose", "action": "bad"},
+        {"kind": "hide", "target": "inspector.tab.agents"},
+        {"kind": "hide", "target": "composer.stop"}
+    ]
+}
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    params = req.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": MANIFEST})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": []}})
+    elif method == "ui/action" and params.get("action") == "check":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "ok": True,
+            "message": "checked " + str(params.get("session_id")),
+            "refresh": ["todo"]
+        }})
+    elif method == "ui/action" and params.get("action") == "bad":
+        send({"jsonrpc": "2.0", "id": rid,
+              "error": {"code": -32000, "message": "the checker is offline"}})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": rid, "result": None})
+        break
+    elif rid is not None:
+        send({"jsonrpc": "2.0", "id": rid,
+              "error": {"code": -32601, "message": "unknown"}})
+"#;
+
+#[tokio::test]
+async fn plugin_ui_contributions_reach_the_config_payload() {
+    let h = HarnessBuilder::new(Vec::new())
+        .plugin(inline_plugin("kc-ui", UI_PLUGIN))
+        .build()
+        .await;
+
+    let config = h.get("/api/config").await.json();
+    let ui = &config["plugin_ui"];
+    let contributions = ui["contributions"].as_array().expect("contributions");
+    assert_eq!(contributions.len(), 3, "{ui}");
+    let button = &contributions[0];
+    assert_eq!(button["plugin"], json!("kc-ui"));
+    assert_eq!(button["version"], json!("0.3.0"));
+    assert_eq!(button["kind"], json!("button"));
+    assert_eq!(button["hosted_id"], json!("plugin__kc-ui__check"));
+    assert_eq!(button["slot"], json!("composer.toolbar"));
+    assert_eq!(button["action"], json!("check"));
+    assert_eq!(contributions[1]["kind"], json!("command"));
+
+    // The refuse-able hide is not applied; the allowed one names its owner.
+    let hidden = ui["hidden"].as_array().expect("hidden");
+    assert_eq!(hidden.len(), 1, "{ui}");
+    assert_eq!(hidden[0]["target"], json!("inspector.tab.agents"));
+    assert_eq!(hidden[0]["plugins"], json!(["kc-ui"]));
+
+    // The catalogues travel with the payload so the UI never hard-codes a slot.
+    let slots = ui["slots"].as_array().expect("slots");
+    assert!(slots.iter().any(|s| s == "composer.toolbar"), "{ui}");
+    let hideable = ui["hideable"].as_array().expect("hideable");
+    assert!(hideable.iter().any(|s| s == "composer.attach"), "{ui}");
+
+    // The dropped hide is explained in the plugin's own diagnostics.
+    let plugins = h.get("/api/plugins").await.json();
+    let note = plugins["plugins"][0]["error"].as_str().unwrap_or_default();
+    assert!(note.contains("composer.stop"), "{note}");
+}
+
+#[tokio::test]
+async fn a_ui_action_runs_over_http_with_the_caller_scope() {
+    let h = HarnessBuilder::new(Vec::new())
+        .plugin(inline_plugin("kc-ui", UI_PLUGIN))
+        .build()
+        .await;
+    let session = h.create_session(Some("ui action session")).await;
+
+    let response = h
+        .post(
+            &format!("/api/plugins/kc-ui/ui/actions/check?session={session}"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.text());
+    let body = response.json();
+    assert_eq!(body["ok"], json!(true));
+    assert_eq!(body["message"], json!(format!("checked {session}")));
+    assert_eq!(body["refresh"], json!(["todo"]));
+    assert_eq!(body["open_url"], json!(null));
+
+    // An action nothing declares is a 404 that names what the plugin offers.
+    let unknown = h
+        .post("/api/plugins/kc-ui/ui/actions/absent", json!({}))
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown.error_code(), "not_found");
+    let text = unknown.text();
+    assert!(text.contains("check"), "{text}");
+
+    // A plugin-side failure is a 502, like a failed panel read.
+    let failed = h.post("/api/plugins/kc-ui/ui/actions/bad", json!({})).await;
+    assert_eq!(failed.status, StatusCode::BAD_GATEWAY, "{}", failed.text());
+    let text = failed.text();
+    assert!(text.contains("the checker is offline"), "{text}");
+}
+
+#[tokio::test]
+async fn an_unknown_plugin_ui_action_is_a_404() {
+    let h = HarnessBuilder::new(Vec::new())
+        .plugin(inline_plugin("kc-ui", UI_PLUGIN))
+        .build()
+        .await;
+    let response = h
+        .post("/api/plugins/nope/ui/actions/check", json!({}))
+        .await;
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+    assert!(response.text().contains("nope"));
+}
+
+#[tokio::test]
+async fn a_server_without_ui_contributions_still_publishes_the_catalogues() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let config = h.get("/api/config").await.json();
+    let ui = &config["plugin_ui"];
+    assert_eq!(ui["contributions"], json!([]));
+    assert_eq!(ui["hidden"], json!([]));
+    assert!(
+        !ui["slots"].as_array().unwrap().is_empty(),
+        "a UI with no plugin controls still says which slots exist"
+    );
+    // The older panel field keeps working alongside it.
+    assert!(config.get("plugin_panels").is_some());
+}
+
+// ---------------------------------------------------------------------------
 // Plugin-contributed inspector panels
 // ---------------------------------------------------------------------------
 
@@ -6483,6 +6705,58 @@ async fn control_chat_lists_agents_of_a_project_session_and_of_itself() {
     assert_eq!(mine["agents"][0]["session_id"], central.as_str());
 }
 
+#[tokio::test]
+async fn control_rename_emits_the_canonical_session_row_once() {
+    let h = HarnessBuilder::new(vec![])
+        .no_ai_titles()
+        .auto_approvals()
+        .build()
+        .await;
+    let target = h
+        .post("/api/sessions", json!({"title":"Before control"}))
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let central = h.post("/api/control/sessions", json!({})).await.json()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_, _, events_body) = h.open_events(&format!("?session={target}"), &[]).await;
+
+    h.factory.push(tool_call(
+        "control_rename_session",
+        &json!({"session_id":target, "title":"  Canonical title  "}).to_string(),
+    ));
+    h.factory.push(text("Renamed."));
+    let sent = h
+        .post(
+            &format!("/api/sessions/{central}/messages"),
+            json!({"content":"Rename the target"}),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::ACCEPTED, "{}", sent.text());
+    let events = collect_events_until(events_body, "session_renamed").await;
+    let renamed: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "session_renamed")
+        .collect();
+    assert_eq!(renamed.len(), 1, "{events:?}");
+    assert_eq!(renamed[0]["session_id"], target);
+    assert_eq!(renamed[0]["title"], "Canonical title");
+    h.wait_until_idle(&central).await;
+    assert_eq!(
+        h.get(&format!("/api/sessions/{target}")).await.json()["session"]["title"],
+        "Canonical title"
+    );
+    let detail = h.get(&format!("/api/sessions/{central}")).await.json();
+    let answer = tool_result_json(&detail, "renamed");
+    assert_eq!(answer["renamed"], true);
+    assert_eq!(answer["session_id"], target);
+    assert_eq!(answer["title"], "Canonical title");
+}
+
 /// `control_set_session_model` does what the model switcher does: it pins one
 /// session, refuses a model the install does not offer, and clears the pin.
 #[tokio::test]
@@ -6947,7 +7221,7 @@ async fn a_replay_reports_that_no_run_ever_started() {
         "control_start_session",
         &json!({"request_id": "interrupted-launch", "project_id": project,
                 "prompt": "Port the CLI to Rust"})
-            .to_string(),
+        .to_string(),
     ));
     h.factory.push(text("Checked."));
     assert_eq!(
@@ -7294,4 +7568,39 @@ async fn artifact_frames_use_a_capability_instead_of_the_master_query_token() {
         )
         .await;
     assert_eq!(posted.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn an_artifact_with_multibyte_text_at_the_sniff_boundary_does_not_panic() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let source = format!("{}😀<p>still rendered</p>", "a".repeat(399));
+    assert!(!source.is_char_boundary(400));
+    let response = h.post("/api/artifacts", json!({ "html": source })).await;
+    assert_eq!(response.status, StatusCode::CREATED, "{}", response.text());
+    let url = response.json()["url"].as_str().unwrap().to_string();
+    let document = h.get(&url).await;
+    assert_eq!(document.status, StatusCode::OK, "{}", document.text());
+    assert!(document.text().contains("still rendered"));
+}
+
+#[tokio::test]
+async fn event_stream_exposes_one_epoch_across_reconnect_with_a_cursor() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let (status, headers, body) = h.open_events("", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let epoch = headers["x-karucode-event-epoch"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(epoch.len(), 32);
+    drop(body);
+
+    let (status, headers, body) = h
+        .open_events("?last_event_id=0", &[("last-event-id", "0")])
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-karucode-event-epoch"], epoch);
+    // The normal replay path is unchanged; this response only advertises which
+    // process owns the cursor.
+    drop(body);
 }

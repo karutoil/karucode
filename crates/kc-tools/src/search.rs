@@ -66,7 +66,7 @@ pub struct SearchQuery {
     pub max_matches_per_file: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchMatch {
     /// Workspace-relative path.
     pub path: String,
@@ -230,6 +230,11 @@ pub async fn search_with_rg(
         .arg(&query.pattern)
         .arg(&base)
         .env("LC_ALL", "C")
+        // A configured `--pre` command would turn this read-only tool into an
+        // arbitrary command runner without going through the approval policy.
+        // Search never needs a user-level ripgrep config: every option it uses is
+        // explicit above.
+        .env_remove("RIPGREP_CONFIG_PATH")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -267,7 +272,14 @@ pub async fn search_with_rg(
                     if query.files_only {
                         read_match_paths(stdout_pipe.take(), ws, &base, max_results).await
                     } else {
-                        read_matches(stdout_pipe.take(), ws, &base, max_results).await
+                        read_matches(
+                            stdout_pipe.take(),
+                            ws,
+                            &base,
+                            max_results,
+                            query.context.min(MAX_CONTEXT_LINES),
+                        )
+                        .await
                     }
                 },
                 read_pipe(&mut stderr_pipe)
@@ -338,29 +350,32 @@ pub async fn search_with_rg(
     }))
 }
 
-/// Read ripgrep's stdout record by record, stopping as soon as `max_results`
-/// matches have been collected.
+/// Read ripgrep's stdout record by record, stopping at `max_results` real matches
+/// but retaining the requested after-context for the last accepted match.
 ///
-/// Takes ownership of the pipe so it is dropped (closed) on return: ripgrep then
-/// dies of SIGPIPE instead of writing the rest of a huge result set, and cannot
-/// block on a full pipe while the caller waits for it to exit. The buffer never
-/// holds more than one record, so memory is bounded by [`MAX_RG_RECORD_BYTES`]
-/// rather than by the size of the output.
+/// With `--null`, a path is terminated by NUL and the record by the first newline
+/// *after* that NUL. Newlines before it are legal filename bytes and must not be
+/// treated as record boundaries. The pending buffer is bounded by
+/// [`MAX_RG_RECORD_BYTES`], and taking ownership of the pipe closes it as soon as
+/// enough output has been consumed so ripgrep cannot block writing the rest.
 ///
-/// Returns `(entries, matched, hit the cap)`. `entries` interleaves matching
-/// lines and their context lines exactly as ripgrep emitted them, minus the `--`
-/// group separators (the built-in walker emits none, and the line numbers already
-/// say where a group resumes).
+/// Returns `(entries, matched, hit the cap)`. Group separators are omitted, just
+/// as they are by the built-in walker.
 async fn read_matches<R: tokio::io::AsyncRead + Unpin>(
     pipe: Option<R>,
     ws: &Workspace,
     base: &Path,
     max_results: usize,
+    context: usize,
 ) -> (Vec<SearchMatch>, usize, bool) {
-    let mut matches: Vec<SearchMatch> = Vec::new();
-    let mut matched = 0usize;
+    let mut out = RgMatches {
+        matches: Vec::new(),
+        matched: 0,
+        max_results: max_results.max(1),
+        trailing_context: None,
+    };
     let Some(pipe) = pipe else {
-        return (matches, matched, false);
+        return (out.matches, out.matched, false);
     };
     let mut reader = tokio::io::BufReader::new(pipe);
     let mut record: Vec<u8> = Vec::new();
@@ -372,33 +387,84 @@ async fn read_matches<R: tokio::io::AsyncRead + Unpin>(
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         };
-        let mut rest = &chunk[..n];
-        while let Some(nl) = rest.iter().position(|b| *b == b'\n') {
-            record.extend_from_slice(&rest[..nl]);
-            if let Some(found) = parse_rg_record(ws, base, &record) {
-                matched += usize::from(!found.is_context);
-                matches.push(found);
-                if matched >= max_results {
-                    return (matches, matched, true);
+        record.extend_from_slice(&chunk[..n]);
+        while let Some(end) = ordinary_record_end(&record) {
+            let complete = record[..end].to_vec();
+            record.drain(..=end);
+            if complete == b"--" {
+                // At the cap a separator proves the accepted match's context is
+                // complete. Before it, separators carry no result information.
+                if out.trailing_context.is_some() {
+                    return (out.matches, out.matched, true);
+                }
+                continue;
+            }
+            if let Some(found) = parse_rg_record(ws, base, &complete) {
+                if out.accept(found, context) {
+                    return (out.matches, out.matched, true);
                 }
             }
-            record.clear();
-            rest = &rest[nl + 1..];
         }
-        record.extend_from_slice(rest);
         if record.len() > MAX_RG_RECORD_BYTES {
             // A single absurdly long record: drop it rather than grow forever.
             record.clear();
         }
     }
-    if !record.is_empty() {
+    if !record.is_empty() && record != b"--" {
         if let Some(found) = parse_rg_record(ws, base, &record) {
-            matched += usize::from(!found.is_context);
-            matches.push(found);
+            out.accept(found, context);
         }
     }
-    let hit_limit = matched >= max_results;
-    (matches, matched, hit_limit)
+    let hit_limit = out.matched >= out.max_results;
+    (out.matches, out.matched, hit_limit)
+}
+
+/// Return the newline delimiter for one ordinary ripgrep record. A bare `--\n`
+/// group separator has no NUL; all real records do, because `--with-filename` and
+/// `--null` are always passed together.
+fn ordinary_record_end(record: &[u8]) -> Option<usize> {
+    // Check a leading separator before scanning ahead for a later record's NUL.
+    if record.starts_with(b"--\n") {
+        return Some(2);
+    }
+    let nul = record.iter().position(|b| *b == 0)?;
+    record[nul + 1..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map(|nl| nul + 1 + nl)
+}
+
+struct RgMatches {
+    matches: Vec<SearchMatch>,
+    matched: usize,
+    max_results: usize,
+    trailing_context: Option<usize>,
+}
+
+impl RgMatches {
+    /// Add one record. `true` means no more output may be accepted. In particular,
+    /// once the cap is hit a later real match is neither counted nor relabelled as
+    /// context; only the accepted hit's own bounded after-context may follow.
+    fn accept(&mut self, found: SearchMatch, context: usize) -> bool {
+        if let Some(remaining) = self.trailing_context {
+            if !found.is_context || remaining == 0 {
+                return true;
+            }
+            self.matches.push(found);
+            let remaining = remaining - 1;
+            self.trailing_context = Some(remaining);
+            return remaining == 0;
+        }
+
+        self.matched += usize::from(!found.is_context);
+        let capped = !found.is_context && self.matched >= self.max_results;
+        self.matches.push(found);
+        if capped {
+            self.trailing_context = Some(context);
+            return context == 0;
+        }
+        false
+    }
 }
 
 /// Read `--files-with-matches --null` output: a NUL-terminated path per file.
@@ -544,9 +610,13 @@ async fn read_pipe<R: tokio::io::AsyncRead + Unpin>(pipe: &mut Option<R>) -> Vec
 /// (verified: 200 CJK chars -> rg 637 bytes / 237 chars, builtin 606 bytes / 206
 /// chars before this change).
 fn normalise_match_text(text: &str) -> String {
-    // ripgrep appends this marker when `--max-columns` cut the line; our own
-    // truncation replaces it, so both engines show the same `…`.
-    let text = text.trim_end_matches(" [... omitted end of long line]");
+    // Never strip ripgrep's preview marker as if it were unambiguous syntax: a
+    // short real line is allowed to end in those exact bytes. The marker is at
+    // least 1200 bytes into any rg-generated preview (`--max-columns` is 1200),
+    // while a Rust char is at most four bytes. It therefore cannot begin within
+    // the first 300 characters of a generated preview, and ordinary character
+    // truncation removes it whenever the line really was long. If it is literal
+    // text on a short line it survives intact.
     truncate_columns(text, MAX_MATCH_COLUMNS)
 }
 
@@ -746,8 +816,6 @@ impl Scan<'_> {
                 break;
             }
         }
-        hits.truncate(per_file_limit);
-
         if self.files_only {
             if hits.is_empty() {
                 return Ok(false);
@@ -763,22 +831,37 @@ impl Scan<'_> {
         }
 
         let lines: Vec<&str> = text.lines().collect();
-        // Hits are ascending, so each context window only overlaps the previous
-        // one: `next` is the first line not yet printed, and overlapping lines are
-        // printed once, in line order - exactly what ripgrep does.
+        // Hits are ascending, so context windows overlap or adjoin: `next` is the
+        // first line not yet printed and every line is emitted once in file order.
+        // The collected hit list includes at most one extra hit. That hit is the
+        // boundary at which global/per-file caps stop rendering, not an extra match.
         let mut next = 0usize;
-        for &hit in &hits {
+        for (hit_index, &hit) in hits.iter().enumerate().take(per_file_limit) {
             if self.matched >= self.max_results {
                 return Ok(true);
             }
             let from = hit.saturating_sub(self.context).max(next);
-            let to = (hit + self.context).min(lines.len().saturating_sub(1));
+            let mut to = (hit + self.context).min(lines.len().saturating_sub(1));
+            let remaining_here = per_file_limit - hit_index;
+            let remaining_global = self.max_results - self.matched;
+            let acceptable = remaining_here.min(remaining_global);
+            if let Some(unaccepted) = hit_index
+                .checked_add(acceptable)
+                .and_then(|idx| hits.get(idx))
+            {
+                // Do not spend the cap-draining tail on a later real match. Its
+                // own result is outside the budget, even when rg includes it in
+                // the accepted hit's context window.
+                to = to.min(unaccepted.saturating_sub(1));
+            }
             for (idx, line) in lines.iter().enumerate().take(to + 1).skip(from) {
                 self.matches.push(SearchMatch {
                     path: rel.clone(),
                     line: idx as u64 + 1,
                     text: truncate_columns(line, MAX_MATCH_COLUMNS),
-                    is_context: idx != hit,
+                    // A line inside an overlapping window can itself be a match.
+                    // Check every real hit position, not merely the current one.
+                    is_context: hits.binary_search(&idx).is_err(),
                 });
             }
             next = to.saturating_add(1);
@@ -1442,5 +1525,255 @@ mod tests {
         let mut rg_files = rg.files();
         rg_files.sort_unstable();
         assert_eq!(rg_files, files);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn newline_paths_round_trip_in_both_engines() {
+        let tmp = TempWs::new("newline-path");
+        let rel = "new\nline.txt";
+        tmp.write(rel, "before\nneedle\nafter\n");
+
+        // Control: raw rg really does put the literal newline before the NUL path
+        // delimiter. This ensures the integration test below exercises the wire
+        // format that used to corrupt records rather than an assumed format.
+        if !rg_available() {
+            return;
+        }
+        let raw = std::process::Command::new("rg")
+            .args(["--line-number", "--no-heading", "--with-filename", "--null"])
+            .arg("--")
+            .arg("needle")
+            .arg(tmp.path.join(rel))
+            .env_remove("RIPGREP_CONFIG_PATH")
+            .output()
+            .unwrap();
+        assert!(raw.status.success(), "{:?}", raw.stderr);
+        let nul = raw.stdout.iter().position(|b| *b == 0).unwrap();
+        assert!(raw.stdout[..nul].contains(&b'\n'), "{:?}", raw.stdout);
+
+        let ws = tmp.ws();
+        let mut q = query("needle", rel, 10);
+        q.context = 1;
+        let cancel = CancellationToken::new();
+        let builtin = search_fallback(&ws, &q).await.unwrap();
+        let rg = search_with_rg("rg", &ws, &q, &cancel)
+            .await
+            .unwrap()
+            .expect("rg is installed");
+        assert_eq!(rg.matches, builtin.matches);
+        assert_eq!(rg.matches.len(), 3);
+        assert!(rg.matches.iter().all(|m| m.path == rel));
+        assert_eq!(rg.matches[1].text, "needle");
+        assert!(!rg.matches[1].is_context);
+    }
+
+    #[tokio::test]
+    async fn hitting_the_cap_drains_only_the_accepted_hits_after_context() {
+        let tmp = TempWs::new("cap-context-stream");
+        tmp.write("a.txt", "unused\n");
+        let ws = tmp.ws();
+        let base = ws.resolve_existing(".").unwrap();
+        let input = b"a.txt\x001:MATCH one\n\
+                     a.txt\x002-after one\n\
+                     a.txt\x003-after two\n\
+                     a.txt\x004:MATCH two\n\
+                     a.txt\x005-after other\n";
+        let (matches, matched, limited) = read_matches(Some(&input[..]), &ws, &base, 1, 2).await;
+        assert_eq!(matched, 1);
+        assert!(limited);
+        assert_eq!(
+            matches.iter().map(|m| m.line).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(matches[0].text, "MATCH one");
+        assert!(matches[1].is_context && matches[2].is_context);
+        assert!(!matches.iter().any(|m| m.text == "MATCH two"));
+    }
+
+    #[tokio::test]
+    async fn exact_cap_at_eof_still_returns_all_requested_context() {
+        let tmp = TempWs::new("cap-context-eof");
+        tmp.write("a.txt", "unused\n");
+        let ws = tmp.ws();
+        let base = ws.resolve_existing(".").unwrap();
+        // Deliberately no final newline: the EOF record path must use the same
+        // cap/context accounting as records that ended with one.
+        let input = b"a.txt\x001:MATCH\na.txt\x002-after one\na.txt\x003-after two";
+        let (matches, matched, limited) = read_matches(Some(&input[..]), &ws, &base, 1, 2).await;
+        assert!(limited, "an exact cap at EOF still reached the cap");
+        assert_eq!(matched, 1);
+        assert_eq!(matches.len(), 3, "{matches:?}");
+        assert_eq!(matches[2].text, "after two");
+    }
+
+    #[tokio::test]
+    async fn overlapping_hit_windows_never_turn_real_matches_into_context() {
+        let tmp = TempWs::new("overlap-hits");
+        tmp.write(
+            "a.txt",
+            "before\nMATCH one\nmiddle\nMATCH two\nafter\nMATCH three\ntail\n",
+        );
+        let ws = tmp.ws();
+        let mut q = query("MATCH", "a.txt", 10);
+        q.context = 2;
+        let cancel = CancellationToken::new();
+        let builtin = search_fallback(&ws, &q).await.unwrap();
+        assert_eq!(builtin.matched, 3, "{:?}", builtin.matches);
+        for line in [2, 4, 6] {
+            let found = builtin.matches.iter().find(|m| m.line == line).unwrap();
+            assert!(!found.is_context, "line {line} was relabelled: {found:?}");
+        }
+
+        if !rg_available() {
+            return;
+        }
+        let rg = search_with_rg("rg", &ws, &q, &cancel)
+            .await
+            .unwrap()
+            .expect("rg is installed");
+        assert_eq!(rg.matches, builtin.matches);
+        assert_eq!(rg.matched, builtin.matched);
+    }
+
+    #[tokio::test]
+    async fn cap_context_is_identical_in_both_engines() {
+        let tmp = TempWs::new("cap-context-parity");
+        tmp.write(
+            "a.txt",
+            "MATCH one\nafter one\nafter two\nMATCH two\nafter other\n",
+        );
+        let ws = tmp.ws();
+        let mut q = query("MATCH", "a.txt", 1);
+        q.context = 2;
+        let cancel = CancellationToken::new();
+        let builtin = search_fallback(&ws, &q).await.unwrap();
+        if !rg_available() {
+            return;
+        }
+        let rg = search_with_rg("rg", &ws, &q, &cancel)
+            .await
+            .unwrap()
+            .expect("rg is installed");
+        assert_eq!(rg.matches, builtin.matches);
+        assert_eq!(rg.matched, builtin.matched);
+        assert_eq!(rg.hit_limit, builtin.hit_limit);
+        assert_eq!(
+            rg.body(),
+            "a.txt:1: MATCH one\na.txt:2- after one\na.txt:3- after two"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_short_literal_long_line_marker_is_not_stripped() {
+        const LITERAL: &str = "NEEDLE [... omitted end of long line]";
+        let tmp = TempWs::new("literal-marker");
+        tmp.write("a.txt", &format!("{LITERAL}\n"));
+        let ws = tmp.ws();
+        let q = query("NEEDLE", "a.txt", 10);
+        let cancel = CancellationToken::new();
+        let builtin = search_fallback(&ws, &q).await.unwrap();
+        assert_eq!(builtin.matches[0].text, LITERAL);
+        if !rg_available() {
+            return;
+        }
+        let rg = search_with_rg("rg", &ws, &q, &cancel)
+            .await
+            .unwrap()
+            .expect("rg is installed");
+        assert_eq!(rg.matches, builtin.matches);
+        assert_eq!(rg.matches[0].text, LITERAL);
+    }
+
+    /// Re-executed so RIPGREP_CONFIG_PATH is hostile only in this child process;
+    /// mutating the test runner's global environment would race unrelated tests.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inherited_ripgrep_config_cannot_execute_a_preprocessor() {
+        const CHILD: &str = "KC_TOOLS_TEST_RG_PRE_CHILD";
+        const MARKER: &str = "KC_TOOLS_TEST_RG_PRE_MARKER";
+        const ROOT: &str = "KC_TOOLS_TEST_RG_PRE_ROOT";
+
+        if std::env::var_os(CHILD).is_some() {
+            let ws = Workspace::new(std::env::var_os(ROOT).unwrap()).unwrap();
+            let q = query("needle", ".", 10);
+            let cancel = CancellationToken::new();
+            let rg = search_with_rg("rg", &ws, &q, &cancel)
+                .await
+                .unwrap()
+                .expect("rg is installed");
+            assert_eq!(rg.matches.len(), 1);
+            assert_eq!(rg.matches[0].text, "needle");
+            assert!(
+                !std::path::Path::new(&std::env::var_os(MARKER).unwrap()).exists(),
+                "RIPGREP_CONFIG_PATH executed a preprocessor in a read-only search"
+            );
+
+            let missing = ws.root().join("definitely-not-rg");
+            let fallback = search_with_program(missing.to_str().unwrap(), &ws, &q, &cancel)
+                .await
+                .unwrap();
+            assert_eq!(fallback.engine, SearchEngine::Builtin);
+            assert_eq!(fallback.matches, rg.matches);
+            assert!(
+                !std::path::Path::new(&std::env::var_os(MARKER).unwrap()).exists(),
+                "the normal fallback path executed the preprocessor"
+            );
+            return;
+        }
+
+        if !rg_available() {
+            return;
+        }
+        let tmp = TempWs::new("rg-pre-environment");
+        tmp.write("one.txt", "needle\n");
+        let pre = tmp.path.join("pre.sh");
+        std::fs::write(
+            &pre,
+            "#!/bin/sh\nprintf 'executed\\n' > \"$KC_TOOLS_TEST_RG_PRE_MARKER\"\ncat \"$1\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pre, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = tmp.path.join("rg.conf");
+        std::fs::write(&config, format!("--pre={}\n", pre.display())).unwrap();
+        let marker = tmp.path.join("PRE_RAN");
+
+        // Prove this is a real execution primitive, not a marker that could never
+        // be created. Only this direct, explicitly spawned control rg sees it.
+        let proof = std::process::Command::new("rg")
+            .arg("needle")
+            .arg(tmp.path.join("one.txt"))
+            .env("RIPGREP_CONFIG_PATH", &config)
+            .env(MARKER, &marker)
+            .output()
+            .unwrap();
+        assert!(proof.status.success(), "{:?}", proof.stderr);
+        assert!(marker.exists(), "the raw-rg control did not execute --pre");
+        std::fs::remove_file(&marker).unwrap();
+
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "search::tests::inherited_ripgrep_config_cannot_execute_a_preprocessor",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env(ROOT, &tmp.path)
+            .env(MARKER, &marker)
+            .env("RIPGREP_CONFIG_PATH", &config)
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "child stdout:\n{}\nchild stderr:\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            !marker.exists(),
+            "the child executed the inherited preprocessor"
+        );
     }
 }

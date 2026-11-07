@@ -36,6 +36,9 @@ pub(crate) struct HttpTransport {
     name: String,
     url: String,
     headers: BTreeMap<String, String>,
+    /// Values scrubbed before an error crosses the transport boundary: configured
+    /// headers plus the raw configured URL (which may itself carry userinfo).
+    secrets: BTreeMap<String, String>,
     client: reqwest::Client,
     session: Mutex<Option<String>>,
     next_id: AtomicU64,
@@ -51,10 +54,24 @@ impl HttpTransport {
             .user_agent(concat!("karucode/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| format!("could not build the HTTP client: {e}"))?;
+        let mut secrets = headers.clone();
+        // A peer can reflect the endpoint in a status body. Never reproduce the
+        // configured URL there: besides credentials in userinfo, its query string
+        // is allowed to contain an API key.
+        secrets.insert("configured URL".to_string(), url.clone());
+        if let Ok(parsed) = reqwest::Url::parse(&url) {
+            if !parsed.username().is_empty() {
+                secrets.insert("URL username".to_string(), parsed.username().to_string());
+            }
+            if let Some(password) = parsed.password() {
+                secrets.insert("URL password".to_string(), password.to_string());
+            }
+        }
         Ok(Self {
             name,
             url,
             headers,
+            secrets,
             client,
             session: Mutex::new(None),
             next_id: AtomicU64::new(0),
@@ -94,15 +111,18 @@ impl Transport for HttpTransport {
     async fn open(&self) -> Result<(), McpError> {
         // Nothing to spawn; validate the URL shape so the error is actionable.
         let parsed = reqwest::Url::parse(&self.url).map_err(|e| {
+            // URL parse errors do not echo their input. Keep the input itself out
+            // of the diagnostic: it can contain userinfo or a query credential.
             McpError::Transport(format!(
-                "MCP server `{}` has an invalid url `{}`: {e}",
-                self.name, self.url
+                "MCP server `{}` has an invalid URL: {e}",
+                self.name
             ))
         })?;
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err(McpError::Transport(format!(
-                "MCP server `{}` url `{}` must be http or https",
-                self.name, self.url
+                "MCP server `{}` URL must use http or https (configured scheme `{}`)",
+                self.name,
+                parsed.scheme()
             )));
         }
         Ok(())
@@ -119,7 +139,9 @@ impl Transport for HttpTransport {
         let body = request_body(id, method, params);
         let exchange = async {
             let response = self.post(&body).send().await.map_err(|e| {
-                // `e` never contains request headers; keep the message short.
+                // Reqwest errors normally carry the request URL. `without_url`
+                // consumes that field before Display is allowed into diagnostics.
+                let e = e.without_url();
                 McpError::Transport(format!("request to MCP server `{}` failed: {e}", self.name))
             })?;
             if let Some(session) = response
@@ -158,16 +180,20 @@ impl Transport for HttpTransport {
         };
         bounded(exchange, timeout, cancel)
             .await
-            .map_err(|error| error.redacted(&self.headers))
+            .map_err(|error| error.redacted(&self.secrets))
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
         self.notify_unbounded(method, params)
             .await
-            .map_err(|error| error.redacted(&self.headers))
+            .map_err(|error| error.redacted(&self.secrets))
     }
 
     async fn close(&self) {
+        self.set_session(None);
+    }
+
+    fn close_now(&self) {
         self.set_session(None);
     }
 
@@ -184,6 +210,7 @@ impl HttpTransport {
     async fn notify_unbounded(&self, method: &str, params: Value) -> Result<(), McpError> {
         let body = notification_body(method, params);
         let response = self.post(&body).send().await.map_err(|e| {
+            let e = e.without_url();
             McpError::Transport(format!("request to MCP server `{}` failed: {e}", self.name))
         })?;
         if let Some(session) = response
@@ -229,6 +256,7 @@ async fn read_body_capped(
     let mut body: Vec<u8> = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| {
+            let e = e.without_url();
             McpError::Transport(format!(
                 "reading the response of MCP server `{name}` failed: {e}"
             ))
@@ -271,6 +299,7 @@ async fn read_sse(response: reqwest::Response, id: u64, name: &str) -> Result<Va
     let mut total: usize = 0;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| {
+            let e = e.without_url();
             McpError::Transport(format!(
                 "reading the SSE body of MCP server `{name}` failed: {e}"
             ))
@@ -279,20 +308,8 @@ async fn read_sse(response: reqwest::Response, id: u64, name: &str) -> Result<Va
         if total > MAX_SSE_BYTES {
             return Err(too_large(name, MAX_SSE_BYTES, "an SSE stream"));
         }
-        buffer.extend_from_slice(&chunk);
-        while let Some(pos) = buffer.iter().position(|b| *b == b'\n') {
-            // The slice up to and including the newline is a complete line, so
-            // it must be valid UTF-8 on its own. An invalid one is a broken
-            // producer, not a chunking artefact: say so instead of guessing.
-            let line: Vec<u8> = buffer.drain(..=pos).collect();
-            let line = std::str::from_utf8(&line).map_err(|_| {
-                McpError::Protocol(format!(
-                    "MCP server `{name}` sent an SSE line that is not valid UTF-8"
-                ))
-            })?;
-            if let Some(result) = handle_sse_line(line, &mut data_lines, id) {
-                return result;
-            }
+        if let Some(result) = consume_sse_chunk(&mut buffer, &chunk, &mut data_lines, id, name) {
+            return result;
         }
     }
     // A stream that ends without a trailing blank line still carries one event.
@@ -302,6 +319,48 @@ async fn read_sse(response: reqwest::Response, id: u64, name: &str) -> Result<Va
     Err(McpError::Protocol(format!(
         "no JSON-RPC response for request {id} in the SSE stream of MCP server `{name}`"
     )))
+}
+
+/// Append a network chunk and consume every complete line in it.
+///
+/// `cursor` advances through the buffer and the consumed prefix is drained once
+/// per chunk. Front-draining each line instead moves the entire suffix on every
+/// iteration, making a legal stream of short comment lines quadratic and tying up
+/// a Tokio worker where timeout/cancellation cannot interrupt it.
+fn consume_sse_chunk(
+    buffer: &mut Vec<u8>,
+    chunk: &[u8],
+    data_lines: &mut Vec<String>,
+    id: u64,
+    name: &str,
+) -> Option<Result<Value, McpError>> {
+    buffer.extend_from_slice(chunk);
+    let mut cursor = 0;
+    let mut outcome = None;
+    while let Some(relative) = buffer[cursor..].iter().position(|b| *b == b'\n') {
+        let end = cursor + relative + 1;
+        // A complete line must be valid UTF-8 on its own even when the producer
+        // split a multi-byte character across transport chunks.
+        match std::str::from_utf8(&buffer[cursor..end]) {
+            Ok(line) => {
+                cursor = end;
+                if let Some(result) = handle_sse_line(line, data_lines, id) {
+                    outcome = Some(result);
+                    break;
+                }
+            }
+            Err(_) => {
+                outcome = Some(Err(McpError::Protocol(format!(
+                    "MCP server `{name}` sent an SSE line that is not valid UTF-8"
+                ))));
+                break;
+            }
+        }
+    }
+    // One suffix move per network chunk, bounded by the stream's total byte cap.
+    // The cursor is at a line boundary, so retained bytes are still untouched.
+    buffer.drain(..cursor);
+    outcome
 }
 
 /// Feed one complete SSE line to the event accumulator.
@@ -399,7 +458,7 @@ mod tests {
     async fn invalid_url_is_rejected_before_any_request() {
         let t = HttpTransport::new("demo".into(), "not-a-url".into(), BTreeMap::new()).unwrap();
         let err = t.open().await.unwrap_err();
-        assert!(err.describe().contains("invalid url"), "{}", err.describe());
+        assert!(err.describe().contains("invalid URL"), "{}", err.describe());
     }
 
     #[test]
@@ -427,6 +486,56 @@ mod tests {
         handle_sse_line("data: not json\n", &mut data, 9);
         assert!(handle_sse_line("\n", &mut data, 9).is_none());
         assert!(data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn url_diagnostics_never_reproduce_userinfo_or_the_raw_url() {
+        for url in [
+            "gopher://alice:url-super-secret-321@example.invalid/mcp?key=query-secret",
+            "http://alice:url-super-secret-321@%/mcp?key=query-secret",
+        ] {
+            let t = HttpTransport::new("urlauth".into(), url.into(), BTreeMap::new()).unwrap();
+            let error = t.open().await.unwrap_err();
+            let text = format!(
+                "{} / {}",
+                error.describe(),
+                error.tool_message("urlauth", "mcp__urlauth__x", Duration::from_secs(1))
+            );
+            assert!(!text.contains(url), "{text}");
+            for secret in ["alice", "url-super-secret-321", "query-secret"] {
+                assert!(!text.contains(secret), "{secret} leaked in {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn many_short_sse_lines_are_linear_and_leave_partial_utf8_buffered() {
+        // Four MiB of legal comments used to take many seconds because each 3-byte
+        // line shifted the remaining multi-megabyte suffix. Keep a broad bound:
+        // the new linear scan takes milliseconds even on a busy test machine.
+        let mut chunk = ":x\n".repeat(4 * 1024 * 1024 / 3);
+        chunk.push_str("data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":\"done\"}\n\n");
+        chunk.push_str(":unterminated");
+        let mut buffer = Vec::new();
+        let mut data = Vec::new();
+        let started = std::time::Instant::now();
+        let result = consume_sse_chunk(&mut buffer, chunk.as_bytes(), &mut data, 7, "demo");
+        let elapsed = started.elapsed();
+        assert_eq!(result.unwrap().unwrap(), json!("done"));
+        assert_eq!(buffer, b":unterminated");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "many short lines took {elapsed:?}; the per-line front-drain regression is back"
+        );
+
+        let mut buffer = Vec::new();
+        let mut data = Vec::new();
+        let first = b"data: {\"id\":7,\"result\":\"\xF0\x9F";
+        assert!(consume_sse_chunk(&mut buffer, first, &mut data, 7, "demo").is_none());
+        assert_eq!(buffer, first);
+        let result = consume_sse_chunk(&mut buffer, b"\x92\xA9\"}\n\n", &mut data, 7, "demo");
+        assert_eq!(result.unwrap().unwrap(), json!("💩"));
+        assert!(buffer.is_empty());
     }
 
     #[test]

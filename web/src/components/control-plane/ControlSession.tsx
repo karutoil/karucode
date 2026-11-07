@@ -68,8 +68,17 @@ function ControlChatIntro({ projects, onStart }: {
         {projects.length === 0
           ? <span class="cp-intro-empty">Add a project first.</span>
           : projects.map((project) => (
-              <button type="button" class="button button-small" key={project.id} onClick={() => onStart(project)}>
-                {project.name}
+              <button
+                type="button"
+                class="button button-small"
+                key={project.id}
+                title={project.name}
+                onClick={() => onStart(project)}
+              >
+                {/* `.button` is nowrap with no max-width, so a long project name
+                    ran the button off a 390px screen. The name yields and
+                    ellipsises; the tooltip keeps the full spelling. */}
+                <span class="cp-intro-project-name">{project.name}</span>
               </button>
             ))}
       </div>
@@ -104,7 +113,7 @@ function SessionFacts({ session, projects }: {
     void copyText(session.id).then((ok) =>
       store.pushToast(ok ? 'Session id copied.' : 'Could not copy the session id.', ok ? 'info' : 'error'));
   };
-  return <section class="inspector-section" aria-label="Session details">
+  return <section class="inspector-section si-info" aria-label="Session details">
     <div class="inspector-kicker-row">
       <span class="inspector-kicker">Session</span>
     </div>

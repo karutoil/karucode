@@ -375,7 +375,7 @@ pub async fn rename_session(
     }
 
     if let Some(title) = &title {
-        state.store().rename_session(&id, title).await?;
+        rename_session_and_emit(&state, &id, title).await?;
     }
 
     // `Some(Some(..))` pins the session, `Some(None)` clears the pin.
@@ -398,17 +398,6 @@ pub async fn rename_session(
     };
 
     let session = session_or_404(&state, &id).await?;
-    if title.is_some() {
-        state.runtime().emit(
-            Some(&id),
-            None,
-            None,
-            Event::SessionRenamed {
-                session_id: id.clone(),
-                title: session.title.clone(),
-            },
-        );
-    }
     if let Some(model) = changed_model {
         state.runtime().emit(
             Some(&id),
@@ -840,6 +829,27 @@ fn strip_leading_marker(text: &str) -> &str {
 /// space and trim the edges.
 fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Rename exactly as the ordinary HTTP route does: persist, read the canonical row
+/// back, then announce the stored title so every client shares one session shape.
+pub(crate) async fn rename_session_and_emit(
+    state: &AppState,
+    id: &str,
+    title: &str,
+) -> ApiResult<Session> {
+    state.store().rename_session(id, title).await?;
+    let session = session_or_404(state, id).await?;
+    state.runtime().emit(
+        Some(id),
+        None,
+        None,
+        Event::SessionRenamed {
+            session_id: id.to_string(),
+            title: session.title.clone(),
+        },
+    );
+    Ok(session)
 }
 
 pub(crate) async fn session_or_404(state: &AppState, id: &str) -> ApiResult<Session> {

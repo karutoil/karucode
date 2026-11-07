@@ -95,6 +95,9 @@ pub async fn run_once(state: &AppState) -> PruneReport {
         runs = report.runs,
         agents = report.agents,
         approvals = report.approvals,
+        claims = report.claims,
+        checkpoints = report.checkpoints,
+        checkpoint_blobs = report.checkpoint_blobs,
         "pruned rows outside the retention window"
     );
     // The deletes free pages inside the file but leave it the same size on

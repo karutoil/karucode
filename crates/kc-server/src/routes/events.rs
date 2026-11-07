@@ -34,11 +34,15 @@
 //! Two hard limits keep one client from costing unbounded memory:
 //!
 //! * [`MAX_SSE_CONNECTIONS`] concurrent streams. Beyond that a new connection is
-//!   refused with an error frame instead of being accepted and starved.
+//!   refused with a typed `karucode.transport` control frame instead of being
+//!   accepted and starved. This frame has no sequence id: it is transport status,
+//!   not a persisted runtime event, and must not advance the resume cursor.
 //! * [`MAX_QUEUED_BYTES`] of queued frames per connection. The queue is bounded by
 //!   *bytes*, not slots: one `tool_call_finished` frame can carry 24 000 bytes and
 //!   `command_output` up to 32 000, so 1024 slots was ~32 MB of worst case. A
-//!   client that exceeds the byte budget is dropped with a `notice` frame.
+//!   client that exceeds the byte budget is dropped with an unsequenced
+//!   `stream_overflow` transport control. Its reconnect keeps the last real cursor
+//!   and refetches authoritative state, because the rejected event was not delivered.
 //!
 //! `: keepalive` comments go out every 15 seconds, which is how a client can tell
 //! a quiet stream from a dead one. Shutdown cancels the task so `axum::serve` can
@@ -78,6 +82,19 @@ const SLOW_CLIENT_GRACE: Duration = Duration::from_secs(5);
 /// Maximum retained envelopes and encoded bytes per runtime.
 const RING_CAPACITY: usize = 1000;
 const MAX_REPLAY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Changes whenever this server process restarts, allowing a client to distinguish
+/// a fresh sequence space from a continuation of the old one.
+pub const EVENT_EPOCH_HEADER: &str = "x-karucode-event-epoch";
+const CONNECTION_CAP_RETRY_AFTER_MS: u64 = 1000;
+const STREAM_OVERFLOW_RETRY_AFTER_MS: u64 = 1000;
+
+fn event_epoch() -> &'static str {
+    static EPOCH: OnceLock<String> = OnceLock::new();
+    EPOCH
+        .get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+        .as_str()
+}
 
 pub async fn stream(
     State(state): State<AppState>,
@@ -128,6 +145,7 @@ pub async fn stream(
         .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-cache, no-transform")
         .header(header::CONNECTION, "keep-alive")
+        .header(EVENT_EPOCH_HEADER, event_epoch())
         // Disable proxy buffering (nginx and friends).
         .header(
             header::HeaderName::from_static("x-accel-buffering"),
@@ -162,25 +180,29 @@ fn last_event_id(headers: &HeaderMap, query: &QueryMap) -> Option<u64> {
 
 /// The answer when [`MAX_SSE_CONNECTIONS`] is already reached.
 ///
-/// A single error frame on a normal event stream, not a `503`: the client already
-/// knows how to read frames and how to back off, and a bare status code would
-/// surface as an opaque "stream failed" banner.
+/// This is explicitly transport status, not a `notice` in the runtime's sequence
+/// space. There is deliberately no `id:` line and no `seq` in the JSON: a client
+/// can display it even after seeing an old high-water mark, without persisting a
+/// cursor that would skip real events on reconnect.
 fn refusal_response() -> Response {
-    // A fresh connection has seen nothing, so any seq is newer than its watermark.
-    let frame = notice_frame(
-        "error",
-        &format!(
+    let value = json!({
+        "type": "connection_cap",
+        "message": format!(
             "too many concurrent event streams (limit {MAX_SSE_CONNECTIONS}); \
-             close another tab or client and reconnect"
+             close another tab or client, then reconnect"
         ),
-        None,
-        1,
-    );
+        "retry_after_ms": CONNECTION_CAP_RETRY_AFTER_MS,
+    });
+    let text = serde_json::to_string(&value)
+        .unwrap_or_else(|_| "{\"type\":\"connection_cap\",\"retry_after_ms\":1000}".to_string());
+    let frame = Bytes::from(format!("event: karucode.transport\ndata: {text}\n\n"));
     let stream = futures_util::stream::once(async move { Ok::<Bytes, Infallible>(frame) });
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-cache, no-transform")
+        .header(header::RETRY_AFTER, "1")
+        .header(EVENT_EPOCH_HEADER, event_epoch())
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())
 }
@@ -203,14 +225,14 @@ async fn pump(
     let mut last_seq: u64 = 0;
     if let Some(resync) = replay.resync {
         let frame = encode_resync(&resync, filter.as_deref());
-        if !send_frame(&tx, &queued, frame, last_seq).await {
+        if !send_frame(&tx, &queued, frame).await {
             return;
         }
         last_seq = resync.newest;
     }
     for envelope in replay.frames {
         let chunk = envelope.frame.clone();
-        if !send_frame(&tx, &queued, chunk, last_seq).await {
+        if !send_frame(&tx, &queued, chunk).await {
             return;
         }
         last_seq = last_seq.max(envelope.seq);
@@ -262,7 +284,7 @@ async fn pump(
             },
         };
 
-        if !send_frame(&tx, &queued, chunk, last_seq).await {
+        if !send_frame(&tx, &queued, chunk).await {
             break;
         }
     }
@@ -272,33 +294,18 @@ async fn pump(
 ///
 /// Returns `false` when the stream must end: the client is gone, it stopped
 /// draining for [`SLOW_CLIENT_GRACE`], or it has more than [`MAX_QUEUED_BYTES`]
-/// waiting. The last case sends a `notice` first (best effort - the queue is full
-/// by definition) so the disconnect is visible rather than a silent truncation.
-async fn send_frame(
-    tx: &mpsc::Sender<Bytes>,
-    queued: &AtomicUsize,
-    chunk: Bytes,
-    last_seq: u64,
-) -> bool {
+/// waiting. The last case sends an unsequenced `stream_overflow` transport control
+/// first (best effort - the queue is full by definition), so the disconnect is
+/// visible without taking the sequence of the rejected event or its successor.
+async fn send_frame(tx: &mpsc::Sender<Bytes>, queued: &AtomicUsize, chunk: Bytes) -> bool {
     if exceeds_queue_limit(queued.load(Ordering::Acquire), chunk.len()) {
         tracing::warn!(
             limit = MAX_QUEUED_BYTES,
             "SSE client exceeded its queue budget; closing the stream"
         );
-        // Stamped one past the newest frame this client has seen. A `seq` of 0
-        // would be discarded by the client's dedupe (`seq <= lastSeq`) and the
-        // disconnect would look like a silent truncation. This is the last frame
-        // the connection will ever send, so it cannot shadow a live one.
-        let notice = notice_frame(
-            "error",
-            &format!(
-                "this event stream fell more than {MAX_QUEUED_BYTES} bytes behind and was \
-                 closed; reconnect with Last-Event-ID to resume"
-            ),
-            None,
-            last_seq.saturating_add(1),
-        );
-        let _ = tx.try_send(notice);
+        // The attempted frame was not delivered. Its reconnect must retain the
+        // last real cursor rather than persisting a synthetic notice sequence.
+        let _ = tx.try_send(stream_overflow_frame());
         return false;
     }
 
@@ -363,23 +370,22 @@ fn frame(seq: u64, text: &str) -> Bytes {
     Bytes::from(format!("id: {seq}\ndata: {text}\n\n"))
 }
 
-/// A `notice` frame, used for the connection-cap and queue-budget messages.
-///
-/// `seq` is explicit because the client drops any frame whose `seq` is not newer
-/// than the last one it saw: a synthetic frame stamped 0 would never be shown.
-fn notice_frame(level: &str, message: &str, session: Option<&str>, seq: u64) -> Bytes {
-    let envelope = EventEnvelope {
-        seq,
-        ts_ms: now_ms(),
-        session_id: session.map(str::to_string),
-        run_id: None,
-        agent_id: None,
-        event: Event::Notice {
-            level: level.into(),
-            message: message.into(),
-        },
-    };
-    encode(&envelope, &None).unwrap_or_else(|| Bytes::from_static(b": notice\n\n"))
+/// Queue saturation is transport status, not a runtime event. In particular there
+/// is no SSE `id:` and no JSON `seq`: the event which tripped the budget was not
+/// sent, so allocating either `N` or `N + 1` would hide a real event after replay.
+fn stream_overflow_frame() -> Bytes {
+    let value = json!({
+        "type": "stream_overflow",
+        "message": format!(
+            "this event stream fell more than {MAX_QUEUED_BYTES} bytes behind and was \
+             closed; reconnect with Last-Event-ID and resynchronise from server state"
+        ),
+        "retry_after_ms": STREAM_OVERFLOW_RETRY_AFTER_MS,
+    });
+    let text = serde_json::to_string(&value).unwrap_or_else(|_| {
+        "{\"type\":\"stream_overflow\",\"message\":\"event stream queue overflow; reconnect and resynchronise\",\"retry_after_ms\":1000}".to_string()
+    });
+    Bytes::from(format!("event: karucode.transport\ndata: {text}\n\n"))
 }
 
 /// The `resync` frame: the requested cursor is older than the ring, so the gap
@@ -620,6 +626,46 @@ mod tests {
                 message: format!("event {seq}"),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn connection_cap_is_typed_transport_and_never_advances_the_cursor() {
+        let response = refusal_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[EVENT_EPOCH_HEADER], event_epoch());
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            text.starts_with("event: karucode.transport\ndata: "),
+            "{text}"
+        );
+        assert!(!text.lines().any(|line| line.starts_with("id:")), "{text}");
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(value["type"], "connection_cap");
+        assert_eq!(value["retry_after_ms"], CONNECTION_CAP_RETRY_AFTER_MS);
+        assert!(value["message"]
+            .as_str()
+            .unwrap()
+            .contains("close another tab"));
+        assert!(
+            value.get("seq").is_none(),
+            "transport is not a sequenced event"
+        );
+    }
+
+    #[test]
+    fn the_event_epoch_is_stable_and_unguessable() {
+        let first = event_epoch();
+        assert_eq!(first, event_epoch());
+        assert_eq!(first.len(), 32);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -911,6 +957,38 @@ mod tests {
         assert!(encode(&matched, &Some("s_1".to_string())).is_some());
     }
 
+    #[tokio::test]
+    async fn rejected_seq_50_overflow_never_allocates_a_false_cursor() {
+        let (tx, mut rx) = mpsc::channel::<Bytes>(CLIENT_BUFFER);
+        // The next ordinary envelope is real seq 50. Model a saturated byte queue
+        // while leaving a channel slot for the best-effort terminal control.
+        let queued = AtomicUsize::new(MAX_QUEUED_BYTES);
+        let rejected = encode(&notice(50, None), &None).unwrap();
+
+        assert!(!send_frame(&tx, &queued, rejected).await);
+        let control = rx.try_recv().expect("overflow control was not queued");
+        let text = String::from_utf8(control.to_vec()).unwrap();
+        assert!(
+            text.starts_with("event: karucode.transport\ndata: "),
+            "{text}"
+        );
+        assert!(!text.lines().any(|line| line.starts_with("id:")), "{text}");
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(value["type"], "stream_overflow");
+        assert_eq!(value["retry_after_ms"], STREAM_OVERFLOW_RETRY_AFTER_MS);
+        assert!(value["message"]
+            .as_str()
+            .unwrap()
+            .contains("resynchronise from server state"));
+        assert_eq!(value.as_object().unwrap().len(), 3, "payload was {value}");
+        assert!(value.get("seq").is_none(), "control allocated a cursor");
+        assert!(rx.try_recv().is_err(), "rejected seq 50 was delivered");
+    }
+
     /// A consumer that never drains must be dropped once its queue passes the byte
     /// budget, not buffered indefinitely. This is the regression the slot-only
     /// bound allowed: 1024 slots x 32 000 bytes is ~32 MB per stalled client.
@@ -924,17 +1002,13 @@ mod tests {
 
         // Push frames without ever reading: the queue grows until the budget is
         // exceeded, then `send_frame` reports that the stream must end.
-        // `last_seq` is the newest frame the client has actually received, which
-        // is what `pump` passes in.
-        let mut last_seq = 0u64;
         let mut sent = 0usize;
         let mut dropped = false;
-        for seq in 1..=(MAX_QUEUED_BYTES / frame.len() + 10) {
-            if !send_frame(&tx, &queued, frame.clone(), last_seq).await {
+        for _ in 1..=(MAX_QUEUED_BYTES / frame.len() + 10) {
+            if !send_frame(&tx, &queued, frame.clone()).await {
                 dropped = true;
                 break;
             }
-            last_seq = seq as u64;
             sent += 1;
         }
         assert!(dropped, "a stalled consumer was never dropped");
@@ -949,19 +1023,22 @@ mod tests {
             "the slot limit ended the stream before the byte budget did"
         );
 
-        // The final frame is the visible `notice`, stamped one past the newest
-        // frame the client received so its dedupe does not swallow it.
+        // The final frame is the visible transport control, never an ordinary
+        // notice whose id would consume an undelivered runtime sequence.
         let mut last = None;
         while let Ok(chunk) = rx.try_recv() {
             last = Some(chunk);
         }
         let text = String::from_utf8(last.expect("no frame was queued").to_vec()).unwrap();
-        assert!(text.contains("\"type\":\"notice\""), "frame was: {text}");
-        assert!(text.contains("\"level\":\"error\""), "frame was: {text}");
         assert!(
-            text.starts_with(&format!("id: {}\n", last_seq + 1)),
-            "the notice must be newer than the last frame received: {text}"
+            text.contains("\"type\":\"stream_overflow\""),
+            "frame was: {text}"
         );
+        assert!(
+            text.contains("event: karucode.transport"),
+            "frame was: {text}"
+        );
+        assert!(!text.lines().any(|line| line.starts_with("id:")), "{text}");
     }
 
     /// A consumer that keeps draining is never dropped, however many frames pass
@@ -979,7 +1056,7 @@ mod tests {
 
         for seq in 1..=(MAX_QUEUED_BYTES / frame.len() * 2) {
             assert!(
-                send_frame(&tx, &queued, frame.clone(), seq as u64).await,
+                send_frame(&tx, &queued, frame.clone()).await,
                 "a draining consumer was dropped at frame {seq}"
             );
             // Model the body stream: each chunk handed to the socket releases its

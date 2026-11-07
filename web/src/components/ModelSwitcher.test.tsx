@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { ModelControls, ModelSwitcher, REASONING_OPTIONS, ReasoningSelector } from './ModelSwitcher';
 import type { Config, SessionModelSelection, SessionSummary } from '../api/types';
 import { jsonResponse, resetAppState, summaryFixture } from '../test/fixtures';
@@ -198,15 +198,78 @@ describe('ModelSwitcher (per-session)', () => {
     expect(store.toasts.value.some((toast) => toast.message.includes('install default'))).toBe(true);
   });
 
+  it('uses roving focus for arrows/Home/End and restores the trigger after selection', async () => {
+    const { calls } = installModelFetch();
+    openSession();
+    render(<ModelSwitcher />);
+    const trigger = screen.getByRole('button', { name: /Model for this session: Model B/i });
+    fireEvent.click(trigger);
+
+    const options = screen.getAllByRole('option');
+    expect(options.map((option) => option.getAttribute('tabindex'))).toEqual(['-1', '0', '-1']);
+    await waitFor(() => expect(document.activeElement).toBe(options[1]));
+
+    fireEvent.keyDown(options[1]!, { key: 'ArrowDown' });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /Tiny/ })));
+    expect(screen.getAllByRole('option').map((option) => option.getAttribute('tabindex'))).toEqual(['-1', '-1', '0']);
+    fireEvent.keyDown(document.activeElement!, { key: 'Home' });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /Model A/ })));
+    fireEvent.keyDown(document.activeElement!, { key: 'End' });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /Tiny/ })));
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /Model B/ })));
+
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    const tiny = await waitFor(() => screen.getByRole('option', { name: /Tiny/ }));
+    expect(document.activeElement).toBe(tiny);
+    fireEvent.click(tiny);
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it('closes on Escape without changing the selection', async () => {
     const { fetchMock } = installModelFetch();
     openSession();
     render(<ModelSwitcher />);
-    fireEvent.click(screen.getByRole('button', { name: /Model for this session: Model B/i }));
+    const trigger = screen.getByRole('button', { name: /Model for this session: Model B/i });
+    fireEvent.click(trigger);
     expect(screen.queryByRole('listbox')).not.toBeNull();
     fireEvent.keyDown(document, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
+    expect(document.activeElement).toBe(trigger);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('disables every model and reasoning action while this session’s pin is pending', async () => {
+    const { fetchMock } = installModelFetch();
+    const session = openSession({ provider: 'gateway', model: 'model-a', reasoning_effort: 'high' });
+    render(<ModelControls />);
+    const modelTrigger = screen.getByRole('button', { name: /Model for this session: Model A/i });
+    const reasoningTrigger = screen.getByRole('button', { name: /Reasoning effort: High/i });
+    fireEvent.click(modelTrigger);
+    fireEvent.click(reasoningTrigger);
+    expect(screen.getAllByRole('listbox')).toHaveLength(2);
+
+    act(() => {
+      store.sessionModelMutationPending.value = session.id;
+    });
+    await waitFor(() => {
+      expect((modelTrigger as HTMLButtonElement).disabled).toBe(true);
+      expect((reasoningTrigger as HTMLButtonElement).disabled).toBe(true);
+    });
+    for (const option of screen.getAllByRole('option')) {
+      expect((option as HTMLButtonElement).disabled).toBe(true);
+    }
+    expect((screen.getByRole('button', { name: /Follow install default/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: /Manage providers and models/ }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole('option', { name: /Tiny/ }));
+    fireEvent.click(screen.getByRole('option', { name: /^Minimal/ }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    act(() => {
+      store.sessionModelMutationPending.value = null;
+    });
   });
 });
 
@@ -231,6 +294,33 @@ describe('ReasoningSelector', () => {
 
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0]?.body).toEqual({ provider: 'gateway', model: 'model-b', reasoning_effort: 'high' });
+  });
+
+  it('supports keyboard navigation and restores its trigger on selection', async () => {
+    const { calls } = installModelFetch();
+    openSession();
+    render(<ReasoningSelector />);
+    const trigger = screen.getByRole('button', { name: /Reasoning effort: Default/i });
+    fireEvent.click(trigger);
+    const options = screen.getAllByRole('option');
+    expect(options.map((option) => option.getAttribute('tabindex'))).toEqual(['0', '-1', '-1', '-1', '-1', '-1', '-1']);
+    await waitFor(() => expect(document.activeElement).toBe(options[0]));
+
+    fireEvent.keyDown(options[0]!, { key: 'End' });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /^Max/ })));
+    fireEvent.keyDown(document.activeElement!, { key: 'Home' });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /^Default/ })));
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /^Max/ })));
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /^Default/ })));
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /^Off/ })));
+
+    fireEvent.click(document.activeElement!);
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(document.activeElement).toBe(trigger);
+    expect(screen.queryByRole('listbox')).toBeNull();
   });
 
   it('spells "off" as reasoning_effort: none', async () => {

@@ -1,0 +1,16 @@
+# `zen` — a demo plugin that turns the workspace into a writing desk.
+#
+# Install: put this directory under `<KARUCODE_DATA_DIR>/plugins/zen/`, or point a
+# config entry at it:
+#
+#   [[plugins]]
+#   name = "zen"
+#   command = ["python3", "/absolute/path/to/plugins/demos/zen/zen.py"]
+#   enabled = true
+#   permissions = ["files.read"]
+#
+# Then **Settings → Plugins & MCP → Rescan plugins**, or POST /api/plugins/reload.
+name = "zen"
+command = ["python3", "zen.py"]
+enabled = true
+permissions = ["files.read"]

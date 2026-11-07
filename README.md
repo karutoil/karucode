@@ -383,6 +383,17 @@ never takes the harness down. Plugins contribute tools and lifecycle hooks and
 declare capabilities and permissions; they are not OS-sandboxed. Tools are
 namespaced `plugin__<plugin>__<tool>`.
 
+A plugin can also change the interface itself, declaratively: buttons in named
+slots (the composer's action row, the results header, the session header),
+command-palette entries, keyboard shortcuts, inspector panels and requests to hide
+a built-in control it replaces. The app draws all of it with its own components — a
+plugin ships no markup, CSS or script — and a click or a chord runs a `ui/action`
+handler inside that plugin or posts a user turn. Everything is attributed: a
+contributed control carries a dot and a tooltip naming the plugin that made it. And
+everything is reversible: **Settings → Plugins & MCP → Controls in the interface**
+switches a contributed control off, or puts a hidden built-in back, without
+disabling the plugin.
+
 ```toml
 [[plugins]]
 name = "example-hello"
@@ -406,6 +417,9 @@ require_approval = true
 Write a plugin: [docs/PLUGINS.md](docs/PLUGINS.md) — including
 `karucode plugin init <dir>`, which scaffolds a project with the SDK vendored so
 it depends on nothing from karucode. Connect a server: [docs/MCP.md](docs/MCP.md).
+Two demo plugins that rearrange the interface live in
+[`plugins/demos/`](plugins/demos/README.md) — single Python files, installable by
+config entry, and the fastest way to see what the UI layer can do.
 
 ## Security
 

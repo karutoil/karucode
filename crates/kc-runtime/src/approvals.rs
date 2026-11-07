@@ -8,6 +8,43 @@
 //! Ordering guarantees: the store row exists *before* `ApprovalRequested` is
 //! emitted, so a client reacting to the event can always resolve the id it saw.
 
+// @kc-doc: approval-expiry-recovery
+// @kc-title: Understand approval timeout and storage-failure recovery
+// @kc-summary: Each approval has an independent expiry scope, and its in-memory waiter survives until expiry is durable.
+// @kc-tags: approvals, timeout, persistence, subagents, recovery, safety
+// @kc-applies-to: config:[approvals], config:approvals.timeout_secs, env:KARUCODE_APPROVAL_TIMEOUT_SECS, route:GET /api/approvals, route:POST /api/approvals/:id, event:approval_resolved
+//
+// # Retry or answer an approval after an expiry problem
+//
+// `approvals.timeout_secs` bounds one request, not every request sharing a run id.
+// A parent and its subagents therefore time out independently. When the timer
+// fires, only that approval expires and its action is treated as denied; sibling
+// cards keep waiting for their own decisions.
+//
+// ```toml
+// [approvals]
+// mode = "ask"
+// allow_commands = []
+// auto_approve_paths = []
+// timeout_secs = 300
+// ```
+//
+// Durable expiry precedes `approval_resolved` and waiter release. Expiry uses a
+// conditional exact-Pending transition for each candidate: a human Allow that
+// commits after the pending-list read wins outright, with no later Expired waiter,
+// event or expiry count. If a store read or write fails, the scope keeps the id and
+// the in-memory registration instead of draining them, so later scope teardown
+// retries expiry and a still-pending card remains answerable through
+// `POST /api/approvals/:id`. No false Expired event is published for a row that is
+// still durable-pending or was already resolved. A late answer never executes an
+// action whose gate already returned `expired`; if the waiter has disappeared, the
+// API reports that race even though the store closed the pending row.
+//
+// Clients normally need no repair command: answer the pending card again after
+// storage recovers, or let loop teardown retry. Pending rows left by a process
+// crash are expired by startup recovery. Approval modes and automatic decisions
+// are documented by `approvals`; route payloads are listed in `http-api`.
+
 use crate::events::{now_ms, EmitCtx};
 use crate::RuntimeInner;
 use async_trait::async_trait;
@@ -172,24 +209,26 @@ impl ApprovalScope {
         self.ids.lock().expect("approval scope lock").remove(id);
     }
 
-    fn take(&self) -> Vec<String> {
+    fn snapshot(&self) -> Vec<String> {
         self.ids
             .lock()
             .expect("approval scope lock")
-            .drain()
+            .iter()
+            .cloned()
             .collect()
     }
 
-    /// Expire the approvals this scope requested that are still pending.
+    /// Expire the approvals this scope requested that are still pending. Returns
+    /// only ids whose expiry was durably written by this call.
     ///
-    /// `run_wide` is only set for the top-level run, whose scope *is* the run:
-    /// when it ends or is cancelled every approval belonging to it must expire,
-    /// and the store's `expire_pending_approvals(run_id, ..)` is the only way to
-    /// record them with status `expired`. Subagent scopes always expire per id
-    /// so a sibling loop's pending request is never touched; the store has no
-    /// per-id `expired` transition, so those rows are closed as `resolved` with
-    /// decision `expired` (the decision, not the status, is what the API and UI
-    /// read).
+    /// Snapshot, never drain: after a list/write failure the id and its in-process
+    /// waiter stay registered so a later scope teardown or a client's explicit
+    /// resolve can retry. A per-id waiter is released only after its own durable
+    /// write succeeds, never merely because a timeout fired or storage failed.
+    ///
+    /// `run_wide` is exclusively for whole-run teardown. One request timing out
+    /// always passes false: a top-level parent and its children share a run id but
+    /// have independent approval deadlines.
     pub(crate) async fn expire_pending(
         &self,
         inner: &Arc<RuntimeInner>,
@@ -197,10 +236,10 @@ impl ApprovalScope {
         run_id: &str,
         run_wide: bool,
         reason: &str,
-    ) {
-        let ids = self.take();
+    ) -> Vec<String> {
+        let ids = self.snapshot();
         if ids.is_empty() {
-            return;
+            return Vec::new();
         }
         let store = &inner.deps.store;
         let pending = match store.list_pending_approvals(Some(session_id)).await {
@@ -210,63 +249,75 @@ impl ApprovalScope {
                     session = %session_id,
                     run = %run_id,
                     error = %e,
-                    "could not list pending approvals while expiring scope"
+                    "could not list pending approvals while expiring scope; keeping waiters for retry"
                 );
-                return;
+                return Vec::new();
             }
         };
         let pending_for_run: Vec<&ApprovalRecord> =
             pending.iter().filter(|a| a.run_id == run_id).collect();
+        // Anything no longer pending was deliberately resolved elsewhere. It no
+        // longer belongs in this expiry scope, but do not invent an Expired event
+        // for what could have been an Allow decision.
+        for id in &ids {
+            if !pending_for_run.iter().any(|approval| &approval.id == id) {
+                self.forget(id);
+            }
+        }
         let ours: Vec<&ApprovalRecord> = pending_for_run
             .iter()
             .filter(|a| ids.contains(&a.id))
             .copied()
             .collect();
-        if ours.is_empty() {
-            return;
-        }
 
-        if run_wide {
-            match store.expire_pending_approvals(run_id, reason).await {
-                Ok(n) => {
-                    tracing::debug!(run = %run_id, expired = n, reason, "expired pending approvals");
-                }
-                Err(e) => {
-                    tracing::warn!(run = %run_id, error = %e, "could not expire the run's pending approvals");
-                }
-            }
-            // The store call closes every pending row of the run, so release
-            // every parked waiter too (normally there is none by now).
-            for approval in pending_for_run {
-                inner
-                    .approvals
-                    .resolve(&approval.id, ApprovalDecision::Expired);
-            }
-            return;
-        }
-
-        for approval in ours {
-            // Wake a waiter that is still parked on the id (for example when the
-            // loop future was dropped before its own timeout branch ran).
-            inner
-                .approvals
-                .resolve(&approval.id, ApprovalDecision::Expired);
+        // A pending-list snapshot is only a candidate set, never evidence that an
+        // expiry happened. A human can commit Allow after the list and before a
+        // bulk update affects zero rows; the conditional per-id transition is the
+        // sole authority for the waiter, event and returned ids. Whole-run teardown
+        // considers child rows too, while one request's timeout remains scoped.
+        let candidates = if run_wide { pending_for_run } else { ours };
+        let mut expired = Vec::new();
+        for approval in candidates {
             match store
-                .resolve_approval(&approval.id, ApprovalDecision::Expired.as_str())
+                .resolve_pending_approval(&approval.id, ApprovalDecision::Expired.as_str())
                 .await
             {
-                Ok(()) => {}
-                // Already resolved/expired concurrently is fine; anything else is
-                // a real persistence problem and must not be silent.
-                Err(Error::NotFound(_)) => {}
+                Ok(true) => {
+                    self.forget(&approval.id);
+                    scope_expired(inner, approval);
+                    expired.push(approval.id.clone());
+                }
+                // Another resolver won the exact Pending transition. Its durable
+                // decision and event are authoritative; never append Expired.
+                Ok(false) | Err(Error::NotFound(_)) => self.forget(&approval.id),
                 Err(e) => tracing::warn!(
                     approval = %approval.id,
                     error = %e,
-                    "could not expire the scoped approval"
+                    "could not expire the scoped approval; keeping its waiter for retry"
                 ),
             }
         }
+        if !expired.is_empty() {
+            tracing::debug!(run = %run_id, expired = expired.len(), reason, "expired pending approvals");
+        }
+        expired
     }
+}
+
+/// Publish one expiry only after its durable transition succeeded.
+fn scope_expired(inner: &Arc<RuntimeInner>, approval: &ApprovalRecord) {
+    inner
+        .approvals
+        .resolve(&approval.id, ApprovalDecision::Expired);
+    inner.emit(
+        Some(&approval.session_id),
+        Some(&approval.run_id),
+        approval.agent_id.as_deref(),
+        Event::ApprovalResolved {
+            approval_id: approval.id.clone(),
+            decision: ApprovalDecision::Expired,
+        },
+    );
 }
 
 impl RuntimeInner {
@@ -466,32 +517,28 @@ impl ApprovalGate for RuntimeApprovalGate {
         );
 
         let timeout = Duration::from_secs(policy.timeout_secs);
-        let decision = tokio::select! {
+        let (decision, expiry_written) = tokio::select! {
             biased;
             _ = self.cancel.cancelled() => {
-                self.expire("run cancelled").await;
-                None
+                (None, self.expire_request(&approval_id, "run cancelled").await)
             }
             _ = tokio::time::sleep(timeout) => {
-                self.expire("approval timed out").await;
-                None
+                (None, self.expire_request(&approval_id, "approval timed out").await)
             }
-            answer = receiver => answer.ok(),
+            answer = receiver => (answer.ok(), true),
         };
-        // Whatever woke us up, this id must no longer be registered: `resolve`
-        // already removed it, and the timeout/cancel/store-failure paths did
-        // not. `discard` is a no-op when the entry is already gone.
-        self.inner.approvals.discard(&approval_id);
+        if decision.is_none() && expiry_written {
+            // A successful expiry resolves/removes the waiter too; discard is only
+            // a no-op safeguard. On storage failure retain both ids for a retry.
+            self.inner.approvals.discard(&approval_id);
+        }
 
         match decision {
             Some(ApprovalDecision::Expired) => {
                 // e.g. `ApprovalRegistry::cancel_all` during shutdown: nobody
-                // updated the store row, so close it here as well.
-                self.expire("approval expired").await;
-                ctx.emit(Event::ApprovalResolved {
-                    approval_id,
-                    decision: ApprovalDecision::Expired,
-                });
+                // updated the store row, so close exactly this request as well.
+                // A scope-level/run-wide expiry that woke us already published it.
+                self.expire_request(&approval_id, "approval expired").await;
                 ApprovalDecision::Expired
             }
             Some(decision) => {
@@ -504,12 +551,9 @@ impl ApprovalGate for RuntimeApprovalGate {
                 decision
             }
             None => {
-                // `resolve()` already emitted the resolved event when the UI
-                // answered; timeout and cancellation are reported here.
-                ctx.emit(Event::ApprovalResolved {
-                    approval_id,
-                    decision: ApprovalDecision::Expired,
-                });
+                // `expire_request` publishes only after durable expiry. If storage
+                // failed, leave the card pending and resolvable on recovery/retry:
+                // an Expired event here would falsely claim persistence succeeded.
                 ApprovalDecision::Expired
             }
         }
@@ -517,18 +561,21 @@ impl ApprovalGate for RuntimeApprovalGate {
 }
 
 impl RuntimeApprovalGate {
-    async fn expire(&self, reason: &str) {
-        // Expire exactly the ids *this* scope created: a concurrent sibling
-        // subagent shares our run id and must keep waiting for its own answer.
+    /// Expire one timed-out/cancelled request, never its whole run. The bool says
+    /// whether this call durably wrote the expiry; false keeps the scope id and
+    /// waiter available for a retry.
+    async fn expire_request(&self, approval_id: &str, reason: &str) -> bool {
         self.scope
             .expire_pending(
                 &self.inner,
                 &self.session_id.0,
                 &self.run_id.0,
-                self.agent_id.is_none(),
+                false,
                 reason,
             )
-            .await;
+            .await
+            .into_iter()
+            .any(|id| id == approval_id)
     }
 }
 
@@ -548,9 +595,9 @@ pub(crate) async fn resolve(
             ))
         })?;
 
-    // Do not durably accept work for a gate that has already expired or been
-    // cancelled. The second check, after the write, handles a cancellation that
-    // races this preflight.
+    // Reject cards whose gate already durably closed. If expiry storage failed,
+    // the waiter deliberately remains here so the durable pending card can still
+    // be answered even though the tool has already treated the wait as expired.
     if !inner.approvals.contains(approval_id) {
         return Err(Error::NotFound(format!(
             "approval {approval_id} is no longer waiting for a decision"
@@ -568,9 +615,9 @@ pub(crate) async fn resolve(
         .await?;
 
     if !inner.approvals.resolve(approval_id, decision) {
-        // The store has the decision, but the waiter disappeared while it was
-        // being written. Never claim that this woke a live gate; in particular,
-        // no tool may run on the strength of a decision that arrived too late.
+        // The store has the decision, but no live tool was woken. This preserves
+        // the cancellation-race error contract while still closing a durable
+        // pending card whose timeout expiry previously failed to persist.
         return Err(Error::NotFound(format!(
             "approval {approval_id} expired while its decision was being stored"
         )));
@@ -591,7 +638,415 @@ pub(crate) async fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kc_core::config::ApprovalMode;
+    use crate::tests_support::{FakeSettings, HarnessBuilder};
+    use kc_core::config::{ApprovalMode, ApprovalPolicy};
+    use tokio::time::Instant;
+
+    fn scoped_request(id: &str, session: &str, run: &str, agent: Option<&str>) -> ApprovalRequest {
+        ApprovalRequest {
+            id: id.into(),
+            kind: ApprovalKind::Mcp,
+            title: format!("Call {id}"),
+            detail: "test approval".into(),
+            payload: serde_json::json!({"tool": id}),
+            session_id: session.into(),
+            run_id: run.into(),
+            agent_id: agent.map(str::to_string),
+        }
+    }
+
+    async fn wait_for_pending(inner: &Arc<RuntimeInner>, session: &str, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let pending = inner
+                .deps
+                .store
+                .list_pending_approvals(Some(session))
+                .await
+                .expect("list pending");
+            if pending.len() == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "wanted {expected} pending approvals, got {pending:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_top_level_timeout_does_not_expire_an_independent_child() {
+        let settings = FakeSettings::default().with_policy(ApprovalPolicy {
+            mode: ApprovalMode::Ask,
+            timeout_secs: 1,
+            ..Default::default()
+        });
+        let h = HarnessBuilder::new(Vec::new())
+            .settings(settings)
+            .build()
+            .await;
+        let inner = Arc::clone(h.runtime.shared());
+        let session = SessionId::from_string(h.session());
+        let run = RunId::new();
+        let parent = Arc::new(RuntimeApprovalGate::new(
+            Arc::clone(&inner),
+            session.clone(),
+            run.clone(),
+            None,
+            CancellationToken::new(),
+            0,
+        ));
+        let child = Arc::new(RuntimeApprovalGate::new(
+            Arc::clone(&inner),
+            session.clone(),
+            run.clone(),
+            Some(AgentId::from_string("a_child")),
+            CancellationToken::new(),
+            1,
+        ));
+        let parent_request = scoped_request("ap_parent", h.session(), &run.0, None);
+        let parent_task = tokio::spawn(async move { parent.request(parent_request).await });
+        wait_for_pending(&inner, h.session(), 1).await;
+
+        // Start the child halfway through the parent's independent one-second
+        // budget. The parent times out while this child still has time remaining.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let child_request = scoped_request("ap_child", h.session(), &run.0, Some("a_child"));
+        let child_task = tokio::spawn(async move { child.request(child_request).await });
+        wait_for_pending(&inner, h.session(), 2).await;
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), parent_task)
+                .await
+                .expect("parent request returned")
+                .expect("parent task joined"),
+            ApprovalDecision::Expired
+        );
+        let pending = inner
+            .deps
+            .store
+            .list_pending_approvals(Some(h.session()))
+            .await
+            .expect("list after parent timeout");
+        assert_eq!(
+            pending
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ap_child"],
+            "a run-wide timeout would incorrectly close the child"
+        );
+        assert!(inner.approvals.contains("ap_child"));
+        assert_eq!(inner.approvals.pending_count(), 1);
+
+        // Resolve the still-independent child through the normal durable path.
+        resolve(Arc::clone(&inner), "ap_child", ApprovalDecision::Deny)
+            .await
+            .expect("resolve child after parent timeout");
+        assert_eq!(
+            child_task.await.expect("child joined"),
+            ApprovalDecision::Deny
+        );
+        assert_eq!(inner.approvals.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_timeout_persistence_keeps_scope_and_pending_card_resolvable() {
+        let settings = FakeSettings::default().with_policy(ApprovalPolicy {
+            mode: ApprovalMode::Ask,
+            timeout_secs: 1,
+            ..Default::default()
+        });
+        let h = HarnessBuilder::new(Vec::new())
+            .settings(settings)
+            .build()
+            .await;
+        let inner = Arc::clone(h.runtime.shared());
+        let session = SessionId::from_string(h.session());
+        let run = RunId::new();
+        let gate = Arc::new(RuntimeApprovalGate::new(
+            Arc::clone(&inner),
+            session.clone(),
+            run.clone(),
+            Some(AgentId::from_string("a_store_failure")),
+            CancellationToken::new(),
+            1,
+        ));
+        let scope = gate.scope();
+        let request = scoped_request(
+            "ap_store_failure",
+            h.session(),
+            &run.0,
+            Some("a_store_failure"),
+        );
+        let task = {
+            let gate = Arc::clone(&gate);
+            tokio::spawn(async move { gate.request(request).await })
+        };
+        wait_for_pending(&inner, h.session(), 1).await;
+        h.store.fail_approval_resolutions(true);
+
+        // The timed-out tool gets a safe denial, but neither its scope id nor its
+        // registry entry can be thrown away while the durable row remains pending.
+        assert_eq!(task.await.expect("gate joined"), ApprovalDecision::Expired);
+        assert!(scope
+            .ids
+            .lock()
+            .expect("scope")
+            .contains("ap_store_failure"));
+        assert!(inner.approvals.contains("ap_store_failure"));
+        assert_eq!(
+            h.store.approvals()[0].status,
+            "pending",
+            "the injected write failure must leave the row pending"
+        );
+
+        // A second expiry attempt during the same outage also changes no waiter.
+        assert!(scope
+            .expire_pending(&inner, h.session(), &run.0, false, "retry during outage",)
+            .await
+            .is_empty());
+        assert!(inner.approvals.contains("ap_store_failure"));
+
+        // Once storage recovers, normal resolution is the other retry path. The
+        // late decision must not pretend to execute the already-expired tool; it
+        // durably closes the card and removes the in-memory registration.
+        h.store.fail_approval_resolutions(false);
+        let late = resolve(
+            Arc::clone(&inner),
+            "ap_store_failure",
+            ApprovalDecision::Deny,
+        )
+        .await;
+        assert!(
+            matches!(late, Err(Error::NotFound(_))),
+            "the vanished waiter is not reported as woken: {late:?}"
+        );
+        assert!(!inner.approvals.contains("ap_store_failure"));
+        assert_eq!(h.store.approvals()[0].status, "resolved");
+        assert_eq!(h.store.approvals()[0].decision.as_deref(), Some("deny"));
+        assert!(scope
+            .expire_pending(&inner, h.session(), &run.0, false, "teardown retry")
+            .await
+            .is_empty());
+        assert!(scope.ids.lock().expect("scope").is_empty());
+    }
+
+    #[tokio::test]
+    async fn expiry_write_retry_closes_the_row_before_releasing_its_waiter() {
+        let settings = FakeSettings::default().with_policy(ApprovalPolicy {
+            mode: ApprovalMode::Ask,
+            timeout_secs: 30,
+            ..Default::default()
+        });
+        let h = HarnessBuilder::new(Vec::new())
+            .settings(settings)
+            .build()
+            .await;
+        let mut events = h.runtime.subscribe();
+        let inner = Arc::clone(h.runtime.shared());
+        let run = RunId::new();
+        let cancel = CancellationToken::new();
+        let gate = Arc::new(RuntimeApprovalGate::new(
+            Arc::clone(&inner),
+            SessionId::from_string(h.session()),
+            run.clone(),
+            Some(AgentId::from_string("a_retry")),
+            cancel.clone(),
+            1,
+        ));
+        let scope = gate.scope();
+        let request = scoped_request("ap_retry", h.session(), &run.0, Some("a_retry"));
+        let task = tokio::spawn(async move { gate.request(request).await });
+        wait_for_pending(&inner, h.session(), 1).await;
+
+        h.store.fail_approval_resolutions(true);
+        cancel.cancel();
+        assert_eq!(task.await.expect("gate joined"), ApprovalDecision::Expired);
+        assert!(inner.approvals.contains("ap_retry"));
+        assert_eq!(h.store.approvals()[0].status, "pending");
+
+        h.store.fail_approval_resolutions(false);
+        let expired = scope
+            .expire_pending(&inner, h.session(), &run.0, false, "teardown retry")
+            .await;
+        assert_eq!(expired, vec!["ap_retry"]);
+        assert_eq!(h.store.approvals()[0].status, "expired");
+        assert_eq!(h.store.approvals()[0].decision.as_deref(), Some("expired"));
+        assert!(!inner.approvals.contains("ap_retry"));
+        assert!(scope.ids.lock().expect("scope").is_empty());
+
+        let mut published = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            published.push(event);
+        }
+        assert_eq!(
+            published
+                .iter()
+                .filter(|event| matches!(
+                    &event.event,
+                    Event::ApprovalResolved {
+                        decision: ApprovalDecision::Expired,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "only the durable retry emits expiry: {published:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_before_run_wide_expiry_never_publishes_or_reports_expired() {
+        let h = HarnessBuilder::new(Vec::new())
+            .settings(FakeSettings::default().with_policy(ApprovalPolicy {
+                mode: ApprovalMode::Ask,
+                timeout_secs: 30,
+                ..Default::default()
+            }))
+            .build()
+            .await;
+        let mut events = h.runtime.subscribe();
+        let inner = Arc::clone(h.runtime.shared());
+        let run = RunId::new();
+        let gate = Arc::new(RuntimeApprovalGate::new(
+            Arc::clone(&inner),
+            SessionId::from_string(h.session()),
+            run.clone(),
+            None,
+            CancellationToken::new(),
+            0,
+        ));
+        let scope = gate.scope();
+        let request = scoped_request("ap_allow_before_expiry", h.session(), &run.0, None);
+        let request_task = tokio::spawn(async move { gate.request(request).await });
+        wait_for_pending(&inner, h.session(), 1).await;
+
+        // Freeze either implementation after it has listed the approval as pending
+        // but before its durable transition. The human Allow therefore wins a real
+        // storage race rather than merely preceding the call to expire the scope.
+        let bulk_gate = h.store.gate_next("expire_pending_approvals");
+        let conditional_gate = h.store.gate_next("resolve_pending_approval");
+        let expiry = {
+            let inner = Arc::clone(&inner);
+            let scope = scope.clone();
+            let session = h.session().to_string();
+            let run_id = run.0.clone();
+            tokio::spawn(async move {
+                scope
+                    .expire_pending(&inner, &session, &run_id, true, "review")
+                    .await
+            })
+        };
+        tokio::select! {
+            _ = bulk_gate.wait_entered() => {}
+            _ = conditional_gate.wait_entered() => {}
+        }
+
+        resolve(
+            Arc::clone(&inner),
+            "ap_allow_before_expiry",
+            ApprovalDecision::AllowOnce,
+        )
+        .await
+        .expect("human decision");
+        assert_eq!(
+            request_task.await.expect("approval request joined"),
+            ApprovalDecision::AllowOnce
+        );
+        bulk_gate.release();
+        conditional_gate.release();
+
+        assert!(
+            expiry.await.expect("expiry joined").is_empty(),
+            "an Allow that already committed must not be reported as expired"
+        );
+        let approval = &h.store.approvals()[0];
+        assert_eq!(approval.status, "resolved");
+        assert_eq!(approval.decision.as_deref(), Some("allow_once"));
+        let mut persisted_and_published = Vec::new();
+        while let Ok(envelope) = events.try_recv() {
+            if let Event::ApprovalResolved {
+                approval_id,
+                decision,
+            } = envelope.event
+            {
+                if approval_id == "ap_allow_before_expiry" {
+                    persisted_and_published.push((approval.decision.clone(), decision));
+                }
+            }
+        }
+        assert_eq!(
+            persisted_and_published,
+            vec![(Some("allow_once".to_string()), ApprovalDecision::AllowOnce)],
+            "published decisions must not contradict the durable Allow"
+        );
+        assert!(scope
+            .expire_pending(&inner, h.session(), &run.0, true, "teardown retry")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn normal_pending_expiry_is_reported_once_and_teardown_retry_is_a_noop() {
+        let h = HarnessBuilder::new(Vec::new())
+            .settings(FakeSettings::default().with_policy(ApprovalPolicy {
+                mode: ApprovalMode::Ask,
+                timeout_secs: 30,
+                ..Default::default()
+            }))
+            .build()
+            .await;
+        let mut events = h.runtime.subscribe();
+        let inner = Arc::clone(h.runtime.shared());
+        let run = RunId::new();
+        let gate = Arc::new(RuntimeApprovalGate::new(
+            Arc::clone(&inner),
+            SessionId::from_string(h.session()),
+            run.clone(),
+            None,
+            CancellationToken::new(),
+            0,
+        ));
+        let scope = gate.scope();
+        let request = scoped_request("ap_normal_expiry", h.session(), &run.0, None);
+        let request_task = tokio::spawn(async move { gate.request(request).await });
+        wait_for_pending(&inner, h.session(), 1).await;
+
+        assert_eq!(
+            scope
+                .expire_pending(&inner, h.session(), &run.0, true, "run finished")
+                .await,
+            vec!["ap_normal_expiry"]
+        );
+        assert_eq!(
+            request_task.await.expect("approval request joined"),
+            ApprovalDecision::Expired
+        );
+        assert!(scope
+            .expire_pending(&inner, h.session(), &run.0, true, "teardown retry")
+            .await
+            .is_empty());
+        let approval = &h.store.approvals()[0];
+        assert_eq!(approval.status, "expired");
+        assert_eq!(approval.decision.as_deref(), Some("expired"));
+        assert_eq!(inner.approvals.pending_count(), 0);
+
+        let mut expired_events = 0;
+        while let Ok(envelope) = events.try_recv() {
+            if matches!(
+                envelope.event,
+                Event::ApprovalResolved {
+                    ref approval_id,
+                    decision: ApprovalDecision::Expired,
+                } if approval_id == "ap_normal_expiry"
+            ) {
+                expired_events += 1;
+            }
+        }
+        assert_eq!(expired_events, 1, "the waiter retry must not publish twice");
+    }
 
     #[test]
     fn session_keys_are_scoped_per_session_and_kind() {

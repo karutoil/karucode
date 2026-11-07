@@ -588,9 +588,13 @@ whose before-image was never captured (over 4 MiB, or not valid UTF-8).
   "run_id": "r_9f3", "files_restored": 2, "files_skipped": 0 }
 ```
 `outcomes` has one entry per journal row, newest first: `restored`, `removed`,
-`not_captured` or `failed`. `run_id` is set by `retry` and `note` and is `null`
-for `none`. `files_restored` counts the clean outcomes and `files_skipped` the
-rest.
+`not_captured` or `failed`. `files_restored` counts the clean outcomes and
+`files_skipped` the rest. `committed` says the transcript/file rewind actually
+happened. `run_id` identifies a replacement started by `retry` or `note`; it is
+null for `none`, and also when replacement startup fails *after* the rewind has
+committed. In that partial-success case the response stays 200 and includes the
+actionable `start_error`; do not claim a rollback or silently retry the rewind.
+The runtime emits exactly one normalized `session_rewound` after that commit.
 
 Rules:
 
@@ -839,9 +843,13 @@ connection covers every agent in every session; there is no per-agent stream.
 ```json
 { "path": ".", "entries": [
   { "name": "src", "path": "src", "kind": "dir", "size": 0 },
-  { "name": "Cargo.toml", "path": "Cargo.toml", "kind": "file", "size": 812 } ] }
+  { "name": "Cargo.toml", "path": "Cargo.toml", "kind": "file", "size": 812 } ],
+  "truncated": false, "limit": 2000 }
 ```
-`depth` is clamped to 1–6 and the listing stops at 2000 entries. Directories that
+`depth` is clamped to 1–6 and the listing stops at 2000 entries. The walk also
+has a work budget and does not fully collect and sort an arbitrarily large
+directory before applying the response cap. `truncated: true` means that result
+or walk limits omitted entries. Directories that
 are never useful in a UI (`node_modules`, `.git`, `target`, `dist`, `.next`,
 `.turbo`, `.venv`, `venv`, `__pycache__`, `.pytest_cache`, `.mypy_cache`,
 `coverage`, `.idea`) are skipped before the entry budget is spent, so a listing
@@ -852,7 +860,8 @@ still reachable by naming one explicitly (`?path=.git`) and by the file tools.
 `GET /api/workspace/file?path=src/main.rs[&project=<id>]` →
 ```json
 { "path": "src/main.rs", "content": "...", "size": 812, "truncated": false,
-  "binary": false, "language": "rust" }
+  "binary": false, "language": "rust",
+  "digest": "sha256:<64 lowercase hex characters>" }
 ```
 `404` for missing files, `400 path_escape` outside the workspace. `project`
 selects the directory, so a file opened from a project's tree is read from that
@@ -876,13 +885,15 @@ takes the **whole** new contents and answers `200`:
 ```bash
 curl -s -X PUT "localhost:8787/api/workspace/file?path=docs/guide.md" \
   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
-  -d '{"content":"# New title\n","expected_size":412}'
+  -d '{"content":"# New title\n","expected_digest":"sha256:<digest returned when the file was read>"}'
 ```
 ```json
-{ "path": "docs/guide.md", "size": 13, "created": false, "language": "markdown" }
+{ "path": "docs/guide.md", "size": 13, "created": false, "language": "markdown",
+  "digest": "sha256:<digest of the saved content>" }
 ```
 
-Body: `{ "content": "<whole file>", "expected_size": <bytes, optional> }`.
+Body: `content` is the whole new file; `expected_size` and `expected_digest`
+are optional assertions about the snapshot that was read.
 
 * `content` is UTF-8 text only, at most **2 MiB** (`413 payload_too_large`,
   the same cap as the `write_file` tool). This endpoint never writes binary.
@@ -890,10 +901,12 @@ Body: `{ "content": "<whole file>", "expected_size": <bytes, optional> }`.
   workspace and symlink escapes are `400 path_escape`.
 * A missing file is `404 not_found`. `create=true` creates it (and its parent
   directories) instead, and the response says `"created": true`.
-* `expected_size` is optimistic concurrency: when the file on disk is no longer
-  that size the save is `409` with the documented `bad_request` code and
-  **nothing is written**, so an editor cannot clobber what the agent wrote in the
-  meantime. `force=true` skips the check — it is the user's answer to that
+* `expected_size` remains available for older clients. A supplied digest rejects
+  every content change, including an edit with exactly the same byte length. Either
+  mismatch is a `409` with the documented `bad_request` code and **nothing is
+  written**, so an editor cannot clobber what the agent wrote in the meantime.
+  Save the digest from the actual successful read; replying to a forced save
+  returns its successor digest. `force=true` skips both checks — the user's answer to that
   prompt, not a default. A file that was deleted while it was open is the same
   `409`, because saving would reverse somebody's deletion.
 * `approvals.mode = "read_only"` refuses every save with `403
@@ -913,10 +926,13 @@ curl -s -D- -o out.png "localhost:8787/api/workspace/raw?path=assets/logo.png"
 ```
 
 `GET /api/workspace/file` answers JSON, which an `<img>` or an embedded PDF
-cannot render, so the viewer points those elements here. The limit is **32 MiB**
-(`413 payload_too_large` above it), confinement and error codes are the same as
-the read endpoint, and `X-Content-Type-Options: nosniff` is always sent so a
-workspace HTML file served here cannot be sniffed into a script.
+cannot render. The viewer therefore fetches these bytes through the authenticated
+API client and displays a managed object URL; it revokes old URLs when content,
+project, or ownership changes. Raw subresource URLs do not accept the deployment's
+master `?token=`, so direct external clients must use `Authorization: Bearer`.
+The limit is **32 MiB** (`413 payload_too_large` above it), confinement and error
+codes are the same as the read endpoint, and `X-Content-Type-Options: nosniff` is
+always sent so a workspace HTML file served here cannot be sniffed into a script.
 
 ### Attaching a file
 
@@ -937,8 +953,11 @@ curl -s -X POST "localhost:8787/api/workspace/upload?session=s_ab12&name=report.
 ```
 
 This is how the composer hands the agent a file it can actually read: the bytes
-are written under the session's project in `.karucode/attachments/<session>/`, and
-`path` is workspace-relative, so it can be passed straight back to
+are written under the session's project in `.karucode/attachments/<session>/`.
+When `project` is omitted, the session's recorded workspace is authoritative even
+for a project-less/control chat; it never falls through to the default project.
+The response's `workspace` names where the bytes actually landed. `path` is
+workspace-relative, so it can be passed straight back to
 `GET /api/workspace/file?path=...` or `@`-mentioned in a prompt. The echoed
 `content_type` comes from the request header with its parameters dropped, and is
 `application/octet-stream` when the request had none.
@@ -982,7 +1001,7 @@ curl -s -X POST localhost:8787/api/artifacts \
 ```
 ```json
 { "id": "9f2c6d1b8a4e0f3c5d7b9a1e2c4f6d80",
-  "url": "/api/artifacts/9f2c6d1b8a4e0f3c5d7b9a1e2c4f6d80",
+  "url": "/api/artifacts/9f2c6d1b8a4e0f3c5d7b9a1e2c4f6d80?capability=<random-scoped-capability>",
   "bytes": 374, "theme": "dark" }
 ```
 
@@ -1009,10 +1028,12 @@ curl -s -X POST localhost:8787/api/artifacts \
   `X-Frame-Options` is deliberately absent, because `DENY` would block the frame.
 * `Cache-Control: no-store`. A malformed or unknown id is `404 not_found`, never a
   `5xx`.
-* With `KARUCODE_AUTH_TOKEN` set this path also accepts `?token=<token>`: an
-  `<iframe src>` is a browser navigation and cannot send `Authorization`. The
-  token in the URL grants nothing the header did not - it is the same trade the
-  event stream and the terminal socket already make.
+* The returned `url` includes a random `capability` that grants read access to
+  this immutable artifact only. An iframe navigation cannot attach the bearer
+  header, so this scoped grant replaces it. The master `?token=` is deliberately
+  not accepted for artifacts and must never appear in an artifact URL. Capabilities
+  are in-memory like their artifacts, so restart/eviction requires reposting the
+  source and using the newly returned URL.
 
 ## Git
 
@@ -1198,17 +1219,26 @@ A `: keepalive` comment is sent every 15 seconds. The envelope always has
 `seq`, `ts_ms`, and optional `session_id`, `run_id`, `agent_id`; the event fields
 are flattened alongside `type`.
 
-**Resume.** Every frame carries `id: {seq}` before its `data:` line, so a
+**Resume.** Every event frame carries `id: {seq}` before its `data:` line, so a
 reconnect can send `Last-Event-ID: <seq>` (or `?last_event_id=<seq>`) and be
 handed the frames it missed instead of refetching the session. The server keeps
-the last 1000 envelopes per session in memory; a cursor older than that gets a
-`resync` frame (`{"type":"resync","requested_id":N,"oldest_available":M}`) rather
-than a silent skip, and the client should refetch once.
+one bounded replay ring per runtime: at most 1000 envelopes and 8 MiB globally,
+not a separate ring for every session. A cursor older than the surviving data
+gets a `resync` frame
+(`{"type":"resync","requested_id":N,"oldest_available":M}`) rather than a silent
+skip, and the client should refetch once.
+
+Each response also carries `X-Karucode-Event-Epoch`, a random identifier stable
+for one server process and different after restart. Clients retain sequence
+cursors across reconnects *only inside that epoch*. A changed epoch requires
+clearing the cursor, accepting the new process's lower sequence numbers, and
+forcing an authoritative session/list resync. Ordinary replay dedupe still stays
+on within an epoch, so a repeated cursor frame does not duplicate work.
 
 When a resume is not possible, the client has to notice what it missed:
 
 * `seq` is monotonic within one server process (it starts again at 1 with the
-  process, which is why dedupe is scoped to a connection). A jump means frames
+  process, which is why cursors are tied to that process's epoch). A jump means frames
   were dropped - refetch the session with `GET /api/sessions/:id` (messages, runs
   and agents are persisted). On a stream opened with `?session=`, holes are
   normal: other sessions' frames are stamped and then filtered out, so only treat
@@ -1227,9 +1257,26 @@ When a resume is not possible, the client has to notice what it missed:
   snapshot only contains persisted messages, so replacing the view mid-answer
   deletes what has not been saved yet. Keep the live view and refetch again when
   the run settles.
+* A saturated connection cap returns one HTTP-200 transport-control frame rather
+  than a replayable event: `event: karucode.transport` with JSON
+  `{"type":"connection_cap","message":"...","retry_after_ms":...}`. It has no
+  ordinary envelope or sequence cursor, must bypass dequeuing/dedupe, and never
+  advances `Last-Event-ID`. Show its message and use the normal retry backoff.
+* A live connection that exceeds its 4 MiB queued-byte budget ends with the
+  sibling transport control
+  `{"type":"stream_overflow","message":"...","retry_after_ms":1000}` under
+  `event: karucode.transport`. It likewise has no `id`, `seq`, or ordinary notice
+  envelope and is not recorded for replay. The event that tripped the budget was
+  rejected, so assigning that sequence (or the next one) to the control would hide
+  real events after reconnect. Show the saturation error, retain the last actually
+  delivered cursor, and immediately refetch authoritative session/list state via
+  the resync/gap handler; then let the ordinary reconnect resume with that cursor.
+  Recovery must not depend solely on numeric gap detection: replay of `51` after
+  cursor `50` is contiguous even though the overflow itself must still be repaired.
 
 | `type` | extra fields |
 | --- | --- |
+| `text_replaced` | `session_id`, `run_id`, `content` — authoritative complete answer for that live run after a runtime correction; replace, rather than append to, its locally accumulated text |
 | `session_created` | `session_id`, `title` |
 | `session_renamed` | `session_id`, `title` |
 | `session_model_changed` | `session_id`, `model` (the new pin, or `null` when cleared) |

@@ -320,6 +320,80 @@ async fn json_ping_gets_a_private_text_pong_not_broadcast_pty_bytes() {
     h.delete(&format!("/api/terminals/{id}")).await;
 }
 
+/// Configured non-secret variables reach the shell, but the same passthrough list
+/// cannot expose a credential-shaped name or invent an absent value.
+#[tokio::test]
+async fn terminal_socket_uses_sanitized_live_command_env_passthrough() {
+    use futures_util::{SinkExt, StreamExt};
+
+    const VALUE: &str = "KC_SERVER_TERMINAL_TEST_VALUE";
+    const SECRET: &str = "KC_SERVER_TERMINAL_TEST_TOKEN";
+    const MISSING: &str = "KC_SERVER_TERMINAL_TEST_MISSING";
+    std::env::set_var(VALUE, "passed-through");
+    std::env::set_var(SECRET, "must-not-appear");
+    std::env::remove_var(MISSING);
+    let limits = kc_core::config::Limits {
+        command_env_passthrough: vec![VALUE.into(), SECRET.into(), MISSING.into()],
+        ..Default::default()
+    };
+    let h = HarnessBuilder::new(Vec::new()).limits(limits).build().await;
+    let created = h.post("/api/terminals", json!({})).await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.text());
+    let id = created.json()["terminal"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = h.router.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let url = format!("ws://{address}/api/terminals/{id}/socket");
+    let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let ready = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(ready.to_text().unwrap()).unwrap()["type"],
+        "ready"
+    );
+    let command = "printf 'KC_ENV_RESULT value=<%s> secret=<%s> missing=<%s>\\n' \"$(printenv KC_SERVER_TERMINAL_TEST_VALUE || printf ABSENT)\" \"$(printenv KC_SERVER_TERMINAL_TEST_TOKEN || printf ABSENT)\" \"$(printenv KC_SERVER_TERMINAL_TEST_MISSING || printf ABSENT)\"\n";
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Binary(
+            command.as_bytes().to_vec(),
+        ))
+        .await
+        .unwrap();
+    let mut output = Vec::new();
+    for _ in 0..200 {
+        let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("terminal output timeout")
+            .unwrap()
+            .unwrap();
+        if frame.is_binary() {
+            output.extend_from_slice(&frame.into_data());
+        }
+        let text = String::from_utf8_lossy(&output);
+        if text.contains("KC_ENV_RESULT") && text.contains("missing=<ABSENT>") {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&output);
+    assert!(text.contains("value=<passed-through>"), "{text:?}");
+    assert!(text.contains("secret=<ABSENT>"), "{text:?}");
+    assert!(text.contains("missing=<ABSENT>"), "{text:?}");
+    assert!(!text.contains("must-not-appear"), "{text:?}");
+
+    drop(socket);
+    server.abort();
+    h.delete(&format!("/api/terminals/{id}")).await;
+    std::env::remove_var(VALUE);
+    std::env::remove_var(SECRET);
+}
+
 /// `terminals.enabled = false` removes the whole surface: no list, no create.
 #[tokio::test]
 async fn a_disabled_terminal_refuses_every_route() {

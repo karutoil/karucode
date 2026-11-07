@@ -18,15 +18,16 @@ use kc_core::error::{Error, Result};
 use kc_core::events::EventEnvelope;
 use kc_core::hooks::Hooks;
 use kc_core::ids::{AgentId, RunId, SessionId};
+use kc_core::message::Role;
 use kc_core::paths::Workspace;
 use kc_core::provider::ProviderFactory;
 use kc_core::queue::{QueuedKind, QueuedMessage, MAX_QUEUED_ATTACHMENTS};
 use kc_core::settings::Settings;
-use kc_core::store::{AgentStatus, Store};
+use kc_core::store::{AgentStatus, NewMessage, Store};
 use kc_core::tool::ToolRegistry;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -184,9 +185,16 @@ pub struct RewindOutcome {
     /// Empty when the rewind only hid the transcript.
     pub outcomes: Vec<kc_core::checkpoint::UndoOutcome>,
     /// The run started after the rewind, for the retry and note modes. `None`
-    /// when the caller only rewound.
+    /// when the caller only rewound or replacement startup failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// Whether `point` and `outcomes` were durably committed. A returned outcome
+    /// is always committed, including when `start_error` is set.
+    pub committed: bool,
+    /// Replacement startup failed *after* the rewind committed. The caller must
+    /// show the rewind as done instead of rolling it back or silently retrying.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_error: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -221,6 +229,39 @@ pub struct Runtime {
     inner: Arc<RuntimeInner>,
 }
 
+type SessionLifecycleMap = Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+
+/// Owns a session lifecycle lock and reclaims its map entry after the last user.
+///
+/// The weak map reference avoids a reference cycle. Removal checks both identity
+/// and strong count while holding the map mutex: a concurrent acquirer therefore
+/// either clones the live lock before removal or creates a new lock afterwards;
+/// it can never leave a waiter attached to an entry that was deleted underneath
+/// it. Dropping the mutex guard comes first, so the next critical section starts
+/// only after the previous one has released the async lock.
+pub(crate) struct SessionLifecycleGuard {
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    lock: Arc<tokio::sync::Mutex<()>>,
+    session_id: String,
+    locks: Weak<SessionLifecycleMap>,
+}
+
+impl Drop for SessionLifecycleGuard {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        let Some(locks) = self.locks.upgrade() else {
+            return;
+        };
+        let mut locks = locks.lock().expect("session lifecycle lock");
+        let remove = locks.get(&self.session_id).is_some_and(|current| {
+            Arc::ptr_eq(current, &self.lock) && Arc::strong_count(current) == 2
+        });
+        if remove {
+            locks.remove(&self.session_id);
+        }
+    }
+}
+
 pub(crate) struct RuntimeInner {
     pub deps: RuntimeDeps,
     pub events: broadcast::Sender<EventEnvelope>,
@@ -231,8 +272,8 @@ pub(crate) struct RuntimeInner {
     pub runs: Mutex<HashMap<String, Arc<RunState>>>,
     /// One fair async lock per session for operations that need a quiescent
     /// transcript: submit, rewind, and the indivisible rewind-and-retry pair.
-    /// The map is locked only long enough to clone the session's lock.
-    pub session_lifecycle: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Entries are reclaimed by [`SessionLifecycleGuard`] after its last waiter.
+    pub session_lifecycle: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     pub approvals: approvals::ApprovalRegistry,
     pub subagents: Arc<subagent::SubagentLimiter>,
     /// The live half of subagents: pause gates, mailboxes and a registry of the
@@ -467,7 +508,7 @@ impl Runtime {
             events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
             tools: RwLock::new(Arc::new(ToolRegistry::new())),
             runs: Mutex::new(HashMap::new()),
-            session_lifecycle: Mutex::new(HashMap::new()),
+            session_lifecycle: Arc::new(Mutex::new(HashMap::new())),
             approvals: approvals::ApprovalRegistry::new(),
             subagents: Arc::new(subagent::SubagentLimiter::new(Default::default())),
             hub: Arc::new(hub::AgentHub::new()),
@@ -557,7 +598,9 @@ impl Runtime {
 
     /// Startup recovery: leftover `running` runs and agents become
     /// `interrupted`, the path claims those agents held are released, and
-    /// approvals still pending become `expired`. Returns counts.
+    /// approvals still pending become `expired`. Returns counts. Every affected
+    /// session also gets a stored recovery notice; the broadcast `Notice` is only
+    /// supplemental because normal server boot has no SSE subscribers yet.
     ///
     /// The transcript repair pass is bounded and best-effort by design:
     ///
@@ -577,14 +620,6 @@ impl Runtime {
         let store = &self.inner.deps.store;
         let started = std::time::Instant::now();
 
-        // Snapshot before rewriting statuses; failed agent snapshots remain best-effort.
-        let (running_agents, include_agents) = match store.running_agent_ids().await {
-            Ok(agents) => (agents, true),
-            Err(e) => {
-                tracing::warn!(error = %e, "startup recovery: could not list agents; interrupted agents' path claims will not be released");
-                (Vec::new(), false)
-            }
-        };
         let skip_repair = skip_recovery_requested();
         let cutoff = events::now_ms() - RECOVERY_MAX_AGE_DAYS * 86_400_000;
         let (total_sessions, candidates) = store
@@ -595,12 +630,18 @@ impl Runtime {
                 } else {
                     RECOVERY_MAX_SESSIONS
                 },
-                include_agents,
+                true,
             )
             .await?;
 
-        let interrupted_runs = store.mark_interrupted_runs().await?;
-        let interrupted_agents = store.mark_interrupted_agents().await?;
+        // These UPDATE...RETURNING operations are the authority for both the
+        // counts and the affected ids. In particular, a same-instance live agent
+        // that was never transitioned cannot have its claims released just because
+        // a different instance's agent was recovered in the same pass.
+        let recovered_runs = store.recover_interrupted_runs().await?;
+        let recovered_agents = store.recover_interrupted_agents().await?;
+        let interrupted_runs = recovered_runs.len();
+        let interrupted_agents = recovered_agents.len();
 
         // A dead agent's claims are not advisory history, they are a lie: every
         // later subagent touching the same path would be warned about an agent
@@ -608,7 +649,7 @@ impl Runtime {
         // ignore the one overlap signal `owned_paths` provides. Release them for
         // exactly the agents this pass marked interrupted.
         let mut released_claims = 0usize;
-        for (_, agent_id) in &running_agents {
+        for (_, agent_id) in &recovered_agents {
             match store.release_claims(agent_id).await {
                 Ok(()) => released_claims += 1,
                 Err(e) => tracing::warn!(
@@ -618,6 +659,7 @@ impl Runtime {
                 ),
             }
         }
+        persist_recovery_notices(&self.inner, &recovered_runs, &recovered_agents).await;
 
         // A crash can leave an assistant turn whose tool result was never
         // persisted. Repair the transcripts a restart could have broken, so the
@@ -722,22 +764,35 @@ impl Runtime {
     ) -> Result<RewindOutcome> {
         let (point, preview, outcomes) =
             rewind::rewind(self, session_id, message_id, revert, keep_prompt).await?;
+        self.emit(
+            Some(session_id),
+            None,
+            None,
+            kc_core::events::Event::SessionRewound {
+                session_id: session_id.to_string(),
+                message_id: point.user_message_id,
+                messages_removed: point.messages_removed,
+            },
+        );
         Ok(RewindOutcome {
             point,
             preview,
             outcomes,
             run_id: None,
+            committed: true,
+            start_error: None,
         })
     }
 
     /// Rewind, then start the run that replaces the hidden turn.
     ///
-    /// The two are one operation on purpose. A caller that rewound and then
-    /// failed to start the run would leave a session whose transcript ends at a
-    /// prompt with no answer and no run - indistinguishable from a crash. Doing
-    /// both here means the only outcomes are "both happened" or "neither did"
-    /// (a rewind whose follow-up run is refused is reported with the preview, so
-    /// the caller can say what state the session is in).
+    /// The store trait has no transaction spanning its rewind and run-creation
+    /// methods, so the two cannot honestly claim atomic rollback. If replacement
+    /// startup fails after the rewind commits, this returns `Ok` with
+    /// `committed: true`, `run_id: None`, and the actionable `start_error`.
+    /// `SessionRewound` is emitted immediately after that commit, before startup
+    /// is attempted; an error can therefore never erase the outcome or its event.
+    /// Errors before the commit still return `Err` and emit no rewind event.
     ///
     /// `next_prompt` is what the new turn says: the original prompt for a retry,
     /// or the user's replacement note. The rewind always hides the original
@@ -761,13 +816,48 @@ impl Runtime {
         let lifecycle = self.inner.lock_session_lifecycle(session_id).await;
         let (point, preview, outcomes) =
             rewind::rewind_quiescent(self, session_id, message_id, revert, false).await?;
-        let handle =
-            agent::start_run_with_lifecycle(self, session_id, next_prompt, lifecycle).await?;
+        self.emit(
+            Some(session_id),
+            None,
+            None,
+            kc_core::events::Event::SessionRewound {
+                session_id: session_id.to_string(),
+                message_id: point.user_message_id,
+                messages_removed: point.messages_removed,
+            },
+        );
+        let (run_id, start_error) = match agent::start_run_with_lifecycle(
+            self,
+            session_id,
+            next_prompt,
+            lifecycle,
+        )
+        .await
+        {
+            Ok(handle) => (Some(handle.run_id), None),
+            Err(error) => {
+                let message = error.to_string();
+                self.emit(
+                    Some(session_id),
+                    None,
+                    None,
+                    kc_core::events::Event::Notice {
+                        level: "warn".into(),
+                        message: format!(
+                            "The rewind committed, but its replacement run could not start: {message}. Send a new prompt when the session is ready."
+                        ),
+                    },
+                );
+                (None, Some(message))
+            }
+        };
         Ok(RewindOutcome {
             point,
             preview,
             outcomes,
-            run_id: Some(handle.run_id),
+            run_id,
+            committed: true,
+            start_error,
         })
     }
 
@@ -790,7 +880,7 @@ impl Runtime {
         let workspace = inner
             .deps
             .workspaces
-            .workspace_for(session.project_id.as_deref())?;
+            .workspace_for_session(session.project_id.as_deref(), &session.workspace)?;
         rewind::Rewinder::new(inner.deps.store.clone(), workspace)
             .preview(session_id, message_id)
             .await
@@ -1222,69 +1312,78 @@ impl Runtime {
     /// [`Error::NotFound`], so a browser that raced the finish is told instead of
     /// silently succeeding.
     pub async fn control_agent(&self, agent_id: &str, action: AgentAction) -> Result<AgentStatus> {
-        let live = self.inner.hub.get(agent_id).ok_or_else(|| {
-            Error::NotFound(format!(
-                "agent {agent_id} is not running; it may have finished already"
-            ))
-        })?;
-        let session_id = live.session_id.clone();
-        let status = match action {
-            AgentAction::Pause => match self.inner.hub.pause(agent_id, "user") {
-                Ok(status) => status,
-                Err(e) => return Err(Error::BadRequest(e.message())),
-            },
-            AgentAction::Resume => match self.inner.hub.resume(agent_id, "user") {
-                Ok(status) => status,
-                Err(e) => return Err(Error::BadRequest(e.message())),
-            },
-            AgentAction::Cancel => {
-                // The loop writes its own final status a moment from now, so the
-                // honest answer here is what was asked for: cancelled. Reporting
-                // the pre-cancel status would be a lie, and reporting nothing
-                // would make a stop button look broken.
-                self.inner
-                    .hub
-                    .kill(&session_id, &[agent_id.to_string()], "user");
-                AgentStatus::Cancelled
+        if matches!(action, AgentAction::Cancel) {
+            // A stop must never wait behind another control call's store I/O.
+            let live = self.inner.hub.get(agent_id).ok_or_else(|| {
+                Error::NotFound(format!(
+                    "agent {agent_id} is not running; it may have finished already"
+                ))
+            })?;
+            self.inner
+                .hub
+                .kill(&live.session_id, &[agent_id.to_string()], "user");
+            self.inner.emit(
+                Some(&live.session_id),
+                None,
+                Some(agent_id),
+                kc_core::events::Event::AgentPaused {
+                    agent_id: agent_id.to_string(),
+                    paused: false,
+                    by: "user".to_string(),
+                },
+            );
+            return Ok(AgentStatus::Cancelled);
+        }
+
+        // Keep this guard through live mutation, CAS, any fallback read and the
+        // event. The tools' pause/resume path uses the same AgentHub::control API,
+        // so every caller has one order per agent rather than two racing locks.
+        let control = self.inner.hub.control(agent_id).await.map_err(|error| {
+            if matches!(error, crate::hub::ControlError::Unknown(_)) {
+                Error::NotFound(error.message())
+            } else {
+                Error::BadRequest(error.message())
             }
+        })?;
+        let session_id = control.live().session_id.clone();
+        let status = match action {
+            AgentAction::Pause => control.pause("user"),
+            AgentAction::Resume => control.resume("user"),
+            AgentAction::Cancel => unreachable!(),
+        }
+        .map_err(|error| Error::BadRequest(error.message()))?;
+        let expected = match action {
+            AgentAction::Pause => AgentStatus::Running.as_str(),
+            AgentAction::Resume => AgentStatus::Paused.as_str(),
+            AgentAction::Cancel => unreachable!(),
         };
-        if !matches!(action, AgentAction::Cancel) {
-            let expected = match action {
-                AgentAction::Pause => AgentStatus::Running.as_str(),
-                AgentAction::Resume => AgentStatus::Paused.as_str(),
-                AgentAction::Cancel => unreachable!(),
-            };
-            match self
-                .inner
-                .deps
-                .store
-                .transition_agent_status(agent_id, &[expected], status.as_str(), events::now_ms())
-                .await
-            {
-                Ok(true) => {}
-                Ok(false) => {
-                    // A terminal full-row write won while the live flag was
-                    // being changed. Report the state that actually persists;
-                    // never publish a pause/resume success that did not land.
-                    let summary = self.inner.deps.store.get_agent(agent_id).await?;
-                    let Some(summary) = summary else {
-                        return Err(Error::NotFound(format!(
-                            "agent {agent_id} disappeared while it was being controlled"
-                        )));
-                    };
-                    return AgentStatus::parse(&summary.agent.status).ok_or_else(|| {
-                        Error::Store(format!(
-                            "agent {agent_id} has unknown status {:?}",
-                            summary.agent.status
-                        ))
-                    });
-                }
-                Err(e) => {
-                    // Preserve the existing live-control contract on a store
-                    // outage: the pause flag is set and the caller gets the
-                    // actual live state, with the persistence failure logged.
-                    tracing::warn!(agent = %agent_id, error = %e, "could not persist an agent status");
-                }
+        match self
+            .inner
+            .deps
+            .store
+            .transition_agent_status(agent_id, &[expected], status.as_str(), events::now_ms())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) // A terminal full-row write won; report persisted truth.
+            => {
+                let summary = self.inner.deps.store.get_agent(agent_id).await?;
+                let Some(summary) = summary else {
+                    return Err(Error::NotFound(format!(
+                        "agent {agent_id} disappeared while it was being controlled"
+                    )));
+                };
+                return AgentStatus::parse(&summary.agent.status).ok_or_else(|| {
+                    Error::Store(format!(
+                        "agent {agent_id} has unknown status {:?}",
+                        summary.agent.status
+                    ))
+                });
+            }
+            Err(error) => {
+                // Preserve the existing live-control contract on a store outage:
+                // the flag is live, and the caller receives the actual live state.
+                tracing::warn!(agent = %agent_id, %error, "could not persist an agent status");
             }
         }
         self.inner.emit(
@@ -1297,6 +1396,7 @@ impl Runtime {
                 by: "user".to_string(),
             },
         );
+        drop(control);
         Ok(status)
     }
 
@@ -1356,22 +1456,26 @@ impl Runtime {
 }
 
 impl RuntimeInner {
-    pub(crate) async fn lock_session_lifecycle(
-        &self,
-        session_id: &str,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = {
+    pub(crate) async fn lock_session_lifecycle(&self, session_id: &str) -> SessionLifecycleGuard {
+        let mut lifecycle = {
             let mut locks = self
                 .session_lifecycle
                 .lock()
                 .expect("session lifecycle lock");
-            Arc::clone(
+            let lock = Arc::clone(
                 locks
                     .entry(session_id.to_string())
                     .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-            )
+            );
+            SessionLifecycleGuard {
+                guard: None,
+                lock,
+                session_id: session_id.to_string(),
+                locks: Arc::downgrade(&self.session_lifecycle),
+            }
         };
-        lock.lock_owned().await
+        lifecycle.guard = Some(Arc::clone(&lifecycle.lock).lock_owned().await);
+        lifecycle
     }
 
     pub(crate) fn tool_view(&self) -> Arc<ToolRegistry> {
@@ -1437,6 +1541,146 @@ fn parse_skip_recovery(value: Option<&str>) -> bool {
             !(value.is_empty() || value == "0" || value == "false" || value == "no")
         }
         None => false,
+    }
+}
+
+/// Record recovery in the transcript as well as the best-effort live stream.
+/// Recovery runs before the HTTP listener exists, so an SSE-only notice is
+/// guaranteed to have no clients; a stored assistant notice is visible on every
+/// later session load and is wrapped in a reconnect despite having no SSE replay.
+async fn persist_recovery_notices(
+    inner: &RuntimeInner,
+    runs: &[(String, String)],
+    agents: &[(String, String)],
+) {
+    let mut affected: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for (session_id, _) in runs {
+        affected.entry(session_id).or_default().0 += 1;
+    }
+    for (session_id, _) in agents {
+        affected.entry(session_id).or_default().1 += 1;
+    }
+    for (session_id, (run_count, agent_count)) in affected {
+        let message = format!(
+            "[server recovery: a restart interrupted {run_count} run(s) and {agent_count} agent(s) before they could finish. They were not resumed automatically; inspect the session before retrying their work.]"
+        );
+        let record = NewMessage {
+            session_id: session_id.to_string(),
+            run_id: None,
+            agent_id: None,
+            role: Role::Assistant.as_str().to_string(),
+            content: message.clone(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: Some("kc-runtime:startup-recovery".into()),
+            images: Vec::new(),
+            reasoning_content: None,
+        };
+        if let Err(error) = inner.deps.store.append_message(&record).await {
+            // The status transitions already committed. Keep recovery best-effort
+            // just like transcript repair, and make a failed durable notice loud.
+            tracing::warn!(session = %session_id, %error,
+                "startup recovery: could not persist the interruption notice");
+        }
+        inner.emit(
+            Some(session_id),
+            None,
+            None,
+            kc_core::events::Event::Notice {
+                level: "warn".into(),
+                message,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::tests_support::test_inner;
+
+    #[tokio::test]
+    async fn lifecycle_entries_are_reclaimed_when_their_operations_finish() {
+        let inner = test_inner();
+        let weak = {
+            let _guard = inner.lock_session_lifecycle("s_reclaim").await;
+            let locks = inner.session_lifecycle.lock().unwrap();
+            assert_eq!(locks.len(), 1);
+            Arc::downgrade(&locks["s_reclaim"])
+        };
+        // `guard` dropped with the block; the weak marker is only for the check.
+        assert!(weak.upgrade().is_none());
+        assert!(inner.session_lifecycle.lock().unwrap().is_empty());
+
+        drop(inner.lock_session_lifecycle("s_reclaim").await);
+        assert!(inner.session_lifecycle.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_and_waiting_guards_never_remove_or_replace_a_live_lock() {
+        let inner = test_inner();
+        let first = inner.lock_session_lifecycle("s_busy").await;
+        let weak = Arc::downgrade(&inner.session_lifecycle.lock().unwrap()["s_busy"]);
+
+        let holder_inner = Arc::clone(&inner);
+        let acquired = Arc::new(tokio::sync::Notify::new());
+        let acquired_by_holder = Arc::clone(&acquired);
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let release_holder = Arc::clone(&release);
+        let holder = tokio::spawn(async move {
+            let guard = holder_inner.lock_session_lifecycle("s_busy").await;
+            acquired_by_holder.notify_one();
+            release_holder.acquire().await.unwrap().forget();
+            drop(guard);
+        });
+        let cancelled_inner = Arc::clone(&inner);
+        let cancelled = tokio::spawn(async move {
+            let _guard = cancelled_inner.lock_session_lifecycle("s_busy").await;
+            panic!("the cancelled waiter unexpectedly acquired the held lock");
+        });
+
+        // Both spawned operations have cloned this exact entry before the test
+        // starts dropping/cancelling guards (map + first guard + two waiters).
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let count = weak.strong_count();
+                if count >= 7 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiters never attached to the session lock");
+        cancelled.abort();
+        assert!(cancelled.await.unwrap_err().is_cancelled());
+        assert!(std::ptr::eq(
+            weak.as_ptr(),
+            Arc::as_ptr(&inner.session_lifecycle.lock().unwrap()["s_busy"])
+        ));
+
+        drop(first);
+        tokio::time::timeout(std::time::Duration::from_secs(5), acquired.notified())
+            .await
+            .expect("holder did not acquire after the first guard dropped");
+        let live = weak.upgrade().expect("live entry was deleted by a waiter");
+        assert!(
+            live.try_lock().is_err(),
+            "a replacement lock admitted a second holder"
+        );
+        assert!(std::ptr::eq(
+            weak.as_ptr(),
+            Arc::as_ptr(&inner.session_lifecycle.lock().unwrap()["s_busy"])
+        ));
+        drop(live);
+
+        release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), holder)
+            .await
+            .expect("holder did not finish")
+            .unwrap();
+        assert!(weak.upgrade().is_none());
+        assert!(inner.session_lifecycle.lock().unwrap().is_empty());
     }
 }
 
@@ -1542,8 +1786,50 @@ mod recovery_tests {
         );
     }
 
+    #[tokio::test]
+    async fn recovery_notice_survives_reconnect_and_is_not_duplicated() {
+        let mut h = HarnessBuilder::new(vec![Script::text("unused")])
+            .build()
+            .await;
+        h.store
+            .create_run("r_interrupted", h.session(), "fake-model", "old prompt")
+            .await
+            .expect("running row");
+
+        let report = h.runtime.recover().await.expect("recover");
+        assert_eq!(report.interrupted_runs, 1);
+        let notice = h.next_event().await;
+        assert!(matches!(
+            notice.event,
+            kc_core::events::Event::Notice { ref level, ref message }
+                if level == "warn" && message.contains("a restart interrupted 1 run(s)")
+        ));
+        let stored: Vec<_> = h
+            .store
+            .messages()
+            .into_iter()
+            .filter(|message| message.name.as_deref() == Some("kc-runtime:startup-recovery"))
+            .collect();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].session_id, h.session());
+        assert_eq!(stored[0].role, "assistant");
+        assert!(stored[0].content.contains("not resumed automatically"));
+
+        // New SSE subscribers start now; there is no event log to replay. The
+        // already-fetched durable row above is what reconnect/reload must show.
+        let mut reconnect = h.runtime.subscribe();
+        assert!(matches!(
+            reconnect.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        let before = h.store.messages().len();
+        let again = h.runtime.recover().await.expect("idempotent recovery");
+        assert_eq!(again.interrupted_runs, 0);
+        assert_eq!(h.store.messages().len(), before);
+    }
+
     /// A crash leaves a subagent's claims behind. Recovery must release them for
-    /// the agents it marks interrupted - and only for those.
+    /// the agents it marks interrupted with its exact transitioned id set.
     #[tokio::test]
     async fn recover_releases_claims_of_interrupted_agents_only() {
         let h = HarnessBuilder::new(vec![Script::text("unused")])

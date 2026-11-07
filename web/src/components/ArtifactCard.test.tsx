@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { Markdown } from './Markdown';
-import { publishArtifact } from '../lib/artifactPreview';
+import { invalidateArtifact, publishArtifact, resetArtifactCache } from '../lib/artifactPreview';
 import { renderMermaid } from '../lib/mermaid';
-import { resetArtifactCache } from '../lib/artifactPreview';
+import { setAuthToken } from '../api/client';
+import * as store from '../state/store';
 
 vi.mock('../lib/artifactPreview', () => ({
   publishArtifact: vi.fn(async () => '/api/artifacts/abc123?capability=scoped-artifact-read'),
+  invalidateArtifact: vi.fn(),
   resetArtifactCache: vi.fn(),
 }));
 
@@ -82,6 +84,23 @@ describe('an HTML artifact', () => {
     expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
     expect(frame.getAttribute('sandbox')).not.toContain('allow-same-origin');
     expect(frame.getAttribute('title')).toContain('rendered as an isolated page');
+  });
+
+  it('invalidates a cached capability and publishes fresh source on Render again', async () => {
+    const fresh = '/api/artifacts/fresh456?capability=new-read';
+    vi.mocked(publishArtifact)
+      .mockResolvedValueOnce('/api/artifacts/abc123?capability=dead-read')
+      .mockResolvedValueOnce(fresh);
+    setAuthToken('master-secret-not-for-artifacts');
+    const { container } = render(<Markdown text={fence('artifact html', HTML_MOCK)} />);
+    await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Render this artifact again' }));
+    await waitFor(() => expect(container.querySelector('iframe')?.getAttribute('src')).toBe(`${fresh}&v=1`));
+    expect(invalidateArtifact).toHaveBeenCalledWith(HTML_MOCK + '\n', 'dark');
+    expect(publishArtifact).toHaveBeenCalledTimes(2);
+    expect(document.body.innerHTML).not.toContain('master-secret-not-for-artifacts');
+    setAuthToken(null);
   });
 
   it('says it is isolated, and can show the source instead', async () => {
@@ -223,6 +242,42 @@ describe('a JSON artifact', () => {
     const { container } = render(<Markdown text={fence('json', broken)} />);
     expect(container.querySelector('[data-testid="artifact-card"]')).toBeNull();
     expect(container.querySelector('.code-block')).not.toBeNull();
+  });
+});
+
+describe('a path image artifact', () => {
+  it('uses bearer-authenticated bytes and revokes its blob URL', async () => {
+    const createDescriptor = Object.getOwnPropertyDescriptor(URL, 'createObjectURL');
+    const revokeDescriptor = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL');
+    const revoke = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: () => 'blob:artifact-image' });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revoke });
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response('png', { status: 200, headers: { 'Content-Type': 'image/png' } }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    setAuthToken('image-master-secret');
+    store.currentProjectId.value = 'p_images';
+
+    const view = render(<Markdown text={fence('artifact image', 'assets/dot.png')} />);
+    await waitFor(() => expect(view.container.querySelector('[data-testid="artifact-image"]')).not.toBeNull());
+    const image = view.container.querySelector('[data-testid="artifact-image"]')!;
+    expect(image.getAttribute('src')).toBe('blob:artifact-image');
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('/api/workspace/raw?path=assets%2Fdot.png&project=p_images');
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Authorization')).toBe('Bearer image-master-secret');
+    expect(document.body.innerHTML).not.toContain('image-master-secret');
+
+    view.unmount();
+    expect(revoke).toHaveBeenCalledWith('blob:artifact-image');
+    setAuthToken(null);
+    store.currentProjectId.value = null;
+    for (const [name, descriptor] of [
+      ['createObjectURL', createDescriptor],
+      ['revokeObjectURL', revokeDescriptor],
+    ] as const) {
+      if (descriptor) Object.defineProperty(URL, name, descriptor);
+      else delete (URL as unknown as Record<string, unknown>)[name];
+    }
   });
 });
 

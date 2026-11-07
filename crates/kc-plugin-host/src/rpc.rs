@@ -23,14 +23,17 @@
 
 use kc_core::config::PluginConfig;
 use kc_core::plugin::{
-    methods, valid_panel_id, PluginDiagnostics, PluginError, PluginManifest, PluginPanel,
-    PluginPanelData, PluginStatus, PluginToolDef, PluginToolResult, ToolCallContext,
-    PANEL_SOURCE_STATIC, PANEL_SOURCE_TOOL, PLUGIN_PROTOCOL_VERSION,
+    allowed_ui_url, hideable_ui_target, known_ui_slot, methods, ui_kind_supported, valid_panel_id,
+    valid_ui_id, PluginDiagnostics, PluginError, PluginManifest, PluginPanel, PluginPanelData,
+    PluginStatus, PluginToolDef, PluginToolResult, PluginUiActionResult, PluginUiContribution,
+    ToolCallContext, MAX_UI_CONTRIBUTIONS, MAX_UI_LABEL_BYTES, MAX_UI_MESSAGE_BYTES,
+    MAX_UI_RESULT_MESSAGE_BYTES, MAX_UI_RESULT_REFRESH, MAX_UI_TITLE_BYTES, PANEL_SOURCE_STATIC,
+    PANEL_SOURCE_TOOL, PLUGIN_PROTOCOL_VERSION, UI_HIDEABLE, UI_KIND_HIDE,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::{ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -213,6 +216,14 @@ struct Inner {
     tools: Vec<PluginToolDef>,
     /// Panels the manifest declared, already validated and de-duplicated.
     panels: Vec<PluginPanel>,
+    /// UI contributions the manifest declared, already validated. Items this
+    /// build cannot honour (an unknown slot, a hide target that is not
+    /// hideable) are not here; their reasons are in `ui_skipped`.
+    ui: Vec<PluginUiContribution>,
+    /// Why a declared contribution was dropped. Reported in the diagnostics so
+    /// an operator sees "3 contributions ignored" instead of a UI that quietly
+    /// lacks a button.
+    ui_skipped: Vec<String>,
     error: Option<String>,
     pid: Option<u32>,
     out: Option<mpsc::Sender<String>>,
@@ -269,6 +280,10 @@ pub(crate) struct PluginShared {
     /// Incremented on every spawn; stale tasks from a previous process compare
     /// their epoch before touching state.
     epoch: AtomicU64,
+    /// Permanent tombstone for this slot generation. Reload/rescan/drop can leave
+    /// tools and hook calls holding this Arc; unlike `epoch`, this flag must make
+    /// every future `start`/`ensure_ready` refuse rather than resurrect old code.
+    retired: AtomicBool,
     /// Where an inbound `notify` frame goes.
     ///
     /// A plugin cannot reach a browser — there is no route mounting and no script
@@ -340,6 +355,8 @@ impl PluginShared {
                 manifest: None,
                 tools: Vec::new(),
                 panels: Vec::new(),
+                ui: Vec::new(),
+                ui_skipped: Vec::new(),
                 error: None,
                 pid: None,
                 out: None,
@@ -352,6 +369,7 @@ impl PluginShared {
             start_lock: tokio::sync::Mutex::new(()),
             next_id: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
+            retired: AtomicBool::new(false),
             notify_tx: Mutex::new(None),
             notify_budget: Mutex::new(NotifyBudget {
                 credit_ms: NOTIFY_BURST_MS,
@@ -368,7 +386,57 @@ impl PluginShared {
     }
 
     pub(crate) fn status(&self) -> PluginStatus {
+        if self.is_retired() {
+            return PluginStatus::Stopped;
+        }
         self.lock().status.clone()
+    }
+
+    pub(crate) fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn mark_retired(&self) {
+        self.retired.store(true, Ordering::SeqCst);
+    }
+
+    fn retirement_error(&self) -> String {
+        format!(
+            "plugin `{}` generation was permanently retired after replacement, unload or host \
+             shutdown; this handle cannot restart it",
+            self.name
+        )
+    }
+
+    /// Drop-time teardown. Mark the generation first, close writers, then signal
+    /// the process group synchronously; the retained supervisor awaits and reaps.
+    pub(crate) fn retire_now(&self) {
+        self.mark_retired();
+        let (kill, pid, pending) = {
+            let mut inner = self.lock();
+            inner.shutting_down = true;
+            inner.out = None;
+            inner.status = PluginStatus::Stopped;
+            inner.error = None;
+            inner.tools.clear();
+            inner.panels.clear();
+            inner.manifest = None;
+            (
+                inner.kill.take(),
+                inner.pid,
+                std::mem::take(&mut inner.pending),
+            )
+        };
+        if let Some(pid) = pid {
+            crate::procgroup::signal_group(pid, crate::procgroup::SIGKILL);
+        }
+        if let Some(tx) = kill {
+            let _ = tx.send(());
+        }
+        let message = self.retirement_error();
+        for (_, tx) in pending {
+            let _ = tx.send(Reply::Transport(message.clone()));
+        }
     }
 
     pub(crate) fn manifest(&self) -> Option<PluginManifest> {
@@ -387,6 +455,29 @@ impl PluginShared {
     /// One declared panel by its bare (un-namespaced) id.
     pub(crate) fn panel_def(&self, panel: &str) -> Option<PluginPanel> {
         self.lock().panels.iter().find(|p| p.id == panel).cloned()
+    }
+
+    /// The validated UI contributions this plugin declared, in manifest order.
+    pub(crate) fn ui_defs(&self) -> Vec<PluginUiContribution> {
+        self.lock().ui.clone()
+    }
+
+    /// Why declared contributions were dropped. Shown in the diagnostics.
+    pub(crate) fn ui_skipped(&self) -> Vec<String> {
+        self.lock().ui_skipped.clone()
+    }
+
+    /// One declared contribution by the action id it runs.
+    ///
+    /// A URL names the *action*, not the contribution: two buttons may share one
+    /// handler, and a command may reuse a button's. The first declaration wins so
+    /// the answer is deterministic.
+    pub(crate) fn ui_action_def(&self, action: &str) -> Option<PluginUiContribution> {
+        self.lock()
+            .ui
+            .iter()
+            .find(|c| c.action.as_deref() == Some(action))
+            .cloned()
     }
 
     pub(crate) fn config(&self) -> PluginConfig {
@@ -442,6 +533,8 @@ impl PluginShared {
         inner.error = Some(message);
         inner.tools.clear();
         inner.panels.clear();
+        inner.ui.clear();
+        inner.ui_skipped.clear();
         inner.manifest = None;
         inner.pid = None;
         inner.out = None;
@@ -471,6 +564,11 @@ impl PluginShared {
         timeout: Duration,
         cancel: Option<&CancellationToken>,
     ) -> Result<Value, RpcError> {
+        // The retirement path itself still needs to send `shutdown`; every tool,
+        // hook and panel request is refused before it can reach the old process.
+        if self.is_retired() && method != methods::SHUTDOWN {
+            return Err(RpcError::NotReady(self.retirement_error()));
+        }
         let (tx, rx) = oneshot::channel();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         {
@@ -657,9 +755,55 @@ impl PluginShared {
         }
     }
 
+    /// Run one contributed UI action inside the plugin.
+    ///
+    /// The plugin answers `ui/action` with a [`PluginUiActionResult`]. The host
+    /// **re-validates** every field before the browser sees it: a toast is
+    /// length-capped, `refresh` names panels this plugin actually declares, and
+    /// `open_url` must be absolute `http`/`https`. A plugin that does not
+    /// implement `ui/action` gets an explanatory error rather than silence.
+    ///
+    /// This is *not* a tool call. It runs because a person activated a control
+    /// the plugin itself contributed, so it does not go through the agent's
+    /// approval policy — the click is the approval. It also cannot add a tool to
+    /// the registry, touch another plugin's UI, or return markup.
+    pub(crate) async fn ui_action_output(
+        self: &Arc<Self>,
+        def: &PluginUiContribution,
+        context: &ToolCallContext,
+    ) -> Result<PluginUiActionResult, RpcError> {
+        let action = def.action.clone().unwrap_or_default();
+        let params = json!({
+            "action": action,
+            "contribution": {
+                "kind": def.kind,
+                "id": def.id,
+                "label": def.label,
+                "slot": def.slot,
+            },
+            "session_id": context.session_id,
+            "project": context.project,
+            "workspace": context.workspace,
+        });
+        let reply = self
+            .request(methods::UI_ACTION, params, self.timeouts.call())
+            .await?;
+        let parsed: PluginUiActionResult = serde_json::from_value(reply).map_err(|e| {
+            RpcError::Transport(format!(
+                "plugin `{}` answered `ui/action` for `{action}` with something that is not \
+                 {{\"ok\", \"message\", \"refresh\", \"open_url\"}}: {e}",
+                self.name
+            ))
+        })?;
+        Ok(sanitize_ui_result(&self.name, &action, parsed))
+    }
+
     /// Start the process (no-op when already ready). Serialised by `start_lock`.
     pub(crate) async fn start(self: &Arc<Self>) -> Result<(), String> {
         let _guard = self.start_lock.lock().await;
+        if self.is_retired() {
+            return Err(self.retirement_error());
+        }
         let status = self.status();
         if status == PluginStatus::Ready {
             return Ok(());
@@ -675,6 +819,9 @@ impl PluginShared {
     /// Used by tool calls: start (or restart, at most [`MAX_RESTARTS`] times)
     /// when the process is known to be dead.
     pub(crate) async fn ensure_ready(self: &Arc<Self>) -> Result<(), String> {
+        if self.is_retired() {
+            return Err(self.retirement_error());
+        }
         match self.status() {
             PluginStatus::Ready => return Ok(()),
             PluginStatus::Disabled => {
@@ -704,6 +851,13 @@ impl PluginShared {
         self.start().await
     }
 
+    /// Permanently retire this generation, then run the normal graceful stop.
+    /// Mark before waiting on `start_lock` so a queued old handle cannot start.
+    pub(crate) async fn retire(self: &Arc<Self>) {
+        self.mark_retired();
+        self.stop().await;
+    }
+
     /// Graceful stop: `shutdown` request, then SIGKILL, then status `Stopped`.
     pub(crate) async fn stop(self: &Arc<Self>) {
         let _guard = self.start_lock.lock().await;
@@ -717,7 +871,9 @@ impl PluginShared {
     }
 
     async fn stop_locked(&self, final_status: PluginStatus) {
-        if self.status() == PluginStatus::Ready {
+        // `status()` deliberately masks retired generations as stopped. Inspect the
+        // actual inner state here so `retire()` can still send graceful `shutdown`.
+        if self.lock().status == PluginStatus::Ready {
             let _ = self
                 .request(methods::SHUTDOWN, json!({}), self.timeouts.shutdown())
                 .await;
@@ -875,6 +1031,15 @@ impl PluginShared {
         let supervisor = self.spawn_supervisor(epoch, pid, child, kill_rx);
         self.lock().supervisor = Some(supervisor);
 
+        // A synchronous host drop can retire while Command::spawn is in progress.
+        // By this point the pid and kill channel are visible, so either retire_now
+        // signalled them or this second check closes the small startup race.
+        if self.is_retired() {
+            let message = self.retirement_error();
+            self.abort(message.clone()).await;
+            return Err(message);
+        }
+
         match self.handshake().await {
             Ok(()) => Ok(()),
             Err(msg) => {
@@ -920,6 +1085,12 @@ impl PluginShared {
         // operator can read in `PluginDiagnostics.error`, not a crash and not a
         // tab that fails every time it is opened.
         let panels = parse_panels(&self.name, &manifest, &tools)?;
+        // UI contributions split the same way panels do, with one deliberate
+        // difference: an item this *build* cannot place (an unknown slot, a hide
+        // target from a newer release) is skipped with a reason instead of
+        // failing the plugin, so a plugin written for a newer host degrades to
+        // "one button missing" rather than "plugin failed to start".
+        let (ui, ui_skipped) = parse_ui(&self.name, &manifest)?;
         let mut inner = self.lock();
         // EOF may race the final tools/list response. The reader has already
         // failed the slot and removed `out`; never overwrite that with Ready.
@@ -931,9 +1102,12 @@ impl PluginShared {
         }
         inner.manifest = Some(PluginManifest {
             panels: panels.clone(),
+            ui: ui.clone(),
             ..manifest
         });
         inner.panels = panels;
+        inner.ui = ui;
+        inner.ui_skipped = ui_skipped;
         inner.tools = tools;
         inner.status = PluginStatus::Ready;
         inner.error = None;
@@ -1386,6 +1560,281 @@ pub(crate) fn parse_panels(
         });
     }
     Ok(out)
+}
+
+/// Validate the UI contributions of a manifest.
+///
+/// Returns the contributions this build will honour plus a human-readable reason
+/// for each one it dropped. Two failure modes, on purpose:
+///
+/// **Fatal** — a programming error the author must fix, reported as a handshake
+/// error so it lands in `PluginDiagnostics.error`:
+///
+/// * more than [`MAX_UI_CONTRIBUTIONS`] contributions;
+/// * a `button`/`command` whose id is empty or unusable in a URL path segment,
+///   or an id declared twice (ids are hosted as `plugin__<plugin>__<id>`);
+/// * a blank label, a label or title over its byte cap, or a `message` over its
+///   cap — a button nobody can read is not cosmetic here, it is a bug;
+/// * neither `action` nor `message` (a control that does nothing), or both (an
+///   ambiguity the author should resolve rather than the host guessing).
+///
+/// **Skipped** — something this build simply does not have, reported as a note
+/// in the diagnostics so the plugin keeps running on a host that predates the
+/// slot or the target: an unknown `kind`, an unknown `slot` for a button, and a
+/// `hide` target that is not in [`UI_HIDEABLE`].
+///
+/// Hiding is the one contribution that changes app-wide state, so it is the one
+/// refused most strictly: only the catalogue in `kc-core` may be hidden, and the
+/// reason for a refusal lists what *is* hideable.
+pub(crate) fn parse_ui(
+    plugin: &str,
+    manifest: &PluginManifest,
+) -> Result<(Vec<PluginUiContribution>, Vec<String>), String> {
+    if manifest.ui.len() > MAX_UI_CONTRIBUTIONS {
+        return Err(format!(
+            "plugin `{plugin}` declared {} UI contributions; the limit is {MAX_UI_CONTRIBUTIONS} \
+             (a manifest is a manifest, not a UI framework)",
+            manifest.ui.len()
+        ));
+    }
+    let mut out: Vec<PluginUiContribution> = Vec::with_capacity(manifest.ui.len());
+    let mut skipped: Vec<String> = Vec::new();
+    for item in &manifest.ui {
+        let kind = item.kind.trim();
+        if !ui_kind_supported(kind) {
+            skipped.push(format!(
+                "ignored UI contribution `{}`: kind `{kind}` is not supported by this build \
+                 (supported: {})",
+                if item.id.is_empty() { "?" } else { &item.id },
+                kc_core::plugin::UI_KINDS.join(", ")
+            ));
+            continue;
+        }
+        if kind == UI_KIND_HIDE {
+            let target = item.target.as_deref().map(str::trim).unwrap_or("");
+            if target.is_empty() {
+                return Err(format!(
+                    "plugin `{plugin}` declared a `hide` contribution with no `target`; name one \
+                     of: {}",
+                    UI_HIDEABLE.join(", ")
+                ));
+            }
+            if !hideable_ui_target(target) {
+                skipped.push(format!(
+                    "ignored `hide` target `{target}`: this build only lets a plugin hide {} \
+                     (hiding a control that stops a run or answers an approval is never allowed)",
+                    UI_HIDEABLE.join(", ")
+                ));
+                continue;
+            }
+            out.push(PluginUiContribution {
+                kind: kind.to_string(),
+                target: Some(target.to_string()),
+                ..PluginUiContribution::default()
+            });
+            continue;
+        }
+
+        // `button` and `command`: a labelled, namespaced, idempotent control.
+        if !valid_ui_id(&item.id) {
+            return Err(format!(
+                "plugin `{plugin}` declared a `{kind}` with the id `{}`; a contribution id must be \
+                 non-empty and may contain only lowercase ASCII letters, digits, `-`, `_` and `.`",
+                item.id
+            ));
+        }
+        if out.iter().any(|existing| existing.id == item.id) {
+            return Err(format!(
+                "plugin `{plugin}` declared the UI contribution id `{}` twice; ids must be unique \
+                 within a plugin (they are hosted as `plugin__{plugin}__<id>`)",
+                item.id
+            ));
+        }
+        let label = item.label.trim();
+        if label.is_empty() {
+            return Err(format!(
+                "plugin `{plugin}` declared `{kind}` `{}` with a blank label; a control needs a \
+                 name a person can read",
+                item.id
+            ));
+        }
+        if label.len() > MAX_UI_LABEL_BYTES {
+            return Err(format!(
+                "plugin `{plugin}` declared `{kind}` `{}` with a {}-byte label; the limit is \
+                 {MAX_UI_LABEL_BYTES}",
+                item.id,
+                label.len()
+            ));
+        }
+        let title = item
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
+        if title.is_some_and(|t| t.len() > MAX_UI_TITLE_BYTES) {
+            return Err(format!(
+                "plugin `{plugin}` declared `{kind}` `{}` with a title over {MAX_UI_TITLE_BYTES} \
+                 bytes",
+                item.id
+            ));
+        }
+        let message = item
+            .message
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty());
+        let action = item
+            .action
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty());
+        match (action, message) {
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "plugin `{plugin}` declared `{kind}` `{}` with both `action` and `message`; \
+                     use one — `action` runs `ui/action` in the plugin, `message` sends a user turn",
+                    item.id
+                ))
+            }
+            (None, None) => {
+                return Err(format!(
+                    "plugin `{plugin}` declared `{kind}` `{}` with neither `action` nor `message`; \
+                     a control that does nothing is a bug, not a no-op",
+                    item.id
+                ))
+            }
+            (Some(action), None) => {
+                if !valid_ui_id(action) {
+                    return Err(format!(
+                        "plugin `{plugin}` declared `{kind}` `{}` with the action `{action}`; an \
+                         action id follows the contribution-id rule (lowercase letters, digits, \
+                         `-`, `_`, `.`)",
+                        item.id
+                    ));
+                }
+            }
+            (None, Some(message)) => {
+                if message.len() > MAX_UI_MESSAGE_BYTES {
+                    return Err(format!(
+                        "plugin `{plugin}` declared `{kind}` `{}` with a {}-byte message; the \
+                         limit is {MAX_UI_MESSAGE_BYTES}",
+                        item.id,
+                        message.len()
+                    ));
+                }
+            }
+        }
+        let slot = if kind == kc_core::plugin::UI_KIND_BUTTON {
+            let slot = item.slot.as_deref().map(str::trim).unwrap_or("");
+            if slot.is_empty() {
+                return Err(format!(
+                    "plugin `{plugin}` declared the button `{}` with no `slot`; put it in one of: \
+                     {}",
+                    item.id,
+                    kc_core::plugin::UI_SLOTS.join(", ")
+                ));
+            }
+            if !known_ui_slot(slot) {
+                skipped.push(format!(
+                    "ignored button `{}`: slot `{slot}` does not exist in this build (slots: {})",
+                    item.id,
+                    kc_core::plugin::UI_SLOTS.join(", ")
+                ));
+                continue;
+            }
+            Some(slot.to_string())
+        } else {
+            None
+        };
+        // A binding is not drawn anywhere: it is matched by the app's key handler.
+        // A malformed shortcut is an author error; a shortcut the app already owns
+        // is a conflict the app wins without breaking the plugin.
+        let keys = if kind == kc_core::plugin::UI_KIND_KEYBINDING {
+            let raw = item.keys.as_deref().map(str::trim).unwrap_or("");
+            if raw.is_empty() {
+                return Err(format!(
+                    "plugin `{plugin}` declared the keybinding `{}` with no `keys`; give it a \
+                     shortcut such as \"mod+shift+f\"",
+                    item.id
+                ));
+            }
+            let Some(canonical) = kc_core::plugin::normalise_ui_keys(raw) else {
+                return Err(format!(
+                    "plugin `{plugin}` declared the keybinding `{}` with `{raw}`, which is not a \
+                     usable shortcut: one or more of `mod`, `ctrl`, `alt` and `shift`, then a \
+                     single key (a letter, a digit, or one of enter, escape, space, /, [, ], \
+                     comma, dot, dash) — for example \"mod+shift+f\"",
+                    item.id
+                ));
+            };
+            if kc_core::plugin::ui_keys_reserved(&canonical) {
+                skipped.push(format!(
+                    "ignored keybinding `{}`: `{canonical}` is one of the app's own shortcuts \
+                     ({}); pick another chord",
+                    item.id,
+                    kc_core::plugin::UI_RESERVED_KEYS.join(", ")
+                ));
+                continue;
+            }
+            Some(canonical)
+        } else {
+            None
+        };
+        out.push(PluginUiContribution {
+            kind: kind.to_string(),
+            id: item.id.clone(),
+            slot,
+            label: label.to_string(),
+            title: title.map(str::to_string),
+            icon: item.icon.clone(),
+            action: action.map(str::to_string),
+            message: message.map(str::to_string),
+            keys,
+            target: None,
+        });
+    }
+    Ok((out, skipped))
+}
+
+/// Re-validate what a plugin answered to `ui/action` before the browser sees it.
+///
+/// The plugin is not the trust boundary for *shape*: it can put anything in
+/// `message`, `refresh` or `open_url`, and the frontend would act on it. So the
+/// host trims the toast to [`MAX_UI_RESULT_MESSAGE_BYTES`], keeps only bare panel
+/// ids that follow the panel-id rule (capped at [`MAX_UI_RESULT_REFRESH`]), and
+/// drops a URL that is not absolute `http`/`https` — the frontend checks again,
+/// because a browser is where the URL is actually used.
+pub(crate) fn sanitize_ui_result(
+    plugin: &str,
+    action: &str,
+    mut result: PluginUiActionResult,
+) -> PluginUiActionResult {
+    if result.message.len() > MAX_UI_RESULT_MESSAGE_BYTES {
+        let mut cut = MAX_UI_RESULT_MESSAGE_BYTES;
+        while cut > 0 && !result.message.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        result.message.truncate(cut);
+        result.message.push('…');
+    }
+    result.refresh.retain(|id| valid_panel_id(id));
+    result.refresh.dedup();
+    if result.refresh.len() > MAX_UI_RESULT_REFRESH {
+        result.refresh.truncate(MAX_UI_RESULT_REFRESH);
+    }
+    if let Some(url) = result.open_url.take() {
+        if allowed_ui_url(&url) {
+            result.open_url = Some(url);
+        } else {
+            warn!(
+                plugin = %plugin,
+                action = %action,
+                "dropped a `ui/action` result: `open_url` must be an absolute http(s) URL, and \
+                 this one is not"
+            );
+        }
+    }
+    result
 }
 
 /// How many outgoing protocol lines may be queued for the writer task.

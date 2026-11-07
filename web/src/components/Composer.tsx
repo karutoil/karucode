@@ -32,6 +32,8 @@ import {
 import { formatBytes } from '../lib/format';
 import { FileMentionMenu, mentionOptionId } from './FileMentionMenu';
 import { ModelControls } from './ModelSwitcher';
+import { PluginSlot } from './PluginSlot';
+import { isUiHidden, UI_HIDE_COMPOSER_ATTACH, UI_SLOT_COMPOSER_TOOLBAR } from './uiContributions';
 import {
   AlertIcon,
   ArrowUpIcon,
@@ -1007,16 +1009,18 @@ export function Composer({
         <div class={`compose-bottom${running ? ' is-running' : ''}`}>
           <div class="compose-configuration">
             <div class="composer-controls compose-bar-left">
-              <button
-                type="button"
-                class="compose-plus"
-                onClick={() => fileInput.current?.click()}
-                disabled={!canType}
-                aria-label="Attach files"
-                title={attachTitle}
-              >
-                <PaperclipIcon size={15} />
-              </button>
+              {isUiHidden(store.pluginUi.value, UI_HIDE_COMPOSER_ATTACH) ? null : (
+                <button
+                  type="button"
+                  class="compose-plus"
+                  onClick={() => fileInput.current?.click()}
+                  disabled={!canType}
+                  aria-label="Attach files"
+                  title={attachTitle}
+                >
+                  <PaperclipIcon size={15} />
+                </button>
+              )}
               <div
                 class="composer-session-pins"
                 role="group"
@@ -1025,6 +1029,9 @@ export function Composer({
               >
                 <ModelControls />
               </div>
+              {/* Controls plugins contributed to this row. Nothing is drawn when
+               * no plugin asked for a place here, which is the normal case. */}
+              <PluginSlot slot={UI_SLOT_COMPOSER_TOOLBAR} />
             </div>
             <div class="composer-spacer" />
             {running ? null : contextControl}

@@ -42,8 +42,10 @@ The whole connect+handshake runs under a **15 s** cap
 * A protocol line is capped at **8 MiB**. A longer line means the server is not
   speaking the protocol: the in-flight request fails with an explicit protocol
   error and the connection is closed instead of buffering an unbounded line.
-* The child is killed on shutdown and on drop; a dead child fails all in-flight
-  requests with the exit status.
+* The child is killed on shutdown and on manager drop. Drop signals the process
+  group synchronously; `shutdown()` retains and awaits the supervisor so the child
+  is actually reaped before it returns. A dead child fails all in-flight requests
+  with the exit status.
 
 ### Streamable-HTTP details
 
@@ -54,9 +56,13 @@ The whole connect+handshake runs under a **15 s** cap
 * If the response carries `Mcp-Session-Id`, the client sends it on all later
   requests. `shutdown()` forgets the session.
 * Response body may be a single JSON object, a batch, or an SSE stream
-  (`data:` lines; `event:`/`id:`/`retry:`/comment lines are ignored). For SSE the
-  client reads until the response with the matching id arrives, so servers that
-  keep the stream open still work.
+  (`data:` lines; `event:`/`id:`/`retry:`/comment lines are ignored). Responses must
+  carry the request's numeric id. A sole response whose id key is genuinely absent
+  is tolerated for compatibility, but an explicit `null`, a wrong number or a
+  string id is rejected rather than misattributed. For SSE the client reads until
+  the response with the matching id arrives, so servers that keep the stream open
+  still work. Complete UTF-8 lines are parsed with a cursor and only one prefix
+  drain per network chunk (linear rather than quadratic copying for short lines).
 * Response bodies are capped at **8 MiB**, and one SSE request may carry at most
   **8 MiB** of stream data. Exceeding either limit is an explicit error (the
   response is rejected, not truncated), so a hostile or broken server cannot make
@@ -108,7 +114,7 @@ Fields:
 | `transport` | `"stdio"` | `stdio`, `http` / `streamable-http` / `streamable_http`. |
 | `command` | `[]` | argv for the stdio transport. Missing → `failed` with an explanatory error. |
 | `url` | — | Endpoint for the HTTP transport. Missing → `failed`. |
-| `env` | `{}` | Extra environment for a stdio child. |
+| `env` | `{}` | Extra environment for a stdio child. Every configured value is redacted if reflected in status, errors, logs or tool content. |
 | `headers` | `{}` | Extra HTTP headers (auth). Never logged. |
 | `enabled` | `true` | `false` keeps the server `disconnected` and unconnected. |
 | `require_approval` | `true` | `true` asks through the runtime approval policy; `false` skips the prompt for this server's tools. It does not change the class (`External`), so `read_only` mode still denies them. |
@@ -180,9 +186,13 @@ before the exemption is consulted.
     text, so the model sees the server's message.
   * HTTP status / protocol garbage → failed outcome naming the status or the
     parse problem.
-* **Secret hygiene**: error strings never contain request headers or environment
-  values; only the URL host, status code and the server's own message body
-  (truncated to 300 characters) appear.
+* **Secret hygiene**: every configured header and environment **value** is
+  scrubbed from connection/status diagnostics, transport and JSON-RPC errors,
+  peer logs, and successful or `isError` tool content (including reflected values).
+  The raw configured URL is never reproduced in invalid-URL/scheme, HTTP-status or
+  reqwest transport errors; userinfo and query strings may contain credentials and
+  reqwest's URL field is explicitly removed before formatting. Non-2xx bodies are
+  otherwise shown only as a 300-character, redacted excerpt.
 
 ### Statuses
 

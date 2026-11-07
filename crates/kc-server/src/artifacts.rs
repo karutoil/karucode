@@ -40,11 +40,12 @@
 //!
 //! # The policy is deliberately stricter than a workspace preview
 //!
-//! [`crate::routes::workspace::PREVIEW_CONTENT_SECURITY_POLICY`] lets a page load
-//! remote assets, which is right for *your own* `index.html` and wrong for text a
-//! model wrote: `img-src *` in a prompt-injected mock is a tracking beacon (the
-//! attacker learns you opened it) and a way to exfiltrate whatever the mock was
-//! given. [`ARTIFACT_CONTENT_SECURITY_POLICY`] therefore keeps the opaque origin
+//! [`crate::routes::workspace::PREVIEW_CONTENT_SECURITY_POLICY`] lets untrusted
+//! workspace HTML load same-origin sibling assets, which a real page needs but text
+//! a model wrote must not need. Neither policy permits remote assets: a subresource
+//! is a tracking beacon (the attacker learns you opened it) and can exfiltrate data
+//! embedded in its URL even when `fetch` is closed.
+//! [`ARTIFACT_CONTENT_SECURITY_POLICY`] therefore keeps the opaque origin
 //! and the inline script/style a mock needs, and closes fetch, remote subresources
 //! and form submission. A directly opened top-level document can still navigate
 //! itself in Chromium; its URL carries only the per-artifact capability and a
@@ -218,7 +219,14 @@ pub fn artifact_id(document: &[u8]) -> String {
 /// that is a measurement, not a style.
 pub fn is_complete_document(source: &str) -> bool {
     let head = source.trim_start();
-    let lower = head[..head.len().min(400)].to_ascii_lowercase();
+    // The sniffing budget is in bytes, but a document is UTF-8. Byte 400 may be
+    // in the middle of a multi-byte character, so walk back to its boundary
+    // instead of slicing there and panicking the request task.
+    let mut end = head.len().min(400);
+    while !head.is_char_boundary(end) {
+        end -= 1;
+    }
+    let lower = head[..end].to_ascii_lowercase();
     lower.starts_with("<!doctype html") || lower.starts_with("<html") || lower.contains("<html ")
 }
 
@@ -506,6 +514,18 @@ mod tests {
         assert!(is_complete_document("  <html lang=\"en\">"));
         assert!(!is_complete_document("<div>fragment</div>"));
         assert!(!is_complete_document("A sentence about <html> as a word"));
+    }
+
+    #[test]
+    fn document_sniffing_never_splits_a_utf8_character_at_its_budget() {
+        // The four-byte character straddles byte 400. The old byte slice panicked
+        // here instead of returning an ordinary fragment.
+        let source = format!("{}😀<html>", "a".repeat(399));
+        assert!(!source.is_char_boundary(400));
+        assert!(!is_complete_document(&source));
+        let wrapped = String::from_utf8(wrap_document(&source, ArtifactTheme::Light)).unwrap();
+        assert!(wrapped.contains('😀'));
+        assert!(wrapped.contains("<html>"));
     }
 
     #[test]

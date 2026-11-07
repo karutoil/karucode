@@ -1,0 +1,129 @@
+/* ---------- plugin-contributed controls --------------------------------
+ *
+ * A plugin supplies a label, a tooltip, the *name* of an icon and a slot; the app
+ * supplies everything that decides what that looks like. So this sheet is short
+ * on purpose: there is one shape for a contributed button, and no per-plugin
+ * styling hook beyond `[data-plugin]`, which exists for debugging rather than for
+ * themes.
+ *
+ * The dot is the attribution rule made visible: a control with a dot at its edge
+ * did not come from the app. Without it, a plugin's button is indistinguishable
+ * from a built-in one — which is exactly the confusion a plugin must not be able
+ * to buy.
+ */
+
+.plugin-slot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.plugin-slot-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-inline: var(--space-4);
+  /* In a tight composer row this shrinks like the model pins do — the accessible
+   * name and the tooltip keep the full label — because overrunning the row would
+   * push the send button off its own edge, which is worse than an ellipsis. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 220px;
+}
+
+.plugin-slot-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-small);
+}
+
+.plugin-slot-icon {
+  display: inline-flex;
+  color: var(--text-subtle);
+}
+
+.plugin-slot-dot {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.55;
+}
+
+.plugin-slot-button[data-running='true'] {
+  /* Busy is visible without a spinner: the label dims and the cursor waits. */
+  opacity: 0.6;
+  cursor: progress;
+}
+
+/* A plugin button in the inspector header sits beside Context, so it borrows the
+ * same small-control rhythm rather than inventing one. */
+.inspector-head-actions .plugin-slot {
+  margin-inline-end: var(--space-2);
+}
+
+/* ---------- Settings → Controls in the interface ------------------------
+ *
+ * The person's overrides. A list rather than a table: one line per control, its
+ * plugin named, and one switch. Nothing here implies the plugin is untrusted —
+ * it is the same "my screen, my rules" affordance the theme and rail toggles
+ * already offer.
+ */
+
+.plugin-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-top: var(--space-7);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--line-inset);
+}
+
+.plugin-controls h4 {
+  margin: 0;
+  font-size: var(--fs-label);
+  font-weight: 600;
+}
+
+.plugin-controls-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plugin-controls-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.plugin-controls-items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plugin-control-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+/* The toggle already owns its label and description; keep them from stretching
+ * the row on a wide settings pane. */
+.plugin-control-row .toggle-label {
+  max-width: 60ch;
+}

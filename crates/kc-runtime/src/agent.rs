@@ -10,6 +10,84 @@
 //! failure (`failed`). Every path persists what actually happened and emits a
 //! visible event.
 
+// @kc-doc: provider-stream-recovery
+// @kc-title: Recover a provider stream without extra logical requests
+// @kc-summary: Pre-content provider retries and post-content runtime restarts are separate, deadline-bounded layers.
+// @kc-tags: provider, streaming, retries, deadline, repetition, events
+// @kc-applies-to: config:[model], config:retry_max_retries, config:retry_max_stream_restarts, config:retry_base_delay_ms, config:retry_max_delay_ms, config:retry_max_total_secs, config:[limits], config:limits.max_run_secs, event:stream_retry, event:text_replaced, event:run_finished
+//
+// # Choose which layer retries
+//
+// The provider retries transient failures before text, reasoning or tool-call
+// content reaches the runtime. Its terminal error (including an exhausted retry
+// budget) is final to the runtime: an identical pre-content request is not given a
+// second, outer retry chain. Only a genuine failure after content can cause the
+// runtime to discard that partial attempt, emit `stream_retry`, and issue another.
+//
+// ```toml
+// [model]
+// retry_max_retries = 50
+// retry_max_stream_restarts = 3
+// retry_base_delay_ms = 500
+// retry_max_delay_ms = 30000
+// retry_max_total_secs = 300
+//
+// [limits]
+// max_run_secs = 86400
+// ```
+//
+// `retry_max_retries = 0` disables pre-content retries;
+// `retry_max_stream_restarts = 0` disables post-content restarts. Restart backoff
+// races the run deadline and cancellation, so no replacement request starts after
+// `limits.max_run_secs`. A terminal refused request still says `failed`, rather
+// than being mislabeled as a transport restart.
+//
+// If answer text degenerates into a repetition, old deltas cannot be unsent. Once
+// the trimmed final answer is known, the runtime emits `text_replaced` with that
+// whole content; a client replaces its live text atomically instead of appending
+// the correction. The replacement equals the persisted assistant text. Reasoning
+// loops instead use the bounded restart path because reasoning is not persisted.
+// Provider configuration and retry classifications are covered by
+// `provider-profiles`; the SSE transport is described by `http-api`.
+
+// @kc-doc: queued-run-recovery
+// @kc-title: Keep steering and follow-up input safe across run endings
+// @kc-summary: Accepted input is applied, converted to an ordered follow-up, or remains recallable after submission conflicts.
+// @kc-tags: runtime, steering, follow-up, queue, recall, failures, limits
+// @kc-applies-to: route:POST /api/sessions/:id/messages, route:DELETE /api/sessions/:id/queues/:queued_id, event:queued_messages, event:steer_applied, config:limits.max_iterations, config:limits.max_run_secs
+//
+// # Submit work while a run is active
+//
+// ```sh
+// curl -X POST 'http://127.0.0.1:3000/api/sessions/s_example/messages?mode=steer' \
+//   -H 'content-type: application/json' \
+//   --data '{"content":"Also run the focused tests"}'
+// curl -X POST 'http://127.0.0.1:3000/api/sessions/s_example/messages?mode=follow_up' \
+//   -H 'content-type: application/json' \
+//   --data '{"content":"Then summarize the result"}'
+// ```
+//
+// A steer is marked `steer_applied` only when it joins a request-building
+// iteration. If an iteration limit or `limits.max_run_secs` ends the run first,
+// unsent steers become ordered follow-ups with their original ids and rendered
+// content intact. The same queue-aware deregistration runs if `begin_run` fails
+// before the background loop starts; accepted work is not left without a scheduler.
+//
+// If an ordinary submit wins the race with a queued follow-up's start, the popped
+// entry goes back at the front and remains recallable; it is not treated as a
+// failed generation. Recall either retained kind through the same route:
+//
+// ```sh
+// curl -X DELETE 'http://127.0.0.1:3000/api/sessions/s_example/queues/followup_example'
+// ```
+//
+// Queue snapshots are whole-state `queued_messages` events, so a client replaces
+// its local lists on each event. Child-to-parent run mail is separate from these
+// user queues: it is admitted only to the exact active session/run generation and
+// retired during cleanup, so a late child cannot inject its old instruction into a
+// successor. See `subagents` for that mailbox, `web-ui` for the user composer, and
+// `http-api` for authentication and the complete route table.
+
 use crate::approvals::{ApprovalScope, RuntimeApprovalGate};
 use crate::context;
 use crate::events::EmitCtx;
@@ -181,7 +259,20 @@ pub(crate) async fn start_run_with_lifecycle(
     runtime: &Arc<Runtime>,
     session_id: &str,
     prompt: String,
-    _lifecycle: tokio::sync::OwnedMutexGuard<()>,
+    lifecycle: crate::SessionLifecycleGuard,
+) -> Result<RunHandle> {
+    start_run_with_lifecycle_policy(runtime, session_id, prompt, lifecycle, true).await
+}
+
+/// `continue_after_failed_start` is false only for a queued follow-up: its caller
+/// still owns the queue's terminal failure report, so scheduling another hop here
+/// as well would race that report and could consume later entries twice.
+async fn start_run_with_lifecycle_policy(
+    runtime: &Arc<Runtime>,
+    session_id: &str,
+    prompt: String,
+    lifecycle: crate::SessionLifecycleGuard,
+    continue_after_failed_start: bool,
 ) -> Result<RunHandle> {
     if prompt.trim().is_empty() {
         return Err(Error::BadRequest("message content may not be empty".into()));
@@ -232,6 +323,9 @@ pub(crate) async fn start_run_with_lifecycle(
         }
         runs.insert(key.clone(), Arc::clone(&state));
     }
+    // A generation must exist before this run can spawn any sender. Delivery only
+    // fills registered entries; cleanup below retires this exact run id.
+    inner.hub.register_run_mail(session_id, &state.run_id.0);
     kc_core::metrics::record_run_started();
 
     let history = match begin_run(&inner, &state, &model, &prompt).await {
@@ -249,7 +343,20 @@ pub(crate) async fn start_run_with_lifecycle(
                     "could not mark the aborted run as failed"
                 );
             }
-            inner.runs.lock().expect("runs lock").remove(&key);
+            // Registration made this run visible to the started counter, queue
+            // admission and run-mail delivery. Retire all three; no sender can be
+            // created before begin_run, so this failed-start generation is empty.
+            inner.hub.clear_run_mail(session_id, &state.run_id.0);
+            if state.claim_finalization(FINALIZE_METRIC) {
+                kc_core::metrics::record_run_finished();
+            }
+            runtime.deregister_top_level(&key, &state);
+            // The caller still holds the per-session lifecycle guard. Continuing
+            // before releasing it would make the queued run wait on ourselves.
+            drop(lifecycle);
+            if continue_after_failed_start {
+                continue_with_follow_up(Arc::clone(runtime), state.session_id.0.clone()).await;
+            }
             return Err(e);
         }
     };
@@ -419,6 +526,18 @@ async fn continue_with_follow_up(runtime: Arc<Runtime>, session_id: String) {
             );
         }
         Err(e) => {
+            // A normal submit can win the small gap between our registration
+            // check and start_run's. The accepted message still belongs to the
+            // user: restore the exact entry so it remains recallable and the run
+            // that won will schedule it when it finishes.
+            if matches!(
+                &e,
+                Error::BadRequest(message)
+                    if message == &format!("a run is already active for session {session_id}")
+            ) {
+                runtime.requeue_follow_up(&session_id, next);
+                return;
+            }
             tracing::warn!(
                 session = %session_id,
                 follow_up = %next_id,
@@ -457,7 +576,10 @@ fn start_run_boxed(
     session_id: String,
     prompt: String,
 ) -> futures_util::future::BoxFuture<'static, Result<RunHandle>> {
-    Box::pin(async move { start_run(&runtime, &session_id, prompt).await })
+    Box::pin(async move {
+        let lifecycle = runtime.shared().lock_session_lifecycle(&session_id).await;
+        start_run_with_lifecycle_policy(&runtime, &session_id, prompt, lifecycle, false).await
+    })
 }
 
 /// Write the run row + user message and load the prior conversation.
@@ -587,8 +709,12 @@ async fn finalize_top_level(
     // provider panicked. The store row and terminal frame are intentionally
     // later: a client reacting to RunFinished sees the settled child roster.
     crate::subagent::cancel_run_children(inner, &state.run_id.0).await;
-    // Late mail addressed to a finished run must not leak into its successor.
-    inner.hub.clear_run_mail(&state.session_id.0);
+    // Retire this exact generation before its terminal frame. A late unwinding
+    // child is now rejected instead of recreating the session queue that its
+    // successor would otherwise drain and persist.
+    inner
+        .hub
+        .clear_run_mail(&state.session_id.0, &state.run_id.0);
     if state.claim_finalization(FINALIZE_METRIC) {
         kc_core::metrics::record_run_finished();
     }
@@ -757,14 +883,14 @@ pub(crate) async fn run_loop(inner: Arc<RuntimeInner>, mut spec: LoopSpec) -> Lo
     };
 
     // Whatever ended the loop, no approval it requested may stay pending: the
-    // waiter is gone, and a stale card would block later runs. Because the scope
-    // is per agent, this never expires a sibling subagent's request.
+    // waiter is gone, and a stale card would block later runs. A top-level teardown
+    // also sweeps its children's rows; single-request timeouts never use run_wide.
     let reason = if outcome.status == RunStatus::Cancelled {
         "run cancelled"
     } else {
         "run finished"
     };
-    scope
+    let _expired = scope
         .expire_pending(&inner, &session_id, &run_id, run_wide, reason)
         .await;
 
@@ -859,7 +985,9 @@ async fn run_loop_inner(
         // run mailbox, which is where a child's "message my parent" lands.
         let mail = match &spec.hub_entry {
             Some(live) => live.take_mail(),
-            None if !spec.is_subagent => inner.hub.take_run_mail(&spec.session_id.0),
+            None if !spec.is_subagent => {
+                inner.hub.take_run_mail(&spec.session_id.0, &spec.run_id.0)
+            }
             None => Vec::new(),
         };
         for inbound in mail {
@@ -909,44 +1037,6 @@ async fn run_loop_inner(
             });
         }
 
-        // --- steering ---------------------------------------------------------
-        // A message the user sent *while this run was working*. It becomes an
-        // ordinary `user` turn here, before the request is built, so the model
-        // sees it exactly where a follow-up would sit if the user had waited.
-        //
-        // Deliberately at the top of the iteration and not mid-stream: the turn
-        // in flight is allowed to finish, because aborting it throws away the
-        // model's tool plan and can persist a tool call with no result. Only a
-        // top-level run takes steers; a subagent has its own transcript and no
-        // user watching it.
-        if !spec.is_subagent {
-            let steers = inner.drain_steers(&spec.session_id.0);
-            for steer in steers {
-                let message = Message::user(&steer.content);
-                if let Err(e) = persist(
-                    &inner,
-                    &spec.session_id,
-                    &spec.run_id,
-                    spec.agent_id.as_ref(),
-                    &message,
-                )
-                .await
-                {
-                    ctx.error(
-                        "store",
-                        format!("could not persist a steering message: {e}"),
-                    );
-                }
-                // The transcript and the request must agree: an unpersisted steer
-                // is still one the model acted on, so it goes into `history`
-                // either way - exactly like the continuation note below.
-                history.push(message);
-                ctx.emit(Event::SteerApplied {
-                    steer_id: steer.id.clone(),
-                    content: steer.content.clone(),
-                });
-            }
-        }
         if segment_iterations >= spec.budget.max_iterations {
             let message = if spec.is_subagent {
                 format!(
@@ -1024,6 +1114,44 @@ segment, limits.max_continues is {})",
                 None
             };
             return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
+        }
+
+        // --- steering ---------------------------------------------------------
+        // Only consume accepted steers once this iteration is certain to build a
+        // provider request. On a terminal limit/deadline exit they stay queued for
+        // deregistration, which converts them to ordered follow-ups with their
+        // original ids; no SteerApplied event is emitted for input nobody sent.
+        //
+        // Deliberately not mid-stream: the turn in flight is allowed to finish,
+        // because aborting it can persist a tool call with no result. Only a
+        // top-level run takes steers; a subagent has its own transcript.
+        if !spec.is_subagent {
+            let steers = inner.drain_steers(&spec.session_id.0);
+            for steer in steers {
+                let message = Message::user(&steer.content);
+                if let Err(e) = persist(
+                    &inner,
+                    &spec.session_id,
+                    &spec.run_id,
+                    spec.agent_id.as_ref(),
+                    &message,
+                )
+                .await
+                {
+                    ctx.error(
+                        "store",
+                        format!("could not persist a steering message: {e}"),
+                    );
+                }
+                // The transcript and the request must agree: an unpersisted steer
+                // is still one the model acted on, so it goes into `history`
+                // either way - exactly like the continuation note below.
+                history.push(message);
+                ctx.emit(Event::SteerApplied {
+                    steer_id: steer.id.clone(),
+                    content: steer.content.clone(),
+                });
+            }
         }
 
         iterations += 1;
@@ -1244,7 +1372,7 @@ segment, limits.max_continues is {})",
                     }
                 };
 
-                let outcome = consume(&ctx, &spec.cancel, spec.deadline, stream).await;
+                let mut outcome = consume(&ctx, &spec.cancel, spec.deadline, stream).await;
                 let restart = match &outcome.3 {
                     StreamEnd::Failed { message, transient } => {
                         *transient
@@ -1276,7 +1404,20 @@ segment, limits.max_continues is {})",
                 tokio::select! {
                     biased;
                     _ = spec.cancel.cancelled() => {}
+                    _ = tokio::time::sleep_until(spec.deadline) => {}
                     _ = tokio::time::sleep(delay) => {}
+                }
+                // A restart is a new billed provider request. Never start one just
+                // because its timer fired at the same time as cancellation or the
+                // run's hard wall-clock ceiling; retain the last partial text for
+                // the same terminal handling as an interrupted consume.
+                if spec.cancel.is_cancelled() {
+                    outcome.3 = StreamEnd::Cancelled;
+                    break outcome;
+                }
+                if Instant::now() >= spec.deadline {
+                    outcome.3 = StreamEnd::TimedOut;
+                    break outcome;
                 }
             };
 
@@ -2523,8 +2664,14 @@ async fn consume(
     let mut text_detector = TextRepetitionDetector::default();
     let mut reason_tail = RepeatTail::default();
     let mut degenerate: Option<Degenerate> = None;
+    // Only failures after visible/content output belong to the runtime restart
+    // layer. Before that point the provider retry layer already owns the request
+    // and has either returned its verdict or exhausted its own attempt budget.
+    let mut content_seen = false;
     // Tool-call arguments stream too, and a runaway one is a loop with no text.
-    let mut arguments_seen = String::new();
+    // Count each fragment once: rescanning the whole accumulation made N small
+    // deltas quadratic and then counted the over-limit string a second time.
+    let mut argument_chars_seen = ArgumentCharCount::default();
     // Once the provider says why it stopped, keep reading for a moment: the
     // `usage` block (tokens, and the prompt-cache counts) arrives in the chunk
     // *after* the one carrying `finish_reason`. The window is bounded so a
@@ -2557,6 +2704,7 @@ async fn consume(
                 match item {
                     Ok(ProviderChunk::Text(delta)) => {
                         if !delta.is_empty() {
+                            content_seen = true;
                             text.push_str(&delta);
                             ctx.emit(Event::TextDelta { delta: delta.clone() });
                             if let Some(loop_hit) = text_detector.push(&delta) {
@@ -2579,6 +2727,7 @@ async fn consume(
                     }
                     Ok(ProviderChunk::Reasoning(delta)) => {
                         if !delta.is_empty() {
+                            content_seen = true;
                             ctx.emit(Event::ReasoningDelta { delta: delta.clone() });
                             if let Some(loop_hit) = reason_tail.push(&delta, REPEATS_REASONING) {
                                 // Reasoning is streamed and then discarded, so
@@ -2593,15 +2742,14 @@ async fn consume(
                         }
                     }
                     Ok(ProviderChunk::ToolCallDelta { index, id, name, arguments_delta }) => {
+                        content_seen = true;
                         if let Some(fragment) = &arguments_delta {
-                            arguments_seen.push_str(fragment);
-                            if arguments_seen.chars().count() > ARGUMENT_TAIL_CHARS {
+                            let seen = argument_chars_seen.push(fragment);
+                            if seen > ARGUMENT_TAIL_CHARS {
                                 // A tool call whose arguments grow past this is
                                 // not a call any more; it is the same runaway
                                 // generation with no text to catch it by.
-                                degenerate = Some(Degenerate::Arguments(
-                                    arguments_seen.chars().count(),
-                                ));
+                                degenerate = Some(Degenerate::Arguments(seen));
                                 break;
                             }
                         }
@@ -2651,10 +2799,11 @@ async fn consume(
                         let suffix = if retryable { " (retryable)" } else { "" };
                         end = StreamEnd::Failed {
                             message: format!("provider stream error: {message}{suffix}"),
-                            // The provider already decided whether this error
-                            // kind is worth another attempt (rate limit,
-                            // overloaded, 5xx ... versus a rejected request).
-                            transient: retryable,
+                            // Preserve the provider's structured verdict in the
+                            // message, but only a failure after content is a
+                            // runtime *stream restart*. A pre-content retryable
+                            // error is the provider layer's terminal result.
+                            transient: retryable && content_seen,
                         };
                         break;
                     }
@@ -2663,10 +2812,11 @@ async fn consume(
                             end = StreamEnd::Cancelled;
                             break;
                         }
-                        // Transport death mid-body: a decode error, a reset
-                        // connection, a read timeout. Another attempt can land
-                        // on a healthy channel; a configuration error cannot.
-                        let transient = matches!(e, Error::Provider(_) | Error::Timeout(_));
+                        // Transport death after content: another runtime attempt
+                        // can land on a healthy channel. Before content this is
+                        // already the provider's handled/exhausted terminal error.
+                        let transient = content_seen
+                            && matches!(&e, Error::Provider(_) | Error::Timeout(_));
                         end = StreamEnd::Failed {
                             message: format!("provider stream failed: {e}"),
                             transient,
@@ -2715,8 +2865,13 @@ async fn consume(
                 transient: true,
             };
         }
-        // Text that loops is trimmed above; the rest of the answer stands.
+        // Text that loops is trimmed above; the rest of the answer stands. The
+        // earlier deltas already went out, so atomically replace the client's
+        // live text now that the exact final/persisted content is known.
         Some(Degenerate::Text(sample)) => {
+            ctx.emit(Event::TextReplaced {
+                content: text.clone(),
+            });
             ctx.notice(
                 "warn",
                 format!("the answer started repeating `{sample}`; the repetition was dropped"),
@@ -2837,6 +2992,20 @@ const REPEAT_SCAN_EVERY: usize = 32;
 /// models cannot emit this many characters in one turn at all, so the cap is a
 /// backstop for a stream that never stops rather than a budget.
 const ARGUMENT_TAIL_CHARS: usize = 1_000_000;
+
+/// Running Unicode-scalar count for streamed tool arguments. Addition saturates
+/// so even an adversarial oversized/malformed stream cannot wrap the guard to zero.
+#[derive(Default)]
+struct ArgumentCharCount {
+    seen: usize,
+}
+
+impl ArgumentCharCount {
+    fn push(&mut self, fragment: &str) -> usize {
+        self.seen = self.seen.saturating_add(fragment.chars().count());
+        self.seen
+    }
+}
 
 /// A caught loop: the block the model was stuck on, and where the run of copies
 /// starts.
@@ -3299,5 +3468,635 @@ mod fingerprint_tests {
         let first = result_fingerprint(&result);
         result.images[0].data = "bbb".into();
         assert_ne!(first, result_fingerprint(&result));
+    }
+}
+
+#[cfg(test)]
+mod current_runtime_regressions {
+    use super::*;
+    use crate::tests_support::{FakeSettings, HarnessBuilder, Script};
+
+    fn restart_model(max_restarts: u32) -> ModelConfig {
+        ModelConfig {
+            retry_max_stream_restarts: max_restarts,
+            retry_base_delay_ms: 1,
+            retry_max_delay_ms: 2,
+            ..ModelConfig::default()
+        }
+    }
+
+    #[test]
+    fn streamed_argument_characters_are_incremental_and_saturating() {
+        let mut count = ArgumentCharCount::default();
+        assert_eq!(count.push("a🦀"), 2);
+        assert_eq!(count.push("\né"), 4, "Unicode scalars, not bytes");
+        let mut nearly_full = ArgumentCharCount {
+            seen: usize::MAX - 1,
+        };
+        assert_eq!(nearly_full.push("🦀🦀"), usize::MAX);
+        assert_eq!(nearly_full.push("still cannot wrap"), usize::MAX);
+    }
+
+    #[tokio::test]
+    async fn over_limit_argument_fragments_use_the_running_unicode_count() {
+        let fragments = vec![
+            "🦀".repeat(ARGUMENT_TAIL_CHARS / 2),
+            "🦀".repeat(ARGUMENT_TAIL_CHARS / 2 + 1),
+        ];
+        let script = Script::Chunks(
+            fragments
+                .into_iter()
+                .map(|arguments_delta| ProviderChunk::ToolCallDelta {
+                    index: 0,
+                    id: Some("huge_call".into()),
+                    name: Some("write_file".into()),
+                    arguments_delta: Some(arguments_delta),
+                })
+                .collect(),
+        );
+        let mut h = HarnessBuilder::new(vec![script])
+            .model(restart_model(0))
+            .build()
+            .await;
+        let events = h.run_to_finish("bounded arguments").await;
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::RunFinished { status, .. } if status == "failed"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::Error { message, .. } if message.contains("1000001 characters")
+        )));
+        assert_eq!(h.factory.requests().len(), 1, "restarts were disabled");
+    }
+
+    #[tokio::test]
+    async fn degenerate_text_replaces_the_already_streamed_live_answer() {
+        let mut chunks = vec![ProviderChunk::Text("A durable prefix. ".into())];
+        chunks.extend(
+            (0..TEXT_REPEATS).map(|_| ProviderChunk::Text("Let me write. Go. Now. OK. ".into())),
+        );
+        let mut h = HarnessBuilder::new(vec![Script::Chunks(chunks)])
+            .build()
+            .await;
+        let events = h.run_to_finish("write").await;
+        let replacement = events
+            .iter()
+            .find_map(|event| match &event.event {
+                Event::TextReplaced { content } => Some((event.seq, content)),
+                _ => None,
+            })
+            .expect("a replacement after the already-sent deltas");
+        let last_delta = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                Event::TextDelta { .. } => Some(event.seq),
+                _ => None,
+            })
+            .max()
+            .expect("the old implementation streamed the repeated text");
+        assert!(replacement.0 > last_delta, "replacement must follow deltas");
+        assert!(
+            !replacement.1.contains("Let me write"),
+            "live replacement kept the loop"
+        );
+        let stored = h
+            .session_messages()
+            .await
+            .into_iter()
+            .find(|message| message.role == "assistant")
+            .expect("stored assistant answer");
+        assert_eq!(
+            replacement.1, &stored.content,
+            "live and durable text agree"
+        );
+    }
+
+    #[tokio::test]
+    async fn permanent_and_handled_precontent_errors_never_start_a_runtime_restart() {
+        let mut permanent = HarnessBuilder::new(vec![Script::Fail(
+            "provider rejected the request [http 400] [permanent]".into(),
+        )])
+        .model(restart_model(3))
+        .build()
+        .await;
+        let permanent_events = permanent.run_to_finish("permanent HTTP refusal").await;
+        assert!(permanent_events.iter().any(|event| matches!(
+            &event.event,
+            Event::RunFinished { status, error: Some(error), .. }
+                if status == "failed" && error.contains("http 400")
+        )));
+        assert!(!permanent_events
+            .iter()
+            .any(|event| matches!(&event.event, Event::StreamRetry { .. })));
+        assert_eq!(permanent.factory.requests().len(), 1);
+
+        // This is the normal Provider contract used by RetryingProvider: opening
+        // the stream returns Ok while its terminal, exhausted error arrives in the
+        // stream. Provider ownership stays below; runtime must not multiply it.
+        let mut exhausted = HarnessBuilder::new(vec![
+            Script::ChunksThenFail(
+                vec![ProviderChunk::Finish {
+                    reason: "stop".into(),
+                }],
+                "upstream temporarily unavailable (gave up after 2 attempts)".into(),
+            ),
+            Script::text("an extra logical request that must never happen"),
+        ])
+        .model(restart_model(3))
+        .build()
+        .await;
+        let exhausted_events = exhausted.run_to_finish("provider retries exhausted").await;
+        assert!(exhausted_events.iter().any(|event| matches!(
+            &event.event,
+            Event::RunFinished { status, error: Some(error), .. }
+                if status == "failed" && error.contains("gave up after 2 attempts")
+        )));
+        assert!(!exhausted_events
+            .iter()
+            .any(|event| matches!(&event.event, Event::StreamRetry { .. })));
+        assert_eq!(exhausted.factory.requests().len(), 1);
+
+        let mut classified =
+            HarnessBuilder::new(vec![Script::Chunks(vec![ProviderChunk::Error {
+                message: "retry budget already spent upstream".into(),
+                retryable: true,
+            }])])
+            .model(restart_model(3))
+            .build()
+            .await;
+        let classified_events = classified.run_to_finish("handled error chunk").await;
+        assert!(classified_events.iter().any(|event| matches!(
+            &event.event,
+            Event::RunFinished { status, .. } if status == "failed"
+        )));
+        assert!(!classified_events
+            .iter()
+            .any(|event| matches!(&event.event, Event::StreamRetry { .. })));
+        assert_eq!(classified.factory.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn genuine_midstream_errors_still_use_the_runtime_restart_layer() {
+        let mut h = HarnessBuilder::new(vec![
+            Script::ChunksThenFail(
+                vec![ProviderChunk::Reasoning("some actual work".into())],
+                "invalid response body: connection reset".into(),
+            ),
+            Script::text("the recovered answer"),
+        ])
+        .model(restart_model(1))
+        .build()
+        .await;
+        let events = h.run_to_finish("retry only the real midstream death").await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(&event.event, Event::StreamRetry { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(h.factory.requests().len(), 2);
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::RunFinished { status, .. } if status == "completed"
+        )));
+    }
+
+    #[tokio::test]
+    async fn restart_backoff_cannot_sleep_past_the_run_deadline() {
+        let model = ModelConfig {
+            retry_max_stream_restarts: 3,
+            retry_base_delay_ms: 60_000,
+            retry_max_delay_ms: 60_000,
+            ..ModelConfig::default()
+        };
+        let limits = Limits {
+            max_run_secs: 1,
+            ..Limits::default()
+        };
+        let mut h = HarnessBuilder::new(vec![Script::ChunksThenFail(
+            vec![ProviderChunk::Text("partial".into())],
+            "connection reset".into(),
+        )])
+        .settings(FakeSettings::default().with_limits(limits))
+        .model(model)
+        .build()
+        .await;
+        let started = Instant::now();
+        let events = h.run_to_finish("the hard run deadline wins").await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "restart slept past max_run_secs: {elapsed:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.event,
+                Event::RunFinished { status, .. } if status == "limit_reached"
+            )),
+            "unexpected terminal events: {events:?}; stored runs: {:?}",
+            h.store.runs()
+        );
+        assert_eq!(
+            h.factory.requests().len(),
+            1,
+            "no request may begin after the deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn iteration_limit_converts_an_unsent_steer_instead_of_marking_it_applied() {
+        let (gate, handle) = crate::tests_support::GateTool::pair("hold_first_turn");
+        let limits = Limits {
+            max_iterations: 1,
+            max_continues: 0,
+            auto_continue: true,
+            ..Limits::default()
+        };
+        let mut h = HarnessBuilder::new(vec![
+            Script::call(&[("call_hold", "hold_first_turn", "{}")]),
+            Script::text("the deferred answer"),
+        ])
+        .tool(Arc::new(gate))
+        .settings(FakeSettings::default().with_limits(limits))
+        .build()
+        .await;
+        h.submit("first run").await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while handle.arrived() == 0 {
+            assert!(Instant::now() < deadline, "tool gate was not reached");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let accepted = h.steer("for the next run");
+
+        handle.release();
+        let mut events = h.collect_until_finished().await;
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::RunFinished { status, .. } if status == "limit_reached"
+        )));
+        events.extend(h.collect_until_finished().await);
+        assert!(
+            !events.iter().any(|event| matches!(
+                &event.event,
+                Event::SteerApplied { steer_id, .. } if steer_id == &accepted.id
+            )),
+            "an unsent steer must never be marked applied"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.event,
+                Event::QueuedMessages { follow_ups, .. }
+                    if follow_ups.iter().any(|entry| entry.id == accepted.id
+                        && entry.kind == kc_core::queue::QueuedKind::FollowUp)
+            )),
+            "the original queued id must survive conversion"
+        );
+        let users: Vec<_> = h
+            .session_messages()
+            .await
+            .into_iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.content)
+            .collect();
+        assert_eq!(users, vec!["first run", "for the next run"]);
+        assert!(h.runtime.queued_all(h.session()).steers.is_empty());
+        assert!(h.runtime.queued_all(h.session()).follow_ups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deadline_after_the_stream_converts_an_unsent_steer_instead_of_marking_it_applied() {
+        let (gate, handle) = crate::tests_support::GateTool::pair("hold_past_deadline");
+        let limits = Limits {
+            max_run_secs: 1,
+            ..Limits::default()
+        };
+        let mut h = HarnessBuilder::new(vec![
+            Script::call(&[("call_deadline", "hold_past_deadline", "{}")]),
+            Script::text("answered after the deadline"),
+        ])
+        .tool(Arc::new(gate))
+        .settings(FakeSettings::default().with_limits(limits))
+        .build()
+        .await;
+        h.submit("first run").await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while handle.arrived() == 0 {
+            assert!(Instant::now() < deadline, "tool gate was not reached");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let accepted = h.steer("for after the deadline");
+
+        // The tool finishes after the wall clock, so the next loop is terminal.
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        handle.release();
+        let mut events = h.collect_until_finished().await;
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::RunFinished { status, .. } if status == "limit_reached"
+        )));
+        events.extend(h.collect_until_finished().await);
+        assert!(!events.iter().any(|event| matches!(
+            &event.event,
+            Event::SteerApplied { steer_id, .. } if steer_id == &accepted.id
+        )));
+        let requests = h.factory.requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "one deadline-limited run and one follow-up"
+        );
+        assert!(
+            !requests[0]
+                .messages
+                .iter()
+                .any(|message| { message.content == "for after the deadline" }),
+            "terminal run never receives the unsent steer"
+        );
+        assert_eq!(
+            requests[1]
+                .messages
+                .last()
+                .map(|message| message.content.as_str()),
+            Some("for after the deadline"),
+            "the ordered follow-up does receive it"
+        );
+        let users: Vec<_> = h
+            .session_messages()
+            .await
+            .into_iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.content)
+            .collect();
+        assert_eq!(users, vec!["first run", "for after the deadline"]);
+    }
+
+    #[tokio::test]
+    async fn an_active_submit_conflict_requeues_the_retained_follow_ups_for_recall() {
+        let mut h = HarnessBuilder::new(vec![
+            Script::Hang(Vec::new()),
+            Script::text("the retained follow-up executed"),
+        ])
+        .build()
+        .await;
+        let session = h.session().to_string();
+        // Register a synthetic predecessor so the real queue-admission API accepts
+        // input, then retire it before scheduling the competing tasks.
+        let previous = Arc::new(RunState::new(
+            RunId::new(),
+            SessionId::from_string(&session),
+            None,
+            CancellationToken::new(),
+            true,
+        ));
+        let previous_key = previous.key();
+        h.runtime
+            .shared()
+            .runs
+            .lock()
+            .expect("runs")
+            .insert(previous_key.clone(), Arc::clone(&previous));
+        let first = h.follow_up("first accepted follow-up");
+        let second = h.follow_up("second accepted follow-up");
+        h.runtime.deregister_top_level(&previous_key, &previous);
+
+        // Tokio's lifecycle mutex is fair. Queue the normal submit first, then the
+        // continuation behind the same held guard: the normal submit registers
+        // first after release, forcing start_run's active-conflict path.
+        let lifecycle = h.runtime.shared().lock_session_lifecycle(&session).await;
+        let normal_runtime = Arc::clone(&h.runtime);
+        let normal = tokio::spawn({
+            let session = session.clone();
+            async move {
+                normal_runtime
+                    .submit(&session, "normal submit wins".into())
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        let continuation = tokio::spawn(continue_with_follow_up(
+            Arc::clone(&h.runtime),
+            session.clone(),
+        ));
+        tokio::task::yield_now().await;
+        drop(lifecycle);
+
+        tokio::time::timeout(Duration::from_secs(5), normal)
+            .await
+            .expect("normal submit returned")
+            .expect("normal submit joined")
+            .expect("competing run started");
+        tokio::time::timeout(Duration::from_secs(5), continuation)
+            .await
+            .expect("continuation returned")
+            .expect("continuation joined");
+        let retained = h.runtime.queued_follow_ups(&session);
+        assert_eq!(
+            retained.len(),
+            2,
+            "the conflict dropped accepted work: {retained:?}"
+        );
+        assert_eq!(
+            retained[0].id, first.id,
+            "the popped oldest entry returns to the front"
+        );
+        assert_eq!(retained[1].id, second.id);
+        assert!(h.runtime.has_active_run(&session));
+
+        let recalled_first = h
+            .runtime
+            .recall_queued(&session, &first.id)
+            .expect("first remains recallable");
+        assert_eq!(recalled_first.content, "first accepted follow-up");
+
+        // The winning run's successor must still schedule and execute the other
+        // retained entry; conflict recovery is not just queue preservation.
+        h.runtime.cancel(&session);
+        h.collect_until_finished().await;
+        h.collect_until_finished().await;
+        let users: Vec<_> = h
+            .session_messages()
+            .await
+            .into_iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.content)
+            .collect();
+        assert_eq!(
+            users,
+            vec!["normal submit wins", "second accepted follow-up"]
+        );
+        assert!(h
+            .session_messages()
+            .await
+            .iter()
+            .any(|message| message.content == "the retained follow-up executed"));
+        assert!(h.runtime.queued_follow_ups(&session).is_empty());
+    }
+
+    struct BeginFailureSettings {
+        delegate: FakeSettings,
+        runtime: std::sync::OnceLock<std::sync::Weak<Runtime>>,
+        session: String,
+        original: std::sync::Mutex<Option<Arc<RunState>>>,
+        queued: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl kc_core::settings::Settings for BeginFailureSettings {
+        async fn model(&self) -> ModelConfig {
+            self.delegate.model().await
+        }
+
+        async fn limits(&self) -> Limits {
+            if !self.queued.swap(true, Ordering::SeqCst) {
+                let runtime = self
+                    .runtime
+                    .get()
+                    .and_then(std::sync::Weak::upgrade)
+                    .expect("runtime attached before the first run");
+                let original = runtime
+                    .shared()
+                    .runs
+                    .lock()
+                    .expect("runs")
+                    .values()
+                    .find(|state| state.top_level && state.session_id.0 == self.session)
+                    .cloned()
+                    .expect("begin_run calls limits after registering its run");
+                *self.original.lock().expect("original") = Some(original);
+                runtime
+                    .steer(&self.session, "accepted steer")
+                    .expect("steer accepted");
+                runtime
+                    .enqueue_follow_up(&self.session, "accepted follow-up")
+                    .expect("follow-up accepted");
+            }
+            self.delegate.limits().await
+        }
+
+        async fn approval_policy(&self) -> kc_core::config::ApprovalPolicy {
+            self.delegate.approval_policy().await
+        }
+
+        async fn subagent_config(&self) -> kc_core::config::SubagentConfig {
+            self.delegate.subagent_config().await
+        }
+    }
+
+    #[tokio::test]
+    async fn begin_run_failure_balances_metrics_and_preserves_accepted_input() {
+        use crate::tests_support::{FakeStore, ScriptedFactory};
+        use kc_core::hooks::NoHooks;
+        use kc_core::store::Store;
+        use kc_core::tool::ToolRegistry;
+
+        let dir =
+            std::env::temp_dir().join(format!("kc-runtime-failed-start-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temporary workspace");
+        let workspace = Arc::new(Workspace::new(&dir).expect("workspace"));
+        let store = Arc::new(FakeStore::new());
+        // Fail exactly the original user append; the two recovered runs remain
+        // writable and therefore can prove the queue is genuinely scheduled.
+        store.fail_appends_containing("original prompt");
+        let factory = Arc::new(ScriptedFactory::new(vec![
+            Script::text("steer recovered"),
+            Script::text("follow-up recovered"),
+        ]));
+        let session = format!("s_{}", uuid::Uuid::new_v4().simple());
+        let settings = Arc::new(BeginFailureSettings {
+            delegate: FakeSettings::default(),
+            runtime: std::sync::OnceLock::new(),
+            session: session.clone(),
+            original: std::sync::Mutex::new(None),
+            queued: std::sync::atomic::AtomicBool::new(false),
+        });
+        let runtime = Runtime::new(crate::RuntimeDeps {
+            store: store.clone(),
+            providers: factory.clone(),
+            tools: Arc::new(ToolRegistry::new()),
+            settings: settings.clone(),
+            hooks: Arc::new(NoHooks),
+            workspaces: Arc::new(crate::SingleWorkspace::new(workspace)),
+        });
+        settings
+            .runtime
+            .set(Arc::downgrade(&runtime))
+            .expect("attach runtime once");
+        store
+            .create_session(&session, "failed start", &dir.to_string_lossy(), None)
+            .await
+            .expect("create session");
+        let mut events = runtime.subscribe();
+
+        let error = runtime
+            .submit(&session, "original prompt".into())
+            .await
+            .expect_err("the injected initial append fails");
+        assert!(matches!(error, Error::Store(_)), "{error:?}");
+        let original = settings
+            .original
+            .lock()
+            .expect("original")
+            .as_ref()
+            .cloned()
+            .expect("settings observed the registered original run");
+        assert!(
+            !original.claim_finalization(FINALIZE_METRIC),
+            "the failed-start terminal path already claimed its finished metric exactly once"
+        );
+        assert!(runtime.queued_all(&session).follow_ups.len() <= 1);
+
+        // No RunStarted/RunFinished is emitted for begin_run itself, so the two
+        // terminal frames belong to the accepted steer and follow-up.
+        let mut frames: Vec<kc_core::events::EventEnvelope> = Vec::new();
+        while frames
+            .iter()
+            .filter(|event| matches!(&event.event, Event::RunFinished { .. }))
+            .count()
+            < 2
+        {
+            let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("recovered queued run finished")
+                .expect("event channel open");
+            frames.push(event);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !runtime.active_runs().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "recovered runs did not deregister"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let runs = store.runs();
+        assert_eq!(
+            runs.len(),
+            3,
+            "one failed original and two accepted follow-ups"
+        );
+        assert_eq!(runs[0].status, "failed");
+        assert!(runs.iter().skip(1).all(|run| run.status == "completed"));
+        assert_eq!(
+            factory.requests().len(),
+            2,
+            "the original failed before any provider request"
+        );
+        let users: Vec<_> = store
+            .messages()
+            .into_iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.content)
+            .collect();
+        assert_eq!(
+            users,
+            vec!["accepted steer", "accepted follow-up"],
+            "the failed initial prompt was never persisted"
+        );
+        assert!(runtime.queued_all(&session).steers.is_empty());
+        assert!(runtime.queued_all(&session).follow_ups.is_empty());
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

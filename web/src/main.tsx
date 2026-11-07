@@ -6,6 +6,9 @@ import { initTheme } from './theme';
 // instead of the generic JSON fallback; imported for its side effect.
 import './components/todoPanelRegister';
 import './components/goalsPanelRegister';
+// The `view` vocabulary: stat / list / bars / progress / clock / stack, claimed by
+// payload shape rather than by plugin, so any plugin gets a real view from data.
+import './components/viewPanelRegister';
 import './styles/index.css';
 
 // Paint the persisted theme before the first render so the workspace never

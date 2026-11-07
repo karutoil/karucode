@@ -134,6 +134,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::IterationStarted { .. } => "iteration_started",
         Event::StreamRetry { .. } => "stream_retry",
         Event::TextDelta { .. } => "text_delta",
+        Event::TextReplaced { .. } => "text_replaced",
         Event::ReasoningDelta { .. } => "reasoning_delta",
         Event::Usage { .. } => "usage",
         Event::ToolCallStarted { .. } => "tool_call_started",
@@ -6206,6 +6207,7 @@ async fn a_subagent_approval_notifies_once_through_the_parent_card() {
 /// matters to a rewind is only that the tool calls `record_checkpoint` first,
 /// which this does at the same point the real one does.
 struct JournalingWrite {
+    name: String,
     path: String,
     content: String,
     /// When set, the tool refuses instead of writing, to prove a refused write
@@ -6217,7 +6219,7 @@ struct JournalingWrite {
 impl kc_core::tool::Tool for JournalingWrite {
     fn spec(&self) -> kc_core::tool::ToolSpec {
         kc_core::tool::ToolSpec {
-            name: "write_file".into(),
+            name: self.name.clone(),
             description: "overwrite one file".into(),
             parameters: serde_json::json!({"type": "object"}),
             origin: ToolOrigin::Builtin,
@@ -6247,7 +6249,12 @@ impl kc_core::tool::Tool for JournalingWrite {
 }
 
 fn journaling_write(path: &str, content: &str) -> Arc<dyn kc_core::tool::Tool> {
+    journaling_write_as("write_file", path, content)
+}
+
+fn journaling_write_as(name: &str, path: &str, content: &str) -> Arc<dyn kc_core::tool::Tool> {
     Arc::new(JournalingWrite {
+        name: name.into(),
         path: path.into(),
         content: content.into(),
         fail: false,
@@ -6257,6 +6264,133 @@ fn journaling_write(path: &str, content: &str) -> Arc<dyn kc_core::tool::Tool> {
 /// The file's bytes, or `None` when it does not exist.
 fn read_file(dir: &std::path::Path, rel: &str) -> Option<String> {
     std::fs::read_to_string(dir.join(rel)).ok()
+}
+
+struct TestWorkspaceDir(std::path::PathBuf);
+
+impl TestWorkspaceDir {
+    fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "kc-runtime-{label}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&path).expect("create test workspace");
+        Self(path)
+    }
+}
+
+impl Drop for TestWorkspaceDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct RecordingWorkspaces {
+    default: Arc<Workspace>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl crate::WorkspaceProvider for RecordingWorkspaces {
+    fn workspace_for(&self, _project_id: Option<&str>) -> kc_core::error::Result<Arc<Workspace>> {
+        self.calls.lock().unwrap().push("default".into());
+        Ok(Arc::clone(&self.default))
+    }
+
+    fn workspace_for_session(
+        &self,
+        _project_id: Option<&str>,
+        recorded: &str,
+    ) -> kc_core::error::Result<Arc<Workspace>> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("session:{recorded}"));
+        Ok(Arc::new(Workspace::new(recorded)?))
+    }
+}
+
+#[tokio::test]
+async fn projectless_preview_and_revert_use_the_saved_session_workspace() {
+    let recorded = TestWorkspaceDir::new("recorded");
+    let default = TestWorkspaceDir::new("default");
+    std::fs::write(recorded.0.join("existing.txt"), "before").unwrap();
+    std::fs::write(default.0.join("existing.txt"), "DEFAULT: do not overwrite").unwrap();
+    std::fs::write(default.0.join("created.txt"), "DEFAULT: do not delete").unwrap();
+    let workspaces = Arc::new(RecordingWorkspaces {
+        default: Arc::new(Workspace::new(&default.0).unwrap()),
+        calls: Mutex::new(Vec::new()),
+    });
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            ("write-existing", "write_file", "{}"),
+            ("write-created", "write_file_again", "{}"),
+        ]),
+        Script::text("done"),
+    ])
+    .tool(journaling_write("existing.txt", "after"))
+    .tool(journaling_write_as(
+        "write_file_again",
+        "created.txt",
+        "new file",
+    ))
+    .workspaces(workspaces.clone())
+    .session_workspace(recorded.0.clone())
+    .build()
+    .await;
+
+    h.run_to_finish("change the recorded workspace").await;
+    h.wait_idle().await;
+    assert_eq!(
+        read_file(&recorded.0, "existing.txt").as_deref(),
+        Some("after")
+    );
+    assert_eq!(
+        read_file(&recorded.0, "created.txt").as_deref(),
+        Some("new file")
+    );
+    workspaces.calls.lock().unwrap().clear();
+    let prompt = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|message| message.role == "user")
+        .expect("prompt")
+        .id;
+
+    let preview = h
+        .runtime
+        .rewind_preview(h.session(), prompt)
+        .await
+        .unwrap()
+        .1;
+    assert_eq!(preview.files.len(), 2);
+    let outcome = h
+        .runtime
+        .rewind(h.session(), prompt, true, true)
+        .await
+        .unwrap();
+    assert_eq!(outcome.outcomes.len(), 2);
+
+    assert_eq!(
+        read_file(&recorded.0, "existing.txt").as_deref(),
+        Some("before")
+    );
+    assert_eq!(read_file(&recorded.0, "created.txt"), None);
+    assert_eq!(
+        read_file(&default.0, "existing.txt").as_deref(),
+        Some("DEFAULT: do not overwrite")
+    );
+    assert_eq!(
+        read_file(&default.0, "created.txt").as_deref(),
+        Some("DEFAULT: do not delete")
+    );
+    let calls = workspaces.calls.lock().unwrap().clone();
+    assert!(!calls.iter().any(|call| call == "default"), "{calls:?}");
+    assert_eq!(
+        calls.len(),
+        2,
+        "preview and revert each resolve the session: {calls:?}"
+    );
 }
 
 /// Visible (non-rewound) messages of the harness session, oldest first.
@@ -6885,6 +7019,68 @@ async fn retrying_with_revert_undoes_the_abandoned_turn_before_re_asking() {
 }
 
 #[tokio::test]
+async fn rewind_reports_commit_and_emits_event_when_replacement_storage_fails() {
+    let mut h = HarnessBuilder::new(vec![
+        Script::text("abandoned answer"),
+        Script::text("a later submit still works"),
+    ])
+    .build()
+    .await;
+    h.run_to_finish("question to replace").await;
+    h.wait_idle().await;
+    while h.events.try_recv().is_ok() {}
+    let original = h
+        .session_messages()
+        .await
+        .into_iter()
+        .find(|message| message.role == "user")
+        .expect("original prompt");
+
+    // The rewind writes rewound_at first. begin_run then creates a run but its
+    // user-message append fails: this is a post-commit startup failure, not a
+    // rollback of a rewind that already happened.
+    h.store.fail_appends(true);
+    let outcome = h
+        .runtime
+        .rewind_and_run(h.session(), original.id, false, "replacement".into())
+        .await
+        .expect("a committed rewind is a structured outcome, not a lost Err");
+    assert!(outcome.committed);
+    assert_eq!(outcome.run_id, None);
+    assert!(outcome
+        .start_error
+        .as_deref()
+        .unwrap_or("")
+        .contains("disk is full"));
+    assert_eq!(outcome.point.user_message_id, original.id);
+    assert!(
+        visible(&h).await.is_empty(),
+        "the original pair really was hidden"
+    );
+
+    let first = h.next_event().await;
+    assert!(matches!(
+        first.event,
+        Event::SessionRewound { ref session_id, message_id, .. }
+            if session_id == h.session() && message_id == original.id
+    ));
+    let notice = h.next_event().await;
+    assert!(matches!(
+        notice.event,
+        Event::Notice { ref level, ref message }
+            if level == "warn" && message.contains("replacement run could not start")
+    ));
+    assert!(h.store.runs().iter().any(|run| run.status == "failed"));
+
+    // Failure did not leave a registered run or lifecycle lock behind.
+    assert!(h.wait_idle().await.is_empty());
+    assert!(h.runtime.inner.session_lifecycle.lock().unwrap().is_empty());
+    h.store.fail_appends(false);
+    let events = h.run_to_finish("later question").await;
+    assert_eq!(finished_status(&events), "completed");
+}
+
+#[tokio::test]
 async fn a_retry_without_a_prompt_is_refused_before_anything_changes() {
     let mut h = HarnessBuilder::new(vec![Script::text("hi")]).build().await;
     h.run_to_finish("hello").await;
@@ -7396,6 +7592,96 @@ async fn pause_parks_a_live_agent_and_resume_lets_it_finish() {
     parent_handle.release();
     let events = h.collect_until_finished().await;
     assert_eq!(finished_status(&events), "completed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pause_resume_share_one_order_and_status_notes_stay_independent() {
+    let mut h = HarnessBuilder::new(vec![]).build().await;
+    let agent = AgentRecord {
+        id: "a_control_order".into(),
+        session_id: h.session().to_string(),
+        parent_run_id: "r_parent".into(),
+        parent_agent_id: None,
+        name: "worker".into(),
+        role: "worker".into(),
+        task: "serialize controls".into(),
+        status: "running".into(),
+        model: "fake-model".into(),
+        iterations: 0,
+        summary: String::new(),
+        error: None,
+        owned_paths: Vec::new(),
+        created_at: 0,
+        updated_at: 0,
+        finished_at: None,
+        background: false,
+        note: String::new(),
+        progress: None,
+    };
+    h.store.upsert_agent(&agent).await.unwrap();
+    let live = h.runtime.inner.hub.insert(
+        &agent,
+        agent.parent_run_id.clone(),
+        1,
+        CancellationToken::new(),
+    );
+
+    let pause_store = h.store.gate_next("transition_agent_status");
+    let runtime = Arc::clone(&h.runtime);
+    let pause = tokio::spawn(async move {
+        runtime
+            .control_agent("a_control_order", crate::AgentAction::Pause)
+            .await
+    });
+    pause_store.wait_entered().await;
+    assert!(live.is_paused(), "the live pause precedes its store await");
+    assert_eq!(h.store.agents()[0].status, "running");
+
+    // report_status updates neither wait for nor take the per-agent control guard.
+    h.runtime
+        .inner
+        .hub
+        .note("a_control_order", "working while paused".into(), Some(0.25));
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        h.store
+            .update_agent_note("a_control_order", "working while paused", Some(0.25), 1),
+    )
+    .await
+    .expect("status-note store update waited for pause/resume control")
+    .unwrap();
+    assert_eq!(live.note.lock().unwrap().as_str(), "working while paused");
+
+    let runtime = Arc::clone(&h.runtime);
+    let resume = tokio::spawn(async move {
+        runtime
+            .control_agent("a_control_order", crate::AgentAction::Resume)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !resume.is_finished(),
+        "resume crossed the paused store transition"
+    );
+
+    pause_store.release();
+    assert_eq!(pause.await.unwrap().unwrap().as_str(), "paused");
+    // The waiting resume may legally finish before this observer is scheduled.
+    assert_eq!(resume.await.unwrap().unwrap().as_str(), "running");
+    assert_eq!(h.store.agents()[0].status, "running");
+    assert!(!live.is_paused());
+    assert_eq!(h.store.agents()[0].note, "working while paused");
+
+    let paused_event = h.events.try_recv().expect("pause event").event;
+    let resumed_event = h.events.try_recv().expect("resume event").event;
+    assert!(matches!(
+        paused_event,
+        Event::AgentPaused { paused: true, .. }
+    ));
+    assert!(matches!(
+        resumed_event,
+        Event::AgentPaused { paused: false, .. }
+    ));
 }
 
 #[tokio::test]

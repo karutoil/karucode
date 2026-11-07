@@ -10,6 +10,7 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use kc_core::plugin::ToolCallContext;
 use kc_plugin_host::PluginPanelsHandle;
+use kc_plugin_host::PluginUiHandle;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -95,6 +96,66 @@ pub async fn enable_plugin(
     Ok(Json(serde_json::to_value(diagnostics).map_err(|e| {
         ApiError::internal(format!("could not serialize plugin: {e}"))
     })?))
+}
+
+/// `POST /api/plugins/:name/ui/actions/:action[?project=&session=]`
+///
+/// Run one UI action a plugin declared. The action id — not the contribution id —
+/// names the handler, because two buttons may share one. The host refuses an
+/// action no contribution declares, so a stale page cannot make an installed
+/// plugin execute something it no longer offers.
+///
+/// The response is the plugin's own answer, already validated by the host:
+///
+/// ```json
+/// {"ok": true, "message": "Checked 3 files", "refresh": ["todo"], "open_url": null}
+/// ```
+///
+/// `refresh` names **panels** of this plugin the UI should re-read. `open_url` is
+/// only ever an absolute `http`/`https` URL — the host drops anything else, and
+/// the frontend checks again before opening a tab.
+///
+/// A UI action is not a tool call: it runs because a person clicked a control the
+/// plugin itself contributed, so it does not go through the agent's approval
+/// policy. It also does not feed the model, change the tool registry, or carry
+/// markup — see `plugins` for the whole contract.
+pub async fn run_ui_action(
+    State(state): State<AppState>,
+    Path((name, action)): Path<(String, String)>,
+    Query(query): Query<QueryMap>,
+) -> ApiResult<Json<Value>> {
+    let session_id = query_str(&query, "session");
+    let project_id = query_str(&query, "project");
+
+    // Same scoping as a panel read: an unknown project is a 404 before the plugin
+    // is consulted, and an unknown session is a caller mistake rather than an
+    // empty answer.
+    let workspace = state.workspace_for_project(project_id)?;
+    if let Some(session) = session_id {
+        if state.store().get_session(session).await?.is_none() {
+            return Err(ApiError::not_found(format!(
+                "no session with id `{session}`"
+            )));
+        }
+    }
+
+    let ctx = ToolCallContext {
+        session_id: session_id.unwrap_or_default().to_string(),
+        project: project_id.map(str::to_string),
+        workspace: workspace.root().to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+
+    // Drop the host mutex before waiting on the plugin process.
+    let ui: PluginUiHandle = {
+        let host = state.plugins().lock().await;
+        host.ui_handle()
+    };
+    let result = ui
+        .action(&name, &action, &ctx)
+        .await
+        .map_err(map_plugin_error)?;
+    Ok(Json(json!(result)))
 }
 
 pub async fn list_mcp(State(state): State<AppState>) -> ApiResult<Json<Value>> {

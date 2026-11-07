@@ -3,11 +3,11 @@
 
 # Write and install a plugin
 
-> Build an out-of-process plugin that adds tools, hooks and inspector panels, register it, and debug it when it fails to start.
+> Build an out-of-process plugin that adds tools, hooks, inspector panels and UI controls (buttons, palette commands, keyboard shortcuts, hides), register it, and debug it when it fails to start.
 
 - **Slug:** `plugins`
-- **Tags:** plugins, extension, sdk, tools, hooks, jsonrpc, panels, notifications
-- **Applies to:** `config:[[plugins]]`, `file:~/.local/share/karucode/plugins/<name>/plugin.toml`, `dir:plugins/example-hello`, `tool:plugin__<plugin>__<tool>`, `cmd:cargo build -p example-hello`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin sdk --check`, `file:src/sdk.rs`, `file:src/protocol.rs`, `doc:docs/PLUGINS.md`, `env:KARUCODE_PLUGIN_NAME`, `env:KARUCODE_PLUGIN_PROTOCOL`, `env:KARUCODE_PLUGIN_PERMISSIONS`, `env:KARUCODE_PLUGIN_SETTINGS`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `config:panels`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:notifications.plugin`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `method:notify`, `hook:on_notify`, `hook:before_prompt`, `fn:PluginBuilder::panel`, `fn:PluginBuilder::on_notify`, `fn:notify`
+- **Tags:** plugins, extension, sdk, tools, hooks, jsonrpc, panels, ui, buttons, commands, shortcuts, notifications
+- **Applies to:** `config:[[plugins]]`, `file:~/.local/share/karucode/plugins/<name>/plugin.toml`, `dir:plugins/example-hello`, `tool:plugin__<plugin>__<tool>`, `cmd:cargo build -p example-hello`, `cmd:karucode plugin init`, `cmd:karucode plugin sdk`, `cmd:karucode plugin sdk --check`, `file:src/sdk.rs`, `file:src/protocol.rs`, `doc:docs/PLUGINS.md`, `env:KARUCODE_PLUGIN_NAME`, `env:KARUCODE_PLUGIN_PROTOCOL`, `env:KARUCODE_PLUGIN_PERMISSIONS`, `env:KARUCODE_PLUGIN_SETTINGS`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `config:panels`, `config:ui`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:notifications.plugin`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `route:POST /api/plugins/:name/ui/actions/:action`, `config:plugin_panels`, `config:plugin_ui`, `method:notify`, `method:ui/action`, `hook:on_notify`, `hook:before_prompt`, `fn:PluginBuilder::panel`, `fn:PluginBuilder::button`, `fn:PluginBuilder::message_button`, `fn:PluginBuilder::command`, `fn:PluginBuilder::message_command`, `fn:PluginBuilder::keybinding`, `fn:PluginBuilder::message_keybinding`, `fn:PluginBuilder::hide`, `fn:PluginBuilder::on_ui_action`, `fn:PluginBuilder::on_notify`, `fn:notify`, `fn:normalise_ui_keys`
 - **Source:** `crates/kc-plugin-sdk/src/lib.rs:49`
 
 ---
@@ -60,6 +60,16 @@ panel with `.panel(…)`, and declare what it touches with
 `.permission(permissions::FILES_WRITE)`. After upgrading karucode, refresh the
 vendored copy with `karucode plugin sdk <dir>`; `--check` exits non-zero when it
 is stale, writes nothing and starts no server, so a plugin's CI can guard it.
+
+The text after `.tool(…)` is the tool's schema description: write it for the
+model, because that exact text describes the tool on every model call. The host
+no longer appends a repeated origin/trust/permission paragraph to each tool.
+Instead the system prompt names the plugins whose tools are exposed (sorted and
+deduplicated) and states once that plugin tools run out of process under host
+supervision, return untrusted output and follow the approval policy. A plugin
+with no tools gets no block. Version/manifest metadata is available from
+`GET /api/plugins`; configured permissions decide the effective set. See
+`docs/PLUGINS.md` §5 for the exposure rules and §6 for permissions.
 
 Inside this repository `plugins/example-hello` is a workspace member and uses
 `kc-plugin-sdk` by relative path (`cargo build -p example-hello`). Copy its
@@ -131,9 +141,14 @@ enable/disable survives a rescan — the config file decides what a *new* plugin
 starts as, not whether an existing one that you switched off comes back.
 
 Both reload routes rebuild the tool registry before they answer, so the model
-sees the new tools on its very next call. A run that is already in flight keeps
-the registry snapshot it started with; a call to a replaced plugin fails with
-"was stopped" rather than hanging, and the next run is clean.
+sees the new tools on its very next call. Tool objects are generation-scoped:
+an old handle retained by an in-flight run is permanently retired when its
+plugin is replaced, removed or shut down. Calling it fails without executing
+or respawning the old process; it cannot revoke that tombstone. Existing
+`hooks_handle()` / `panels_handle()` views instead follow the current shared
+slot list across reload/rescan as well as enable/disable. Dropping a live
+`PluginHost` synchronously signals the process groups, and their supervisors
+reap the children.
 
 To skip the curl entirely, let the server watch its own sources:
 
@@ -195,10 +210,12 @@ In a hand-written plugin, declare the panel in the manifest and answer
 ```
 
 * the panel id is hosted as `plugin__<plugin>__<id>`, so it cannot collide with
-  a built-in tab or another plugin's panel. Ids are lowercase `a-z`, `0-9`,
-  `-`, `_`, `.`; anything else, a duplicate id, an unknown `source` or a `tool`
-  the plugin does not advertise in `tools/list` fails the handshake and shows
-  up in the plugin diagnostics;
+  a built-in tab. The delimiter is not an encoding: `a` / `b__c` and `a__b` /
+  `c` do collide. As with tools, the first plugin keeps the hosted id; later
+  claimants are omitted from panel lists and reads are refused, with the reason
+  in that plugin's diagnostics. Ids are lowercase `a-z`, `0-9`, `-`, `_`, `.`;
+  anything else, a duplicate id within one plugin, an unknown `source` or a
+  `tool` the plugin does not advertise in `tools/list` fails the handshake;
 * `data` is any JSON. `title` is optional — the manifest's title is used when
   it is missing;
 * `icon` is a *name* from the app's icon set (`check`, `list`, `eye`, `folder`,
@@ -210,11 +227,88 @@ In a hand-written plugin, declare the panel in the manifest and answer
   make the UI hammer the server;
 * the payload is capped at 256 KiB when rendered. Do real work in a tool the
   agent calls, not in a panel handler that runs every few seconds.
+* a payload with a `view` field is drawn as a **real view** instead of a JSON
+  tree: `stat`, `list`, `bars`, `progress`, `clock`, `stack`. Every field is plain
+  text or a number, each is clamped, and anything unrecognised keeps the JSON
+  view — so this is additive and an older app still reads a newer panel:
+
+```json
+{"view": "stack", "views": [
+  {"view": "clock", "label": "Writing", "remaining_secs": 932, "running": true},
+  {"view": "stat", "label": "Words", "value": "12,408", "detail": "31 files", "tone": "ok"},
+  {"view": "bars", "label": "By area", "bars": [{"label": "src", "value": 134413, "display": "131 kB"}]},
+  {"view": "list", "title": "Touched", "items": [{"text": "README.md", "detail": "now"}]},
+  {"view": "progress", "label": "Snapshots", "fraction": 0.3, "detail": "3 of 10"}
+]}
+```
+
+  With `refresh_ms` set, a `clock` really ticks: each poll is a fresh payload, and
+  that is the only real-time surface a plugin has.
+
+Two complete demo plugins live in `plugins/demos/` (a writing desk that hides
+chrome, and a workspace map with two panels and its own on-disk state). They are
+single Python files — read them instead of guessing.
 
 The tab is listed in `GET /api/config` under `plugin_panels` and read over
 `GET /api/plugins/:name/panels/:panel?project=&session=`; a plugin that
 declares no panels changes nothing, which is why this is additive and did not
 bump the protocol version.
+
+## UI controls: buttons, palette commands, shortcuts and hides
+
+The `ui` array adds the rest of the chrome without ever shipping markup, CSS or
+script: the app draws every control itself from a name it already owns.
+
+```rust
+use sdk::{PluginBuilder, UiActionRequest, UiActionResult, UiActionResultExt};
+
+fn main() -> std::io::Result<()> {
+    let greet = |_req: UiActionRequest| UiActionResult::ok("Hello");
+    PluginBuilder::new("focus", "0.1.0")
+        // A button in the composer's action row. Same id = same `ui/action`.
+        .button("composer.toolbar", "focus", "Focus mode", greet)
+        // The same action on a chord (Ctrl/Cmd + Shift + F).
+        .keybinding("focus-key", "Focus mode", "mod+shift+f", greet)
+        // A palette command that hands work to the agent instead.
+        .message_command("plan", "Ask about the plan", "Summarise the plan.")
+        // Ask the app not to draw a built-in control.
+        .hide("inspector.tab.agents")
+        .run()
+}
+```
+
+* kinds are `button`, `command`, `keybinding` and `hide`; a control is activated
+  either by `action` (the plugin answers `ui/action`) or by `message` (the text
+  is posted as a user turn). Exactly one of the two, and two controls may share
+  one action;
+* slots are a closed list: `composer.toolbar` (the composer's action row),
+  `inspector.header` (beside **Context**) and `session.header`. A button naming
+  another slot is skipped with a note in the diagnostics;
+* a `keybinding` needs a modifier — `mod` (Ctrl on Windows/Linux, Cmd on macOS),
+  `ctrl` or `alt` — then one key. A bare key is typing, so it is refused; so is
+  any chord the app already uses (`mod+k` palette, `mod+b` rail, `mod+n` new
+  session, `mod+j` context, `mod+shift+t` theme studio, `mod+enter` send), and so
+  is a chord another plugin bound first. A binding never fires while the caret is
+  in a text field or while a dialog is open;
+* a control is always attributed — it carries a dot and a tooltip naming the
+  plugin — because a plugin must not be able to pass its button off as a
+  built-in one;
+* `ui/action` is **not** a tool call: it runs because a person clicked or typed a
+  shortcut, so it does not go through the approval policy, never reaches the
+  model and cannot change the tool registry. Its answer is a toast (`message`),
+  panels to re-read (`refresh`) and at most one `http`/`https` URL to open
+  (`open_url`);
+* `hide` is an allowlist and app-wide: `composer.attach`, `inspector.tab.workspace`,
+  `inspector.tab.changes`, `inspector.tab.session`, `inspector.tab.agents`,
+  `inspector.context`. Anything else — including every control that stops a run
+  or answers an approval — is refused, and the inspector will not hide its last
+  remaining tab;
+* the person on the other side has the last word: Settings → Plugins & MCP →
+  **Controls in the interface** switches a contributed control off or puts a
+  hidden built-in back, per browser, without disabling the plugin;
+* contributions reach the browser as `GET /api/config`'s `plugin_ui`, and the
+  click posts to `POST /api/plugins/:name/ui/actions/:action`. A plugin that
+  declares no `ui` changes nothing.
 
 ## The call context
 
@@ -240,12 +334,15 @@ A tool's declared `class` is a **hint only**. Every plugin tool is exposed as
 exempt itself by declaring `read_only`. To let a specific tool skip the prompt,
 list it in the plugin's `settings.read_only_tools = ["tool", …]`.
 
-Those two keys, `trust` and `read_only_tools`, are **operator-only**: they are
-honoured from the `[[plugins]]` entry in `config.toml` and ignored when a
-`plugin.toml` in the plugin's own directory sets them. A plugin ships that file,
-so letting it decide its own approval exemptions would defeat the policy; the
-host logs the ignore and repeats it in the plugin's `error` field rather than
-obeying it silently. Every other `settings` key still reaches the plugin.
+The wildcard `permissions = ["*"]` and the two keys `trust` and
+`read_only_tools` are **operator-only**: they are honoured from the `[[plugins]]`
+entry in `config.toml` and ignored when a `plugin.toml` in the plugin's own
+directory sets them. Narrow disk permissions such as `permissions = ["shell"]`
+remain deliberate reviewed grants. A plugin ships its own manifest, so letting
+it delegate all runtime-declared permissions or decide its own approval
+exemptions would defeat the policy; the host logs the refusal and repeats it in
+the plugin's `error` field rather than obeying it silently. Every other
+`settings` key still reaches the plugin.
 
 ## Tool names
 

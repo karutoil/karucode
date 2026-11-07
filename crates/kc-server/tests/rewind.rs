@@ -300,6 +300,76 @@ async fn a_clean_rewind_emits_a_session_rewound_event() {
 }
 
 #[tokio::test]
+async fn a_committed_rewind_reports_replacement_start_failure_and_one_normalized_event() {
+    let h = HarnessBuilder::new(vec![text("original answer")])
+        .build()
+        .await;
+    let id = h.create_session(Some("faulted rewind")).await;
+    h.post(
+        &format!("/api/sessions/{id}/messages"),
+        json!({"content":"original prompt"}),
+    )
+    .await;
+    h.wait_until_idle(&id).await;
+    let detail = h.get(&format!("/api/sessions/{id}")).await.json();
+    let user = user_message_id(&detail, "original prompt");
+    let assistant = detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .and_then(|message| message["id"].as_i64())
+        .unwrap();
+    {
+        let connection = rusqlite::Connection::open(h.state.db_path()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_replacement_prompt
+                 BEFORE INSERT ON messages
+                 WHEN NEW.content = 'replacement prompt'
+                 BEGIN SELECT RAISE(ABORT, 'disk is full'); END;",
+            )
+            .unwrap();
+    }
+    let (_, _, events_body) = h.open_events(&format!("?session={id}"), &[]).await;
+    let response = h
+        .post(
+            &format!("/api/sessions/{id}/rewind"),
+            // Deliberately pick the assistant row: the event must use its parent
+            // user-prompt id, not replay the caller's assistant id.
+            json!({"message_id":assistant, "mode":"note", "note":"replacement prompt"}),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.text());
+    let outcome = response.json();
+    assert_eq!(outcome["committed"], true);
+    assert_eq!(outcome["point"]["user_message_id"], user);
+    assert!(outcome["run_id"].is_null(), "{outcome}");
+    assert!(
+        outcome["start_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("disk is full"),
+        "{outcome}"
+    );
+    let reloaded = h.get(&format!("/api/sessions/{id}")).await.json();
+    assert!(reloaded["messages"].as_array().unwrap().is_empty());
+
+    let events = support::events_within(events_body, std::time::Duration::from_millis(300)).await;
+    let rewound: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "session_rewound")
+        .collect();
+    assert_eq!(
+        rewound.len(),
+        1,
+        "route and runtime must not both emit: {events:?}"
+    );
+    assert_eq!(rewound[0]["session_id"], id);
+    assert_eq!(rewound[0]["message_id"], user);
+}
+
+#[tokio::test]
 async fn rewinding_a_session_that_is_running_is_a_conflict() {
     use support::Script;
     let h = HarnessBuilder::new(vec![Script::Hang])

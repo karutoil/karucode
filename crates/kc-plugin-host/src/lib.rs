@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -98,6 +98,89 @@ pub struct PluginPanels {
     pub plugin: String,
     pub version: String,
     pub panels: Vec<PanelSummary>,
+}
+
+/// One UI contribution as the host exposes it: the manifest declaration plus the
+/// plugin that owns it and the id it is hosted under.
+///
+/// This is a **description**, never markup. Every field is a string the app
+/// validates or draws itself, and the frontend still re-checks the whole payload
+/// (see `web/src/components/uiContributions.ts`) rather than trusting it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UiContributionSummary {
+    /// The plugin that declared it.
+    pub plugin: String,
+    /// The plugin's version, so the UI can badge what it came from.
+    pub version: String,
+    /// `button`, `command` or `hide`.
+    pub kind: String,
+    /// The bare id from the manifest. Empty for `hide`.
+    pub id: String,
+    /// `plugin__<plugin>__<id>`: a DOM key and a stable React-less identity.
+    pub hosted_id: String,
+    /// For a button: the slot it mounts in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String>,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// The `ui/action` id to run. Mutually exclusive with `message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// A user turn to send instead of running an action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// For `keybinding`: the canonical shortcut (`mod+shift+f`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<String>,
+    /// For `hide`: the built-in element to hide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+/// A built-in element one or more plugins asked the app to hide, and who asked.
+///
+/// Naming the plugins matters: an unexplained missing button is a bug report, a
+/// button missing *because kc-focus said so* is a decision somebody can reverse.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UiHiddenTarget {
+    pub target: String,
+    /// Plugins that asked, in discovery order.
+    pub plugins: Vec<String>,
+}
+
+/// Everything ready plugins contribute to the app's own UI.
+///
+/// `slots` and `hideable` are catalogues from `kc-core`: sending them with the
+/// contributions means a frontend never hard-codes a mount point, and a test can
+/// assert that every slot the app mounts is one a plugin may target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PluginUi {
+    pub contributions: Vec<UiContributionSummary>,
+    pub hidden: Vec<UiHiddenTarget>,
+    pub slots: Vec<String>,
+    pub hideable: Vec<String>,
+}
+
+impl PluginUi {
+    /// The empty contribution set, with the catalogues always populated.
+    pub fn empty() -> Self {
+        Self {
+            contributions: Vec::new(),
+            hidden: Vec::new(),
+            slots: kc_core::plugin::UI_SLOTS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            hideable: kc_core::plugin::UI_HIDEABLE
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
 }
 
 /// Time budget for each plugin interaction. Defaults: 10s handshake, 60s tool
@@ -296,8 +379,33 @@ impl RescanReport {
     }
 }
 
+/// Shared slot membership for the public hook/panel handles. The Vec is replaced
+/// on discovery reload/rescan; individual Arcs remain mutable for enable/disable.
+/// Calls clone a short-lived snapshot and release the mutex before process I/O.
+#[derive(Clone, Default)]
+struct LivePlugins(Arc<Mutex<Vec<Arc<PluginShared>>>>);
+
+impl LivePlugins {
+    fn replace(&self, slots: &[PluginSlot]) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = slots
+            .iter()
+            .filter_map(|slot| slot.shared.clone())
+            .collect();
+    }
+
+    fn snapshot(&self) -> Vec<Arc<PluginShared>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
 pub struct PluginHost {
     plugins: Vec<PluginSlot>,
+    /// Shared by every handle ever returned, including one created before reload.
+    live_plugins: LivePlugins,
     timeouts: Arc<TimeoutRefs>,
     /// Where the manifest-only plugins live, kept so a rescan can look again.
     data_dir: PathBuf,
@@ -312,14 +420,17 @@ impl PluginHost {
     /// used are kept as `failed` diagnostics with a message that says why.
     pub fn discover(configs: &[PluginConfig], data_dir: &Path) -> Self {
         let timeouts = Arc::new(TimeoutRefs::default());
-        let plugins = discover_entries(configs, data_dir)
+        let plugins: Vec<PluginSlot> = discover_entries(configs, data_dir)
             .into_iter()
             // Nothing is listening yet: `listen_notifications` is called after
             // `discover`.
             .map(|entry| entry.into_slot(Arc::clone(&timeouts), None, None))
             .collect();
+        let live_plugins = LivePlugins::default();
+        live_plugins.replace(&plugins);
         Self {
             plugins,
+            live_plugins,
             timeouts,
             data_dir: data_dir.to_path_buf(),
             notify_tx: None,
@@ -382,32 +493,22 @@ impl PluginHost {
 
     /// Snapshot of every plugin slot, ready or not.
     pub fn diagnostics(&self) -> Vec<PluginDiagnostics> {
-        let collisions = colliding_tools(&self.plugins);
+        let tools = colliding_tools(&self.plugins);
+        let panels = colliding_panels(&self.plugins);
         self.plugins
             .iter()
-            .map(|slot| {
-                let note = collisions
-                    .iter()
-                    .find(|(_, (_, claimants))| claimants.contains(&slot.config.name))
-                    .map(|(name, (owner, _))| collision_note(name, owner));
-                slot_diagnostics(slot, note.as_deref())
-            })
+            .map(|slot| slot_diagnostics(slot, &collision_notes(slot, &tools, &panels)))
             .collect()
     }
 
     /// Diagnostics for one plugin.
     pub fn diagnostics_for(&self, name: &str) -> Option<PluginDiagnostics> {
-        let collisions = colliding_tools(&self.plugins);
+        let tools = colliding_tools(&self.plugins);
+        let panels = colliding_panels(&self.plugins);
         self.plugins
             .iter()
             .find(|s| s.config.name == name)
-            .map(|slot| {
-                let note = collisions
-                    .iter()
-                    .find(|(_, (_, claimants))| claimants.contains(&slot.config.name))
-                    .map(|(name, (owner, _))| collision_note(name, owner));
-                slot_diagnostics(slot, note.as_deref())
-            })
+            .map(|slot| slot_diagnostics(slot, &collision_notes(slot, &tools, &panels)))
     }
 
     /// Tools of all currently ready plugins, in discovery order.
@@ -440,10 +541,6 @@ impl PluginHost {
                 continue;
             }
             let manifest = shared.manifest();
-            let version = manifest
-                .as_ref()
-                .map(|m| m.version.clone())
-                .unwrap_or_else(|| "unknown".into());
             // The config entry is authoritative: a manifest cannot grant itself
             // a permission the operator did not configure.
             let (granted, ignored) = effective_permissions(&slot.config, manifest.as_ref());
@@ -490,11 +587,7 @@ impl PluginHost {
                     continue;
                 }
                 seen.insert(name, slot.config.name.clone());
-                out.push(Arc::new(tool::PluginTool::new(
-                    Arc::clone(shared),
-                    def,
-                    version.clone(),
-                )));
+                out.push(Arc::new(tool::PluginTool::new(Arc::clone(shared), def)));
             }
         }
         out
@@ -538,7 +631,7 @@ impl PluginHost {
         } else {
             shared.disable().await;
         }
-        Ok(slot_diagnostics(&self.plugins[idx], None))
+        Ok(slot_diagnostics(&self.plugins[idx], &[]))
     }
 
     /// Fan a hook out to every ready plugin that advertises it and collect the
@@ -598,6 +691,23 @@ impl PluginHost {
         )
     }
 
+    /// Every UI contribution of every **ready** plugin, plus the catalogues of
+    /// slots and hideable targets this build understands.
+    ///
+    /// Additive and empty by default: a plugin that declares no `ui` changes
+    /// nothing, and a failed or disabled plugin contributes nothing.
+    pub fn ui(&self) -> PluginUi {
+        ui_of(&self.ready_plugins())
+    }
+
+    /// A live handle for reading contributions and running actions without the
+    /// host mutex — the counterpart of [`panels_handle`](Self::panels_handle).
+    pub fn ui_handle(&self) -> PluginUiHandle {
+        PluginUiHandle {
+            plugins: self.live_plugins.clone(),
+        }
+    }
+
     /// Read one panel's payload.
     ///
     /// The plugin answers `panels/read` with opaque JSON. `Err` carries the
@@ -626,11 +736,7 @@ impl PluginHost {
     /// handle instead and drops the lock first.
     pub fn panels_handle(&self) -> PluginPanelsHandle {
         PluginPanelsHandle {
-            plugins: self
-                .plugins
-                .iter()
-                .filter_map(|slot| slot.shared.clone())
-                .collect(),
+            plugins: self.live_plugins.clone(),
         }
     }
 
@@ -639,16 +745,12 @@ impl PluginHost {
     /// server for admin operations ([`set_enabled`](Self::set_enabled),
     /// [`shutdown`](Self::shutdown)).
     ///
-    /// The handle observes start/stop/enable/disable immediately: it holds the
-    /// same per-plugin state the host mutates. Slots are fixed at discovery, so
-    /// create the handle after [`discover`](Self::discover).
+    /// The handle observes start/stop/enable/disable and reload/rescan. Slot
+    /// membership lives in shared dynamic state rather than a Vec snapshot, so a
+    /// handle created before a reload follows its replacement generation.
     pub fn hooks_handle(&self) -> PluginHooks {
         PluginHooks {
-            plugins: self
-                .plugins
-                .iter()
-                .filter_map(|slot| slot.shared.clone())
-                .collect(),
+            plugins: self.live_plugins.clone(),
         }
     }
 
@@ -677,10 +779,11 @@ impl PluginHost {
     /// A runtime enable/disable (`set_enabled`) survives a rescan: `enabled` is
     /// only taken from the sources for a name that did not exist before.
     ///
-    /// Objects already handed to the runtime (tools, panels) keep pointing at
-    /// the process they were created for. Call the server's `reload_tools`
-    /// afterwards so the registry exposes the new set — the same contract as
-    /// [`set_enabled`](Self::set_enabled).
+    /// Tool objects are generation-scoped: one already handed to the runtime is
+    /// permanently retired with its old process and cannot restart replaced or
+    /// unloaded code. Hook/panel handles instead follow this shared slot list.
+    /// Call the server's `reload_tools` afterwards so the registry exposes the new
+    /// set — the same contract as [`set_enabled`](Self::set_enabled).
     pub async fn rescan(&mut self, configs: &[PluginConfig]) -> RescanReport {
         let desired = discover_entries(configs, &self.data_dir);
         let mut report = RescanReport::default();
@@ -737,12 +840,18 @@ impl PluginHost {
             }
             report.removed.push(slot.config.name);
         }
+        // Tombstone every departing Arc before publishing the new membership or
+        // waiting on any one process: an old tool may be invoked concurrently.
+        for shared in &stops {
+            shared.mark_retired();
+        }
         self.plugins = next;
+        self.live_plugins.replace(&self.plugins);
 
         // Stop before start: a replacement must not race its predecessor for the
         // same name, port, lock file or socket.
         for shared in stops {
-            shared.stop().await;
+            shared.retire().await;
         }
         start_many(starts).await;
         report
@@ -779,7 +888,8 @@ impl PluginHost {
 
         let old = self.plugins.remove(idx);
         if let Some(shared) = old.shared.clone() {
-            shared.stop().await;
+            shared.mark_retired();
+            shared.retire().await;
         }
         let slot = entry.into_slot(
             Arc::clone(&self.timeouts),
@@ -789,6 +899,7 @@ impl PluginHost {
         let shared = slot.shared.clone();
         let enabled = slot.config.enabled;
         self.plugins.insert(idx, slot);
+        self.live_plugins.replace(&self.plugins);
         if enabled {
             if let Some(shared) = shared {
                 if let Err(e) = shared.start().await {
@@ -796,7 +907,7 @@ impl PluginHost {
                 }
             }
         }
-        Ok(slot_diagnostics(&self.plugins[idx], None))
+        Ok(slot_diagnostics(&self.plugins[idx], &[]))
     }
 
     /// A cheap number that changes when anything a reload depends on changes:
@@ -819,16 +930,34 @@ impl PluginHost {
         hasher.finish()
     }
 
-    /// Stop every plugin process. Safe to call more than once.
+    /// Permanently retire every process generation. Safe to call more than once.
     pub async fn shutdown(&mut self) {
+        let shared: Vec<_> = self
+            .plugins
+            .iter()
+            .filter_map(|slot| slot.shared.clone())
+            .collect();
+        // Mark synchronously before any shutdown wait: old tools must not spawn a
+        // fresh process while another plugin's graceful shutdown is pending.
+        for plugin in &shared {
+            plugin.mark_retired();
+        }
         let mut set = JoinSet::new();
-        for slot in &self.plugins {
-            let Some(shared) = slot.shared.clone() else {
-                continue;
-            };
-            set.spawn(async move { shared.stop().await });
+        for plugin in shared {
+            set.spawn(async move { plugin.retire().await });
         }
         while set.join_next().await.is_some() {}
+    }
+}
+
+impl Drop for PluginHost {
+    fn drop(&mut self) {
+        for slot in &self.plugins {
+            if let Some(shared) = &slot.shared {
+                shared.retire_now();
+            }
+        }
+        self.live_plugins.clear();
     }
 }
 
@@ -958,7 +1087,8 @@ fn discover_entries(configs: &[PluginConfig], data_dir: &Path) -> Vec<Discovered
                         // `settings` still reaches the plugin.
                         let source = manifest_path.display().to_string();
                         let trusted = strip_disk_trust_settings(&mut cfg, &source);
-                        let warnings: Vec<String> = trusted.into_iter().collect();
+                        let wildcard = strip_disk_permission_wildcard(&mut cfg, &source);
+                        let warnings: Vec<String> = trusted.into_iter().chain(wildcard).collect();
                         let fingerprint = Fingerprint::of(&cfg, Some(&manifest_path));
                         push_entry_with_warnings(
                             &mut out,
@@ -1113,6 +1243,33 @@ fn colliding_tools(plugins: &[PluginSlot]) -> BTreeMap<String, (String, Vec<Stri
     claims
 }
 
+/// Hosted panel names claimed by more than one ready plugin. Delimiters are not
+/// an encoding: `a`/`b__c` and `a__b`/`c` both produce `plugin__a__b__c`.
+fn colliding_panels(plugins: &[PluginSlot]) -> BTreeMap<String, (String, Vec<String>)> {
+    let mut claims: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+    for slot in plugins {
+        let Some(shared) = &slot.shared else { continue };
+        if shared.status() != PluginStatus::Ready {
+            continue;
+        }
+        for panel in shared.panel_defs() {
+            let name = hosted_panel_id(&slot.config.name, &panel.id);
+            match claims.get_mut(&name) {
+                Some((_, claimants)) => {
+                    if !claimants.contains(&slot.config.name) {
+                        claimants.push(slot.config.name.clone());
+                    }
+                }
+                None => {
+                    claims.insert(name, (slot.config.name.clone(), Vec::new()));
+                }
+            }
+        }
+    }
+    claims.retain(|_, (_, claimants)| !claimants.is_empty());
+    claims
+}
+
 /// The sentence shown in diagnostics for a plugin that lost a name collision.
 fn collision_note(name: &str, owner: &str) -> String {
     format!(
@@ -1123,7 +1280,34 @@ fn collision_note(name: &str, owner: &str) -> String {
     )
 }
 
-fn slot_diagnostics(slot: &PluginSlot, collisions: Option<&str>) -> PluginDiagnostics {
+fn panel_collision_note(name: &str, owner: &str) -> String {
+    format!(
+        "not exposing panel `{name}`: the hosted id is already provided by plugin `{owner}`. \
+         Two plugins produced the same namespaced panel id (`plugin__` only prevents collisions \
+         with built-in tabs), so this one was refused rather than aliasing the other panel's tab, \
+         cache and payload. Rename the plugin or the panel"
+    )
+}
+
+fn collision_notes(
+    slot: &PluginSlot,
+    tools: &BTreeMap<String, (String, Vec<String>)>,
+    panels: &BTreeMap<String, (String, Vec<String>)>,
+) -> Vec<String> {
+    tools
+        .iter()
+        .filter(|(_, (_, claimants))| claimants.contains(&slot.config.name))
+        .map(|(name, (owner, _))| collision_note(name, owner))
+        .chain(
+            panels
+                .iter()
+                .filter(|(_, (_, claimants))| claimants.contains(&slot.config.name))
+                .map(|(name, (owner, _))| panel_collision_note(name, owner)),
+        )
+        .collect()
+}
+
+fn slot_diagnostics(slot: &PluginSlot, collisions: &[String]) -> PluginDiagnostics {
     let mut diagnostics = match &slot.setup_error {
         Some(err) => PluginDiagnostics {
             name: slot.config.name.clone(),
@@ -1166,8 +1350,16 @@ fn slot_diagnostics(slot: &PluginSlot, collisions: Option<&str>) -> PluginDiagno
     for warning in &slot.warnings {
         append_note(&mut diagnostics, warning.clone());
     }
-    if let Some(note) = collisions {
-        append_note(&mut diagnostics, note.to_string());
+    // UI contributions this build could not place: the plugin keeps running but
+    // the operator must be able to see *why* a button is missing.
+    if let Some(shared) = &slot.shared {
+        for note in shared.ui_skipped() {
+            warn!(plugin = %slot.config.name, "{note}");
+            append_note(&mut diagnostics, note);
+        }
+    }
+    for note in collisions {
+        append_note(&mut diagnostics, note.clone());
     }
     diagnostics
 }
@@ -1302,6 +1494,26 @@ fn strip_disk_trust_settings(config: &mut PluginConfig, source: &str) -> Option<
     Some(warning)
 }
 
+/// Remove the operator-only permissions wildcard from a plugin's disk manifest.
+/// Narrow entries such as `shell` are deliberate reviewed grants and remain.
+fn strip_disk_permission_wildcard(config: &mut PluginConfig, source: &str) -> Option<String> {
+    let original_len = config.permissions.len();
+    config
+        .permissions
+        .retain(|permission| permission.trim() != WILDCARD_PERMISSION);
+    if config.permissions.len() == original_len {
+        return None;
+    }
+    let warning = format!(
+        "ignored `permissions = [\"*\"]` declared by the plugin manifest at {source}: the wildcard \
+         lets a runtime manifest grant its own permissions and is honoured only from the \
+         operator's [[plugins]] entry in config.toml. Narrow permission names in the disk manifest \
+         are retained; move the wildcard to the operator entry if that delegation is intended"
+    );
+    warn!("{warning}");
+    Some(warning)
+}
+
 /// Shape of `<data_dir>/plugins/<name>/plugin.toml`.
 #[derive(Debug, Deserialize)]
 struct PluginFile {
@@ -1397,7 +1609,7 @@ fn value_to_text(value: &Value) -> Option<String> {
 /// runtime. See [`PluginHost::hooks_handle`].
 #[derive(Clone)]
 pub struct PluginHooks {
-    plugins: Vec<Arc<PluginShared>>,
+    plugins: LivePlugins,
 }
 
 /// Live panel view over the plugin slots. See [`PluginHost::panels_handle`].
@@ -1406,13 +1618,13 @@ pub struct PluginHooks {
 /// plugin process rather than on the server's plugin mutex.
 #[derive(Clone)]
 pub struct PluginPanelsHandle {
-    plugins: Vec<Arc<PluginShared>>,
+    plugins: LivePlugins,
 }
 
 impl PluginPanelsHandle {
     /// Every panel contributed by a ready plugin, in discovery order.
     pub fn panels(&self) -> Vec<PluginPanels> {
-        panels_of(&self.plugins)
+        panels_of(&self.plugins.snapshot())
     }
 
     /// Read one panel's payload from a ready plugin.
@@ -1427,8 +1639,119 @@ impl PluginPanelsHandle {
         panel: &str,
         ctx: &ToolCallContext,
     ) -> kc_core::Result<PanelPayload> {
-        read_panel(&self.plugins, name, panel, ctx).await
+        read_panel(&self.plugins.snapshot(), name, panel, ctx).await
     }
+}
+
+/// Live view over the UI contributions of the plugin slots.
+///
+/// The counterpart of [`PluginPanelsHandle`] for the declarative UI layer: the
+/// server takes it, drops the host mutex, and then waits on a plugin process.
+/// Reading contributions is free (they are validated at handshake time); running
+/// an action may take as long as one call timeout.
+#[derive(Clone)]
+pub struct PluginUiHandle {
+    plugins: LivePlugins,
+}
+
+impl PluginUiHandle {
+    /// Every contribution of every ready plugin, with the app's catalogues.
+    pub fn ui(&self) -> PluginUi {
+        ui_of(&self.plugins.snapshot())
+    }
+
+    /// Run one contributed action inside the plugin that declared it.
+    ///
+    /// `action` names the *action id* from the manifest, not the contribution:
+    /// two buttons may share one handler. An action no contribution declares is
+    /// a `NotFound` rather than a plugin call, so a stale page cannot make an
+    /// installed plugin execute something it no longer offers.
+    pub async fn action(
+        &self,
+        name: &str,
+        action: &str,
+        ctx: &ToolCallContext,
+    ) -> kc_core::Result<kc_core::plugin::PluginUiActionResult> {
+        run_ui_action(&self.plugins.snapshot(), name, action, ctx).await
+    }
+}
+
+/// The body of [`PluginUiHandle::action`].
+///
+/// Error mapping mirrors [`read_panel`] so both paths answer the same way: an
+/// unknown plugin or action is `NotFound`, a plugin that is not usable is
+/// `Config`, and a plugin that failed to answer is `Plugin`.
+async fn run_ui_action(
+    plugins: &[Arc<PluginShared>],
+    name: &str,
+    action: &str,
+    ctx: &ToolCallContext,
+) -> kc_core::Result<kc_core::plugin::PluginUiActionResult> {
+    let shared = plugins
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| kc_core::Error::NotFound(format!("plugin `{name}` is not configured")))?;
+    match shared.status() {
+        PluginStatus::Ready => {}
+        PluginStatus::Disabled => {
+            return Err(kc_core::Error::Config(format!(
+                "plugin `{name}` is disabled; enable it in the plugin settings to use its UI"
+            )))
+        }
+        PluginStatus::Failed | PluginStatus::Stopped | PluginStatus::Starting => {
+            let reason = shared
+                .diagnostics()
+                .error
+                .unwrap_or_else(|| "not running".into());
+            return Err(kc_core::Error::Plugin(format!(
+                "plugin `{name}` is not ready ({reason})"
+            )));
+        }
+    }
+    let def = shared.ui_action_def(action).ok_or_else(|| {
+        let mut known: Vec<String> = shared
+            .ui_defs()
+            .into_iter()
+            .filter_map(|c| c.action)
+            .collect();
+        known.sort();
+        known.dedup();
+        let listed = if known.is_empty() {
+            "it declares no actions".to_string()
+        } else {
+            format!("it declares [{}]", known.join(", "))
+        };
+        kc_core::Error::NotFound(format!(
+            "plugin `{name}` has no UI action `{action}`: {listed}"
+        ))
+    })?;
+    shared.ui_action_output(&def, ctx).await.map_err(|e| {
+        kc_core::Error::Plugin(format!(
+            "UI action `{action}` of plugin `{name}` failed: {}",
+            e.describe()
+        ))
+    })
+}
+
+/// If `name`/`panel` is a later delimiter-collision claimant, return the plugin
+/// that owns the hosted id. The first declaration in discovery order keeps it.
+fn refused_panel_owner(plugins: &[Arc<PluginShared>], name: &str, panel: &str) -> Option<String> {
+    let hosted = hosted_panel_id(name, panel);
+    for candidate in plugins {
+        if candidate.status() != PluginStatus::Ready {
+            continue;
+        }
+        for declared in candidate.panel_defs() {
+            if hosted_panel_id(&candidate.name, &declared.id) != hosted {
+                continue;
+            }
+            if candidate.name == name && declared.id == panel {
+                return None;
+            }
+            return Some(candidate.name.clone());
+        }
+    }
+    None
 }
 
 /// The body of [`PluginPanelsHandle::panel`], shared with the handle the server
@@ -1473,6 +1796,15 @@ async fn read_panel(
                 known.join(", ")
             ))
         })?;
+        if let Some(owner) = refused_panel_owner(plugins, name, panel) {
+            return Err(kc_core::Error::Config(format!(
+                "panel `{}` of plugin `{name}` was refused: hosted id `{}` collides with plugin \
+                 `{owner}`; {}. The panel was not called.",
+                def.id,
+                hosted_panel_id(name, panel),
+                panel_collision_note(&hosted_panel_id(name, panel), &owner)
+            )));
+        }
         match shared.panel_output(&def, ctx).await {
             Ok(payload) => Ok(payload),
             Err(e) => Err(kc_core::Error::Plugin(format!(
@@ -1486,6 +1818,7 @@ async fn read_panel(
 
 fn panels_of(plugins: &[Arc<PluginShared>]) -> Vec<PluginPanels> {
     let mut out = Vec::new();
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
     for shared in plugins {
         if shared.status() != PluginStatus::Ready {
             continue;
@@ -1494,32 +1827,138 @@ fn panels_of(plugins: &[Arc<PluginShared>]) -> Vec<PluginPanels> {
         if declared.is_empty() {
             continue;
         }
+        let mut accepted = Vec::with_capacity(declared.len());
+        for panel in declared {
+            let hosted_id = hosted_panel_id(&shared.name, &panel.id);
+            if let Some(owner) = seen.get(&hosted_id) {
+                warn!(
+                    plugin = %shared.name,
+                    panel = %panel.id,
+                    hosted_id = %hosted_id,
+                    claimed_by = %owner,
+                    "not exposing plugin panel: the hosted id `{hosted_id}` is already provided \
+                     by plugin `{owner}`; refusing the delimiter collision rather than aliasing \
+                     tabs, caches or payloads. Rename the plugin or the panel"
+                );
+                continue;
+            }
+            seen.insert(hosted_id, shared.name.clone());
+            accepted.push(PanelSummary::new(&shared.name, panel));
+        }
+        if accepted.is_empty() {
+            continue;
+        }
         out.push(PluginPanels {
             plugin: shared.name.clone(),
             version: shared
                 .manifest()
                 .map(|m| m.version)
                 .unwrap_or_else(|| "unknown".into()),
-            panels: declared
-                .into_iter()
-                .map(|panel| PanelSummary::new(&shared.name, panel))
-                .collect(),
+            panels: accepted,
         });
     }
     out
 }
 
+/// Flatten the contributions of every ready plugin into one app-facing payload.
+///
+/// Two rules, both borrowed from [`panels_of`]:
+///
+/// * a contribution hosted id claimed by a later plugin is **refused**, not
+///   aliased, with a warning naming both plugins — a duplicate key would make the
+///   DOM and the click handler disagree about who owns a button;
+/// * `hide` targets are unioned across plugins, keeping who asked so the UI can
+///   explain a missing control instead of just not drawing it.
+///
+/// Output order is deterministic: discovery order, then manifest order, then
+/// hidden targets sorted by name. Nothing here depends on a HashMap iteration.
+fn ui_of(plugins: &[Arc<PluginShared>]) -> PluginUi {
+    let mut out = PluginUi::empty();
+    let mut hidden: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    // One chord, one handler: a later claimant is skipped, not stacked, so a
+    // keystroke can never run two plugins at once.
+    let mut bound: BTreeMap<String, String> = BTreeMap::new();
+    for shared in plugins {
+        if shared.status() != PluginStatus::Ready {
+            continue;
+        }
+        let version = shared
+            .manifest()
+            .map(|m| m.version)
+            .unwrap_or_else(|| "unknown".into());
+        for contribution in shared.ui_defs() {
+            if contribution.kind == kc_core::plugin::UI_KIND_HIDE {
+                let Some(target) = contribution.target else {
+                    continue;
+                };
+                let owners = hidden.entry(target).or_default();
+                if !owners.contains(&shared.name) {
+                    owners.push(shared.name.clone());
+                }
+                continue;
+            }
+            let hosted_id = kc_core::plugin::hosted_ui_id(&shared.name, &contribution.id);
+            if let Some(owner) = seen.get(&hosted_id) {
+                warn!(
+                    plugin = %shared.name,
+                    contribution = %contribution.id,
+                    hosted_id = %hosted_id,
+                    claimed_by = %owner,
+                    "not exposing plugin UI contribution: the hosted id is already provided by \
+                     another plugin; refusing the delimiter collision rather than aliasing buttons"
+                );
+                continue;
+            }
+            if let Some(keys) = &contribution.keys {
+                if let Some(owner) = bound.get(keys) {
+                    warn!(
+                        plugin = %shared.name,
+                        contribution = %contribution.id,
+                        keys = %keys,
+                        claimed_by = %owner,
+                        "not exposing plugin keybinding: the chord is already bound by another \
+                         plugin; the first in discovery order keeps it"
+                    );
+                    continue;
+                }
+                bound.insert(keys.clone(), shared.name.clone());
+            }
+            seen.insert(hosted_id.clone(), shared.name.clone());
+            out.contributions.push(UiContributionSummary {
+                plugin: shared.name.clone(),
+                version: version.clone(),
+                kind: contribution.kind,
+                id: contribution.id,
+                hosted_id,
+                slot: contribution.slot,
+                label: contribution.label,
+                title: contribution.title,
+                icon: contribution.icon,
+                action: contribution.action,
+                message: contribution.message,
+                keys: contribution.keys,
+                target: None,
+            });
+        }
+    }
+    out.hidden = hidden
+        .into_iter()
+        .map(|(target, plugins)| UiHiddenTarget { target, plugins })
+        .collect();
+    out
+}
+
 impl PluginHooks {
-    /// Fan a hook out to the ready plugins that advertise it.
     pub async fn call_hook(&self, hook: &str, payload: Value) -> Vec<Value> {
-        fan_out(&self.plugins, hook, &payload).await
+        fan_out(&self.plugins.snapshot(), hook, &payload).await
     }
 }
 
 #[async_trait]
 impl kc_core::hooks::Hooks for PluginHooks {
     async fn before_prompt(&self, session_id: &str, workspace: &str) -> Vec<String> {
-        prompt_notes(&self.plugins, session_id, workspace, None).await
+        prompt_notes(&self.plugins.snapshot(), session_id, workspace, None).await
     }
 
     async fn before_prompt_for_turn(
@@ -1528,7 +1967,7 @@ impl kc_core::hooks::Hooks for PluginHooks {
         workspace: &str,
         turn: Option<&str>,
     ) -> Vec<String> {
-        prompt_notes(&self.plugins, session_id, workspace, turn).await
+        prompt_notes(&self.plugins.snapshot(), session_id, workspace, turn).await
     }
 
     async fn on_run_end(&self, session_id: &str, run_id: &str, status: &str) {
@@ -1537,7 +1976,7 @@ impl kc_core::hooks::Hooks for PluginHooks {
             "run_id": run_id,
             "status": status,
         });
-        fan_out(&self.plugins, hooks::ON_RUN_END, &payload).await;
+        fan_out(&self.plugins.snapshot(), hooks::ON_RUN_END, &payload).await;
     }
 
     async fn on_tool_result(&self, session_id: &str, tool: &str, ok: bool) {
@@ -1546,7 +1985,7 @@ impl kc_core::hooks::Hooks for PluginHooks {
             "tool": tool,
             "ok": ok,
         });
-        fan_out(&self.plugins, hooks::ON_TOOL_RESULT, &payload).await;
+        fan_out(&self.plugins.snapshot(), hooks::ON_TOOL_RESULT, &payload).await;
     }
 
     fn notifier(&self) -> Option<std::sync::Arc<dyn kc_core::hooks::NotificationObserver>> {
@@ -1564,7 +2003,7 @@ impl kc_core::hooks::Hooks for PluginHooks {
 #[async_trait]
 impl kc_core::hooks::NotificationObserver for PluginHooks {
     async fn on_notify(&self, payload: Value) {
-        fan_out(&self.plugins, hooks::ON_NOTIFY, &payload).await;
+        fan_out(&self.plugins.snapshot(), hooks::ON_NOTIFY, &payload).await;
     }
 }
 
@@ -1603,7 +2042,7 @@ impl kc_core::hooks::Hooks for PluginHost {
 
     fn notifier(&self) -> Option<std::sync::Arc<dyn kc_core::hooks::NotificationObserver>> {
         Some(std::sync::Arc::new(PluginHooks {
-            plugins: self.ready_plugins(),
+            plugins: self.live_plugins.clone(),
         }))
     }
 }

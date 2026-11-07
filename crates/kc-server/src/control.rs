@@ -468,9 +468,7 @@ async fn agent_counts(state: &AppState) -> ApiResult<HashMap<String, (usize, usi
 /// One query for the whole server: an approval means a run is *stopped* until a
 /// person answers, so both the per-chat badge and the overview's total come from
 /// the same read and can never disagree.
-async fn pending_counts(
-    state: &AppState,
-) -> ApiResult<(HashMap<String, usize>, usize)> {
+async fn pending_counts(state: &AppState) -> ApiResult<(HashMap<String, usize>, usize)> {
     let pending = state.store().list_pending_approvals(None).await?;
     let total = pending.len();
     let mut by_session: HashMap<String, usize> = HashMap::new();

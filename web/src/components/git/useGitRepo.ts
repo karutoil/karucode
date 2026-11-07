@@ -86,37 +86,88 @@ export function useGitRepo(projectId: string | null): GitRepo {
   // effect pass, and the reload below has to see the latest answer.
   const historyWanted = useRef(false);
   const stashWanted = useRef(false);
+  const historyRequest = useRef<AbortController | null>(null);
+  const stashRequest = useRef<AbortController | null>(null);
+  const mutationRequest = useRef<AbortController | null>(null);
+  const mutationSequence = useRef(0);
+  const repositoryGeneration = useRef(0);
+  const renderedProject = useRef(projectId);
+  renderedProject.current = projectId;
 
   const loadHistory = useCallback((): void => {
     historyWanted.current = true;
+    historyRequest.current?.abort();
     const controller = new AbortController();
+    const generation = repositoryGeneration.current;
+    historyRequest.current = controller;
+    const current = (): boolean =>
+      repositoryGeneration.current === generation &&
+      renderedProject.current === projectId &&
+      historyRequest.current === controller;
     getGitLog(projectId, { signal: controller.signal, limit: HISTORY_LIMIT })
-      .then((result) => setCommits(result.commits))
+      .then((result) => {
+        if (current()) setCommits(result.commits);
+      })
       .catch((cause: unknown) => {
-        if (controller.signal.aborted) return;
+        if (!current() || controller.signal.aborted) return;
         store.pushToast(`Could not read the history: ${toErrorMessage(cause)}`, 'error');
         setCommits([]);
+      })
+      .finally(() => {
+        if (historyRequest.current === controller) historyRequest.current = null;
       });
   }, [projectId]);
 
   const loadStashes = useCallback((): void => {
     stashWanted.current = true;
+    stashRequest.current?.abort();
     const controller = new AbortController();
+    const generation = repositoryGeneration.current;
+    stashRequest.current = controller;
+    const current = (): boolean =>
+      repositoryGeneration.current === generation &&
+      renderedProject.current === projectId &&
+      stashRequest.current === controller;
     getGitStashes(projectId, { signal: controller.signal })
-      .then((result) => setStashes(result.stashes))
+      .then((result) => {
+        if (current()) setStashes(result.stashes);
+      })
       .catch((cause: unknown) => {
-        if (controller.signal.aborted) return;
+        if (!current() || controller.signal.aborted) return;
         store.pushToast(`Could not read the stash list: ${toErrorMessage(cause)}`, 'error');
         setStashes([]);
+      })
+      .finally(() => {
+        if (stashRequest.current === controller) stashRequest.current = null;
       });
   }, [projectId]);
 
-  // Which repository the state belongs to. Only a *change* drops the loaded
-  // history and stash list; a refresh keeps them (and re-reads them below) so the
-  // sections do not collapse every time the tree is re-probed.
-  const loadedProject = useRef(projectId);
-  const projectChanged = loadedProject.current !== projectId;
-  loadedProject.current = projectId;
+  // Project identity owns every outstanding request. Cleanup runs before the new
+  // repository's effects, so an old response can no longer pass a generation test
+  // even when a test double resolves after being aborted.
+  useEffect(() => {
+    repositoryGeneration.current += 1;
+    setStatus(null);
+    setBranches([]);
+    setCommits(null);
+    setStashes(null);
+    setState('loading');
+    setError(null);
+    setBusy(null);
+    setActionError(null);
+    historyWanted.current = false;
+    stashWanted.current = false;
+    return () => {
+      repositoryGeneration.current += 1;
+      mutationSequence.current += 1;
+      historyRequest.current?.abort();
+      stashRequest.current?.abort();
+      mutationRequest.current?.abort();
+      historyRequest.current = null;
+      stashRequest.current = null;
+      mutationRequest.current = null;
+    };
+  }, [projectId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -124,12 +175,6 @@ export function useGitRepo(projectId: string | null): GitRepo {
     let live = true;
     setState((current) => (current === 'loading' ? 'loading' : 'ready'));
     setError(null);
-    if (projectChanged) {
-      setCommits(null);
-      setStashes(null);
-      historyWanted.current = false;
-      stashWanted.current = false;
-    }
 
     const statusJob = getGitStatus(projectId, { signal })
       .then((result) => {
@@ -179,23 +224,34 @@ export function useGitRepo(projectId: string | null): GitRepo {
   const run = useCallback(
     async (
       label: string,
-      action: () => Promise<{ status: GitStatus; message: string | null; commit: unknown }>,
+      action: (signal: AbortSignal) => Promise<{ status: GitStatus; message: string | null; commit: unknown }>,
     ): Promise<boolean> => {
+      if (renderedProject.current !== projectId) return false;
+      mutationRequest.current?.abort();
+      const controller = new AbortController();
+      const generation = repositoryGeneration.current;
+      const operation = ++mutationSequence.current;
+      mutationRequest.current = controller;
+      const current = (): boolean =>
+        repositoryGeneration.current === generation &&
+        renderedProject.current === projectId &&
+        mutationSequence.current === operation;
       setBusy(label);
       setActionError(null);
       try {
-        const result = await action();
+        const result = await action(controller.signal);
+        if (!current()) return false;
         setStatus(result.status);
-        setRevision((current) => current + 1);
+        setRevision((value) => value + 1);
         setState('ready');
         if (result.message) store.pushToast(result.message, 'success');
-        // A commit changes the history, a checkout changes the branch list; one
-        // reload keeps both honest without the caller having to know which. It is
-        // best effort, so it carries its own catch: a rejection here would be an
-        // unhandled promise (the tests report one per action, and a browser logs
-        // it), and the status above is already up to date either way.
-        void getGitBranches(projectId)
-          .then((list) => setBranches(list.is_repo ? list.branches : []))
+        // A commit changes the history, a checkout changes the branch list. These
+        // follow-ups belong to the same repository generation and operation too:
+        // abort alone is not enough for a fetch mock or already-settled response.
+        void getGitBranches(projectId, { signal: controller.signal })
+          .then((list) => {
+            if (current()) setBranches(list.is_repo ? list.branches : []);
+          })
           .catch(() => {
             // The previous list stands; the next refresh will try again.
           });
@@ -203,12 +259,16 @@ export function useGitRepo(projectId: string | null): GitRepo {
         if (stashWanted.current) loadStashes();
         return true;
       } catch (cause: unknown) {
+        if (!current() || controller.signal.aborted) return false;
         const message = toErrorMessage(cause);
         setActionError(message);
         store.pushToast(message, 'error');
         return false;
       } finally {
-        setBusy(null);
+        if (current()) {
+          setBusy(null);
+          mutationRequest.current = null;
+        }
       }
     },
     [projectId, loadHistory, loadStashes],
@@ -218,7 +278,7 @@ export function useGitRepo(projectId: string | null): GitRepo {
     (paths: string[] | 'all', label?: string): Promise<boolean> =>
       run(
         label ?? (paths === 'all' ? 'Staging every change' : `Staging ${paths.length} file${paths.length === 1 ? '' : 's'}`),
-        () => stageGitPaths(paths === 'all' ? { all: true } : { paths }, projectId),
+        (signal) => stageGitPaths(paths === 'all' ? { all: true } : { paths }, projectId, { signal }),
       ),
     [projectId, run],
   );
@@ -227,14 +287,14 @@ export function useGitRepo(projectId: string | null): GitRepo {
     (paths: string[] | 'all', label?: string): Promise<boolean> =>
       run(
         label ?? (paths === 'all' ? 'Unstaging everything' : `Unstaging ${paths.length} file${paths.length === 1 ? '' : 's'}`),
-        () => unstageGitPaths(paths === 'all' ? { all: true } : { paths }, projectId),
+        (signal) => unstageGitPaths(paths === 'all' ? { all: true } : { paths }, projectId, { signal }),
       ),
     [projectId, run],
   );
 
   const discard = useCallback(
     (paths: string[] | 'all', staged: boolean, label?: string): Promise<boolean> =>
-      run(label ?? 'Discarding changes', () =>
+      run(label ?? 'Discarding changes', (signal) =>
         discardGitPaths(
           {
             ...(paths === 'all' ? { all: true } : { paths }),
@@ -242,6 +302,7 @@ export function useGitRepo(projectId: string | null): GitRepo {
             confirm: true,
           },
           projectId,
+          { signal },
         ),
       ),
     [projectId, run],
@@ -249,7 +310,7 @@ export function useGitRepo(projectId: string | null): GitRepo {
 
   const commit = useCallback(
     (message: string, options: { amend?: boolean } = {}): Promise<boolean> =>
-      run(options.amend ? 'Amending the last commit' : 'Committing', () =>
+      run(options.amend ? 'Amending the last commit' : 'Committing', (signal) =>
         commitGitChanges(
           {
             message,
@@ -260,6 +321,7 @@ export function useGitRepo(projectId: string | null): GitRepo {
             stage_all: countsNothingStaged(status),
           },
           projectId,
+          { signal },
         ),
       ),
     [projectId, run, status],
@@ -267,29 +329,33 @@ export function useGitRepo(projectId: string | null): GitRepo {
 
   const checkout = useCallback(
     (name: string): Promise<boolean> =>
-      run(`Switching to ${name}`, () => checkoutGitBranch(name, projectId)),
+      run(`Switching to ${name}`, (signal) => checkoutGitBranch(name, projectId, { signal })),
     [projectId, run],
   );
 
   const createBranch = useCallback(
     (name: string, options: { checkout?: boolean } = {}): Promise<boolean> =>
-      run(`Creating ${name}`, () =>
-        createGitBranch({ name, checkout: options.checkout ?? true }, projectId),
+      run(`Creating ${name}`, (signal) =>
+        createGitBranch({ name, checkout: options.checkout ?? true }, projectId, { signal }),
       ),
     [projectId, run],
   );
 
   const deleteBranch = useCallback(
     (name: string, options: { force?: boolean } = {}): Promise<boolean> =>
-      run(`Deleting ${name}`, () =>
-        deleteGitBranch({ name, force: options.force ?? false, confirm: options.force ?? false }, projectId),
+      run(`Deleting ${name}`, (signal) =>
+        deleteGitBranch(
+          { name, force: options.force ?? false, confirm: options.force ?? false },
+          projectId,
+          { signal },
+        ),
       ),
     [projectId, run],
   );
 
   const stash = useCallback(
     (action: GitStashAction, options: { index?: number; includeUntracked?: boolean } = {}): Promise<boolean> =>
-      run(stashLabel(action, options.index ?? 0), () =>
+      run(stashLabel(action, options.index ?? 0), (signal) =>
         runGitStash(
           {
             action,
@@ -298,6 +364,7 @@ export function useGitRepo(projectId: string | null): GitRepo {
             confirm: action === 'drop',
           },
           projectId,
+          { signal },
         ),
       ),
     [projectId, run],

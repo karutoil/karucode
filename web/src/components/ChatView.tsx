@@ -22,6 +22,8 @@ import { ResultResizer } from './ResultResizer';
 import { ContextDrawer } from './ContextDrawer';
 import { WorkbenchTaskMenu } from './WorkbenchTaskMenu';
 import { LiveAnnouncer } from './LiveAnnouncer';
+import { PluginSlot } from './PluginSlot';
+import { UI_SLOT_SESSION_HEADER } from './uiContributions';
 import { Tabs, type TabItem } from './Tabs';
 import { TerminalTab } from './TerminalTab';
 import {
@@ -266,6 +268,9 @@ function SessionHeader({
       <WorkspaceTabs view={view} onChange={onSelectView} />
 
       <div class="header-buttons">
+        {/* Controls plugins contributed to the session header. Before the
+         * built-in chips so they never push the bell or Context out of reach. */}
+        <PluginSlot slot={UI_SLOT_SESSION_HEADER} />
         <BranchChip onShowChanges={onShowChanges} />
         {/* The notification centre's way in. It lives in the header rather than on
          * the project rail because it is the one place a bell is reachable in every

@@ -9,7 +9,7 @@
 // @kc-title: Configure a model provider
 // @kc-summary: Point karucode at any OpenAI-compatible endpoint, by environment or as named profiles, and choose the active model.
 // @kc-tags: provider, model, config, setup, gateway, llm
-// @kc-applies-to: env:KARUCODE_BASE_URL, env:KARUCODE_API_KEY, env:KARUCODE_MODEL, env:OPENAI_BASE_URL, env:OPENAI_API_KEY, env:KARUCODE_TEMPERATURE, env:KARUCODE_MAX_TOKENS, env:KARUCODE_REQUEST_TIMEOUT_SECS, env:KARUCODE_MODELS_DEV_URL, env:KARUCODE_RETRY_MAX_RETRIES, env:KARUCODE_RETRY_BASE_DELAY_MS, env:KARUCODE_RETRY_MAX_DELAY_MS, env:KARUCODE_RETRY_MAX_STREAM_RESTARTS, env:KARUCODE_MODEL_SUPPORTS_IMAGES, config:[[providers]], config:active_provider, config:active_model, config:[model], config:model.supports_images, config:vision, config:retry_max_retries, config:retry_base_delay_ms, config:retry_max_delay_ms, config:retry_max_stream_restarts, event:stream_retry, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, ui:Settings
+// @kc-applies-to: env:KARUCODE_BASE_URL, env:KARUCODE_API_KEY, env:KARUCODE_MODEL, env:OPENAI_BASE_URL, env:OPENAI_API_KEY, env:KARUCODE_TEMPERATURE, env:KARUCODE_MAX_TOKENS, env:KARUCODE_REQUEST_TIMEOUT_SECS, env:KARUCODE_MODELS_DEV_URL, env:KARUCODE_RETRY_MAX_RETRIES, env:KARUCODE_RETRY_BASE_DELAY_MS, env:KARUCODE_RETRY_MAX_DELAY_MS, env:KARUCODE_RETRY_MAX_STREAM_RESTARTS, env:KARUCODE_MODEL_SUPPORTS_IMAGES, config:[[providers]], config:active_provider, config:active_model, config:[model], config:model.supports_images, config:vision, config:retry_max_retries, config:retry_base_delay_ms, config:retry_max_delay_ms, config:retry_max_stream_restarts, event:stream_retry, event:text_replaced, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, request:messages[].name, internal:kc-runtime:context-digest, internal:kc-runtime:startup-recovery, ui:Settings
 //
 // # Fastest path: three environment variables
 //
@@ -67,7 +67,11 @@
 // * `context_window` is not decoration: it decides how much conversation a run
 //   may send (`window - max_output_tokens`, at four characters per token). A
 //   model added by hand without it falls back to `limits.context_max_chars`,
-//   so fill it in - models picked from the catalog already have it.
+//   so fill it in - models picked from the catalog already have it. Flat
+//   `[model]` context/output limits are inherited only by synthesized
+//   default/environment entries and by a legacy profile with no model entries
+//   when resolving the flat `model.model` id; they are not lent to a different
+//   declared model whose own metadata is absent.
 // * `max_output_tokens` is sent on the wire as `max_tokens`, so the room the
 //   budget reserves for the answer is actually enforced. `max_tokens` wins when
 //   both are set; only one is ever sent. Newer OpenAI models reject `max_tokens`
@@ -94,6 +98,9 @@
 //   (`base_url`, `api_key`, `request_timeout_secs`, `extra_headers`, `extra_body`)
 //   are ignored; without profiles, a `default` profile is synthesised from
 //   `[model]`.
+// * An explicit `Authorization` entry in `extra_headers` (or a request-specific
+//   override) wins over `api_key`; the key supplies `Bearer <key>` only when no
+//   explicit Authorization header was configured.
 // * `vision = true` on a model entry (or `supports_images = true` in `[model]`,
 //   or `KARUCODE_MODEL_SUPPORTS_IMAGES=1`) tells karucode the model accepts image
 //   input. Nothing guesses it from the model id. With it on, `read_file` on a
@@ -126,6 +133,10 @@
 // Setting `KARUCODE_MODEL`, `KARUCODE_BASE_URL` or `KARUCODE_API_KEY` (or the
 // `OPENAI_*` fallbacks) expresses them as a reserved `env` profile and selects
 // it, so an env-driven deployment never silently keeps using a file profile.
+// `KARUCODE_REQUEST_TIMEOUT_SECS`, when present, overrides `request_timeout_secs`
+// on every loaded file profile as well as the synthesized env profile, including
+// session-pinned models; by itself it does not select another endpoint. Flat
+// `[model].request_timeout_secs` is still ignored when named profiles exist.
 // Keys are write-only: `GET /api/config` reports `api_key_set`, never the key.
 //
 // # Timeouts: two deadlines from one setting
@@ -136,9 +147,11 @@
 // | deadline | what it bounds | what it catches |
 // |---|---|---|
 // | **per-read gap**, `request_timeout_secs` | the silence *between* two reads | an endpoint that stops talking: a dead backend, a stalled proxy |
-// | **whole attempt**, twice `request_timeout_secs` | the request from send to last byte | an endpoint that never stops talking: a body that trickles a byte at a time, a stream that sends nothing but keepalive comments |
+// | **whole attempt**, twice `request_timeout_secs` | one absolute deadline set before send, shared by header waits, buffered error/JSON reads and the streamed body | an endpoint that never stops talking: a body that trickles a byte at a time, a stream that sends nothing but keepalive comments |
 //
-// Both are needed. A per-read timeout cannot see a drip-fed body, because every
+// Header latency consumes the whole-attempt budget; starting the body does not
+// reset it. Both buffered reads and body streaming also observe cancellation.
+// Both deadlines are needed. A per-read timeout cannot see a drip-fed body, because every
 // individual read returns in time; measured, a 5 s setting let a drip-fed body
 // run for 42 s and kept a keepalive-only stream alive indefinitely. The whole
 // attempt is a multiple of the gap rather than a separate key so there is one
@@ -191,14 +204,15 @@
 // | 400, 413, 422 | **no** | a malformed or oversized request stays malformed |
 // | 401, 403, 404 | **no** | a revoked key or a missing model id is permanent here |
 // | other 4xx | **no** | the endpoint refused the request |
+// | 3xx redirect | **no** | no redirected/repeated POST: update `base_url` explicitly |
 // | 200 + `application/json` | **no** | a buffered completion or an error object (`insufficient_quota`); the body's reason is surfaced |
-// | 200 + empty body | **no** | the endpoint answered "nothing", and will answer it again |
+// | 200 + empty body (including close-delimited EOF) | **no** | the endpoint answered "nothing", and will answer it again |
 // | 200 + HTML/plain splash | yes | a broken proxy; the next attempt lands on a healthy channel |
 // | in-stream `retryable: false` | **no** | the endpoint judged the request mid-answer (`invalid_request_error`, a context overflow) |
-// | `data: [DONE]` only | n/a | a finished (empty) answer, not a failure: the turn ends with empty text |
+// | `data: [DONE]`, with or without another finish reason | n/a | a normal stop; keepalive/usage/role-only JSON does not make it `eof` |
 //
-// The last three matter because each retry is a billed generation. A 200 with an
-// error body used to be a generic provider error - no status to classify, so
+// The permanent responses matter because each retry is a billed generation. A 200
+// with an error body used to be a generic provider error - no status to classify, so
 // transient - and was re-sent up to 51 times; a completion delivered only as
 // `[DONE]` was read as "the stream died before sending anything" and regenerated
 // four times for one empty turn. Both now end the turn with the real reason.
@@ -269,6 +283,10 @@
 //   when the value is not valid JSON;
 // * markers split across network chunks are reassembled, and no half-marker is
 //   ever rendered as text and then retracted;
+// * marker-shaped text inside a literal parameter remains argument data, not a
+//   nested invoke or closing block. Balanced invoke/parameter/close markup stays
+//   verbatim in the outer value; ambiguous or unbalanced nesting fails closed as
+//   prose. Malformed block tags never borrow a later `>` and become calls;
 // * several invokes in one block become several calls, and a turn that carries
 //   both a real `tool_calls` field and a text block keeps them apart.
 //
@@ -305,7 +323,9 @@
 // * **answer text** that loops is cut back to where the run starts and the turn
 //   completes, because the model did produce something worth keeping; the
 //   repeated tail is never persisted, so it cannot become the model's own habit
-//   on the next request. Fenced code is never compared, so a repetitive program
+//   on the next request. After the older delta events, the runtime also emits
+//   `text_replaced` with the full final trimmed content so live UI text matches
+//   the persisted answer. Fenced code is never compared, so a repetitive program
 //   is safe.
 //
 // The bar is deliberately high, because a false positive throws away a good
@@ -353,6 +373,11 @@
 // * karucode never sends `tool_choice`. Explicit `tool_choice: "auto"` was
 //   measured pushing time-to-first-token to 9-30 s on some gateways. Use
 //   `[model.extra_body] tool_choice = ...` only if a gateway requires it.
+// * The local-only message labels `kc-runtime:context-digest` and
+//   `kc-runtime:startup-recovery` are omitted from OpenAI `messages[].name`,
+//   whose grammar does not admit `:`. Their role and content still reach the
+//   model and the stored transcript keeps the labels; ordinary task, participant
+//   and tool names are still serialized unchanged.
 // * `base_url` is the prefix, not the full URL: karucode appends
 //   `/chat/completions` (and `/models` for a probe).
 // * A model that does not support tool calls will answer, but it cannot edit
@@ -383,7 +408,10 @@ mod stream;
 
 pub use dsml::strip_tool_markup;
 pub use errors::{is_context_overflow, is_context_overflow_error, CONTEXT_OVERFLOW_TAG};
-pub use request::{build_chat_body, build_chat_body_for, chat_completions_url, models_url};
+pub use request::{
+    build_chat_body, build_chat_body_for, chat_completions_url, models_url,
+    serialized_message_count,
+};
 pub use retry::{RetryPolicy, RetryingProvider};
 
 /// TCP/TLS handshake budget; the timeout of the request itself is derived from
@@ -418,6 +446,10 @@ impl OpenAiProvider {
     pub fn new(config: ModelConfig) -> Result<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
+            // A redirected POST can repeat a billed generation and forward
+            // credentials to another origin. Make the operator update base_url
+            // deliberately; the 3xx response is classified as permanent below.
+            .redirect(reqwest::redirect::Policy::none())
             // A per-read timeout keeps long generations alive while still
             // failing when the endpoint goes silent. The whole attempt is
             // bounded separately, by `attempt_timeout`, because a per-read gap
@@ -552,6 +584,11 @@ impl Provider for OpenAiProvider {
         let secrets = self.secrets(&headers);
         let timeout = timeout_for(&self.config);
         let attempt = attempt_timeout(&self.config);
+        // One absolute clock covers send, headers, buffered bodies and streaming.
+        // The body must never receive a fresh `attempt` after slow headers.
+        let started = tokio::time::Instant::now();
+        let deadline = started + attempt;
+        let header_deadline = (started + timeout).min(deadline);
 
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
@@ -561,7 +598,7 @@ impl Provider for OpenAiProvider {
         let response = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(Error::Cancelled),
-            outcome = tokio::time::timeout(timeout, send) => match outcome {
+            outcome = tokio::time::timeout_at(header_deadline, send) => match outcome {
                 Err(_) => {
                     return Err(Error::Timeout(format!(
                         "provider at {url} sent no response headers within {}s",
@@ -579,13 +616,16 @@ impl Provider for OpenAiProvider {
             // gateway that drips an error page must not hold the attempt either.
             let error =
                 errors::http_status_error(response, &url, &self.config.model, &secrets, false);
-            return Err(match tokio::time::timeout(attempt, error).await {
-                Ok(error) => error,
-                Err(_) => Error::Timeout(format!(
+            return Err(buffered_error_with_cancel(
+                error,
+                &cancel,
+                deadline,
+                format!(
                     "provider at {url} did not finish sending its {status} response within {}s",
                     attempt.as_secs()
-                )),
-            });
+                ),
+            )
+            .await);
         }
         if status == reqwest::StatusCode::NO_CONTENT || response.content_length() == Some(0) {
             // A 200/204 with no body is not a transient failure: the endpoint
@@ -623,14 +663,17 @@ impl Provider for OpenAiProvider {
                 &content_type,
                 &secrets,
             );
-            return Err(match tokio::time::timeout(attempt, error).await {
-                Ok(error) => error,
-                Err(_) => Error::Timeout(format!(
+            return Err(buffered_error_with_cancel(
+                error,
+                &cancel,
+                deadline,
+                format!(
                     "provider at {url} did not finish sending its {content_type} response \
                      within {}s",
                     attempt.as_secs()
-                )),
-            });
+                ),
+            )
+            .await);
         }
 
         Ok(stream::stream_from_response(
@@ -639,6 +682,7 @@ impl Provider for OpenAiProvider {
             url,
             timeout,
             attempt,
+            deadline,
             secrets,
             request.tools.iter().map(|tool| tool.name.clone()).collect(),
         ))
@@ -650,9 +694,12 @@ impl Provider for OpenAiProvider {
         let secrets = self.secrets(&headers);
         let timeout = timeout_for(&self.config);
         let attempt = attempt_timeout(&self.config);
+        let started = tokio::time::Instant::now();
+        let deadline = started + attempt;
+        let header_deadline = (started + timeout).min(deadline);
 
         let send = self.client.get(&url).headers(headers).send();
-        let response = match tokio::time::timeout(timeout, send).await {
+        let response = match tokio::time::timeout_at(header_deadline, send).await {
             Err(_) => {
                 return Err(Error::Timeout(format!(
                     "provider at {url} sent no response within {}s",
@@ -665,7 +712,7 @@ impl Provider for OpenAiProvider {
         if !response.status().is_success() {
             let error =
                 errors::http_status_error(response, &url, &self.config.model, &secrets, true);
-            return Err(match tokio::time::timeout(attempt, error).await {
+            return Err(match tokio::time::timeout_at(deadline, error).await {
                 Ok(error) => error,
                 Err(_) => Error::Timeout(format!(
                     "provider at {url} did not finish sending its error response within {}s",
@@ -677,7 +724,7 @@ impl Provider for OpenAiProvider {
         // time exactly like a stream is, so the whole read gets the attempt
         // deadline too.
         let read = read_limited(response, &url, MODELS_BODY_LIMIT, timeout, &secrets);
-        let body = match tokio::time::timeout(attempt, read).await {
+        let body = match tokio::time::timeout_at(deadline, read).await {
             Ok(body) => body?,
             Err(_) => {
                 return Err(Error::Timeout(format!(
@@ -696,6 +743,24 @@ impl Provider for OpenAiProvider {
                 "provider at {url} returned no model list (expected `{{\"data\":[{{\"id\":\"...\"}}]}}` or a top-level array)"
             ))
         })
+    }
+}
+
+/// Finish a bounded buffered error/JSON read without losing the user's cancel
+/// signal or extending the attempt past the absolute deadline set before send.
+async fn buffered_error_with_cancel(
+    read: impl std::future::Future<Output = Error>,
+    cancel: &CancellationToken,
+    deadline: tokio::time::Instant,
+    timeout_message: String,
+) -> Error {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Error::Cancelled,
+        outcome = tokio::time::timeout_at(deadline, read) => match outcome {
+            Ok(error) => error,
+            Err(_) => Error::Timeout(timeout_message),
+        },
     }
 }
 

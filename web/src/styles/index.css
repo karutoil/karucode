@@ -6,6 +6,8 @@
 @import './artifacts.css';
 @import './composer.css';
 @import './inspector.css';
+@import './plugin-slots.css';
+@import './plugin-views.css';
 @import './git.css';
 @import './terminal.css';
 @import './todo.css';

@@ -23,9 +23,10 @@
 //!
 //! An agent is *owned* by the agent (or top-level run) that spawned it, and
 //! ownership is transitive: the owner, and every owner of the owner, may pause,
-//! resume, kill and inspect it. Messaging is open - any agent may message any
-//! other, including its parent - because a child reporting a blocker to its
-//! parent is the case the whole feature exists for.
+//! resume, kill and inspect it. Messaging is open *within one session*, including
+//! between siblings and upwards to a parent, because a child reporting a blocker
+//! to its parent is the case the whole feature exists for. An explicit id in a
+//! different session is not a live target even though this registry is global.
 //!
 //! # What this deliberately does not do
 //!
@@ -39,7 +40,7 @@ use kc_core::store::{AgentRecord, AgentStatus};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -62,6 +63,25 @@ pub struct AgentMessage {
 /// itself, and it would be delivered into a context budget that cannot hold it.
 pub const MAX_MAILBOX: usize = 32;
 
+/// The actual result of trying to enqueue a message.
+///
+/// A full mailbox is deliberately distinct from an accepted message at depth 32:
+/// only `Queued` may produce a delivered/queued event or increment a tool's
+/// delivery count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MailboxDelivery {
+    Queued {
+        depth: usize,
+    },
+    Full {
+        depth: usize,
+    },
+    /// Unknown, already removed, or not in the caller's session. These cases are
+    /// intentionally indistinguishable to a model caller so an id cannot be used
+    /// to inspect or inject into another session.
+    NotLive,
+}
+
 /// One live agent: everything the runtime needs to steer it.
 pub(crate) struct LiveAgent {
     pub id: AgentId,
@@ -82,6 +102,10 @@ pub(crate) struct LiveAgent {
     pub mailbox: Mutex<VecDeque<AgentMessage>>,
     /// Woken whenever the mailbox gains a message or the pause state changes.
     pub wake: Notify,
+    /// Serializes the live pause flag with the caller's persisted status write.
+    /// Every pause/resume path, including HTTP and a model tool, must hold this
+    /// guard until its conditional store transition has finished.
+    control: Arc<AsyncMutex<()>>,
     /// `true` while the agent should not start another iteration.
     pub paused: Mutex<bool>,
     /// A human (or a kill_agents call) asked for this to stop, as opposed to a
@@ -116,6 +140,7 @@ impl LiveAgent {
             cancel,
             mailbox: Mutex::new(VecDeque::new()),
             wake: Notify::new(),
+            control: Arc::new(AsyncMutex::new(())),
             paused: Mutex::new(false),
             killed: Mutex::new(false),
             settled: Mutex::new(None),
@@ -150,6 +175,55 @@ impl LiveAgent {
     }
 }
 
+/// An exclusive pause/resume operation on one agent.
+///
+/// The guard is async because the caller must keep it across the store await. A
+/// second control operation cannot change either the live flag or the persisted
+/// status's expected predecessor until the first operation has published its
+/// result.
+pub(crate) struct AgentControlGuard {
+    live: Arc<LiveAgent>,
+    _lock: OwnedMutexGuard<()>,
+}
+
+impl AgentControlGuard {
+    pub fn live(&self) -> &Arc<LiveAgent> {
+        &self.live
+    }
+
+    /// Pause `id`. Returns the status it was in, for the event and the caller.
+    pub fn pause(&self, by: &str) -> Result<AgentStatus, ControlError> {
+        let id = &self.live.id.0;
+        if self.live.cancel.is_cancelled() {
+            return Err(ControlError::NotLive {
+                agent: id.clone(),
+                status: AgentStatus::Cancelled.as_str().to_string(),
+            });
+        }
+        let mut paused = self.live.paused.lock().expect("paused lock");
+        if *paused {
+            // Idempotent: a second pause is a no-op, not an error. A parent that
+            // pauses a subtree twice should not have to care which call landed.
+            return Ok(AgentStatus::Paused);
+        }
+        *paused = true;
+        drop(paused);
+        tracing::debug!(agent = %id, by, "paused a subagent");
+        Ok(AgentStatus::Paused)
+    }
+
+    /// Lift a pause and wake a parked loop.
+    pub fn resume(&self, by: &str) -> Result<AgentStatus, ControlError> {
+        let id = &self.live.id.0;
+        if self.live.cancel.is_cancelled() {
+            return Ok(AgentStatus::Cancelled);
+        }
+        self.live.set_paused(false);
+        tracing::debug!(agent = %id, by, "resumed a subagent");
+        Ok(AgentStatus::Running)
+    }
+}
+
 /// Every live agent in one runtime.
 #[derive(Default)]
 pub(crate) struct AgentHub {
@@ -158,14 +232,14 @@ pub(crate) struct AgentHub {
     /// `wait_for_agents` that raced the removal still gets a real answer instead
     /// of "unknown agent". Bounded by the prune below.
     finished: Mutex<HashMap<String, AgentStatus>>,
-    /// Mail addressed to a *top-level run*, per session.
+    /// Mail addressed to a *top-level run*, keyed by session and exact run id.
     ///
-    /// A child's "message my parent" means a run, not an agent, when it was
-    /// spawned by the main agent - so this is the other half of the mailbox
-    /// system, not a special case bolted on. The run loop drains it in the same
-    /// place it drains user steers, which keeps one rule: a message to a loop is
-    /// an ordinary user turn at the top of an iteration, never an interruption.
-    run_mail: Mutex<HashMap<String, VecDeque<AgentMessage>>>,
+    /// An entry's existence is also its liveness registration. Registration is
+    /// explicit; delivery never creates an entry, so a late child cannot recreate
+    /// a retired mailbox after cleanup. An empty active entry remains until clear.
+    /// The run loop drains mail where it drains user steers: a message to a loop
+    /// is an ordinary user turn at the top of an iteration, never an interruption.
+    run_mail: Mutex<HashMap<(String, String), VecDeque<AgentMessage>>>,
 }
 
 /// How many settled agent statuses are remembered for a late waiter.
@@ -221,6 +295,26 @@ impl AgentHub {
         self.agents.lock().expect("agents lock").get(id).cloned()
     }
 
+    /// Serialize a pause/resume operation and its caller's store transition.
+    ///
+    /// Revalidate after waiting: an agent may finish while its predecessor holds
+    /// the guard, in which case controlling the removed `Arc` would be a phantom
+    /// success. Cancellation deliberately does not use this guard; a slow store
+    /// must never delay a stop request.
+    pub async fn control(&self, id: &str) -> Result<AgentControlGuard, ControlError> {
+        let live = self
+            .get(id)
+            .ok_or_else(|| ControlError::Unknown(id.to_string()))?;
+        let lock = Arc::clone(&live.control).lock_owned().await;
+        let still_live = self.get(id).is_some_and(|current| {
+            Arc::ptr_eq(&current, &live) && live.settled.lock().expect("settled lock").is_none()
+        });
+        if !still_live {
+            return Err(ControlError::Unknown(id.to_string()));
+        }
+        Ok(AgentControlGuard { live, _lock: lock })
+    }
+
     /// Remove an agent's live entry, remembering how it settled.
     pub fn finish(&self, id: &str, status: AgentStatus) {
         {
@@ -236,8 +330,10 @@ impl AgentHub {
         self.agents.lock().expect("agents lock").remove(id);
     }
 
-    /// How an agent settled, if it has. Checks the live map first: an agent that
-    /// is still running is `None` even if a previous agent had the same id.
+    /// Test access to the remembered settlement status. Production named waits
+    /// use the owned persisted row so they can return its real summary as well.
+    /// Checks the live map first: a running agent is never mistaken for settled.
+    #[cfg(test)]
     pub fn settled_status(&self, id: &str) -> Option<AgentStatus> {
         if let Some(live) = self.get(id) {
             return *live.settled.lock().expect("settled lock");
@@ -331,56 +427,33 @@ impl AgentHub {
             .count()
     }
 
-    /// Queue one message for `to`. Returns the recipient's queue depth after it,
-    /// or `None` when the recipient is not live.
-    pub fn deliver(&self, to: &str, message: AgentMessage) -> Option<usize> {
-        let live = self.get(to)?;
+    /// Queue one message for a live agent in the sender's own session.
+    ///
+    /// The hub is global, so the session check belongs here immediately before
+    /// the mailbox write rather than in a distant tool-level precheck. `Full`
+    /// means the message was dropped, including when `depth == MAX_MAILBOX`.
+    pub fn deliver_in_session(
+        &self,
+        session_id: &str,
+        to: &str,
+        message: AgentMessage,
+    ) -> MailboxDelivery {
+        let Some(live) = self.get(to) else {
+            return MailboxDelivery::NotLive;
+        };
+        if live.session_id != session_id || live.settled.lock().expect("settled lock").is_some() {
+            return MailboxDelivery::NotLive;
+        }
         let depth = {
             let mut queue = live.mailbox.lock().expect("mailbox lock");
             if queue.len() >= MAX_MAILBOX {
-                return Some(queue.len());
+                return MailboxDelivery::Full { depth: queue.len() };
             }
             queue.push_back(message);
             queue.len()
         };
         live.wake.notify_waiters();
-        Some(depth)
-    }
-
-    /// Pause `id`. Returns the status it was in, for the event and the caller.
-    pub fn pause(&self, id: &str, by: &str) -> Result<AgentStatus, ControlError> {
-        let live = self
-            .get(id)
-            .ok_or_else(|| ControlError::Unknown(id.to_string()))?;
-        if live.cancel.is_cancelled() {
-            return Err(ControlError::NotLive {
-                agent: id.to_string(),
-                status: AgentStatus::Cancelled.as_str().to_string(),
-            });
-        }
-        let mut paused = live.paused.lock().expect("paused lock");
-        if *paused {
-            // Idempotent: a second pause is a no-op, not an error. A parent that
-            // pauses a subtree twice should not have to care which call landed.
-            return Ok(AgentStatus::Paused);
-        }
-        *paused = true;
-        drop(paused);
-        tracing::debug!(agent = %id, by, "paused a subagent");
-        Ok(AgentStatus::Paused)
-    }
-
-    /// Lift a pause and wake a parked loop.
-    pub fn resume(&self, id: &str, by: &str) -> Result<AgentStatus, ControlError> {
-        let live = self
-            .get(id)
-            .ok_or_else(|| ControlError::Unknown(id.to_string()))?;
-        if live.cancel.is_cancelled() {
-            return Ok(AgentStatus::Cancelled);
-        }
-        live.set_paused(false);
-        tracing::debug!(agent = %id, by, "resumed a subagent");
-        Ok(AgentStatus::Running)
+        MailboxDelivery::Queued { depth }
     }
 
     /// Cancel `id` and everything below it. Returns the agents that were asked to
@@ -412,41 +485,67 @@ impl AgentHub {
         }
     }
 
-    /// Queue one message for a session's top-level run.
+    /// Register the mailbox for one newly admitted top-level run.
     ///
-    /// Accepted whether or not the run is live: a child that finishes after its
-    /// parent's run has ended still gets a truthful "queued", and the message is
-    /// dropped with the session's queue rather than leaking into a later run.
-    /// Returns the queue depth.
-    pub fn deliver_to_run(&self, session_id: &str, message: AgentMessage) -> usize {
+    /// Only this lifecycle operation creates a generation. `deliver_to_run` may
+    /// fill it and `take_run_mail` may empty it, but neither can resurrect it after
+    /// `clear_run_mail` has retired the run.
+    pub fn register_run_mail(&self, session_id: &str, run_id: &str) {
+        let key = (session_id.to_string(), run_id.to_string());
+        let previous = self
+            .run_mail
+            .lock()
+            .expect("run mail lock")
+            .insert(key, VecDeque::new());
+        debug_assert!(previous.is_none(), "run mailbox registered twice");
+    }
+
+    /// Queue one message for the sender's exact top-level run generation.
+    ///
+    /// A late unwinding child gets `NotLive` after its parent run is retired. It
+    /// cannot create an ownerless queue that a later run in the session would
+    /// inherit. Normal same-run parent delivery and the 32/33 bound are unchanged.
+    pub fn deliver_to_run(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        message: AgentMessage,
+    ) -> MailboxDelivery {
+        let key = (session_id.to_string(), run_id.to_string());
         let mut mail = self.run_mail.lock().expect("run mail lock");
-        let queue = mail.entry(session_id.to_string()).or_default();
+        let Some(queue) = mail.get_mut(&key) else {
+            return MailboxDelivery::NotLive;
+        };
         if queue.len() >= MAX_MAILBOX {
-            return queue.len();
+            return MailboxDelivery::Full { depth: queue.len() };
         }
         queue.push_back(message);
-        queue.len()
+        MailboxDelivery::Queued { depth: queue.len() }
     }
 
-    /// Take everything addressed to a session's run, oldest first.
-    pub fn take_run_mail(&self, session_id: &str) -> Vec<AgentMessage> {
-        let mut mail = self.run_mail.lock().expect("run mail lock");
-        let drained: Vec<AgentMessage> = mail
-            .get_mut(session_id)
-            .map(|queue| queue.drain(..).collect())
-            .unwrap_or_default();
-        if mail.get(session_id).is_some_and(VecDeque::is_empty) {
-            mail.remove(session_id);
-        }
-        drained
-    }
-
-    /// Drop a session's run mailbox (its run ended or the session was deleted).
-    pub fn clear_run_mail(&self, session_id: &str) {
+    /// Take everything addressed to one exact run generation, oldest first.
+    ///
+    /// Keep the empty entry: it is the active-generation registration, not garbage
+    /// for a late sender to interpret as an idle session queue.
+    pub fn take_run_mail(&self, session_id: &str, run_id: &str) -> Vec<AgentMessage> {
+        let key = (session_id.to_string(), run_id.to_string());
         self.run_mail
             .lock()
             .expect("run mail lock")
-            .remove(session_id);
+            .get_mut(&key)
+            .map(|queue| queue.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    /// Retire and drop exactly one run generation's mailbox.
+    ///
+    /// Cleanup is idempotent and cannot clear the successor's queue, even when an
+    /// outer panic guard repeats finalization for an older run.
+    pub fn clear_run_mail(&self, session_id: &str, run_id: &str) {
+        self.run_mail
+            .lock()
+            .expect("run mail lock")
+            .remove(&(session_id.to_string(), run_id.to_string()));
     }
 }
 
@@ -613,14 +712,21 @@ mod tests {
             content: "look at the parser".into(),
             sent_at: 0,
         };
-        assert_eq!(hub.deliver("a_1", message.clone()), Some(1));
-        assert_eq!(hub.deliver("a_1", message), Some(2));
+        assert_eq!(
+            hub.deliver_in_session("s_1", "a_1", message.clone()),
+            MailboxDelivery::Queued { depth: 1 }
+        );
+        assert_eq!(
+            hub.deliver_in_session("s_1", "a_1", message),
+            MailboxDelivery::Queued { depth: 2 }
+        );
         assert_eq!(hub.get("a_1").unwrap().queued_mail(), 2);
         assert_eq!(hub.get("a_1").unwrap().take_mail().len(), 2);
         assert_eq!(hub.get("a_1").unwrap().queued_mail(), 0);
         // An unknown recipient is not an error here; the tool reports it.
         assert_eq!(
-            hub.deliver(
+            hub.deliver_in_session(
+                "s_1",
                 "nope",
                 AgentMessage {
                     from: None,
@@ -629,8 +735,159 @@ mod tests {
                     sent_at: 0,
                 }
             ),
-            None
+            MailboxDelivery::NotLive
         );
+    }
+
+    #[test]
+    fn mailbox_depth_32_is_accepted_and_33_is_typed_full() {
+        fn message(content: String) -> AgentMessage {
+            AgentMessage {
+                from: Some("sender".into()),
+                from_name: "sender".into(),
+                content,
+                sent_at: 0,
+            }
+        }
+
+        let hub = AgentHub::new();
+        let live = hub.insert(
+            &record("a_full", None, true),
+            "r_1".into(),
+            1,
+            CancellationToken::new(),
+        );
+        for index in 0..MAX_MAILBOX {
+            assert_eq!(
+                hub.deliver_in_session("s_1", "a_full", message(format!("agent-{index}"))),
+                MailboxDelivery::Queued { depth: index + 1 }
+            );
+        }
+        assert_eq!(
+            hub.deliver_in_session("s_1", "a_full", message("dropped-agent-33".into())),
+            MailboxDelivery::Full { depth: MAX_MAILBOX }
+        );
+        let queued = live.take_mail();
+        assert_eq!(queued.len(), MAX_MAILBOX);
+        assert!(queued.iter().all(|mail| mail.content != "dropped-agent-33"));
+
+        // A registered top-level run has the same 32/33 boundary and typed-full
+        // rejection as a live agent mailbox.
+        hub.register_run_mail("s_1", "r_1");
+        for index in 0..MAX_MAILBOX {
+            assert_eq!(
+                hub.deliver_to_run("s_1", "r_1", message(format!("run-{index}"))),
+                MailboxDelivery::Queued { depth: index + 1 }
+            );
+        }
+        assert_eq!(
+            hub.deliver_to_run("s_1", "r_1", message("dropped-run-33".into())),
+            MailboxDelivery::Full { depth: MAX_MAILBOX }
+        );
+        let queued = hub.take_run_mail("s_1", "r_1");
+        assert_eq!(queued.len(), MAX_MAILBOX);
+        assert!(queued.iter().all(|mail| mail.content != "dropped-run-33"));
+    }
+
+    #[test]
+    fn late_mail_after_run_cleanup_cannot_recreate_a_successors_queue() {
+        fn mail(content: &str) -> AgentMessage {
+            AgentMessage {
+                from: Some("a_old".into()),
+                from_name: "old child".into(),
+                content: content.to_string(),
+                sent_at: 0,
+            }
+        }
+
+        let hub = AgentHub::new();
+        hub.register_run_mail("s_1", "r_old");
+        assert_eq!(
+            hub.deliver_to_run("s_1", "r_old", mail("delivered before retirement")),
+            MailboxDelivery::Queued { depth: 1 }
+        );
+        hub.clear_run_mail("s_1", "r_old");
+        assert!(hub.take_run_mail("s_1", "r_old").is_empty());
+
+        // Retirement can win before delivery. This is the late unwinding child:
+        // it is rejected and, crucially, no fresh ownerless entry is inserted.
+        assert_eq!(
+            hub.deliver_to_run("s_1", "r_old", mail("retired instruction")),
+            MailboxDelivery::NotLive
+        );
+        hub.register_run_mail("s_1", "r_new");
+        assert_eq!(
+            hub.deliver_to_run("s_1", "r_old", mail("late after successor start")),
+            MailboxDelivery::NotLive
+        );
+        assert!(hub.take_run_mail("s_1", "r_new").is_empty());
+
+        // The inverse lock order is exact too: old-run cleanup after successor
+        // registration/delivery must not drain the successor's legitimate mail.
+        assert_eq!(
+            hub.deliver_to_run("s_1", "r_new", mail("current parent instruction")),
+            MailboxDelivery::Queued { depth: 1 }
+        );
+        hub.clear_run_mail("s_1", "r_old");
+        let current = hub.take_run_mail("s_1", "r_new");
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].content, "current parent instruction");
+        assert_eq!(
+            hub.deliver_to_run("s_1", "r_new", mail("same run remains active")),
+            MailboxDelivery::Queued { depth: 1 },
+            "draining an active run must not accidentally retire it"
+        );
+        hub.clear_run_mail("s_1", "r_new");
+        assert_eq!(
+            hub.deliver_to_run("s_1", "r_new", mail("settled current run")),
+            MailboxDelivery::NotLive
+        );
+    }
+
+    #[test]
+    fn a_global_hub_never_delivers_to_another_sessions_agent() {
+        let hub = AgentHub::new();
+        let mut foreign = record("a_foreign", None, true);
+        foreign.session_id = "s_other".into();
+        let live = hub.insert(&foreign, "r_other".into(), 1, CancellationToken::new());
+        assert_eq!(
+            hub.deliver_in_session(
+                "s_1",
+                "a_foreign",
+                AgentMessage {
+                    from: Some("a_sender".into()),
+                    from_name: "sender".into(),
+                    content: "cross-session prompt".into(),
+                    sent_at: 0,
+                },
+            ),
+            MailboxDelivery::NotLive
+        );
+        assert_eq!(live.queued_mail(), 0);
+    }
+
+    #[tokio::test]
+    async fn control_guard_excludes_a_second_pause_or_resume() {
+        let hub = Arc::new(AgentHub::new());
+        hub.insert(
+            &record("a_control", None, true),
+            "r_1".into(),
+            1,
+            CancellationToken::new(),
+        );
+        let first = hub.control("a_control").await.unwrap();
+        let second = {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move { hub.control("a_control").await.unwrap() })
+        };
+        tokio::task::yield_now().await;
+        assert!(!second.is_finished());
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("the waiting control operation should acquire the guard")
+            .unwrap();
+        second.resume("test").unwrap();
     }
 
     #[test]
@@ -683,10 +940,10 @@ mod tests {
         let cancel = CancellationToken::new();
         let far = Instant::now() + Duration::from_secs(30);
 
-        hub.pause("a_1", "user").unwrap();
+        hub.control("a_1").await.unwrap().pause("user").unwrap();
         assert!(live.is_paused());
         // A second pause is idempotent.
-        assert!(hub.pause("a_1", "user").is_ok());
+        assert!(hub.control("a_1").await.unwrap().pause("user").is_ok());
 
         let waiting = {
             let live = Arc::clone(&live);
@@ -696,7 +953,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!waiting.is_finished(), "a paused loop must park");
 
-        hub.resume("a_1", "user").unwrap();
+        hub.control("a_1").await.unwrap().resume("user").unwrap();
         assert_eq!(waiting.await.unwrap(), PauseExit::Running);
     }
 
@@ -710,7 +967,7 @@ mod tests {
             CancellationToken::new(),
         );
         let live = hub.get("a_1").unwrap();
-        hub.pause("a_1", "user").unwrap();
+        hub.control("a_1").await.unwrap().pause("user").unwrap();
         let cancel = live.cancel.clone();
         let far = Instant::now() + Duration::from_secs(30);
         let waiting = {

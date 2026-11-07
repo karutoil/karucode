@@ -1,0 +1,282 @@
+/* ---------- plugin panel views -----------------------------------------
+ *
+ * The `view` vocabulary (see `web/src/components/PluginViews.tsx`): a plugin sends
+ * data, these rules decide what a stat, a bar and a clock look like. Colours come
+ * from the semantic roles, radii and spacing from the token layer, so a plugin
+ * cannot ship a style and every view looks like the rest of the app.
+ */
+
+.plugin-view-frame {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.plugin-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-5);
+  border: 1px solid var(--line-inset);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  min-width: 0;
+}
+
+.plugin-view-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  color: var(--text-subtle);
+  font-size: var(--fs-small);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.plugin-view-detail {
+  color: var(--text-subtle);
+  font-size: var(--fs-tiny);
+  font-variant-numeric: tabular-nums;
+}
+
+.plugin-view-value {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-display);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  /* A long value wraps inside its card rather than pushing the tab sideways. */
+  overflow-wrap: anywhere;
+}
+
+.plugin-view-clock-face {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-hero);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* Tone is a left edge, not a colour wash: a warning should be visible at a glance
+ * without making a whole card shout. */
+.plugin-view.tone-ok,
+.plugin-view.tone-warn,
+.plugin-view.tone-bad,
+.plugin-view.tone-accent {
+  border-inline-start-width: 3px;
+}
+
+.plugin-view.tone-ok {
+  border-inline-start-color: var(--success);
+}
+
+.plugin-view.tone-warn {
+  border-inline-start-color: var(--warning);
+}
+
+.plugin-view.tone-bad {
+  border-inline-start-color: var(--danger);
+}
+
+.plugin-view.tone-accent {
+  border-inline-start-color: var(--accent);
+}
+
+.plugin-view.empty {
+  color: var(--text-subtle);
+}
+
+.plugin-view-empty {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: var(--fs-small);
+}
+
+/* ---------- list ---------- */
+
+.plugin-view-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plugin-view-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: var(--fs-small);
+}
+
+.plugin-view-row-text {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.plugin-view-row-detail {
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.plugin-view-row.tone-ok .plugin-view-row-text {
+  color: var(--success);
+}
+
+.plugin-view-row.tone-warn .plugin-view-row-text {
+  color: var(--warning);
+}
+
+.plugin-view-row.tone-bad .plugin-view-row-text {
+  color: var(--danger);
+}
+
+/* ---------- bars ---------- */
+
+.plugin-view-bars-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plugin-view-bar {
+  display: grid;
+  /* The label and the printed value size to their text; the track takes the rest,
+   * so a value like "131.3 kB" never wraps to two lines. */
+  grid-template-columns: 8ch 1fr max-content;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--fs-tiny);
+}
+
+.plugin-view-bar-label {
+  color: var(--text-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-view-bar-track {
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+
+.plugin-view-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  /* A bar grows on arrival: the panel polls, so this animates once per read and
+   * makes a changing number legible as motion rather than a flicker. */
+  transition: width 240ms ease;
+}
+
+.plugin-view-bar.tone-ok .plugin-view-bar-fill {
+  background: var(--success);
+}
+
+.plugin-view-bar.tone-warn .plugin-view-bar-fill {
+  background: var(--warning);
+}
+
+.plugin-view-bar.tone-bad .plugin-view-bar-fill {
+  background: var(--danger);
+}
+
+.plugin-view-bar-value {
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+  white-space: nowrap;
+}
+
+/* ---------- progress ---------- */
+
+.plugin-view-progress-track {
+  display: block;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+
+.plugin-view-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  transition: width 240ms ease;
+}
+
+.plugin-view-progress.tone-warn .plugin-view-progress-fill {
+  background: var(--warning);
+}
+
+.plugin-view-progress.tone-bad .plugin-view-progress-fill {
+  background: var(--danger);
+}
+
+/* ---------- stack ---------- */
+
+.plugin-view-stack {
+  border: 0;
+  padding: 0;
+  background: none;
+}
+
+.plugin-view-stack-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* A running clock gets a quiet breathing dot, so "live" reads as live. */
+.plugin-view-clock.is-running .plugin-view-label::after {
+  content: '';
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: 50%;
+  background: var(--accent);
+  animation: plugin-view-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes plugin-view-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plugin-view-bar-fill,
+  .plugin-view-progress-fill {
+    transition: none;
+  }
+  .plugin-view-clock.is-running .plugin-view-label::after {
+    animation: none;
+    opacity: 1;
+  }
+}

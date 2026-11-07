@@ -55,6 +55,47 @@ fn plugin(name: &str, env_name: &str) -> PluginConfig {
     }
 }
 
+/// Run the real fixture with one recorded PID per spawn. `exec` keeps the shell
+/// wrapper's pid, so this is also the process-group leader the host must kill.
+fn recorded_plugin(name: &str, pid_file: &std::path::Path) -> PluginConfig {
+    let mut config = plugin(name, name);
+    config.command = vec![
+        "sh".into(),
+        "-c".into(),
+        "printf '%s\\n' \"$$\" >> \"$1\"; exec sh \"$2\"".into(),
+        "kc-plugin-pid-recorder".into(),
+        pid_file.to_string_lossy().into_owned(),
+        FIXTURE.into(),
+    ];
+    config
+}
+
+fn spawn_count(pid_file: &std::path::Path) -> usize {
+    std::fs::read_to_string(pid_file)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 only probes; the tests pass a pid returned by the host.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+async fn assert_pid_reaped(pid: u32) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while pid_alive(pid) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("process {pid} was still alive or unreaped after five seconds"));
+}
+
 struct TestSettings;
 
 #[async_trait]
@@ -161,8 +202,36 @@ async fn handshake_lists_namespaced_tools() {
             name: "fake".into()
         }
     );
-    assert!(spec.description.contains("Echo the text argument back."));
-    assert!(spec.description.contains("[plugin: fake v0.1.0]"));
+    // The schema carries the tool semantics, not the same trust/permission
+    // paragraph repeated on every tool. The origin remains structured metadata.
+    assert_eq!(spec.description, "Echo the text argument back.");
+    assert!(!spec.description.contains("Runs out of process"));
+    assert!(!spec.description.contains("Effective permissions"));
+
+    // All exposed tools produce one prompt note naming the plugin, not one note
+    // per tool; the tool descriptions themselves are untouched by that note.
+    let specs: Vec<_> = tools.iter().map(|tool| tool.spec()).collect();
+    let prompt = kc_core::prompt::system_prompt(
+        "/ws",
+        &specs,
+        "ask",
+        &kc_core::prompt::Budget::for_run(&kc_core::config::Limits::default()),
+        &[],
+    );
+    assert!(
+        prompt.contains("Plugins with tools available: `fake`."),
+        "{prompt}"
+    );
+    assert_eq!(prompt.matches("Plugins with tools available:").count(), 1);
+    assert_eq!(prompt.matches("Plugin tools run out of process").count(), 1);
+    for tool in &specs {
+        assert!(
+            !tool.description.contains("Runs out of process"),
+            "the shared note leaked into `{}`: {}",
+            tool.name,
+            tool.description
+        );
+    }
     assert_eq!(
         spec.parameters["properties"]["text"]["type"],
         serde_json::json!("string")
@@ -570,7 +639,7 @@ async fn a_stopped_plugin_reports_actionable_tool_errors() {
 }
 
 #[tokio::test]
-async fn hooks_handle_stays_live_across_enable_and_disable() {
+async fn hooks_handle_stays_live_across_enable_disable_and_reload() {
     let dir = temp_dir("hooks-handle");
     let mut host = PluginHost::discover(&[plugin("fake", "fake")], &dir);
     host.start_all().await;
@@ -584,6 +653,19 @@ async fn hooks_handle_stays_live_across_enable_and_disable() {
 
     host.set_enabled("fake", true).await.unwrap();
     assert_eq!(hooks.before_prompt("s_1", "/w").await.len(), 1);
+
+    // A handle returned before reload must follow the new shared slot, not the
+    // permanently retired Arc it originally observed.
+    host.reload("fake", &[plugin("fake", "fake")])
+        .await
+        .unwrap();
+    let after_reload = hooks.before_prompt("s_1", "/w").await;
+    assert_eq!(after_reload.len(), 1, "{after_reload:?}");
+    assert!(host
+        .panels_handle()
+        .panels()
+        .iter()
+        .any(|group| group.plugin == "fake"));
 
     // PluginHost itself implements Hooks too.
     let direct = host.before_prompt("s_1", "/w").await;
@@ -1171,6 +1253,425 @@ async fn a_panel_read_is_bounded_by_the_call_timeout() {
 }
 
 // ---------------------------------------------------------------------------
+// Declarative UI contributions
+// ---------------------------------------------------------------------------
+
+/// Inline plugin that contributes buttons, a palette command and two hides — one
+/// allowed, one refused — plus an unknown slot and an unknown kind.
+const UI_PLUGIN: &str = r#"
+import json, sys
+
+MANIFEST = {
+    "name": "uip", "version": "0.2.0", "protocol": "1",
+    "capabilities": ["tools", "ui"], "permissions": [], "hooks": [],
+    "ui": [
+        {"kind": "button", "id": "run", "label": " Run check ", "title": "Run the check",
+         "slot": "composer.toolbar", "icon": "bolt", "action": "run-check"},
+        {"kind": "command", "id": "ask", "label": "Ask about the plan",
+         "message": "Summarise the plan."},
+        {"kind": "keybinding", "id": "focus-key", "label": "Focus mode shortcut",
+         "keys": "Mod+Shift+F", "action": "run-check"},
+        {"kind": "keybinding", "id": "palette-key", "label": "Palette clash",
+         "keys": "mod+k", "action": "focus"},
+        {"kind": "hide", "target": "inspector.tab.agents"},
+        {"kind": "hide", "target": "composer.stop"},
+        {"kind": "button", "id": "nowhere", "label": "Nowhere",
+         "slot": "composer.middle", "action": "nowhere-action"},
+        {"kind": "webview", "id": "html", "label": "HTML"}
+    ]
+}
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid, params = req.get("method"), req.get("id"), req.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid, "result": MANIFEST})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": []}})
+    elif method == "ui/action" and params.get("action") == "run-check":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "ok": True,
+            "message": "checked for " + str(params.get("session_id")),
+            "refresh": ["todo", "../etc", "todo"],
+            "echo": {"contribution": params.get("contribution"),
+                     "workspace": params.get("workspace")}
+        }})
+    elif method == "ui/action" and params.get("action") == "wild":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "message": "x" * 5000,
+            "refresh": ["ok"] * 40,
+            "open_url": "javascript:alert(1)"
+        }})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": rid, "result": None})
+        break
+    elif rid is not None:
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "unknown"}})
+"#;
+
+fn script_plugin(dir: &std::path::Path, name: &str, script: &str) -> PluginConfig {
+    let path = dir.join(format!("{name}.py"));
+    std::fs::write(&path, script).unwrap();
+    PluginConfig {
+        name: name.into(),
+        enabled: true,
+        command: vec!["python3".to_string(), path.to_string_lossy().into_owned()],
+        env: BTreeMap::new(),
+        permissions: Vec::new(),
+        settings: BTreeMap::new(),
+    }
+}
+
+fn manifest_plugin(manifest: serde_json::Value) -> String {
+    format!(
+        r#"
+import json, sys
+MANIFEST = {manifest}
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        send({{"jsonrpc": "2.0", "id": rid, "result": MANIFEST}})
+    elif method == "tools/list":
+        send({{"jsonrpc": "2.0", "id": rid, "result": {{"tools": []}}}})
+    elif method == "shutdown":
+        send({{"jsonrpc": "2.0", "id": rid, "result": None}})
+        break
+    elif rid is not None:
+        send({{"jsonrpc": "2.0", "id": rid, "error": {{"code": -32601, "message": "unknown"}}}})
+"#
+    )
+}
+
+#[tokio::test]
+async fn ui_contributions_are_validated_and_exposed() {
+    let dir = temp_dir("ui-expose");
+    let mut host = PluginHost::discover(&[script_plugin(&dir, "uip", UI_PLUGIN)], &dir);
+    host.start_all().await;
+
+    let ui = host.ui();
+    let kinds: Vec<(&str, &str)> = ui
+        .contributions
+        .iter()
+        .map(|c| (c.kind.as_str(), c.id.as_str()))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("button", "run"),
+            ("command", "ask"),
+            ("keybinding", "focus-key"),
+        ],
+        "only the contributions this build can honour are exposed, in manifest order"
+    );
+
+    let button = &ui.contributions[0];
+    assert_eq!(button.plugin, "uip");
+    assert_eq!(button.version, "0.2.0");
+    assert_eq!(button.hosted_id, "plugin__uip__run");
+    assert_eq!(button.label, "Run check", "labels are trimmed");
+    assert_eq!(button.slot.as_deref(), Some("composer.toolbar"));
+    assert_eq!(button.action.as_deref(), Some("run-check"));
+    assert_eq!(button.message, None);
+
+    let command = &ui.contributions[1];
+    assert_eq!(command.slot, None, "a palette command has no slot");
+    assert_eq!(command.message.as_deref(), Some("Summarise the plan."));
+
+    // A binding is canonicalised, so the host, the plugin and the browser compare
+    // plain strings, and it carries no slot.
+    let binding = &ui.contributions[2];
+    assert_eq!(binding.keys.as_deref(), Some("mod+shift+f"));
+    assert_eq!(binding.slot, None);
+    assert_eq!(binding.action.as_deref(), Some("run-check"));
+
+    // Hides: the allowed one is published with its owner, the refused one is not.
+    assert_eq!(
+        ui.hidden,
+        vec![kc_plugin_host::UiHiddenTarget {
+            target: "inspector.tab.agents".into(),
+            plugins: vec!["uip".into()],
+        }]
+    );
+
+    // The catalogues travel with the payload so the UI never hard-codes a slot.
+    assert!(ui.slots.iter().any(|s| s == "composer.toolbar"));
+    assert!(ui.hideable.iter().any(|s| s == "composer.attach"));
+    assert!(!ui.hideable.iter().any(|s| s == "composer.stop"));
+
+    // Every dropped contribution is explained in the diagnostics, not silently lost.
+    let diags = host.diagnostics();
+    assert_eq!(diags[0].status, PluginStatus::Ready);
+    let notes = diags[0].error.clone().unwrap_or_default();
+    assert!(notes.contains("composer.middle"), "{notes}");
+    assert!(notes.contains("composer.stop"), "{notes}");
+    assert!(notes.contains("webview"), "{notes}");
+    // The chord the app already owns is refused, and the note says which.
+    assert!(notes.contains("mod+k"), "{notes}");
+    assert!(notes.contains("palette-key"), "{notes}");
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn a_malformed_keybinding_fails_the_handshake_and_a_second_claim_is_skipped() {
+    // A spec the app cannot match is an author error: say so at the handshake
+    // instead of shipping a shortcut that silently never fires.
+    for (tag, keys, expected) in [
+        ("bare", "f", "not a usable shortcut"),
+        ("shift-only", "shift+f", "not a usable shortcut"),
+        ("no-key", "mod+", "not a usable shortcut"),
+        ("missing", "", "no `keys`"),
+    ] {
+        let dir = temp_dir(&format!("ui-keys-{tag}"));
+        let mut manifest: serde_json::Value = serde_json::from_str(
+            r#"{"name":"uip","version":"0.1.0","protocol":"1","capabilities":["ui"],
+                "permissions":[],"hooks":[]}"#,
+        )
+        .unwrap();
+        manifest["ui"] = serde_json::json!([
+            {"kind":"keybinding","id":"k","label":"K","keys":keys,"action":"focus"}
+        ]);
+        let script = manifest_plugin(manifest);
+        let mut host = PluginHost::discover(&[script_plugin(&dir, "uip", &script)], &dir);
+        host.start_all().await;
+        let diags = host.diagnostics();
+        assert_eq!(diags[0].status, PluginStatus::Failed, "{tag}");
+        let error = diags[0].error.clone().unwrap_or_default();
+        assert!(error.contains(expected), "{tag}: {error:?}");
+        host.shutdown().await;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[tokio::test]
+async fn two_plugins_binding_the_same_chord_leave_it_with_the_first() {
+    let dir = temp_dir("ui-keys-conflict");
+    let first = UI_PLUGIN.replace("\"name\": \"uip\"", "\"name\": \"first\"");
+    let second = UI_PLUGIN.replace("\"name\": \"uip\"", "\"name\": \"second\"");
+    let mut host = PluginHost::discover(
+        &[
+            script_plugin(&dir, "first", &first),
+            script_plugin(&dir, "second", &second),
+        ],
+        &dir,
+    );
+    host.start_all().await;
+
+    let ui = host.ui();
+    let bindings: Vec<(&str, &str)> = ui
+        .contributions
+        .iter()
+        .filter(|c| c.kind == "keybinding")
+        .map(|c| (c.plugin.as_str(), c.keys.as_deref().unwrap_or("")))
+        .collect();
+    assert_eq!(bindings, vec![("first", "mod+shift+f")]);
+    // Every other contribution of the second plugin is still exposed: one
+    // conflicting chord must not cost a plugin its buttons.
+    assert!(ui
+        .contributions
+        .iter()
+        .any(|c| c.plugin == "second" && c.kind == "button"));
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn a_ui_action_runs_inside_the_plugin_and_is_validated() {
+    let dir = temp_dir("ui-action");
+    let mut host = PluginHost::discover(&[script_plugin(&dir, "uip", UI_PLUGIN)], &dir);
+    host.start_all().await;
+
+    let ctx = ToolCallContext {
+        session_id: "s_ui".into(),
+        project: Some("p_ui".into()),
+        workspace: "/tmp/ws-ui".into(),
+        ..Default::default()
+    };
+    let result = host
+        .ui_handle()
+        .action("uip", "run-check", &ctx)
+        .await
+        .unwrap();
+    assert!(result.ok);
+    assert_eq!(result.message, "checked for s_ui");
+    // Only usable panel ids survive, de-duplicated, so a stale page cannot make
+    // the UI treat a path as a panel name.
+    assert_eq!(result.refresh, vec!["todo".to_string()]);
+    assert_eq!(result.open_url, None);
+
+    // An action that is not declared by any contribution is a not-found that
+    // lists what the plugin does offer.
+    let err = host
+        .ui_handle()
+        .action("uip", "nowhere-action", &ctx)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "not_found");
+    assert!(err.to_string().contains("run-check"), "{err}");
+
+    let err = host
+        .ui_handle()
+        .action("nope", "run-check", &ctx)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "not_found");
+    assert!(err.to_string().contains("nope"), "{err}");
+
+    // The plugin stays healthy after both refusals.
+    assert_eq!(host.diagnostics()[0].status, PluginStatus::Ready);
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn a_ui_action_result_is_capped_and_urls_are_restricted() {
+    let dir = temp_dir("ui-action-wild");
+    let mut host = PluginHost::discover(&[script_plugin(&dir, "uip", UI_PLUGIN)], &dir);
+    host.start_all().await;
+
+    // The fixture declares `run-check` only, so drive `wild` through a second
+    // host whose manifest names it.
+    host.shutdown().await;
+
+    let mut manifest: serde_json::Value = serde_json::from_str(
+        r#"{"name":"uip","version":"0.2.0","protocol":"1","capabilities":["ui"],
+            "permissions":[],"hooks":[]}"#,
+    )
+    .unwrap();
+    manifest["ui"] = serde_json::json!([
+        {"kind": "button", "id": "wild", "label": "Wild", "slot": "composer.toolbar", "action": "wild"}
+    ]);
+    let script = manifest_plugin(manifest);
+    // Reuse the action handler from UI_PLUGIN by appending it to the skeleton.
+    let script = script.replace(
+        "    elif rid is not None:",
+        r#"    elif method == "ui/action" and (req.get("params") or {}).get("action") == "wild":
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "message": "x" * 5000,
+            "refresh": ["p%d" % i for i in range(40)],
+            "open_url": "javascript:alert(1)"
+        }})
+    elif rid is not None:"#,
+    );
+    let mut host = PluginHost::discover(&[script_plugin(&dir, "uip", &script)], &dir);
+    host.start_all().await;
+
+    let result = host
+        .ui_handle()
+        .action("uip", "wild", &ToolCallContext::default())
+        .await
+        .unwrap();
+    assert!(
+        result.message.len() <= 2_000 + 4,
+        "a toast is capped, got {} bytes",
+        result.message.len()
+    );
+    assert!(result.message.ends_with('…'), "the cut is visible");
+    assert_eq!(result.refresh.len(), 16, "refresh ids are capped");
+    assert_eq!(
+        result.refresh.first().map(String::as_str),
+        Some("p0"),
+        "the cap keeps the first ids, in order"
+    );
+    assert_eq!(
+        result.open_url, None,
+        "javascript: must never reach the browser"
+    );
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn a_uis_shape_errors_fail_the_handshake_with_a_fixable_message() {
+    for (tag, contribution, expected) in [
+        (
+            "blank-label",
+            serde_json::json!({"kind":"button","id":"x","label":"  ",
+                               "slot":"composer.toolbar","action":"x"}),
+            "blank label",
+        ),
+        (
+            "both-actions",
+            serde_json::json!({"kind":"button","id":"x","label":"X",
+                               "slot":"composer.toolbar","action":"x","message":"hi"}),
+            "both `action` and `message`",
+        ),
+        (
+            "no-action",
+            serde_json::json!({"kind":"command","id":"x","label":"X"}),
+            "neither `action` nor `message`",
+        ),
+        (
+            "bad-id",
+            serde_json::json!({"kind":"button","id":"Not An Id","label":"X",
+                               "slot":"composer.toolbar","action":"x"}),
+            "contribution id",
+        ),
+        (
+            "no-slot",
+            serde_json::json!({"kind":"button","id":"x","label":"X","action":"x"}),
+            "no `slot`",
+        ),
+        (
+            "no-target",
+            serde_json::json!({"kind":"hide"}),
+            "no `target`",
+        ),
+    ] {
+        let dir = temp_dir(&format!("ui-fatal-{tag}"));
+        let mut manifest: serde_json::Value = serde_json::from_str(
+            r#"{"name":"uip","version":"0.1.0","protocol":"1","capabilities":["ui"],
+                "permissions":[],"hooks":[]}"#,
+        )
+        .unwrap();
+        manifest["ui"] = serde_json::json!([contribution]);
+        let script = manifest_plugin(manifest);
+        let mut host = PluginHost::discover(&[script_plugin(&dir, "uip", &script)], &dir);
+        host.start_all().await;
+
+        let diags = host.diagnostics();
+        assert_eq!(diags[0].status, PluginStatus::Failed, "{tag}");
+        let error = diags[0].error.clone().unwrap_or_default();
+        assert!(
+            error.contains(expected),
+            "{tag}: expected {expected:?} in {error:?}"
+        );
+        assert!(host.ui().contributions.is_empty(), "{tag}");
+        host.shutdown().await;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[tokio::test]
+async fn a_plugin_without_ui_contributes_nothing() {
+    let dir = temp_dir("ui-empty");
+    let mut host = PluginHost::discover(&[plugin("fake", "fake")], &dir);
+    host.start_all().await;
+    let ui = host.ui();
+    assert!(ui.contributions.is_empty());
+    assert!(ui.hidden.is_empty());
+    assert!(!ui.slots.is_empty(), "the catalogues are always present");
+    assert_eq!(host.diagnostics()[0].status, PluginStatus::Ready);
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
 // Call context (tools/call)
 // ---------------------------------------------------------------------------
 
@@ -1264,6 +1765,38 @@ async fn rescan_hot_loads_a_new_manifest_and_hot_unloads_it_again() {
     assert_eq!(report.removed, vec!["fresh".to_string()]);
     assert!(host.diagnostics().is_empty());
     assert!(host.tools().is_empty());
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn disk_manifest_wildcard_is_ignored_but_narrow_reviewed_grants_remain() {
+    let dir = temp_dir("disk-permission-wildcard");
+    write_manifest(&dir, "sneaky", "sneaky", "permissions = [\"*\"]");
+    let mut host = PluginHost::discover(&[], &dir);
+    host.start_all().await;
+    let diag = host.diagnostics_for("sneaky").unwrap();
+    assert_eq!(diag.status, PluginStatus::Ready, "{:?}", diag.error);
+    let note = diag.error.unwrap_or_default();
+    assert!(note.contains("permissions = [\"*\"]"), "{note}");
+    assert!(note.contains("operator"), "{note}");
+    let names: Vec<_> = host.tools().iter().map(|tool| tool.spec().name).collect();
+    assert!(
+        !names.contains(&"plugin__sneaky__deploy".to_string()),
+        "{names:?}"
+    );
+    assert!(names.contains(&"plugin__sneaky__echo".to_string()));
+
+    // Stripping the wildcard must not erase a narrow, deliberately installed
+    // permission: shell remains effective after this rescan and exposes deploy.
+    write_manifest(&dir, "sneaky", "sneaky", "permissions = [\"shell\"]");
+    let report = host.rescan(&[]).await;
+    assert_eq!(report.restarted, vec!["sneaky".to_string()]);
+    let deploy = find(&host.tools(), "plugin__sneaky__deploy").clone();
+    assert_eq!(deploy.class(), ToolClass::External);
+    let out = call(&deploy, &dir, serde_json::json!({})).await;
+    assert!(out.ok, "{}", out.content);
 
     host.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();
@@ -1390,6 +1923,129 @@ async fn reload_restarts_one_plugin_only() {
     assert!(host.tools().is_empty());
 
     host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn replaced_and_unloaded_tool_generations_never_spawn_another_process() {
+    let dir = temp_dir("retired-tool-generations");
+    let pids = dir.join("spawns.txt");
+    let cfg = recorded_plugin("fake", &pids);
+    let mut host = PluginHost::discover(std::slice::from_ref(&cfg), &dir);
+    host.start_all().await;
+    assert_eq!(host.diagnostics()[0].status, PluginStatus::Ready);
+    assert_eq!(spawn_count(&pids), 1);
+    let first_pid = host.diagnostics()[0].pid.unwrap();
+    let old_tool = find(&host.tools(), "plugin__fake__echo").clone();
+
+    host.reload("fake", &[cfg]).await.unwrap();
+    assert_eq!(
+        spawn_count(&pids),
+        2,
+        "the explicit replacement starts once"
+    );
+    assert_ne!(host.diagnostics()[0].pid, Some(first_pid));
+    assert_pid_reaped(first_pid).await;
+
+    // This is the old real tool object, not a fresh `host.tools()` lookup. The old
+    // implementation restarted the fixture here with its old config and wrote a
+    // third PID; retirement makes that impossible.
+    let out = call(&old_tool, &dir, serde_json::json!({"text": "must not run"})).await;
+    assert!(!out.ok, "retired tool unexpectedly ran: {}", out.content);
+    assert!(
+        out.content.contains("permanently retired"),
+        "{}",
+        out.content
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        spawn_count(&pids),
+        2,
+        "old handle spawned a replacement process"
+    );
+
+    let replacement_tool = find(&host.tools(), "plugin__fake__echo").clone();
+    let second_pid = host.diagnostics()[0].pid.unwrap();
+    let report = host.rescan(&[]).await;
+    assert_eq!(report.removed, vec!["fake".to_string()]);
+    assert_pid_reaped(second_pid).await;
+    let out = call(
+        &replacement_tool,
+        &dir,
+        serde_json::json!({"text": "unloaded"}),
+    )
+    .await;
+    assert!(!out.ok, "unloaded tool unexpectedly ran: {}", out.content);
+    assert!(
+        out.content.contains("permanently retired"),
+        "{}",
+        out.content
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(spawn_count(&pids), 2, "unload handle revived the process");
+    assert!(host.tools().is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_a_live_host_kills_and_reaps_the_real_plugin_pid() {
+    let dir = temp_dir("drop-plugin-pid");
+    let pids = dir.join("spawns.txt");
+    let mut host = PluginHost::discover(&[recorded_plugin("fake", &pids)], &dir);
+    host.start_all().await;
+    assert_eq!(host.diagnostics()[0].status, PluginStatus::Ready);
+    let pid = host.diagnostics()[0].pid.unwrap();
+    let old_tool = find(&host.tools(), "plugin__fake__echo").clone();
+    assert!(pid_alive(pid));
+
+    drop(host);
+    assert_pid_reaped(pid).await;
+    let out = call(&old_tool, &dir, serde_json::json!({"text": "after drop"})).await;
+    assert!(
+        !out.ok,
+        "a dropped host's tool unexpectedly ran: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("permanently retired"),
+        "{}",
+        out.content
+    );
+    assert_eq!(
+        spawn_count(&pids),
+        1,
+        "dropping then calling spawned a new process"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_shutdown_retires_handles_instead_of_letting_them_revive_a_process() {
+    let dir = temp_dir("shutdown-retirement");
+    let pids = dir.join("spawns.txt");
+    let mut host = PluginHost::discover(&[recorded_plugin("fake", &pids)], &dir);
+    host.start_all().await;
+    let tool = find(&host.tools(), "plugin__fake__echo").clone();
+    let pid = host.diagnostics()[0].pid.unwrap();
+
+    host.shutdown().await;
+    assert_pid_reaped(pid).await;
+    assert_eq!(host.diagnostics()[0].status, PluginStatus::Stopped);
+    let out = call(&tool, &dir, serde_json::json!({"text": "after shutdown"})).await;
+    assert!(!out.ok, "shutdown tool unexpectedly ran: {}", out.content);
+    assert!(
+        out.content.contains("permanently retired"),
+        "{}",
+        out.content
+    );
+    assert_eq!(
+        spawn_count(&pids),
+        1,
+        "shutdown handle spawned a new generation"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2100,9 +2756,12 @@ import json, os, sys
 
 NAME = os.environ["COLLIDE_PLUGIN_NAME"]
 TOOL = os.environ["COLLIDE_TOOL_NAME"]
+PANEL = os.environ.get("COLLIDE_PANEL_NAME")
 
 MANIFEST = {"name": NAME, "version": "0.1.0", "protocol": "1",
-            "capabilities": ["tools"], "permissions": [], "hooks": []}
+            "capabilities": ["tools"] + (["panels"] if PANEL else []),
+            "permissions": [], "hooks": [],
+            "panels": ([{"id": PANEL, "title": NAME, "source": "static"}] if PANEL else [])}
 TOOLS = [{"name": TOOL, "description": "Answers with its own plugin and tool name.",
           "parameters": {"type": "object", "properties": {}}, "class": "read_only"}]
 
@@ -2122,6 +2781,9 @@ for line in sys.stdin:
     elif method == "tools/call":
         send({"jsonrpc": "2.0", "id": rid,
               "result": {"ok": True, "content": "%s/%s" % (NAME, TOOL)}})
+    elif method == "panels/read":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"title": NAME, "data": {"owner": NAME}}})
     elif method == "shutdown":
         send({"jsonrpc": "2.0", "id": rid, "result": None})
         break
@@ -2150,6 +2812,12 @@ fn colliding_plugin(
         permissions: Vec::new(),
         settings: BTreeMap::new(),
     }
+}
+
+fn colliding_panel_plugin(dir: &std::path::Path, name: &str, panel: &str) -> PluginConfig {
+    let mut config = colliding_plugin(dir, name, name, "unused");
+    config.env.insert("COLLIDE_PANEL_NAME".into(), panel.into());
+    config
 }
 
 /// The bug FIX 5 is about: the `plugin__` prefix only prevents collisions with
@@ -2200,6 +2868,48 @@ async fn a_namespaced_tool_name_collision_is_refused_loudly() {
             .unwrap_or_default()
             .is_empty(),
         "the plugin that kept the name must not be flagged"
+    );
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn hosted_panel_delimiter_collisions_are_refused_with_diagnostics() {
+    let dir = temp_dir("panel-collision");
+    let first = colliding_panel_plugin(&dir, "a", "b__c");
+    let second = colliding_panel_plugin(&dir, "a__b", "c");
+    let mut host = PluginHost::discover(&[first, second], &dir);
+    host.start_all().await;
+
+    let groups = host.panels_handle().panels();
+    let summaries: Vec<_> = groups
+        .iter()
+        .flat_map(|group| group.panels.iter())
+        .collect();
+    assert_eq!(summaries.len(), 1, "{summaries:?}");
+    assert_eq!(summaries[0].hosted_id, "plugin__a__b__c");
+    assert_eq!(groups[0].plugin, "a");
+
+    let loser = host.diagnostics_for("a__b").unwrap();
+    assert_eq!(loser.status, PluginStatus::Ready);
+    let note = loser.error.unwrap_or_default();
+    assert!(
+        note.contains("not exposing panel `plugin__a__b__c`"),
+        "{note}"
+    );
+    assert!(note.contains("plugin `a`"), "{note}");
+    assert!(note.contains("Rename the plugin or the panel"), "{note}");
+    assert!(host.diagnostics_for("a").unwrap().error.is_none());
+
+    let context = ToolCallContext::default();
+    let winner = host.panel("a", "b__c", &context).await.unwrap();
+    assert_eq!(winner.data["owner"], "a");
+    let refused = host.panel("a__b", "c", &context).await.unwrap_err();
+    assert!(refused.to_string().contains("was refused"), "{refused}");
+    assert!(
+        refused.to_string().contains("The panel was not called"),
+        "{refused}"
     );
 
     host.shutdown().await;

@@ -175,41 +175,6 @@
 .cp-intro-empty { color: var(--muted); font-size: var(--fs-small); }
 .cp-intro-hint { margin: var(--space-8) 0 0; color: var(--muted); font-size: var(--fs-small); line-height: 1.6; }
 
-/* --------------------------------------------------------------- the dialogs
- *
- * TEMPORARY - not this region's markup, and the only `.cp-*` pair left here.
- *
- * The rename dialog is rendered by `ControlPlane.tsx` (the shell), whose field
- * still carries `class="cp-dialog-label"` / `class="cp-dialog-input"`. The
- * product's field is `<label class="field-label">` + `<input class="input">`
- * (`base.css` / `settings.css`), which is what every other dialog and the
- * project rail use. Until that one line changes, these two rules keep the dialog
- * looking the way it does today; delete both in the same commit that changes it.
- */
-
-.cp-dialog-label {
-  display: block;
-  margin-bottom: var(--space-3);
-  color: var(--muted);
-  font-size: var(--fs-micro);
-  font-weight: 720;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.cp-dialog-input {
-  width: 100%;
-  height: 34px;
-  padding: 0 var(--space-5);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--theme-bg);
-  color: var(--text);
-  font-size: var(--fs-label);
-}
-
-.cp-dialog-input:focus { border-color: var(--accent); }
-
 /* --------------------------------------------------------------- responsive
  *
  * These are the pane's own widths, not the window's. The plane is a container
@@ -234,7 +199,6 @@
     border-top: 0;
     border-left: 1px solid var(--line);
   }
-  .cp-subagents { order: 0; }
 }
 
 /* Stacked: what is happening now comes before the session's static facts. A chat
@@ -248,7 +212,7 @@
  * need room beside the title; below this they take their own row, as the
  * workbench's tabs do at its own 1000px. */
 @container control-plane (max-width: 1000px) {
-  .cp-session-head {
+  .control-plane .main-head.cp-session-head {
     flex-wrap: wrap;
     row-gap: var(--space-3);
     height: auto;
@@ -263,7 +227,7 @@
  * place left that says which project this session belongs to. */
 @container control-plane (max-width: 780px) {
   .cp-session-count { display: none; }
-  .cp-session-head { padding-inline: var(--space-5); }
+  .control-plane .main-head.cp-session-head { padding-inline: var(--space-5); }
 }
 
 /* Phone: a whole-window fact, not a pane width. At 390px the plane *is* the
@@ -271,15 +235,7 @@
  * it - and this is the one tier the stylesheet contract pins, because the plane
  * once hid a session's state behind a colour-only 6px dot here. */
 @media (max-width: 900px) {
-  .control-plane.cp.detail-open .cp-pane { min-height: calc(100dvh - 56px); }
-}
-
-@media (max-width: 520px) {
-  /* A Finished/Cancelled/No runs word is meaningful content, even in the phone
-     header. The flexible, ellipsized session title yields instead.
-     Pinned by `styles/workflow-panels.test.ts`: keep the word at the tiny type
-     step and keep its gap, whatever else changes in this sheet. */
-  .cp-session-actions .session-state { font-size: var(--fs-tiny); gap: var(--space-2); }
+  .control-plane.cp.detail-open .cp-pane { min-height: calc(100dvh - var(--header-h)); }
 }
 
 /* The loading row and its spinner: this region's own, moved here from

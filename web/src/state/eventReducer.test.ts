@@ -101,6 +101,44 @@ describe('applyEventToChat', () => {
     expect(lastMessage(current).content).toBe('After the tool.');
   });
 
+  it('atomically replaces, rather than appends, a run’s final normalized live text', () => {
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(current, event(2, 'reasoning_delta', { delta: 'keep this reasoning' }));
+    current = applyEventToChat(current, event(3, 'text_delta', { delta: 'raw repeated raw repeated' }));
+
+    current = applyEventToChat(current, event(4, 'text_replaced', {
+      run_id: 'r_x', content: 'final normalized answer',
+    }));
+
+    const assistants = current.items.filter(
+      (item) => item.kind === 'message' && item.role === 'assistant' && item.runId === 'r_x',
+    );
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0]?.kind === 'message' ? assistants[0].content : '').toBe('final normalized answer');
+    expect(assistants[0]?.kind === 'message' ? assistants[0].reasoning : '').toBe('keep this reasoning');
+    expect(assistants[0]?.kind === 'message' ? assistants[0].streaming : false).toBe(true);
+  });
+
+  it('supports an empty text replacement without touching another run or session', () => {
+    let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
+    current = applyEventToChat(current, event(2, 'text_delta', { delta: 'temporary' }));
+    const unchanged = applyEventToChat(current, envelope(3, {
+      type: 'text_replaced', run_id: 'r_other', session_id: 's_ab12', content: 'wrong run',
+    } as Partial<KarucodeEvent>));
+    expect(unchanged.items).toBe(current.items);
+
+    current = applyEventToChat(current, event(4, 'text_replaced', { run_id: 'r_x', content: '' }));
+    const answer = current.items.find(
+      (item) => item.kind === 'message' && item.role === 'assistant' && item.runId === 'r_x',
+    );
+    expect(answer?.kind === 'message' ? answer.content : 'missing').toBe('');
+
+    const otherSession = applyEventToChat(current, envelope(5, {
+      type: 'text_replaced', run_id: 'r_x', session_id: 's_other', content: 'foreign',
+    } as Partial<KarucodeEvent>));
+    expect(otherSession).toBe(current);
+  });
+
   it('drops the abandoned attempt when the runtime restarts a dead stream', () => {
     let current = applyEventToChat(state(), event(1, 'run_started', { prompt: 'Hi' }));
     current = applyEventToChat(current, event(2, 'reasoning_delta', { delta: 'thinking hard' }));

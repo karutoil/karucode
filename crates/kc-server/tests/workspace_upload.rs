@@ -544,6 +544,48 @@ async fn upload_follows_the_session_project_when_no_project_is_given() {
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn upload_without_a_project_uses_the_recorded_control_workspace() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    let created = h
+        .post(
+            "/api/control/sessions",
+            json!({ "title": "Attachment scope" }),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.text());
+    let created = created.json();
+    let session = created["session_id"].as_str().unwrap().to_string();
+    let recorded = created["workspace"].as_str().unwrap().to_string();
+    assert!(created["project_id"].is_null());
+    assert_ne!(
+        std::path::Path::new(&recorded)
+            .canonicalize()
+            .unwrap()
+            .as_path(),
+        h.workspace_path().canonicalize().unwrap().as_path()
+    );
+
+    let response = Upload::new(format!("session={session}&name=control.txt"))
+        .body(b"control scratch")
+        .send(&h)
+        .await;
+    assert_eq!(response.status, StatusCode::CREATED, "{}", response.text());
+    assert_eq!(response.json()["workspace"].as_str().unwrap(), recorded);
+    let stored = std::path::Path::new(&recorded)
+        .join(".karucode/attachments")
+        .join(&session)
+        .join("control.txt");
+    assert_eq!(std::fs::read(stored).unwrap(), b"control scratch");
+    assert!(
+        !h.workspace_path()
+            .join(".karucode/attachments")
+            .join(&session)
+            .exists(),
+        "a project-less session must never fall back to the default project"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_symlinked_attachment_root_cannot_be_used_to_escape_the_workspace() {

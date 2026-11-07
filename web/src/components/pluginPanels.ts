@@ -72,6 +72,17 @@ export interface PluginPanelRenderer {
 /** The registry: first registration for an id wins, so core can pre-empt one. */
 const renderers = new Map<string, PluginPanelRenderer>();
 
+/**
+ * Renderers that claim a payload by its *shape* rather than by a panel id.
+ *
+ * This is how a plugin gets a decent panel without the app knowing it exists: a
+ * payload that follows the documented `view` vocabulary (`{"view": "stat", …}`)
+ * is drawn by the app's own components, and anything else stays on the generic
+ * JSON view. The list is ordered and the first renderer that claims the payload
+ * draws it, so a specific shape can be added without renumbering anything.
+ */
+const shapeRenderers: PluginPanelRenderer[] = [];
+
 /** Payloads are capped so a hostile or broken plugin cannot freeze the tab. */
 export const MAX_PANEL_PAYLOAD_CHARS = 256 * 1024;
 
@@ -104,6 +115,54 @@ export function findPluginPanelRenderer(
   return renderers.get(panel.hosted_id) ?? renderers.get(panel.id);
 }
 
+/**
+ * Register a renderer that claims payloads by shape, for every plugin.
+ *
+ * Used for the documented `view` vocabulary (see `PluginViews.tsx`): a plugin that
+ * answers `{"view": "stat", "value": 12}` gets the app's stat component without
+ * the app knowing which plugin it is. A shape renderer must be cheap and
+ * defensive — it runs for every panel payload that has no id-specific renderer.
+ */
+export function registerPanelShapeRenderer(renderer: PluginPanelRenderer): void {
+  shapeRenderers.push(renderer);
+}
+
+/**
+ * The first shape renderer that claims `data`, or `undefined`.
+ *
+ * A renderer that throws while deciding is skipped rather than turning a plugin's
+ * odd payload into a broken tab: declining is how a renderer says "not mine", and
+ * a throw means the same thing here.
+ */
+export function findPanelShapeRenderer(data: unknown): PluginPanelRenderer | undefined {
+  for (const renderer of shapeRenderers) {
+    try {
+      if (renderer.matches(data)) return renderer;
+    } catch {
+      // Treat a throwing predicate as a decline.
+    }
+  }
+  return undefined;
+}
+
+/** Legacy servers could alias two declarations onto one hosted id. First wins, visibly. */
+export function uniqueHostedPanels<T extends PluginPanelSummary>(panels: readonly T[]): {
+  panels: T[];
+  duplicates: T[];
+} {
+  const seen = new Set<string>();
+  const unique: T[] = [];
+  const duplicates: T[] = [];
+  for (const panel of panels) {
+    if (seen.has(panel.hosted_id)) duplicates.push(panel);
+    else {
+      seen.add(panel.hosted_id);
+      unique.push(panel);
+    }
+  }
+  return { panels: unique, duplicates };
+}
+
 /** True when a payload is small enough to serialise and draw. */
 export function panelPayloadFits(data: unknown): boolean {
   try {
@@ -118,6 +177,7 @@ export function panelPayloadFits(data: unknown): boolean {
 /** Reset the registry. Tests only: the app registers at import time. */
 export function resetPluginPanelRenderers(): void {
   renderers.clear();
+  shapeRenderers.length = 0;
 }
 
 /**

@@ -78,13 +78,27 @@ Inherited secrets are never passed on: `KARUCODE_*`, `AWS_*`, `OPENAI_*`,
 `npx` servers and their `postinstall` scripts run arbitrary code at startup.
 The `env` table is *not* filtered: a credential an operator configures for a
 specific server is intentional, and that is how a server receives its own key.
+Every configured header and env **value** is nevertheless treated as secret on
+the way back: connection/status diagnostics, transport/JSON-RPC errors and
+successful or `isError` tool content are scrubbed even if the peer reflects the
+value (including a rewritten Bearer scheme). Dropping a live `McpManager` sends
+a synchronous kill signal to each stdio process group; explicit `shutdown()`
+awaits the retained supervisor so the actual child is reaped before it returns.
+
+HTTP errors never reproduce the configured URL: URL userinfo/query may contain
+credentials. Reqwest diagnostics have their URL field removed before they are
+formatted, so invalid-scheme, non-2xx and connection errors expose no userinfo.
+A JSON response with one wrong or explicit-null id is rejected; the only
+compatibility exception is a sole response whose id key is genuinely absent.
 
 ## Limits
 
 Connect plus handshake is capped at 15 s per server; one `tools/call` has 120 s.
 Protocol lines and response bodies are capped at 8 MiB, and exceeding that is an
 explicit error rather than unbounded buffering. Servers connect concurrently, so
-one broken server never delays startup or the others.
+one broken server never delays startup or the others. SSE retains raw bytes until
+a complete UTF-8 line arrives and drains the consumed prefix once per network
+chunk, so many short lines take linear work rather than quadratic copying.
 
 ## Not supported
 

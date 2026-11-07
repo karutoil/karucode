@@ -7,7 +7,7 @@
 
 - **Slug:** `terminals`
 - **Tags:** terminal, shell, pty, websocket, ui, tabs
-- **Applies to:** `route:GET /api/terminals`, `route:POST /api/terminals`, `route:PATCH /api/terminals/:id`, `route:DELETE /api/terminals/:id`, `route:POST /api/terminals/:id/restart`, `route:GET /api/terminals/:id/socket`, `config:[terminals]`, `config:terminals.enabled`, `config:terminals.shell`, `config:terminals.scrollback_bytes`, `config:terminals.max_terminals`, `config:terminals.idle_timeout_secs`, `env:KARUCODE_TERMINALS`, `env:KARUCODE_TERMINALS_SHELL`, `env:KARUCODE_TERMINALS_SCROLLBACK_BYTES`, `env:KARUCODE_TERMINALS_MAX`, `env:KARUCODE_TERMINAL_IDLE_SECS`, `env:KARUCODE_ALLOWED_HOSTS`, `ui:TerminalTab`, `file:web/src/components/TerminalTab.tsx`, `file:crates/kc-server/src/terminals.rs`
+- **Applies to:** `route:GET /api/terminals`, `route:POST /api/terminals`, `route:PATCH /api/terminals/:id`, `route:DELETE /api/terminals/:id`, `route:POST /api/terminals/:id/restart`, `route:GET /api/terminals/:id/socket`, `config:[terminals]`, `config:terminals.enabled`, `config:terminals.shell`, `config:terminals.scrollback_bytes`, `config:terminals.max_terminals`, `config:terminals.idle_timeout_secs`, `config:limits.command_env_passthrough`, `env:KARUCODE_TERMINALS`, `env:KARUCODE_TERMINALS_SHELL`, `env:KARUCODE_TERMINALS_SCROLLBACK_BYTES`, `env:KARUCODE_TERMINALS_MAX`, `env:KARUCODE_TERMINAL_IDLE_SECS`, `env:KARUCODE_ALLOWED_HOSTS`, `ui:TerminalTab`, `file:web/src/components/TerminalTab.tsx`, `file:crates/kc-server/src/terminals.rs`
 - **Source:** `crates/kc-server/src/terminals.rs:1`
 
 ---
@@ -88,11 +88,10 @@ appear as an explicit `KARUCODE_ALLOWED_HOSTS` entry. So
 `Origin: http://localhost:9999` against `Host: 127.0.0.1:8787` is refused
 (they are different origins, whatever the port is doing), while a proxy
 fronting `https://karucode.example.com` still works because that name is
-listed. There is no dev-server exemption to lose: `web/vite.config.ts` proxies
-`/api` without `ws: true`, so `npm run dev` never reaches this socket - open
-the built app at `http://127.0.0.1:8787` instead. A missing `Origin` is a
-non-browser client and is accepted (the `Host` guard and the bearer token are
-the gate for those), never a web page.
+listed. Vite development and preview servers proxy `/api` **with `ws: true`**,
+so terminals work there too; the origin check is still enforced on the upgrade.
+A missing `Origin` is a non-browser client and is accepted (the `Host` guard and
+the bearer token are the gate for those), never a web page.
 
 ## The shell
 
@@ -103,13 +102,18 @@ rather than a websocket that fails every time the tab opens.
 The child gets a **cleared environment** plus the same allowlist
 `run_command` uses (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`,
 `LC_ALL`, `TERM`, `TMPDIR`, `PWD`, `TZ`) and anything in
-`limits.command_env_passthrough`. `KARUCODE_AUTH_TOKEN` and the provider API
-key are therefore not in a shell's environment: an interactive session is
-exactly where `env | curl` is easiest to type.
+`limits.command_env_passthrough`, using each name's current value only when set.
+Credential-shaped names (`KARUCODE_*`, `AWS_*`, `OPENAI_*`, `ANTHROPIC_*`,
+`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, and the named GitHub/npm tokens)
+are dropped even if configured. `KARUCODE_AUTH_TOKEN` and provider keys therefore
+do not reach a shell's environment: an interactive session is exactly where
+`env | curl` is easiest to type.
 
 Each shell is its own session and process group, so closing the tab, deleting
 the terminal or stopping the server kills the whole tree - a `make watch` left
-running in a terminal does not survive it.
+running in a terminal does not survive it. Shutdown sends SIGHUP, escalates to
+SIGKILL after two seconds when needed, and waits for the leader and PTY close;
+a shell that ignores SIGHUP therefore cannot escape through process bootstrap.
 
 ## Limits
 

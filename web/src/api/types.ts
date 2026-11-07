@@ -296,6 +296,65 @@ export interface PluginPanelData {
   fetched_ms: number;
 }
 
+/**
+ * One control a plugin contributes, as `GET /api/config` describes it.
+ *
+ * Described, never executed: `kind`, `slot`, `icon` and `target` are names from
+ * closed sets the app owns, and `label`/`title` are plain text. Nothing here is
+ * markup, a URL, a selector or code.
+ */
+export interface PluginUiContributionWire {
+  plugin: string;
+  version: string;
+  /** `button`, `command` or `keybinding`. (`hide` entries are folded into `hidden`.) */
+  kind: string;
+  id: string;
+  hosted_id: string;
+  /** For a button: the slot it mounts in. */
+  slot?: string | null;
+  label: string;
+  title?: string | null;
+  icon?: string | null;
+  /** The `ui/action` id to run. Exactly one of `action` / `message` is set. */
+  action?: string | null;
+  /** A user turn to send instead of running an action. */
+  message?: string | null;
+  /** For a keybinding: the canonical chord (`mod+shift+f`). */
+  keys?: string | null;
+}
+
+/** A built-in control one or more plugins asked the app to hide. */
+export interface PluginUiHiddenWire {
+  target: string;
+  /** Plugins that asked, so a missing button can name who took it. */
+  plugins: string[];
+}
+
+/**
+ * `GET /api/config`'s `plugin_ui`.
+ *
+ * `slots` and `hideable` are the server's catalogues: they travel with the
+ * payload so a client can report a mismatch instead of hard-coding a mount point.
+ */
+export interface PluginUiConfig {
+  contributions?: PluginUiContributionWire[];
+  hidden?: PluginUiHiddenWire[];
+  slots?: string[];
+  hideable?: string[];
+}
+
+/** `POST /api/plugins/:name/ui/actions/:action` — the plugin's validated answer. */
+export interface PluginUiActionResult {
+  /** `false` renders the message as an error. */
+  ok: boolean;
+  /** The toast text. Already capped by the host. */
+  message: string;
+  /** Bare panel ids of this plugin the UI should re-read. */
+  refresh: string[];
+  /** An `http`/`https` URL to open in a new tab, or null. */
+  open_url: string | null;
+}
+
 export interface ConfigMcpSummary {
   name: string;
   transport: string;
@@ -325,6 +384,15 @@ export interface Config {
    * Absent on an older server, which simply means "no plugin tabs".
    */
   plugin_panels?: PluginPanelGroup[];
+  /**
+   * What plugins contribute to the app's own UI: buttons in named slots, palette
+   * commands, and built-in controls they asked to hide.
+   *
+   * Absent on an older server, which simply means "no plugin controls". The
+   * frontend re-validates every entry (`components/uiContributions.ts`) instead
+   * of trusting the shape.
+   */
+  plugin_ui?: PluginUiConfig;
   mcp_servers: ConfigMcpSummary[];
   /**
    * Whether the server re-reads plugin sources on a timer (`plugins_watch`), and
@@ -991,6 +1059,10 @@ export interface WorkspaceEntry {
 export interface WorkspaceTree {
   path: string;
   entries: WorkspaceEntry[];
+  /** Optional for servers predating bounded tree collection. */
+  truncated?: boolean;
+  /** Maximum entries in this response, separate from the traversal work cap. */
+  limit?: number;
 }
 
 /**
@@ -1039,6 +1111,11 @@ export interface WorkspaceFile {
   path: string;
   content: string;
   size: number;
+  /**
+   * SHA-256 of the complete on-disk bytes, as `sha256:<64 lowercase hex>`.
+   * Optional only for compatibility with older servers.
+   */
+  digest?: string;
   truncated: boolean;
   binary: boolean;
   language: string | null;
@@ -1047,13 +1124,16 @@ export interface WorkspaceFile {
 /**
  * `200` response of `PUT /api/workspace/file` — the editor's save.
  *
- * The body sent is `{ content, expected_size? }`; `created` says the save made a
- * new file rather than replacing one.
+ * The body sent is `{ content, expected_digest?, expected_size? }`; the digest is
+ * the precise optimistic-concurrency check and size remains for older servers.
+ * `created` says the save made a new file rather than replacing one.
  */
 export interface WorkspaceFileWrite {
   path: string;
   /** Bytes written (`content.length` in UTF-8). */
   size: number;
+  /** Fresh digest of the written bytes on servers that support digest checks. */
+  digest?: string;
   /** True when the file did not exist before this save. */
   created: boolean;
   language: string | null;
@@ -1293,6 +1373,8 @@ export type KnownEvent = EventEnvelope &
     | { type: 'run_cancelled'; run_id: string }
     | { type: 'iteration_started'; iteration: number }
     | { type: 'text_delta'; delta: string }
+    /** Full final text when server-side normalization changed the streamed deltas. */
+    | { type: 'text_replaced'; run_id: string; content: string }
     | { type: 'reasoning_delta'; delta: string }
     | { type: 'usage'; input_tokens: number; output_tokens: number; cached_tokens?: number }
     | {

@@ -42,7 +42,7 @@
 .cp-hero h1 {
   margin: var(--space-3) 0 var(--space-4);
   font-size: var(--fs-hero);
-  font-weight: 660;
+  font-weight: 720;
   letter-spacing: -0.035em;
   line-height: 1.15;
 }
@@ -76,7 +76,10 @@
   border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--warn) 10%, transparent);
-  color: var(--warn);
+  /* Ink on a tint of itself: `--warn` alone measured 4.45:1 on this fill in
+   * Paper. The on-tint role (the accent's §5.8 rule, applied to warn) mixes
+   * toward `--text` so the palette's contrast floor reaches the pair. */
+  color: color-mix(in srgb, var(--warn) 78%, var(--text));
   font-size: var(--fs-small);
 }
 
@@ -95,11 +98,11 @@
   border-radius: var(--radius-lg);
   background: var(--surface);
 }
-.cp-launch-label { margin-bottom: var(--space-5); }
+.cp-launch .cp-launch-label { margin-bottom: var(--space-5); }
 .cp-launch-row { display: flex; align-items: center; gap: var(--space-5); min-width: 0; }
 .cp-launch-spark { flex: none; color: var(--accent-text); }
-.cp-launch-input { flex: 1 1 auto; width: auto; min-width: 0; }
-.cp-launch-project { flex: 0 1 auto; width: auto; max-width: 180px; min-width: 0; }
+.cp-launch-row .cp-launch-input { flex: 1 1 auto; width: auto; min-width: 0; }
+.cp-launch-row .cp-launch-project { flex: 0 1 auto; width: auto; max-width: 180px; min-width: 0; }
 .cp-launch-submit { flex: none; }
 
 /* The launch box's model + reasoning choice: the chat does not exist yet, so
@@ -111,7 +114,7 @@
   margin-top: var(--space-5);
 }
 .cp-launch-pick { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
-.cp-launch-select { flex: 0 1 auto; width: auto; max-width: min(280px, 100%); min-width: 0; }
+.cp-launch-pick .cp-launch-select { flex: 0 1 auto; width: auto; max-width: min(280px, 100%); min-width: 0; }
 .cp-launch-hint { margin-top: var(--space-5); }
 
 /* ------------------------------------------------------------- the dashboard */
@@ -147,7 +150,7 @@
 .cp-card-title {
   overflow: hidden;
   font-size: var(--fs-message);
-  font-weight: 660;
+  font-weight: 720;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -188,7 +191,7 @@
  * the project mark.
  */
 .cp-table { overflow: hidden; border: 1px solid var(--line-card); border-radius: var(--radius); background: var(--surface); }
-.cp-table-head, .cp-table-row {
+.cp-table .cp-table-head, .cp-table .cp-table-row {
   display: grid;
   grid-template-columns: minmax(0, 2.4fr) minmax(0, 1fr) 104px 62px 104px;
   gap: var(--space-6);
@@ -197,10 +200,14 @@
   text-align: left;
 }
 /* `.eyebrow` sets `display: flex` and `width: fit-content`; a column header row
-   is a grid that fills the table, so both are put back. Everything else about
-   the head - 10px, weight 720, 0.125em, uppercase, `--meta-text` - is the one
-   kerning the product has for a kicker. */
-.cp-table-head {
+   is a grid that fills the table, so both are put back. The `.cp-table` ancestor
+   is what makes that true: the plane's sheets are emitted before `index.css` in
+   the built bundle, so at equal specificity the shared rule wins and this one
+   silently dies. Every plane override of a shared recipe carries a plane
+   ancestor for exactly this reason - specificity, not load order, decides.
+   Everything else about the head - 10px, weight 720, 0.125em, uppercase,
+   `--meta-text` - is the one kerning the product has for a kicker. */
+.cp-table .cp-table-head {
   width: auto;
   border-bottom: 1px solid var(--line);
 }
@@ -214,7 +221,7 @@
   overflow: hidden;
   color: var(--text-secondary);
   font-size: var(--fs-label);
-  font-weight: 500;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -230,10 +237,11 @@
  * `.session-open` + `.session-title` + `.session-meta` - because they are the
  * same role: a session, its project and its age, read as a list. The one thing
  * the rail's row reserves space for and these do not is the kebab menu, so the
- * trailing 26px comes back to the text. Two classes, not one: the densities'
- * `:root[data-density] .session-open` rules would otherwise out-specify it.
+ * trailing 26px comes back to the text. The densities' rules are
+ * `:root[data-density] .session-open` — (0,3,0) — so this one needs four classes
+ * to out-rank them at every density; two are not enough, measured.
  */
-.cp-dash .cp-side-row { padding-right: var(--space-6); }
+.cp-overview .cp-dash .session-open.cp-side-row { padding-right: var(--space-6); }
 
 /* ------------------------------------------------------------- live agents
  *
@@ -267,7 +275,7 @@
  * `.empty-state` is the product's "nothing here" (chat.css); the section is not
  * a whole screen, so the container's screen-sized minimum goes and the sentence
  * keeps the shared `.empty-copy` voice untouched. */
-.cp-empty { min-height: 0; padding: var(--space-9) var(--space-6); }
+.cp-section .cp-empty { min-height: 0; padding: var(--space-9) var(--space-6); }
 .cp-empty .empty-copy { margin: 0; }
 
 /* ------------------------------------------------------------- responsive
@@ -280,7 +288,7 @@
   /* Wide: the counters sit beside the headline, and the dashboard splits into
      live work on the left and the things that need a human on the right. */
   .cp-hero { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-10); }
-  .cp-stats { flex: 0 1 560px; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: 0; }
+  .cp-stats { flex: 0 1 560px; margin-top: 0; }
   .cp-dash { grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); align-items: start; }
   .cp-dash-side { position: sticky; top: 0; }
 }
@@ -310,4 +318,18 @@
      slivers: the title and the state are what a narrow row is for. */
   .cp-table-head, .cp-table-row { grid-template-columns: minmax(0, 1fr) 104px; }
   .cp-table-head > .cp-col-meta, .cp-table-row > .cp-col-meta { display: none; }
+}
+
+/* A project name can be longer than a phone is wide. `.button` is nowrap with no
+ * max-width, so the button ran off a 390px screen; the name yields instead and
+ * the button's title keeps the full spelling. */
+.cp-intro-projects .button {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.cp-intro-project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

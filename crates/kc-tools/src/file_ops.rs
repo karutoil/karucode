@@ -155,9 +155,12 @@ pub fn read_file_cancellable(
     // "next N lines" hint describe the real file instead of the prefix.
     let available = lines.len();
     let (total, total_capped) = if byte_limited {
-        match continue_counting(&mut file, &buf) {
-            // The count is a nicety; never fail a readable file over it.
+        match continue_counting(&mut file, &buf, cancel) {
+            // The count is a nicety; never fail a readable file over an IO error.
+            // Cancellation is different: it belongs to the current run and must
+            // not be swallowed and replaced with a successful, misleading total.
             Ok(counted) => counted,
+            Err(Error::Cancelled) => return Err(Error::Cancelled),
             Err(_) => (available, false),
         }
     } else {
@@ -536,11 +539,14 @@ fn read_chunk(file: &mut std::fs::File, buf: &mut [u8], path: &Path) -> Result<O
 ///
 /// Matches `str::lines` semantics: a trailing newline does not start a new line,
 /// and an empty file has zero lines.
-fn continue_counting(file: &mut std::fs::File, prefix: &[u8]) -> Result<(usize, bool)> {
+fn continue_counting(
+    file: &mut std::fs::File,
+    prefix: &[u8],
+    cancel: &CancellationToken,
+) -> Result<(usize, bool)> {
     let mut newlines = prefix.iter().filter(|b| **b == b'\n').count();
     let mut last_byte = prefix.last().copied();
-    let (tail, tail_last, capped) =
-        drain_counting(file, Path::new("<file>"), &CancellationToken::new())?;
+    let (tail, tail_last, capped) = drain_counting(file, Path::new("<file>"), cancel)?;
     newlines += tail;
     if let Some(byte) = tail_last {
         last_byte = Some(byte);
@@ -891,6 +897,18 @@ pub const MAX_GLOB_ENTRIES: usize = 200;
 /// cap cut something, so the note can say so instead of implying that is all
 /// there was.
 pub fn glob(ws: &Workspace, pattern: &str, path: &str, max_entries: usize) -> Result<Rendered> {
+    glob_cancellable(ws, pattern, path, max_entries, &CancellationToken::new())
+}
+
+/// [`glob`] with the run's real cancellation token, checked before every yielded
+/// directory entry or walk error.
+pub(crate) fn glob_cancellable(
+    ws: &Workspace,
+    pattern: &str,
+    path: &str,
+    max_entries: usize,
+    cancel: &CancellationToken,
+) -> Result<Rendered> {
     let pattern = pattern.trim();
     if pattern.is_empty() {
         return Err(Error::BadRequest(
@@ -925,7 +943,20 @@ pub fn glob(ws: &Workspace, pattern: &str, path: &str, max_entries: usize) -> Re
         .follow_links(false)
         .filter_entry(|entry| !is_skipped_dir(entry.file_name()))
         .build();
+    glob_from_walker(ws, pattern, &rel_root, &set, max_entries, walker, cancel)
+}
 
+/// Process an existing walker separately so a test can cancel from an iterator's
+/// second yield, proving the check runs mid-walk rather than only before it.
+fn glob_from_walker(
+    ws: &Workspace,
+    pattern: &str,
+    rel_root: &str,
+    set: &globset::GlobSet,
+    max_entries: usize,
+    walker: impl IntoIterator<Item = std::result::Result<ignore::DirEntry, ignore::Error>>,
+    cancel: &CancellationToken,
+) -> Result<Rendered> {
     struct Found {
         is_dir: bool,
         rel: String,
@@ -934,6 +965,10 @@ pub fn glob(ws: &Workspace, pattern: &str, path: &str, max_entries: usize) -> Re
     let mut walk_errors = 0usize;
     let mut capped = false;
     for entry in walker {
+        // Check before matching Ok/Err so cancellation covers walk errors too.
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         if found.len() > max_entries {
             capped = true;
             break;
@@ -1913,7 +1948,8 @@ mod tests {
             tmp.write(name, body);
             let mut file = std::fs::File::open(tmp.path.join(name)).unwrap();
             // No prefix: everything comes from the streaming loop.
-            let (counted, capped) = continue_counting(&mut file, b"").unwrap();
+            let (counted, capped) =
+                continue_counting(&mut file, b"", &CancellationToken::new()).unwrap();
             assert_eq!(counted, body.lines().count(), "{name} ({body:?})");
             assert!(!capped, "{name}");
 
@@ -1926,7 +1962,8 @@ mod tests {
                 let mut file = std::fs::File::open(tmp.path.join(name)).unwrap();
                 use std::io::Seek;
                 file.seek(std::io::SeekFrom::Start(cut as u64)).unwrap();
-                let (counted, _) = continue_counting(&mut file, &bytes[..cut]).unwrap();
+                let (counted, _) =
+                    continue_counting(&mut file, &bytes[..cut], &CancellationToken::new()).unwrap();
                 assert_eq!(
                     counted,
                     body.lines().count(),
@@ -1934,6 +1971,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn glob_cancellation_stops_a_walk_after_its_first_entry() {
+        let tmp = TempWs::new("glob-midwalk-cancel");
+        tmp.write("one.txt", "one\n");
+        tmp.write("two.txt", "two\n");
+        let ws = Workspace::new(&tmp.path).unwrap();
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(globset::Glob::new("*").unwrap());
+        let set = builder.build().unwrap();
+        let walker = ignore::WalkBuilder::new(&tmp.path).build();
+        let cancel = CancellationToken::new();
+        let during_walk = cancel.clone();
+        let yielded = std::cell::Cell::new(0usize);
+        let walker = walker.inspect(move |_| {
+            let seen = yielded.get();
+            yielded.set(seen + 1);
+            if seen == 1 {
+                // The root was already yielded and processed. Cancellation happens
+                // as the next real entry arrives, not before glob_from_walker.
+                during_walk.cancel();
+            }
+        });
+        let err = glob_from_walker(&ws, "*", ".", &set, 200, walker, &cancel).unwrap_err();
+        assert!(matches!(err, Error::Cancelled), "{err}");
+    }
+
+    #[test]
+    fn prefix_line_counting_propagates_the_read_cancellation() {
+        let tmp = TempWs::new("prefix-count-cancel");
+        tmp.write("large.txt", "a\nb\nc\n");
+        let ws = Workspace::new(&tmp.path).unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let err = read_file_cancellable(&ws, "large.txt", None, None, 2, &cancel).unwrap_err();
+        assert!(matches!(err, Error::Cancelled), "{err}");
     }
 
     /// A file under the cap must keep the exact header it always had.

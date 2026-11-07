@@ -42,6 +42,7 @@ What is covered:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -49,6 +50,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -510,7 +512,7 @@ class TransactionalInstall(Case):
         path.write_text(body, encoding="utf-8")
         path.chmod(0o755)
 
-    def run_live(self, code="200", curl_rc="0", fresh=False):
+    def run_live(self, code="200", curl_rc="0", fresh=False, tarball=None):
         if fresh:
             self.live_binary.unlink(missing_ok=True)
             self.unit_path.unlink(missing_ok=True)
@@ -526,14 +528,58 @@ class TransactionalInstall(Case):
             "FAKE_HTTP_CODE": code,
             "FAKE_CURL_RC": curl_rc,
         }
+        artifact = ["--binary", str(self.binary)]
+        if tarball is not None:
+            artifact = ["--tarball", str(tarball)]
         argv = [
-            "sh", str(INSTALL_SH), "--binary", str(self.binary),
+            "sh", str(INSTALL_SH), *artifact,
             "--prefix", str(self.prefix), "--workspace", str(self.workspace),
             "--data-dir", str(self.data_dir), "--service-user", self.me,
             "--service-group", group, "--env-file", str(self.tmp / "env" / "karucode.env"),
             "--unit-file", str(UNIT_FILE), "--force-systemd", "--no-enable",
         ]
         return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=30)
+
+    def make_tarball(self, list_archive=True):
+        artifact_dir = self.tmp / "artifact"
+        artifact_dir.mkdir()
+        payload = artifact_dir / "payload-karucode"
+        shutil.copy(self.binary, payload)
+        payload.chmod(0o755)
+        archive = artifact_dir / "karucode-local.tar.gz"
+        with tarfile.open(archive, "w:gz") as bundle:
+            bundle.add(payload, arcname="karucode-local/karucode")
+        if list_archive:
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            (artifact_dir / "SHA256SUMS").write_text(
+                f"{digest}  {archive.name}\n", encoding="utf-8"
+            )
+        return archive
+
+    def test_local_tarball_missing_from_sibling_checksums_is_refused(self):
+        archive = self.make_tarball(list_archive=False)
+        # Unrelated valid entries must not silently turn into permission to
+        # install this archive without authentication.
+        (archive.parent / "SHA256SUMS").write_text(
+            f"{hashlib.sha256(b'other artifact').hexdigest()}  other.tar.gz\n",
+            encoding="utf-8",
+        )
+        result = self.run_live(tarball=archive)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"{archive.name} is not listed", result.stderr)
+        self.assertIn("refusing to install an unverified local tarball", result.stderr)
+        self.assertEqual(self.live_binary.read_bytes(), self.old_binary.read_bytes())
+        self.assertEqual(self.unit_path.read_bytes(), self.old_unit)
+        calls = self.systemctl_log.read_text() if self.systemctl_log.exists() else ""
+        for operation in ("restart", "start", "daemon-reload", "enable"):
+            self.assertNotIn(operation, calls, f"the refusal ran systemctl {operation}")
+
+    def test_listed_local_tarball_installs_through_the_real_archive_path(self):
+        archive = self.make_tarball()
+        result = self.run_live(tarball=archive)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("checksum verified", result.stdout)
+        self.assertEqual(self.live_binary.read_bytes(), self.binary.read_bytes())
 
     def assert_rolled_back(self, result, code):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)

@@ -2,7 +2,7 @@
 // @kc-title: Use the terminal tab
 // @kc-summary: A real shell in the browser that survives a reload, another browser and a cleared cache - and the honest limit of what survives a restart.
 // @kc-tags: terminal, shell, pty, websocket, ui, tabs
-// @kc-applies-to: route:GET /api/terminals, route:POST /api/terminals, route:PATCH /api/terminals/:id, route:DELETE /api/terminals/:id, route:POST /api/terminals/:id/restart, route:GET /api/terminals/:id/socket, config:[terminals], config:terminals.enabled, config:terminals.shell, config:terminals.scrollback_bytes, config:terminals.max_terminals, config:terminals.idle_timeout_secs, env:KARUCODE_TERMINALS, env:KARUCODE_TERMINALS_SHELL, env:KARUCODE_TERMINALS_SCROLLBACK_BYTES, env:KARUCODE_TERMINALS_MAX, env:KARUCODE_TERMINAL_IDLE_SECS, env:KARUCODE_ALLOWED_HOSTS, ui:TerminalTab, file:web/src/components/TerminalTab.tsx, file:crates/kc-server/src/terminals.rs
+// @kc-applies-to: route:GET /api/terminals, route:POST /api/terminals, route:PATCH /api/terminals/:id, route:DELETE /api/terminals/:id, route:POST /api/terminals/:id/restart, route:GET /api/terminals/:id/socket, config:[terminals], config:terminals.enabled, config:terminals.shell, config:terminals.scrollback_bytes, config:terminals.max_terminals, config:terminals.idle_timeout_secs, config:limits.command_env_passthrough, env:KARUCODE_TERMINALS, env:KARUCODE_TERMINALS_SHELL, env:KARUCODE_TERMINALS_SCROLLBACK_BYTES, env:KARUCODE_TERMINALS_MAX, env:KARUCODE_TERMINAL_IDLE_SECS, env:KARUCODE_ALLOWED_HOSTS, ui:TerminalTab, file:web/src/components/TerminalTab.tsx, file:crates/kc-server/src/terminals.rs
 //
 // The **Terminal** tab in the chat area runs a real shell in a real PTY as the
 // server user, in the current project's directory. It is a shell for *you*, the
@@ -80,11 +80,10 @@
 // `Origin: http://localhost:9999` against `Host: 127.0.0.1:8787` is refused
 // (they are different origins, whatever the port is doing), while a proxy
 // fronting `https://karucode.example.com` still works because that name is
-// listed. There is no dev-server exemption to lose: `web/vite.config.ts` proxies
-// `/api` without `ws: true`, so `npm run dev` never reaches this socket - open
-// the built app at `http://127.0.0.1:8787` instead. A missing `Origin` is a
-// non-browser client and is accepted (the `Host` guard and the bearer token are
-// the gate for those), never a web page.
+// listed. Vite development and preview servers proxy `/api` **with `ws: true`**,
+// so terminals work there too; the origin check is still enforced on the upgrade.
+// A missing `Origin` is a non-browser client and is accepted (the `Host` guard and
+// the bearer token are the gate for those), never a web page.
 //
 // # The shell
 //
@@ -95,13 +94,18 @@
 // The child gets a **cleared environment** plus the same allowlist
 // `run_command` uses (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`,
 // `LC_ALL`, `TERM`, `TMPDIR`, `PWD`, `TZ`) and anything in
-// `limits.command_env_passthrough`. `KARUCODE_AUTH_TOKEN` and the provider API
-// key are therefore not in a shell's environment: an interactive session is
-// exactly where `env | curl` is easiest to type.
+// `limits.command_env_passthrough`, using each name's current value only when set.
+// Credential-shaped names (`KARUCODE_*`, `AWS_*`, `OPENAI_*`, `ANTHROPIC_*`,
+// `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, and the named GitHub/npm tokens)
+// are dropped even if configured. `KARUCODE_AUTH_TOKEN` and provider keys therefore
+// do not reach a shell's environment: an interactive session is exactly where
+// `env | curl` is easiest to type.
 //
 // Each shell is its own session and process group, so closing the tab, deleting
 // the terminal or stopping the server kills the whole tree - a `make watch` left
-// running in a terminal does not survive it.
+// running in a terminal does not survive it. Shutdown sends SIGHUP, escalates to
+// SIGKILL after two seconds when needed, and waits for the leader and PTY close;
+// a shell that ignores SIGHUP therefore cannot escape through process bootstrap.
 //
 // # Limits
 //
@@ -334,6 +338,7 @@ impl Terminal {
         id: &str,
         session: &TerminalSession,
         settings: &TerminalConfig,
+        env_passthrough: &[String],
         cols: u16,
         rows: u16,
     ) -> kc_core::Result<Arc<Self>> {
@@ -352,7 +357,7 @@ impl Terminal {
             .stdin(Stdio::from(slave))
             .stdout(Stdio::from(slave_stdout))
             .stderr(Stdio::from(slave_stderr));
-        apply_environment(&mut command);
+        apply_environment(&mut command, env_passthrough);
         // New session => new process group, so closing the terminal reaches
         // every child (a `make watch`, a `sleep`), not just the leader.
         unsafe {
@@ -527,7 +532,10 @@ impl Terminal {
     ///
     /// Closing the master is what actually ends the child's `read`, so the
     /// process is signalled first (so it can run its exit handlers) and the fd
-    /// is closed after the grace period or as soon as it exits.
+    /// is closed after the grace period or as soon as it exits. This call does not
+    /// return until escalation, `wait(2)`, and the close have completed; spawning
+    /// an unjoined cleanup thread let the process exit while a HUP-ignoring shell
+    /// was still alive.
     pub fn shutdown(&self) {
         if self.dead.swap(true, Ordering::AcqRel) {
             return;
@@ -536,34 +544,42 @@ impl Terminal {
         if pid != 0 {
             signal_group(pid, libc::SIGHUP);
         }
-        let terminal_pid = pid;
-        let io = Arc::clone(&self.io);
-        let output = self.output.clone();
-        std::thread::spawn(move || {
-            let deadline = Instant::now() + KILL_GRACE;
-            loop {
-                if terminal_pid == 0 {
-                    break;
-                }
-                if !group_alive(terminal_pid) {
-                    break;
-                }
-                if Instant::now() > deadline {
-                    signal_group(terminal_pid, libc::SIGKILL);
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(25));
+        let deadline = Instant::now() + KILL_GRACE;
+        loop {
+            if pid == 0 {
+                break;
             }
-            let mut state = io.lock().unwrap_or_else(|e| e.into_inner());
-            // Reap the leader so it does not linger as a zombie for the life of
-            // the server.
-            if let Some(mut child) = state.child.take() {
-                let _ = child.wait();
+            {
+                let mut state = self.io.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(child) = state.child.as_mut() {
+                    match child.try_wait() {
+                        Ok(Some(_)) | Err(_) => {
+                            // `try_wait` has reaped an exited leader. Descendants,
+                            // if any, still keep the process group alive below.
+                            state.child.take();
+                        }
+                        Ok(None) => {}
+                    }
+                }
             }
-            state.master = None;
-            drop(state);
-            let _ = output.send(Output::Exit(None));
-        });
+            if !group_alive(pid) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                signal_group(pid, libc::SIGKILL);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let mut state = self.io.lock().unwrap_or_else(|e| e.into_inner());
+        // Reap the leader before closing the PTY. After SIGKILL this wait cannot
+        // be survived by a HUP handler, and by this point the whole group got it.
+        if let Some(mut child) = state.child.take() {
+            let _ = child.wait();
+        }
+        state.master = None;
+        drop(state);
+        let _ = self.output.send(Output::Exit(None));
     }
 }
 
@@ -737,16 +753,24 @@ fn dup_fd(file: &std::fs::File) -> kc_core::Result<std::fs::File> {
 
 /// The environment a shell may see.
 ///
-/// The same allowlist `run_command` uses, for the same reason: the server holds
-/// `KARUCODE_AUTH_TOKEN` and the provider API key, and an interactive shell is
-/// where `env | curl -d @-` is easiest to type. `TERM` and `LC_ALL` are set by
-/// the caller so they cannot be lost by an unusual inherited environment.
-fn apply_environment(command: &mut std::process::Command) {
+/// The same allowlist and secret-shaped-name filter `run_command` uses, for the
+/// same reason: the server holds `KARUCODE_AUTH_TOKEN` and provider keys, and an
+/// interactive shell is where `env | curl -d @-` is easiest to type. Extra names
+/// come from the live `limits.command_env_passthrough`; absent variables are never
+/// invented as empty values.
+fn apply_environment(command: &mut std::process::Command, passthrough: &[String]) {
     command.env_clear();
     const ALLOWLIST: &[&str] = &[
-        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "PWD", "TZ",
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "PWD", "TZ",
     ];
-    for name in ALLOWLIST {
+    for name in ALLOWLIST
+        .iter()
+        .copied()
+        .chain(passthrough.iter().map(String::as_str))
+    {
+        if is_secret_like(name) || !is_valid_environment_name(name) {
+            continue;
+        }
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }
@@ -762,6 +786,28 @@ fn apply_environment(command: &mut std::process::Command) {
     if std::env::var_os("LANG").is_none() {
         command.env("LANG", "C.UTF-8");
     }
+}
+
+/// Match kc-tools' filter exactly: passthrough is not a way to reauthorise a
+/// credential. Matching is case-insensitive and uses real name boundaries.
+fn is_secret_like(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    const SECRET_PREFIXES: &[&str] = &["KARUCODE_", "AWS_", "OPENAI_", "ANTHROPIC_"];
+    const SECRET_NAMES: &[&str] = &["GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN"];
+    const SECRET_SUFFIXES: &[&str] = &["_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD"];
+    SECRET_PREFIXES
+        .iter()
+        .any(|prefix| upper.starts_with(prefix))
+        || SECRET_NAMES.contains(&upper.as_str())
+        || SECRET_SUFFIXES.iter().any(|suffix| upper.ends_with(suffix))
+}
+
+fn is_valid_environment_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn clamp_cols(cols: u16) -> u16 {
@@ -920,6 +966,27 @@ pub fn terminal_settings(state: &AppState) -> TerminalConfig {
     state.settings().snapshot().terminals
 }
 
+/// Spawn with one coherent live settings snapshot, including the operator's
+/// current extra environment names. This is used by create, restart and attach so
+/// no path silently falls back to the fixed allowlist.
+pub fn spawn_for_state(
+    state: &AppState,
+    id: &str,
+    row: &TerminalSession,
+    cols: u16,
+    rows: u16,
+) -> kc_core::Result<Arc<Terminal>> {
+    let snapshot = state.settings().snapshot();
+    Terminal::spawn(
+        id,
+        row,
+        &snapshot.terminals,
+        &snapshot.limits.command_env_passthrough,
+        cols,
+        rows,
+    )
+}
+
 /// The router-facing part of a terminal: `GET /api/terminals` and friends.
 ///
 /// The rows come from SQLite, so the answer is the same in every browser; each
@@ -991,7 +1058,7 @@ pub fn ensure_live(
             return Ok(Arc::clone(existing));
         }
     }
-    let terminal = Terminal::spawn(&row.id, row, &settings, cols, rows)?;
+    let terminal = spawn_for_state(state, &row.id, row, cols, rows)?;
     if let Some(old) = live.insert(row.id.clone(), Arc::clone(&terminal)) {
         old.shutdown();
     }
@@ -1532,8 +1599,8 @@ mod tests {
     /// reader. This is the whole feature in one test.
     #[tokio::test]
     async fn a_shell_runs_and_its_output_is_replayed() {
-        let terminal =
-            Terminal::spawn("t_test", &session(&cwd()), &settings(), 100, 30).expect("spawn shell");
+        let terminal = Terminal::spawn("t_test", &session(&cwd()), &settings(), &[], 100, 30)
+            .expect("spawn shell");
         assert!(!terminal.is_dead());
         assert!(terminal.pid() > 0);
         assert_eq!(terminal.size(), Some((100, 30)));
@@ -1575,12 +1642,57 @@ mod tests {
         assert!(!group_alive(pid), "the shell outlived its terminal");
     }
 
+    #[tokio::test]
+    async fn shutdown_kills_and_reaps_a_shell_that_ignores_sighup_before_returning() {
+        let terminal = Terminal::spawn("t_stubborn", &session(&cwd()), &settings(), &[], 80, 24)
+            .expect("spawn stubborn shell");
+        assert!(
+            terminal.write(b"trap '' HUP; printf 'KC_HUP_IGNORED\\n'; while :; do sleep 1; done\n")
+        );
+        for _ in 0..200 {
+            if String::from_utf8_lossy(&terminal.replay()).contains("KC_HUP_IGNORED") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(String::from_utf8_lossy(&terminal.replay()).contains("KC_HUP_IGNORED"));
+        let pid = terminal.pid();
+        let started = std::time::Instant::now();
+        terminal.shutdown();
+        assert!(
+            started.elapsed() >= KILL_GRACE,
+            "HUP ignored must escalate to KILL"
+        );
+        assert!(started.elapsed() < KILL_GRACE + Duration::from_secs(2));
+        assert!(
+            terminal.io.lock().unwrap().child.is_none(),
+            "leader was not reaped"
+        );
+        assert!(
+            terminal.io.lock().unwrap().master.is_none(),
+            "PTY was not closed"
+        );
+        // The leader is our child and has been waited on, so its id cannot still be
+        // alive. Group members received SIGKILL before the same return point.
+        assert_ne!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
+        for _ in 0..40 {
+            if !group_alive(pid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            !group_alive(pid),
+            "a stubborn process group survived shutdown"
+        );
+    }
+
     /// A dead shell is reported as dead, which is what makes the route start a
     /// new one instead of attaching to a closed fd.
     #[tokio::test]
     async fn a_shell_that_exits_marks_the_terminal_dead() {
-        let terminal =
-            Terminal::spawn("t_test", &session(&cwd()), &settings(), 80, 24).expect("spawn shell");
+        let terminal = Terminal::spawn("t_test", &session(&cwd()), &settings(), &[], 80, 24)
+            .expect("spawn shell");
         assert!(terminal.write(b"exit 7\n"));
         for _ in 0..200 {
             if terminal.is_dead() {
@@ -1659,7 +1771,8 @@ mod tests {
 
     #[test]
     fn attachment_slots_are_bounded_and_drop_releases_reservation() {
-        let terminal = Terminal::spawn("t_slots", &session(&cwd()), &settings(), 80, 24).unwrap();
+        let terminal =
+            Terminal::spawn("t_slots", &session(&cwd()), &settings(), &[], 80, 24).unwrap();
         let registry = TerminalRegistry::new();
         let slots = registry.attachment_slots("t_slots");
         let mut attachments = Vec::new();
@@ -1683,7 +1796,8 @@ mod tests {
     #[test]
     fn attachment_budget_survives_terminal_replacement() {
         let registry = TerminalRegistry::new();
-        let old = Terminal::spawn("t_generation", &session(&cwd()), &settings(), 80, 24).unwrap();
+        let old =
+            Terminal::spawn("t_generation", &session(&cwd()), &settings(), &[], 80, 24).unwrap();
         registry.insert(Arc::clone(&old));
         let permits: Vec<_> = (0..MAX_ATTACHMENTS)
             .map(|_| {
@@ -1693,7 +1807,8 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let new = Terminal::spawn("t_generation", &session(&cwd()), &settings(), 80, 24).unwrap();
+        let new =
+            Terminal::spawn("t_generation", &session(&cwd()), &settings(), &[], 80, 24).unwrap();
         registry.insert(new);
         assert!(registry
             .attachment_slots("t_generation")
@@ -1710,7 +1825,8 @@ mod tests {
     #[test]
     fn detach_refreshes_idle_before_reaper_can_observe_zero() {
         let registry = Arc::new(TerminalRegistry::new());
-        let terminal = Terminal::spawn("t_detach", &session(&cwd()), &settings(), 80, 24).unwrap();
+        let terminal =
+            Terminal::spawn("t_detach", &session(&cwd()), &settings(), &[], 80, 24).unwrap();
         registry.insert(Arc::clone(&terminal));
         for _ in 0..1000 {
             terminal.mark_attached();
@@ -1736,8 +1852,8 @@ mod tests {
     #[test]
     fn replacing_entry_shuts_down_old_shell() {
         let registry = TerminalRegistry::new();
-        let old = Terminal::spawn("t_replace", &session(&cwd()), &settings(), 80, 24).unwrap();
-        let new = Terminal::spawn("t_replace", &session(&cwd()), &settings(), 80, 24).unwrap();
+        let old = Terminal::spawn("t_replace", &session(&cwd()), &settings(), &[], 80, 24).unwrap();
+        let new = Terminal::spawn("t_replace", &session(&cwd()), &settings(), &[], 80, 24).unwrap();
         registry.insert(Arc::clone(&old));
         registry.insert(Arc::clone(&new));
         assert!(old.is_dead());
@@ -1751,10 +1867,10 @@ mod tests {
     #[tokio::test]
     async fn the_idle_reaper_spares_attached_terminals() {
         let registry = TerminalRegistry::new();
-        let idle =
-            Terminal::spawn("t_idle", &session(&cwd()), &settings(), 80, 24).expect("spawn idle");
-        let busy =
-            Terminal::spawn("t_busy", &session(&cwd()), &settings(), 80, 24).expect("spawn busy");
+        let idle = Terminal::spawn("t_idle", &session(&cwd()), &settings(), &[], 80, 24)
+            .expect("spawn idle");
+        let busy = Terminal::spawn("t_busy", &session(&cwd()), &settings(), &[], 80, 24)
+            .expect("spawn busy");
         busy.mark_attached();
         // Pretend the idle one was last seen two days ago.
         idle.last_seen.store(
@@ -1785,8 +1901,8 @@ mod tests {
     async fn the_shell_environment_is_cleared_of_secrets() {
         std::env::set_var("KARUCODE_AUTH_TOKEN", "super-secret-token");
         std::env::set_var("OPENAI_API_KEY", "sk-secret");
-        let terminal =
-            Terminal::spawn("t_test", &session(&cwd()), &settings(), 200, 50).expect("spawn shell");
+        let terminal = Terminal::spawn("t_test", &session(&cwd()), &settings(), &[], 200, 50)
+            .expect("spawn shell");
         assert!(terminal.write(b"env\n"));
         let mut seen = String::new();
         for _ in 0..200 {

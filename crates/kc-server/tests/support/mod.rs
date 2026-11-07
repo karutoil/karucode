@@ -14,7 +14,6 @@ use futures_util::StreamExt;
 use kc_core::config::{
     ApprovalMode, Config, McpServerConfig, ModelConfig, PluginConfig, TerminalConfig, TitlesConfig,
 };
-use kc_core::hooks::NoHooks;
 use kc_core::paths::Workspace;
 use kc_core::provider::{ChatRequest, Provider, ProviderChunk, ProviderFactory, ProviderStream};
 use kc_core::store::Store;
@@ -26,7 +25,7 @@ use kc_plugin_host::PluginHost;
 use kc_runtime::{Runtime, RuntimeDeps};
 use kc_server::app::build_router;
 use kc_server::settings::SettingsHandle;
-use kc_server::state::{base_tool_registry, AppState, AppStateDeps, ProjectRegistry};
+use kc_server::state::{base_tool_registry, AppState, AppStateDeps, PluginHooks, ProjectRegistry};
 use kc_store::SqliteStore;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -283,6 +282,10 @@ pub struct HarnessBuilder {
     project_roots: Vec<PathBuf>,
     /// `[terminals]`. `None` uses the defaults (on, `/bin/sh`-ish, 16 slots).
     terminals: Option<TerminalConfig>,
+    /// `[limits]`. Tests that exercise command environment forwarding use this to
+    /// build the same initial settings as a config file.
+    limits: Option<kc_core::config::Limits>,
+    retention_days: u64,
     /// `allow_temp_dir = false`: the workspace is the only allowed root, so a
     /// `..` escape is refused the way it is in a normal install outside `/tmp`.
     strict_root: bool,
@@ -307,6 +310,8 @@ impl HarnessBuilder {
             allowed_hosts: None,
             project_roots: Vec::new(),
             terminals: None,
+            limits: None,
+            retention_days: 0,
             strict_root: false,
             titles: None,
             approval_mode: None,
@@ -318,6 +323,16 @@ impl HarnessBuilder {
     /// sets it here rather than reaching into the live settings.
     pub fn terminals(mut self, config: TerminalConfig) -> Self {
         self.terminals = Some(config);
+        self
+    }
+
+    pub fn limits(mut self, config: kc_core::config::Limits) -> Self {
+        self.limits = Some(config);
+        self
+    }
+
+    pub fn retention_days(mut self, days: u64) -> Self {
+        self.retention_days = days;
         self
     }
 
@@ -447,7 +462,9 @@ impl HarnessBuilder {
             // it that way too.
             plugins: self.plugin_configs.clone(),
             terminals: self.terminals.clone().unwrap_or_default(),
+            limits: self.limits.clone().unwrap_or_default(),
             project_roots: self.project_roots.clone(),
+            retention_days: self.retention_days,
             allow_temp_dir: !self.strict_root,
             titles: self.titles.clone().unwrap_or_default(),
             approvals: kc_core::config::ApprovalPolicy {
@@ -510,7 +527,7 @@ impl HarnessBuilder {
             providers: factory.clone(),
             tools,
             settings: settings.clone(),
-            hooks: Arc::new(NoHooks),
+            hooks: Arc::new(PluginHooks::new(Arc::clone(&plugins))),
             workspaces: Arc::clone(&projects) as Arc<dyn kc_runtime::WorkspaceProvider>,
         });
         runtime.recover().await.expect("recover");

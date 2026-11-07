@@ -39,6 +39,7 @@ npm install
 npm run dev        # http://127.0.0.1:5173, proxies /api to http://127.0.0.1:8787
 npm run typecheck
 npm test
+npm audit --audit-level=moderate  # reject vulnerable dev/build dependencies too
 npm run build      # writes dist/index.html + hashed assets
 npm run preview    # static preview; also proxies /api to 8787
 npm run preview:api  # prints the KARUCODE_WEB_DIR hint for serving the Rust binary

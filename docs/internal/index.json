@@ -1,7 +1,30 @@
 {
-  "count": 24,
+  "count": 27,
   "generated_by": "cargo run -p kc-docs -- --write",
   "topics": [
+    {
+      "applies_to": [
+        "config:[approvals]",
+        "config:approvals.timeout_secs",
+        "env:KARUCODE_APPROVAL_TIMEOUT_SECS",
+        "route:GET /api/approvals",
+        "route:POST /api/approvals/:id",
+        "event:approval_resolved"
+      ],
+      "path": "approval-expiry-recovery.md",
+      "slug": "approval-expiry-recovery",
+      "source": "crates/kc-runtime/src/approvals.rs:11",
+      "summary": "Each approval has an independent expiry scope, and its in-memory waiter survives until expiry is durable.",
+      "tags": [
+        "approvals",
+        "timeout",
+        "persistence",
+        "subagents",
+        "recovery",
+        "safety"
+      ],
+      "title": "Understand approval timeout and storage-failure recovery"
+    },
     {
       "applies_to": [
         "config:[approvals]",
@@ -93,7 +116,8 @@
         "config:[model]",
         "config:model.supports_images",
         "config:limits.max_image_read_bytes",
-        "env:KARUCODE_MODEL_SUPPORTS_IMAGES"
+        "env:KARUCODE_MODEL_SUPPORTS_IMAGES",
+        "env:RIPGREP_CONFIG_PATH"
       ],
       "path": "builtin-tools.md",
       "slug": "builtin-tools",
@@ -233,6 +257,7 @@
         "cmd:install.sh --workspace",
         "cmd:install.sh --dry-run",
         "cmd:install.sh --binary",
+        "cmd:install.sh --tarball",
         "cmd:install.sh --no-systemd",
         "cmd:install.sh --allow-jit",
         "cmd:install.sh --port",
@@ -366,9 +391,15 @@
         "route:GET /api/mcp",
         "config:plugin_panels",
         "route:GET /api/events",
+        "header:X-Karucode-Event-Epoch",
         "event:notification",
         "event:queued_messages",
         "event:session_rewound",
+        "event:karucode.transport",
+        "event:connection_cap",
+        "event:stream_overflow",
+        "event:text_replaced",
+        "field:expected_digest",
         "config:[notifications]",
         "header:X-Karucode-Client",
         "env:KARUCODE_AUTH_TOKEN",
@@ -504,6 +535,7 @@
         "env:KARUCODE_PLUGINS_WATCH",
         "env:KARUCODE_PLUGINS_WATCH_SECS",
         "config:panels",
+        "config:ui",
         "config:plugins_watch",
         "config:plugins_watch_secs",
         "config:notifications.plugin",
@@ -512,18 +544,30 @@
         "route:POST /api/plugins/:name/reload",
         "route:POST /api/plugins/:name/enable",
         "route:GET /api/plugins/:name/panels/:panel",
+        "route:POST /api/plugins/:name/ui/actions/:action",
         "config:plugin_panels",
+        "config:plugin_ui",
         "method:notify",
+        "method:ui/action",
         "hook:on_notify",
         "hook:before_prompt",
         "fn:PluginBuilder::panel",
+        "fn:PluginBuilder::button",
+        "fn:PluginBuilder::message_button",
+        "fn:PluginBuilder::command",
+        "fn:PluginBuilder::message_command",
+        "fn:PluginBuilder::keybinding",
+        "fn:PluginBuilder::message_keybinding",
+        "fn:PluginBuilder::hide",
+        "fn:PluginBuilder::on_ui_action",
         "fn:PluginBuilder::on_notify",
-        "fn:notify"
+        "fn:notify",
+        "fn:normalise_ui_keys"
       ],
       "path": "plugins.md",
       "slug": "plugins",
       "source": "crates/kc-plugin-sdk/src/lib.rs:49",
-      "summary": "Build an out-of-process plugin that adds tools, hooks and inspector panels, register it, and debug it when it fails to start.",
+      "summary": "Build an out-of-process plugin that adds tools, hooks, inspector panels and UI controls (buttons, palette commands, keyboard shortcuts, hides), register it, and debug it when it fails to start.",
       "tags": [
         "plugins",
         "extension",
@@ -532,6 +576,10 @@
         "hooks",
         "jsonrpc",
         "panels",
+        "ui",
+        "buttons",
+        "commands",
+        "shortcuts",
         "notifications"
       ],
       "title": "Write and install a plugin"
@@ -642,10 +690,14 @@
         "config:retry_max_delay_ms",
         "config:retry_max_stream_restarts",
         "event:stream_retry",
+        "event:text_replaced",
         "route:GET /api/config",
         "route:PATCH /api/config",
         "route:POST /api/provider/test",
         "route:GET /api/models/catalog",
+        "request:messages[].name",
+        "internal:kc-runtime:context-digest",
+        "internal:kc-runtime:startup-recovery",
         "ui:Settings"
       ],
       "path": "provider-profiles.md",
@@ -661,6 +713,58 @@
         "llm"
       ],
       "title": "Configure a model provider"
+    },
+    {
+      "applies_to": [
+        "config:[model]",
+        "config:retry_max_retries",
+        "config:retry_max_stream_restarts",
+        "config:retry_base_delay_ms",
+        "config:retry_max_delay_ms",
+        "config:retry_max_total_secs",
+        "config:[limits]",
+        "config:limits.max_run_secs",
+        "event:stream_retry",
+        "event:text_replaced",
+        "event:run_finished"
+      ],
+      "path": "provider-stream-recovery.md",
+      "slug": "provider-stream-recovery",
+      "source": "crates/kc-runtime/src/agent.rs:13",
+      "summary": "Pre-content provider retries and post-content runtime restarts are separate, deadline-bounded layers.",
+      "tags": [
+        "provider",
+        "streaming",
+        "retries",
+        "deadline",
+        "repetition",
+        "events"
+      ],
+      "title": "Recover a provider stream without extra logical requests"
+    },
+    {
+      "applies_to": [
+        "route:POST /api/sessions/:id/messages",
+        "route:DELETE /api/sessions/:id/queues/:queued_id",
+        "event:queued_messages",
+        "event:steer_applied",
+        "config:limits.max_iterations",
+        "config:limits.max_run_secs"
+      ],
+      "path": "queued-run-recovery.md",
+      "slug": "queued-run-recovery",
+      "source": "crates/kc-runtime/src/agent.rs:53",
+      "summary": "Accepted input is applied, converted to an ordered follow-up, or remains recallable after submission conflicts.",
+      "tags": [
+        "runtime",
+        "steering",
+        "follow-up",
+        "queue",
+        "recall",
+        "failures",
+        "limits"
+      ],
+      "title": "Keep steering and follow-up input safe across run endings"
     },
     {
       "applies_to": [
@@ -832,6 +936,7 @@
         "config:terminals.scrollback_bytes",
         "config:terminals.max_terminals",
         "config:terminals.idle_timeout_secs",
+        "config:limits.command_env_passthrough",
         "env:KARUCODE_TERMINALS",
         "env:KARUCODE_TERMINALS_SHELL",
         "env:KARUCODE_TERMINALS_SCROLLBACK_BYTES",
@@ -953,7 +1058,30 @@
         "event:session_rewound",
         "route:GET /api/plugins/:name/panels/:panel",
         "config:plugin_panels",
-        "config:providers.models.context_window",
+        "route:POST /api/plugins/:name/ui/actions/:action",
+        "config:plugin_ui",
+        "config:ui",
+        "file:web/src/components/PluginSlot.tsx",
+        "file:web/src/components/uiContributions.ts",
+        "file:web/src/components/PluginControls.tsx",
+        "file:web/src/state/pluginUiPreferences.ts",
+        "file:web/src/components/PluginViews.tsx",
+        "file:web/src/components/viewPanelRegister.ts",
+        "file:web/src/styles/plugin-views.css",
+        "dir:plugins/demos",
+        "file:plugins/demos/README.md",
+        "file:scripts/verify_plugin_demos.py",
+        "cmd:python3 scripts/verify_plugin_demos.py",
+        "file:web/src/styles/plugin-slots.css",
+        "file:scripts/verify_plugin_ui.py",
+        "cmd:python3 scripts/verify_plugin_ui.py",
+        "fn:matchUiKeybinding",
+        "fn:applyUiPreferences",
+        "ui:keybinding",
+        "ui:plugin-controls",
+        "fn:registerPluginPanelRenderer",
+        "ui:PluginSlot",
+        "ui:plugin-slot-button",
         "config:[notifications]",
         "event:usage",
         "event:notification",
@@ -994,7 +1122,6 @@
         "file:web/src/lib/tps.ts",
         "file:web/src/state/promptTokens.ts",
         "file:web/src/lib/dockHeight.ts",
-        "fn:registerPluginPanelRenderer",
         "event:tool_call_finished",
         "tool:read_file",
         "config:model.supports_images",
@@ -1050,7 +1177,7 @@
       "path": "web-ui.md",
       "slug": "web-ui",
       "source": "web/src/app.tsx:1",
-      "summary": "Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary.",
+      "summary": "Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary.",
       "tags": [
         "ui",
         "web",
@@ -1059,7 +1186,9 @@
         "panels",
         "context",
         "shortcuts",
-        "preact"
+        "preact",
+        "plugins",
+        "buttons"
       ],
       "title": "Use the browser workspace"
     }

@@ -25,15 +25,19 @@ afterEach(() => {
 
 describe('apiRequest timeouts', () => {
   it('gives up on a hung request and says the server did not answer', async () => {
-    vi.useFakeTimers();
+    const deadline = new AbortController();
+    // Drive the native AbortSignal deadline rather than assuming advancing a fake
+    // clock schedules the composite signal consistently across runner versions.
+    // The signal still flows through the real timeout selection and hung request.
+    vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
     const fetchImpl = hangingFetch();
 
     const pending = apiRequest('/api/sessions/s_ab12', { fetchImpl });
-    // Attach the rejection handler before the clock moves, or the rejection is
+    // Attach the rejection handler before the deadline fires so it cannot be
     // reported as unhandled.
     const settled = pending.catch((error: unknown) => error);
 
-    await vi.advanceTimersByTimeAsync(30_001);
+    deadline.abort(new DOMException('Request timed out', 'TimeoutError'));
     const error = await settled;
 
     expect(error).toBeInstanceOf(ApiError);

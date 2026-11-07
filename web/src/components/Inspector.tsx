@@ -15,14 +15,38 @@ import { changeCounts } from './git/gitModel';
 import { SessionInfoTab, sessionInfoTooltip } from './SessionInfoTab';
 import { AgentsTab } from './AgentsTab';
 import { PluginPanelView } from './PluginPanelView';
+import { PluginSlot } from './PluginSlot';
+import { uniqueHostedPanels } from './pluginPanels';
+import {
+  isUiHidden,
+  UI_HIDE_INSPECTOR_CONTEXT,
+  UI_HIDE_INSPECTOR_TAB_AGENTS,
+  UI_HIDE_INSPECTOR_TAB_CHANGES,
+  UI_HIDE_INSPECTOR_TAB_SESSION,
+  UI_HIDE_INSPECTOR_TAB_WORKSPACE,
+  UI_SLOT_INSPECTOR_HEADER,
+  visibleTabs,
+} from './uiContributions';
 import { BranchIcon, CircleCheckIcon, CloseIcon, LayersIcon, PanelIcon, pluginPanelIcon } from './icons';
 
 /**
- * Refresh a plugin panel when the user asks for it. Kept next to the tabs so the
- * tab strip has a single place that knows a plugin tab is not a built-in one.
+ * The hide target of a built-in inspector tab, or null for a plugin tab.
  */
-function isPluginTab(id: InspectorTab): boolean {
-  return id.startsWith('plugin__');
+function inspectorTabTarget(id: InspectorTab): string | null {
+  switch (id) {
+    case 'workspace':
+      return UI_HIDE_INSPECTOR_TAB_WORKSPACE;
+    case 'changes':
+      return UI_HIDE_INSPECTOR_TAB_CHANGES;
+    case 'session':
+      return UI_HIDE_INSPECTOR_TAB_SESSION;
+    case 'agents':
+      return UI_HIDE_INSPECTOR_TAB_AGENTS;
+    default:
+      // A plugin's own tab is not hideable from the outside: its plugin already
+      // decides whether it declares one.
+      return null;
+  }
 }
 
 /**
@@ -100,14 +124,26 @@ export function Inspector(): JSX.Element {
   // Context is the top phone surface. The result sheet remains mounted, but must
   // not run a second focus trap or expose its controls behind the drawer.
   useFocusTrap(inspectorRef, isNarrow && isSheetOpen && !contextOpen, actions.closeSheets);
-  const pluginTabs = store.pluginPanelTabs.value;
+  const hostedPanels = uniqueHostedPanels(store.pluginPanelTabs.value);
+  const pluginTabs = hostedPanels.panels;
+  const ui = store.pluginUi.value;
+  // Built-in tabs first, minus anything a plugin asked the app to hide. The last
+  // surviving tab is never removed: an empty strip is worse than an ignored
+  // request, and the plugin diagnostics say the request was made.
+  const builtins = visibleTabs<TabItem<InspectorTab>>(
+    [
+      { id: 'workspace', label: 'Files' },
+      { id: 'changes', label: 'Git', title: 'Source control — stage, commit, branches, history' },
+      // The session's own numbers, not a second place to read commands: the
+      // transcript already renders every command card inline, with its output.
+      { id: 'session', label: 'Session usage', title: sessionInfoTooltip(store.sessionInfo.value) },
+      { id: 'agents', label: 'Agents', count: store.runningAgents.value },
+    ],
+    ui,
+    (id) => inspectorTabTarget(id),
+  );
   const items: TabItem<InspectorTab>[] = [
-    { id: 'workspace', label: 'Files' },
-    { id: 'changes', label: 'Git', title: 'Source control — stage, commit, branches, history' },
-    // The session's own numbers, not a second place to read commands: the
-    // transcript already renders every command card inline, with its output.
-    { id: 'session', label: 'Session usage', title: sessionInfoTooltip(store.sessionInfo.value) },
-    { id: 'agents', label: 'Agents', count: store.runningAgents.value },
+    ...builtins.tabs,
     // One tab per panel a plugin declared. The plugin supplies a data payload,
     // never markup: see `pluginPanels.ts` for why that matters.
     ...pluginTabs.map((panel) => ({
@@ -118,13 +154,12 @@ export function Inspector(): JSX.Element {
   ];
 
   // A panel that disappears (its plugin was disabled, or the tab list arrived
-  // after a boot) must not leave the inspector pointing at nothing.
+  // after a boot) must not leave the inspector pointing at nothing. The same goes
+  // for a tab a plugin just hid while it was the one on screen.
   useEffect(() => {
-    if (!isPluginTab(active)) return;
-    if (!pluginTabs.some((panel) => panel.hosted_id === active)) {
-      store.inspectorTab.value = 'workspace';
-    }
-  }, [active, pluginTabs]);
+    if (items.some((item) => item.id === active)) return;
+    store.inspectorTab.value = items[0]?.id ?? 'workspace';
+  }, [active, items.map((item) => item.id).join('|')]);
 
   return (
     <aside
@@ -144,17 +179,21 @@ export function Inspector(): JSX.Element {
             <span class="inspector-label">Results</span>
           </div>
           <div class="inspector-head-actions">
-            <button
-              type="button"
-              class="button button-small inspector-context-button"
-              onClick={() => workbench.openContext('now')}
-              aria-haspopup="dialog"
-              aria-expanded={contextOpen}
-              title="Current workspace, session, usage and access"
-            >
-              <LayersIcon size={13} />
-              <span>Context</span>
-            </button>
+            {/* Controls plugins contributed beside Context. */}
+            <PluginSlot slot={UI_SLOT_INSPECTOR_HEADER} />
+            {isUiHidden(ui, UI_HIDE_INSPECTOR_CONTEXT) ? null : (
+              <button
+                type="button"
+                class="button button-small inspector-context-button"
+                onClick={() => workbench.openContext('now')}
+                aria-haspopup="dialog"
+                aria-expanded={contextOpen}
+                title="Current workspace, session, usage and access"
+              >
+                <LayersIcon size={13} />
+                <span>Context</span>
+              </button>
+            )}
             <button
               type="button"
               class="icon-button inspector-quick"
@@ -175,6 +214,13 @@ export function Inspector(): JSX.Element {
           label="Inspector sections"
           idPrefix="inspector"
         />
+        {hostedPanels.duplicates.length > 0 ? (
+          <p class="inline-warning" role="alert">
+            {hostedPanels.duplicates.length} legacy plugin panel{hostedPanels.duplicates.length === 1 ? '' : 's'}
+            {' '}used a duplicate hosted id and {hostedPanels.duplicates.length === 1 ? 'was' : 'were'} omitted
+            to prevent two plugins aliasing one inspector tab. Reload the plugins to get fresh diagnostics.
+          </p>
+        ) : null}
 
         <TabPanel idPrefix="inspector" id="workspace" active={active === 'workspace'}>
           <WorkspaceTab />

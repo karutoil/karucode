@@ -538,17 +538,17 @@ impl Tool for RenameSession {
         {
             return err;
         }
-        match self
-            .0
-            .store()
-            .rename_session(&args.session_id, args.title.trim())
-            .await
+        match crate::routes::sessions::rename_session_and_emit(
+            &self.0,
+            &args.session_id,
+            args.title.trim(),
+        )
+        .await
         {
-            Ok(()) => ToolOutcome::ok(
-                json!({"renamed":true,"session_id":args.session_id,"title":args.title.trim()})
-                    .to_string(),
+            Ok(session) => ToolOutcome::ok(
+                json!({"renamed":true,"session_id":session.id,"title":session.title}).to_string(),
             ),
-            Err(e) => ToolOutcome::err(e.to_string()),
+            Err(e) => ToolOutcome::err(e.message),
         }
     }
 }

@@ -9,6 +9,8 @@ declare module 'node:fs' {
   export function readFileSync(path: string | URL, encoding: 'utf8' | 'utf-8'): string;
   export function readdirSync(path: string | URL): string[];
   export function writeFileSync(path: string | URL, data: string): void;
+  /** `scale.test.ts` walks the sources to find the custom properties written by JS. */
+  export function statSync(path: string | URL): { isDirectory(): boolean };
 }
 
 /** Read by the env-gated code generators (`first-paint.emit.test.ts`). */

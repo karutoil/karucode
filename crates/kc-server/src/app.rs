@@ -171,10 +171,13 @@ use tower_http::trace::TraceLayer;
 /// document's origin, so it can only carry same-origin content — it is not a way
 /// to load or leak anything from another host, which is what `img-src` exists to
 /// prevent. Remote images stay blocked, so a prompt-injected Markdown image still
-/// cannot phone home.
+/// cannot phone home. The same mechanism renders PDFs after an authenticated
+/// fetch: `frame-src 'self' blob:` permits that managed object URL in an iframe
+/// without opening remote frame origins. Route-local raw/artifact sandbox policies
+/// still win for those documents themselves.
 pub const CONTENT_SECURITY_POLICY: &str =
     "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
-     connect-src 'self'; frame-ancestors 'none'";
+     connect-src 'self'; frame-src 'self' blob:; frame-ancestors 'none'";
 
 /// Build the complete application router.
 pub fn build_router(state: AppState) -> Router {
@@ -705,5 +708,16 @@ mod tests {
             plain.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
             "nosniff"
         );
+        let csp = plain
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let frame_src = csp
+            .split(';')
+            .map(str::trim)
+            .find(|directive| directive.starts_with("frame-src"))
+            .expect("application response has an explicit frame-src");
+        assert_eq!(frame_src, "frame-src 'self' blob:");
     }
 }

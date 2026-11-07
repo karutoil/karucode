@@ -188,30 +188,46 @@ pub fn api_router() -> Router<AppState> {
         .route("/plugins/:name/enable", post(plugins::enable_plugin))
         .route("/plugins/:name/reload", post(plugins::reload_plugin))
         .route("/plugins/:name/panels/:panel", get(plugins::read_panel))
+        .route(
+            "/plugins/:name/ui/actions/:action",
+            post(plugins::run_ui_action),
+        )
         .route("/mcp", get(plugins::list_mcp))
         .route("/events", get(events::stream))
-        .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES));
+        .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
+        .layer(axum::middleware::from_fn(|request, next| {
+            json_error_shape_with_limit(request, next, Some(MAX_JSON_BODY_BYTES))
+        }));
 
     // The upload body is the raw file, not JSON, so it gets its own, larger
     // limit; the handler still enforces `MAX_UPLOAD_BYTES` and reports the
     // documented message.
     let upload_routes = Router::new()
         .route("/workspace/upload", post(workspace::upload))
-        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES));
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES))
+        .layer(axum::middleware::from_fn(|request, next| {
+            json_error_shape_with_limit(request, next, Some(MAX_UPLOAD_BODY_BYTES))
+        }));
 
     // The editor's save body is JSON but can carry a 2 MiB file, so it gets its
     // own limit too. `put` lives here rather than on the GET route above so that
     // a 413 comes from the handler that names `MAX_WRITE_BYTES`.
     let write_routes = Router::new()
         .route("/workspace/file", axum::routing::put(workspace::write_file))
-        .layer(DefaultBodyLimit::max(MAX_WRITE_BODY_BYTES));
+        .layer(DefaultBodyLimit::max(MAX_WRITE_BODY_BYTES))
+        .layer(axum::middleware::from_fn(|request, next| {
+            json_error_shape_with_limit(request, next, Some(MAX_WRITE_BODY_BYTES))
+        }));
 
     // A chat artifact is up to 1 MiB of HTML with JSON escaping on top, so it
     // needs its own transport limit for the same reason the editor does: the
     // handler's 413 names the real limit, and a transport rejection does not.
     let artifact_routes = Router::new()
         .route("/artifacts", post(artifacts::create))
-        .layer(DefaultBodyLimit::max(artifacts::MAX_ARTIFACT_BODY_BYTES));
+        .layer(DefaultBodyLimit::max(artifacts::MAX_ARTIFACT_BODY_BYTES))
+        .layer(axum::middleware::from_fn(|request, next| {
+            json_error_shape_with_limit(request, next, Some(artifacts::MAX_ARTIFACT_BODY_BYTES))
+        }));
 
     json_routes
         .merge(upload_routes)
@@ -271,6 +287,17 @@ fn admin_token_from(headers: &HeaderMap) -> Option<&str> {
 /// `{"error":{"code","message"}}` shape. Responses that are already JSON are
 /// passed through untouched.
 async fn json_error_shape(request: axum::extract::Request, next: Next) -> Response {
+    json_error_shape_with_limit(request, next, None).await
+}
+
+/// Rewrite a transport failure, carrying the route's actual body limit when its
+/// sub-router supplied one. The outer fallback has no such knowledge and must not
+/// claim that the generic JSON limit rejected an 8 MiB upload or a 2 MiB save.
+async fn json_error_shape_with_limit(
+    request: axum::extract::Request,
+    next: Next,
+    body_limit: Option<usize>,
+) -> Response {
     let response = next.run(request).await;
     let status = response.status();
     if !status.is_client_error() && !status.is_server_error() {
@@ -286,7 +313,14 @@ async fn json_error_shape(request: axum::extract::Request, next: Next) -> Respon
         return response;
     }
     let error = if status == StatusCode::PAYLOAD_TOO_LARGE {
-        ApiError::payload_too_large(MAX_JSON_BODY_BYTES, None)
+        match body_limit {
+            Some(limit) => ApiError::payload_too_large(limit, None),
+            None => ApiError::new(
+                status,
+                "payload_too_large",
+                "the request body exceeds this endpoint's configured size limit",
+            ),
+        }
     } else {
         ApiError::new(
             status,
@@ -459,6 +493,47 @@ mod tests {
             serde_json::json!("payload_too_large")
         );
         assert!(value["error"]["message"].is_string());
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(
+            !message.contains(&MAX_JSON_BODY_BYTES.to_string()),
+            "an unknown transport limit must not claim the generic JSON cap: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_route_transport_rejection_reports_its_actual_limit() {
+        use tower::ServiceExt;
+
+        let app: Router = Router::new()
+            .route(
+                "/echo",
+                post(|body: Bytes| async move { body.len().to_string() }),
+            )
+            .layer(DefaultBodyLimit::max(4096))
+            .layer(axum::middleware::from_fn(|request, next| {
+                json_error_shape_with_limit(request, next, Some(4096))
+            }));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/echo")
+                    .body(axum::body::Body::from(vec![b'x'; 8192]))
+                    .unwrap(),
+            )
+            .await
+            .expect("router call");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.contains("4096"), "{message}");
+        assert!(
+            !message.contains(&MAX_JSON_BODY_BYTES.to_string()),
+            "{message}"
+        );
     }
 
     #[test]

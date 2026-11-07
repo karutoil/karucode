@@ -44,8 +44,17 @@ import * as store from './store';
 
 let stream: EventStreamHandle | null = null;
 let bootstrapPromise: Promise<void> | null = null;
+interface BootstrapEventBuffer {
+  events: RawEvent[];
+  needsResync: boolean;
+}
+let bootstrapEventBuffer: BootstrapEventBuffer | null = null;
 let sessionGeneration = 0;
 let projectGeneration = 0;
+/** User navigation intents, including time spent waiting for a project switch. */
+let navigationGeneration = 0;
+let createGeneration = 0;
+let healthGeneration = 0;
 // Independent read generations handle overlapping reads even within one project;
 // projectGeneration handles the more dangerous A -> B -> A stale-response case.
 let sessionListReadGeneration = 0;
@@ -62,7 +71,10 @@ let resyncFailures = 0;
 const RESYNC_RETRIES = 3;
 const RESYNC_BACKOFF_MS = 1_000;
 let localMessageSequence = 0;
-let sendInFlight = false;
+const sendInFlight = new Set<string>();
+let modelMutationGeneration = 0;
+const modelMutationGenerations = new Map<string, number>();
+let modelMutationOwner: { sessionId: string; generation: number } | null = null;
 /** Queued ids with a recall request in flight; module-scoped so a remount cannot double-fire. */
 const recallingQueued = new Set<string>();
 let handoffToken = 0;
@@ -173,6 +185,10 @@ function clearSelection(): void {
  * remembered last session behind.
  */
 export function closeSession(): void {
+  // An explicit close is a later navigation too: a pending create must not reopen
+  // the session it was about to select after the reader deliberately closed it.
+  navigationGeneration += 1;
+  sessionGeneration += 1;
   clearSelection();
 }
 
@@ -182,17 +198,33 @@ function pickSession(): SessionSummary | null {
   return list.find((session) => session.id === last) ?? list[0] ?? null;
 }
 
-export function startStream(): void {
+function receiveRawEvent(event: RawEvent): void {
+  if (bootstrapEventBuffer) {
+    bootstrapEventBuffer.events.push(event);
+    return;
+  }
+  handleRawEvent(event);
+}
+
+function requestStreamResync(): void {
+  if (bootstrapEventBuffer) {
+    bootstrapEventBuffer.needsResync = true;
+    return;
+  }
+  scheduleGapResync();
+}
+
+function openStream(duringBootstrap: boolean): void {
   stopStream();
-  if (store.boot.value !== 'ready') return;
+  if (!duringBootstrap && store.boot.value !== 'ready') return;
   let opens = 0;
   stream = startEventStream({
     token: getAuthToken(),
-    onEvent: handleRawEvent,
+    onEvent: receiveRawEvent,
     // Normal reconnects resume from Last-Event-ID. A remaining seq hole, an
     // explicit lag marker or a resync control still requires an authoritative read.
-    onGap: () => scheduleGapResync(),
-    onResync: () => scheduleGapResync(),
+    onGap: requestStreamResync,
+    onResync: requestStreamResync,
     onStatus: (state, detail) => {
       store.connection.value = {
         ...store.connection.value,
@@ -207,13 +239,18 @@ export function startStream(): void {
     },
     onOpen: () => {
       opens += 1;
-      // The first open follows bootstrap; only reconnect needs a resync.
-      if (opens === 1) return;
+      // Bootstrap owns the first authoritative reads. Reconnect opens during it
+      // must not launch a second, unordered snapshot either.
+      if (opens === 1 || bootstrapEventBuffer) return;
       void refreshSessions();
       const id = store.currentSessionId.value;
       if (id) void openSession(id, { silent: true, preserveLive: true });
     },
   });
+}
+
+export function startStream(): void {
+  openStream(false);
 }
 
 export function stopStream(): void {
@@ -372,6 +409,7 @@ function handleRawEvent(raw: RawEvent): void {
   }
 
   if (event.type === 'session_deleted') {
+    store.forgetSessionNotifications(event.session_id);
     if (store.currentSessionId.value === event.session_id) {
       const next = store.sessions.value[0] ?? null;
       store.writeLastSessionId(null);
@@ -419,6 +457,15 @@ function handleRawEvent(raw: RawEvent): void {
   }
 
   applyChatEvent(event);
+}
+
+function releaseBootstrapEvents(buffer: BootstrapEventBuffer): void {
+  if (bootstrapEventBuffer !== buffer) return;
+  // Open the live gate before replaying: a handler is then indistinguishable from
+  // an event that arrives immediately after this synchronous release pass.
+  bootstrapEventBuffer = null;
+  for (const event of buffer.events) handleRawEvent(event);
+  if (buffer.needsResync) scheduleGapResync(0);
 }
 
 function applyChatEvent(event: KarucodeEvent): void {
@@ -603,12 +650,18 @@ export function scheduleSessionsRefresh(): void {
 
 export async function bootstrap(force = false): Promise<void> {
   if (bootstrapPromise && !force) return bootstrapPromise;
+  const buffer: BootstrapEventBuffer = { events: [], needsResync: false };
+  bootstrapEventBuffer = buffer;
   bootstrapPromise = (async () => {
     store.boot.value = 'loading';
     store.bootError.value = null;
     store.sessionsLoading.value = true;
     replaceOverlay(null);
     try {
+      // Subscribe before the first snapshot and hold its frames until every
+      // snapshot has committed. Otherwise creation/notification frames between
+      // the reads and startStream have no subscriber and are lost forever.
+      openStream(true);
       const [health, config, projectList] = await Promise.all([
         api.getHealth(),
         api.getConfig(),
@@ -645,8 +698,8 @@ export async function bootstrap(force = false): Promise<void> {
       store.boot.value = 'ready';
       if (target) await openSession(target.id);
       else clearSelection();
-      startStream();
     } catch (error) {
+      stopStream();
       store.sessionsLoading.value = false;
       store.projectsLoading.value = false;
       if (isUnauthorized(error)) {
@@ -662,6 +715,8 @@ export async function bootstrap(force = false): Promise<void> {
         lastError: toErrorMessage(error),
         checkedAt: Date.now(),
       };
+    } finally {
+      releaseBootstrapEvents(buffer);
     }
   })().finally(() => {
     bootstrapPromise = null;
@@ -679,6 +734,8 @@ export interface OpenSessionOptions {
    * messages, so replacing the view mid-answer would delete the text arriving now.
    */
   preserveLive?: boolean;
+  /** Internal owner shared across an await in `openSessionInProject`. */
+  navigationOwner?: number;
 }
 
 /**
@@ -712,6 +769,8 @@ export function focusSession(sessionId: string, projectId?: string | null): void
 export async function openSession(id: string, options: OpenSessionOptions = {}): Promise<boolean> {
   const silent = options.silent ?? false;
   if (id === store.currentSessionId.value && !silent && !options.force) return false;
+  if (options.navigationOwner === undefined) navigationGeneration += 1;
+  else if (options.navigationOwner !== navigationGeneration) return false;
 
   const generation = (sessionGeneration += 1);
   const sessionChanged = store.currentSessionId.value !== id;
@@ -805,13 +864,34 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
 }
 
 export async function createSession(): Promise<Session | null> {
+  const projectId = store.currentProjectId.value;
+  const projectRead = projectGeneration;
+  const sessionRead = sessionGeneration;
+  // Create is itself a navigation intent. In particular it supersedes the
+  // automatic "open latest" step of a project switch whose list is still loading.
+  const navigationOwner = ++navigationGeneration;
+  const intent = ++createGeneration;
   try {
-    const session = await api.createSession(undefined, store.currentProjectId.value);
+    const session = await api.createSession(undefined, projectId);
+    if (
+      intent !== createGeneration ||
+      projectRead !== projectGeneration ||
+      sessionRead !== sessionGeneration ||
+      navigationOwner !== navigationGeneration ||
+      projectId !== store.currentProjectId.value
+    ) {
+      // Creation succeeded remotely, but this response no longer owns navigation.
+      // In particular do not insert A's row into B's newly loaded project list.
+      return null;
+    }
     mergeSummary(summaryFromSession(session));
     store.mobileSheet.value = null;
-    await openSession(session.id);
-    store.composerFocusTick.value += 1;
-    return session;
+    await openSession(session.id, { navigationOwner });
+    if (store.currentProjectId.value === projectId && store.currentSessionId.value === session.id) {
+      store.composerFocusTick.value += 1;
+      return session;
+    }
+    return null;
   } catch (error) {
     if (isUnauthorized(error)) enterAuthState();
     else store.pushToast(toErrorMessage(error));
@@ -848,6 +928,7 @@ export async function deleteSessionById(id: string): Promise<boolean> {
   try {
     await api.deleteSession(id);
     promptTokens.forgetPromptTokens(id);
+    store.forgetSessionNotifications(id);
     store.sessions.value = store.sessions.value.filter((session) => session.id !== id);
     if (store.currentSessionId.value === id) {
       const next = store.sessions.value[0] ?? null;
@@ -869,9 +950,9 @@ export async function sendChatMessage(content: string): Promise<boolean> {
   const projectRead = projectGeneration;
   const trimmed = content.trim();
   if (!sessionId || trimmed === '') return false;
-  if (store.chat.value.running || sendInFlight) return false;
+  if (store.chat.value.running || sendInFlight.has(sessionId)) return false;
 
-  sendInFlight = true;
+  sendInFlight.add(sessionId);
   localMessageSequence += 1;
   const localId = `local:${Date.now()}:${localMessageSequence}`;
   const optimistic: MessageItem = {
@@ -909,15 +990,23 @@ export async function sendChatMessage(content: string): Promise<boolean> {
     scheduleSessionsRefresh();
     return true;
   } catch (error) {
-    if (store.currentSessionId.value === sessionId) {
-      const current = store.chat.value;
-      store.chat.value = {
-        ...current,
-        items: current.items.filter((item) => item.id !== localId),
-        running: false,
-        runStatus: null,
-      };
+    // A silent same-session snapshot is a newer owner too. Check everything before
+    // removing the optimistic row, changing run state, reporting an old error, or
+    // launching another read: doing that afterwards already clipped the new run.
+    if (
+      generation !== sessionGeneration ||
+      projectRead !== projectGeneration ||
+      store.currentSessionId.value !== sessionId
+    ) {
+      return false;
     }
+    const current = store.chat.value;
+    store.chat.value = {
+      ...current,
+      items: current.items.filter((item) => item.id !== localId),
+      running: false,
+      runStatus: null,
+    };
     if (isUnauthorized(error)) {
       enterAuthState();
     } else if (error instanceof ApiError && error.status === 409) {
@@ -925,16 +1014,10 @@ export async function sendChatMessage(content: string): Promise<boolean> {
     } else {
       store.pushToast(toErrorMessage(error));
     }
-    if (
-      generation === sessionGeneration &&
-      projectRead === projectGeneration &&
-      store.currentSessionId.value === sessionId
-    ) {
-      void openSession(sessionId, { silent: true });
-    }
+    void openSession(sessionId, { silent: true });
     return false;
   } finally {
-    sendInFlight = false;
+    sendInFlight.delete(sessionId);
   }
 }
 
@@ -1144,8 +1227,10 @@ export async function resolveApproval(
 }
 
 export async function checkHealth(): Promise<boolean> {
+  const generation = ++healthGeneration;
   try {
     const result = await api.getHealth();
+    if (generation !== healthGeneration) return false;
     store.health.value = result;
     store.connection.value = {
       ...store.connection.value,
@@ -1155,6 +1240,7 @@ export async function checkHealth(): Promise<boolean> {
     };
     return true;
   } catch (error) {
+    if (generation !== healthGeneration) return false;
     if (isUnauthorized(error)) {
       enterAuthState();
       return false;
@@ -1267,6 +1353,48 @@ export async function switchModel(providerId: string, modelId: string): Promise<
   return true;
 }
 
+interface SessionModelMutation {
+  sessionId: string;
+  generation: number;
+  sessionRead: number;
+  projectRead: number;
+}
+
+function beginSessionModelMutation(sessionId: string): SessionModelMutation {
+  const mutation = {
+    sessionId,
+    generation: ++modelMutationGeneration,
+    sessionRead: sessionGeneration,
+    projectRead: projectGeneration,
+  };
+  modelMutationGenerations.set(sessionId, mutation.generation);
+  modelMutationOwner = { sessionId, generation: mutation.generation };
+  store.sessionModelMutationPending.value = sessionId;
+  return mutation;
+}
+
+function ownsVisibleSessionModelMutation(mutation: SessionModelMutation): boolean {
+  return (
+    modelMutationGenerations.get(mutation.sessionId) === mutation.generation &&
+    mutation.sessionRead === sessionGeneration &&
+    mutation.projectRead === projectGeneration &&
+    store.currentSessionId.value === mutation.sessionId
+  );
+}
+
+function finishSessionModelMutation(mutation: SessionModelMutation): void {
+  if (modelMutationGenerations.get(mutation.sessionId) === mutation.generation) {
+    modelMutationGenerations.delete(mutation.sessionId);
+  }
+  if (
+    modelMutationOwner?.sessionId === mutation.sessionId &&
+    modelMutationOwner.generation === mutation.generation
+  ) {
+    modelMutationOwner = null;
+    store.sessionModelMutationPending.value = null;
+  }
+}
+
 /**
  * Pin the current session to a provider + model. `reasoningEffort` rides along
  * (`none` turns reasoning off; absent keeps the endpoint's default). Pass no
@@ -1279,6 +1407,7 @@ export async function setSessionModelSelection(
 ): Promise<boolean> {
   const sessionId = store.currentSessionId.value;
   if (!sessionId) return false;
+  const mutation = beginSessionModelMutation(sessionId);
   const selection = {
     provider: providerId,
     model: modelId,
@@ -1286,6 +1415,7 @@ export async function setSessionModelSelection(
   };
   try {
     const session = await api.setSessionModel(sessionId, selection);
+    if (!ownsVisibleSessionModelMutation(mutation)) return false;
     store.sessions.value = store.sessions.value.map((entry) =>
       entry.id === sessionId ? { ...entry, model: session.model ?? null } : entry,
     );
@@ -1297,12 +1427,15 @@ export async function setSessionModelSelection(
     store.pushToast(`This session now uses ${label}.`, 'success');
     return true;
   } catch (error) {
+    if (!ownsVisibleSessionModelMutation(mutation)) return false;
     if (isUnauthorized(error)) {
       enterAuthState();
       return false;
     }
     store.pushToast(toErrorMessage(error));
     return false;
+  } finally {
+    finishSessionModelMutation(mutation);
   }
 }
 
@@ -1310,8 +1443,10 @@ export async function setSessionModelSelection(
 export async function clearSessionModelSelection(): Promise<boolean> {
   const sessionId = store.currentSessionId.value;
   if (!sessionId) return false;
+  const mutation = beginSessionModelMutation(sessionId);
   try {
     const session = await api.setSessionModel(sessionId, null);
+    if (!ownsVisibleSessionModelMutation(mutation)) return false;
     store.sessions.value = store.sessions.value.map((entry) =>
       entry.id === sessionId ? { ...entry, model: session.model ?? null } : entry,
     );
@@ -1321,12 +1456,15 @@ export async function clearSessionModelSelection(): Promise<boolean> {
     store.pushToast('This session follows the install default again.', 'success');
     return true;
   } catch (error) {
+    if (!ownsVisibleSessionModelMutation(mutation)) return false;
     if (isUnauthorized(error)) {
       enterAuthState();
       return false;
     }
     store.pushToast(toErrorMessage(error));
     return false;
+  } finally {
+    finishSessionModelMutation(mutation);
   }
 }
 
@@ -1387,11 +1525,24 @@ export async function refreshProjects(): Promise<void> {
  * Show another project. Sessions are fetched per project from the server, so
  * switching never mixes two projects' histories (or their chat state).
  */
+interface ProjectSwitchOptions {
+  navigationOwner?: number;
+  /** A targeted open waits and selects its own session after the project read. */
+  openLatest?: boolean;
+}
+
 export async function switchProject(id: string): Promise<void> {
+  await switchProjectInternal(id);
+}
+
+async function switchProjectInternal(id: string, options: ProjectSwitchOptions = {}): Promise<void> {
+  if (options.navigationOwner !== undefined && options.navigationOwner !== navigationGeneration) return;
   if (store.currentProjectId.value === id) {
     store.projectSheetOpen.value = false;
     return;
   }
+  if (options.navigationOwner === undefined) navigationGeneration += 1;
+  const navigationOwner = options.navigationOwner ?? navigationGeneration;
   // Invalidate in-flight chat/session/agent reads before changing the project.
   const generation = ++projectGeneration;
   sessionGeneration += 1;
@@ -1418,8 +1569,12 @@ export async function switchProject(id: string): Promise<void> {
   clearSelection();
   await refreshSessions();
   if (generation !== projectGeneration || store.currentProjectId.value !== id) return;
+  // A later create, close or manual selection owns navigation now. The switch's
+  // old automatic selection must not overwrite it after this await.
+  if (navigationOwner !== navigationGeneration) return;
+  if (options.openLatest === false) return;
   const next = pickSession();
-  if (next) await openSession(next.id);
+  if (next) await openSession(next.id, { navigationOwner });
 }
 
 export async function createProject(name: string, path: string): Promise<Project | null> {
@@ -1712,11 +1867,10 @@ export async function loadOlderAgent(): Promise<void> {
 
 /** Jump from an agent to the session it belongs to (switching projects if needed). */
 export async function openAgentSession(agent: AgentSummary): Promise<void> {
-  if (agent.project_id && agent.project_id !== store.currentProjectId.value) {
-    await switchProject(agent.project_id);
-  }
-  closeAgentDetail();
-  await openSession(agent.session_id);
+  await openSessionInProject(agent.project_id ?? null, agent.session_id);
+  // The shared helper owns the whole project/session navigation. Do not close a
+  // newer agent detail either if this old request lost that navigation race.
+  if (store.currentSessionId.value === agent.session_id) closeAgentDetail();
 }
 
 // ---------------------------------------------------------------------------
@@ -1983,6 +2137,95 @@ export function resetPluginPanelData(): void {
   store.pluginPanelData.value = {};
 }
 
+/** Kept so two rapid clicks on one contributed button run one request. */
+const pluginUiInFlight = new Set<string>();
+
+/**
+ * Run one control a plugin contributed: a `ui/action`, or a user turn.
+ *
+ * This is the click path for every plugin button and palette command, and it is
+ * deliberately the *only* path — the component that draws a control does not
+ * touch the network, so attribution, in-flight suppression and error reporting
+ * live in one place.
+ *
+ * What happens, in order:
+ *
+ * 1. a contribution with a `message` sends that turn (queued behind a running
+ *    run, exactly like the composer) and does nothing else;
+ * 2. a contribution with an `action` posts to
+ *    `POST /api/plugins/:name/ui/actions/:action` scoped by the current project
+ *    and session;
+ * 3. the answer is a toast, a set of panels to re-read, and at most one URL to
+ *    open. The URL is re-checked here — `http`/`https` only — before a tab is
+ *    opened, because this is where it is actually used.
+ *
+ * A failed action is shown as a failure and never fakes success. Returns whether
+ * anything happened, so a caller can keep a spinner honest.
+ */
+export async function runPluginContributions(
+  contribution: store.PluginUiContribution,
+): Promise<boolean> {
+  const label = contribution.label;
+  if (contribution.message) {
+    if (!store.currentSessionId.value) {
+      store.pushToast(`Open a session to use “${label}”.`, 'error');
+      return false;
+    }
+    if (store.chat.value.running) {
+      const queued = await queueChatMessage('follow_up', { content: contribution.message });
+      if (queued) {
+        store.pushToast(`Queued “${label}” behind the running turn.`, 'success');
+      }
+      return queued;
+    }
+    return sendChatMessage(contribution.message);
+  }
+  const action = contribution.action;
+  if (!action) return false;
+  const key = `${contribution.plugin}:${action}`;
+  if (pluginUiInFlight.has(key)) return false;
+  pluginUiInFlight.add(key);
+  try {
+    const result = await api.runPluginUiAction(contribution.plugin, action, {
+      project: store.currentProjectId.value,
+      session: store.currentSessionId.value,
+    });
+    const message = result.message.trim();
+    if (message !== '') {
+      store.pushToast(message, result.ok ? 'success' : 'error');
+    }
+    for (const panel of result.refresh) {
+      const tab = store.pluginPanelTabs.value.find(
+        (candidate) => candidate.plugin === contribution.plugin && candidate.id === panel,
+      );
+      if (tab) void refreshPluginPanel(tab);
+    }
+    if (result.open_url && isOpenableUiUrl(result.open_url)) {
+      window.open(result.open_url, '_blank', 'noopener,noreferrer');
+    }
+    return true;
+  } catch (error) {
+    if (isUnauthorized(error)) enterAuthState();
+    else store.pushToast(`“${label}” failed: ${toErrorMessage(error)}`, 'error');
+    return false;
+  } finally {
+    pluginUiInFlight.delete(key);
+  }
+}
+
+/**
+ * The client-side half of the URL rule: absolute `http`/`https`, nothing else.
+ *
+ * The host already drops anything else, and this re-checks because *this* is the
+ * code that hands the string to the browser.
+ */
+export function isOpenableUiUrl(url: string): boolean {
+  const trimmed = url.trim();
+  if (trimmed === '' || trimmed.length > 2_048 || /\s/.test(trimmed)) return false;
+  const lower = trimmed.toLowerCase();
+  return lower.startsWith('https://') || lower.startsWith('http://');
+}
+
 export function openSettings(): void {
   replaceOverlay('settings');
 }
@@ -2097,15 +2340,21 @@ export async function openSessionInProject(
   projectId: string | null,
   sessionId: string,
 ): Promise<boolean> {
+  const navigationOwner = ++navigationGeneration;
   if (projectId !== null && projectId !== store.currentProjectId.value) {
     if (controlPlaneOpen.value) controlPlaneOpen.value = false;
-    await switchProject(projectId);
-    // A later navigation may have won while this switch was awaiting its list.
-    if (store.currentProjectId.value !== projectId) return false;
+    await switchProjectInternal(projectId, { navigationOwner, openLatest: false });
+    // A later navigation may have won while this switch was awaiting its list,
+    // including another session selected in this same destination project.
+    if (
+      navigationOwner !== navigationGeneration ||
+      store.currentProjectId.value !== projectId
+    ) return false;
   }
+  if (navigationOwner !== navigationGeneration) return false;
   store.mobileSheet.value = null;
   store.paletteOpen.value = false;
-  return openSession(sessionId);
+  return openSession(sessionId, { navigationOwner });
 }
 
 // ---------------------------------------------------------------------------
@@ -2248,18 +2497,26 @@ export function registerAuthHandler(): () => void {
 export function resetRuntimeForTests(): void {
   stopStream();
   bootstrapPromise = null;
+  bootstrapEventBuffer = null;
   replaceOverlay(null);
   // Invalidate, rather than reset to zero, so a deferred response from before a
   // test teardown cannot become current again in the next test.
   sessionGeneration += 1;
   projectGeneration += 1;
+  navigationGeneration += 1;
+  createGeneration += 1;
+  healthGeneration += 1;
+  modelMutationGeneration += 1;
+  modelMutationGenerations.clear();
+  modelMutationOwner = null;
+  store.sessionModelMutationPending.value = null;
   agentDetailGeneration += 1;
   rewindGeneration += 1;
   resultPanelWidthWriteGeneration += 1;
   resultPanelWidthWrites.clear();
   sessionListReadGeneration += 1;
   agentListReadGeneration += 1;
-  sendInFlight = false;
+  sendInFlight.clear();
   refreshingSessionId = null;
   refreshQueue = [];
   resyncInFlight = false;

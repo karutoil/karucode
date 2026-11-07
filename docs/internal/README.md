@@ -15,6 +15,7 @@ cargo run -p kc-docs -- --check   # what CI runs
 
 | Topic | What it covers | Source |
 | --- | --- | --- |
+| [`approval-expiry-recovery`](approval-expiry-recovery.md) | Each approval has an independent expiry scope, and its in-memory waiter survives until expiry is durable. | `crates/kc-runtime/src/approvals.rs:11` |
 | [`approvals`](approvals.md) | The four approval modes, the allowlists behind them, and how a pending approval is answered or times out. | `crates/kc-core/src/approval.rs:1` |
 | [`artifacts`](artifacts.md) | An agent can put a diagram, an HTML mock, a table or a document in its reply, and the web UI draws it as a card with a live Preview and the Source it came from. | `web/src/lib/artifacts.ts:4` |
 | [`builtin-tools`](builtin-tools.md) | What each first-party tool does, how it is gated, and the limits and gotchas that shape its output. | `crates/kc-tools/src/lib.rs:7` |
@@ -26,11 +27,13 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`mcp`](mcp.md) | Add stdio or streamable-HTTP MCP servers to the config and use their tools through the same approval policy. | `crates/kc-mcp/src/lib.rs:18` |
 | [`missions`](missions.md) | Group explicitly started project-local sessions across projects in durable missions. | `crates/kc-server/src/routes/missions.rs:3` |
 | [`notifications`](notifications.md) | karucode pings you when a run settles, parks on an approval or fails — with a sound per kind, desktop notifications, an unread badge, and four independent ways to turn it off. | `crates/kc-core/src/notify.rs:24` |
-| [`plugins`](plugins.md) | Build an out-of-process plugin that adds tools, hooks and inspector panels, register it, and debug it when it fails to start. | `crates/kc-plugin-sdk/src/lib.rs:49` |
+| [`plugins`](plugins.md) | Build an out-of-process plugin that adds tools, hooks, inspector panels and UI controls (buttons, palette commands, keyboard shortcuts, hides), register it, and debug it when it fails to start. | `crates/kc-plugin-sdk/src/lib.rs:49` |
 | [`project-instructions`](project-instructions.md) | How karucode finds a workspace's instructions file, which name wins, how much of it reaches the system prompt, and why it cannot override your request. | `crates/kc-core/src/prompt.rs:3` |
 | [`projects`](projects.md) | How projects map to directories, how sessions are confined to one, and what happens when a project's directory moves or is deleted. | `crates/kc-server/src/state.rs:6` |
 | [`prompt-cache`](prompt-cache.md) | Why a long run can re-bill its whole context every turn, what karucode does to keep the cached prefix stable, and how to read the hit rate. | `crates/kc-runtime/src/context.rs:89` |
 | [`provider-profiles`](provider-profiles.md) | Point karucode at any OpenAI-compatible endpoint, by environment or as named profiles, and choose the active model. | `crates/kc-provider/src/lib.rs:8` |
+| [`provider-stream-recovery`](provider-stream-recovery.md) | Pre-content provider retries and post-content runtime restarts are separate, deadline-bounded layers. | `crates/kc-runtime/src/agent.rs:13` |
+| [`queued-run-recovery`](queued-run-recovery.md) | Accepted input is applied, converted to an ordered follow-up, or remains recallable after submission conflicts. | `crates/kc-runtime/src/agent.rs:53` |
 | [`run-server`](run-server.md) | Build the UI and the binary, start it against a workspace, and know what each CLI flag and startup failure means. | `crates/kc-server/src/bootstrap.rs:8` |
 | [`security`](security.md) | What karucode protects by default, what it explicitly does not, and the recipe for safe remote access. | `crates/kc-server/src/app.rs:16` |
 | [`session-titles`](session-titles.md) | Sessions are titled from their first message; with `[titles]` on (the default) a model writes a short, plain-language title instead, using the session's own model or a cheaper one you pick. | `crates/kc-server/src/titles.rs:1` |
@@ -38,6 +41,6 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`terminals`](terminals.md) | A real shell in the browser that survives a reload, another browser and a cleared cache - and the honest limit of what survives a restart. | `crates/kc-server/src/terminals.rs:1` |
 | [`themes`](themes.md) | Built-in palettes, live colour and density editing, fonts and custom CSS, the transcript view options (cards or rows, grouped calls, folded turns), saved in the browser and shareable as a theme JSON file. | `web/src/theme/engine.ts:1` |
 | [`tool-call-errors`](tool-call-errors.md) | A call that fails because of how it was written comes back with a working version of itself, so the next attempt is correct instead of another guess. | `crates/kc-core/src/tool.rs:1` |
-| [`web-ui`](web-ui.md) | Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
+| [`web-ui`](web-ui.md) | Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-24 topic(s).
+27 topic(s).

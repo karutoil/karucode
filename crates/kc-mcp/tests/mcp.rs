@@ -57,6 +57,47 @@ fn stdio_server(name: &str) -> McpServerConfig {
     }
 }
 
+#[cfg(unix)]
+fn recorded_stdio_server(name: &str, pid_file: &Path) -> McpServerConfig {
+    let mut config = stdio_server(name);
+    config.command = vec![
+        "sh".into(),
+        "-c".into(),
+        "printf '%s\\n' \"$$\" > \"$1\"; exec sh \"$2\"".into(),
+        "kc-mcp-pid-recorder".into(),
+        pid_file.to_string_lossy().into_owned(),
+        FIXTURE.into(),
+    ];
+    config
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 only probes the specific test child, never its group.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+async fn assert_pid_reaped(pid: u32) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while pid_alive(pid) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("MCP child {pid} was still alive or unreaped after five seconds"));
+}
+
+#[cfg(unix)]
+fn recorded_pid(pid_file: &Path) -> u32 {
+    std::fs::read_to_string(pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
 struct TestSettings;
 
 #[async_trait]
@@ -175,6 +216,47 @@ async fn stdio_handshake_and_tools_list() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_a_live_manager_kills_and_reaps_the_real_mcp_pid() {
+    let dir = temp_dir("drop-mcp-pid");
+    let pid_file = dir.join("pid");
+    let mut manager = McpManager::new(&[recorded_stdio_server("pid-drop", &pid_file)]);
+    manager.connect_all().await;
+    assert_eq!(
+        manager.statuses()[0].status,
+        "connected",
+        "{:?}",
+        manager.statuses()
+    );
+    let pid = recorded_pid(&pid_file);
+    assert!(pid_alive(pid));
+
+    drop(manager);
+    assert_pid_reaped(pid).await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_stdio_shutdown_still_waits_for_the_real_reap() {
+    let dir = temp_dir("shutdown-mcp-pid");
+    let pid_file = dir.join("pid");
+    let mut manager = McpManager::new(&[recorded_stdio_server("pid-shutdown", &pid_file)]);
+    manager.connect_all().await;
+    assert_eq!(manager.statuses()[0].status, "connected");
+    let pid = recorded_pid(&pid_file);
+
+    manager.shutdown().await;
+    // No polling should be needed here: close retains and awaits the supervisor.
+    assert!(
+        !pid_alive(pid),
+        "shutdown returned while {pid} was alive/unreaped"
+    );
+    assert_eq!(manager.statuses()[0].status, "disconnected");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[tokio::test]
 async fn stdio_tools_call_joins_text_content() {
     let dir = temp_dir("stdio-call");
@@ -222,6 +304,102 @@ async fn stdio_is_error_and_jsonrpc_errors_become_failed_outcomes() {
 
     // Remote errors do not disconnect the server.
     assert_eq!(manager.statuses()[0].status, "connected");
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Real stdio peer that deliberately reflects its configured environment value
+/// on four public surfaces. It must remain untouched in the process but be
+/// scrubbed before status, logs, provider transcripts or a model see it.
+const SECRET_REFLECTING_SERVER: &str = r#"
+import json, os, sys
+SECRET = os.environ["MCP_PRIVATE"]
+PHASE = os.environ.get("MCP_REFLECT_PHASE", "")
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def result(rid, value):
+    send({"jsonrpc": "2.0", "id": rid, "result": value})
+
+def reflected_error(rid):
+    send({"jsonrpc": "2.0", "id": rid,
+          "error": {"code": -32000, "message": "reflected=" + SECRET}})
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    if method == "initialize":
+        if PHASE == "initialize":
+            reflected_error(rid)
+        else:
+            result(rid, {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
+                         "serverInfo": {"name": "secrets", "version": "0"}})
+    elif method == "tools/list":
+        result(rid, {"tools": [
+            {"name": name, "description": name, "inputSchema": {"type": "object"}}
+            for name in ["content_ok", "content_error", "remote"]
+        ]})
+    elif method == "tools/call":
+        name = (req.get("params") or {}).get("name")
+        if name == "remote":
+            reflected_error(rid)
+        else:
+            result(rid, {"content": [{"type": "text", "text": "reflected=" + SECRET}],
+                         "isError": name == "content_error"})
+"#;
+
+#[tokio::test]
+async fn configured_stdio_env_is_scrubbed_from_connection_status_and_all_tool_content() {
+    let dir = temp_dir("stdio-env-reflection");
+    let script = dir.join("reflect_secret.py");
+    std::fs::write(&script, SECRET_REFLECTING_SERVER).unwrap();
+    let secret = "env-super-secret-9182";
+
+    let mut config = stdio_server("connection-secret");
+    config.command = vec!["python3".into(), script.to_string_lossy().into_owned()];
+    config.env.insert("MCP_PRIVATE".into(), secret.into());
+    config
+        .env
+        .insert("MCP_REFLECT_PHASE".into(), "initialize".into());
+    let mut manager = McpManager::new(&[config]);
+    manager.connect_all().await;
+    let status = &manager.statuses()[0];
+    assert_eq!(status.status, "failed", "{status:?}");
+    let rendered = format!("{status:?}");
+    assert!(!rendered.contains(secret), "{rendered}");
+    assert!(rendered.contains("[redacted]"), "{rendered}");
+    manager.shutdown().await;
+
+    let mut config = stdio_server("tool-secret");
+    config.command = vec!["python3".into(), script.to_string_lossy().into_owned()];
+    config.env.insert("MCP_PRIVATE".into(), secret.into());
+    let mut manager = McpManager::new(&[config]);
+    manager.connect_all().await;
+    assert_eq!(
+        manager.statuses()[0].status,
+        "connected",
+        "{:?}",
+        manager.statuses()
+    );
+    for name in ["content_ok", "content_error", "remote"] {
+        let out = call_tool(
+            find(&manager.tools(), &format!("mcp__tool-secret__{name}")),
+            &dir,
+            json!({}),
+        )
+        .await;
+        assert_eq!(out.ok, name == "content_ok", "{name}: {}", out.content);
+        assert!(!out.content.contains(secret), "{name}: {}", out.content);
+        assert!(
+            out.content.contains("[redacted]"),
+            "{name}: {}",
+            out.content
+        );
+    }
+    let rendered = format!("{:?}", manager.statuses());
+    assert!(!rendered.contains(secret), "{rendered}");
     manager.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -650,6 +828,115 @@ async fn http_transport_handshakes_calls_and_carries_the_session_id() {
 
     manager.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn http_json_never_accepts_a_sole_response_with_the_wrong_id_type_or_value() {
+    let handler: Handler = Arc::new(|request| {
+        let body = request.json_body();
+        match body["method"].as_str().unwrap_or_default() {
+            "initialize" => rpc_result(request, initialize_result()),
+            "notifications/initialized" => (202, vec![], String::new()),
+            "tools/list" => rpc_result(
+                request,
+                json!({"tools": [{"name": "echo", "description": "Echo.",
+                                  "inputSchema": {"type": "object"}}]}),
+            ),
+            "tools/call" => {
+                let wrong_id = if body["params"]["arguments"]["kind"] == "string" {
+                    json!("1002")
+                } else {
+                    json!(1002)
+                };
+                let payload = json!({"jsonrpc": "2.0", "id": wrong_id,
+                    "result": {"content": [{"type": "text", "text": "WRONG_ID_ACCEPTED"}]}});
+                (
+                    200,
+                    vec![("content-type".into(), "application/json".into())],
+                    payload.to_string(),
+                )
+            }
+            other => panic!("unexpected method {other}"),
+        }
+    });
+    let server = CannedHttp::start(handler).await;
+    let mut manager = McpManager::new(&[http_config("ids", server.url("/mcp"), BTreeMap::new())]);
+    manager.connect_all().await;
+    assert_eq!(manager.statuses()[0].status, "connected");
+    let tool = find(&manager.tools(), "mcp__ids__echo");
+    let dir = temp_dir("http-wrong-id");
+    for kind in ["numeric", "string"] {
+        let out = call_tool(tool.clone(), &dir, json!({"kind": kind})).await;
+        assert!(!out.ok, "wrong {kind} id was accepted: {}", out.content);
+        assert!(
+            out.content.contains("no response for request"),
+            "{}",
+            out.content
+        );
+        assert!(
+            !out.content.contains("WRONG_ID_ACCEPTED"),
+            "{}",
+            out.content
+        );
+    }
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn url_userinfo_never_leaks_in_scheme_status_or_transport_errors() {
+    let handler: Handler = Arc::new(|_request| {
+        (
+            500,
+            vec![("content-type".into(), "text/plain".into())],
+            "reflected alice:url-super-secret-321".into(),
+        )
+    });
+    let server = CannedHttp::start(handler).await;
+    let status_url = server
+        .url("/mcp?key=query-secret")
+        .replace("http://", "http://alice:url-super-secret-321@");
+    let scheme_url =
+        "gopher://alice:url-super-secret-321@example.invalid/mcp?key=query-secret".to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let closed_addr = listener.local_addr().unwrap();
+    drop(listener);
+    let transport_url =
+        format!("http://alice:url-super-secret-321@{closed_addr}/mcp?key=query-secret");
+    let mut manager = McpManager::new(&[
+        http_config("scheme", scheme_url.clone(), BTreeMap::new()),
+        http_config("status", status_url.clone(), BTreeMap::new()),
+        http_config("transport", transport_url.clone(), BTreeMap::new()),
+    ]);
+    manager.set_timeouts(McpTimeouts {
+        connect: Duration::from_secs(2),
+        call: Duration::from_secs(2),
+    });
+    manager.connect_all().await;
+
+    let statuses = manager.statuses();
+    assert!(
+        statuses.iter().all(|status| status.status == "failed"),
+        "{statuses:?}"
+    );
+    let rendered = format!(
+        "{statuses:?} / {}",
+        serde_json::to_string(&statuses).unwrap()
+    );
+    for url in [&scheme_url, &status_url, &transport_url] {
+        assert!(!rendered.contains(url), "raw URL leaked: {rendered}");
+    }
+    for secret in ["alice", "url-super-secret-321"] {
+        assert!(!rendered.contains(secret), "{secret} leaked: {rendered}");
+    }
+    assert!(
+        !rendered.contains("key=query-secret"),
+        "query string leaked: {rendered}"
+    );
+    assert!(statuses[0].error.as_deref().unwrap().contains("gopher"));
+    assert!(statuses[1].error.as_deref().unwrap().contains("500"));
+    assert!(statuses[2].error.as_deref().unwrap().contains("failed"));
+    manager.shutdown().await;
 }
 
 #[tokio::test]
@@ -1092,13 +1379,14 @@ async fn an_mcp_servers_grandchildren_are_killed_with_it() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// stdio server whose name and single tool name come from the environment, so
-/// two of them can be made to produce the same namespaced tool name.
+/// stdio server whose name and single tool name come from argv, so two can make
+/// the same namespaced tool name. Argv is deliberate: configured env values are
+/// credentials for redaction purposes and must never reappear in tool content.
 const COLLIDING_SERVER: &str = r#"
-import json, os, sys
+import json, sys
 
-NAME = os.environ["COLLIDE_SERVER_NAME"]
-TOOL = os.environ["COLLIDE_TOOL_NAME"]
+NAME = sys.argv[1]
+TOOL = sys.argv[2]
 
 def send(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
@@ -1132,13 +1420,12 @@ fn colliding_server(dir: &std::path::Path, slot: &str, name: &str, tool: &str) -
         std::fs::write(&script, COLLIDING_SERVER).unwrap();
     }
     let mut config = stdio_server(slot);
-    config.command = vec!["python3".to_string(), script.to_string_lossy().into_owned()];
-    config
-        .env
-        .insert("COLLIDE_SERVER_NAME".to_string(), name.to_string());
-    config
-        .env
-        .insert("COLLIDE_TOOL_NAME".to_string(), tool.to_string());
+    config.command = vec![
+        "python3".to_string(),
+        script.to_string_lossy().into_owned(),
+        name.to_string(),
+        tool.to_string(),
+    ];
     config
 }
 

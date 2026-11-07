@@ -533,7 +533,7 @@ pub(crate) async fn rewind_quiescent(
     let workspace = inner
         .deps
         .workspaces
-        .workspace_for(session.project_id.as_deref())?;
+        .workspace_for_session(session.project_id.as_deref(), &session.workspace)?;
 
     let rewinder = Rewinder::new(inner.deps.store.clone(), workspace);
     let (point, preview) = rewinder.preview(session_id, message_id).await?;

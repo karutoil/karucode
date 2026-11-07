@@ -236,6 +236,17 @@ fn messages_json(messages: &[Message]) -> Vec<Value> {
     out
 }
 
+/// Number of OpenAI-compatible wire messages produced from a transcript.
+///
+/// Every source message produces one message, and each source message carrying
+/// one or more images produces exactly one additional `user` message containing
+/// all of its image parts. The provider deliberately holds those image messages
+/// until adjacent tool results have been serialised; this count includes that
+/// grouping without exposing the wire builder's private representation.
+pub fn serialized_message_count(messages: &[Message]) -> usize {
+    messages_json(messages).len()
+}
+
 /// The `user` message that carries one message's images.
 fn image_message_json(message: &Message) -> Value {
     let mut parts = Vec::with_capacity(message.images.len() * 2 + 1);
@@ -301,7 +312,15 @@ fn message_json(message: &Message) -> Value {
         }
     }
     if let Some(name) = &message.name {
-        obj.insert("name".into(), Value::String(name.clone()));
+        // These exact labels are runtime-local provenance, not participant or
+        // tool names. OpenAI's name grammar excludes ':', so keep their content
+        // and role but leave the reserved labels on the stored transcript only.
+        if !matches!(
+            name.as_str(),
+            "kc-runtime:context-digest" | "kc-runtime:startup-recovery"
+        ) {
+            obj.insert("name".into(), Value::String(name.clone()));
+        }
     }
     Value::Object(obj)
 }
@@ -329,18 +348,20 @@ pub(crate) fn build_headers_with(
     {
         insert_header(&mut headers, name, value)?;
     }
-    if let Some(key) = config
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-    {
-        let value = HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| {
-            Error::Config(
-                "model.api_key contains characters that are not valid in an HTTP header".into(),
-            )
-        })?;
-        headers.insert(AUTHORIZATION, value);
+    if !headers.contains_key(AUTHORIZATION) {
+        if let Some(key) = config
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+        {
+            let value = HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| {
+                Error::Config(
+                    "model.api_key contains characters that are not valid in an HTTP header".into(),
+                )
+            })?;
+            headers.insert(AUTHORIZATION, value);
+        }
     }
     Ok(headers)
 }
@@ -524,6 +545,53 @@ mod tests {
     }
 
     #[test]
+    fn internal_provenance_names_stay_off_the_wire() {
+        let mut digest = Message::user("[context digest: earlier work]");
+        digest.name = Some("kc-runtime:context-digest".into());
+        let mut recovery =
+            Message::assistant("[server recovery: a restart interrupted this run]", vec![]);
+        recovery.name = Some("kc-runtime:startup-recovery".into());
+        let mut task = Message::user("perform the named task");
+        task.name = Some("research-task".into());
+        let messages = vec![
+            digest,
+            recovery,
+            task,
+            Message::tool_result("call-1", "read_file", "contents"),
+        ];
+
+        let body = build_chat_body(&request_with_messages(messages.clone()));
+        let wire = body["messages"].as_array().unwrap();
+        assert_eq!(wire.len(), messages.len());
+        assert_eq!(wire[0]["role"], "user");
+        assert_eq!(wire[0]["content"], "[context digest: earlier work]");
+        assert_eq!(wire[1]["role"], "assistant");
+        assert_eq!(
+            wire[1]["content"],
+            "[server recovery: a restart interrupted this run]"
+        );
+        assert_eq!(wire[2]["role"], "user");
+        assert_eq!(wire[2]["content"], "perform the named task");
+        assert_eq!(wire[2]["name"], "research-task");
+        assert_eq!(wire[3]["name"], "read_file");
+        assert_eq!(wire[3]["tool_call_id"], "call-1");
+        for message in &wire[..2] {
+            assert!(message.get("name").is_none(), "{message}");
+        }
+
+        // Filtering is serialisation-only: local compaction/recovery provenance
+        // remains available on the original transcript objects.
+        assert_eq!(
+            messages[0].name.as_deref(),
+            Some("kc-runtime:context-digest")
+        );
+        assert_eq!(
+            messages[1].name.as_deref(),
+            Some("kc-runtime:startup-recovery")
+        );
+    }
+
+    #[test]
     fn extra_body_may_override_tool_choice() {
         let mut req = request();
         req.tools.push(ToolSpec {
@@ -662,6 +730,75 @@ mod tests {
             sensitive_values(&headers),
             vec!["Bearer sk-abc".to_string()]
         );
+    }
+
+    #[test]
+    fn explicit_authorization_wins_over_the_api_key() {
+        let mut req = request();
+        req.extra_headers = vec![("authorization".into(), "Custom request-credential".into())];
+        let config = ModelConfig {
+            api_key: Some("sk-must-not-overwrite".into()),
+            extra_headers: std::collections::BTreeMap::from_iter([(
+                "Authorization".to_string(),
+                "Custom config-credential".to_string(),
+            )]),
+            ..ModelConfig::default()
+        };
+        let headers = build_headers(&config, &req).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap(),
+            "Custom request-credential"
+        );
+
+        let headers = build_headers(&config, &request()).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap(),
+            "Custom config-credential",
+            "an explicit config header wins when the request has none"
+        );
+    }
+
+    #[test]
+    fn serialized_count_adds_one_per_image_bearing_source_message() {
+        let image = ImageAttachment {
+            media_type: "image/png".into(),
+            data: "aGk=".into(),
+            bytes: 2,
+            name: Some("pixel.png".into()),
+        };
+        let messages = vec![
+            Message::assistant(
+                "",
+                vec![ToolCall {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }],
+            ),
+            Message::tool_result("call-1", "read_file", "two images")
+                .with_images(vec![image.clone(), image.clone()]),
+            Message::tool_result("call-2", "read_file", "must stay adjacent"),
+            Message::user("one more").with_images(vec![image]),
+        ];
+        assert_eq!(serialized_message_count(&messages), messages.len() + 2);
+        let wire = build_chat_body(&request_with_messages(messages));
+        let wire = wire["messages"].as_array().unwrap();
+        assert_eq!(wire.len(), 6);
+        assert_eq!(wire[0]["role"], "assistant");
+        assert_eq!(wire[1]["role"], "tool");
+        assert_eq!(wire[2]["role"], "tool");
+        assert_eq!(wire[3]["role"], "user");
+        assert_eq!(wire[3]["content"].as_array().unwrap().len(), 5);
+        assert_eq!(wire[4]["role"], "user");
+        assert_eq!(wire[5]["role"], "user");
+        assert_eq!(wire[5]["content"].as_array().unwrap().len(), 3);
+    }
+
+    fn request_with_messages(messages: Vec<Message>) -> ChatRequest {
+        ChatRequest {
+            messages,
+            ..request()
+        }
     }
 
     #[test]

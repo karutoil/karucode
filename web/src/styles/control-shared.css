@@ -22,7 +22,6 @@
 /* The rail's k. button: a plain button that inherits the brand mark's paint. */
 .control-plane-trigger { border: 0; background: transparent; cursor: pointer; }
 
-.control-plane-trigger:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: var(--focus-ring-offset); }
 
 .control-plane.cp {
   display: flex;
@@ -45,7 +44,7 @@
      Safe here: nothing inside the plane is `position: fixed` (dialogs portal to
      `document.body`, so they are outside it entirely), and the one absolutely
      positioned element - the row's kebab menu - is positioned against
-     `.cp-row-item`, which is `position: relative`. */
+     `.session-row`, which is `position: relative` (layout.css). */
   container-type: inline-size;
   container-name: control-plane;
 }
@@ -78,8 +77,6 @@
 
 /* ------------------------------------------------------------- quiet text */
 
-.cp-note { padding: var(--space-6) var(--space-5); color: var(--muted); font-size: var(--fs-tiny); line-height: 1.6; }
-
 /* ------------------------------------------------------- shared roles
  *
  * These roles are drawn by more than one region, so no region sheet may own
@@ -105,19 +102,19 @@
  * the rail is the same project read two different ways, which is the defect the
  * parity rule exists to prevent.
  */
-.rail-avatar[data-tone='1'] {
-  color: var(--success);
+.control-plane .rail-avatar[data-tone='1'] {
+  color: color-mix(in srgb, var(--success) 78%, var(--text));
   border-color: color-mix(in srgb, var(--success) 40%, transparent);
   background: color-mix(in srgb, var(--success) 14%, var(--theme-surface));
 }
 
-.rail-avatar[data-tone='2'] {
-  color: var(--info);
+.control-plane .rail-avatar[data-tone='2'] {
+  color: color-mix(in srgb, var(--info) 78%, var(--text));
   border-color: color-mix(in srgb, var(--info) 40%, transparent);
   background: color-mix(in srgb, var(--info) 14%, var(--theme-surface));
 }
 
-.rail-avatar[data-tone='3'] {
+.control-plane .rail-avatar[data-tone='3'] {
   /* Project initials are text. `--accent` is tuned against the canvas, so on the
    * accent tint it measured 3.61:1 in Daybreak; `--accent-on-tint` is the AA role
    * for accent ink on an accent tint (§4.8). `styles/accent.test.ts` pins it. */
@@ -138,4 +135,24 @@
   /* With a chat open the rail is behind the conversation, so it is dropped
      rather than squeezed: one column at a time, with Back to return. */
   .control-plane.cp.detail-open .cp-browser { display: none; }
+}
+
+/* The row's two layout wrappers: an avatar beside a text column. Both plane
+ * lists that carry a project tile use them (the rail's rows and the overview's
+ * waiting/attention rows), because `.session-open` stacks its children and a
+ * 26px avatar inside `.session-head` would stretch every row to 49px against
+ * the product's 41px. They add layout only; no shared recipe is re-set. */
+.cp-row-body {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.cp-row-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--hairline);
+  min-width: 0;
 }

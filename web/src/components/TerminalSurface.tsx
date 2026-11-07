@@ -5,7 +5,7 @@ import { Terminal as XTerm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import type { Terminal } from '../api/types';
 import { toErrorMessage } from '../api/client';
-import { activeTheme, contrastRatio, mix, normalizeHex } from '../theme';
+import { activeTheme, contrastRatio, mix, normalizeHex, rgbToHex } from '../theme';
 import * as terminalsState from '../state/terminals';
 import { TerminalSocket, type TerminalSocketStatus } from '../state/terminalSocket';
 import { RefreshIcon } from './icons';
@@ -106,6 +106,98 @@ function readToken(name: string, fallback: string): string {
   return value || fallback;
 }
 
+/** The three colour channels of an rgb()/rgba() functional colour, before alpha. */
+function rgbFunctionTokens(value: string): string[] | null {
+  const match = /^rgba?\((.*)\)$/i.exec(value.trim());
+  if (!match) return null;
+  const body = (match[1] ?? '').split('/')[0]?.trim() ?? '';
+  const tokens = body.includes(',') ? body.split(',').map((part) => part.trim()) : body.split(/\s+/);
+  return tokens.length >= 3 ? tokens.slice(0, 3) : null;
+}
+
+function hslFunctionHex(value: string): string | null {
+  const match = /^hsla?\((.*)\)$/i.exec(value.trim());
+  if (!match) return null;
+  const body = (match[1] ?? '').split('/')[0]?.trim() ?? '';
+  const tokens = body.includes(',') ? body.split(',').map((part) => part.trim()) : body.split(/\s+/);
+  if (tokens.length < 3) return null;
+  const hue = Number.parseFloat(tokens[0] ?? '');
+  const saturation = Number.parseFloat(tokens[1] ?? '') / 100;
+  const lightness = Number.parseFloat(tokens[2] ?? '') / 100;
+  if (
+    !Number.isFinite(hue) ||
+    !/^[-+]?(?:\d+\.?\d*|\.\d+)(?:deg)?$/i.test(tokens[0] ?? '') ||
+    !tokens[1]?.endsWith('%') ||
+    !tokens[2]?.endsWith('%') ||
+    !Number.isFinite(saturation) ||
+    !Number.isFinite(lightness)
+  ) return null;
+  const h = ((hue % 360) + 360) % 360;
+  const s = Math.min(1, Math.max(0, saturation));
+  const l = Math.min(1, Math.max(0, lightness));
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const channel = (offset: number): number => {
+    let t = h / 360 + offset;
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  return rgbToHex([channel(1 / 3) * 255, channel(0) * 255, channel(-1 / 3) * 255]);
+}
+
+/** Convert browser-valid CSS colours to the hex-only input xterm's blends need. */
+function terminalHex(value: string): string | null {
+  const direct = normalizeHex(value);
+  if (direct) return direct;
+  const rgbTokens = rgbFunctionTokens(value);
+  if (rgbTokens) {
+    const channels = rgbTokens.map((token) => {
+      const percentage = token.endsWith('%');
+      const numeric = token.slice(0, percentage ? -1 : undefined);
+      if (!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(numeric)) return null;
+      const channel = Number(numeric);
+      return Number.isFinite(channel) ? channel * (percentage ? 2.55 : 1) : null;
+    });
+    const [red, green, blue] = channels;
+    if (typeof red === 'number' && typeof green === 'number' && typeof blue === 'number') {
+      return rgbToHex([red, green, blue]);
+    }
+  }
+  const hsl = hslFunctionHex(value);
+  if (hsl) return hsl;
+
+  // Named, system or newer CSS colour syntax is left to the browser's own
+  // canonical RGB answer. Detached/jsdom fallbacks still get a safe conversion.
+  if (typeof document === 'undefined' || typeof window?.getComputedStyle !== 'function') return null;
+  const probe = document.createElement('span');
+  probe.style.color = value;
+  if (probe.style.color === '') return null;
+  probe.style.position = 'absolute';
+  probe.style.visibility = 'hidden';
+  probe.style.pointerEvents = 'none';
+  document.documentElement.appendChild(probe);
+  try {
+    const canonical = window.getComputedStyle(probe).color || probe.style.color;
+    if (canonical !== value) return terminalHex(canonical);
+    return null;
+  } finally {
+    probe.remove();
+  }
+}
+
+function mixTerminal(from: string, to: string, amount: number): string {
+  const a = terminalHex(from);
+  const b = terminalHex(to);
+  if (a && b) return mix(a, b, amount);
+  // An unknown colour must not take down the whole workspace. Prefer the known
+  // endpoint; the directly supplied terminal colours still remain on screen.
+  return a ?? b ?? '#000000';
+}
+
 /**
  * The mono stack from the Theme studio, so choosing a code font retypes the
  * shell with the rest of the app instead of leaving it on the default.
@@ -162,7 +254,7 @@ function terminalTheme(): Record<string, string> {
   const warn = read('--warn', '#e0af68');
   const info = read('--info', '#7aa2f7');
   const muted = read('--muted', '#8b92a1');
-  const lighten = (colour: string, amount = 0.28): string => mix(colour, foreground, amount);
+  const lighten = (colour: string, amount = 0.28): string => mixTerminal(colour, foreground, amount);
   // Colour 0 is a *foreground*, so "readable" is a property of the theme rather
   // than a constant blend. 22% of the ink over Ember's near-black canvas is a mid
   // grey at 4.4:1 (fine); the same 22% over Daybreak's near-white canvas is a pale
@@ -170,12 +262,14 @@ function terminalTheme(): Record<string, string> {
   // introduced to fix, just in the other mode. Walk the blend up until it clears
   // the §4 4.5:1 floor, so one formula is right in every theme.
   const readable = (ink: string, floor = 4.5): string => {
-    if (!normalizeHex(background) || !normalizeHex(ink)) return mix(background, ink, 0.22);
+    const base = terminalHex(background);
+    const color = terminalHex(ink);
+    if (!base || !color) return mixTerminal(background, ink, 0.22);
     for (let amount = 0.2; amount < 0.95; amount += 0.05) {
-      const candidate = mix(background, ink, amount);
-      if (contrastRatio(candidate, background) >= floor) return candidate;
+      const candidate = mix(base, color, amount);
+      if (contrastRatio(candidate, base) >= floor) return candidate;
     }
-    return mix(background, ink, 0.95);
+    return mix(base, color, 0.95);
   };
   return {
     background,
@@ -192,16 +286,16 @@ function terminalTheme(): Record<string, string> {
     yellow: warn,
     // Colour 4 is blue. `--info` is the palette's blue; the accent is not.
     blue: info,
-    magenta: mix(danger, info, 0.5),
-    cyan: mix(info, success, 0.5),
+    magenta: mixTerminal(danger, info, 0.5),
+    cyan: mixTerminal(info, success, 0.5),
     white: foreground,
     brightBlack: muted,
     brightRed: lighten(danger),
     brightGreen: lighten(success),
     brightYellow: lighten(warn),
     brightBlue: lighten(info),
-    brightMagenta: lighten(mix(danger, info, 0.5)),
-    brightCyan: lighten(mix(info, success, 0.5)),
+    brightMagenta: lighten(mixTerminal(danger, info, 0.5)),
+    brightCyan: lighten(mixTerminal(info, success, 0.5)),
     brightWhite: lighten(foreground, 0.5),
   };
 }

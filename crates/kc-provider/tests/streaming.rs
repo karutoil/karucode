@@ -216,6 +216,40 @@ async fn unauthorized_error_never_leaks_the_api_key() {
 }
 
 #[tokio::test]
+async fn mixed_case_bearer_echo_and_bare_component_are_redacted() {
+    const TOKEN: &str = "Sk-SeNsItIvE-ToKeN";
+    let leaky_body =
+        format!("{{\"error\":{{\"message\":\"header bEaReR {TOKEN}; bare sk-sensitive-token\"}}}}");
+    let server = spawn(move |_req, mut socket| {
+        let response = response("401 Unauthorized", "application/json", &leaky_body);
+        async move {
+            socket.write_all(&response).await.unwrap();
+            let _ = socket.shutdown().await;
+        }
+    })
+    .await;
+
+    let mut config = model_config(&server);
+    config
+        .extra_headers
+        .insert("Authorization".into(), format!("bEaReR {TOKEN}"));
+    let provider = OpenAiProvider::new(config).unwrap();
+    let err = expect_err(
+        provider
+            .stream_chat(chat_request(), CancellationToken::new())
+            .await,
+    );
+    let text = err.to_string();
+    let lower = text.to_ascii_lowercase();
+    assert!(!lower.contains("sk-sensitive-token"), "{text}");
+    assert!(!lower.contains("bearer"), "{text}");
+    assert_eq!(
+        server.request().header("authorization").as_deref(),
+        Some(format!("bEaReR {TOKEN}").as_str())
+    );
+}
+
+#[tokio::test]
 async fn server_error_is_reported_with_status_and_excerpt() {
     let server = spawn(move |_req, mut socket| async move {
         let response = response("500 Internal Server Error", "text/plain", "internal boom");
@@ -297,6 +331,54 @@ async fn cancellation_aborts_a_live_stream() {
     assert!(stream.next().await.is_none());
 }
 
+async fn cancellation_of_buffered_body(head: &'static str, prefix: &'static str) {
+    let server = spawn(move |_req, mut socket| async move {
+        socket.write_all(head.as_bytes()).await.unwrap();
+        socket.write_all(prefix.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    })
+    .await;
+    let provider = OpenAiProvider::new(model_config(&server)).unwrap();
+    let cancel = CancellationToken::new();
+    let canceller = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel.cancel();
+        })
+    };
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        provider.stream_chat(chat_request(), cancel),
+    )
+    .await
+    .expect("the buffered body read must be cancellation-safe");
+    let err = expect_err(result);
+    assert!(matches!(err, kc_core::Error::Cancelled), "{err:?}");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    canceller.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancellation_aborts_a_buffered_http_error_body() {
+    cancellation_of_buffered_body(
+        "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n",
+        "{\"error\":",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cancellation_aborts_a_buffered_json_success_body() {
+    cancellation_of_buffered_body(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n",
+        "{\"choices\":",
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn stream_without_done_terminator_still_finishes() {
     let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n";
@@ -328,6 +410,36 @@ async fn unterminated_final_event_is_parsed_at_eof() {
     }));
 }
 
+#[tokio::test]
+async fn done_after_json_metadata_without_finish_reason_is_a_normal_stop() {
+    let body = concat!(
+        "data: {\"type\":\"keepalive\"}\n\n",
+        "data: {\"choices\":[]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":0}}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, body).await }).await;
+    let (stream, _cancel) = start(model_config(&server), chat_request()).await;
+    let chunks = collect(stream).await;
+    assert!(chunks.contains(&ProviderChunk::Usage {
+        input_tokens: 3,
+        output_tokens: 0,
+        cached_tokens: None,
+    }));
+    assert_eq!(
+        chunks.last(),
+        Some(&ProviderChunk::Finish {
+            reason: "stop".into()
+        }),
+        "{chunks:?}"
+    );
+    assert!(!chunks
+        .iter()
+        .any(|chunk| matches!(chunk, ProviderChunk::Finish { reason } if reason == "eof")));
+}
+
 /// A gateway that terminates events with CRLF, interleaves keep-alive comments
 /// and splits frames at arbitrary byte boundaries must still stream cleanly.
 #[tokio::test]
@@ -355,6 +467,35 @@ async fn crlf_keepalives_and_split_frames_are_handled() {
     let (stream, _cancel) = start(model_config(&server), chat_request()).await;
     let chunks = collect(stream).await;
     assert_eq!(texts(&chunks), "ab");
+    assert!(chunks.contains(&ProviderChunk::Finish {
+        reason: "stop".into()
+    }));
+}
+
+#[tokio::test]
+async fn cr_only_and_mixed_event_boundaries_stream_over_real_socket_splits() {
+    let body = concat!(
+        ": keepalive\r\r",
+        "data: {\"choices\":\r",
+        "data: [{\"delta\":{\"content\":\"a\"}}]}\r\r",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"b\"},\"finish_reason\":\"stop\"}]}\n\r",
+        "data: [DONE]\r\n\n",
+    );
+    let wire = format!("{SSE_HEAD}{body}").into_bytes();
+    let server = spawn(move |_req, mut socket| {
+        let wire = wire.clone();
+        async move {
+            for byte in wire {
+                socket.write_all(&[byte]).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+            let _ = socket.shutdown().await;
+        }
+    })
+    .await;
+    let (stream, _cancel) = start(model_config(&server), chat_request()).await;
+    let chunks = collect(stream).await;
+    assert_eq!(texts(&chunks), "ab", "{chunks:?}");
     assert!(chunks.contains(&ProviderChunk::Finish {
         reason: "stop".into()
     }));
@@ -670,6 +811,52 @@ async fn a_drip_fed_body_is_stopped_by_the_attempt_deadline() {
     assert!(kc_provider::retry::retryable(&error), "{text}");
 }
 
+#[tokio::test]
+async fn header_time_consumes_the_same_attempt_budget_as_the_body() {
+    let server = spawn(move |_req, mut socket| async move {
+        // Within the five-second header gap, but almost half the ten-second whole
+        // attempt. The body must receive only the remaining six seconds, not a
+        // fresh ten-second deadline after these headers.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        socket.write_all(SSE_HEAD.as_bytes()).await.unwrap();
+        socket.flush().await.ok();
+        loop {
+            if socket.write_all(b"d").await.is_err() || socket.flush().await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await;
+    let mut config = model_config(&server);
+    config.request_timeout_secs = 5;
+    let provider = OpenAiProvider::new(config).unwrap();
+    let started = Instant::now();
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(6),
+        provider.stream_chat(chat_request(), CancellationToken::new()),
+    )
+    .await
+    .expect("slow headers fit the five-second read gap")
+    .unwrap();
+    let err = tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(item) = stream.next().await {
+            if let Err(err) = item {
+                return err;
+            }
+        }
+        panic!("a trickling body must hit the attempt deadline")
+    })
+    .await
+    .expect("the shared absolute attempt deadline must end the body");
+    assert!(matches!(err, kc_core::Error::Timeout(_)), "{err:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(13),
+        "headers plus body took {:?}; the body reset the ten-second attempt",
+        started.elapsed()
+    );
+}
+
 /// A normal answer inside the budget is unaffected by the deadline.
 #[tokio::test]
 async fn a_prompt_completion_is_not_disturbed_by_the_attempt_deadline() {
@@ -875,6 +1062,42 @@ async fn dsml_and_native_tool_calls_in_one_turn_do_not_merge() {
     assert!(text.is_empty(), "no prose was sent: {text:?}");
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert_eq!(calls[0].name, "list_dir");
+    assert_eq!(calls[0].arguments, "{\"path\":\".\"}");
+    assert_eq!(calls[1].name, "git_status");
+    assert_eq!(calls[1].arguments, "{}");
+}
+
+#[tokio::test]
+async fn native_dsml_reserved_index_128_cannot_merge_calls() {
+    let native_ok = serde_json::json!({"choices":[{"delta":{"tool_calls":[{
+        "index":127,"id":"native-ok",
+        "function":{"name":"list_dir","arguments":"{\"path\":\".\"}"}
+    }]}}]});
+    let native_reserved = serde_json::json!({"choices":[{"delta":{"tool_calls":[{
+        "index":128,"id":"must-not-merge",
+        "function":{"name":"list_dir","arguments":"{\"path\":\"bad\"}"}
+    }]}}]});
+    let dsml = content_events(&["<||DSML||tool_calls><||DSML||invoke name=\"git_status\">\
+         </||DSML||invoke></||DSML||tool_calls>"]);
+    let body = format!("data: {native_ok}\n\ndata: {native_reserved}\n\n{dsml}");
+    let server = spawn(move |_req, mut socket| {
+        let body = body.clone();
+        async move { write_sse(&mut socket, &body).await }
+    })
+    .await;
+    let (stream, _cancel) = start(
+        model_config(&server),
+        request_with_tools(&["list_dir", "git_status"]),
+    )
+    .await;
+    let chunks = collect(stream).await;
+    assert!(!chunks.iter().any(|chunk| matches!(
+        chunk,
+        ProviderChunk::ToolCallDelta { index: 128, id: Some(id), .. } if id == "must-not-merge"
+    )));
+    let (_text, calls) = calls_and_text(&chunks);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0].id, "native-ok");
     assert_eq!(calls[0].arguments, "{\"path\":\".\"}");
     assert_eq!(calls[1].name, "git_status");
     assert_eq!(calls[1].arguments, "{}");

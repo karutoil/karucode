@@ -2,18 +2,30 @@ import type { JSX } from 'preact';
 import { useEffect, useMemo } from 'preact/hooks';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
-import { findPluginPanelRenderer, panelPayloadFits, panelPollInterval } from './pluginPanels';
+import { findPanelShapeRenderer, findPluginPanelRenderer, panelPayloadFits, panelPollInterval } from './pluginPanels';
 import { RefreshIcon } from './icons';
 
+/** Structural caps apply even when every individual string is tiny. */
+export const PANEL_JSON_MAX_DEPTH = 6;
+export const PANEL_JSON_MAX_ENTRIES = 40;
+export const PANEL_JSON_MAX_NODES = 400;
+
+interface JsonBudget {
+  remaining: number;
+  truncated: boolean;
+}
+
+function jsonTruncation(message: string): JSX.Element {
+  return <span class="plugin-panel-json-truncation">{message}</span>;
+}
+
 /**
- * A generic, read-only view of any JSON document.
- *
- * This is the fallback for a plugin panel the app has no renderer for — which
- * is the normal case, because a plugin ships its payload but never its UI. It is
- * deliberately inert: text only, no HTML, no links built from the payload, no
- * keys turned into URLs. A plugin payload is untrusted input.
+ * Build the bounded VNode tree iteratively at each level. A shared budget is
+ * consumed before rendering a value, so hostile breadth cannot enqueue work that
+ * will only discover the cap after thousands of child components have mounted.
  */
-function JsonView({ value, depth = 0 }: { value: unknown; depth?: number }): JSX.Element {
+function jsonValue(value: unknown, depth: number, budget: JsonBudget): JSX.Element {
+  budget.remaining -= 1;
   if (value === null || value === undefined) {
     return <span class="plugin-panel-json-null">null</span>;
   }
@@ -26,40 +38,87 @@ function JsonView({ value, depth = 0 }: { value: unknown; depth?: number }): JSX
   if (typeof value === 'boolean') {
     return <span class="plugin-panel-json-boolean">{String(value)}</span>;
   }
-  if (Array.isArray(value)) {
-    if (value.length === 0) {
-      return <span class="plugin-panel-json-empty">[ ]</span>;
-    }
-    return (
-      <ul class="plugin-panel-json-list">
-        {value.map((item, index) => (
-          <li key={index}>
-            <JsonView value={item} depth={depth + 1} />
-          </li>
-        ))}
-      </ul>
+
+  const array = Array.isArray(value);
+  const object = !array && typeof value === 'object';
+  const entries = array
+    ? (value as unknown[]).map((item, index) => [String(index), item] as const)
+    : object
+      ? Object.entries(value as Record<string, unknown>)
+      : [];
+  if (array && (value as unknown[]).length === 0) {
+    return <span class="plugin-panel-json-empty">[ ]</span>;
+  }
+  if (object && entries.length === 0) {
+    return <span class="plugin-panel-json-empty">{'{ }'}</span>;
+  }
+  if (!array && !object) {
+    return <span class="plugin-panel-json-empty">{typeof value}</span>;
+  }
+  if (depth >= PANEL_JSON_MAX_DEPTH) {
+    budget.truncated = true;
+    return jsonTruncation(
+      `Depth limit ${PANEL_JSON_MAX_DEPTH} reached; ${entries.length} entr${entries.length === 1 ? 'y is' : 'ies are'} not shown here.`,
     );
   }
-  if (typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>);
-    if (entries.length === 0) {
-      return <span class="plugin-panel-json-empty">{'{ }'}</span>;
+
+  const rows: JSX.Element[] = [];
+  const visible = Math.min(entries.length, PANEL_JSON_MAX_ENTRIES);
+  if (entries.length > visible) budget.truncated = true;
+  for (let index = 0; index < visible; index += 1) {
+    if (budget.remaining <= 0) {
+      budget.truncated = true;
+      break;
     }
-    return (
-      <dl class="plugin-panel-json-object">
-        {entries.map(([key, item]) => (
-          <div class="plugin-panel-json-row" key={key}>
-            <dt>{key}</dt>
-            <dd>
-              <JsonView value={item} depth={depth + 1} />
-            </dd>
-          </div>
-        ))}
-      </dl>
+    const [key, child] = entries[index]!;
+    const drawn = jsonValue(child, depth + 1, budget);
+    rows.push(
+      array ? (
+        <li key={key}>{drawn}</li>
+      ) : (
+        <div class="plugin-panel-json-row" key={key}>
+          <dt>{key}</dt>
+          <dd>{drawn}</dd>
+        </div>
+      ),
     );
   }
-  // Functions, symbols and anything else: say what it is instead of guessing.
-  return <span class="plugin-panel-json-empty">{typeof value}</span>;
+  const hidden = entries.length - rows.length;
+  if (hidden > 0) {
+    budget.truncated = true;
+    rows.push(
+      array ? (
+        <li>{jsonTruncation(
+          `${hidden} more ${hidden === 1 ? 'item' : 'items'} not shown (entry or total-node limit).`,
+        )}</li>
+      ) : (
+        <div class="plugin-panel-json-row">
+          <dd>{jsonTruncation(
+            `${hidden} more ${hidden === 1 ? 'entry' : 'entries'} not shown (entry or total-node limit).`,
+          )}</dd>
+        </div>
+      ),
+    );
+  }
+  return array
+    ? <ul class="plugin-panel-json-list">{rows}</ul>
+    : <dl class="plugin-panel-json-object">{rows}</dl>;
+}
+
+function JsonView({ value }: { value: unknown }): JSX.Element {
+  const budget: JsonBudget = { remaining: PANEL_JSON_MAX_NODES, truncated: false };
+  const rendered = jsonValue(value, 0, budget);
+  return (
+    <>
+      {rendered}
+      {budget.truncated ? (
+        <p class="plugin-panel-json-truncation" data-testid="plugin-panel-json-truncated" role="note">
+          Preview truncated at {PANEL_JSON_MAX_DEPTH} levels, {PANEL_JSON_MAX_ENTRIES} entries per
+          container, or {PANEL_JSON_MAX_NODES} values. The fetched payload is unchanged.
+        </p>
+      ) : null}
+    </>
+  );
 }
 
 export interface PluginPanelViewProps {
@@ -79,6 +138,14 @@ export function PluginPanelView({ panel }: PluginPanelViewProps): JSX.Element {
   const projectId = store.currentProjectId.value;
   const sessionId = store.currentSessionId.value;
   const renderer = useMemo(() => findPluginPanelRenderer(panel), [panel.hosted_id, panel.id]);
+  // No renderer for this id: a payload that follows the `view` vocabulary still
+  // gets the app's own components (see `PluginViews.tsx`), which is what lets a
+  // plugin draw a stat, a bar chart or a live clock without shipping any UI.
+  const shapeRenderer = useMemo(
+    () => (renderer ? undefined : findPanelShapeRenderer(store.pluginPanelData.value[panel.hosted_id]?.data)),
+    [renderer, panel.hosted_id, store.pluginPanelData.value[panel.hosted_id]?.data],
+  );
+  const drawn = renderer ?? shapeRenderer;
   const interval = panelPollInterval(panel);
 
   // Read on open, and again whenever the answer could have changed. Both keys
@@ -134,8 +201,8 @@ export function PluginPanelView({ panel }: PluginPanelViewProps): JSX.Element {
         </button>
       </div>
     );
-  } else if (renderer && renderer.matches(data)) {
-    body = renderer.render({ panel, plugin: panel.plugin, version: panel.version, data, refresh });
+  } else if (drawn && drawn.matches(data)) {
+    body = drawn.render({ panel, plugin: panel.plugin, version: panel.version, data, refresh });
   } else {
     body = (
       <div class="inspector-section">
@@ -146,7 +213,7 @@ export function PluginPanelView({ panel }: PluginPanelViewProps): JSX.Element {
         <div class="plugin-panel-json">
           <JsonView value={data} />
         </div>
-        {renderer ? (
+        {drawn ? (
           <p class="inspector-note">
             A renderer is registered for this panel id but did not claim this payload.
           </p>

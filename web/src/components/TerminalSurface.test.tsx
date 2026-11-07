@@ -469,6 +469,41 @@ describe('TerminalSurface follows the live theme', () => {
     expect(refreshCalls).toHaveLength(refreshesBefore + 1);
   });
 
+  it('accepts valid rgb()/hsl() custom CSS tokens when deriving ANSI mixes', async () => {
+    Object.assign(tokenValues, DARK_TOKENS, {
+      '--bg-sunken': 'rgb(22 24 29)',
+      '--text': 'hsl(220 20% 85%)',
+      '--danger': 'rgb(247 118 142 / 80%)',
+      '--success': 'hsl(90, 50%, 60%)',
+      '--info': 'rgb(122 162 247)',
+      '--warn': 'hsl(35 80% 65%)',
+    });
+
+    // This used to throw `Not a hex colour` from getInstance during render,
+    // before there was any terminal panel the app-level boundary could retain.
+    render(<TerminalSurface terminal={terminal()} />);
+    await waitFor(() => expect(document.querySelector('.xterm')).not.toBeNull());
+    const instance = optionSets[0];
+    if (!instance) throw new Error('the emulator was never constructed');
+    const theme = instance.theme as Record<string, string>;
+    for (const key of [
+      'black',
+      'magenta',
+      'cyan',
+      'brightRed',
+      'brightGreen',
+      'brightYellow',
+      'brightBlue',
+      'brightMagenta',
+      'brightCyan',
+      'brightWhite',
+    ]) {
+      expect(theme[key], key).toMatch(/^#[0-9a-f]{6}$/);
+    }
+    expect(theme.background).toBe('rgb(22 24 29)');
+    expect(theme.foreground).toBe('hsl(220 20% 85%)');
+  });
+
   it('keeps xterm resize events connected to the terminal socket', async () => {
     render(<TerminalSurface terminal={terminal()} />);
     await waitFor(() => expect(document.querySelector('.xterm')).not.toBeNull());

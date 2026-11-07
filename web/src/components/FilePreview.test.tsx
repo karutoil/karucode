@@ -1,19 +1,22 @@
-import { describe, expect, it } from 'vitest';
-import { render } from '@testing-library/preact';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { render, waitFor } from '@testing-library/preact';
+import { setAuthToken } from '../api/client';
 import { FilePreview, htmlDocument, renderMarkdownForFile } from './FilePreview';
 
 describe('renderMarkdownForFile', () => {
-  it('points relative images at the raw-bytes endpoint for that file', () => {
+  it('marks relative images for authenticated blob loading without a raw src', () => {
     const html = renderMarkdownForFile('![logo](assets/logo.png)', 'docs/guide.md', null);
-    expect(html).toContain('src="/api/workspace/raw?path=docs%2Fassets%2Flogo.png"');
+    expect(html).toContain('data-workspace-image-path="docs/assets/logo.png"');
     expect(html).toContain('loading="lazy"');
+    expect(html).not.toContain('/api/workspace/raw');
+    expect(html).not.toContain('src=');
   });
 
   it('resolves ../ and passes the project through', () => {
     const html = renderMarkdownForFile('![logo](../assets/logo.png)', 'docs/guide.md', 'p_1');
-    // `&` is escaped in the attribute, which is exactly what the browser parses
-    // back to a query separator.
-    expect(html).toContain('/api/workspace/raw?path=assets%2Flogo.png&amp;project=p_1');
+    expect(html).toContain('data-workspace-image-path="assets/logo.png"');
+    expect(html).toContain('data-workspace-image-project="p_1"');
+    expect(html).not.toContain('/api/workspace/raw');
   });
 
   it('marks relative links so the viewer can open that file', () => {
@@ -117,5 +120,81 @@ describe('the HTML preview is a real document, not srcdoc', () => {
       <FilePreview path="page.html" content="<h1>draft</h1>" render="html" dirty />,
     );
     expect(container.querySelector('.file-preview-note')?.textContent).toContain('saved page');
+  });
+});
+
+describe('authenticated workspace media', () => {
+  let createDescriptor: PropertyDescriptor | undefined;
+  let revokeDescriptor: PropertyDescriptor | undefined;
+  const revokeObjectURL = vi.fn();
+
+  beforeEach(() => {
+    createDescriptor = Object.getOwnPropertyDescriptor(URL, 'createObjectURL');
+    revokeDescriptor = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL');
+    let sequence = 0;
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => `blob:workspace-${++sequence}`),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL });
+    revokeObjectURL.mockClear();
+    setAuthToken('browser-test-secret');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('media bytes', { status: 200, headers: { 'Content-Type': 'image/png' } })),
+    );
+  });
+
+  afterEach(() => {
+    setAuthToken(null);
+    vi.unstubAllGlobals();
+    for (const [name, descriptor] of [
+      ['createObjectURL', createDescriptor],
+      ['revokeObjectURL', revokeDescriptor],
+    ] as const) {
+      if (descriptor) Object.defineProperty(URL, name, descriptor);
+      else delete (URL as unknown as Record<string, unknown>)[name];
+    }
+  });
+
+  it.each(['image', 'pdf'] as const)('fetches a %s with bearer auth and revokes its object URL', async (kind) => {
+    const view = render(
+      <FilePreview path={kind === 'pdf' ? 'docs/spec.pdf' : 'assets/logo.png'} content="" render={kind} project="p_1" />,
+    );
+    const testId = kind === 'pdf' ? 'file-preview-pdf' : 'file-preview-image';
+    const element = await waitFor(() => {
+      const found = view.container.querySelector(`[data-testid="${testId}"]`);
+      if (!found) throw new Error('media not loaded');
+      return found;
+    });
+    expect(element.getAttribute('src')).toBe('blob:workspace-1');
+
+    const fetchMock = vi.mocked(globalThis.fetch);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toContain('/api/workspace/raw?');
+    expect(String(url)).toContain('project=p_1');
+    expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer browser-test-secret');
+    expect(document.body.innerHTML).not.toContain('browser-test-secret');
+
+    view.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:workspace-1');
+  });
+
+  it('loads and revokes a Markdown-relative image without ever assigning the raw src', async () => {
+    const view = render(
+      <FilePreview path="docs/guide.md" content="![logo](assets/logo.png)" render="markdown" project="p_1" />,
+    );
+    const image = view.container.querySelector<HTMLImageElement>('img[data-workspace-image-path]')!;
+    expect(image.getAttribute('src')).toBeNull();
+    await waitFor(() => expect(image.getAttribute('src')).toBe('blob:workspace-1'));
+
+    const fetchMock = vi.mocked(globalThis.fetch);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toBe('/api/workspace/raw?path=docs%2Fassets%2Flogo.png&project=p_1');
+    expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer browser-test-secret');
+    expect(document.body.innerHTML).not.toContain('browser-test-secret');
+    view.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:workspace-1');
   });
 });

@@ -123,6 +123,45 @@ describe('agent event routing', () => {
     expect(continued.items[0]?.kind === 'message' ? continued.items[0].streaming : false).toBe(true);
   });
 
+  it('atomically replaces live subagent text without moving or settling tool activity', () => {
+    let activity = applyAgentEvent(
+      emptyActivity(),
+      agentEvent(1, 'reasoning_delta', 'a_child', { delta: 'keep this reasoning' }),
+    );
+    activity = applyAgentEvent(
+      activity,
+      agentEvent(2, 'text_delta', 'a_child', { delta: 'raw repeated raw repeated' }),
+    );
+    activity = applyAgentEvent(
+      activity,
+      agentEvent(3, 'tool_call_started', 'a_child', {
+        call_id: 'call_1', name: 'read_file', arguments: { path: 'src/lib.rs' },
+      }),
+    );
+    const beforeForeignRun = applyAgentEvent(
+      activity,
+      agentEvent(4, 'text_replaced', 'a_child', {
+        run_id: 'r_other', content: 'must not replace another run',
+      }),
+    );
+    expect(beforeForeignRun).toBe(activity);
+
+    activity = applyAgentEvent(
+      activity,
+      agentEvent(5, 'text_replaced', 'a_child', { content: 'final normalized answer' }),
+    );
+    expect(activity.items).toHaveLength(2);
+    const answer = activity.items[0];
+    const tool = activity.items[1];
+    expect(answer?.kind === 'message' ? answer.content : 'missing').toBe('final normalized answer');
+    expect(answer?.kind === 'message' ? answer.reasoning : '').toBe('keep this reasoning');
+    expect(answer?.kind === 'message' ? answer.streaming : false).toBe(true);
+    expect(answer?.kind === 'message' ? answer.agentId : null).toBe('a_child');
+    expect(tool?.kind === 'tool' ? tool.status : null).toBe('running');
+    expect(tool?.kind === 'tool' ? tool.output : null).toBe('');
+    expect(activity.lastSeq).toBe(5);
+  });
+
   it('builds a tool card from started/finished frames, including its output', () => {
     let activity = emptyActivity();
     activity = applyAgentEvent(

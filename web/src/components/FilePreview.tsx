@@ -1,6 +1,6 @@
 import type { JSX } from 'preact';
-import { useMemo } from 'preact/hooks';
-import { getAuthToken } from '../api/client';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { apiRequestBlob, getAuthToken, toErrorMessage } from '../api/client';
 import { workspacePreviewUrl, workspaceRawUrl } from '../api/endpoints';
 import { copyText } from '../lib/clipboard';
 import { isExternalReference, resolveRelativePath, type FileRender } from '../lib/fileKind';
@@ -19,6 +19,113 @@ export interface FilePreviewProps {
   onOpenFile?: (path: string) => void;
 }
 
+interface WorkspaceObjectUrl {
+  key: string;
+  url: string | null;
+  error: string | null;
+}
+
+/**
+ * Fetch workspace bytes through the authenticated API, then lend the DOM a blob
+ * URL. An `img`/`iframe` navigation cannot add an Authorization header itself.
+ */
+export function useWorkspaceObjectUrl(
+  path: string | null,
+  project: string | null,
+): WorkspaceObjectUrl {
+  const identity = JSON.stringify([path, project]);
+  const [state, setState] = useState<WorkspaceObjectUrl>({ key: identity, url: null, error: null });
+
+  useEffect(() => {
+    if (path === null) {
+      setState({ key: identity, url: null, error: null });
+      return undefined;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setState({ key: identity, url: null, error: null });
+    apiRequestBlob(workspaceRawUrl(path, project), { signal: controller.signal })
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        if (cancelled) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        setState({ key: identity, url: objectUrl, error: null });
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled && !controller.signal.aborted) {
+          setState({ key: identity, url: null, error: toErrorMessage(cause) });
+        }
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (objectUrl !== null) URL.revokeObjectURL(objectUrl);
+    };
+  }, [path, project, identity]);
+
+  // Effects run after paint. Do not paint the previous file's object URL for one
+  // frame while a new identity is waiting for its cleanup effect.
+  return state.key === identity ? state : { key: identity, url: null, error: null };
+}
+
+/** Resolve sanitized Markdown's relative-image markers without a raw navigation. */
+function useMarkdownWorkspaceImages(
+  root: { current: HTMLDivElement | null },
+  html: string,
+  project: string | null,
+  enabled: boolean,
+): void {
+  useEffect(() => {
+    const container = root.current;
+    if (!enabled || !container) return undefined;
+    let cancelled = false;
+    const requests: {
+      image: HTMLImageElement;
+      controller: AbortController;
+      objectUrl: string | null;
+    }[] = [];
+    for (const image of Array.from(container.querySelectorAll<HTMLImageElement>('img[data-workspace-image-path]'))) {
+      const path = image.dataset.workspaceImagePath;
+      if (!path) continue;
+      const controller = new AbortController();
+      const request: { image: HTMLImageElement; controller: AbortController; objectUrl: string | null } = {
+        image,
+        controller,
+        objectUrl: null,
+      };
+      requests.push(request);
+      apiRequestBlob(workspaceRawUrl(path, project), { signal: controller.signal })
+        .then((blob) => {
+          if (cancelled) return;
+          request.objectUrl = URL.createObjectURL(blob);
+          if (cancelled || !container.contains(image)) {
+            URL.revokeObjectURL(request.objectUrl);
+            request.objectUrl = null;
+            return;
+          }
+          image.src = request.objectUrl;
+          image.removeAttribute('aria-busy');
+        })
+        .catch((cause: unknown) => {
+          if (cancelled || controller.signal.aborted) return;
+          image.removeAttribute('aria-busy');
+          image.dataset.workspaceImageError = toErrorMessage(cause);
+        });
+    }
+    return () => {
+      cancelled = true;
+      for (const request of requests) {
+        request.controller.abort();
+        if (request.objectUrl !== null) URL.revokeObjectURL(request.objectUrl);
+      }
+    };
+  }, [root, html, project, enabled]);
+}
+
 /**
  * The rendered half of the file viewer.
  *
@@ -28,7 +135,8 @@ export interface FilePreviewProps {
  * endpoint. Nothing from the workspace is ever inserted into the app's own DOM as
  * markup. The HTML frame runs the page's own scripts - that is the point of
  * previewing a page - but it is an opaque origin served under a policy that
- * blocks network access, so it cannot reach the app's origin, storage or API.
+ * blocks foreign network requests and forms. Only relative workspace siblings,
+ * inline data and blobs may load; it cannot reach the app's origin, storage or API.
  */
 export function FilePreview({
   path,
@@ -42,6 +150,9 @@ export function FilePreview({
     () => (render === 'markdown' ? renderMarkdownForFile(content, path, project) : ''),
     [render, content, path, project],
   );
+  const markdownRef = useRef<HTMLDivElement>(null);
+  useMarkdownWorkspaceImages(markdownRef, markdownHtml, project, render === 'markdown');
+  const media = useWorkspaceObjectUrl(render === 'image' || render === 'pdf' ? path : null, project);
 
   if (render === 'markdown') {
     const onClick = (event: JSX.TargetedMouseEvent<HTMLDivElement>): void => {
@@ -56,6 +167,7 @@ export function FilePreview({
     };
     return (
       <div
+        ref={markdownRef}
         class="file-preview-scroll file-preview-markdown markdown"
         role="region"
         aria-label={`Rendered contents of ${path}`}
@@ -67,11 +179,16 @@ export function FilePreview({
   }
 
   if (render === 'image') {
-    const url = workspaceRawUrl(path, project);
     return (
       <div class="file-preview-scroll file-preview-media" role="region" aria-label={`Image ${path}`}>
-        {/* `alt` names the file: the viewer cannot know what it depicts. */}
-        <img class="file-preview-image" src={url} alt={path} data-testid="file-preview-image" />
+        {media.error ? (
+          <p class="file-notice" role="alert">Could not load {path}: {media.error}</p>
+        ) : media.url ? (
+          // `alt` names the file: the viewer cannot know what it depicts.
+          <img class="file-preview-image" src={media.url} alt={path} data-testid="file-preview-image" />
+        ) : (
+          <p class="file-notice" role="status">Loading {path}…</p>
+        )}
         {dirty ? (
           <p class="file-preview-note">
             The preview shows the saved file; there is no unsaved edit to show.
@@ -82,16 +199,27 @@ export function FilePreview({
   }
 
   if (render === 'pdf') {
-    const url = workspaceRawUrl(path, project);
     return (
       <div class="file-preview-scroll file-preview-media" role="region" aria-label={`PDF ${path}`}>
-        <iframe class="file-preview-pdf" src={url} title={path} data-testid="file-preview-pdf" />
+        {media.error ? (
+          <p class="file-notice" role="alert">Could not load {path}: {media.error}</p>
+        ) : media.url ? (
+          <iframe class="file-preview-pdf" src={media.url} title={path} data-testid="file-preview-pdf" />
+        ) : (
+          <p class="file-notice" role="status">Loading {path}…</p>
+        )}
         <p class="file-preview-note">
-          If the PDF does not render,{' '}
-          <a href={url} target="_blank" rel="noopener noreferrer">
-            open it in a new tab
-          </a>
-          .
+          {media.url ? (
+            <>
+              If the PDF does not render,{' '}
+              <a href={media.url} target="_blank" rel="noopener noreferrer">
+                open it in a new tab
+              </a>
+              .
+            </>
+          ) : (
+            'The PDF is fetched with this session’s API credentials.'
+          )}
         </p>
       </div>
     );
@@ -105,8 +233,8 @@ export function FilePreview({
     // relative images were all refused and the preview came up nearly blank; and
     // a `srcdoc` document has no path, so `./style.css` has nothing to resolve
     // against. Serving the file from `/api/workspace/preview/<path>` gives it
-    // both: its own policy (script yes, network no, opaque origin) and a base URL
-    // in its own directory.
+    // both: its own policy (script and relative workspace assets yes, foreign
+    // network and forms no, opaque origin) and a base URL in its own directory.
     //
     // `sandbox="allow-scripts"` matches the server's policy and never adds
     // `allow-same-origin`: without that pair the frame would share the app's
@@ -147,7 +275,7 @@ export function FilePreview({
         <p class="file-preview-note">
           {dirty
             ? 'The preview shows the saved page; save to see your edits rendered.'
-            : 'Rendered as an isolated page: scripts run, but it cannot reach karucode, its storage or the network.'}
+            : 'Rendered as an isolated opaque-origin page: scripts and relative workspace assets run/load; remote assets, fetch and forms are blocked.'}
         </p>
       </div>
     );
@@ -160,8 +288,9 @@ export function FilePreview({
  * Render Markdown and rewrite the links and images that point inside the
  * workspace so they resolve relative to the *file*, not the app's own URL.
  *
- * Relative images are pointed at the raw-bytes endpoint; relative links get a
- * `data-workspace-path` marker the click handler turns into "open that file".
+ * Relative images get a marker whose bytes are fetched with API auth and assigned
+ * a temporary blob URL; relative links get a `data-workspace-path` marker the
+ * click handler turns into "open that file".
  * Anything absolute (http:, mailto:, data:) is left exactly as rendered. A
  * reference that is relative but escapes the workspace is dropped: leaving the
  * browser to resolve it against the app's own URL would request a path in the app
@@ -186,7 +315,12 @@ export function renderMarkdownForFile(
       image.replaceWith(container.ownerDocument.createTextNode(`[missing image: ${source}]`));
       continue;
     }
-    image.setAttribute('src', workspaceRawUrl(target, project));
+    // The effect supplies an authenticated blob URL. Leaving the raw endpoint in
+    // `src` here would make the browser issue an unauthenticated request first.
+    image.removeAttribute('src');
+    image.setAttribute('data-workspace-image-path', target);
+    image.setAttribute('data-workspace-image-project', project ?? '');
+    image.setAttribute('aria-busy', 'true');
     image.setAttribute('loading', 'lazy');
   }
   for (const anchor of Array.from(container.querySelectorAll('a'))) {

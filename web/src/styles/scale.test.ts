@@ -14,7 +14,7 @@
  * When this fails it prints `file:line value`, so the fix is mechanical.
  */
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { cssDeclarations } from '../../scripts/css-declarations.mjs';
 
@@ -147,6 +147,21 @@ describe('the declaration scanner', () => {
 });
 
 describe('inline and inline-multiline declarations', () => {
+  it('reads a custom property whose name carries a digit', () => {
+    // The old pattern was `[a-z-]+`, which matched `--space-` and then failed on
+    // the `1`, so every numbered token (`--space-1`, `--surface-2`, `--fs-label`)
+    // was invisible to the audit — including the guard that checks a sheet only
+    // reads tokens that exist.
+    const found = parseDeclarations(
+      'probe.css',
+      ':root {\n  --space-1: 2px;\n  --surface-2: var(--surface-raised);\n}\n',
+    );
+    expect(found).toEqual([
+      { at: 'probe.css:2', property: '--space-1', value: '2px' },
+      { at: 'probe.css:3', property: '--surface-2', value: 'var(--surface-raised)' },
+    ]);
+  });
+
   it('reads complete rule bodies and preserves declaration start lines', () => {
     const css = [
       '/* .comment { color: #abcdef; } */',
@@ -259,6 +274,48 @@ describe('the token layer itself is complete', () => {
 
   it('publishes every step the other rules allow', () => {
     for (const value of SPACE) expect(css, `--space for ${value}`).toContain(value);
+  });
+
+  it('defines every custom property the sheets read', () => {
+    // An undefined `var()` is invalid at computed-value time: the whole declaration
+    // is dropped, so a typo'd token paints nothing and no test notices. This is the
+    // defect the alias comment in tokens.css describes (seven silently empty fills),
+    // so it gets a guard of its own.
+    //
+    // Two legitimate sources of a name that is not in a sheet: the token layer, and
+    // a runtime writer (`style.setProperty`, `useHeightVariable`). Anything else is
+    // a typo.
+    const declared = new Set<string>();
+    for (const file of readdirSync(DIR).filter((name) => name.endsWith('.css'))) {
+      for (const declaration of declarations(file)) {
+        if (declaration.property.startsWith('--')) declared.add(declaration.property.slice(2));
+      }
+    }
+    const runtime = new Set<string>();
+    const source = (path: string): string => readFileSync(path, 'utf8');
+    const src = new URL('../', import.meta.url).pathname;
+    const walk = (dir: string): void => {
+      for (const name of readdirSync(dir)) {
+        if (name === 'node_modules' || name.startsWith('.')) continue;
+        const path = `${dir}${name}`;
+        if (statSync(path).isDirectory()) walk(`${path}/`);
+        else if (/\.(ts|tsx)$/.test(name) && !name.includes('.test.')) {
+          for (const match of source(path).matchAll(/--([a-z0-9-]+)/g)) runtime.add(match[1]!);
+        }
+      }
+    };
+    walk(src);
+
+    const used = new Set<string>();
+    for (const file of sheets()) {
+      for (const declaration of declarations(file)) {
+        for (const match of declaration.value.matchAll(/var\(--([a-z0-9-]+)/g)) {
+          used.add(match[1]!);
+        }
+      }
+    }
+    const missing = [...used].filter((name) => !declared.has(name) && !runtime.has(name)).sort();
+    expect(missing, `undefined tokens read by a sheet:\n${missing.join('\n')}`).toEqual([]);
   });
 
   it('documents the three rules it enforces', () => {

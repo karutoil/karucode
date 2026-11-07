@@ -176,6 +176,33 @@ export function applyAgentEvent(activity: AgentActivity, event: KarucodeEvent): 
       return appendDelta(activity, event, agentId, 'content', event.delta);
     }
 
+    case 'text_replaced': {
+      // The runtime may replace normalized text after streaming deltas that had
+      // repeated fragments. Replace only this agent's newest live message for the
+      // event's run; keep its position, reasoning and every other activity item.
+      let answerIndex = -1;
+      for (let index = activity.items.length - 1; index >= 0; index -= 1) {
+        const item = activity.items[index];
+        if (
+          item?.kind === 'message' &&
+          item.role === 'assistant' &&
+          item.streaming &&
+          item.agentId === agentId &&
+          item.runId === event.run_id
+        ) {
+          answerIndex = index;
+          break;
+        }
+      }
+      if (answerIndex === -1) return activity;
+      const answer = activity.items[answerIndex];
+      if (answer?.kind !== 'message') return activity;
+      const content = clampText(event.content);
+      const items = [...activity.items];
+      items[answerIndex] = { ...answer, content };
+      return { items, lastSeq: Math.max(activity.lastSeq, event.seq) };
+    }
+
     case 'reasoning_delta': {
       if (!event.delta) return activity;
       return appendDelta(activity, event, agentId, 'reasoning', event.delta);

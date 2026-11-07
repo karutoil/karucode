@@ -16,10 +16,14 @@ exactly what is and is not protected, so you can decide where to run it.
 
 ## What is protected
 
-**Network exposure.** Loopback-only by default. With a token configured, every
-request needs `Authorization: Bearer <token>`; the SSE endpoint additionally
-accepts `?token=` because streams are harder to authenticate from some clients.
-Without a token, anyone who can reach the port can use the agent.
+**Network exposure.** Loopback-only by default. With a token configured, API,
+metrics, and terminal routes require `Authorization: Bearer <token>`. The public
+SPA shell and static assets are deliberately readable so the browser can render
+its authentication screen; that exposes no transcript or project data. The SSE
+and terminal endpoints additionally accept `?token=` because browser stream and
+WebSocket clients cannot reliably attach a header. Artifact frames instead use
+their random per-artifact `?capability=`, never the master token. Without a
+token, anyone who can reach the port can use the agent.
 
 **Browser-origin attacks (CSRF) and DNS rebinding.** Any state-changing request
 (POST/PATCH/DELETE) must include `X-Karucode-Client: web`. A request that carries
@@ -203,6 +207,14 @@ responses. A repository can contain text that tries to steer the model. The
 system prompt tells the model to treat such content as data, and approvals gate
 mutations, but prompt injection is not solved. Do not run an unattended agent
 with `auto` approval on an untrusted repository.
+
+**Workspace HTML previews.** Previewed workspace HTML executes script only in an
+opaque sandbox. It cannot read application storage/cookies or issue script fetches,
+and it cannot submit forms or embed remote assets. Only relative resources from
+that workspace's own fixed preview route and data/blob resources load. A remote
+URL or CDN is not network-authorized merely because a workspace page was opened.
+Treat previewed files as untrusted despite the confinement; custom tool approval
+and filesystem permissions are separate decisions.
 
 **Chat artifacts.** HTML artifacts execute in opaque-origin sandboxed frames and
 use a random capability that grants read access only to that artifact; they never

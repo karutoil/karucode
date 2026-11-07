@@ -27,6 +27,7 @@ import type {
   McpServer,
   PluginDiagnostics,
   PluginPanelData,
+  PluginUiActionResult,
   PluginRescanResponse,
   Project,
   ProjectListResponse,
@@ -515,17 +516,21 @@ export function getWorkspaceFile(
  * Save a workspace file from the viewer's editor.
  *
  * `PUT /api/workspace/file?path=<file>[&project=][&create=][&force=]` takes the
- * **whole** new contents as JSON. `expectedSize` is optimistically checked by the
- * server: when the file changed on disk since it was loaded the save is refused
- * with `409` and nothing is written, unless `force` is set — which is the user's
- * answer to that prompt, so only pass it after asking.
+ * **whole** new contents as JSON. `expectedDigest` is the precise optimistic
+ * concurrency check: when the file changed on disk since it was loaded the save
+ * is refused with `409` and nothing is written, even if its byte length is still
+ * the same. `expectedSize` rides along for compatibility with older servers.
+ * `force` skips both checks, and is the user's answer to the overwrite prompt,
+ * so only pass it after asking.
  */
 export function saveWorkspaceFile(
   path: string,
   content: string,
   params: {
     project?: string | null;
-    /** Size the editor loaded; omit to save without a staleness check. */
+    /** Full-file digest returned by the read, for example `sha256:<64 hex>`. */
+    expectedDigest?: string;
+    /** Size the editor loaded; retained for compatibility with older servers. */
     expectedSize?: number;
     /** Create the file if it does not exist (the viewer's "new file" path). */
     create?: boolean;
@@ -541,7 +546,15 @@ export function saveWorkspaceFile(
       create: params.create ? 'true' : undefined,
       force: params.force ? 'true' : undefined,
     }),
-    { ...options, method: 'PUT', body: { content, expected_size: params.expectedSize } },
+    {
+      ...options,
+      method: 'PUT',
+      body: {
+        content,
+        expected_digest: params.expectedDigest,
+        expected_size: params.expectedSize,
+      },
+    },
   );
 }
 
@@ -903,6 +916,32 @@ export function getPluginPanel(
 
 export function listMcpServers(options: CallOptions = {}): Promise<McpServer[]> {
   return apiRequest<{ servers: McpServer[] }>('/api/mcp', options).then((r) => r.servers);
+}
+
+/**
+ * Run one UI action a plugin declared.
+ *
+ * The action id — not the contribution id — names the handler, because two
+ * buttons may share one. `project`/`session` scope the click exactly like a panel
+ * read, so a plugin that acts on a workspace knows which one.
+ *
+ * The answer is already validated by the host: `message` is capped, `refresh`
+ * names bare panel ids of this plugin, and `open_url` is only ever `http`/`https`.
+ * The caller re-checks the URL anyway before opening a tab.
+ */
+export function runPluginUiAction(
+  plugin: string,
+  action: string,
+  params: { project?: string | null; session?: string | null } = {},
+  options: CallOptions = {},
+): Promise<PluginUiActionResult> {
+  return apiRequest<PluginUiActionResult>(
+    withQuery(
+      `/api/plugins/${encodeURIComponent(plugin)}/ui/actions/${encodeURIComponent(action)}`,
+      { project: params.project ?? undefined, session: params.session ?? undefined },
+    ),
+    { ...options, method: 'POST', body: {} },
+  );
 }
 
 // ---- terminals ------------------------------------------------------------

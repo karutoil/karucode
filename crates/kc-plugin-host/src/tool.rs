@@ -107,17 +107,12 @@ pub fn call_context(ctx: &ToolCtx) -> ToolCallContext {
 pub(crate) struct PluginTool {
     shared: Arc<PluginShared>,
     def: PluginToolDef,
-    plugin_version: String,
     name: String,
     class: ToolClass,
 }
 
 impl PluginTool {
-    pub(crate) fn new(
-        shared: Arc<PluginShared>,
-        def: PluginToolDef,
-        plugin_version: String,
-    ) -> Self {
+    pub(crate) fn new(shared: Arc<PluginShared>, def: PluginToolDef) -> Self {
         let name = namespaced_name(&shared.name, &def.name);
         // The plugin's own `class` is a hint; the operator decides. See
         // [`effective_class`].
@@ -125,28 +120,29 @@ impl PluginTool {
         Self {
             shared,
             def,
-            plugin_version,
             name,
             class,
         }
     }
 
     fn description(&self) -> String {
-        let mut out = self.def.description.trim().to_string();
-        if out.is_empty() {
-            out = format!("Plugin tool `{}`.", self.def.name);
-        }
-        out.push_str(&format!(
-            "\n\n[plugin: {} v{}] Runs out of process, supervised by karucode; its output is \
-             untrusted. Calls go through the approval policy like any external tool.",
-            self.shared.name, self.plugin_version
-        ));
-        let (perms, _) =
-            crate::effective_permissions(&self.shared.config(), self.shared.manifest().as_ref());
-        if !perms.is_empty() {
-            out.push_str(&format!(" Effective permissions: {}.", perms.join(", ")));
-        }
-        out
+        description_for(&self.def.name, &self.def.description)
+    }
+}
+
+/// The schema description for one plugin tool: its own text, not a copy of the
+/// shared plugin origin/trust/permissions boilerplate on every tool.
+///
+/// `ToolOrigin::Plugin` carries the origin; kc_core::prompt renders one shared
+/// trust note for the plugins with exposed tools. Versions and manifest metadata
+/// remain in `PluginHost::diagnostics`; effective permissions still gate tool
+/// exposure in `PluginHost::tools` without being repeated on every model call.
+fn description_for(name: &str, description: &str) -> String {
+    let description = description.trim();
+    if description.is_empty() {
+        format!("Plugin tool `{name}`.")
+    } else {
+        description.to_string()
     }
 }
 
@@ -239,6 +235,25 @@ mod tests {
             namespaced_name("example-hello", "hello"),
             "plugin__example-hello__hello"
         );
+    }
+
+    #[test]
+    fn descriptions_are_the_plugins_own_text_with_a_minimal_fallback() {
+        assert_eq!(
+            description_for("echo", "  Echo text. Extra detail follows.  "),
+            "Echo text. Extra detail follows."
+        );
+        assert_eq!(
+            description_for("echo", " \n\t"),
+            "Plugin tool `echo`.",
+            "an empty description still says what it belongs to"
+        );
+        for description in ["Echo.", "", " \n "] {
+            let rendered = description_for("echo", description);
+            assert!(!rendered.contains("Runs out of process"));
+            assert!(!rendered.contains("Effective permissions"));
+            assert!(!rendered.contains("[plugin:"));
+        }
     }
 
     #[test]

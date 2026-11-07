@@ -331,9 +331,13 @@ export function ControlRail({
       // cuts the tail, and losing "2 msgs" is a smaller loss than losing the age.
       // Both spellings are `lib/format.ts`'s: abbreviated on the line, spelled
       // out in its tooltip.
+      // Age first: it is the fact a reader scans for, and the line truncates its
+      // tail, so the fact most worth keeping goes where the clip cannot reach.
+      // The project name carries its full spelling in a tooltip because it is the
+      // one fact here that is long enough to be cut (§5.9).
       facts={[
-        <span key="project">{project}</span>,
         <span key="age">{relativeTime(session.updated_at)}</span>,
+        <span key="project" title={project}>{project}</span>,
         <span key="messages" title={pluralise(session.message_count, 'message')}>
           {pluralise(session.message_count, 'msg')}
         </span>,
@@ -383,9 +387,14 @@ export function ControlRail({
 
   return <aside ref={railRef} class="cp-browser" aria-label="Sessions across projects" tabIndex={-1}>
     <header class="side-head cp-head">
-      <div class="cp-head-copy">
-        <h1 class="cp-head-title">Control plane</h1>
-        <p class="path-hint">Every project, one view</p>
+      {/* The workbench's rail head is `.project-title` holding a text span and a
+          `.path-hint`; the plane's head is the same role on a screen that lists
+          every project, so it wears the same structure instead of a fourth
+          title recipe. Not a heading: the workbench's is a labelled button, and
+          the page's one h1 is the overview's hero. */}
+      <div class="project-title">
+        <span class="project-title-text">Control plane</span>
+        <span class="path-hint">Every project, one view</span>
       </div>
       <button
         type="button"

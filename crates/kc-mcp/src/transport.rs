@@ -31,6 +31,11 @@ pub(crate) trait Transport: Send + Sync {
     /// Close the connection and reap any child process.
     async fn close(&self);
 
+    /// Synchronous last-resort close used by the public owner's `Drop`. Unlike
+    /// dropping a future, this must signal a stdio child before returning; its
+    /// retained supervisor performs the asynchronous reap.
+    fn close_now(&self);
+
     /// `false` once a stdio child has exited; always `true` for HTTP.
     fn alive(&self) -> bool;
 

@@ -35,13 +35,16 @@ function openEventStream(): Response {
   });
 }
 
-function installFetch() {
+function installFetch(config: typeof configFixture = configFixture) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     void init;
     if (url.startsWith('/api/events')) return openEventStream();
     if (url === '/api/health') return jsonResponse(healthFixture);
-    if (url === '/api/config') return jsonResponse(configFixture);
+    if (url === '/api/config') return jsonResponse(config);
+    if (url.includes('/ui/actions/')) {
+      return jsonResponse({ ok: true, message: 'Focused', refresh: [], open_url: null });
+    }
     if (url === '/api/projects')
       return jsonResponse({
         projects: [
@@ -150,6 +153,58 @@ describe('App smoke render', () => {
     await waitFor(() => expect(controlPlaneOpen.value).toBe(false));
     expect(document.querySelectorAll('#chat-main')).toHaveLength(1);
     expect(document.querySelectorAll('#composer-input')).toHaveLength(1);
+  });
+
+  it('runs a contributed shortcut from the workspace, but never while typing or in a dialog', async () => {
+    const config = {
+      ...configFixture,
+      plugin_ui: {
+        contributions: [
+          {
+            plugin: 'kc-focus',
+            version: '1.0.0',
+            kind: 'keybinding',
+            id: 'focus-key',
+            hosted_id: 'plugin__kc-focus__focus-key',
+            label: 'Focus mode shortcut',
+            keys: 'mod+shift+f',
+            action: 'focus',
+          },
+        ],
+      },
+    } as typeof configFixture;
+    const fetchMock = installFetch(config);
+    render(<App />);
+    await waitFor(() => expect(store.boot.value).toBe('ready'));
+
+    const mac = /mac|iphone|ipad/i.test(`${navigator.platform} ${navigator.userAgent}`);
+    const chord = { key: 'f', shiftKey: true, metaKey: mac, ctrlKey: !mac };
+    const actionCalls = () =>
+      fetchMock.mock.calls.filter(([url]) => String(url).includes('/ui/actions/focus')).length;
+
+    // While the caret is in the composer the chord belongs to the field.
+    fireEvent.keyDown(screen.getByLabelText('Message karucode'), chord);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(actionCalls()).toBe(0);
+
+    // With a dialog open nothing fires behind it.
+    store.paletteOpen.value = true;
+    fireEvent.keyDown(window, chord);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(actionCalls()).toBe(0);
+    store.paletteOpen.value = false;
+
+    // Anywhere else in the workspace it runs the plugin's action.
+    fireEvent.keyDown(window, chord);
+    await waitFor(() => expect(actionCalls()).toBe(1));
+    // The answer comes back as the plugin's own toast.
+    await waitFor(() =>
+      expect(store.toasts.value.map((toast) => toast.message)).toContain('Focused'),
+    );
   });
 });
 describe('App crash containment', () => {

@@ -61,4 +61,24 @@ describe('global session creation events', () => {
     expect(store.sessions.value[0]?.title).toBe('Created locally');
     expect(store.currentSessionId.value).toBe('s_local');
   });
+
+  it('forgets dead notification-centre rows when a session_deleted event arrives', () => {
+    store.recordNotification({
+      id: 'run:deleted', kind: 'run_finished', title: 'Finished', body: '',
+      session_id: 's_deleted', session_title: 'Deleted', project_id: 'p_one',
+      source: 'runtime', sticky: false,
+    }, false);
+    store.recordNotification({
+      id: 'run:kept', kind: 'run_finished', title: 'Finished', body: '',
+      session_id: 's_kept', session_title: 'Kept', project_id: 'p_one',
+      source: 'runtime', sticky: false,
+    }, false);
+    expect(store.unreadTotal.value).toBe(2);
+
+    emit({ type: 'session_deleted', session_id: 's_deleted' });
+
+    expect(store.notifications.value.map((entry) => entry.id)).toEqual(['run:kept']);
+    expect(store.unreadTotal.value).toBe(1);
+    expect(store.unread.value).toEqual({ s_kept: 1 });
+  });
 });

@@ -1236,7 +1236,7 @@ else
     fi
 fi
 
-if [ "$SKIP_BUILD" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && [ ! -f "$BUILT" ]; then
+if [ "$FROM_STAGE" -eq 0 ] && [ "$SKIP_BUILD" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && [ ! -f "$BUILT" ]; then
     die "the build reported success but ${BUILT} is missing"
 fi
 

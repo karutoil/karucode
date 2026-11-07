@@ -92,11 +92,13 @@
 //
 // # Stopping
 //
-// `SIGINT`/`SIGTERM` cancel runs, expire pending approvals, shut plugins and MCP
-// children down and checkpoint SQLite. Graceful drain is bounded at 10 s so a
-// stuck keep-alive connection cannot hold the process forever. On the next start,
-// leftover `running` runs and agents are marked `interrupted` and pending
-// approvals `expired`; nothing is silently retried.
+// `SIGINT`/`SIGTERM` cancel runs, expire pending approvals, completely stop terminal
+// process groups, shut plugins and MCP children down and checkpoint SQLite. Graceful
+// drain is bounded at 10 s so a stuck keep-alive connection cannot hold the process
+// forever. On the next start, exactly the leftover foreign-instance `running` runs
+// and agents are marked `interrupted` and pending approvals `expired`. Each affected
+// session gets a stored assistant recovery notice; reconnect/reload shows it, and
+// no interrupted work auto-resumes.
 //
 // # Startup failures you will actually see
 //
@@ -105,8 +107,12 @@
 //   Fix the path, or drop it and start with no project.
 // * `refusing to bind ... without KARUCODE_AUTH_TOKEN` - remote binds need a
 //   token of at least 16 characters.
-// * `could not open the database at ...` - permissions or a corrupt/foreign
-//   file; move it aside to start fresh.
+// * `could not open the database at ...`, including `database ... failed its
+//   integrity check` - permissions, structural corruption, or foreign-key
+//   violations in an existing/restored file. Integrity and foreign-key checks run
+//   before migration, so orphaned writes are not accepted into a migrated schema.
+//   Fix the references or restore/recover a consistent copy; move it aside only if
+//   starting fresh is really intended.
 // * `port ... in use` - another instance is running (plugin/MCP children are
 //   stopped before exiting).
 //

@@ -59,7 +59,10 @@ harness never executes a guess at what the model meant.
 The arguments are checked against the schema the model was actually offered,
 before anything is approved or run: `required` presence, `enum` membership, a
 declared `type` (or a list, as in `["string","null"]`) and
-`additionalProperties: false`. Richer keywords (`anyOf`, `$ref`, `format`,
+`additionalProperties: false`. `null` is not a universal bypass: it must be
+allowed by the declared type (for example `["string","null"]`) or by an enum
+containing `null`, and must still satisfy every other declared constraint.
+Richer keywords (`anyOf`, `$ref`, `format`,
 nested `required`) are left to the tool, because a wrong "invalid" verdict from
 the harness would block a call the tool would have accepted. A server that
 publishes a bare `{"type":"object"}` gets no second-guessing at all.

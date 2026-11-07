@@ -60,7 +60,7 @@
 // | `artifact markdown` / `markdown` | the document, rendered like the chat does |
 // | `artifact json` / `json` | the payload, pretty-printed |
 // | `artifact csv` / `tsv` | the table, header row and all |
-// | `artifact image` | a `data:image/…` URL or a workspace path |
+// | `artifact image` | a `data:image/…` URL or workspace path fetched with API auth and rendered through a temporary blob URL |
 //
 // Without a declared type, the language of the fence decides, and an `artifact`
 // fence with no language is sniffed: a tag means HTML, `graph TD` means Mermaid,
@@ -99,9 +99,11 @@
 // this residual can disclose the viewing event and this one artifact's capability,
 // never the master bearer, and `no-referrer` keeps the capability out of Referer
 // headers. Everything is in memory, keyed by a SHA-256 of the bytes, and dropped
-// when the process exits: posting the same artifact again is the same id, and a 404
-// simply means "post it again". The authenticated POST returns the random, scoped
-// capability; GET never accepts the deployment's master `?token=`.
+// when the process exits: posting the same artifact again is the same id.
+// **Render again** (or **Try again** after a failure) explicitly invalidates the
+// browser-cached capability and POSTs the source again, so an after-restart or
+// after-eviction retry never reuses a dead URL. The authenticated POST returns the
+// random, scoped capability; GET never accepts the deployment's master `?token=`.
 //
 // Full reference: `docs/API.md` (Chat artifacts) and `web/README.md` (how the
 // renderer is put together).

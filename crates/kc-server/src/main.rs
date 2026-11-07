@@ -7,7 +7,7 @@
 // @kc-title: Run it as a systemd service
 // @kc-summary: Install the binary and a hardened unit, keep it enabled across reboots, and upgrade or roll back without losing the paths it needs.
 // @kc-tags: install, deploy, systemd, service, upgrade, reboot, production
-// @kc-applies-to: file:packaging/install.sh, file:packaging/update.sh, file:packaging/karucode.service, cmd:install.sh, cmd:install.sh --workspace, cmd:install.sh --dry-run, cmd:install.sh --binary, cmd:install.sh --no-systemd, cmd:install.sh --allow-jit, cmd:install.sh --port, cmd:install.sh --service-user, cmd:install.sh --service-group, cmd:update.sh, cmd:update.sh --check, cmd:update.sh --dry-run, cmd:update.sh --no-pull, cmd:update.sh --ref, cmd:update.sh --build-only, cmd:update.sh --skip-build, cmd:update.sh --allow-dirty, cmd:update.sh --no-backup, cmd:update.sh --force, cmd:update.sh --stage-only, cmd:update.sh --from-stage, cmd:update.sh --no-stage, cmd:update.sh --stage-dir, cmd:update.sh --detach, cmd:update.sh --no-detach, cmd:update.sh --follow, env:SUDO_USER, env:LOGNAME, path:/etc/systemd/system/karucode.service, path:/etc/systemd/system/karucode.service.d/10-install.conf, path:/etc/systemd/system/karucode.service.d/20-local.conf, path:/etc/karucode/karucode.env, path:/var/lib/karucode, path:/usr/local/bin/karucode, cmd:systemctl enable --now karucode, cmd:systemctl restart karucode, cmd:journalctl -u karucode
+// @kc-applies-to: file:packaging/install.sh, file:packaging/update.sh, file:packaging/karucode.service, cmd:install.sh, cmd:install.sh --workspace, cmd:install.sh --dry-run, cmd:install.sh --binary, cmd:install.sh --tarball, cmd:install.sh --no-systemd, cmd:install.sh --allow-jit, cmd:install.sh --port, cmd:install.sh --service-user, cmd:install.sh --service-group, cmd:update.sh, cmd:update.sh --check, cmd:update.sh --dry-run, cmd:update.sh --no-pull, cmd:update.sh --ref, cmd:update.sh --build-only, cmd:update.sh --skip-build, cmd:update.sh --allow-dirty, cmd:update.sh --no-backup, cmd:update.sh --force, cmd:update.sh --stage-only, cmd:update.sh --from-stage, cmd:update.sh --no-stage, cmd:update.sh --stage-dir, cmd:update.sh --detach, cmd:update.sh --no-detach, cmd:update.sh --follow, env:SUDO_USER, env:LOGNAME, path:/etc/systemd/system/karucode.service, path:/etc/systemd/system/karucode.service.d/10-install.conf, path:/etc/systemd/system/karucode.service.d/20-local.conf, path:/etc/karucode/karucode.env, path:/var/lib/karucode, path:/usr/local/bin/karucode, cmd:systemctl enable --now karucode, cmd:systemctl restart karucode, cmd:journalctl -u karucode
 //
 // # Install
 //
@@ -26,6 +26,13 @@
 // # preview first, change nothing
 // sudo sh packaging/install.sh --workspace /srv/karucode/workspace --dry-run
 // ```
+//
+// A prebuilt release archive can be installed with `sudo sh packaging/install.sh
+// --tarball /path/to/release.tar.gz --workspace /srv/karucode/workspace`. If a
+// sibling `SHA256SUMS` exists, it must contain the archive's basename and matching
+// SHA-256; an absent entry is an error, not permission to install without
+// verification. With no sibling checksum file the local-archive behavior is
+// unchanged. Use `--binary` for a locally compiled executable instead.
 //
 // `--workspace` is the one directory the agent may read and edit. The installer
 // creates it, owns it by the service user, installs the unit, enables it at boot,
@@ -176,7 +183,9 @@
 // `--stage-only` is the maintenance-window form: it reports the staged version
 // and sha256 and changes nothing live. `--from-stage` applies exactly those
 // bytes, refuses if the staged binary no longer matches its recorded checksum,
-// and leaves no stage behind afterwards. The stage lives in
+// and leaves no stage behind afterwards. It does not build or require the
+// original `target/release/karucode`; that file may be deleted after staging.
+// The stage lives in
 // `<data-dir>/stage` (`--stage-dir` to move it) and is root-owned, because the
 // build runs as you and `install.sh` reads it as root.
 //

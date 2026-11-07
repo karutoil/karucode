@@ -273,6 +273,29 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
       };
     }
 
+    case 'text_replaced': {
+      if (event.agent_id) return state;
+      const answer = findItem(
+        state,
+        (item) =>
+          item.kind === 'message' &&
+          item.role === 'assistant' &&
+          item.streaming &&
+          item.agentId === null &&
+          item.runId === event.run_id,
+      );
+      if (!answer || answer.kind !== 'message') return seen;
+      if (answer.content === event.content) return seen;
+      return {
+        ...seen,
+        items: state.items.map((item) =>
+          item.id === answer.id && item.kind === 'message'
+            ? { ...item, content: event.content }
+            : item
+        ),
+      };
+    }
+
     case 'reasoning_delta': {
       if (event.agent_id) return state;
       if (!event.delta) return seen;

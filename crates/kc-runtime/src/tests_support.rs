@@ -20,8 +20,9 @@ use kc_core::paths::Workspace;
 use kc_core::provider::{ChatRequest, Provider, ProviderChunk, ProviderFactory, ProviderStream};
 use kc_core::settings::Settings;
 use kc_core::store::{
-    AgentRecord, AgentSummary, ApprovalRecord, ClaimRecord, NewMessage, Project, RunRecord,
-    RunStatus, Session, SessionSummary, Store, StoredMessage, TerminalSession, UsageRecord,
+    AgentRecord, AgentStatus, AgentSummary, ApprovalRecord, ClaimRecord, NewMessage, Project,
+    RunRecord, RunStatus, Session, SessionSummary, Store, StoredMessage, TerminalSession,
+    UsageRecord,
 };
 use kc_core::tool::{
     Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOrigin, ToolOutcome, ToolRegistry, ToolSpec,
@@ -495,6 +496,7 @@ impl Store for FakeStore {
     }
 
     async fn append_message(&self, message: &NewMessage) -> Result<i64> {
+        self.wait_at_gate("append_message").await;
         if self.fail_appends.load(Ordering::SeqCst) {
             return Err(Error::Store("disk is full".into()));
         }
@@ -677,6 +679,20 @@ impl Store for FakeStore {
         Ok(count)
     }
 
+    async fn recover_interrupted_runs(&self) -> Result<Vec<(String, String)>> {
+        let now = now_ms();
+        let mut db = self.db();
+        let mut recovered = Vec::new();
+        for run in db.runs.iter_mut() {
+            if run.status == RunStatus::Running.as_str() {
+                run.status = RunStatus::Interrupted.as_str().to_string();
+                run.finished_at = Some(now);
+                recovered.push((run.session_id.clone(), run.id.clone()));
+            }
+        }
+        Ok(recovered)
+    }
+
     async fn list_runs(&self, session_id: &str, limit: usize) -> Result<Vec<RunRecord>> {
         let db = self.db();
         let mut out: Vec<RunRecord> = db
@@ -698,6 +714,47 @@ impl Store for FakeStore {
             None => db.agents.push(agent.clone()),
         }
         Ok(())
+    }
+
+    async fn update_agent_note(
+        &self,
+        id: &str,
+        note: &str,
+        progress: Option<f32>,
+        updated_at: i64,
+    ) -> Result<bool> {
+        self.wait_at_gate("update_agent_note").await;
+        let mut db = self.db();
+        let Some(agent) = db.agents.iter_mut().find(|agent| agent.id == id) else {
+            return Ok(false);
+        };
+        agent.note = note.to_string();
+        agent.progress = progress;
+        agent.updated_at = updated_at;
+        Ok(true)
+    }
+
+    async fn transition_agent_status(
+        &self,
+        id: &str,
+        expected: &[&str],
+        next: &str,
+        updated_at: i64,
+    ) -> Result<bool> {
+        if expected.is_empty() {
+            return Ok(false);
+        }
+        self.wait_at_gate("transition_agent_status").await;
+        let mut db = self.db();
+        let Some(agent) = db.agents.iter_mut().find(|agent| agent.id == id) else {
+            return Ok(false);
+        };
+        if !expected.contains(&agent.status.as_str()) {
+            return Ok(false);
+        }
+        agent.status = next.to_string();
+        agent.updated_at = updated_at;
+        Ok(true)
     }
 
     async fn list_agents(&self, session_id: &str) -> Result<Vec<AgentRecord>> {
@@ -788,6 +845,21 @@ impl Store for FakeStore {
         Ok(count)
     }
 
+    async fn recover_interrupted_agents(&self) -> Result<Vec<(String, String)>> {
+        let now = now_ms();
+        let mut db = self.db();
+        let mut recovered = Vec::new();
+        for agent in db.agents.iter_mut() {
+            if matches!(agent.status.as_str(), "running" | "paused") {
+                agent.status = AgentStatus::Interrupted.as_str().to_string();
+                agent.updated_at = now;
+                agent.finished_at = Some(now);
+                recovered.push((agent.session_id.clone(), agent.id.clone()));
+            }
+        }
+        Ok(recovered)
+    }
+
     async fn record_usage(&self, record: &UsageRecord) -> Result<()> {
         self.db().usage.push(record.clone());
         Ok(())
@@ -806,7 +878,11 @@ impl Store for FakeStore {
         let mut db = self.db();
         match db.approvals.iter_mut().find(|a| a.id == id) {
             Some(approval) if approval.status == "pending" => {
-                approval.status = "resolved".to_string();
+                approval.status = if decision == "expired" {
+                    "expired".to_string()
+                } else {
+                    "resolved".to_string()
+                };
                 approval.decision = Some(decision.to_string());
                 approval.resolved_at = Some(now_ms());
                 Ok(())
@@ -816,7 +892,43 @@ impl Store for FakeStore {
         }
     }
 
+    async fn resolve_pending_approval(&self, id: &str, decision: &str) -> Result<bool> {
+        let decision = match decision.trim() {
+            "allow_once" => "allow_once",
+            "allow_session" => "allow_session",
+            "deny" => "deny",
+            "expired" => "expired",
+            other => {
+                return Err(Error::BadRequest(format!(
+                    "unknown approval decision `{other}`: expected allow_once, allow_session, deny or expired"
+                )));
+            }
+        };
+        self.wait_at_gate("resolve_pending_approval").await;
+        if self.fail_approval_resolutions.load(Ordering::SeqCst) {
+            return Err(Error::Store("approval store unavailable".into()));
+        }
+        let mut db = self.db();
+        let Some(approval) = db.approvals.iter_mut().find(|a| a.id == id) else {
+            return Ok(false);
+        };
+        if approval.status != "pending" {
+            return Ok(false);
+        }
+        approval.status = if decision == "expired" {
+            "expired".to_string()
+        } else {
+            "resolved".to_string()
+        };
+        approval.decision = Some(decision.to_string());
+        approval.resolved_at = Some(now_ms());
+        Ok(true)
+    }
+
     async fn expire_pending_approvals(&self, run_id: &str, _reason: &str) -> Result<usize> {
+        // Block before even reading the fake database: the regression interleaving
+        // needs the human decision to commit while a stale expiry snapshot waits.
+        self.wait_at_gate("expire_pending_approvals").await;
         let mut db = self.db();
         let mut count = 0;
         for approval in db.approvals.iter_mut() {
@@ -2433,6 +2545,8 @@ pub(crate) struct HarnessBuilder {
     /// project, so a test of that field opts in here.
     project_id: Option<String>,
     hooks: Arc<dyn Hooks>,
+    workspaces: Option<Arc<dyn crate::WorkspaceProvider>>,
+    session_workspace: Option<PathBuf>,
 }
 
 impl HarnessBuilder {
@@ -2443,6 +2557,8 @@ impl HarnessBuilder {
             tools: Vec::new(),
             project_id: None,
             hooks: Arc::new(NoHooks),
+            workspaces: None,
+            session_workspace: None,
         }
     }
 
@@ -2462,6 +2578,16 @@ impl HarnessBuilder {
         self
     }
 
+    pub(crate) fn workspaces(mut self, workspaces: Arc<dyn crate::WorkspaceProvider>) -> Self {
+        self.workspaces = Some(workspaces);
+        self
+    }
+
+    pub(crate) fn session_workspace(mut self, workspace: PathBuf) -> Self {
+        self.session_workspace = Some(workspace);
+        self
+    }
+
     /// Replace the model config (sampling + retry budgets) the runtime sees.
     pub(crate) fn model(mut self, model: ModelConfig) -> Self {
         self.settings.model = model;
@@ -2477,6 +2603,12 @@ impl HarnessBuilder {
         let dir = std::env::temp_dir().join(format!("kc-runtime-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create temp workspace");
         let workspace = Arc::new(Workspace::new(&dir).expect("workspace"));
+        let session_workspace = self.session_workspace.unwrap_or_else(|| dir.clone());
+        std::fs::create_dir_all(&session_workspace).expect("create recorded session workspace");
+        let workspaces: Arc<dyn crate::WorkspaceProvider> = match self.workspaces {
+            Some(workspaces) => workspaces,
+            None => Arc::new(crate::SingleWorkspace::new(workspace)),
+        };
         let store = Arc::new(FakeStore::new());
         let factory = Arc::new(ScriptedFactory::new(self.scripts));
         let settings = Arc::new(self.settings);
@@ -2492,7 +2624,7 @@ impl HarnessBuilder {
             tools: Arc::new(registry),
             settings: settings.clone(),
             hooks: self.hooks,
-            workspaces: Arc::new(crate::SingleWorkspace::new(workspace)),
+            workspaces,
         });
         let events = runtime.subscribe();
         let session_id = format!("s_{}", uuid::Uuid::new_v4().simple());
@@ -2500,7 +2632,7 @@ impl HarnessBuilder {
             .create_session(
                 &session_id,
                 "test session",
-                &dir.to_string_lossy(),
+                &session_workspace.to_string_lossy(),
                 self.project_id.as_deref(),
             )
             .await
@@ -2653,7 +2785,7 @@ pub(crate) fn test_inner_with_settings(settings: FakeSettings) -> Arc<RuntimeInn
         events: broadcast::channel(64).0,
         tools: RwLock::new(Arc::new(ToolRegistry::new())),
         runs: Mutex::new(HashMap::new()),
-        session_lifecycle: Mutex::new(HashMap::new()),
+        session_lifecycle: Arc::new(Mutex::new(HashMap::new())),
         approvals: ApprovalRegistry::new(),
         subagents: Arc::new(SubagentLimiter::new(Default::default())),
         hub: Arc::new(crate::hub::AgentHub::new()),

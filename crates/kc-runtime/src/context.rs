@@ -83,7 +83,7 @@
 
 use kc_core::message::{Message, Role};
 use kc_core::tool::truncate_output;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 // @kc-doc: prompt-cache
@@ -235,7 +235,10 @@ use std::sync::{Arc, Mutex};
 // | `0` means | derive it from the model | **no ceiling** - only for a provider with no item limit |
 //
 // The count is what the request actually carries, and the compaction digest that
-// replaces the dropped turns is counted too. Compaction also buys
+// replaces the dropped turns is counted too. Because OpenAI-compatible tool
+// messages cannot carry images, every image-bearing source message also produces
+// one extra `user` wire message (however many images that source carries); that
+// expansion is counted in both fitting and the held run window. Compaction also buys
 // `TURNS_OF_HEADROOM` (50) turns of room in *items*, exactly as it does in
 // characters - a ceiling that compacted down to itself would re-compact on the
 // very next turn and cost a cache miss per turn.
@@ -298,6 +301,10 @@ use std::sync::{Arc, Mutex};
 //   key only improves routing across cache shards on very large providers.
 
 const TRIM_PREFIX: &str = "[context digest: ";
+/// Runtime provenance for a digest. Content alone is untrusted: a user or tool
+/// may legitimately return text beginning with [`TRIM_PREFIX`], and treating that
+/// as a runtime marker would delete it and could orphan the neighbouring calls.
+const DIGEST_NAME: &str = "kc-runtime:context-digest";
 
 /// How much space the compaction digest may take. It is a summary, not a
 /// transcript: if it grew without a bound it would defeat the budget it exists
@@ -427,6 +434,17 @@ fn cap_image_bytes(messages: &mut [Message]) {
             ));
         }
     }
+}
+
+/// Messages the OpenAI-compatible provider puts on the wire for this window.
+///
+/// Every image-bearing source message expands into itself plus one synthetic
+/// user message (all of that source's images share the one addition). The
+/// provider serializer is the conformance authority; the runtime keeps this
+/// small structural mirror so [`ContextLimits::max_messages`] bounds the actual
+/// request rather than the pre-serialization vector.
+pub fn provider_message_count(messages: &[Message]) -> usize {
+    messages.len().saturating_add(image_message_count(messages))
 }
 
 /// Number of characters a message contributes to the budget.
@@ -715,7 +733,7 @@ fn fit_report(
     // Both ceilings are checked before anything is rewritten: a window that
     // satisfies them is returned byte-identical, which is what keeps the
     // provider's prefix cache hitting between compactions.
-    if limits.fits(total, prepared.len()) {
+    if limits.fits(total, provider_message_count(&prepared)) {
         return FitOutcome::unchanged(prepared);
     }
 
@@ -751,7 +769,7 @@ fn fit_report(
     if saved > 0 {
         total = total.saturating_sub(saved);
     }
-    if limits.fits(total, prepared.len()) {
+    if limits.fits(total, provider_message_count(&prepared)) {
         // The stubs alone brought the window under budget (or under the item
         // ceiling, which stubs cannot move - the count is unchanged). Nothing
         // is dropped, so there is nothing to digest.
@@ -791,6 +809,7 @@ fn fit_report(
     let digests = prepared.iter().filter(|m| is_digest(m)).count();
     let mut survivors = total;
     let mut survivor_count = prepared.len();
+    let mut survivor_image_messages = image_message_count(&prepared);
     let mut dropped_messages = 0usize;
     let mut dropped = vec![false; prepared.len()];
     let mut next = 0usize;
@@ -800,11 +819,14 @@ fn fit_report(
         // drops the same units for either reason, so the counts can never
         // disagree about what "compact" means.
         while next < units.len()
-            && (survivors > target || emitted_count(survivor_count, digests) > count_target)
+            && (survivors > target
+                || emitted_count(survivor_count, digests, survivor_image_messages) > count_target)
         {
             let unit = &units[next];
             survivors = survivors.saturating_sub(unit_chars(&prepared, unit));
             survivor_count = survivor_count.saturating_sub(unit.len());
+            survivor_image_messages =
+                survivor_image_messages.saturating_sub(unit_image_messages(&prepared, unit));
             dropped_messages += unit.len();
             for &i in unit {
                 dropped[i] = true;
@@ -852,7 +874,11 @@ fn fit_report(
         }
         let notice = compact_notice(&prepared, &dropped, dropped_messages, max_chars, notes);
         let fits = survivors + notice.chars().count() <= max_chars
-            && limits.within_messages(emitted_count(survivor_count, digests));
+            && limits.within_messages(emitted_count(
+                survivor_count,
+                digests,
+                survivor_image_messages,
+            ));
         if fits || next >= units.len() {
             break notice;
         }
@@ -861,6 +887,8 @@ fn fit_report(
         let unit = &units[next];
         survivors = survivors.saturating_sub(unit_chars(&prepared, unit));
         survivor_count = survivor_count.saturating_sub(unit.len());
+        survivor_image_messages =
+            survivor_image_messages.saturating_sub(unit_image_messages(&prepared, unit));
         dropped_messages += unit.len();
         for &i in unit {
             dropped[i] = true;
@@ -968,7 +996,7 @@ pub fn compact_run_window_with_limits(
     let max_chars = limits.max_chars;
     cap_image_bytes(history);
     let mut total: usize = history.iter().map(message_chars).sum();
-    if limits.fits(total, history.len()) {
+    if limits.fits(total, provider_message_count(history)) {
         return;
     }
 
@@ -993,7 +1021,7 @@ pub fn compact_run_window_with_limits(
     if saved > 0 {
         total = total.saturating_sub(saved);
     }
-    if limits.fits(total, history.len()) {
+    if limits.fits(total, provider_message_count(history)) {
         // The stubs alone brought the held window under budget.
         return;
     }
@@ -1029,6 +1057,7 @@ pub fn compact_run_window_with_limits(
     let mut dropped_messages = 0usize;
     let mut survivors = total;
     let mut survivor_count = history.len();
+    let mut survivor_image_messages = image_message_count(history);
     let mut next = 0usize;
 
     // The digest costs characters too, so it is part of the budget: keep
@@ -1036,11 +1065,14 @@ pub fn compact_run_window_with_limits(
     // item count fits the ceiling.
     let notice = loop {
         while next < units.len()
-            && (survivors > target || emitted_count(survivor_count, digests) > count_target)
+            && (survivors > target
+                || emitted_count(survivor_count, digests, survivor_image_messages) > count_target)
         {
             let unit = &units[next];
             survivors = survivors.saturating_sub(unit_chars(history, unit));
             survivor_count = survivor_count.saturating_sub(unit.len());
+            survivor_image_messages =
+                survivor_image_messages.saturating_sub(unit_image_messages(history, unit));
             dropped_messages += unit.len();
             for &i in unit {
                 dropped[i] = true;
@@ -1071,13 +1103,19 @@ pub fn compact_run_window_with_limits(
         }
         let notice = compact_notice(history, &dropped, dropped_messages, max_chars, notes);
         let fits = survivors + notice.chars().count() <= max_chars
-            && limits.within_messages(emitted_count(survivor_count, digests));
+            && limits.within_messages(emitted_count(
+                survivor_count,
+                digests,
+                survivor_image_messages,
+            ));
         if fits || next >= units.len() {
             break notice;
         }
         let unit = &units[next];
         survivors = survivors.saturating_sub(unit_chars(history, unit));
         survivor_count = survivor_count.saturating_sub(unit.len());
+        survivor_image_messages =
+            survivor_image_messages.saturating_sub(unit_image_messages(history, unit));
         dropped_messages += unit.len();
         for &i in unit {
             dropped[i] = true;
@@ -1165,13 +1203,26 @@ fn supersede(messages: &mut [Message], from: usize, stub_below: usize) -> Vec<us
         return saved;
     }
 
-    // What each call asked for, by call id: a result does not always name its
-    // path, and the assistant turn that declared the call is always behind it.
-    // Keyed by an owned id because the table outlives the borrow of `messages`.
-    let mut calls: HashMap<String, CallTarget> = HashMap::new();
-    for message in messages.iter() {
-        for call in &message.tool_calls {
-            calls.insert(call.id.clone(), CallTarget::from(call));
+    // Resolve each result against the assistant occurrence that structurally
+    // owns its contiguous result run. Call ids are not globally unique in real
+    // transcripts: gateways reuse ids such as `call_0`, sometimes with different
+    // arguments. A global id -> arguments map would make the old result inherit
+    // the newest occurrence's path and stub it with a false replacement claim.
+    let mut calls: Vec<Option<CallTarget>> = vec![None; messages.len()];
+    let mut owner: Option<&Message> = None;
+    for (index, message) in messages.iter().enumerate() {
+        match message.role {
+            Role::Assistant if !message.tool_calls.is_empty() => owner = Some(message),
+            Role::Tool => {
+                calls[index] = message.tool_call_id.as_deref().and_then(|id| {
+                    owner
+                        .and_then(|assistant| {
+                            assistant.tool_calls.iter().find(|call| call.id == id)
+                        })
+                        .map(CallTarget::from)
+                });
+            }
+            _ => owner = None,
         }
     }
 
@@ -1180,10 +1231,7 @@ fn supersede(messages: &mut [Message], from: usize, stub_below: usize) -> Vec<us
         if messages[i].role != Role::Tool {
             continue;
         }
-        let call = messages[i]
-            .tool_call_id
-            .as_deref()
-            .and_then(|id| calls.get(id));
+        let call = calls[i].as_ref();
         let tool = match messages[i].name.as_deref() {
             Some(name) if !name.is_empty() => name.to_string(),
             _ => match call {
@@ -1233,6 +1281,7 @@ fn supersede(messages: &mut [Message], from: usize, stub_below: usize) -> Vec<us
 }
 
 /// One call's target, resolved from its arguments once.
+#[derive(Clone)]
 struct CallTarget {
     tool: String,
     path: Option<String>,
@@ -1784,18 +1833,18 @@ fn target_messages(messages: &[Message], limits: ContextLimits) -> usize {
 /// user message alone), so the headroom arithmetic never multiplies by zero.
 fn recent_exchange_messages(messages: &[Message]) -> usize {
     let start = current_exchange_start(messages);
-    messages.len().saturating_sub(start).max(1)
+    provider_message_count(&messages[start.min(messages.len())..]).max(1)
 }
 
-/// How many items `rebuild` will emit for a window of `survivors` messages that
-/// carries `digests` older digests: every survivor, minus the digests it
-/// replaces, plus the one digest it inserts.
-///
-/// This is the count the ceiling has to be compared against, not the raw number
-/// of survivors: a window with a carried digest gains no item when it is
-/// compacted.
-fn emitted_count(survivors: usize, digests: usize) -> usize {
-    survivors.saturating_sub(digests).saturating_add(1)
+/// How many wire items `rebuild` will emit for a window of `survivors` messages
+/// that carries `digests` older digests and `image_messages` image-bearing
+/// sources: every survivor, minus replaced digests, plus one new digest, plus
+/// the synthetic user message each image-bearing source expands into.
+fn emitted_count(survivors: usize, digests: usize, image_messages: usize) -> usize {
+    survivors
+        .saturating_sub(digests)
+        .saturating_add(1)
+        .saturating_add(image_messages)
 }
 
 /// Say so, once per compaction, when the request that is about to be sent still
@@ -1809,10 +1858,11 @@ fn emitted_count(survivors: usize, digests: usize) -> usize {
 /// message in it answers a call in it, and splitting one of those pairs is what
 /// produces an invalid request instead of an oversized one.
 fn warn_if_over_ceiling(messages: &[Message], limits: ContextLimits, reason: &str) {
-    if !limits.within_messages(messages.len()) {
+    let sent = provider_message_count(messages);
+    if !limits.within_messages(sent) {
         tracing::warn!(
             ceiling = limits.max_messages,
-            sent = messages.len(),
+            sent,
             reason,
             "context window cannot be brought under limits.max_context_messages: the request is \
              sent as-is. Raise `limits.max_context_messages`, or set it to 0 for a provider with \
@@ -1859,8 +1909,13 @@ fn current_exchange_start(messages: &[Message]) -> usize {
 }
 
 /// Is this message the compaction digest that replaced dropped turns?
+///
+/// The reserved `name` is runtime provenance; the visible prefix is not proof.
+/// Ordinary persisted user rows have no name, and tool rows name their tool.
 pub fn is_digest(message: &Message) -> bool {
-    message.content.starts_with(TRIM_PREFIX)
+    message.role == Role::User
+        && message.name.as_deref() == Some(DIGEST_NAME)
+        && message.content.starts_with(TRIM_PREFIX)
 }
 
 /// The prefix every compaction digest starts with.
@@ -1903,6 +1958,19 @@ fn unit_chars(messages: &[Message], unit: &[usize]) -> usize {
     unit.iter().map(|&i| message_chars(&messages[i])).sum()
 }
 
+fn image_message_count(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| !message.images.is_empty())
+        .count()
+}
+
+fn unit_image_messages(messages: &[Message], unit: &[usize]) -> usize {
+    unit.iter()
+        .filter(|&&index| !messages[index].images.is_empty())
+        .count()
+}
+
 /// Rebuild the list: everything before `[start, end)` keeps its position, the
 /// notice goes directly after the system prompt / pinned prefix, survivors follow.
 fn rebuild(messages: Vec<Message>, pin: usize, dropped: &[bool], notice: String) -> Vec<Message> {
@@ -1936,7 +2004,9 @@ fn push_digest(out: &mut Vec<Message>, notice: String) {
     // A `user` turn, not an `assistant` one: the model did not say this, and a
     // transcript that claims it did makes the model believe it already
     // summarised or decided something.
-    out.push(Message::user(notice));
+    let mut digest = Message::user(notice);
+    digest.name = Some(DIGEST_NAME.to_string());
+    out.push(digest);
 }
 
 /// What the model gets instead of the turns that were dropped.
@@ -2961,6 +3031,155 @@ mod image_budget_tests {
             .content
             .contains("encoded image byte budget exceeded"));
     }
+
+    #[test]
+    fn fitted_request_and_held_window_match_the_real_provider_wire_count() {
+        let mut input = vec![Message::system("system"), Message::user("task")];
+        for index in 0..5 {
+            let id = format!("image-{index}");
+            input.push(Message::assistant(
+                "",
+                vec![kc_core::message::ToolCall {
+                    id: id.clone(),
+                    name: "read_file".into(),
+                    arguments: format!(r#"{{"path":"src/{index}.png"}}"#),
+                }],
+            ));
+            input.push(
+                Message::tool_result(&id, "read_file", format!("image {index}"))
+                    .with_images(vec![image(16), image(16)]),
+            );
+            input.push(Message::assistant(format!("looked at {index}"), vec![]));
+            input.push(Message::user(if index == 4 { "finish" } else { "next" }));
+        }
+        let limits = ContextLimits::new(240_000, 12);
+
+        let fitted = fit_with_limits(input.clone(), limits, 24_000);
+        assert!(
+            fitted.len() < input.len(),
+            "the image expansion must trigger fitting"
+        );
+        assert_eq!(
+            provider_message_count(&fitted),
+            kc_provider::request::serialized_message_count(&fitted),
+            "runtime accounting must equal actual OpenAI request serialization"
+        );
+        assert!(kc_provider::request::serialized_message_count(&fitted) <= limits.max_messages);
+
+        // Held-window regression: 39 source items formerly looked like a perfect
+        // fit after reserving the system prompt, but four image carriers expand it
+        // to 44 wire items. Give it a tail longer than PROTECTED_TAIL so whole old
+        // exchanges really are droppable instead of exercising the warned escape.
+        let mut held = vec![Message::user("held task")];
+        for index in 0..4 {
+            let id = format!("held-image-{index}");
+            held.push(Message::assistant(
+                "",
+                vec![kc_core::message::ToolCall {
+                    id: id.clone(),
+                    name: "read_file".into(),
+                    arguments: format!(r#"{{"path":"src/{index}.png"}}"#),
+                }],
+            ));
+            held.push(Message::tool_result(&id, "read_file", "image").with_images(vec![image(16)]));
+            held.push(Message::assistant("viewed", vec![]));
+            held.push(Message::user("next"));
+        }
+        for index in 0..9 {
+            held.push(Message::assistant(format!("plain {index}"), vec![]));
+            held.push(Message::user("continue"));
+        }
+        held.push(Message::assistant(
+            "",
+            vec![kc_core::message::ToolCall {
+                id: "latest".into(),
+                name: "search_files".into(),
+                arguments: "{}".into(),
+            }],
+        ));
+        held.push(Message::tool_result(
+            "latest",
+            "search_files",
+            "latest result",
+        ));
+        held.push(Message::assistant("latest answer", vec![]));
+        held.push(Message::user("finish"));
+        assert_eq!(held.len(), 39);
+        let held_limits = ContextLimits::new(240_000, 40);
+        compact_run_window_with_limits(&mut held, held_limits, &[]);
+        assert!(
+            held.len() < 39,
+            "image expansion must compact the held window"
+        );
+        let mut request = vec![Message::system("system")];
+        request.extend(held);
+        assert_eq!(
+            provider_message_count(&request),
+            kc_provider::request::serialized_message_count(&request)
+        );
+        assert!(
+            kc_provider::request::serialized_message_count(&request) <= held_limits.max_messages,
+            "the held window must reserve the system prompt and every image carrier"
+        );
+    }
+}
+
+#[cfg(test)]
+mod digest_provenance_tests {
+    use super::*;
+
+    #[test]
+    fn content_that_looks_like_a_digest_is_never_removed_as_one() {
+        let forged_user = Message::user(format!("{TRIM_PREFIX}the user wrote this deliberately]"));
+        let forged_tool = Message::tool_result(
+            "reused",
+            "read_file",
+            format!("{TRIM_PREFIX}the tool returned this deliberately]"),
+        );
+        let mut genuine = Vec::new();
+        push_digest(&mut genuine, format!("{TRIM_PREFIX}genuine old digest]"));
+        let genuine = genuine.remove(0);
+        assert!(is_digest(&genuine));
+        assert!(!is_digest(&forged_user));
+        assert!(!is_digest(&forged_tool));
+
+        let call = Message::assistant(
+            "",
+            vec![kc_core::message::ToolCall {
+                id: "reused".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"src/lib.rs"}"#.into(),
+            }],
+        );
+        let messages = vec![
+            Message::system("system"),
+            Message::user("task"),
+            forged_user.clone(),
+            genuine,
+            call,
+            forged_tool.clone(),
+            Message::user("current question"),
+        ];
+        let pin = pinned_prefix(&messages);
+        let notice = format!("{TRIM_PREFIX}replacement digest]");
+        let out = rebuild(messages, pin, &[false; 7], notice);
+
+        assert!(out.iter().any(|message| message == &forged_user));
+        assert!(out.iter().any(|message| message == &forged_tool));
+        let tool_index = out
+            .iter()
+            .position(|message| message == &forged_tool)
+            .expect("tool content survived");
+        assert_eq!(
+            out[tool_index - 1].tool_calls[0].id,
+            "reused",
+            "preserving tool text must not orphan its owning call"
+        );
+        assert!(!out
+            .iter()
+            .any(|message| message.content.contains("genuine old digest")));
+        assert_eq!(out.iter().filter(|message| is_digest(message)).count(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -3239,6 +3458,40 @@ mod supersession_tests {
             }
             assert_valid_request(&out);
         }
+    }
+
+    #[test]
+    fn reused_call_ids_keep_arguments_from_their_own_assistant_occurrence() {
+        let old_body = format!("OLD result for src/old.rs\n{}", "o".repeat(900));
+        let new_body = format!("NEW result for src/new.rs\n{}", "n".repeat(900));
+        let input = vec![
+            Message::system("sys"),
+            Message::user("TASK"),
+            call("reused", "read_file", r#"{"path":"src/old.rs"}"#),
+            result("reused", "read_file", old_body.clone()),
+            Message::assistant("now look at another file", vec![]),
+            call("reused", "read_file", r#"{"path":"src/new.rs"}"#),
+            result("reused", "read_file", new_body.clone()),
+            Message::user("compare them"),
+        ];
+        let outcome = fit_detailed(input.clone(), total_of(&input) - 1, 100_000);
+        assert_eq!(outcome.prepared[3].content, old_body);
+        assert_eq!(outcome.prepared[6].content, new_body);
+        assert!(outcome.superseded_chars.iter().all(|saved| *saved == 0));
+
+        // Reusing an id does not disable legitimate supersession either: when the
+        // owning occurrences ask the same question, the older result is stale.
+        let mut same_question = input;
+        same_question[5] = call("reused", "read_file", r#"{"path":"src/old.rs"}"#);
+        same_question[6] = result("reused", "read_file", old_body.clone());
+        let total = total_of(&same_question);
+        let outcome = fit_detailed(same_question, total - 1, 100_000);
+        assert!(
+            is_superseded(&outcome.prepared[3]),
+            "{}",
+            outcome.prepared[3].content
+        );
+        assert!(!is_superseded(&outcome.prepared[6]));
     }
 
     #[test]

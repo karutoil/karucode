@@ -66,14 +66,26 @@ mid-plan throws away work and can persist a tool call with no result. So
 Pausing works the same way: the agent finishes its current turn, then parks.
 That is the only point where stopping is free. A paused agent still holds its
 subagent slot, and `kill_agents` still works on it - a paused agent is never
-unkillable.
+unkillable. HTTP controls and the model's pause/resume tools share one per-agent
+serialization guard through the live flag and store transition, so opposing
+calls cannot leave the two states disagreeing. `report_status` updates only its
+advisory note/progress fields and cannot resurrect or rewind a control state.
 
 **Ownership.** An agent may pause, resume, kill and inspect the agents it
-spawned and everything *they* spawned. Messaging is open to everyone, including
-upwards to the parent: a child reporting a blocker is the case this exists for.
-Welcome but worth knowing: a child can therefore inject a turn into its
-parent's conversation. That is by design, and it is why the injected turn is
-labelled with who sent it.
+spawned and everything *they* spawned. Messaging is open within the sender's
+session, including between siblings and upwards to the parent: a child reporting
+a blocker is the case this exists for. Explicit ids in another session/project
+are rejected as not live, even though the process-wide hub can see them. A child
+can therefore inject a turn into its parent's conversation, but never into an
+unrelated session. The injected turn is labelled with who sent it.
+
+Agent and top-level run mailboxes accept at most 32 messages. The 32nd message
+is queued; the 33rd returns `full` without emitting a queued event. Parent-run
+mail is scoped to the exact session and run generation. Once that run finishes,
+cleanup rejects an unwinding child's late message instead of creating a queue
+its successor could read or persist; the tool result says nothing was queued.
+A named, already-settled child passed to `wait_for_agents` is resolved from its
+persisted row (including its real summary), not mistaken for an unknown live id.
 
 ## Limits
 
@@ -172,6 +184,12 @@ A subagent failure is a failed tool result for the parent - it never fails the
 parent run. A timeout, a provider error and a cancelled task all come back with
 an explanatory message. A *background* agent has no such result to carry the
 failure, so it notifies and leaves it in its row and its summary.
+
+Cancellation is also safe while a spawn is still preparing its persisted task.
+If that preparation future is dropped after creating the running row but before
+the child loop exists, a preparation guard records the agent as `cancelled`,
+releases its path claims and emits the terminal event; no unsupervised running
+row or concurrency slot is left behind.
 
 ## Gotchas
 

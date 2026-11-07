@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/preact';
 import { GitManager } from './GitManager';
+import { GitCommitBox } from './GitCommitBox';
+import { useGitRepo } from './useGitRepo';
 import type {
   GitBranchList,
   GitCommitDetail,
@@ -332,6 +334,47 @@ describe('GitManager — full-width source control view', () => {
     expect(messages[1]?.value).toBe('');
   });
 
+  it('resets one mounted commit box when the project changes but branch stays main', async () => {
+    const onCommit = vi.fn(async () => true);
+    const common = {
+      variant: 'page' as const,
+      status: { ...STATUS, branch: 'main' },
+      branch: 'main',
+      busy: null,
+      onCommit,
+    };
+    const view = render(<GitCommitBox {...common} projectId="p_a" />);
+    const message = screen.getByRole('textbox', { name: 'Commit message' });
+    fireEvent.input(message, { target: { value: 'project A draft' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: /amend/i }));
+
+    view.rerender(<GitCommitBox {...common} projectId="p_b" />);
+    await waitFor(() => expect((message as HTMLTextAreaElement).value).toBe(''));
+    expect(screen.getByRole('textbox', { name: 'Commit message' })).toBe(message);
+    expect((screen.getByRole('checkbox', { name: /amend/i }) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('clears drafts and selection across projects that both report main', async () => {
+    installFetch({ status: { ...STATUS, branch: 'main' } });
+    const view = render(<GitManager variant="page" />);
+    const changes = await screen.findByRole('region', { name: 'Changes' });
+    fireEvent.click(within(changes).getByRole('button', { name: 'Modified src/plugins/loader.rs' }));
+    expect(await screen.findByText(/pub async fn load/)).not.toBeNull();
+    const message = screen.getByRole('textbox', { name: 'Commit message' });
+    fireEvent.input(message, { target: { value: 'belongs only to project A' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: /amend/i }));
+
+    act(() => {
+      store.currentProjectId.value = 'p_b';
+    });
+    view.rerender(<GitManager variant="page" />);
+
+    await waitFor(() => expect((screen.getByRole('textbox', { name: 'Commit message' }) as HTMLTextAreaElement).value).toBe(''));
+    expect((screen.getByRole('checkbox', { name: /amend/i }) as HTMLInputElement).checked).toBe(false);
+    await waitFor(() => expect(screen.queryByText(/pub async fn load/)).toBeNull());
+    expect(containerRow('loader.rs').className).not.toContain('is-active');
+  });
+
   it('commits the staged files with the typed message', async () => {
     const calls = installFetch({ statusAfter: { ...STATUS, files: [] } });
     render(<GitManager variant="page" />);
@@ -525,6 +568,142 @@ describe('GitManager — full-width source control view', () => {
     expect(alert.textContent).toContain('git exploded');
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(attempts).toBe(2));
+  });
+});
+
+describe('repository switching races', () => {
+  it('ignores every late A response and cannot clear B’s mutation busy state', async () => {
+    interface Pending {
+      response: {
+        promise: Promise<Response>;
+        resolve: (value: Response) => void;
+      };
+      signal: AbortSignal | null;
+    }
+    const pending = new Map<string, Pending>();
+    const requestKey = (project: string, method: string, path: string): string => `${project}:${method}:${path}`;
+    const status = (project: string, suffix: string): GitStatus => ({
+      ...STATUS,
+      branch: 'main',
+      upstream: null,
+      ahead: project === 'p_b' ? 7 : 1,
+      files: [{
+        path: `${project}-${suffix}.txt`,
+        orig_path: null,
+        index: ' ',
+        worktree: 'M',
+        status: 'M',
+        staged: false,
+        unstaged: true,
+        untracked: false,
+        conflict: false,
+      }],
+    });
+    const branches = (project: string): GitBranchList => ({
+      ...BRANCHES,
+      branch: 'main',
+      branches: [{ ...BRANCHES.branches[1]!, current: true, subject: `${project} branch` }],
+    });
+    const answer = (project: string, method: string, path: string, body: unknown, statusCode = 200): void => {
+      const found = pending.get(requestKey(project, method, path));
+      if (!found) throw new Error(`missing deferred ${project} ${method} ${path}`);
+      found.response.resolve(jsonResponse(body, statusCode));
+    };
+
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost');
+      const project = url.searchParams.get('project') ?? 'p_a';
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (project === 'p_a' || method === 'POST') {
+        let resolve!: (value: Response) => void;
+        const promise = new Promise<Response>((onResolve) => { resolve = onResolve; });
+        pending.set(requestKey(project, method, url.pathname), {
+          response: { promise, resolve },
+          signal: init?.signal ?? null,
+        });
+        return promise;
+      }
+      if (url.pathname === '/api/git/status') return Promise.resolve(jsonResponse(status(project, 'read')));
+      if (url.pathname === '/api/git/branches') return Promise.resolve(jsonResponse(branches(project)));
+      return Promise.resolve(jsonResponse({ error: { code: 'not_found', message: `unmocked ${url.pathname}` } }, 404));
+    }));
+
+    const hook = renderHook(({ project }: { project: string }) => useGitRepo(project), {
+      initialProps: { project: 'p_a' },
+    });
+    let mutationA!: Promise<boolean>;
+    act(() => {
+      hook.result.current.loadHistory();
+      hook.result.current.loadStashes();
+      mutationA = hook.result.current.stage(['a.txt'], 'Staging A');
+    });
+    await waitFor(() => {
+      expect(pending.has(requestKey('p_a', 'GET', '/api/git/status'))).toBe(true);
+      expect(pending.has(requestKey('p_a', 'GET', '/api/git/branches'))).toBe(true);
+      expect(pending.has(requestKey('p_a', 'GET', '/api/git/log'))).toBe(true);
+      expect(pending.has(requestKey('p_a', 'GET', '/api/git/stash'))).toBe(true);
+      expect(pending.has(requestKey('p_a', 'POST', '/api/git/stage'))).toBe(true);
+    });
+    expect(hook.result.current.busy).toBe('Staging A');
+
+    act(() => hook.rerender({ project: 'p_b' }));
+    await waitFor(() => expect(hook.result.current.status?.files[0]?.path).toBe('p_b-read.txt'));
+    let mutationB!: Promise<boolean>;
+    act(() => {
+      mutationB = hook.result.current.stage(['b.txt'], 'Staging B');
+    });
+    await waitFor(() => expect(pending.has(requestKey('p_b', 'POST', '/api/git/stage'))).toBe(true));
+    expect(hook.result.current.busy).toBe('Staging B');
+
+    await act(async () => {
+      answer('p_a', 'GET', '/api/git/status', status('p_a', 'late-read'));
+      answer('p_a', 'GET', '/api/git/branches', branches('p_a'));
+      answer('p_a', 'GET', '/api/git/log', {
+        is_repo: true,
+        truncated: false,
+        commits: [{ ...LOG.commits[0]!, subject: 'late A history' }],
+      });
+      answer('p_a', 'GET', '/api/git/stash', {
+        is_repo: true,
+        truncated: false,
+        stashes: [{ index: 0, ref: 'stash@{0}', message: 'late A stash', timestamp: 1 }],
+      });
+      answer('p_a', 'POST', '/api/git/stage', {
+        ok: true,
+        message: 'late A mutation',
+        status: status('p_a', 'late-mutation'),
+        commit: null,
+      });
+      await Promise.all(
+        [...pending.entries()]
+          .filter(([key]) => key.startsWith('p_a:'))
+          .map(([, entry]) => entry.response.promise),
+      );
+      expect(await mutationA).toBe(false);
+    });
+
+    expect(hook.result.current.status?.files[0]?.path).toBe('p_b-read.txt');
+    expect(hook.result.current.branches[0]?.subject).toBe('p_b branch');
+    expect(hook.result.current.commits).toBeNull();
+    expect(hook.result.current.stashes).toBeNull();
+    expect(hook.result.current.busy).toBe('Staging B');
+    expect(hook.result.current.actionError).toBeNull();
+    expect(store.toasts.value.some((toast) => toast.message === 'late A mutation')).toBe(false);
+    for (const [key, request] of pending) {
+      if (key.startsWith('p_a:')) expect(request.signal?.aborted, key).toBe(true);
+    }
+
+    await act(async () => {
+      answer('p_b', 'POST', '/api/git/stage', {
+        ok: true,
+        message: 'B complete',
+        status: status('p_b', 'after-mutation'),
+        commit: null,
+      });
+      expect(await mutationB).toBe(true);
+    });
+    await waitFor(() => expect(hook.result.current.status?.files[0]?.path).toBe('p_b-after-mutation.txt'));
+    expect(hook.result.current.busy).toBeNull();
   });
 });
 

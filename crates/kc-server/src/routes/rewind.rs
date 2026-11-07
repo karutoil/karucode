@@ -183,17 +183,9 @@ pub async fn rewind(
         }
     };
 
-    // The transcript changed for every client, not only the one that asked.
-    state.runtime().emit(
-        Some(&id),
-        None,
-        None,
-        kc_core::events::Event::SessionRewound {
-            session_id: id.clone(),
-            message_id: body.message_id,
-            messages_removed: result.point.messages_removed,
-        },
-    );
+    // The runtime publishes SessionRewound after commit, including a replacement-
+    // start failure. Emitting here as well would double-apply the notification and
+    // could use an assistant id instead of the normalized user prompt id.
 
     let undone = result
         .outcomes
@@ -214,6 +206,8 @@ pub async fn rewind(
             "preview": result.preview,
             "outcomes": result.outcomes,
             "run_id": result.run_id,
+            "committed": result.committed,
+            "start_error": result.start_error,
             "mode": mode.as_str(),
             "files_restored": undone,
             "files_skipped": failed,

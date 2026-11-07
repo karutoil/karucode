@@ -39,7 +39,12 @@ const layoutCss = read('./layout.css');
 const controlRail = read('./control-rail.css');
 const controlOverview = read('./control-overview.css');
 const controlSession = read('./control-session.css');
+const workbenchNavigation = read('./workbench-navigation.css');
 const sessionControl = [controlShared, controlRail, controlOverview, controlSession].join('\n');
+// Every sheet that could hide the status word, so re-scoping or re-adding a
+// hiding rule anywhere in the family fails here. The original defect lived in a
+// sheet no hand-written list had thought to include.
+const wordSheets = [layoutCss, workbenchNavigation, controlShared, controlRail, controlOverview, controlSession];
 const inspector = read('./inspector.css');
 const tokensCss = read('./tokens.css');
 
@@ -191,14 +196,35 @@ describe('control plane: status words survive, actions keep names', () => {
     expect(declarations(layoutCss, '.session-state-warn')['color']).toBe('var(--warning)');
   });
 
-  it('keeps Finished, Cancelled and No runs readable in the ≤520px header', () => {
-    // No sheet in the plane, and none in the shared family, may hide the word.
-    expect(sessionControl).not.toMatch(/\.(cp-state|session-state)[^{]*\{[^}]*font-size:\s*0/g);
-    expect(layoutCss).not.toMatch(/\.session-state[^{]*\{[^}]*font-size:\s*0/g);
-    const phoneTier = controlSession.slice(controlSession.indexOf('@media (max-width: 520px)'));
-    expect(phoneTier).toContain(
-      '.cp-session-actions .session-state { font-size: var(--fs-tiny); gap: var(--space-2); }',
-    );
+  it('never hides the word, in any sheet, at any width', () => {
+    // `font-size: 0` was the original sin, but it was never the only way to make
+    // "Finished", "Cancelled" and "No runs" three identical dots: `display: none`,
+    // `visibility: hidden`, `opacity: 0`, `color: transparent`, `text-indent`,
+    // `width: 0` or a 1px type step all do it too, in any tier of any sheet. The
+    // phone-width header is where the room runs out first, so it is where the
+    // temptation lives; the scan is deliberately not scoped to one tier.
+    //
+    // A redundant tier that merely restated the base values was deleted: it
+    // pinned nothing (the base rule already held those values) while reading as
+    // a guarantee. This scan is the guarantee.
+    const hiding = /(?:^|[;{\s])(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|color\s*:\s*transparent|text-indent\s*:\s*-|width\s*:\s*0(?:px)?\s*(?:!|$|;)|max-width\s*:\s*0|overflow\s*:\s*hidden|font-size\s*:\s*(?:0|1px))/;
+    for (const sheet of wordSheets) {
+      const rules = sheet.match(/[^{}]*\.session-state[^{}]*\{[^{}]*\}/g) ?? [];
+      for (const rule of rules) {
+        const selector = rule.slice(0, rule.indexOf('{')).trim();
+        const body = rule.slice(rule.indexOf('{') + 1, rule.lastIndexOf('}'));
+        // `overflow: hidden` on the *word itself* is how a long label ellipsises
+        // inside a narrow header - that is legibility, not hiding - so it is only
+        // a defect when paired with a zero width or a negative indent.
+        const verdict = body
+          .split(';')
+          .map((decl) => decl.trim())
+          .filter((decl) => hiding.test(decl + ';') || hiding.test(decl));
+        expect(verdict, `hiding declaration in \`${selector}\``).toEqual([]);
+      }
+    }
+    // And the word is actually drawn at the type step the family owns.
+    expect(declarations(layoutCss, '.session-state')['font-size']).toBe('var(--fs-tiny)');
   });
 
   it('lets the phone session title shrink and truncate around the status word', () => {
@@ -212,7 +238,6 @@ describe('control plane: status words survive, actions keep names', () => {
   });
 
   it('sizes the state from the type scale', () => {
-    expect(declarations(layoutCss, '.session-state')['font-size']).toBe('var(--fs-tiny)');
     // The table row is a one-line rule; it keeps the same step.
     expect(sessionControl).toMatch(
       /\.cp-table-row \.session-state \{[^}]*font-size: var\(--fs-tiny\)/,

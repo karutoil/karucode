@@ -910,6 +910,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "kc-core",
+ "kc-provider",
  "serde",
  "serde_json",
  "sha2 0.10.9",

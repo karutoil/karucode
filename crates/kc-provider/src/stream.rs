@@ -42,7 +42,9 @@ type ByteStream = BoxStream<'static, reqwest::Result<Bytes>>;
 /// `timeout` is the per-read gap and `attempt` the wall-clock budget for the
 /// whole body (see [`crate::attempt_timeout`]): the first catches a silent
 /// endpoint, the second a stream that keeps trickling - or sends nothing but
-/// keepalive comments - forever.
+/// keepalive comments - forever. `deadline` is the absolute instant computed
+/// before the request was sent; time spent awaiting headers is therefore already
+/// spent when body streaming starts.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_from_response(
     bytes: ByteStream,
@@ -50,6 +52,7 @@ pub(crate) fn stream_from_response(
     url: String,
     timeout: Duration,
     attempt: Duration,
+    deadline: tokio::time::Instant,
     secrets: Vec<String>,
     tool_names: Vec<String>,
 ) -> ProviderStream {
@@ -59,7 +62,7 @@ pub(crate) fn stream_from_response(
         url,
         timeout,
         attempt,
-        deadline: tokio::time::Instant::now() + attempt,
+        deadline,
         secrets,
         parser: SseParser::new(),
         decoder: Utf8Decoder::default(),
@@ -98,9 +101,8 @@ struct StreamState {
     dsml_calls: usize,
     /// At least one JSON payload was understood.
     saw_event: bool,
-    /// A `data: [DONE]` terminator arrived. Distinct from `saw_event` because a
-    /// completion delivered only as `[DONE]` is a finished (empty) answer, not a
-    /// stream that died before sending anything.
+    /// A `data: [DONE]` terminator arrived. This is an explicit clean stop even
+    /// when the endpoint omitted `finish_reason` or sent only bookkeeping JSON.
     saw_done: bool,
     /// A `finish_reason` was delivered, so no synthetic Finish is needed.
     saw_finish: bool,
@@ -140,37 +142,27 @@ impl StreamState {
                     }));
                 }
                 if !self.saw_finish {
-                    if !self.saw_event {
-                        // A completion delivered only as `data: [DONE]`: the
-                        // endpoint said it finished and had nothing to say.
-                        // That is a legitimate (if odd) answer - a model that
-                        // stopped on an empty string - so the turn ends with
-                        // empty text. Reporting it as "sent no data" made the
-                        // runtime restart the whole generation, which billed
-                        // four completions for one empty turn.
-                        tracing::debug!(
-                            url = %self.url,
-                            "provider stream carried only [DONE]: ending the turn with empty text"
-                        );
-                        self.saw_finish = true;
-                        return Some(Ok(ProviderChunk::Finish {
-                            reason: "stop".into(),
-                        }));
-                    }
-                    // The stream carried a payload but no `finish_reason`. Report
-                    // that honestly as `eof` rather than claiming a clean stop:
-                    // the provider does not know whether the answer was
-                    // complete, and the runtime treats `eof` as an incomplete
-                    // stream (it does not synthesise a successful finish).
+                    // [DONE] is itself the completion signal. Bookkeeping events
+                    // (`choices: []`, usage, a role-only delta, or a JSON
+                    // keepalive) do not turn that signal into an ambiguous EOF.
+                    // Without [DONE], a payload but no finish_reason remains eof.
                     self.saw_finish = true;
                     return Some(Ok(ProviderChunk::Finish {
-                        reason: "eof".into(),
+                        reason: if self.saw_done { "stop" } else { "eof" }.into(),
                     }));
                 }
                 return None;
             }
 
-            // Cloned so the two select arms borrow disjoint values.
+            // Check the absolute clock before polling the body. With `biased`,
+            // putting an always-ready body above the timer lets a byte drip (or a
+            // synthetic stream) starve the deadline forever without yielding.
+            if tokio::time::Instant::now() >= self.deadline {
+                self.timed_out();
+                continue;
+            }
+
+            // Cloned so the select arms borrow disjoint values.
             let cancel = self.cancel.clone();
             tokio::select! {
                 biased;
@@ -178,8 +170,26 @@ impl StreamState {
                     self.finished = true;
                     return Some(Err(Error::Cancelled));
                 }
+                // Also precede the body in the select: the clock can expire
+                // between the check above and this poll.
+                _ = tokio::time::sleep_until(self.deadline) => {
+                    self.timed_out();
+                    continue;
+                }
                 chunk = self.bytes.next() => match chunk {
                     None => {
+                        if !self.parser.has_input() {
+                            // A close-delimited 200 has no Content-Length, so its
+                            // empty body cannot be known at the headers. Detect it
+                            // at the first EOF rather than starting 50 more
+                            // generations. Comments and splash pages count as
+                            // input and keep their existing retry classification.
+                            self.fail_permanent(format!(
+                                "provider at {} returned an empty response body; check that the model supports streaming and that no proxy dropped the body",
+                                self.url
+                            ));
+                            continue;
+                        }
                         self.input_done = true;
                         if let Some(event) = self.parser.finish() {
                             self.handle_event(event);
@@ -200,18 +210,6 @@ impl StreamState {
                     }
                     Some(Ok(bytes)) => self.feed(&bytes),
                 },
-                // The whole-attempt budget. A per-read timeout cannot fire
-                // against a body that trickles, or against a stream that sends
-                // nothing but SSE keepalive comments, so without this an
-                // endpoint can hold the attempt open for as long as it likes.
-                // Reported as a timeout (retryable: the endpoint did not
-                // answer, which says nothing bad about the request), and
-                // queued behind whatever has already been delivered so no text
-                // is lost with it.
-                _ = tokio::time::sleep_until(self.deadline) => {
-                    self.timed_out();
-                    continue;
-                }
             }
         }
     }
@@ -232,6 +230,9 @@ impl StreamState {
     }
 
     fn feed(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.parser.note_input();
+        }
         let text = self.decoder.push(bytes);
         if text.is_empty() {
             return;
@@ -280,26 +281,14 @@ impl StreamState {
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| error.to_string());
-            let kind = error
-                .get("type")
-                .or_else(|| error.get("code"))
+            // Type is not a fallback for code: real gateways send, for example,
+            // `type: "tokens"` alongside `code: "rate_limit_exceeded"`. Inspect
+            // every independent field, including both numeric and textual status.
+            let retryable = ["type", "code", "status", "status_code"]
+                .iter()
+                .filter_map(|field| error.get(*field).or_else(|| value.get(*field)))
                 .map(text_of)
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let retryable = [
-                "rate_limit",
-                "overloaded",
-                "server_error",
-                "timeout",
-                "unavailable",
-                "429",
-                "500",
-                "502",
-                "503",
-                "504",
-            ]
-            .iter()
-            .any(|needle| kind.contains(needle));
+                .any(|kind| transient_error_kind(&kind));
             let message = redact(&format!("provider error: {message}"), &self.secrets);
             // The message is over. Anything the DSML scanner still holds is
             // text, and it has to be queued ahead of the error so the partial
@@ -358,8 +347,20 @@ impl StreamState {
                         let index = call
                             .get("index")
                             .and_then(Value::as_u64)
-                            .map(|i| i as usize)
+                            .and_then(|i| usize::try_from(i).ok())
                             .unwrap_or(position);
+                        if (self.dsml.is_some() || self.dsml_calls > 0) && index >= DSML_INDEX_BASE
+                        {
+                            // The second half belongs to recovered DSML calls.
+                            // Accepting a native index 128 here merged its deltas
+                            // with DSML index 128 in ToolCallAccumulator.
+                            tracing::warn!(
+                                index,
+                                reserved_from = DSML_INDEX_BASE,
+                                "ignoring a native tool-call delta in the DSML-reserved range"
+                            );
+                            continue;
+                        }
                         let id = call.get("id").and_then(Value::as_str).and_then(non_empty);
                         let function = call.get("function");
                         let name = function
@@ -460,13 +461,39 @@ impl StreamState {
         // land on a healthy channel. Nothing in this path is a rejected
         // request (those come back as an HTTP status or an `error` payload),
         // so it is always worth another attempt.
-        self.queue.push_back(Ok(ProviderChunk::Error {
-            message,
-            retryable: true,
-        }));
+        self.push_error(message, true);
+    }
+
+    fn fail_permanent(&mut self, message: String) {
+        let message = redact(&message, &self.secrets);
+        self.push_error(message, false);
+    }
+
+    fn push_error(&mut self, message: String, retryable: bool) {
+        self.queue
+            .push_back(Ok(ProviderChunk::Error { message, retryable }));
         self.failed = true;
         self.input_done = true;
     }
+}
+
+fn transient_error_kind(kind: &str) -> bool {
+    let kind = kind.to_ascii_lowercase();
+    [
+        "rate_limit",
+        "too_many_requests",
+        "overloaded",
+        "server_error",
+        "timeout",
+        "unavailable",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+    ]
+    .iter()
+    .any(|needle| kind.contains(needle))
 }
 
 fn non_empty(text: &str) -> Option<String> {
@@ -703,6 +730,23 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn an_always_ready_body_cannot_starve_the_attempt_deadline() {
+        let mut state = state_with_chunks(Vec::new());
+        state.bytes = stream::repeat_with(|| {
+            Ok::<Bytes, reqwest::Error>(Bytes::from_static(b": keepalive\n\n"))
+        })
+        .boxed();
+        state.attempt = Duration::from_millis(40);
+        state.deadline = tokio::time::Instant::now() + state.attempt;
+
+        let items = tokio::time::timeout(Duration::from_secs(2), drain(state))
+            .await
+            .expect("an always-ready body must still observe the deadline");
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(matches!(items[0], Err(Error::Timeout(_))), "{items:?}");
+    }
+
     /// A body that only ever sends keepalive comments produces no events at all,
     /// so nothing but the attempt deadline can end it.
     #[tokio::test]
@@ -796,19 +840,61 @@ mod tests {
         );
     }
 
-    /// A body that really did send nothing is still an error worth retrying: the
-    /// `[DONE]` exception above must not swallow it.
     #[tokio::test]
-    async fn a_stream_with_no_data_and_no_done_still_requests_a_retry() {
+    async fn an_empty_close_delimited_body_is_permanent() {
         let items = drain(state_with_chunks(vec![""])).await;
         assert_eq!(items.len(), 1, "{items:?}");
         match items[0].as_ref().unwrap() {
             ProviderChunk::Error { message, retryable } => {
-                assert!(*retryable, "{message}");
-                assert!(message.contains("without sending any data"), "{message}");
+                assert!(!retryable, "{message}");
+                assert!(message.contains("empty response body"), "{message}");
             }
             other => panic!("unexpected chunk: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn done_after_bookkeeping_or_content_without_finish_is_a_clean_stop() {
+        let body = concat!(
+            "data: {\"keepalive\":true}\n\n",
+            "data: {\"choices\":[]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":0}}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let items = drain(state_with_chunks(vec![body])).await;
+        let chunks: Vec<ProviderChunk> = items.into_iter().map(|item| item.unwrap()).collect();
+        assert!(chunks.contains(&ProviderChunk::Usage {
+            input_tokens: 8,
+            output_tokens: 0,
+            cached_tokens: None,
+        }));
+        assert_eq!(
+            chunks.last(),
+            Some(&ProviderChunk::Finish {
+                reason: "stop".into()
+            }),
+            "{chunks:?}"
+        );
+        assert!(!chunks
+            .iter()
+            .any(|chunk| matches!(chunk, ProviderChunk::Finish { reason } if reason == "eof")));
+
+        let items = drain(state_with_chunks(vec![concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"complete\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        )]))
+        .await;
+        let chunks: Vec<ProviderChunk> = items.into_iter().map(|item| item.unwrap()).collect();
+        assert_eq!(
+            chunks,
+            vec![
+                ProviderChunk::Text("complete".into()),
+                ProviderChunk::Finish {
+                    reason: "stop".into()
+                }
+            ]
+        );
     }
 
     /// The provider reports prompt-cache hits in three different shapes, and a
@@ -834,6 +920,35 @@ mod tests {
                 })
                 .expect("a usage chunk");
             assert_eq!(reported, expected, "usage {usage}");
+        }
+    }
+
+    #[test]
+    fn in_stream_error_type_code_and_status_are_independent() {
+        let cases = [
+            (
+                serde_json::json!({"error":{"type":"tokens","code":"rate_limit_exceeded"}}),
+                true,
+            ),
+            (
+                serde_json::json!({"error":{"type":"tokens","status":429}}),
+                true,
+            ),
+            (
+                serde_json::json!({"error":{"type":"tokens"},"status":503}),
+                true,
+            ),
+            (serde_json::json!({"error":{"type":"tokens"}}), false),
+        ];
+        for (payload, expected) in cases {
+            let mut state = state_with_chunks(Vec::new());
+            state.handle_payload(&payload);
+            match state.queue.pop_front().expect("an error chunk") {
+                Ok(ProviderChunk::Error { retryable, .. }) => {
+                    assert_eq!(retryable, expected, "{payload}")
+                }
+                other => panic!("expected an error, got {other:?}"),
+            }
         }
     }
 
@@ -892,11 +1007,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_without_any_data_reports_a_retryable_error() {
-        let items = drain(state_with_chunks(vec![])).await;
+    async fn a_keepalive_only_eof_is_still_retryable() {
+        let items = drain(state_with_chunks(vec![": keepalive\n\n"])).await;
         assert_eq!(items.len(), 1);
         match items[0].as_ref().unwrap() {
-            ProviderChunk::Error { retryable, .. } => assert!(*retryable),
+            ProviderChunk::Error { message, retryable } => {
+                assert!(*retryable, "{message}");
+                assert!(message.contains("without sending any data"), "{message}");
+            }
             other => panic!("unexpected chunk: {other:?}"),
         }
     }

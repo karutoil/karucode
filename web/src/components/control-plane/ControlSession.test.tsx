@@ -274,6 +274,12 @@ describe('the open session’s header', () => {
     // ...and the embedded conversation’s header stays suppressed. jsdom applies
     // no stylesheets, so the rule that does it is read from the sheet itself.
     expect(sheet).toMatch(/\.cp-chat \.main-head \{ display: none; \}/);
+    // The load-bearing half of the pair: the component emits the wrapper the
+    // sheet's rule keys on. Rename `.cp-chat` in the component and the rule
+    // matches nothing while jsdom stays green and the app shows the title twice.
+    // (The other half - that nothing visible renders a second header - is the
+    // browser harness's job: `verify_control_parity.py` counts visible headers.)
+    expect(container.querySelector('.cp-chat')).toBeTruthy();
 
     // The same for a control chat, whose first-run intro is a *different*
     // heading - not a second statement of the session's title.

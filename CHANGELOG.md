@@ -10,6 +10,63 @@ under **Changed**.
 
 ### Added
 
+- **Panel views: a plugin's data drawn as a real view, without shipping UI.** A
+  panel payload used to land on the generic JSON tree, which is honest and not much
+  of a panel. The app now understands a small, closed vocabulary under `view` —
+  `stat`, `list`, `bars`, `progress`, `clock`, `stack` — claimed by *shape* rather
+  than by plugin id, so any plugin gets the product's own components for free:
+  a big number, a bar chart, a checklist, a progress meter, or a **live clock** that
+  really ticks because a panel with `refresh_ms` is re-read every poll. Every field
+  is plain text or a number; lengths, fractions, bar widths and `stack` depth are
+  clamped; anything unrecognised keeps the JSON view, so this is additive and an
+  older app still reads a newer plugin. Two demo plugins in `plugins/demos/` show
+  the whole surface in two single Python files — a **writing desk** that hides the
+  Agents tab, the Context button and the composer paperclip and replaces them with
+  a live word-count dashboard, and a **workspace atlas** with two panels, its own
+  on-disk snapshots, a tool the agent can call, and one action reachable from a
+  button, a palette command and `Ctrl/Cmd+Alt+S`. `scripts/verify_plugin_demos.py`
+  drives both in a real Chromium against a real server.
+- **A plugin can now add controls to the app, not just a tab.** The manifest's new
+  `ui` array declares **buttons** in named slots, **command-palette entries**, and
+  built-in controls it asks the app to **hide** — all declarative names the app
+  owns, so a plugin still ships no markup, CSS or script, and every control is
+  drawn by a first-party component. Three slots exist (`composer.toolbar` in the
+  composer's action row, `inspector.header` beside **Context**, `session.header`
+  before the header chips); commands join the palette as ordinary rows under
+  **Plugins**. A control is activated either by `action` — a new `ui/action` RPC
+  inside the plugin, answered with a toast, panels to refresh and at most one
+  `http`/`https` URL — or by `message`, which posts that text as a user turn. That
+  second form also closes an old gap: a panel button could previously only hand
+  the agent a message, because no route ran plugin code; now the plugin itself can
+  act. Hiding is app-wide and allowlisted (`composer.attach`, the four inspector
+  tabs, the inspector's **Context** button), safety controls are deliberately
+  absent, and the inspector refuses to hide its last tab instead of drawing an
+  empty strip. A contributed control is always attributed — a dot plus a tooltip
+  naming the plugin and version — because a plugin must not be able to pass its
+  button off as part of the app. The layer is additive: a plugin with no `ui`
+  changes nothing, `GET /api/config`'s new `plugin_ui` is empty, an unknown slot or
+  hide target from a newer release is skipped with a note rather than failing the
+  plugin, and a shape error (no label, two behaviours, a bad id) fails the
+  handshake with a fixable message. The SDK exposes it as
+  `.button/.button_with/.message_button/.command/.command_with/.message_command/.hide/.on_ui_action`
+  over `.ui(…)`; `plugins/example-hello` now contributes all three kinds.
+- **Plugins can bind keyboard shortcuts, and every one of their requests is
+  reversible by the person using the app.** A fourth contribution kind,
+  `keybinding`, binds a chord to the same `ui/action` a button uses — one handler,
+  reachable two ways. A binding must carry `mod` (Ctrl/Cmd), `ctrl` or `alt`, so a
+  bare key can never shadow typing; the app's own chords (`mod+k`, `mod+b`, `mod+n`,
+  `mod+j`, `mod+shift+t`, `mod+enter`) are refused by both host and client, and a
+  chord two plugins claim stays with the first in discovery order, so one keystroke
+  can never run two plugins. A binding does not fire while the caret is in a field
+  or while a dialog is open, and a palette row whose action is also bound shows the
+  chord. On the other side of the same bargain, **Settings → Plugins & MCP →
+  Controls in the interface** now lists every contributed control per plugin and
+  every hidden built-in with the plugin that hid it, with one switch each: a control
+  nobody wants can be switched off and a built-in a plugin took away can be put
+  back, without disabling the plugin and losing its tools. Those overrides live in
+  `localStorage` (per browser, no approval, no round trip) and are applied as a pure
+  transform before anything is drawn, so no component needs to know why a control
+  is absent.
 - **Chat artifacts: a reply can show instead of describe.** A fenced block
   labelled `artifact` — or one whose language is already content (`html`, `svg`,
   `mermaid`, `markdown`, `json`, `csv`/`tsv`, an image) — is drawn in the

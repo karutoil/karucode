@@ -7,7 +7,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::routes::{parse_body, query_usize, QueryMap};
 use crate::state::AppState;
-use crate::terminals::{self, Terminal};
+use crate::terminals;
 use axum::body::Bytes;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, State};
@@ -123,7 +123,7 @@ pub async fn create_terminal(State(state): State<AppState>, body: Bytes) -> ApiR
     // websocket the first time the tab is opened.
     let cols = body.cols.unwrap_or(80);
     let rows = body.rows.unwrap_or(24);
-    let terminal = match Terminal::spawn(&created.id, &created, &settings, cols, rows) {
+    let terminal = match terminals::spawn_for_state(&state, &created.id, &created, cols, rows) {
         Ok(terminal) => terminal,
         Err(error) => {
             // The row is rolled back: a terminal that can never start is not a
@@ -218,7 +218,7 @@ pub async fn restart_terminal(
     let rows = query_usize(&query, "rows")?
         .and_then(|v| u16::try_from(v).ok())
         .unwrap_or(24);
-    let terminal = Terminal::spawn(&row.id, &row, &settings, cols, rows)?;
+    let terminal = terminals::spawn_for_state(&state, &row.id, &row, cols, rows)?;
     state.terminals().insert(Arc::clone(&terminal));
     let _ = store.touch_terminal(&id).await;
     Ok(Json(json!({

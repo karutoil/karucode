@@ -69,6 +69,13 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
   const [branchesOpen, setBranchesOpen] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
 
+  useEffect(() => {
+    // Paths, SHAs and open confirmations from repository A are meaningless in B.
+    setSelection(null);
+    setBranchesOpen(false);
+    setConfirm(null);
+  }, [projectId]);
+
   // A manager that was hidden while the agent worked re-reads the tree when it
   // comes back, instead of showing what it last saw.
   const wasActive = useRef(active);
@@ -335,6 +342,7 @@ export function GitManager({ variant = 'panel', active = true }: GitManagerProps
       key="commit-box"
       variant={variant}
       status={status}
+      projectId={projectId}
       branch={status?.branch ?? null}
       busy={repo.busy}
       onCommit={(message, options) => repo.commit(message, options)}

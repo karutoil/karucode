@@ -183,6 +183,32 @@ async fn api_key_is_sent_as_bearer_token_only_when_configured() {
 }
 
 #[tokio::test]
+async fn configured_authorization_is_not_overwritten_by_api_key() {
+    let server =
+        spawn(move |_req, mut socket| async move { write_sse(&mut socket, OK_SSE).await }).await;
+    let mut config = base_config(&server);
+    config.api_key = Some("sk-must-not-replace-the-explicit-header".into());
+    config
+        .extra_headers
+        .insert("Authorization".into(), "Custom explicit-credential".into());
+    let provider = OpenAiProvider::new(config).unwrap();
+    let stream = provider
+        .stream_chat(full_request(), CancellationToken::new())
+        .await
+        .unwrap();
+    drain(stream).await;
+    let request = server.wait_for_request().await;
+    assert_eq!(
+        request.header("authorization").as_deref(),
+        Some("Custom explicit-credential")
+    );
+    assert!(!request
+        .header("authorization")
+        .unwrap()
+        .contains("sk-must-not"));
+}
+
+#[tokio::test]
 async fn empty_api_key_does_not_send_authorization() {
     let server =
         spawn(move |_req, mut socket| async move { write_sse(&mut socket, OK_SSE).await }).await;

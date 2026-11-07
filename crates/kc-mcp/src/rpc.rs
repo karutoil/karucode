@@ -30,25 +30,26 @@ pub enum McpError {
 }
 
 impl McpError {
-    /// Remove every configured HTTP header value from an error before it can be
-    /// logged, returned in server status, or handed to the model.
+    /// Remove every configured credential value from an error before it can be
+    /// logged, returned in server status, or handed to the model. The map carries
+    /// HTTP headers for remote servers and environment values for stdio servers.
     ///
     /// Servers can reflect credentials in a non-2xx body, a JSON-RPC error, or even
     /// a transport diagnostic. Redacting at the transport boundary keeps all of
     /// those surfaces covered instead of relying on every message constructor to
     /// remember which strings came from a remote peer.
-    pub(crate) fn redacted(self, headers: &BTreeMap<String, String>) -> Self {
+    pub(crate) fn redacted(self, secrets: &BTreeMap<String, String>) -> Self {
         match self {
-            Self::Transport(message) => Self::Transport(redact_headers(&message, headers)),
+            Self::Transport(message) => Self::Transport(redact_secrets(&message, secrets)),
             Self::Http { status, body } => Self::Http {
                 status,
-                body: redact_headers(&body, headers),
+                body: redact_secrets(&body, secrets),
             },
             Self::Remote { code, message } => Self::Remote {
                 code,
-                message: redact_headers(&message, headers),
+                message: redact_secrets(&message, secrets),
             },
-            Self::Protocol(message) => Self::Protocol(redact_headers(&message, headers)),
+            Self::Protocol(message) => Self::Protocol(redact_secrets(&message, secrets)),
             Self::Timeout(timeout) => Self::Timeout(timeout),
             Self::Cancelled => Self::Cancelled,
         }
@@ -108,12 +109,12 @@ impl McpError {
     }
 }
 
-/// Scrub configured header values, including a Bearer credential echoed without
-/// its original scheme or capitalization. Header *names* are not secrets and stay
-/// visible so diagnostics remain actionable.
-pub(crate) fn redact_headers(text: &str, headers: &BTreeMap<String, String>) -> String {
+/// Scrub configured header/environment values, including a Bearer credential
+/// echoed without its original scheme or capitalization. Configuration *names*
+/// are not secrets and stay visible so diagnostics remain actionable.
+pub(crate) fn redact_secrets(text: &str, secrets: &BTreeMap<String, String>) -> String {
     let mut out = text.to_string();
-    for value in headers.values() {
+    for value in secrets.values() {
         let secret = value.trim();
         if secret.is_empty() {
             continue;
@@ -327,7 +328,10 @@ pub(crate) fn response_payload(value: &Value) -> Result<Value, McpError> {
 }
 
 /// Pick the response for `id` out of a JSON body that may be a single object or
-/// a batch. Servers that omit ids on single responses are tolerated.
+/// a batch. One compatibility exception is intentionally narrow: when the body
+/// contains exactly one response and that response **omits** `id`, accept it. An
+/// explicit `null`, a wrong numeric id and a string id are not an absent id and
+/// can never be substituted for the requested response.
 pub(crate) fn pick_response(body: Value, id: u64) -> Result<Value, McpError> {
     let items = match body {
         Value::Array(items) => items,
@@ -338,15 +342,19 @@ pub(crate) fn pick_response(body: Value, id: u64) -> Result<Value, McpError> {
             return result;
         }
     }
-    // Tolerate a single id-less response (some lightweight servers do this).
     let responses: Vec<&Value> = items
         .iter()
         .filter(|v| {
             v.get("method").is_none() && (v.get("result").is_some() || v.get("error").is_some())
         })
         .collect();
-    if responses.len() == 1 {
-        return response_payload(responses[0]);
+    if let [response] = responses.as_slice() {
+        if response
+            .as_object()
+            .is_some_and(|object| !object.contains_key("id"))
+        {
+            return response_payload(response);
+        }
     }
     Err(McpError::Protocol(format!(
         "no response for request {id} (got {} message(s))",
@@ -373,7 +381,7 @@ mod tests {
             "mixed=bEaReR   sk-live-Secret; token=second-secret; ",
             "decoy=BEARER sk-live-other"
         );
-        let out = redact_headers(reflected, &headers);
+        let out = redact_secrets(reflected, &headers);
         for secret in ["sk-live-Secret", "second-secret"] {
             assert!(!out.contains(secret), "{secret} survived in {out}");
         }
@@ -436,11 +444,28 @@ mod tests {
     }
 
     #[test]
-    fn pick_response_handles_batches_and_id_less_bodies() {
+    fn pick_response_handles_batches_and_only_truly_id_less_bodies() {
         let batch = json!([{"id": 2, "result": "x"}, {"id": 1, "result": "y"}]);
         assert_eq!(pick_response(batch, 1).unwrap(), json!("y"));
-        // A single response without an id is tolerated.
+        // The sole-response compatibility exception requires an absent `id` key.
         assert_eq!(pick_response(json!({"result": 7}), 9).unwrap(), json!(7));
+        assert_eq!(
+            pick_response(
+                json!([{"method": "notifications/progress"}, {"result": 8}]),
+                9
+            )
+            .unwrap(),
+            json!(8)
+        );
+        for wrong in [
+            json!({"id": 1002, "result": "WRONG_NUMERIC_ID"}),
+            json!({"id": "1002", "result": "WRONG_STRING_ID"}),
+            json!({"id": "9", "result": "STRING_IS_NOT_NUMERIC_ID"}),
+            json!({"id": null, "result": "EXPLICIT_NULL_IS_NOT_ABSENT"}),
+        ] {
+            let error = pick_response(wrong, 9).unwrap_err();
+            assert!(error.describe().contains("no response for request 9"));
+        }
         let nothing = json!([{"method": "notifications/progress"}]);
         assert!(pick_response(nothing, 3).is_err());
     }

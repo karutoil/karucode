@@ -29,6 +29,12 @@ branding/social/*.png
 .karucode/
 .kc-data/
 .audit/
+# A working config copied from `config.example.toml` for a local run. The
+# example is the versioned file; this one is where a real provider `api_key`
+# ends up, and `KARUCODE_CONFIG=./config.toml` makes it a one-flag download of
+# someone else's secret. Root-anchored so an example or demo app may still
+# commit its own `config.toml`.
+/config.toml
 
 # --- tool output that is never a source file ---------------------------------
 # The checks in this repo are mostly Python and Node: `python3 tests/...` and

@@ -51,7 +51,10 @@
 // The arguments are checked against the schema the model was actually offered,
 // before anything is approved or run: `required` presence, `enum` membership, a
 // declared `type` (or a list, as in `["string","null"]`) and
-// `additionalProperties: false`. Richer keywords (`anyOf`, `$ref`, `format`,
+// `additionalProperties: false`. `null` is not a universal bypass: it must be
+// allowed by the declared type (for example `["string","null"]`) or by an enum
+// containing `null`, and must still satisfy every other declared constraint.
+// Richer keywords (`anyOf`, `$ref`, `format`,
 // nested `required`) are left to the tool, because a wrong "invalid" verdict from
 // the harness would block a call the tool would have accepted. A server that
 // publishes a bare `{"type":"object"}` gets no second-guessing at all.
@@ -370,9 +373,6 @@ impl ToolSpec {
                     }
                     continue;
                 };
-                if value.is_null() {
-                    continue;
-                }
                 if let Some(allowed) = schema.get("enum").and_then(|e| e.as_array()) {
                     if !allowed.contains(value) {
                         problems.push(format!(
@@ -1282,6 +1282,17 @@ mod tests {
             .is_ok());
 
         let problems = spec
+            .validate_arguments(&serde_json::json!({"path": null}))
+            .unwrap_err();
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("`path` must be string")
+                    && problem.contains("got null")),
+            "a required non-nullable string rejects null: {problems:?}"
+        );
+
+        let problems = spec
             .validate_arguments(&serde_json::json!({"offset": 3}))
             .unwrap_err();
         assert_eq!(problems.len(), 1, "{problems:?}");
@@ -1312,6 +1323,7 @@ mod tests {
                 "properties": {
                     "action": {"type": "string", "enum": ["list", "read"]},
                     "base": {"type": ["string", "null"]},
+                    "choice": {"enum": ["auto", null]},
                     "limit": {"type": "number"}
                 },
                 "required": ["action"],
@@ -1322,6 +1334,18 @@ mod tests {
         assert!(spec
             .validate_arguments(&serde_json::json!({"action": "read", "base": null}))
             .is_ok());
+        assert!(spec
+            .validate_arguments(&serde_json::json!({"action": "read", "choice": null}))
+            .is_ok());
+        let problems = spec
+            .validate_arguments(&serde_json::json!({"action": null}))
+            .unwrap_err();
+        assert!(
+            problems.iter().any(|problem| {
+                problem.contains("must be one of") && problem.contains("got null")
+            }),
+            "an enum without null rejects null: {problems:?}"
+        );
         // A whole integer is a valid `number`.
         assert!(spec
             .validate_arguments(&serde_json::json!({"action": "list", "limit": 2}))

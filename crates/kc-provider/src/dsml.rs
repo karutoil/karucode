@@ -101,6 +101,24 @@ pub(crate) struct DsmlScanner {
     /// that. [`find_marker_from`] reports where a failed search may resume, so
     /// each delta only scans the bytes that arrived since the last one.
     scanned: usize,
+    /// Delimiter state at `scanned`, including any balanced marker-shaped text
+    /// inside an open literal parameter. Kept across deltas so streaming does
+    /// not rescan the block or change which closer is structural.
+    structure: BlockStructure,
+}
+
+/// Delimiters are protocol tokens before execution policy is applied; no marker
+/// in this state is itself accepted as a tool call.
+#[derive(Debug, Default)]
+struct BlockStructure {
+    /// Whether the cursor is inside a parameter value.
+    parameter: bool,
+    /// Marker-shaped, balanced snippets inside that literal. These tags are
+    /// tracked only to find the parameter's actual closer, never emitted.
+    literal_nesting: Vec<Tag>,
+    /// Contradictory nesting makes the whole block text rather than choosing a
+    /// profitable-looking interpretation and dispatching it.
+    malformed: bool,
 }
 
 /// A block longer than this is not a tool call any more. Give up on it and let
@@ -114,6 +132,7 @@ impl DsmlScanner {
             buf: String::new(),
             block: None,
             scanned: 0,
+            structure: BlockStructure::default(),
         }
     }
 
@@ -136,10 +155,14 @@ impl DsmlScanner {
                     self.buf.drain(..found.at);
                     self.block = Some(0);
                     self.scanned = 0;
+                    self.structure = BlockStructure::default();
                 }
                 Some(start) => {
                     let from = close_hint(&self.buf, start).max(self.scanned);
-                    let (found, resume) = find_marker_from(&self.buf, from, Tag::ToolCalls, true);
+                    let structure = std::mem::take(&mut self.structure);
+                    let (found, resume, structure) =
+                        find_block_close_from(&self.buf, from, structure);
+                    self.structure = structure;
                     let Some(found) = found else {
                         // Everything before `resume` can never become the start of
                         // a closing marker, so the next delta starts looking
@@ -153,6 +176,7 @@ impl DsmlScanner {
                             step.text.push_str(&std::mem::take(&mut self.buf));
                             self.block = None;
                             self.scanned = 0;
+                            self.structure = BlockStructure::default();
                         }
                         return step;
                     };
@@ -162,6 +186,7 @@ impl DsmlScanner {
                     self.buf.drain(..found.end);
                     self.block = None;
                     self.scanned = 0;
+                    self.structure = BlockStructure::default();
                     step.extend(self.decide(&block, start, found.end));
                 }
             }
@@ -175,6 +200,7 @@ impl DsmlScanner {
         step.text.push_str(&std::mem::take(&mut self.buf));
         self.block = None;
         self.scanned = 0;
+        self.structure = BlockStructure::default();
         step
     }
 
@@ -239,7 +265,9 @@ enum Tag {
 struct Found {
     /// Byte offset of the `<`.
     at: usize,
-    /// Byte offset just past the tag name.
+    /// Byte offset just past the tag name; attributes start here.
+    name_end: usize,
+    /// Byte offset just past the tag's structural `>`.
     end: usize,
     /// A `</...>` marker.
     close: bool,
@@ -286,6 +314,60 @@ fn find_marker_from(text: &str, from: usize, tag: Tag, close: bool) -> (Option<F
     // No `<` is left, so the next candidate can only be in text that has not
     // arrived yet: everything already here is safe to skip.
     (None, text.len())
+}
+
+/// Find the structural close of an open `tool_calls` block without treating a
+/// marker in a literal parameter as syntax. Delimiter state is persisted with
+/// the resume cursor, so parsing remains linear across network chunks.
+fn find_block_close_from(
+    text: &str,
+    from: usize,
+    mut structure: BlockStructure,
+) -> (Option<Found>, usize, BlockStructure) {
+    let mut at = from;
+    while let Some(found) = text[at..].find('<').map(|pos| at + pos) {
+        match scan_marker(text, found) {
+            Scan::Match(marker) => {
+                if structure.parameter {
+                    observe_literal_marker(&mut structure, marker);
+                } else if marker.tag == Tag::Parameter && !marker.close {
+                    structure.parameter = true;
+                } else if marker.tag == Tag::ToolCalls && marker.close {
+                    return (Some(marker), marker.at, structure);
+                }
+                at = marker.end;
+            }
+            Scan::Mismatch => at = found + 1,
+            Scan::Incomplete => return (None, found, structure),
+        }
+    }
+    (None, text.len(), structure)
+}
+
+/// Consume a marker-shaped token inside a literal solely to identify its outer
+/// parameter close. Nested tool names are never looked up or emitted as calls.
+fn observe_literal_marker(structure: &mut BlockStructure, marker: Found) {
+    if !marker.close {
+        structure.literal_nesting.push(marker.tag);
+        return;
+    }
+    match structure.literal_nesting.last().copied() {
+        Some(expected) if expected == marker.tag => {
+            structure.literal_nesting.pop();
+        }
+        Some(_) => {
+            // A close for a different open literal tag cannot safely be assigned
+            // to either level. Fail closed even if later text looks executable.
+            structure.malformed = true;
+        }
+        None if marker.tag == Tag::Parameter => {
+            structure.parameter = false;
+        }
+        None => {
+            // Other closing markers are literal data, including tool_calls and
+            // invoke closers in an example being written to a file.
+        }
+    }
 }
 
 enum Scan {
@@ -343,23 +425,62 @@ fn scan_marker(text: &str, at: usize) -> Scan {
     } else {
         return Scan::Mismatch;
     };
-    // Consume the tag's `>` when it is already there, so `end` means "past this
-    // tag" for the block delimiters. An `invoke`/`parameter` carries attributes
-    // between the name and its `>`, which their parser reads for itself.
+    let name_end = cur.pos;
     cur.skip_ws();
-    // A marker is not complete until its `>` arrives. Without this,
-    // `<|DSML|tool_calls` is matched as a whole opener the moment the tag name
-    // is buffered, and the `>` that follows is then re-read as body text.
-    if !cur.text[cur.pos..].contains(&b'>') {
+    let attributes_start = cur.pos;
+
+    // Block delimiters and every closing tag have no attributes. Never use an
+    // arbitrary later `>` to complete them: that made malformed prose executable
+    // and made the result depend on how the network packed the bytes.
+    if close || tag == Tag::ToolCalls {
+        return match cur.peek() {
+            None => Scan::Incomplete,
+            Some(b'>') => {
+                cur.pos += 1;
+                Scan::Match(Found {
+                    at,
+                    name_end,
+                    end: cur.pos,
+                    close,
+                    tag,
+                })
+            }
+            Some(_) => Scan::Mismatch,
+        };
+    }
+
+    // Invoke/parameter openers may carry attributes, but their `>` must belong to
+    // this tag. Quoted `>` characters are attributes; a new unquoted `<` means the
+    // old tag was malformed rather than being completed by some later prose. The
+    // exact tag name at a chunk boundary is still incomplete: attributes or `>`
+    // may be in the next chunk, so it is not a malformed delimiter yet.
+    if cur.peek().is_none() {
         return Scan::Incomplete;
     }
-    cur.eat(b'>');
-    Scan::Match(Found {
-        at,
-        end: cur.pos,
-        close,
-        tag,
-    })
+    if cur.peek() != Some(b'>') && attributes_start == name_end {
+        return Scan::Mismatch;
+    }
+    let mut quote = None;
+    while let Some(byte) = cur.peek() {
+        match (quote, byte) {
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (Some(open), found) if open == found => quote = None,
+            (None, b'<') => return Scan::Mismatch,
+            (None, b'>') => {
+                cur.pos += 1;
+                return Scan::Match(Found {
+                    at,
+                    name_end,
+                    end: cur.pos,
+                    close,
+                    tag,
+                });
+            }
+            _ => {}
+        }
+        cur.pos += 1;
+    }
+    Scan::Incomplete
 }
 
 /// Tag names the scanner knows, for spotting one that is still arriving.
@@ -535,12 +656,18 @@ fn parse_block(markup: &str, tools: &DsmlTools) -> Parsed {
     let Some(open) = find_marker(markup, 0, Tag::ToolCalls, false) else {
         return Parsed::NotACall;
     };
-    let Some(close) = find_marker(markup, open.end, Tag::ToolCalls, true) else {
+    let (close, _, structure) = find_block_close_from(markup, open.end, BlockStructure::default());
+    let Some(close) = close else {
         return Parsed::NotACall;
     };
+    if structure.malformed || structure.parameter {
+        return Parsed::NotACall;
+    }
     let body = &markup[open.end..close.at];
 
-    let invokes = parse_invokes(body);
+    let Some(invokes) = parse_invokes(body) else {
+        return Parsed::NotACall;
+    };
     if invokes.is_empty() {
         return Parsed::NotACall;
     }
@@ -566,76 +693,156 @@ fn parse_block(markup: &str, tools: &DsmlTools) -> Parsed {
     )
 }
 
-fn parse_invokes(body: &str) -> Vec<Invoke> {
+fn parse_invokes(body: &str) -> Option<Vec<Invoke>> {
     let mut invokes = Vec::new();
     let mut from = 0;
-    while let Some(open) = find_marker(body, from, Tag::Invoke, false) {
-        // `open.end` is past the tag name; its attributes and `>` come next.
-        let header_end = match body[open.end..].find('>') {
-            Some(at) => open.end + at,
-            None => break,
+    let mut structure = BlockStructure::default();
+    loop {
+        let (found, next) = find_invoke_boundary(body, from, structure);
+        structure = next;
+        let Some(open) = found else {
+            break;
         };
-        let attributes = &body[open.end..header_end];
+        if open.close {
+            // A closer without a matching structural opener must not turn later
+            // literal text into an independent tool call.
+            structure.malformed = true;
+            from = open.end;
+            continue;
+        }
+        // The structural scanner has already located this tag's own unquoted `>`.
+        // A `>` inside a quoted attribute, or in a later unrelated tag, cannot
+        // change where this header ends.
+        let attributes = &body[open.name_end..open.end - 1];
         let name = attribute(attributes, "name");
-        let value_start = header_end + 1;
-        // The invoke ends at its closing marker; a model that never closed it
-        // ends it where the next invoke starts, or at the end of the block.
-        let next_open = find_marker(body, value_start, Tag::Invoke, false);
-        let close = find_marker(body, value_start, Tag::Invoke, true);
-        let end = match (close, next_open) {
-            (Some(close), Some(next)) => close.at.min(next.at),
-            (Some(close), None) => close.at,
-            (None, Some(next)) => next.at,
-            (None, None) => body.len(),
+        let value_start = open.end;
+        // The invoke ends at its structural closing marker; for compatibility,
+        // an unclosed invoke still ends at the next structural invoke opener.
+        let (boundary, next) = find_invoke_boundary(body, value_start, structure);
+        structure = next;
+        let (end, next_from) = match boundary {
+            Some(close) if close.close => (close.at, close.end),
+            Some(next) => (next.at, next.at),
+            None => (body.len(), body.len()),
         };
-        from = match close {
-            Some(close) if close.at <= end => close.end,
-            _ => end,
-        };
+        from = next_from;
         if let Some(name) = name {
             invokes.push(Invoke {
                 name,
-                parameters: parse_parameters(&body[value_start..end.min(body.len())]),
+                parameters: parse_parameters(&body[value_start..end])?,
             });
         }
     }
-    invokes
+    if structure.malformed || structure.parameter {
+        None
+    } else {
+        Some(invokes)
+    }
 }
 
-fn parse_parameters(invoke_body: &str) -> Vec<(String, Option<String>, String)> {
+/// Find an invoke opener or closer without seeing through a literal parameter.
+fn find_invoke_boundary(
+    body: &str,
+    from: usize,
+    mut structure: BlockStructure,
+) -> (Option<Found>, BlockStructure) {
+    let mut at = from;
+    while let Some(found) = body[at..].find('<').map(|pos| at + pos) {
+        match scan_marker(body, found) {
+            Scan::Match(marker) => {
+                if structure.parameter {
+                    observe_literal_marker(&mut structure, marker);
+                } else if marker.tag == Tag::Parameter && !marker.close {
+                    structure.parameter = true;
+                } else if marker.tag == Tag::Invoke {
+                    return (Some(marker), structure);
+                }
+                at = marker.end;
+            }
+            Scan::Mismatch => at = found + 1,
+            Scan::Incomplete => return (None, structure),
+        }
+    }
+    (None, structure)
+}
+
+fn parse_parameters(invoke_body: &str) -> Option<Vec<(String, Option<String>, String)>> {
     let mut out = Vec::new();
     let mut from = 0;
     let mut seen: HashSet<String> = HashSet::new();
-    while let Some(open) = find_marker(invoke_body, from, Tag::Parameter, false) {
-        let Some(gt) = invoke_body[open.end..].find('>').map(|at| open.end + at) else {
+    let mut structure = BlockStructure::default();
+    loop {
+        let (found, next) = find_parameter_boundary(invoke_body, from, structure);
+        structure = next;
+        let Some(open) = found else {
             break;
         };
-        let attributes = &invoke_body[open.end..gt];
+        if open.close {
+            structure.malformed = true;
+            from = open.end;
+            continue;
+        }
+        let attributes = &invoke_body[open.name_end..open.end - 1];
         let Some(name) = attribute(attributes, "name") else {
-            from = gt + 1;
+            structure.malformed = true;
+            from = open.end;
             continue;
         };
         let string = attribute(attributes, "string");
-        let value_start = gt + 1;
-        let close = find_marker(invoke_body, value_start, Tag::Parameter, true);
-        let next_open = find_marker(invoke_body, value_start, Tag::Parameter, false);
-        let end = match (close, next_open) {
-            (Some(close), Some(next)) => close.at.min(next.at),
-            (Some(close), None) => close.at,
-            (None, Some(next)) => next.at,
-            (None, None) => invoke_body.len(),
-        };
-        from = match close {
-            Some(close) if close.at <= end => close.end,
-            _ => end,
-        };
+        let value_start = open.end;
+        let (close, next) = find_parameter_boundary(invoke_body, value_start, structure);
+        structure = next;
+        let end = close.map_or(invoke_body.len(), |close| close.at);
+        from = close.map_or(invoke_body.len(), |close| close.end);
         // A duplicate parameter is a format error; keep the first, which is the
         // one the model committed to.
         if seen.insert(name.clone()) {
             out.push((name, string, invoke_body[value_start..end].to_string()));
         }
     }
-    out
+    if structure.malformed || structure.parameter {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Outside a value, return the next parameter opener; inside it, return only
+/// its unmatched outer close. Every nested opener belongs to the literal value.
+fn find_parameter_boundary(
+    body: &str,
+    from: usize,
+    mut structure: BlockStructure,
+) -> (Option<Found>, BlockStructure) {
+    let mut at = from;
+    while let Some(found) = body[at..].find('<').map(|pos| at + pos) {
+        match scan_marker(body, found) {
+            Scan::Match(marker) if marker.tag == Tag::Parameter => {
+                if structure.parameter {
+                    let was_nested = !structure.literal_nesting.is_empty();
+                    observe_literal_marker(&mut structure, marker);
+                    if marker.close && !was_nested {
+                        return (Some(marker), structure);
+                    }
+                } else {
+                    if !marker.close {
+                        structure.parameter = true;
+                    }
+                    return (Some(marker), structure);
+                }
+                at = marker.end;
+            }
+            Scan::Match(marker) => {
+                if structure.parameter {
+                    observe_literal_marker(&mut structure, marker);
+                }
+                at = marker.end;
+            }
+            Scan::Mismatch => at = found + 1,
+            Scan::Incomplete => return (None, structure),
+        }
+    }
+    (None, structure)
 }
 
 /// `name="value"` / `name='value'` / `name=value` inside a tag's attributes.
@@ -929,6 +1136,160 @@ mod tests {
     }
 
     #[test]
+    fn nested_tool_markup_inside_a_literal_parameter_is_content_at_every_split() {
+        const VALUE: &str = "literal <||DSML||invoke name=\"read_file\">\
+             <||DSML||parameter name=\"path\" string=\"true\">Cargo.toml</||DSML||parameter>\
+             </||DSML||invoke> </||DSML||tool_calls> tail";
+        let body = format!(
+            "before<||DSML||tool_calls><||DSML||invoke name=\"write_file\">\
+             <||DSML||parameter name=\"content\" string=\"true\">{VALUE}\
+             </||DSML||parameter></||DSML||invoke></||DSML||tool_calls>after"
+        );
+        let boundaries: Vec<usize> = body
+            .char_indices()
+            .map(|(at, _)| at)
+            .chain(std::iter::once(body.len()))
+            .collect();
+        for split in boundaries {
+            let mut scanner = scanner(&["write_file", "read_file"]);
+            let mut text = String::new();
+            let mut calls = Vec::new();
+            for piece in [&body[..split], &body[split..]] {
+                let step = scanner.push(piece);
+                text.push_str(&step.text);
+                calls.extend(step.calls);
+            }
+            let end = scanner.finish();
+            text.push_str(&end.text);
+            calls.extend(end.calls);
+            assert_eq!(text, "beforeafter", "split at byte {split}");
+            assert_eq!(calls.len(), 1, "split at byte {split}: {calls:?}");
+            assert_eq!(calls[0].name, "write_file");
+            let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+            assert_eq!(
+                args["content"],
+                serde_json::json!(VALUE),
+                "split at byte {split}"
+            );
+        }
+
+        // Also exercise the state machine when every marker byte arrives alone.
+        let mut scanner = scanner(&["write_file", "read_file"]);
+        let mut text = String::new();
+        let mut calls = Vec::new();
+        for ch in body.chars() {
+            let step = scanner.push(&ch.to_string());
+            text.push_str(&step.text);
+            calls.extend(step.calls);
+        }
+        let end = scanner.finish();
+        text.push_str(&end.text);
+        calls.extend(end.calls);
+        assert_eq!(text, "beforeafter");
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(args["content"], serde_json::json!(VALUE));
+    }
+
+    #[test]
+    fn unbalanced_literal_tool_markup_fails_closed_at_every_split() {
+        // The quoted inner invoke never closes. Its apparent outer parameter and
+        // invoke closers are therefore ambiguous: no inner call may be recovered.
+        let body = "<||DSML||tool_calls><||DSML||invoke name=\"write_file\">\
+            <||DSML||parameter name=\"content\" string=\"true\">prefix \
+            <||DSML||invoke name=\"read_file\"><||DSML||parameter name=\"path\" string=\"true\">\
+            Cargo.toml</||DSML||parameter></||DSML||parameter></||DSML||invoke>\
+            </||DSML||tool_calls>";
+        let boundaries: Vec<usize> = body
+            .char_indices()
+            .map(|(at, _)| at)
+            .chain(std::iter::once(body.len()))
+            .collect();
+        for split in boundaries {
+            let mut scanner = scanner(&["write_file", "read_file"]);
+            let mut text = String::new();
+            let mut calls = Vec::new();
+            for piece in [&body[..split], &body[split..]] {
+                let step = scanner.push(piece);
+                text.push_str(&step.text);
+                calls.extend(step.calls);
+            }
+            let end = scanner.finish();
+            text.push_str(&end.text);
+            calls.extend(end.calls);
+            assert!(calls.is_empty(), "split at byte {split}: {calls:?}");
+            assert_eq!(text, body, "split at byte {split}");
+        }
+    }
+
+    #[test]
+    fn a_block_closer_inside_a_literal_parameter_is_content_at_every_split() {
+        const VALUE: &str = "write this verbatim: </||DSML||tool_calls>\n<h1>still the file</h1>";
+        let body = format!(
+            "before<||DSML||tool_calls><||DSML||invoke name=\"write_file\">\
+             <||DSML||parameter name=\"content\" string=\"true\">{VALUE}\
+             </||DSML||parameter></||DSML||invoke></||DSML||tool_calls>after"
+        );
+        let expected = run(&["write_file"], &body);
+        assert_eq!(expected.0, "beforeafter");
+        assert_eq!(expected.1.len(), 1);
+        let args: serde_json::Value = serde_json::from_str(&expected.1[0].arguments).unwrap();
+        assert_eq!(args["content"], serde_json::json!(VALUE));
+
+        let mut split = scanner(&["write_file"]);
+        let mut text = String::new();
+        let mut calls = Vec::new();
+        let value_start = body.find(VALUE).unwrap();
+        let parameter_close = body.find("</||DSML||parameter>").unwrap();
+        for (at, ch) in body.char_indices() {
+            let step = split.push(&ch.to_string());
+            if at >= value_start && at < parameter_close + "</||DSML||parameter>".len() - 1 {
+                assert!(split.structure.parameter, "literal state lost at byte {at}");
+            }
+            text.push_str(&step.text);
+            calls.extend(step.calls);
+        }
+        let end = split.finish();
+        text.push_str(&end.text);
+        calls.extend(end.calls);
+        assert_eq!(
+            (text, calls),
+            expected,
+            "network boundaries changed the value"
+        );
+    }
+
+    #[test]
+    fn malformed_block_tags_never_borrow_a_later_angle_bracket() {
+        let body = "<||DSML||tool_calls this is prose><||DSML||invoke name=\"write_file\">\
+            <||DSML||parameter name=\"content\" string=\"true\">do not dispatch</||DSML||parameter>\
+            </||DSML||invoke></||DSML||tool_calls>";
+        let expected_text = body.to_string();
+        for one_byte_at_a_time in [false, true] {
+            let mut scanner = scanner(&["write_file"]);
+            let mut text = String::new();
+            let mut calls = Vec::new();
+            if one_byte_at_a_time {
+                for ch in body.chars() {
+                    let step = scanner.push(&ch.to_string());
+                    text.push_str(&step.text);
+                    calls.extend(step.calls);
+                }
+            } else {
+                let step = scanner.push(body);
+                text.push_str(&step.text);
+                calls.extend(step.calls);
+            }
+            let end = scanner.finish();
+            text.push_str(&end.text);
+            calls.extend(end.calls);
+            assert!(calls.is_empty(), "malformed markup executed: {calls:?}");
+            assert_eq!(text, expected_text);
+        }
+        assert!(find_marker(body, 0, Tag::ToolCalls, false).is_none());
+    }
+
+    #[test]
     fn an_empty_block_is_not_a_call() {
         let (text, calls) = run(&["read_file"], "<||DSML||tool_calls></||DSML||tool_calls>");
         assert!(calls.is_empty());
@@ -1103,7 +1464,7 @@ pub fn strip_tool_markup(text: &str) -> String {
     // the cursor. The text between the cursor and that opener is prose and stays.
     while let Some(open) = find_marker(text, cursor, Tag::ToolCalls, false) {
         out.push_str(&text[cursor..open.at]);
-        match find_marker(text, open.end, Tag::ToolCalls, true) {
+        match find_block_close_from(text, open.end, BlockStructure::default()).0 {
             Some(close) => cursor = close.end,
             None => {
                 // Unterminated: everything from the opener on is markup.

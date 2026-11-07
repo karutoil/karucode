@@ -11,7 +11,12 @@ import {
   splitHostedPanelId,
   unregisterPluginPanelRenderer,
 } from './pluginPanels';
-import { PluginPanelView } from './PluginPanelView';
+import {
+  PANEL_JSON_MAX_DEPTH,
+  PANEL_JSON_MAX_ENTRIES,
+  PANEL_JSON_MAX_NODES,
+  PluginPanelView,
+} from './PluginPanelView';
 import { Inspector } from './Inspector';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
@@ -318,6 +323,56 @@ describe('rendering a plugin panel', () => {
     await waitFor(() => {
       expect(screen.getByText(/too much data to display/i)).toBeTruthy();
     });
+  });
+
+  it('bounds a hostile but legal small-character array by total output nodes', async () => {
+    const tail = 'hostile-tail-must-not-render';
+    const data = Array.from({ length: PANEL_JSON_MAX_NODES * 4 }, (_, index) =>
+      index === PANEL_JSON_MAX_NODES * 4 - 1 ? tail : `v${index}`,
+    );
+    expect(panelPayloadFits(data)).toBe(true);
+    stubPanelFetch(() => jsonResponse({ title: 'Todo', data, version: 1, fetched_ms: 1 }));
+
+    const { container } = render(<PluginPanelView panel={panelTab()} />);
+    expect(await screen.findByTestId('plugin-panel-json-truncated')).toBeTruthy();
+    expect(screen.queryByText(tail)).toBeNull();
+    expect(container.querySelectorAll('.plugin-panel-json-list > li').length).toBeLessThanOrEqual(
+      PANEL_JSON_MAX_NODES + 1,
+    );
+    expect(container.textContent).toContain(`${PANEL_JSON_MAX_NODES} values`);
+  });
+
+  it('stops at the depth cap before rendering the bottom of a deep document', async () => {
+    let data: unknown = { bottom: 'deep-sentinel-must-not-render' };
+    for (let depth = 0; depth < PANEL_JSON_MAX_DEPTH + 20; depth += 1) data = { child: data };
+    expect(panelPayloadFits(data)).toBe(true);
+    stubPanelFetch(() => jsonResponse({ title: 'Todo', data, version: 1, fetched_ms: 1 }));
+
+    render(<PluginPanelView panel={panelTab()} />);
+    expect(await screen.findByTestId('plugin-panel-json-truncated')).toBeTruthy();
+    expect(screen.queryByText('deep-sentinel-must-not-render')).toBeNull();
+    expect(screen.getByText(new RegExp(`Depth limit ${PANEL_JSON_MAX_DEPTH} reached`))).toBeTruthy();
+  });
+
+  it('caps deep/nested wide data by entry count and the shared node budget', async () => {
+    const data = {
+      groups: Array.from({ length: PANEL_JSON_MAX_ENTRIES * 2 }, (_, group) => ({
+        name: `group-${group}`,
+        values: Array.from({ length: 12 }, (_, value) => `v${value}`),
+      })),
+      final: 'wide-tail-must-not-render',
+    };
+    expect(panelPayloadFits(data)).toBe(true);
+    stubPanelFetch(() => jsonResponse({ title: 'Todo', data, version: 1, fetched_ms: 1 }));
+
+    const { container } = render(<PluginPanelView panel={panelTab()} />);
+    expect(await screen.findByTestId('plugin-panel-json-truncated')).toBeTruthy();
+    expect(screen.getByText('group-0')).toBeTruthy();
+    expect(screen.queryByText(`group-${PANEL_JSON_MAX_ENTRIES * 2 - 1}`)).toBeNull();
+    expect(screen.queryByText('wide-tail-must-not-render')).toBeNull();
+    // An explicit truncation note is not enough if the renderer still mounted all
+    // the omitted data on its way there; the real DOM must be bounded too.
+    expect(container.querySelector('.plugin-panel-json')?.querySelectorAll('*').length).toBeLessThan(5000);
   });
 
   it('never renders a payload as HTML', async () => {

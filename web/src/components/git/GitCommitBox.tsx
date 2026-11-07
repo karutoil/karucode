@@ -6,6 +6,8 @@ import { canCommit } from './gitModel';
 export interface GitCommitBoxProps {
   variant: 'page' | 'panel';
   status: GitStatus | null;
+  /** Repository identity: equal branch names in two projects are not one draft. */
+  projectId: string | null;
   branch: string | null;
   /** An action is in flight; the box stays readable but cannot be resubmitted. */
   busy: string | null;
@@ -31,6 +33,7 @@ function isSubmitChord(event: KeyboardEvent): boolean {
 export function GitCommitBox({
   variant,
   status,
+  projectId,
   branch,
   busy,
   onCommit,
@@ -45,22 +48,25 @@ export function GitCommitBox({
   // message written for one project land in another. The previous key is kept in
   // a ref so this only fires on a real *change* - an effect that also ran on
   // mount would wipe the first characters typed while the status was landing.
-  const branchKey = `${branch ?? ''}`;
-  const previousBranch = useRef(branchKey);
+  const repositoryKey = JSON.stringify([projectId, branch]);
+  const previousRepository = useRef(repositoryKey);
   useEffect(() => {
-    if (previousBranch.current === branchKey) return;
-    previousBranch.current = branchKey;
+    if (previousRepository.current === repositoryKey) return;
+    previousRepository.current = repositoryKey;
     setMessage('');
     setAmend(false);
-  }, [branchKey]);
+    setSubmitting(false);
+  }, [repositoryKey]);
 
   const gate = canCommit(message, status, { amend });
   const disabled = submitting || busy !== null || !gate.enabled;
 
   const submit = async (): Promise<void> => {
     if (disabled) return;
+    const submittedRepository = repositoryKey;
     setSubmitting(true);
     const committed = await onCommit(message, { amend });
+    if (previousRepository.current !== submittedRepository) return;
     setSubmitting(false);
     if (committed) {
       setMessage('');

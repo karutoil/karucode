@@ -7,7 +7,7 @@
 
 - **Slug:** `builtin-tools`
 - **Tags:** tools, agent, files, search, shell, git
-- **Applies to:** `tool:read_file`, `tool:list_dir`, `tool:search_files`, `tool:glob`, `tool:write_file`, `tool:edit_file`, `tool:run_command`, `tool:git_status`, `tool:git_diff`, `tool:git_log`, `tool:karucode_docs`, `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `route:POST /api/sessions/:id/rewind`, `config:[limits]`, `config:limits.max_file_read_bytes`, `config:limits.search_max_results`, `config:limits.max_tool_output_bytes`, `config:allow_temp_dir`, `env:KARUCODE_ALLOW_TEMP_DIR`, `config:[model]`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`
+- **Applies to:** `tool:read_file`, `tool:list_dir`, `tool:search_files`, `tool:glob`, `tool:write_file`, `tool:edit_file`, `tool:run_command`, `tool:git_status`, `tool:git_diff`, `tool:git_log`, `tool:karucode_docs`, `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `route:POST /api/sessions/:id/rewind`, `config:[limits]`, `config:limits.max_file_read_bytes`, `config:limits.search_max_results`, `config:limits.max_tool_output_bytes`, `config:allow_temp_dir`, `env:KARUCODE_ALLOW_TEMP_DIR`, `config:[model]`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:RIPGREP_CONFIG_PATH`
 - **Source:** `crates/kc-tools/src/lib.rs:7`
 
 ---
@@ -94,7 +94,10 @@ result header are previewed at 512 characters (metadata still has the command).
   cannot spend the whole global budget; `0` (the default) leaves only the
   global cap. `context` (N lines before *and* after each match, like `grep -C`)
   is reported as `path:line- text` so a context line is never mistaken for the
-  matching line, and it is capped at 10 lines. `files_only` returns the
+  matching line, and it is capped at 10 lines. Reaching the global cap still
+  drains the accepted match's requested after-context, but never admits a later
+  real match. Overlapping windows keep every real hit labelled as a hit.
+  `files_only` returns the
   distinct paths that matched, one per line, like `grep -l`; `context` has no
   meaning there and is ignored. Both engines produce the **same shape** for
   all three - the crate's promise is that the model cannot tell them apart
@@ -103,12 +106,17 @@ result header are previewed at 512 characters (metadata still has the command).
   line rather than replacing it with a placeholder; the cap is counted in
   characters, not bytes, so a line of multi-byte text is cut in the same place
   by both engines (ripgrep's own `--max-columns` counts bytes, so it is set
-  wide enough that our character cap is the one that decides). A path
-  containing `:` is reported correctly: ripgrep is asked for `--null` records.
+  wide enough that our character cap is the one that decides). A literal suffix
+  that resembles ripgrep's preview marker is preserved on a short line. Paths
+  containing `:` or newlines are reported correctly: ripgrep paths end at NUL,
+  and only a newline after that delimiter ends the record. For security,
+  ripgrep is spawned without inherited `RIPGREP_CONFIG_PATH`; a user config's
+  `--pre` command therefore cannot turn this read-only tool into shell execution.
 * `glob` matches an entry's file name, its path relative to `path` and its
   workspace-relative path, so `*.rs`, `src/**/*.rs` and `crates/*/src/lib.rs`
   all work. It lists directories too, with a trailing `/`, and its walk stops
-  at 200 paths (the note says the cap cut it). Read-only, no approval.
+  at 200 paths (the note says the cap cut it). The run's cancellation token is
+  checked on every yielded entry or error. Read-only, no approval.
 * `run_command` reports a **success** when the command exits 0 and leaves a
   child running in the background (`build & exit 0`) instead of waiting for that
   child to close the output pipes. The result says the output may be incomplete

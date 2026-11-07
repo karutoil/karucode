@@ -91,6 +91,27 @@ async fn the_page_csp_allows_blob_images_for_the_rail() {
     }
 }
 
+/// PDF content is fetched with the bearer header and then displayed as a blob
+/// iframe. The response header's parent-page frame policy must allow that managed
+/// object URL; no remote frame origin is allowed.
+#[tokio::test]
+async fn the_page_csp_allows_authenticated_pdf_blob_frames() {
+    let h = HarnessBuilder::new(vec![]).build().await;
+    let response = h.get("/api/health").await;
+    let csp = response.headers[axum::http::header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .expect("CSP header");
+    let frame_src = csp
+        .split(';')
+        .map(str::trim)
+        .find(|directive| directive.starts_with("frame-src"))
+        .unwrap_or_else(|| panic!("no frame-src directive in {csp}"));
+    assert_eq!(frame_src, "frame-src 'self' blob:");
+    assert!(!frame_src
+        .split_whitespace()
+        .any(|source| { matches!(source, "*" | "http:" | "https:") }));
+}
+
 #[tokio::test]
 async fn the_projects_own_icon_is_served_with_its_sniffed_type() {
     let h = HarnessBuilder::new(vec![]).build().await;

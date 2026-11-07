@@ -6,6 +6,7 @@
  * The `vi.mock` blocks below are a per-file copy on purpose: `vi.mock` is
  * hoisted per test file, so a shared fixture module cannot register them.
  */
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import * as store from '../../state/store';
@@ -303,7 +304,7 @@ describe('the overview speaks the product’s vocabulary', () => {
     expect(cells).toHaveLength(5);
     for (const cell of cells) {
       expect(cell.querySelector('.metric-num')?.textContent).toMatch(/^\d+$/);
-      expect(cell.querySelector('.metric-label')?.textContent?.trim()).not.toBe('');
+      expect(cell.querySelector('.metric-label')?.textContent?.trim()).toBeTruthy();
     }
     // …and no private number-plus-label markup survives beside it: every child of
     // the summary is a `.metric`, so the two cannot drift apart again.
@@ -311,11 +312,17 @@ describe('the overview speaks the product’s vocabulary', () => {
   });
 
   it('offers exactly the reasoning efforts the composer offers', async () => {
+    // The import is the contract: a private copy with today's seven entries would
+    // pass the value comparison below and drift the day the composer gains an
+    // eighth. So assert the source imports the shared constant from its owner,
+    // then assert the rendered options match it.
+    // cwd is `web/` under vitest; `import.meta.url` is an http URL in jsdom, so
+    // a file: URL built from it would not resolve.
+    const source = readFileSync('src/components/control-plane/ControlOverview.tsx', 'utf8');
+    expect(source).toContain('REASONING_OPTIONS');
+    expect(source).toMatch(/from '\.\.\/ModelSwitcher'/);
     render(<ControlPlane />);
     const reasoning = await screen.findByLabelText('Reasoning for the new chat') as HTMLSelectElement;
-    // The launch box imports `REASONING_OPTIONS` rather than keeping its own
-    // table, so a new effort cannot reach the composer and miss the launch box
-    // (or the other way round). This asserts the source, not just the values.
     expect([...reasoning.options].map((option) => [option.value, option.textContent])).toEqual(
       REASONING_OPTIONS.map((option) => [option.value, option.label]),
     );

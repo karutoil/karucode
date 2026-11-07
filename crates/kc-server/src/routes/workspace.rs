@@ -18,6 +18,7 @@ use kc_core::paths::Workspace;
 use kc_core::settings::Settings;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,10 @@ const COLLISION_ATTEMPTS: u32 = 1000;
 const DEFAULT_DEPTH: usize = 1;
 const MAX_DEPTH: usize = 6;
 const MAX_TREE_ENTRIES: usize = 2000;
+/// Equally important: cap directory entries *examined*, not just returned. A
+/// workspace containing millions of generated files must not turn one UI poll
+/// into a full filesystem scan.
+const MAX_TREE_WORK_ITEMS: usize = 32_000;
 /// Directories that are never useful in a UI listing: build output, dependency
 /// trees and VCS internals. They are skipped *before* the entry budget is spent,
 /// so a project is not truncated down to `.git` objects and `target/` artifacts.
@@ -88,17 +93,58 @@ fn tree_blocking(workspace: &Workspace, path: &str, depth: usize) -> Result<Valu
         )));
     }
     let mut entries = Vec::new();
-    walk(workspace, &root, depth, &mut entries);
+    let mut work_remaining = MAX_TREE_WORK_ITEMS;
+    let mut truncated = false;
+    walk(
+        workspace,
+        &root,
+        depth,
+        &mut entries,
+        &mut work_remaining,
+        &mut truncated,
+    );
     Ok(json!({
         "path": workspace.relative(&root),
         "entries": entries,
+        "truncated": truncated,
+        "limit": MAX_TREE_ENTRIES,
     }))
 }
 
-/// Depth-first listing, directories first, bounded in count. Unreadable
-/// subdirectories are skipped instead of failing the whole tree, and
-/// [`IGNORED_DIRS`] never enters the listing at all.
-fn walk(workspace: &Workspace, dir: &Path, depth: usize, out: &mut Vec<Value>) {
+type DirectoryItem = (bool, String, PathBuf);
+
+fn directory_item_cmp(a: &DirectoryItem, b: &DirectoryItem) -> std::cmp::Ordering {
+    b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1))
+}
+
+/// Retain only the best `MAX_TREE_ENTRIES` siblings. This avoids collecting and
+/// sorting an arbitrarily large generated directory before the global cap applies.
+fn retain_directory_item(items: &mut Vec<DirectoryItem>, item: DirectoryItem) -> bool {
+    items.push(item);
+    if items.len() <= MAX_TREE_ENTRIES {
+        return false;
+    }
+    let worst = items
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| directory_item_cmp(a, b))
+        .map(|(index, _)| index)
+        .expect("an over-cap directory is not empty");
+    items.swap_remove(worst);
+    true
+}
+
+/// Depth-first listing, directories first, bounded in returned entries, retained
+/// siblings and examined filesystem entries. Unreadable subdirectories are skipped
+/// instead of failing the whole tree, and [`IGNORED_DIRS`] never enters the listing.
+fn walk(
+    workspace: &Workspace,
+    dir: &Path,
+    depth: usize,
+    out: &mut Vec<Value>,
+    work_remaining: &mut usize,
+    truncated: &mut bool,
+) {
     if depth == 0 || out.len() >= MAX_TREE_ENTRIES {
         return;
     }
@@ -109,8 +155,13 @@ fn walk(workspace: &Workspace, dir: &Path, depth: usize, out: &mut Vec<Value>) {
             return;
         }
     };
-    let mut items: Vec<(bool, String, std::path::PathBuf)> = Vec::new();
+    let mut items: Vec<DirectoryItem> = Vec::new();
     for entry in read_dir.flatten() {
+        if *work_remaining == 0 {
+            *truncated = true;
+            break;
+        }
+        *work_remaining -= 1;
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(_) => continue,
@@ -122,12 +173,21 @@ fn walk(workspace: &Workspace, dir: &Path, depth: usize, out: &mut Vec<Value>) {
         if is_dir && IGNORED_DIRS.contains(&name.as_str()) {
             continue;
         }
-        items.push((is_dir, name, entry.path()));
+        if retain_directory_item(&mut items, (is_dir, name, entry.path())) {
+            *truncated = true;
+        }
     }
-    items.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    items.sort_by(directory_item_cmp);
 
-    for (is_dir, _name, full) in items {
+    let item_count = items.len();
+    for (index, (is_dir, _name, full)) in items.into_iter().enumerate() {
         if out.len() >= MAX_TREE_ENTRIES {
+            // If another sibling remains, the response is definitely partial. If
+            // this was the final sibling, the bounded-retention overflow check
+            // above has already determined whether anything was omitted.
+            if index < item_count {
+                *truncated = true;
+            }
             return;
         }
         let name = full
@@ -148,7 +208,7 @@ fn walk(workspace: &Workspace, dir: &Path, depth: usize, out: &mut Vec<Value>) {
             "size": size,
         }));
         if is_dir {
-            walk(workspace, &full, depth - 1, out);
+            walk(workspace, &full, depth - 1, out, work_remaining, truncated);
         }
     }
 }
@@ -189,13 +249,27 @@ fn file_blocking(workspace: &Workspace, path: &str, limit: usize) -> Result<Valu
             "`{path}` is not a regular file; FIFOs, sockets and devices cannot be read"
         )));
     }
-    let size = meta.len();
     let mut file = std::fs::File::open(&abs).map_err(|e| Error::io(abs.clone(), e))?;
     let mut bytes = Vec::new();
-    Read::by_ref(&mut file)
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| Error::io(abs.clone(), e))?;
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    // Hash the complete file while retaining only the bounded preview prefix.
+    // Hashing just that prefix would let a same-prefix edit made after a
+    // truncated read pass the editor's optimistic-concurrency check.
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| Error::io(abs.clone(), e))?;
+        if read == 0 {
+            break;
+        }
+        size = size.saturating_add(read as u64);
+        hasher.update(&buffer[..read]);
+        let keep = (limit + 1).saturating_sub(bytes.len());
+        bytes.extend_from_slice(&buffer[..read.min(keep)]);
+    }
+    let digest = content_digest(hasher);
     let truncated = bytes.len() > limit || size > limit as u64;
     bytes.truncate(limit);
 
@@ -211,6 +285,7 @@ fn file_blocking(workspace: &Workspace, path: &str, limit: usize) -> Result<Valu
                     "path": workspace.relative(&abs),
                     "content": "",
                     "size": size,
+                    "digest": digest,
                     "truncated": truncated,
                     "binary": true,
                     "language": Value::Null,
@@ -223,6 +298,7 @@ fn file_blocking(workspace: &Workspace, path: &str, limit: usize) -> Result<Valu
         "path": workspace.relative(&abs),
         "content": content,
         "size": size,
+        "digest": digest,
         "truncated": truncated,
         "binary": binary,
         "language": language_for(&abs),
@@ -271,13 +347,14 @@ pub const MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
 ///   origin opaque. Verified in Chromium: the frame's `parent`, `localStorage`
 ///   and `document.cookie` reads all throw `SecurityError`, `window.open`
 ///   returns `null`, and `top.location` cannot be navigated.
-/// * `script-src`/`style-src`/`img-src`/`font-src`/`media-src` allow `*`, so a
-///   page's own `./app.js`, `./style.css` and remote CDN assets load. It is
-///   safe to be this open *because* the origin is opaque: a hostile script can
-///   only reach what it was served with.
-/// * `connect-src 'none'` blocks `fetch`/XHR/WebSocket. That is the one channel
-///   that could lift data out of the rendered document, so it stays off even
-///   though nothing sensitive is reachable.
+/// * `script-src`/`style-src`/`img-src`/`font-src`/`media-src` allow `'self'`,
+///   so `./app.js`, `./style.css` and sibling images load from this workspace.
+///   Remote sources are deliberately absent: an opaque origin does not stop an
+///   `<img>` or stylesheet from transmitting DOM-derived data to another server.
+///   `data:`/`blob:` remain available for generated inline resources.
+/// * `connect-src 'none'` blocks `fetch`/XHR/WebSocket as well. Workspace HTML is
+///   untrusted, script-capable content inside an opaque sandbox, not an authorized
+///   general-purpose web page; opening a preview never approves network egress.
 /// * `frame-src`/`child-src`/`object-src 'none'` stop the preview nesting more
 ///   documents or plugins, `form-action 'none'` stops it submitting anywhere,
 ///   and `base-uri 'self'` stops a `<base>` from re-pointing its own relative
@@ -287,8 +364,8 @@ pub const MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
 ///   `sandbox` directive also makes [`crate::app::security_headers`] withhold
 ///   `X-Frame-Options: DENY`, which would otherwise block that frame.
 pub const PREVIEW_CONTENT_SECURITY_POLICY: &str = "sandbox allow-scripts; default-src 'none'; \
-     img-src * data: blob:; media-src * data: blob:; font-src * data:; \
-     style-src * 'unsafe-inline'; script-src * 'unsafe-inline' 'unsafe-eval' blob:; \
+     img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; \
+     style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; \
      connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; \
      object-src 'none'; form-action 'none'; base-uri 'self'; frame-ancestors 'self'";
 
@@ -314,10 +391,11 @@ pub const PREVIEW_CONTENT_SECURITY_POLICY: &str = "sandbox allow-scripts; defaul
 /// narrow in both cases:
 ///
 /// * a document (`text/html`) gets [`PREVIEW_CONTENT_SECURITY_POLICY`], which is
-///   an opaque origin with script but no network;
+///   an opaque origin with script but no foreign network or remote egress: only
+///   its local preview siblings and inline data/blob resources are permitted;
 /// * every other asset keeps [`RAW_CONTENT_SECURITY_POLICY`], which is an opaque
-///   origin with no script and no network - correct for bytes that are only ever
-///   meant to be drawn.
+///   origin with no script and no further subresources - correct for bytes that
+///   are only ever meant to be drawn.
 ///
 /// Both are opaque origins, so neither can reach the app: no `/api` call, no
 /// `localStorage`, no cookie, no framing of the app.
@@ -569,12 +647,13 @@ pub const MAX_WRITE_BYTES: usize = kc_tools::file_ops::MAX_FILE_WRITE_BYTES;
 
 /// `PUT /api/workspace/file?path=<file>[&project=<id>][&create=true][&force=true]`
 ///
-/// The body is JSON: `{ "content": "...", "expected_size": <bytes, optional> }`.
-/// `content` must be UTF-8 text — this endpoint never writes binary data — and
-/// `expected_size`, when present, is an optimistic-concurrency check: the save is
-/// refused with `409` when the file on disk is no longer that size, so an editor
-/// cannot silently overwrite what the agent wrote in the meantime. `force=true`
-/// skips that check (the UI asks the user first).
+/// The body is JSON: `{ "content": "...", "expected_size": <bytes, optional>,
+/// "expected_digest": "sha256:<64 hex>", optional }`. `content` must be UTF-8 text
+/// — this endpoint never writes binary data. Both expected fields are
+/// optimistic-concurrency checks; the digest also catches an equal-length edit.
+/// A stale snapshot is refused with `409`, so an editor cannot silently overwrite
+/// what the agent wrote in the meantime. `force=true` skips both checks (the UI
+/// asks the user first).
 ///
 /// Saves are gated by the same policy the `write_file` tool obeys: `read_only`
 /// denies them, and `ask`/`ask_commands` require the path to be inside the
@@ -601,6 +680,9 @@ pub async fn write_file(
     }
 
     let request: WriteFileBody = parse_required(&body, "writing a workspace file")?;
+    if let Some(expected) = request.expected_digest.as_deref() {
+        validate_expected_digest(expected)?;
+    }
     let content = request.content;
     // The cap is on the decoded bytes: JSON escaping can make the request body
     // larger than the file it writes.
@@ -612,11 +694,12 @@ pub async fn write_file(
     }
 
     let value = tokio::task::spawn_blocking(move || {
-        write_file_blocking(
+        write_file_versioned_blocking(
             &workspace,
             &path,
             &content,
             request.expected_size,
+            request.expected_digest.as_deref(),
             create,
             force,
         )
@@ -631,11 +714,17 @@ pub struct WriteFileBody {
     /// The complete new file contents. Required, but an empty file is legitimate.
     #[serde(default)]
     pub content: String,
-    /// Size the editor loaded. A mismatch is a `409` unless `force=true`.
+    /// Size the editor loaded. Kept for compatibility with older clients; unlike
+    /// the digest this cannot detect a replacement of the same byte length.
     #[serde(default)]
     pub expected_size: Option<u64>,
+    /// The read response's full-file `digest`. A mismatch is a `409` unless
+    /// `force=true`, including when the replacement has the same size.
+    #[serde(default)]
+    pub expected_digest: Option<String>,
 }
 
+#[cfg(test)]
 fn write_file_blocking(
     workspace: &Workspace,
     path: &str,
@@ -644,6 +733,22 @@ fn write_file_blocking(
     create: bool,
     force: bool,
 ) -> Result<Value, ApiError> {
+    write_file_versioned_blocking(workspace, path, content, expected_size, None, create, force)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_file_versioned_blocking(
+    workspace: &Workspace,
+    path: &str,
+    content: &str,
+    expected_size: Option<u64>,
+    expected_digest: Option<&str>,
+    create: bool,
+    force: bool,
+) -> Result<Value, ApiError> {
+    if let Some(expected) = expected_digest {
+        validate_expected_digest(expected)?;
+    }
     // `resolve_existing` refuses traversal, symlink escapes and a missing file in
     // one step; `resolve_for_write` additionally allows a new path, so the two
     // branches below cannot disagree about confinement.
@@ -671,7 +776,7 @@ fn write_file_blocking(
         Err(e) => return Err(ApiError::from(Error::io(&abs, e))),
     };
 
-    if previous_size.is_none() && expected_size.is_some() && !force {
+    if previous_size.is_none() && (expected_size.is_some() || expected_digest.is_some()) && !force {
         // The editor loaded a file that has since been deleted. Recreating it on
         // save is reasonable, but silently reversing somebody's deletion is not.
         return Err(ApiError::conflict(format!(
@@ -686,15 +791,65 @@ fn write_file_blocking(
             )));
         }
     }
+    if let (Some(expected), Some(_)) = (expected_digest, previous_size) {
+        if !force {
+            let actual = file_digest(&abs)?;
+            if expected != actual {
+                return Err(ApiError::conflict(format!(
+                    "`{path}` changed on disk (its content digest no longer matches the snapshot); \
+                     reload it or save with force=true to overwrite"
+                )));
+            }
+        }
+    }
 
     kc_tools::file_ops::write_atomic(&abs, content.as_bytes())?;
 
     Ok(json!({
         "path": workspace.relative(&abs),
         "size": content.len(),
+        "digest": content_digest(Sha256::new().chain_update(content.as_bytes())),
         "created": previous_size.is_none(),
         "language": language_for(&abs),
     }))
+}
+
+fn content_digest(hasher: Sha256) -> String {
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn file_digest(path: &Path) -> Result<String, ApiError> {
+    let mut file =
+        std::fs::File::open(path).map_err(|error| ApiError::from(Error::io(path, error)))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| ApiError::from(Error::io(path, error)))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(content_digest(hasher))
+}
+
+fn validate_expected_digest(expected: &str) -> ApiResult<()> {
+    let hex = expected.strip_prefix("sha256:").unwrap_or_default();
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::bad_request(
+            "`expected_digest` must be `sha256:` followed by 64 hexadecimal characters",
+        ));
+    }
+    // The GET token is canonical lowercase. Refuse a visually equivalent but
+    // differently encoded value rather than silently weakening exact-version use.
+    if !hex.bytes().all(|byte| !byte.is_ascii_uppercase()) {
+        return Err(ApiError::bad_request(
+            "`expected_digest` must use lowercase hexadecimal, as returned by GET",
+        ));
+    }
+    Ok(())
 }
 
 /// `POST /api/workspace/upload?session=<id>&name=<file>[&project=<id>]`
@@ -737,10 +892,10 @@ pub async fn upload(
         .get_session(&session_id)
         .await?
         .ok_or_else(|| ApiError::not_found(format!("session `{session_id}` does not exist")))?;
-    let project_id = query_str(&query, "project")
-        .map(str::to_string)
-        .or_else(|| session.project_id.clone());
-    let workspace = state.workspace_for_project(project_id.as_deref())?;
+    let workspace = match query_str(&query, "project") {
+        Some(project_id) => state.workspace_for_project(Some(project_id))?,
+        None => state.workspace_for_session(session.project_id.as_deref(), &session.workspace)?,
+    };
 
     // An honest `Content-Length` is rejected before a byte is buffered. A
     // missing or lying one is caught by the bounded read below.
@@ -1161,6 +1316,53 @@ mod tests {
     }
 
     #[test]
+    fn tree_bounds_wide_directory_work_and_reports_truncation() {
+        let (dir, ws) = workspace();
+        std::fs::create_dir_all(dir.join("wide")).unwrap();
+        for index in (0..=MAX_TREE_ENTRIES).rev() {
+            std::fs::write(dir.join("wide").join(format!("file-{index:04}.txt")), "x").unwrap();
+        }
+        let value = tree_blocking(&ws, "wide", 1).unwrap();
+        let entries = value["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), MAX_TREE_ENTRIES);
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["limit"], MAX_TREE_ENTRIES);
+        assert_eq!(entries[0]["path"], "wide/file-0000.txt");
+        assert_eq!(entries[MAX_TREE_ENTRIES - 1]["path"], "wide/file-1999.txt");
+
+        // Build an independent exact-cap directory: exactly the cap is complete,
+        // not conservatively marked truncated.
+        std::fs::create_dir_all(dir.join("exact")).unwrap();
+        for index in 0..MAX_TREE_ENTRIES {
+            std::fs::write(dir.join("exact").join(format!("file-{index:04}.txt")), "x").unwrap();
+        }
+        let exact = tree_blocking(&ws, "exact", 1).unwrap();
+        assert_eq!(exact["entries"].as_array().unwrap().len(), MAX_TREE_ENTRIES);
+        assert_eq!(exact["truncated"], false);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn retained_siblings_stay_bounded_and_keep_the_sort_order_prefix() {
+        let mut items = Vec::new();
+        for index in (0..10_000).rev() {
+            retain_directory_item(
+                &mut items,
+                (
+                    false,
+                    format!("{index:05}"),
+                    PathBuf::from(format!("f{index}")),
+                ),
+            );
+            assert!(items.len() <= MAX_TREE_ENTRIES);
+        }
+        items.sort_by(directory_item_cmp);
+        assert_eq!(items.len(), MAX_TREE_ENTRIES);
+        assert_eq!(items[0].1, "00000");
+        assert_eq!(items[MAX_TREE_ENTRIES - 1].1, "01999");
+    }
+
+    #[test]
     fn file_reports_content_and_language() {
         let (dir, ws) = workspace();
         let value = file_blocking(&ws, "src/main.rs", 1024).unwrap();
@@ -1168,6 +1370,10 @@ mod tests {
         assert_eq!(value["language"], "rust");
         assert_eq!(value["binary"], false);
         assert_eq!(value["truncated"], false);
+        assert_eq!(
+            value["digest"].as_str().unwrap(),
+            file_digest(&dir.join("src/main.rs")).unwrap()
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1441,6 +1647,79 @@ mod tests {
         // `force` is the user's answer to that prompt.
         write_file_blocking(&ws, "README.md", "x", Some(4), false, true).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("README.md")).unwrap(), "x");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn write_detects_an_equal_length_edit_by_digest_and_force_still_overrides() {
+        let (dir, ws) = workspace();
+        let loaded = file_blocking(&ws, "README.md", 1024).unwrap();
+        let digest = loaded["digest"].as_str().unwrap().to_string();
+        std::fs::write(dir.join("README.md"), "# HI\n").unwrap();
+        assert_eq!(loaded["size"], 5, "fixture original size");
+        assert_eq!(std::fs::metadata(dir.join("README.md")).unwrap().len(), 5);
+
+        let err = write_file_versioned_blocking(
+            &ws,
+            "README.md",
+            "replacement",
+            Some(5),
+            Some(&digest),
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert!(err.message.contains("digest"), "{}", err.message);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README.md")).unwrap(),
+            "# HI\n"
+        );
+
+        let saved = write_file_versioned_blocking(
+            &ws,
+            "README.md",
+            "forced",
+            Some(5),
+            Some(&digest),
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            saved["digest"],
+            file_digest(&dir.join("README.md")).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README.md")).unwrap(),
+            "forced"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn write_rejects_a_malformed_digest() {
+        let (dir, ws) = workspace();
+        for invalid in [
+            String::new(),
+            "deadbeef".into(),
+            format!("sha256:{}", "A".repeat(64)),
+        ] {
+            assert_eq!(
+                write_file_versioned_blocking(
+                    &ws,
+                    "README.md",
+                    "x",
+                    None,
+                    Some(&invalid),
+                    false,
+                    false,
+                )
+                .unwrap_err()
+                .status,
+                StatusCode::BAD_REQUEST
+            );
+        }
         std::fs::remove_dir_all(dir).ok();
     }
 

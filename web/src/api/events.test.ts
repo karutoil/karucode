@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { consumeSseBuffer, consumeSseFrames, parseEventPayload, startEventStream } from './events';
 import type { ConnectionState, RawEvent } from './types';
 
-function sseResponse(chunks: string[], close = true): Response {
+function sseResponse(chunks: string[], close = true, epoch?: string): Response {
   const encoder = new TextEncoder();
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -12,7 +12,10 @@ function sseResponse(chunks: string[], close = true): Response {
   });
   return new Response(body, {
     status: 200,
-    headers: { 'content-type': 'text/event-stream' },
+    headers: {
+      'content-type': 'text/event-stream',
+      ...(epoch ? { 'X-Karucode-Event-Epoch': epoch } : {}),
+    },
   });
 }
 
@@ -69,8 +72,8 @@ describe('consumeSseBuffer', () => {
     expect(parsed.rest).toBe('');
     expect(parsed.frames).toHaveLength(1);
     expect(parsed.frames[0]?.id).toBe('41');
-    expect(parsed.frames[0]?.event.seq).toBe(41);
-    expect(parsed.frames[0]?.event.delta).toBe('resumed');
+    expect(parsed.frames[0]?.event?.seq).toBe(41);
+    expect(parsed.frames[0]?.event?.delta).toBe('resumed');
     // The existing data-only API remains useful to parser callers and tests.
     expect(consumeSseBuffer(`id: 41\ndata: ${payload}\n\n`).events[0]?.seq).toBe(41);
   });
@@ -121,6 +124,202 @@ describe('startEventStream', () => {
     const request = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
     expect((request?.headers as Record<string, string>).Authorization).toBe('Bearer secret');
     expect((request?.headers as Record<string, string>).Accept).toBe('text/event-stream');
+  });
+
+  it('resets both cursors and resynchronises when a new process epoch restarts at seq 1', async () => {
+    // Exact restart repro: this handle consumed old-process seq 50. The next
+    // process legitimately starts at 1, then replays 1 before delivering 2.
+    const responses = [
+      sseResponse([framedEvent(50, 'old process')], true, 'process-old'),
+      sseResponse([framedEvent(1, 'new process')], true, 'process-new'),
+      sseResponse([
+        framedEvent(1, 'same-epoch replay'),
+        framedEvent(2, 'new process next'),
+      ], true, 'process-new'),
+    ];
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        responses.shift() ?? sseResponse([], true, 'process-new'),
+    );
+    const received: RawEvent[] = [];
+    const onResync = vi.fn();
+    const onGap = vi.fn();
+    let boundedRetries = 0;
+    const handle = startEventStream({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      minDelayMs: 1,
+      maxDelayMs: 1,
+      random: () => 0,
+      sleep: async () => {
+        // A broken client keeps reconnecting without ever accepting seq 1/2.
+        // Bound the repro's fallback so the red pre-fix run is an assertion, not OOM.
+        if (++boundedRetries > 6) handle.stop();
+      },
+      onResync,
+      onGap,
+      onEvent: (event) => {
+        received.push(event);
+        if (event.delta === 'new process next') handle.stop();
+      },
+    });
+
+    await vi.waitFor(() => expect(received).toHaveLength(3));
+    expect(received.map((event) => [event.seq, event.delta])).toEqual([
+      [50, 'old process'],
+      [1, 'new process'],
+      [2, 'new process next'],
+    ]);
+    expect(onResync).toHaveBeenCalledTimes(1);
+    expect(onGap).not.toHaveBeenCalled();
+    // The request that discovers the new epoch necessarily had the old cursor;
+    // the response resets it before the following reconnect is constructed.
+    expect((fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>)['Last-Event-ID']).toBe('50');
+    expect((fetchMock.mock.calls[2]?.[1]?.headers as Record<string, string>)['Last-Event-ID']).toBe('1');
+    handle.stop();
+  });
+
+  it('delivers a connection_cap transport after old seq 50 without advancing either cursor', async () => {
+    const control = JSON.stringify({
+      type: 'connection_cap',
+      message: 'event-stream connection limit reached; close another tab',
+      retry_after_ms: 250,
+    });
+    const responses = [
+      sseResponse([framedEvent(50, 'before refusal')], true, 'process-a'),
+      sseResponse([`id: 0\nevent: karucode.transport\ndata: ${control}\n\n`], true, 'process-a'),
+      // A transport control is not an event in the sequence. Replay therefore
+      // still starts at 50 and only the genuinely new 51 reaches the reducer.
+      sseResponse([
+        framedEvent(50, 'replay'),
+        framedEvent(51, 'after refusal'),
+      ], true, 'process-a'),
+    ];
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        responses.shift() ?? sseResponse([], true, 'process-a'),
+    );
+    const received: RawEvent[] = [];
+    const errors: (string | undefined)[] = [];
+    const onResync = vi.fn();
+    const handle = startEventStream({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      minDelayMs: 1,
+      maxDelayMs: 1,
+      random: () => 0,
+      sleep: async () => undefined,
+      onResync,
+      onStatus: (state, detail) => {
+        if (state === 'reconnecting' && detail?.error) errors.push(detail.error);
+      },
+      onEvent: (event) => {
+        received.push(event);
+        if (event.seq === 51) handle.stop();
+      },
+    });
+
+    await vi.waitFor(() => expect(received.some((event) => event.seq === 51)).toBe(true));
+    expect(received.map((event) => event.seq)).toEqual([50, 51]);
+    expect(errors).toContain('event-stream connection limit reached; close another tab');
+    expect(onResync).not.toHaveBeenCalled();
+    expect((fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>)['Last-Event-ID']).toBe('50');
+    expect((fetchMock.mock.calls[2]?.[1]?.headers as Record<string, string>)['Last-Event-ID']).toBe('50');
+    handle.stop();
+  });
+
+  it('resynchronises on stream_overflow without advancing old cursor 50 or dropping real 51', async () => {
+    const control = JSON.stringify({
+      type: 'stream_overflow',
+      message: 'event stream queue saturated; reconnect and resynchronise',
+      retry_after_ms: 1000,
+    });
+    const responses = [
+      sseResponse([framedEvent(50, 'before overflow')], true, 'process-a'),
+      // Exactly the server's terminal control: no SSE id and no JSON seq. The
+      // rejected event never arrived, so 50 remains the last valid resume cursor.
+      sseResponse([`event: karucode.transport\ndata: ${control}\n\n`], true, 'process-a'),
+      sseResponse([framedEvent(50, 'replay'), framedEvent(51, 'real event after overflow')], true, 'process-a'),
+    ];
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        responses.shift() ?? sseResponse([], true, 'process-a'),
+    );
+    const received: RawEvent[] = [];
+    const errors: (string | undefined)[] = [];
+    const onResync = vi.fn();
+    const onGap = vi.fn();
+    let retries = 0;
+    const handle = startEventStream({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      minDelayMs: 1,
+      maxDelayMs: 1,
+      random: () => 0,
+      sleep: async () => {
+        if (++retries > 6) handle.stop();
+      },
+      onResync,
+      onGap,
+      onStatus: (state, detail) => {
+        if (state === 'reconnecting' && detail?.error) errors.push(detail.error);
+      },
+      onEvent: (event) => {
+        received.push(event);
+        if (event.type === 'text_delta' && event.delta === 'real event after overflow') handle.stop();
+      },
+    });
+
+    await vi.waitFor(() =>
+      expect(received.some((event) => event.delta === 'real event after overflow')).toBe(true),
+    );
+    expect(received.map((event) => event.seq)).toEqual([50, 51]);
+    expect(onResync).toHaveBeenCalledTimes(1);
+    // The control explicitly requests an authoritative repair; seq 50 -> 51 is
+    // contiguous after replay and therefore must not fabricate a second gap.
+    expect(onGap).not.toHaveBeenCalled();
+    expect(errors).toContain('event stream queue saturated; reconnect and resynchronise');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect((fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>)['Last-Event-ID']).toBe('50');
+    expect((fetchMock.mock.calls[2]?.[1]?.headers as Record<string, string>)['Last-Event-ID']).toBe('50');
+    handle.stop();
+  });
+
+  it('keeps stream_overflow visible and resynchronises when its response changes epoch', async () => {
+    const message = 'event stream queue saturated during restart';
+    const control = JSON.stringify({ type: 'stream_overflow', message, retry_after_ms: 1000 });
+    const responses = [
+      sseResponse([framedEvent(50, 'old process')], true, 'process-old'),
+      sseResponse([`event: karucode.transport\ndata: ${control}\n\n`], true, 'process-new'),
+    ];
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        responses.shift() ?? sseResponse([], false, 'process-new'),
+    );
+    const errors: (string | undefined)[] = [];
+    const onResync = vi.fn();
+    const onGap = vi.fn();
+    let retries = 0;
+    const handle = startEventStream({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      minDelayMs: 1,
+      maxDelayMs: 1,
+      random: () => 0,
+      sleep: async () => {
+        if (++retries === 2) handle.stop();
+      },
+      onResync,
+      onGap,
+      onStatus: (state, detail) => {
+        if (state === 'reconnecting' && detail?.error) errors.push(detail.error);
+      },
+      onEvent: () => undefined,
+    });
+
+    await vi.waitFor(() => expect(onResync).toHaveBeenCalledTimes(2));
+    // One resync is the process-epoch change, the other is the overflow's own
+    // dropped-event signal. The named saturation error remains human-visible.
+    expect(errors).toContain(message);
+    expect(onGap).not.toHaveBeenCalled();
+    expect((fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>)['Last-Event-ID']).toBe('50');
+    handle.stop();
   });
 
   it.each(['/api/events', '/api/events?session=s_1'])(

@@ -1,0 +1,17 @@
+# `atlas` — maps the workspace and keeps a history of what it looked like.
+#
+# Install: put this directory under `<KARUCODE_DATA_DIR>/plugins/atlas/`, or point a
+# config entry at it:
+#
+#   [[plugins]]
+#   name = "atlas"
+#   command = ["python3", "/absolute/path/to/plugins/demos/atlas/atlas.py"]
+#   enabled = true
+#   permissions = ["files.read", "files.write"]
+#
+# It writes only inside `<workspace>/.karucode/atlas/`, and only when you press
+# Snapshot.
+name = "atlas"
+command = ["python3", "atlas.py"]
+enabled = true
+permissions = ["files.read", "files.write"]

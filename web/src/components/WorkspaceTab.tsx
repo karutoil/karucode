@@ -1,5 +1,5 @@
 import type { JSX } from 'preact';
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { WorkspaceEntry, WorkspaceFile } from '../api/types';
 import { getWorkspaceFile, getWorkspaceTree } from '../api/endpoints';
 import { toErrorMessage } from '../api/client';
@@ -56,7 +56,15 @@ type PreviewState =
  * last picked in the tree — real bytes, no placeholder sample — and falls back
  * to the file viewer when the content cannot be previewed inline.
  */
-function QuickPreview({ path, onOpen }: { path: string | null; onOpen: () => void }): JSX.Element | null {
+function QuickPreview({
+  path,
+  projectId,
+  onOpen,
+}: {
+  path: string | null;
+  projectId: string | null;
+  onOpen: () => void;
+}): JSX.Element | null {
   const [state, setState] = useState<PreviewState>({ kind: 'idle' });
   const refreshTick = store.workspaceRefreshTick.value;
 
@@ -67,7 +75,7 @@ function QuickPreview({ path, onOpen }: { path: string | null; onOpen: () => voi
     }
     const controller = new AbortController();
     setState({ kind: 'loading' });
-    getWorkspaceFile(path, store.currentProjectId.value, { signal: controller.signal })
+    getWorkspaceFile(path, projectId, { signal: controller.signal })
       .then((file) => {
         if (controller.signal.aborted) return;
         if (!file.binary && file.content.length > PREVIEW_MAX_BYTES) {
@@ -81,8 +89,8 @@ function QuickPreview({ path, onOpen }: { path: string | null; onOpen: () => voi
       });
     return () => controller.abort();
     // A save from the file viewer bumps the tick: this card must not keep showing
-    // the pre-save bytes.
-  }, [path, refreshTick]);
+    // the pre-save bytes. The same path in another project is a different file.
+  }, [path, projectId, refreshTick]);
 
   const file = state.kind === 'ready' ? state.file : null;
   const lines = useMemo(() => {
@@ -178,6 +186,8 @@ export function WorkspaceTab(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [lastOpened, setLastOpened] = useState<string | null>(null);
+  const [partialPaths, setPartialPaths] = useState<Set<string>>(new Set());
+  const treeGeneration = useRef(0);
 
   // Read the project into a local so the effect re-runs on a project switch;
   // otherwise the previous project's tree would stay on screen.
@@ -185,14 +195,18 @@ export function WorkspaceTab(): JSX.Element {
 
   useEffect(() => {
     const controller = new AbortController();
+    const generation = ++treeGeneration.current;
     setState('loading');
     setError(null);
     setChildren({});
     setExpanded(new Set());
+    setLoadingPaths(new Set());
+    setPartialPaths(new Set());
     getWorkspaceTree('.', 1, projectId, { signal: controller.signal })
       .then((tree) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || generation !== treeGeneration.current) return;
         setRootEntries(visibleEntries(tree.entries));
+        setPartialPaths(new Set(tree.truncated ? ['.'] : []));
         setState('ready');
       })
       .catch((cause: unknown) => {
@@ -207,18 +221,29 @@ export function WorkspaceTab(): JSX.Element {
 
   const loadChildren = async (path: string): Promise<void> => {
     if (children[path] || loadingPaths.has(path)) return;
+    const generation = treeGeneration.current;
     setLoadingPaths((current) => new Set(current).add(path));
     try {
       const tree = await getWorkspaceTree(path, 1, projectId);
+      if (generation !== treeGeneration.current) return;
       setChildren((current) => ({ ...current, [path]: visibleEntries(tree.entries) }));
-    } catch (cause) {
-      store.pushToast(toErrorMessage(cause));
-    } finally {
-      setLoadingPaths((current) => {
+      setPartialPaths((current) => {
         const next = new Set(current);
-        next.delete(path);
+        if (tree.truncated) next.add(path);
+        else next.delete(path);
         return next;
       });
+    } catch (cause) {
+      if (generation !== treeGeneration.current) return;
+      store.pushToast(toErrorMessage(cause));
+    } finally {
+      if (generation === treeGeneration.current) {
+        setLoadingPaths((current) => {
+          const next = new Set(current);
+          next.delete(path);
+          return next;
+        });
+      }
     }
   };
 
@@ -233,7 +258,11 @@ export function WorkspaceTab(): JSX.Element {
     if (willOpen) void loadChildren(entry.path);
   };
 
-  const workspace = store.health.value?.workspace ?? store.config.value?.workspace ?? '.';
+  const workspace =
+    store.projects.value.find((project) => project.id === projectId)?.path ??
+    store.health.value?.workspace ??
+    store.config.value?.workspace ??
+    '.';
 
   const copyPath = (): void => {
     void copyText(workspace).then((ok) => {
@@ -306,7 +335,19 @@ export function WorkspaceTab(): JSX.Element {
         />
       ) : null}
 
-      <QuickPreview path={lastOpened} onOpen={() => lastOpened && actions.openFileViewer(lastOpened)} />
+      {partialPaths.size > 0 ? (
+        <p class="inspector-note tree-partial-warning" role="status">
+          Some folders are only partially listed because the server's entry or traversal budget was
+          reached. Use file search for a file that is not shown.
+        </p>
+      ) : null}
+
+      <QuickPreview
+        key={`${projectId ?? 'none'}:${lastOpened ?? ''}`}
+        path={lastOpened}
+        projectId={projectId}
+        onOpen={() => lastOpened && actions.openFileViewer(lastOpened)}
+      />
 
       {state === 'ready' ? (
         <p class="inspector-note">VCS and build directories are hidden. File contents are read on demand.</p>

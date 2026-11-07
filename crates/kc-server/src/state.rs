@@ -116,8 +116,10 @@
 //   shares it unless a session is pinned. A per-session pin
 //   (`PATCH /api/sessions/:id/model`) travels with the session, not the project,
 //   so two sessions in one project can run different models.
-// * There is no per-session workspace override: the project (or the default
-//   workspace) decides.
+// * Ordinary project sessions have no per-session override: their project decides.
+//   A control chat (or another project-less session) instead retains its recorded
+//   workspace. Uploads without an explicit `project` follow that record and never
+//   silently land in the default project.
 // * Symlinked project roots are canonicalised on insert, so the stored path is the
 //   real one.
 //
@@ -321,32 +323,67 @@ impl PluginHooks {
     pub fn new(host: Arc<Mutex<PluginHost>>) -> Self {
         Self { host }
     }
+
+    /// Obtain the live slot view, then release the administrative host lock before
+    /// waiting on any out-of-process hook. The handle follows reload generations.
+    async fn handle(&self) -> kc_plugin_host::PluginHooks {
+        self.host.lock().await.hooks_handle()
+    }
+}
+
+struct PluginNotificationForwarder {
+    host: Arc<Mutex<PluginHost>>,
+}
+
+#[async_trait]
+impl kc_core::hooks::NotificationObserver for PluginNotificationForwarder {
+    async fn on_notify(&self, payload: serde_json::Value) {
+        let observer = { self.host.lock().await.hooks_handle().notifier() };
+        if let Some(observer) = observer {
+            observer.on_notify(payload).await;
+        }
+    }
 }
 
 #[async_trait]
 impl Hooks for PluginHooks {
     async fn before_prompt(&self, session_id: &str, workspace: &str) -> Vec<String> {
-        self.host
-            .lock()
+        self.handle()
             .await
             .before_prompt(session_id, workspace)
             .await
     }
 
+    async fn before_prompt_for_turn(
+        &self,
+        session_id: &str,
+        workspace: &str,
+        turn: Option<&str>,
+    ) -> Vec<String> {
+        self.handle()
+            .await
+            .before_prompt_for_turn(session_id, workspace, turn)
+            .await
+    }
+
     async fn on_run_end(&self, session_id: &str, run_id: &str, status: &str) {
-        self.host
-            .lock()
+        self.handle()
             .await
             .on_run_end(session_id, run_id, status)
             .await
     }
 
     async fn on_tool_result(&self, session_id: &str, tool: &str, ok: bool) {
-        self.host
-            .lock()
+        self.handle()
             .await
             .on_tool_result(session_id, tool, ok)
             .await
+    }
+
+    fn notifier(&self) -> Option<Arc<dyn kc_core::hooks::NotificationObserver>> {
+        Some(Arc::new(PluginNotificationForwarder {
+            host: Arc::clone(&self.host),
+        }))
     }
 }
 
@@ -481,6 +518,20 @@ impl AppState {
         self.inner
             .projects
             .workspace_for(project_id)
+            .map_err(crate::error::ApiError::from)
+    }
+
+    /// Resolve the workspace recorded on a session. Project-less sessions (most
+    /// importantly control chats) keep their own root; they must never fall back
+    /// to the install's default project merely because it exists.
+    pub fn workspace_for_session(
+        &self,
+        project_id: Option<&str>,
+        recorded: &str,
+    ) -> std::result::Result<Arc<Workspace>, crate::error::ApiError> {
+        self.inner
+            .projects
+            .workspace_for_session(project_id, recorded)
             .map_err(crate::error::ApiError::from)
     }
 
@@ -657,6 +708,14 @@ impl AppState {
             let host = self.inner.plugins.lock().await;
             host.panels()
         };
+        // The declarative UI layer: buttons, palette commands and hide requests,
+        // plus the catalogues of slots and hideable elements this build knows.
+        // Empty by default, so a server with no UI-contributing plugin sends an
+        // object the frontend can ignore wholesale.
+        let plugin_ui = {
+            let host = self.inner.plugins.lock().await;
+            host.ui()
+        };
         let mcp_servers: Vec<serde_json::Value> = {
             let mcp = self.inner.mcp.lock().await;
             mcp.statuses().iter().map(mcp_summary).collect()
@@ -670,6 +729,7 @@ impl AppState {
             );
             object.insert("plugins".into(), json!(plugins));
             object.insert("plugin_panels".into(), json!(plugin_panels));
+            object.insert("plugin_ui".into(), json!(plugin_ui));
             object.insert("mcp_servers".into(), json!(mcp_servers));
         }
         payload

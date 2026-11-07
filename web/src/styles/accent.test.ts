@@ -92,7 +92,10 @@ describe('accent fill: a primary action is readable in every theme', () => {
     for (const name of ['chat.css', 'composer.css', 'git.css', 'inspector.css', 'layout.css', 'overlays.css', 'rail.css', 'settings.css', 'goals.css', 'todo.css', 'control-shared.css', 'control-rail.css', 'control-overview.css', 'control-session.css']) {
       const css = read(`./${name}`);
       for (const match of css.matchAll(/\{[^{}]*\}/g)) {
-        const body = match[0];
+        // `match[0]` starts with the opening brace, so a `^color:` anchor below
+        // would never see the FIRST declaration of a rule - and CSS convention
+        // puts the ink first. Strip the braces before splitting.
+        const body = match[0].slice(1, -1);
         if (!tints.test(body)) continue;
         // Split on `;` and read the *property*, not a substring: `border-color`
         // and `background-color` both end in "color" and are not ink.
@@ -116,7 +119,14 @@ describe('accent fill: a primary action is readable in every theme', () => {
     // accent label on a tint.
     // The avatar is the workbench's `.rail-avatar`; the tone is a variant the
     // plane adds in the shared sheet so both of its lists agree.
-    const glyph = ruleBody(read('./control-shared.css'), ".rail-avatar[data-tone='3']");
+    const shared = read('./control-shared.css');
+    expect(
+      shared.match(/\.rail-avatar\[data-tone='3'\]\s*\{/g),
+      'exactly one recipe for the accent tile: a later duplicate would win the cascade unseen',
+    ).toHaveLength(1);
+    // Scoped under `.control-plane` so the avatar's own `:hover` (same
+    // specificity, later in the bundle) cannot wipe the hue under the pointer.
+    const glyph = ruleBody(shared, ".control-plane .rail-avatar[data-tone='3']");
     expect(glyph).toContain('color: var(--accent-on-tint);');
     expect(glyph).not.toMatch(/color:\s*var\(--accent\);/);
   });

@@ -121,7 +121,20 @@ class Provider(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - http.server's name
         length = int(self.headers.get("content-length") or 0)
-        self.rfile.read(length)
+        payload = self.rfile.read(length)
+        # A run whose first user message carries `[fail]` gets an upstream 500, so
+        # the harness can seed a FAILED session: without one, every session is
+        # idle, `sessionStatusView` returns no word, and the workbench rail draws
+        # neither a status word nor a dot - which silently skipped the plane's
+        # status treatment from every comparison.
+        if b"[fail]" in payload:
+            err = b'{"error": {"message": "mock upstream failure", "type": "server_error"}}'
+            self.send_response(500)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(err)))
+            self.end_headers()
+            self.wfile.write(err)
+            return
         body = sse(text_chunks("Noted."))
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
@@ -178,6 +191,17 @@ SHARED_PRIMITIVES = frozenset({
     ".empty-title",
 })
 
+#: Plane-local modifiers of a shared class that restate properties the shared
+#: recipe owns. Each entry needs a reason here; the check fails on any other.
+#: The hue is identity, not state, and no workbench element carries `data-tone`,
+#: so nothing outside the plane can disagree with it - which is what makes an
+#: override safe here and unsafe anywhere else.
+PLANE_SANCTIONED_OVERRIDES = frozenset({
+    ".control-plane .rail-avatar[data-tone='1']",
+    ".control-plane .rail-avatar[data-tone='2']",
+    ".control-plane .rail-avatar[data-tone='3']",
+})
+
 #: The computed properties a matched pair must agree on. Chosen because these are
 #: exactly the ones the recon pass found diverging; adding more makes the check
 #: stricter, and a property that legitimately differs per surface must be argued
@@ -232,7 +256,16 @@ if (!el) { how = 'enabled-variant'; el = candidates.find(enabled); }
 if (!el) { how = 'variant'; el = candidates[0]; }
 
 const s = getComputedStyle(el);
-const out = {present: true, sel, how, cls: classes(el).join(' '), disabled: !!el.disabled};
+// Report the shared vocabulary only: plane-local classes (`.cp-*`,
+// `.control-plane*`) are this surface's own business and must not opt an element
+// out of comparison. Two elements play the same role when their shared class
+// lists match, whatever private names either side also carries.
+const sharedOf = (list) => list.filter((c) => !/^(cp-|control-plane)/.test(c));
+const out = {
+  present: true, sel, how,
+  cls: sharedOf(classes(el)).join(' '),
+  disabled: !!el.disabled,
+};
 for (const p of props) out[p] = s[p];
 const r = el.getBoundingClientRect();
 out._w = Math.round(r.width);
@@ -438,6 +471,27 @@ def main() -> int:
             {"title": "Refresh onboarding guide", "project": project_id},
         )
         http_json(api + "/api/control/sessions", "POST", {"title": "Release audit"})
+        # One failed run, so both surfaces draw a status word and a danger dot:
+        # the role this harness exists to compare, and the one an all-idle seed
+        # silently skipped (an idle session has no word on either side).
+        failed = http_json(
+            api + "/api/sessions",
+            "POST",
+            {"title": "Audit the flaky login test", "project": project_id},
+        )
+        failed = failed.get("session", failed)
+        http_json(
+            f"{api}/api/sessions/{failed['id']}/messages",
+            "POST",
+            {"content": "[fail] audit the flaky login test"},
+        )
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            cur = http_json(f"{api}/api/sessions/{failed['id']}")
+            cur = cur.get("session", cur)
+            if cur.get("last_run_status") == "failed":
+                break
+            time.sleep(0.25)
 
         session.cdp("Page.navigate", {"url": api + "/"})
         wait("return !!document.querySelector('.app');", 30)
@@ -469,7 +523,12 @@ def main() -> int:
             "row": ".session-row:not(.is-active)",
             "rowTitle": ".session-row:not(.is-active) .session-title",
             "rowMeta": ".session-row:not(.is-active) .session-meta",
-            "stateWord": ".session-row:not(.is-active) .session-state",
+            # The failed row, named by its state class: the one row both surfaces
+            # must spell and ink the same. A generic "first .session-state" would
+            # pair the workbench's project rows against the plane's control-chat
+            # rows - different lists, so a mismatch would prove nothing.
+            "stateWord": ".session-row.failed .session-state",
+            "statusDot": ".session-row.failed .status-dot",
             "iconButton": ".icon-button:not(.session-menu-trigger)",
             "badge": ".badge",
             "eyebrow": ".eyebrow",
@@ -506,7 +565,8 @@ def main() -> int:
             "row": RAIL + " .session-row:not(.is-active), " + RAIL + " .cp-row:not(.selected)",
             "rowTitle": RAIL + " .session-row:not(.is-active) .session-title, " + RAIL + " .cp-row-title-text",
             "rowMeta": RAIL + " .session-row:not(.is-active) .session-meta, " + RAIL + " .cp-row-meta",
-            "stateWord": RAIL + " .session-state, " + PLANE + " .cp-state",
+            "stateWord": RAIL + " .session-row.failed .session-state",
+            "statusDot": RAIL + " .session-row.failed .status-dot",
             "iconButton": RAIL + " .icon-button:not(.session-menu-trigger), " + RAIL + " .cp-icon",
             "badge": RAIL + " .badge, " + RAIL + " .cp-badge",
             "eyebrow": PLANE + " .eyebrow, " + PLANE + " .cp-eyebrow",
@@ -741,7 +801,13 @@ def main() -> int:
                     )
                     sets = set(re.findall(r"([\w-]+)\s*:", body))
                     owned = recipe_props(primitive)
-                    if not modifiers or (not plane_local and sets & owned):
+                    # A plane-local modifier may restate the recipe only if it is
+                    # on this list, with its reason. Everything else may add
+                    # properties the base never sets; re-setting an owned one is a
+                    # second recipe reached by a private name, which is the same
+                    # defect under a different hat.
+                    sanctioned = part in PLANE_SANCTIONED_OVERRIDES
+                    if not modifiers or (sets & owned and not sanctioned):
                         shadowed.append(
                             f"{sheet}: `{part} {{ {body[:60]} }}`"
                             + (f" (re-sets {sorted(sets & owned)})" if sets & owned else "")
@@ -980,6 +1046,57 @@ def main() -> int:
             json.dumps(external_state),
         )
 
+        # ------------------------------------------- 9b. the re-stack is real
+        # §5A's container-query rule is the claim that the plane and the workbench
+        # re-stack at the same width. Nothing pinned it: deleting the wide tier
+        # left every unit test and both browser harnesses green, because a
+        # mis-stacked layout does not overflow. Measure the stack itself.
+        session.cdp(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+        )
+        time.sleep(0.4)
+        stack = js(
+            """
+            const body = document.querySelector('.cp-session-body');
+            const chat = document.querySelector('.cp-chat');
+            const insp = document.querySelector('.cp-inspector');
+            if (!body || !chat || !insp) return JSON.stringify({present: false});
+            const c = chat.getBoundingClientRect(), i = insp.getBoundingClientRect();
+            return JSON.stringify({present: true, dir: getComputedStyle(body).flexDirection,
+                                   beside: i.left >= c.right - 1});
+            """
+        )
+        st = json.loads(stack)
+        check(
+            "at 1440px the facts sit beside the conversation",
+            st.get("present") and st.get("dir") == "row" and st.get("beside"),
+            json.dumps(st),
+        )
+        session.cdp(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": 1024, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+        )
+        time.sleep(0.4)
+        stack = js(
+            """
+            const body = document.querySelector('.cp-session-body');
+            if (!body) return JSON.stringify({present: false});
+            return JSON.stringify({present: true, dir: getComputedStyle(body).flexDirection});
+            """
+        )
+        st = json.loads(stack)
+        check(
+            "at 1024px the facts stack under the conversation",
+            st.get("present") and st.get("dir") == "column",
+            json.dumps(st),
+        )
+        session.cdp(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},
+        )
+        time.sleep(0.4)
+
         # ------------------------------------------------------ 10. no overflow
         for width in (1440, 1280, 1024, 390):
             session.cdp(
@@ -1002,6 +1119,63 @@ def main() -> int:
                 and metrics["doc"] <= metrics["win"] + 1,
                 json.dumps(metrics),
             )
+            # An inner scroller can clip while the plane reports no overflow: a
+            # button wider than a phone, a meta line cut mid-fact. `overflow:
+            # hidden` is not permission to lose content (§5.9) - whatever clips
+            # must say so with an ellipsis and keep its facts reachable.
+            clipped = js(
+                """
+                const bad = [];
+                for (const el of document.querySelectorAll('.control-plane.cp *')) {
+                  const s = getComputedStyle(el);
+                  if (s.overflowX !== 'hidden' && s.overflowX !== 'clip') continue;
+                  if (el.scrollWidth <= el.clientWidth + 1) continue;
+                  // `.sr-only` clips on purpose: a 1px box whose text exists for
+                  // assistive technology, not for eyes. Its clip is the utility.
+                  if (el.classList.contains('sr-only')) continue;
+                  const r = el.getBoundingClientRect();
+                  if (r.width <= 1 || r.height <= 1) continue;
+                  if (s.textOverflow === 'ellipsis') continue;
+                  // A scroller is a legitimate answer too; a clip is not.
+                  if (s.overflowY === 'auto' || s.overflowY === 'scroll') continue;
+                  bad.push((el.className || el.tagName) + ' ' + el.scrollWidth + '>' + el.clientWidth);
+                }
+                return JSON.stringify(bad.slice(0, 6));
+                """
+            )
+            bad = json.loads(clipped)
+            check(
+                f"nothing clips silently at {width}px",
+                not bad,
+                "; ".join(bad) if bad else "every clipped element ellipsises or scrolls",
+            )
+            if width == 390:
+                # The phone tier is where the room runs out first: the status word
+                # must still be drawn, at a readable step, in an ink that is not
+                # the pane's own background.
+                word = js(
+                    """
+                    const el = document.querySelector('.cp-session-actions .session-state');
+                    if (!el) return JSON.stringify({present: false});
+                    const s = getComputedStyle(el), r = el.getBoundingClientRect();
+                    const pane = document.querySelector('.cp-pane');
+                    return JSON.stringify({present: true, fs: parseFloat(s.fontSize),
+                        w: Math.round(r.width), h: Math.round(r.height),
+                        ink: s.color, pane: pane ? getComputedStyle(pane).backgroundColor : null,
+                        text: (el.innerText || '').trim()});
+                    """
+                )
+                wv = json.loads(word)
+                check(
+                    "the status word survives the phone header",
+                    wv.get("present")
+                    and wv.get("fs", 0) >= 11
+                    and wv.get("w", 0) > 0
+                    and wv.get("h", 0) > 0
+                    and bool(wv.get("text"))
+                    and wv.get("ink") != wv.get("pane"),
+                    json.dumps(wv),
+                )
         session.cdp(
             "Emulation.setDeviceMetricsOverride",
             {"width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False},

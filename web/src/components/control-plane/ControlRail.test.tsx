@@ -279,7 +279,7 @@ describe('the rail speaks the workbench’s session-row grammar', () => {
       // out at all, so a row outside one is a broken rail.
       expect(row.parentElement?.classList.contains('session-list')).toBe(true);
       expect(row.querySelector('.session-open')).toBeTruthy();
-      expect(row.querySelector('.session-open .session-title')?.textContent).not.toBe('');
+      expect(row.querySelector('.session-open .session-title')?.textContent?.trim()).toBeTruthy();
       expect(row.querySelector('.session-head .session-title')).toBeTruthy();
       // The title comes first in the head: the accessible name of a row is its
       // title, not its status.
@@ -342,7 +342,7 @@ describe('the rail speaks the workbench’s session-row grammar', () => {
       const word = row.querySelector('.session-state');
       // Never font-size 0 and never an empty span: three states that differ only
       // by colour are three states a reader cannot tell apart.
-      expect(word?.textContent?.trim()).not.toBe('');
+      expect(word?.textContent?.trim()).toBeTruthy();
       expect(word?.getAttribute('title')).toMatch(/^Latest state: /);
       // The word lives in the shared meta line, beside the meta dots.
       expect(word?.closest('.session-meta')).toBeTruthy();
@@ -417,7 +417,13 @@ describe('the rail draws icons, not text glyphs', () => {
       .querySelector('svg')).toBeTruthy();
     expect(rows).toHaveLength(4);
     for (const row of rows) {
-      expect(row.querySelector('.session-menu-trigger svg')).toBeTruthy();
+      const kebab = row.querySelector('.session-menu-wrap > button');
+      // Wearing `.session-menu-trigger` is not enough: renaming its base class
+      // would drop the shared 24px recipe and the hover-reveal rule while every
+      // presence assertion here still passed. The role lives on the element.
+      expect(kebab?.classList.contains('icon-button'), 'the kebab is an .icon-button').toBe(true);
+      expect(kebab?.classList.contains('session-menu-trigger')).toBe(true);
+      expect(kebab?.querySelector('svg')).toBeTruthy();
     }
     // The control chat's tile is a mark, not an icon: `k.` is the plane's own.
     expect(browser.querySelector('.cp-tile-control')?.textContent).toBe('k.');

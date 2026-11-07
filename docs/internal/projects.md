@@ -119,8 +119,10 @@ stop it first. This is deliberate: a misclick must not delete source code.
   shares it unless a session is pinned. A per-session pin
   (`PATCH /api/sessions/:id/model`) travels with the session, not the project,
   so two sessions in one project can run different models.
-* There is no per-session workspace override: the project (or the default
-  workspace) decides.
+* Ordinary project sessions have no per-session override: their project decides.
+  A control chat (or another project-less session) instead retains its recorded
+  workspace. Uploads without an explicit `project` follow that record and never
+  silently land in the default project.
 * Symlinked project roots are canonicalised on insert, so the stored path is the
   real one.
 

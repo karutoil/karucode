@@ -51,19 +51,7 @@
   gap: var(--space-4);
 }
 
-.cp-head-copy {
-  flex: 1 1 auto;
-  min-width: 0;
-}
 
-.cp-head-title {
-  margin: 0;
-  color: var(--text);
-  font-size: var(--fs-lead);
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  line-height: 1.3;
-}
 
 /* -------------------------------------------------------------- filter chips */
 
@@ -107,25 +95,6 @@
  * and the two text lines sit in one child that stays below the height the
  * workbench's row needs: 26px tile against a 31px text column, which keeps the
  * row at the workbench's 41px instead of growing it. */
-.cp-row-body {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  min-width: 0;
-}
-
-.cp-row-text {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: var(--hairline);
-  min-width: 0;
-}
-
-/* A control chat's tile is the plane's own mark: the same `k.` the workbench
- * paints in `.workbench-control-mark`, in the same neutral tile every project
- * gets, so the two kinds of row read as one list. The mono face matters: `k.` is
- * a mark, not an initial. */
 .cp-row-body .cp-tile-control {
   color: var(--accent-fill);
   font-family: var(--font-mono);
@@ -182,11 +151,11 @@
   flex: none;
   border-radius: var(--radius-md);
   background: var(--theme-accent-bg);
-  color: var(--theme-accent);
+  color: var(--accent-on-tint);
   font-size: var(--fs-lead);
 }
 
-.cp-chev { color: var(--theme-accent); font-size: var(--fs-body); }
+.cp-chev { color: var(--accent-on-tint); font-size: var(--fs-body); }
 
 .cp-control-entry {
   display: flex;
@@ -203,10 +172,20 @@
 
 .cp-control-entry:hover { border-color: var(--theme-accent); }
 
-.cp-control-entry.selected { box-shadow: inset 0 0 0 1px var(--theme-accent-line); }
 
 .cp-control-copy { min-width: 0; flex: 1; }
 
 .cp-control-copy strong { display: block; font-size: var(--fs-label); }
 
 .cp-control-copy small { display: block; margin-top: var(--space-1); font-size: var(--fs-tiny); color: var(--muted); }
+
+/* A meta fact may run out of room; losing the age or the message count to a hard
+ * clip is losing a fact (§5.9). Each fact yields and ellipsises on its own, so
+ * the line degrades to "project…" rather than to "project" plus silence. The dot
+ * is excluded: it is a 3px mark with nothing to truncate. */
+.control-plane .session-meta > span:not(.meta-dot) {
+  min-width: 0;
+  overflow: hidden;
+  flex: 0 1 auto;
+  text-overflow: ellipsis;
+}

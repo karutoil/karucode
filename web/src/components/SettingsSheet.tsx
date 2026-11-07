@@ -38,6 +38,7 @@ import {
 } from './NotificationsSettings';
 import { TabPanel, Tabs, type TabItem } from './Tabs';
 import { Toggle } from './Toggle';
+import { PluginControls } from './PluginControls';
 import { AlertIcon, CheckIcon, EditIcon, PaletteIcon, PlusIcon, RefreshIcon } from './icons';
 
 /** Density labels, matching the Theme studio so one setting reads the same in both. */
@@ -3004,6 +3005,13 @@ export function SettingsSheet(): JSX.Element | null {
                       </ul>
                     </div>
                   </div>
+
+                  {/* What plugins added to the interface, and what they asked the
+                    * app to hide. This is the person's side of that bargain: a
+                    * control nobody wants can be switched off, and a built-in a
+                    * plugin took away can be put back — without disabling the
+                    * plugin, which would take its tools and hooks with it. */}
+                  <PluginControls />
                 </section>
 
                 <section class="security-note" aria-labelledby="settings-security-plugins">

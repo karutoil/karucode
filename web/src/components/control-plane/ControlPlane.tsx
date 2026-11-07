@@ -397,10 +397,10 @@ export function ControlPlane(): JSX.Element {
         class="confirm-body"
         onSubmit={(event) => { event.preventDefault(); void rename(renaming, renameDraft); }}
       >
-        <label class="cp-dialog-label" for="cp-rename-input">Title</label>
+        <label class="field-label" for="cp-rename-input">Title</label>
         <input
           id="cp-rename-input"
-          class="cp-dialog-input"
+          class="input"
           value={renameDraft}
           aria-label="Session title"
           onInput={(event) => setRenameDraft(event.currentTarget.value)}

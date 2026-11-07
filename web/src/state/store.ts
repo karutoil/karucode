@@ -18,6 +18,8 @@ import type {
   Toast,
 } from '../api/types';
 import { isAgentLive } from '../api/types';
+import { applyUiPreferences, parsePluginUi, type ParsedPluginUi, type UiContribution } from '../components/uiContributions';
+import { pluginUiPreferences } from './pluginUiPreferences';
 import { emptyChatState, type ChatState } from './chat';
 import { controlChats as controlChatList } from './controlPlane';
 import { agentActivity, pendingApprovals } from './selectors';
@@ -222,6 +224,41 @@ export const pluginPanelTabs = computed<PluginPanelTab[]>(() => {
  * project and session so another context's response cannot populate this view.
  */
 export const pluginPanelData = signal<Record<string, PluginPanelState>>({});
+/**
+ * What plugins contribute to the app's own UI: buttons per slot, palette
+ * commands and the built-in controls they asked to hide.
+ *
+ * Derived from `GET /api/config`'s `plugin_ui` and re-validated on the way in
+ * (see `components/uiContributions.ts`), so a payload that is stale, truncated or
+ * hostile draws fewer controls instead of breaking the shell. Every path that
+ * refreshes `config` — boot, a settings save, a plugin enable/disable/reload —
+ * updates this for free.
+ *
+ * Two views of the same payload:
+ *
+ * * `pluginUiDeclared` is exactly what the plugins asked for. The settings screen
+ *   lists it, because that is the only way to switch back on what somebody turned
+ *   off (and to see a hide that was overridden).
+ * * `pluginUi` applies the person's overrides (`state/pluginUiPreferences.ts`).
+ *   Every component that draws a control reads this one, so nothing downstream
+ *   has to know why a control is absent.
+ */
+export const pluginUiDeclared = computed<ParsedPluginUi>(() =>
+  parsePluginUi(config.value?.plugin_ui),
+);
+export const pluginUi = computed<ParsedPluginUi>(() =>
+  applyUiPreferences(pluginUiDeclared.value, pluginUiPreferences.value),
+);
+
+
+/**
+ * One control a plugin contributed, after validation.
+ *
+ * Re-exported here so components import their identities from the store, the way
+ * `PluginPanelTab` already works, instead of reaching into the parser module for a
+ * type the shell hands them.
+ */
+export type PluginUiContribution = UiContribution;
 export const settingsOpen = signal(false);
 export const paletteOpen = signal(false);
 /**
@@ -728,6 +765,9 @@ export const openSessionModel = signal<{
   sessionId: string;
   model: SessionModelSelection | null | undefined;
 } | null>(null);
+
+/** Session id whose newest model pin/default write is still awaiting the server. */
+export const sessionModelMutationPending = signal<string | null>(null);
 
 /**
  * Record the open session's model pin.

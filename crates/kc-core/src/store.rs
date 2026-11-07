@@ -533,12 +533,24 @@ pub struct PruneReport {
     pub agents: usize,
     /// Approvals deleted for the same reason as `runs`.
     pub approvals: usize,
+    /// Path claims whose agent was pruned.
+    pub claims: usize,
+    /// File journal rows whose transcript position or writer disappeared.
+    pub checkpoints: usize,
+    /// Unreferenced before-image payloads reclaimed with those journal rows.
+    pub checkpoint_blobs: usize,
 }
 
 impl PruneReport {
-    /// Total rows removed by the pass.
+    /// Total rows removed by the pass, including auxiliary retention cleanup.
     pub fn total(&self) -> usize {
-        self.messages + self.runs + self.agents + self.approvals
+        self.messages
+            + self.runs
+            + self.agents
+            + self.approvals
+            + self.claims
+            + self.checkpoints
+            + self.checkpoint_blobs
     }
 
     /// True when the pass deleted nothing.
@@ -547,12 +559,12 @@ impl PruneReport {
     }
 }
 
-/// Result of a full `PRAGMA integrity_check`.
+/// Result of a full `PRAGMA integrity_check` plus a bounded foreign-key sweep.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrityReport {
-    /// True when SQLite reported `ok` for every page.
+    /// True when neither structural checks nor foreign_key_check found a problem.
     pub ok: bool,
-    /// Raw rows returned by the check; `["ok"]` for a healthy database.
+    /// Diagnostic rows returned by the checks; empty for a healthy database.
     pub problems: Vec<String>,
     /// When the check ran (unix milliseconds).
     pub checked_at: i64,
@@ -985,6 +997,9 @@ pub trait Store: Send + Sync {
         -> Result<()>;
     async fn finish_run(&self, run_id: &str, status: RunStatus, error: Option<&str>) -> Result<()>;
     async fn mark_interrupted_runs(&self) -> Result<usize>;
+    /// Interrupt foreign-instance running rows and return exactly `(session_id,
+    /// run_id)` for the rows this atomic operation transitioned.
+    async fn recover_interrupted_runs(&self) -> Result<Vec<(String, String)>>;
     async fn list_runs(&self, session_id: &str, limit: usize) -> Result<Vec<RunRecord>>;
 
     // ---- rewind ----------------------------------------------------------
@@ -1065,6 +1080,15 @@ pub trait Store: Send + Sync {
     async fn last_rewind_at(&self, session_id: &str) -> Result<Option<i64>>;
 
     async fn upsert_agent(&self, agent: &AgentRecord) -> Result<()>;
+    /// Change only an agent's advisory note, progress and modification time.
+    /// Returns false for an unknown id; lifecycle fields are deliberately untouched.
+    async fn update_agent_note(
+        &self,
+        id: &str,
+        note: &str,
+        progress: Option<f32>,
+        updated_at: i64,
+    ) -> Result<bool>;
     /// Change only status/updated_at while the persisted status is one of the
     /// expected values. False lets control operations preserve terminal state.
     async fn transition_agent_status(
@@ -1153,6 +1177,9 @@ pub trait Store: Send + Sync {
         Ok(BTreeMap::new())
     }
     async fn mark_interrupted_agents(&self) -> Result<usize>;
+    /// Interrupt foreign-instance live rows and return exactly `(session_id,
+    /// agent_id)` for the rows this atomic operation transitioned.
+    async fn recover_interrupted_agents(&self) -> Result<Vec<(String, String)>>;
 
     // ---- token accounting -------------------------------------------------
     //
@@ -1206,6 +1233,10 @@ pub trait Store: Send + Sync {
 
     async fn create_approval(&self, record: &ApprovalRecord) -> Result<()>;
     async fn resolve_approval(&self, id: &str, decision: &str) -> Result<()>;
+    /// Resolve `id` only while it is still pending. Returns true only when this
+    /// call performed the transition; false means it was unknown or already
+    /// resolved/expired, so a stale caller must not publish another decision.
+    async fn resolve_pending_approval(&self, id: &str, decision: &str) -> Result<bool>;
     async fn expire_pending_approvals(&self, run_id: &str, reason: &str) -> Result<usize>;
     async fn list_pending_approvals(&self, session_id: Option<&str>)
         -> Result<Vec<ApprovalRecord>>;
@@ -1264,14 +1295,17 @@ pub trait Store: Send + Sync {
     // hand the freed pages back to the filesystem.
 
     /// Delete messages older than `days`, keeping the newest
-    /// [`Store::retention_keep_messages`] messages of every session so a session
-    /// never loses its recent context. Runs, agents and approvals that belong to
-    /// a session with no message left are deleted too.
+    /// [`Store::retention_keep_messages`] visible parent messages of every session
+    /// so a session never loses its recent context. Hidden and subagent rows do
+    /// not consume those slots: aged hidden rows are cleaned independently, while
+    /// each subagent keeps the same number of its own newest visible rows. Runs,
+    /// agents and approvals whose transcript is gone are deleted too, along with
+    /// orphaned claims, checkpoint journal rows and blobs (all counted in the report).
     ///
     /// `days == 0` is a no-op: it means "keep everything".
     async fn prune_messages_older_than(&self, days: u64) -> Result<PruneReport>;
 
-    /// How many messages per session a retention pass always keeps.
+    /// Visible rows kept per parent session and, separately, per subagent.
     fn retention_keep_messages(&self) -> usize;
 
     /// Rebuild the database file and reclaim all free pages. Expensive and
@@ -1286,8 +1320,9 @@ pub trait Store: Send + Sync {
     /// Size of the database file in bytes (0 when it does not exist yet).
     async fn db_size_bytes(&self) -> Result<u64>;
 
-    /// Full `PRAGMA integrity_check`. `open` already runs the cheap
-    /// `quick_check`; this is the deep check for a maintenance endpoint.
+    /// Full `PRAGMA integrity_check` plus bounded `foreign_key_check`. `open`
+    /// already runs `quick_check` and the foreign-key sweep; either kind of
+    /// violation blocks startup. This is the deep check for a maintenance endpoint.
     async fn integrity_check(&self) -> Result<IntegrityReport>;
 
     /// When the last integrity check ran (unix milliseconds), or `None` if the

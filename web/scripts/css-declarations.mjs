@@ -52,7 +52,7 @@ function blankIgnored(css) {
  */
 export function cssDeclarations(css) {
   const clean = blankIgnored(css);
-  const declaration = /(^|\n|[;{])\s*([a-z-]+)\s*:\s*([^;{}]*?)(?=;|\}|$)/g;
+  const declaration = /(^|\n|[;{])\s*(--?[a-z0-9-]+|[a-z][a-z0-9-]*)\s*:\s*([^;{}]*?)(?=;|\}|$)/g;
   const out = [];
   let line = 1;
   let countedTo = 0;

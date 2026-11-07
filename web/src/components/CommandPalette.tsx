@@ -10,6 +10,7 @@ import {
   FileIcon,
   PanelIcon,
   PlusIcon,
+  pluginPanelIcon,
   SearchIcon,
   SettingsIcon,
   SidebarIcon,
@@ -102,6 +103,28 @@ export function CommandPalette(): JSX.Element | null {
         run: () => actions.switchSession(session.id),
       });
     }
+
+    // Commands plugins contributed. They are ordinary palette rows, so arrow
+    // keys, Enter and the filter treat them exactly like a built-in one; the
+    // group and hint name the plugin so a surprising action is attributable
+    // before it runs, not after. When the same action is also bound to a chord,
+    // the row shows the chord instead — that is what a person is trying to learn.
+    const shortcuts = new Map<string, string>();
+    for (const binding of store.pluginUi.value.keybindings) {
+      if (binding.action && binding.keys && !shortcuts.has(binding.action)) {
+        shortcuts.set(binding.action, binding.keys);
+      }
+    }
+    for (const contribution of store.pluginUi.value.commands) {
+      list.push({
+        id: contribution.hosted_id,
+        label: contribution.label,
+        group: 'Plugins',
+        hint: (contribution.action ? shortcuts.get(contribution.action) : undefined) ?? contribution.plugin,
+        icon: pluginPanelIcon(contribution.icon, { size: 15 }),
+        run: () => void actions.runPluginContributions(contribution),
+      });
+    }
     return list;
   }, [
     open,
@@ -110,6 +133,7 @@ export function CommandPalette(): JSX.Element | null {
     store.inspectorCollapsed.value,
     store.narrowViewport.value,
     store.clock.value,
+    store.pluginUi.value,
   ]);
 
   const filtered = useMemo(() => {

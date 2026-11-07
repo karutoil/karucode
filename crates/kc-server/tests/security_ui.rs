@@ -253,6 +253,52 @@ async fn raw_workspace_files_cannot_execute() {
         .contains("sandbox"));
 }
 
+/// Rendered workspace HTML is untrusted and script-capable only inside its opaque
+/// origin. Relative page assets still work, but no wildcard resource source can
+/// exfiltrate preview content to another origin.
+#[tokio::test]
+async fn workspace_preview_is_offline_except_for_relative_assets() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    write(
+        &h,
+        "site/index.html",
+        br#"<!doctype html><link rel="stylesheet" href="sibling.css"><script src="sibling.js"></script><img src="https://example.invalid/steal">"#,
+    );
+    write(&h, "site/sibling.css", b"body { color: green }");
+    write(&h, "site/sibling.js", b"window.relativeScriptLoaded = true");
+    let document = h.get("/api/workspace/preview/site/index.html").await;
+    assert_eq!(document.status, StatusCode::OK, "{}", document.text());
+    let csp = document.headers[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("sandbox allow-scripts"));
+    assert!(!csp.contains("allow-same-origin"));
+    for directive in [
+        "img-src",
+        "media-src",
+        "font-src",
+        "style-src",
+        "script-src",
+    ] {
+        let source = csp
+            .split(';')
+            .find_map(|part| part.trim().starts_with(directive).then_some(part.trim()))
+            .unwrap();
+        assert!(source.contains("'self'"), "{source}");
+        assert!(
+            !source.split_whitespace().any(|source| source == "*"),
+            "{source}"
+        );
+    }
+    assert!(csp.contains("connect-src 'none'"));
+    assert!(csp.contains("form-action 'none'"));
+    for asset in ["sibling.css", "sibling.js"] {
+        let response = h.get(&format!("/api/workspace/preview/site/{asset}")).await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.text());
+        assert!(!response.body.is_empty());
+    }
+}
+
 /// The shell is public, but it is still only the shell: `raw` needs the token
 /// like every other `/api` route, so an unauthenticated `<img src>` cannot read a
 /// workspace file either.

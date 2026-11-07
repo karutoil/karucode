@@ -159,16 +159,59 @@ export function parseEventPayload(payload: string): RawEvent | null {
   return parsed as RawEvent;
 }
 
+const TRANSPORT_CONTROL_RECOVERY = {
+  /** Capacity refusal lost no events: retry from the existing cursor. */
+  connection_cap: 'retry',
+  /** The rejected frame and any disconnect-window frames need authoritative repair. */
+  stream_overflow: 'resync',
+} as const;
+
+export type EventStreamTransportControlType = keyof typeof TRANSPORT_CONTROL_RECOVERY;
+
+export interface EventStreamTransportControl {
+  type: EventStreamTransportControlType;
+  message: string;
+  retry_after_ms?: number;
+}
+
+function isTransportControlType(value: unknown): value is EventStreamTransportControlType {
+  return typeof value === 'string' && Object.hasOwn(TRANSPORT_CONTROL_RECOVERY, value);
+}
+
 export interface SseFrame {
   /** The SSE `id:` line, which is the resume cursor (not a JSON data field). */
   id: string | null;
-  event: RawEvent;
+  /** Normal runtime envelope; null for a non-replayable transport control. */
+  event: RawEvent | null;
+  /** `event: karucode.transport`: deliberately outside the event-sequence cursor. */
+  transport?: EventStreamTransportControl;
+}
+
+function parseTransportControl(payload: string): EventStreamTransportControl | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload) as unknown;
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || !isTransportControlType(parsed.type) || typeof parsed.message !== 'string') {
+    return null;
+  }
+  const retryAfter = parsed.retry_after_ms;
+  return {
+    type: parsed.type,
+    message: parsed.message,
+    ...(typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter >= 0
+      ? { retry_after_ms: retryAfter }
+      : {}),
+  };
 }
 
 /**
  * Extract complete SSE blocks, preserving each frame's `id:` alongside its JSON
  * payload. Both CRLF and LF framing are accepted, including a CRLF split between
- * network chunks. Keepalive comments and field names such as `event:` are ignored.
+ * network chunks. Keepalive comments are ignored. `karucode.transport` controls
+ * have no runtime envelope and never become ordinary replayable events.
  */
 export function consumeSseFrames(buffer: string): { frames: SseFrame[]; rest: string } {
   const frames: SseFrame[] = [];
@@ -182,8 +225,10 @@ export function consumeSseFrames(buffer: string): { frames: SseFrame[]; rest: st
     rest = rest.slice(boundary.index + boundary[0].length);
     const data: string[] = [];
     let id: string | null = null;
+    let eventName = '';
     for (const line of block.split(/\r?\n/)) {
       if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+      if (line.startsWith('event:')) eventName = line.slice(6).replace(/^ /, '');
       if (line.startsWith('id:')) {
         const value = line.slice(3).replace(/^ /, '');
         // The SSE algorithm ignores id values containing NUL. Decimal validation
@@ -192,7 +237,13 @@ export function consumeSseFrames(buffer: string): { frames: SseFrame[]; rest: st
       }
     }
     if (data.length === 0) continue;
-    const event = parseEventPayload(data.join('\n'));
+    const payload = data.join('\n');
+    if (eventName === 'karucode.transport') {
+      const transport = parseTransportControl(payload);
+      if (transport) frames.push({ id, event: null, transport });
+      continue;
+    }
+    const event = parseEventPayload(payload);
     if (event) frames.push({ id, event });
   }
   return { frames, rest };
@@ -201,7 +252,11 @@ export function consumeSseFrames(buffer: string): { frames: SseFrame[]; rest: st
 /** Extract just event payloads for data-only consumers (the original helper). */
 export function consumeSseBuffer(buffer: string): { events: RawEvent[]; rest: string } {
   const consumed = consumeSseFrames(buffer);
-  return { events: consumed.frames.map((frame) => frame.event), rest: consumed.rest };
+  const events: RawEvent[] = [];
+  for (const frame of consumed.frames) {
+    if (frame.event) events.push(frame.event);
+  }
+  return { events, rest: consumed.rest };
 }
 
 /**
@@ -229,6 +284,9 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
   // Null means a fresh connection. Once an event arrives this persists for the
   // lifetime of the stream handle, including a session-filtered URL.
   let lastEventId: number | null = null;
+  // A process epoch scopes the otherwise monotonically increasing sequence. This
+  // deliberately survives reconnects of this handle but is never shared globally.
+  let eventEpoch: string | null = null;
 
   const setState = (next: ConnectionState, detail?: EventStreamStatusDetail): void => {
     state = next;
@@ -294,6 +352,7 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
     // when delivery and disconnect race. Id-less servers fall back to `seq`.
     let lastSeq = Number.NEGATIVE_INFINITY;
     const sequenceFor = (frame: SseFrame): number => {
+      if (!frame.event) return Number.NaN;
       const parsedId = frame.id !== null && /^\d+$/.test(frame.id) ? Number(frame.id) : Number.NaN;
       return Number.isSafeInteger(parsedId) && parsedId >= 0 ? parsedId : frame.event.seq;
     };
@@ -325,6 +384,21 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
           throw new Error(`event stream failed with HTTP ${response.status}`);
         }
 
+        const nextEpoch = response.headers.get('X-Karucode-Event-Epoch')?.trim() || null;
+        if (nextEpoch && nextEpoch !== eventEpoch) {
+          // seq and Last-Event-ID are only meaningful inside one server process.
+          // Reset both before reading the first new-epoch frame, so old 50 -> new 1
+          // is a fresh valid stream rather than a permanently discarded suffix.
+          const changedEpoch = eventEpoch !== null || lastSeq !== Number.NEGATIVE_INFINITY;
+          eventEpoch = nextEpoch;
+          if (changedEpoch) {
+            lastSeq = Number.NEGATIVE_INFINITY;
+            lastEventId = null;
+            attempt = 0;
+            safely(() => options.onResync?.());
+          }
+        }
+
         setState('open', { attempt });
         safely(() => options.onOpen?.());
 
@@ -336,7 +410,22 @@ export function startEventStream(options: EventStreamOptions): EventStreamHandle
 
         const deliver = (frames: SseFrame[]): void => {
           for (const frame of frames) {
+            if (frame.transport) {
+              const transport = frame.transport;
+              // Not an event and not a cursor: even id 0 after old seq 50 must be
+              // visible, while the next reconnect still asks for frames after 50.
+              setState('reconnecting', { attempt, error: transport.message });
+              if (TRANSPORT_CONTROL_RECOVERY[transport.type] === 'resync') {
+                // Overflow proves loss even if replay makes the next live event look
+                // contiguous. Keep the real cursor, repair from a snapshot, and let
+                // the ordinary EOF/reconnect path continue rather than stopping it.
+                attempt = 0;
+                safely(() => options.onResync?.());
+              }
+              continue;
+            }
             const event = frame.event;
+            if (!event) continue;
             // Resync is a transport control frame, not a replayable event. Its
             // watermark can equal an already seen sequence, including on filtered
             // streams, but it must still trigger recovery.

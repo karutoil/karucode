@@ -1,9 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/preact';
+import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import type { EventStreamOptions } from '../api/events';
-import type { Config, KarucodeEvent, RawEvent } from '../api/types';
-import { resetAppState } from '../test/fixtures';
+import type { Config, KarucodeEvent, RawEvent, Session } from '../api/types';
+import { jsonResponse, resetAppState } from '../test/fixtures';
 import { ModelSwitcher } from '../components/ModelSwitcher';
+
+const realFetch = globalThis.fetch;
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function sessionWithModel(model: Session['model']): Session {
+  return {
+    id: 's_one', title: 'Pinned work', workspace: '/work', project_id: 'p1',
+    created_at: 0, updated_at: 1, model,
+  };
+}
 
 /**
  * The open session's model pin, kept outside every session list.
@@ -91,6 +106,7 @@ beforeEach(() => {
 afterEach(() => {
   actions.stopStream();
   resetAppState();
+  globalThis.fetch = realFetch;
   streamOptions = null;
   vi.restoreAllMocks();
 });
@@ -204,5 +220,107 @@ describe('the open session model pin', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /Model for this session: Tiny on Local/i })).not.toBeNull(),
     );
+  });
+
+  it('locks the component caller while a newer action owns an older patch response', async () => {
+    const oldModel = deferred<Response>();
+    const newModel = deferred<Response>();
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { model?: string };
+      return body.model === 'model-a' ? oldModel.promise : newModel.promise;
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    store.config.value = testConfig();
+    store.currentSessionId.value = 's_one';
+    store.rememberSessionModel('s_one', { provider: 'gateway', model: 'model-b' });
+    render(<ModelSwitcher />);
+    const selections = vi.spyOn(actions, 'setSessionModelSelection');
+
+    fireEvent.click(screen.getByRole('button', { name: /Model for this session: Model B on Gateway/i }));
+    fireEvent.click(screen.getByRole('option', { name: /Model A/ }));
+    await waitFor(() => expect(selections).toHaveBeenCalledTimes(1));
+    const trigger = screen.getByRole('button', { name: /Model for this session: Model B on Gateway/i });
+    expect((trigger as HTMLButtonElement).disabled).toBe(true);
+    // The component deliberately locks every action during a pending write. The
+    // action layer still has to order concurrent programmatic/session callers.
+    void actions.setSessionModelSelection('local', 'tiny');
+    await waitFor(() => expect(selections).toHaveBeenCalledTimes(2));
+    expect(store.sessionModelMutationPending.value).toBe('s_one');
+
+    oldModel.resolve(jsonResponse(sessionWithModel({ provider: 'gateway', model: 'model-a' })));
+    expect(await selections.mock.results[0]?.value).toBe(false);
+    expect(store.sessionModelMutationPending.value).toBe('s_one');
+    expect(store.modelSelection.value.modelId).toBe('model-b');
+
+    newModel.resolve(jsonResponse(sessionWithModel({ provider: 'local', model: 'tiny' })));
+    expect(await selections.mock.results[1]?.value).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Model for this session: Tiny on Local/i })).not.toBeNull(),
+    );
+    expect(store.sessionModelMutationPending.value).toBeNull();
+  });
+
+  it('discards an older choice that answers after the newer choice completed', async () => {
+    const oldModel = deferred<Response>();
+    const newModel = deferred<Response>();
+    globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { model?: string };
+      return body.model === 'model-a' ? oldModel.promise : newModel.promise;
+    }) as unknown as typeof fetch;
+    store.config.value = testConfig();
+    store.currentSessionId.value = 's_one';
+
+    const oldChoice = actions.setSessionModelSelection('gateway', 'model-a');
+    const newChoice = actions.setSessionModelSelection('local', 'tiny');
+    newModel.resolve(jsonResponse(sessionWithModel({ provider: 'local', model: 'tiny' })));
+    expect(await newChoice).toBe(true);
+    oldModel.resolve(jsonResponse(sessionWithModel({ provider: 'gateway', model: 'model-a' })));
+    expect(await oldChoice).toBe(false);
+    expect(store.modelSelection.value).toMatchObject({
+      providerId: 'local', modelId: 'tiny', pinned: true,
+    });
+    expect(store.toasts.value.filter((toast) => toast.message.includes('Model A'))).toHaveLength(0);
+  });
+
+  it('keeps the newer default clear when an older pin answers late', async () => {
+    const oldModel = deferred<Response>();
+    const clearing = deferred<Response>();
+    globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { model?: string };
+      return body.model === 'model-a' ? oldModel.promise : clearing.promise;
+    }) as unknown as typeof fetch;
+    store.config.value = testConfig();
+    store.currentSessionId.value = 's_one';
+    store.rememberSessionModel('s_one', { provider: 'local', model: 'tiny' });
+
+    const oldChoice = actions.setSessionModelSelection('gateway', 'model-a');
+    const latestClear = actions.clearSessionModelSelection();
+    clearing.resolve(jsonResponse(sessionWithModel(null)));
+    expect(await latestClear).toBe(true);
+    oldModel.resolve(jsonResponse(sessionWithModel({ provider: 'gateway', model: 'model-a' })));
+    expect(await oldChoice).toBe(false);
+    expect(store.modelSelection.value.pinned).toBe(false);
+    expect(store.modelSelection.value.modelId).toBe('model-b');
+  });
+
+  it('keeps the newer pin when an older clear/default response arrives late', async () => {
+    const oldClear = deferred<Response>();
+    const newModel = deferred<Response>();
+    globalThis.fetch = vi.fn(async (_input: RequestInfo| URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { model?: string };
+      return body.model === 'model-a' ? newModel.promise : oldClear.promise;
+    }) as unknown as typeof fetch;
+    store.config.value = testConfig();
+    store.currentSessionId.value = 's_one';
+
+    const staleClear = actions.clearSessionModelSelection();
+    const latestChoice = actions.setSessionModelSelection('gateway', 'model-a', 'high');
+    newModel.resolve(jsonResponse(sessionWithModel({ provider: 'gateway', model: 'model-a', reasoning_effort: 'high' })));
+    expect(await latestChoice).toBe(true);
+    oldClear.resolve(jsonResponse(sessionWithModel(null)));
+    expect(await staleClear).toBe(false);
+    expect(store.modelSelection.value).toMatchObject({
+      providerId: 'gateway', modelId: 'model-a', pinned: true, effort: 'high',
+    });
   });
 });

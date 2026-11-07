@@ -899,6 +899,19 @@ class Staging(Case):
         # No second build: applying a stage must not compile anything.
         self.assertEqual(self.cargo_log.read_text(), cargo_before)
 
+    def test_from_stage_applies_after_the_original_build_is_deleted(self):
+        self.build()
+        staged = self.stage()
+        self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
+        built = self.src / "target" / "release" / "karucode"
+        built.unlink()
+
+        result = self.run_update(*self.base_args(), "--from-stage")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(built.exists())
+        args = self.install_args(result)
+        self.assertEqual(args[args.index("--binary") + 1], str(self.stage_files() / "karucode"))
+
     def test_from_stage_clears_the_stage_after_a_successful_switch(self):
         self.build()
         self.stage()

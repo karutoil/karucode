@@ -87,13 +87,27 @@
 // `npx` servers and their `postinstall` scripts run arbitrary code at startup.
 // The `env` table is *not* filtered: a credential an operator configures for a
 // specific server is intentional, and that is how a server receives its own key.
+// Every configured header and env **value** is nevertheless treated as secret on
+// the way back: connection/status diagnostics, transport/JSON-RPC errors and
+// successful or `isError` tool content are scrubbed even if the peer reflects the
+// value (including a rewritten Bearer scheme). Dropping a live `McpManager` sends
+// a synchronous kill signal to each stdio process group; explicit `shutdown()`
+// awaits the retained supervisor so the actual child is reaped before it returns.
+//
+// HTTP errors never reproduce the configured URL: URL userinfo/query may contain
+// credentials. Reqwest diagnostics have their URL field removed before they are
+// formatted, so invalid-scheme, non-2xx and connection errors expose no userinfo.
+// A JSON response with one wrong or explicit-null id is rejected; the only
+// compatibility exception is a sole response whose id key is genuinely absent.
 //
 // # Limits
 //
 // Connect plus handshake is capped at 15 s per server; one `tools/call` has 120 s.
 // Protocol lines and response bodies are capped at 8 MiB, and exceeding that is an
 // explicit error rather than unbounded buffering. Servers connect concurrently, so
-// one broken server never delays startup or the others.
+// one broken server never delays startup or the others. SSE retains raw bytes until
+// a complete UTF-8 line arrives and drains the consumed prefix once per network
+// chunk, so many short lines take linear work rather than quadratic copying.
 //
 // # Not supported
 //
@@ -132,7 +146,7 @@ mod rpc;
 mod stdio;
 mod transport;
 
-use rpc::{redact_headers, McpError};
+use rpc::{redact_secrets, McpError};
 use transport::Transport;
 
 /// MCP protocol revision this client speaks.
@@ -304,6 +318,24 @@ struct ServerSlot {
     setup_error: Option<String>,
 }
 
+/// Every value the operator deliberately gave this server and a remote peer can
+/// therefore reflect. Prefixing keys avoids an env var accidentally replacing a
+/// header with the same name: redaction only reads the values.
+fn configured_secrets(config: &McpServerConfig) -> BTreeMap<String, String> {
+    let mut secrets: BTreeMap<String, String> = config
+        .headers
+        .iter()
+        .map(|(name, value)| (format!("header:{name}"), value.clone()))
+        .collect();
+    secrets.extend(
+        config
+            .env
+            .iter()
+            .map(|(name, value)| (format!("env:{name}"), value.clone())),
+    );
+    secrets
+}
+
 /// Owns every configured MCP server: transports, connections, tools and status.
 pub struct McpManager {
     servers: Vec<ServerSlot>,
@@ -358,9 +390,9 @@ impl McpManager {
             let state = Arc::clone(&slot.state);
             let timeouts = Arc::clone(&self.timeouts);
             let name = slot.config.name.clone();
-            let headers = slot.config.headers.clone();
+            let secrets = configured_secrets(&slot.config);
             set.spawn(
-                async move { connect_server(name, transport, state, timeouts, headers).await },
+                async move { connect_server(name, transport, state, timeouts, secrets).await },
             );
         }
         while let Some(joined) = set.join_next().await {
@@ -420,7 +452,7 @@ impl McpManager {
                     transport: Arc::clone(&transport),
                     state: Arc::clone(&slot.state),
                     budget: self.timeouts.call(),
-                    headers: slot.config.headers.clone(),
+                    secrets: configured_secrets(&slot.config),
                     require_approval: slot.config.require_approval,
                 }));
             }
@@ -469,7 +501,7 @@ impl McpManager {
                         transport: slot.config.transport.clone(),
                         status: ServerStatus::Failed.as_str().into(),
                         tools: Vec::new(),
-                        error: Some(redact_headers(err, &slot.config.headers)),
+                        error: Some(redact_secrets(err, &configured_secrets(&slot.config))),
                     };
                 }
                 let (mut status, mut error, tools) = {
@@ -515,19 +547,30 @@ impl McpManager {
                     transport: slot.config.transport.clone(),
                     status: status.as_str().into(),
                     tools,
-                    error: error.map(|message| redact_headers(&message, &slot.config.headers)),
+                    error: error
+                        .map(|message| redact_secrets(&message, &configured_secrets(&slot.config))),
                 }
             })
             .collect()
     }
 
-    /// Close every connection and reaped every child process.
+    /// Close every connection and reap every child process.
     pub async fn shutdown(&mut self) {
         for slot in &self.servers {
             if let Some(transport) = &slot.transport {
                 transport.close().await;
             }
             slot.state.disconnected();
+        }
+    }
+}
+
+impl Drop for McpManager {
+    fn drop(&mut self) {
+        for slot in &self.servers {
+            if let Some(transport) = &slot.transport {
+                transport.close_now();
+            }
         }
     }
 }
@@ -585,7 +628,7 @@ async fn connect_server(
     transport: Arc<dyn Transport>,
     state: Arc<ServerState>,
     timeouts: Arc<TimeoutRefs>,
-    headers: BTreeMap<String, String>,
+    secrets: BTreeMap<String, String>,
 ) {
     let budget = timeouts.connect();
     let attempt = async {
@@ -625,7 +668,7 @@ async fn connect_server(
             state.connected(tools);
         }
         Ok(Err(e)) => {
-            let message = redact_headers(&e.describe(), &headers);
+            let message = redact_secrets(&e.describe(), &secrets);
             warn!(server = %name, "MCP server failed to connect: {message}");
             transport.close().await;
             state.failed(message);
@@ -716,9 +759,10 @@ struct McpTool {
     transport: Arc<dyn Transport>,
     state: Arc<ServerState>,
     budget: Duration,
-    /// Configured values are scrubbed again at the tool/model boundary, including
-    /// a server reporting `isError` with a credential reflected in its content.
-    headers: BTreeMap<String, String>,
+    /// Configured header and environment values are scrubbed again at the
+    /// tool/model boundary, including a server reporting `isError` with a
+    /// credential reflected in its content.
+    secrets: BTreeMap<String, String>,
     /// `McpServerConfig.require_approval`: `false` exempts the server's tools
     /// from the runtime-level approval prompt (the class stays `External`).
     require_approval: bool,
@@ -801,7 +845,7 @@ impl Tool for McpTool {
                 } else {
                     text
                 };
-                let content = redact_headers(&content, &self.headers);
+                let content = redact_secrets(&content, &self.secrets);
                 if is_error {
                     ToolOutcome::err(format!(
                         "MCP server `{}` reported that tool `{}` failed: {content}",
@@ -815,11 +859,11 @@ impl Tool for McpTool {
                 if matches!(e, McpError::Transport(_) | McpError::Http { .. }) {
                     // Keep `GET /api/mcp` honest about a dead/unreachable server.
                     self.state
-                        .failed(redact_headers(&e.describe(), &self.headers));
+                        .failed(redact_secrets(&e.describe(), &self.secrets));
                 }
-                ToolOutcome::err(redact_headers(
+                ToolOutcome::err(redact_secrets(
                     &e.tool_message(&self.server, &self.name, self.budget),
-                    &self.headers,
+                    &self.secrets,
                 ))
             }
         }
@@ -921,6 +965,25 @@ mod tests {
         assert!(parse_tools("s", json!({"tools": [{"name": " "}]})).is_err());
         assert!(parse_tools("s", json!({"tools": [{"name": "a b"}]})).is_err());
         assert!(parse_tools("s", json!({"tools": "nope"})).is_err());
+    }
+
+    #[test]
+    fn headers_and_env_values_with_the_same_name_are_both_redacted() {
+        let config = McpServerConfig {
+            name: "secrets".into(),
+            transport: "stdio".into(),
+            command: vec!["sh".into()],
+            url: None,
+            env: BTreeMap::from([("Authorization".into(), "env-secret".into())]),
+            headers: BTreeMap::from([("Authorization".into(), "header-secret".into())]),
+            enabled: true,
+            require_approval: true,
+        };
+        let secrets = configured_secrets(&config);
+        let output = redact_secrets("header-secret then env-secret", &secrets);
+        assert!(!output.contains("header-secret"));
+        assert!(!output.contains("env-secret"));
+        assert_eq!(secrets.len(), 2);
     }
 
     #[test]

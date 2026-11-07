@@ -155,7 +155,10 @@ the same grouping rule:
 | `0` means | derive it from the model | **no ceiling** - only for a provider with no item limit |
 
 The count is what the request actually carries, and the compaction digest that
-replaces the dropped turns is counted too. Compaction also buys
+replaces the dropped turns is counted too. Because OpenAI-compatible tool
+messages cannot carry images, every image-bearing source message also produces
+one extra `user` wire message (however many images that source carries); that
+expansion is counted in both fitting and the held run window. Compaction also buys
 `TURNS_OF_HEADROOM` (50) turns of room in *items*, exactly as it does in
 characters - a ceiling that compacted down to itself would re-compact on the
 very next turn and cost a cache miss per turn.

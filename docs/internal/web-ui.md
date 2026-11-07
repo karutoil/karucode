@@ -3,11 +3,11 @@
 
 # Use the browser workspace
 
-> Panels, keyboard shortcuts and the dev loop for the Preact frontend that ships inside the binary.
+> Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary.
 
 - **Slug:** `web-ui`
-- **Tags:** ui, web, frontend, workbench, panels, context, shortcuts, preact
-- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:RailPeek`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:ResultResizer`, `route:PATCH /api/projects/:id/preferences`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:notification-bell`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `config:providers.models.context_window`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/state/railPeek.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/components/SessionsRail.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `fn:registerPluginPanelRenderer`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`, `ui:GitManager`, `ui:GitChanges`, `ui:GitCommitBox`, `ui:GitBranchDialog`, `ui:GitHistory`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `file:web/src/components/git/GitManager.tsx`, `file:web/src/styles/git.css`, `ui:WorkbenchTaskMenu`, `ui:ContextDrawer`, `file:web/src/components/WorkbenchTaskMenu.tsx`, `file:web/src/components/ContextDrawer.tsx`, `file:web/src/state/workbench.ts`, `file:web/src/lib/approvalCopy.ts`, `file:web/src/styles/workbench.css`, `file:web/src/styles/workbench-navigation.css`, `file:scripts/verify_workbench_frontend.py`, `cmd:python3 scripts/verify_workbench_frontend.py`, `ui:ControlPlane`, `route:GET /api/control/overview`, `route:GET /api/control/sessions`, `file:web/src/state/controlPlane.ts`, `file:web/src/components/control-plane/ControlPlane.tsx`, `file:web/src/components/control-plane/ControlRail.tsx`, `file:web/src/components/control-plane/ControlOverview.tsx`, `file:web/src/components/control-plane/ControlSession.tsx`, `file:web/src/components/control-plane/controlModel.ts`, `file:web/src/styles/control-shared.css`, `file:web/src/styles/control-rail.css`, `file:web/src/styles/control-overview.css`, `file:web/src/styles/control-session.css`
+- **Tags:** ui, web, frontend, workbench, panels, context, shortcuts, preact, plugins, buttons
+- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:RailPeek`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:ResultResizer`, `route:PATCH /api/projects/:id/preferences`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:notification-bell`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `route:POST /api/plugins/:name/ui/actions/:action`, `config:plugin_ui`, `config:ui`, `file:web/src/components/PluginSlot.tsx`, `file:web/src/components/uiContributions.ts`, `file:web/src/components/PluginControls.tsx`, `file:web/src/state/pluginUiPreferences.ts`, `file:web/src/components/PluginViews.tsx`, `file:web/src/components/viewPanelRegister.ts`, `file:web/src/styles/plugin-views.css`, `dir:plugins/demos`, `file:plugins/demos/README.md`, `file:scripts/verify_plugin_demos.py`, `cmd:python3 scripts/verify_plugin_demos.py`, `file:web/src/styles/plugin-slots.css`, `file:scripts/verify_plugin_ui.py`, `cmd:python3 scripts/verify_plugin_ui.py`, `fn:matchUiKeybinding`, `fn:applyUiPreferences`, `ui:keybinding`, `ui:plugin-controls`, `fn:registerPluginPanelRenderer`, `ui:PluginSlot`, `ui:plugin-slot-button`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/state/railPeek.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/components/SessionsRail.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`, `ui:GitManager`, `ui:GitChanges`, `ui:GitCommitBox`, `ui:GitBranchDialog`, `ui:GitHistory`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `file:web/src/components/git/GitManager.tsx`, `file:web/src/styles/git.css`, `ui:WorkbenchTaskMenu`, `ui:ContextDrawer`, `file:web/src/components/WorkbenchTaskMenu.tsx`, `file:web/src/components/ContextDrawer.tsx`, `file:web/src/state/workbench.ts`, `file:web/src/lib/approvalCopy.ts`, `file:web/src/styles/workbench.css`, `file:web/src/styles/workbench-navigation.css`, `file:scripts/verify_workbench_frontend.py`, `cmd:python3 scripts/verify_workbench_frontend.py`, `ui:ControlPlane`, `route:GET /api/control/overview`, `route:GET /api/control/sessions`, `file:web/src/state/controlPlane.ts`, `file:web/src/components/control-plane/ControlPlane.tsx`, `file:web/src/components/control-plane/ControlRail.tsx`, `file:web/src/components/control-plane/ControlOverview.tsx`, `file:web/src/components/control-plane/ControlSession.tsx`, `file:web/src/components/control-plane/controlModel.ts`, `file:web/src/styles/control-shared.css`, `file:web/src/styles/control-rail.css`, `file:web/src/styles/control-overview.css`, `file:web/src/styles/control-session.css`
 - **Source:** `web/src/app.tsx:1`
 
 ---
@@ -472,6 +472,16 @@ prefers a renderer registered for the hosted id (`plugin__<plugin>__<id>`) and
 falls back to the bare id, so one plugin's panel can be styled without
 affecting another's panel of the same name.
 
+A plugin with no first-party renderer still gets a real view if it uses the
+**`view` vocabulary** (`components/PluginViews.tsx`): a payload shaped like
+`{"view": "stat" | "list" | "bars" | "progress" | "clock" | "stack"}` is claimed
+by shape rather than by id and drawn with the app's own components. Every field
+is text or a number, each is clamped, and a payload that does not match keeps the
+JSON view. With `refresh_ms` set on the panel, a `clock` really ticks — the only
+real-time surface a plugin has, and enough for a timer or a build status.
+`plugins/demos/` has two complete examples (a writing desk that hides chrome, and
+a workspace map with two panels and its own state).
+
 Panel data must never reach `dangerouslySetInnerHTML`, must never be used to
 build a URL, and must never be evaluated: that is the whole point of shipping
 data instead of markup, and it is why the page keeps `frame-ancestors 'none'`
@@ -481,6 +491,61 @@ a string that looks like markup is shown as text.
 A browser cannot reach a plugin any other way: there is no plugin route
 mounting, no asset serving and no script execution. A panel is a tab whose
 *contents* the app draws from the plugin's data.
+
+## Plugin controls: buttons, commands, shortcuts and hides
+
+Panels are tabs; `ui` contributions are the rest of the chrome. A plugin
+declares a **button** for a named slot, a **command** for the palette, a
+**keybinding**, or a **hide** for one of the app's own controls, and the app
+draws (or binds) every one of them itself. `GET /api/config`'s `plugin_ui`
+carries the contributions, the hidden targets (with the plugins that asked) and
+the catalogues of slots and hideable names; `components/uiContributions.ts`
+re-validates all of it — an unknown slot, a mismatched hosted id, a control with
+two behaviours or a chord the app already uses is refused, not rendered.
+
+The slots this build mounts:
+
+| Slot | Mount point |
+| --- | --- |
+| `composer.toolbar` | the composer's action row (`Composer`) |
+| `inspector.header` | beside **Context** in the results dock (`Inspector`) |
+| `session.header` | before the built-in chips in the session header (`ChatView`) |
+
+Commands become ordinary palette rows under the **Plugins** group, so filtering,
+arrow keys and Enter treat them exactly like a built-in one — and a row whose
+action is also bound to a chord shows the chord as its hint. A contributed
+control always carries a dot and a tooltip naming its plugin: a plugin must not
+be able to pass its button off as part of the app.
+
+A **keybinding** has its own window listener in `app.tsx`, separate from the
+app's own shortcuts. The two sets cannot collide by construction (a binding must
+carry a modifier, and the app's chords are both host- and client-reserved), and
+a binding never fires while the caret is in a field or while a dialog is open —
+`Ctrl+Shift+F` in the composer belongs to the editor, not to a plugin.
+
+Activating a control has two paths, and `state/actions.ts` owns both:
+`message` sends that text as a user turn (queued behind a running run, like the
+composer), while `action` posts to `POST
+/api/plugins/:name/ui/actions/:action[?project=&session=]` and shows the
+plugin's answer as a toast, re-reads the panels it named, and opens the one
+`http`/`https` URL it may return. Neither feeds the model; a failed action is
+shown as a failure and never as a success.
+
+Hiding is app-wide and allowlisted — `composer.attach`, the four inspector
+tabs, and the inspector's **Context** button. Nothing that stops a run or
+answers an approval is on the list, and the inspector refuses to hide its last
+remaining tab: it keeps the tab strip non-empty and moves the selection to a
+tab that still exists.
+
+The person looking at the screen has the last word: Settings → Plugins & MCP →
+**Controls in the interface** (`components/PluginControls.tsx`) lists every
+contribution per plugin and every hidden built-in with the plugin that hid it,
+with one switch each. The overrides live in `localStorage`
+(`state/pluginUiPreferences.ts`), are applied as a pure transform in
+`applyUiPreferences`, and need no server round trip and no approval — they are a
+preference about this browser, like the theme. A workspace with no
+UI-contributing plugin renders exactly as it did before any of this existed, and
+a slot with no contributions draws nothing at all, not an empty row.
 
 ## Keyboard shortcuts
 

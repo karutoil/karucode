@@ -8,7 +8,17 @@
   background-image: none;
 }
 
-.chat-main.is-workbench .main-head {
+/* The page header is one recipe with two mount points: the workbench's own
+ * conversation header, and the control plane's, which is the same role (a page
+ * head carrying a breadcrumb, a title and right-hand actions) on a screen that
+ * is not `.is-workbench`. Scoping the recipe to the workbench alone left the
+ * plane's header on `layout.css`'s base numbers - 66px tall, 14px/500 title -
+ * while the product's page head is 58px and 13px/600. Same role, one recipe.
+ * The breadcrumb's *grid* override stays workbench-only: the plane's breadcrumb
+ * is a single line (crumb, separator, title) because its header also carries
+ * Back and the session actions. */
+.chat-main.is-workbench .main-head,
+.main-head.cp-session-head {
   height: var(--workbench-header-h);
   min-height: var(--workbench-header-h);
   gap: var(--space-5);
@@ -24,7 +34,8 @@
   color: var(--muted);
 }
 
-.chat-main.is-workbench .breadcrumb > strong {
+.chat-main.is-workbench .breadcrumb > strong,
+.main-head.cp-session-head .breadcrumb > strong {
   grid-column: 1 / -1;
   max-width: 100%;
   font-family: var(--font-ui);
@@ -37,7 +48,8 @@
   display: none;
 }
 
-.chat-main.is-workbench .main-title {
+.chat-main.is-workbench .main-title,
+.main-head.cp-session-head .main-title {
   grid-column: 1;
   max-width: min(360px, 100%);
   font-size: var(--fs-body);
@@ -283,7 +295,16 @@
 /* Keep every action mounted when the header is constrained: only the workspace
  * tablist wraps, to a second row that still belongs to the same <header>. */
 @container workbench (max-width: 1000px) {
-  .chat-main.is-workbench .main-head {
+  /* The page header is one recipe with two mount points: the workbench's own
+ * conversation header, and the control plane's, which is the same role (a page
+ * head carrying a breadcrumb, a title and right-hand actions) on a screen that
+ * is not `.is-workbench`. Scoping the recipe to the workbench alone left the
+ * plane's header on `layout.css`'s base numbers - 66px tall, 14px/500 title -
+ * while the product's page head is 58px and 13px/600. Same role, one recipe.
+ * The breadcrumb's *grid* override stays workbench-only: the plane's breadcrumb
+ * is a single line (crumb, separator, title) because its header also carries
+ * Back and the session actions. */
+.chat-main.is-workbench .main-head {
     flex-wrap: wrap;
     column-gap: var(--space-3);
     row-gap: 0;
@@ -412,7 +433,16 @@
 }
 
 @media (max-width: 640px) {
-  .chat-main.is-workbench .main-head {
+  /* The page header is one recipe with two mount points: the workbench's own
+ * conversation header, and the control plane's, which is the same role (a page
+ * head carrying a breadcrumb, a title and right-hand actions) on a screen that
+ * is not `.is-workbench`. Scoping the recipe to the workbench alone left the
+ * plane's header on `layout.css`'s base numbers - 66px tall, 14px/500 title -
+ * while the product's page head is 58px and 13px/600. Same role, one recipe.
+ * The breadcrumb's *grid* override stays workbench-only: the plane's breadcrumb
+ * is a single line (crumb, separator, title) because its header also carries
+ * Back and the session actions. */
+.chat-main.is-workbench .main-head {
     column-gap: var(--space-2);
     row-gap: 0;
     padding: 0 var(--space-5);

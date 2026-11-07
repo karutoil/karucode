@@ -98,6 +98,46 @@ describe('Workbench result dock', () => {
     expect(screen.getByTestId('workspace-result')).toBeTruthy();
   });
 
+  it('never aliases two legacy panels that emit the same hosted id', async () => {
+    store.config.value = {
+      ...configFixture,
+      plugin_panels: [
+        {
+          plugin: 'a',
+          version: '1',
+          panels: [{
+            id: 'b__c',
+            hosted_id: 'plugin__a__b__c',
+            title: 'First panel',
+            icon: null,
+            source: 'static',
+            refresh_ms: 0,
+          }],
+        },
+        {
+          plugin: 'a__b',
+          version: '2',
+          panels: [{
+            id: 'c',
+            hosted_id: 'plugin__a__b__c',
+            title: 'Aliased second panel',
+            icon: null,
+            source: 'static',
+            refresh_ms: 0,
+          }],
+        },
+      ],
+    };
+    render(<Inspector />);
+
+    expect(screen.getByRole('tab', { name: 'First panel' })).toBeTruthy();
+    expect(screen.queryByRole('tab', { name: 'Aliased second panel' })).toBeNull();
+    expect(screen.getByRole('alert').textContent).toContain('duplicate hosted id');
+    fireEvent.click(screen.getByRole('tab', { name: 'First panel' }));
+    await waitFor(() => expect(screen.getAllByTestId('plugin-result')).toHaveLength(1));
+    expect(screen.getByTestId('plugin-result').getAttribute('data-panel-id')).toBe('plugin__a__b__c');
+  });
+
   it('keeps a selected result mounted while desktop Context opens and closes', () => {
     store.inspectorTab.value = 'changes';
     render(<><Inspector /><ContextDrawer /></>);
@@ -164,5 +204,71 @@ describe('Workbench result dock', () => {
 
     view.unmount();
     expect(document.body.style.overflow).toBe('');
+  });
+
+  it('hides the tabs a plugin asked to hide, and moves off a tab that just vanished', async () => {
+    store.inspectorTab.value = 'agents';
+    store.config.value = {
+      ...configFixture,
+      plugin_ui: {
+        hidden: [{ target: 'inspector.tab.agents', plugins: ['kc-focus'] }],
+        slots: [],
+        hideable: [],
+        contributions: [],
+      },
+    };
+    render(<Inspector />);
+
+    expect(screen.queryByRole('tab', { name: 'Agents' })).toBeNull();
+    // The tab that was selected is gone, so the dock lands on a real one rather
+    // than showing nothing.
+    await waitFor(() => expect(store.inspectorTab.value).toBe('workspace'));
+    expect(screen.getByTestId('workspace-result')).toBeTruthy();
+  });
+
+  it('never lets a plugin empty the tab strip', async () => {
+    store.config.value = {
+      ...configFixture,
+      plugin_ui: {
+        hidden: [
+          { target: 'inspector.tab.workspace', plugins: ['kc-focus'] },
+          { target: 'inspector.tab.changes', plugins: ['kc-focus'] },
+          { target: 'inspector.tab.session', plugins: ['kc-focus'] },
+          { target: 'inspector.tab.agents', plugins: ['kc-focus'] },
+        ],
+      },
+    };
+    render(<Inspector />);
+    // Every request is refused rather than honoured into an empty panel.
+    expect(screen.getAllByRole('tab')).toHaveLength(4);
+  });
+
+  it('carries plugin-contributed buttons in its header, and lets one hide Context', () => {
+    store.config.value = {
+      ...configFixture,
+      plugin_ui: {
+        contributions: [
+          {
+            plugin: 'kc-focus',
+            version: '1.0.0',
+            kind: 'button',
+            id: 'focus',
+            hosted_id: 'plugin__kc-focus__focus',
+            slot: 'inspector.header',
+            label: 'Focus mode',
+            title: 'Focus mode',
+            action: 'focus',
+          },
+        ],
+        hidden: [{ target: 'inspector.context', plugins: ['kc-focus'] }],
+      },
+    };
+    render(<Inspector />);
+
+    const control = screen.getByRole('button', { name: 'Focus mode' });
+    expect(control.getAttribute('data-plugin')).toBe('kc-focus');
+    // The built-in Context button is gone, so the header keeps one way in and one
+    // way to close — no layout with a missing control and a duplicated one.
+    expect(screen.queryByRole('button', { name: 'Context' })).toBeNull();
   });
 });

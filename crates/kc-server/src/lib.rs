@@ -22,7 +22,7 @@
 // @kc-title: Call the HTTP API
 // @kc-summary: Authenticate, send the CSRF header, and find the endpoint for sessions, config, approvals, files, git, plugins, MCP and the event stream.
 // @kc-tags: api, http, rest, sse, curl, endpoints
-// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:PATCH /api/projects/:id/preferences, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/control/sessions, route:POST /api/control/sessions, route:GET /api/control/overview, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, route:POST /api/artifacts, route:GET /api/artifacts/:id, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, config:plugin_panels, route:GET /api/events, event:notification, event:queued_messages, event:session_rewound, config:[notifications], header:X-Karucode-Client, env:KARUCODE_AUTH_TOKEN, doc:docs/API.md
+// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:PATCH /api/projects/:id/preferences, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/control/sessions, route:POST /api/control/sessions, route:GET /api/control/overview, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:POST /api/workspace/upload, route:POST /api/artifacts, route:GET /api/artifacts/:id, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, config:plugin_panels, route:GET /api/events, header:X-Karucode-Event-Epoch, event:notification, event:queued_messages, event:session_rewound, event:karucode.transport, event:connection_cap, event:stream_overflow, event:text_replaced, field:expected_digest, config:[notifications], header:X-Karucode-Client, env:KARUCODE_AUTH_TOKEN, doc:docs/API.md
 //
 // The API is same-origin only; there is no CORS surface. Two rules matter:
 //
@@ -78,8 +78,34 @@
 // | `POST /api/plugins/reload` | rescan every plugin source: start new plugins, drop removed ones, replace changed ones (no server restart) |
 // | `POST /api/plugins/:name/reload` | replace one plugin's process (after a rebuild or a manifest edit) |
 // | `GET /api/plugins/:name/panels/:panel` | one plugin panel's payload for the inspector |
+// | `POST /api/plugins/:name/ui/actions/:action` | run one UI action a plugin contributed (a button or palette command a person activated) |
 // | `GET /api/mcp` | MCP server status and discovered tools |
 // | `GET /api/events` | the SSE event stream for the open session |
+//
+// # Workspace reads, saves and previews
+//
+// `GET /api/workspace/file` includes `digest: "sha256:<64 lowercase hex>"`, the
+// SHA-256 of the **whole current file**, even when the returned text is truncated.
+// An editor passes it back as `expected_digest` in its PUT body together with the
+// complete replacement `content`. A changed file is `409 conflict` even when an
+// edit kept the old `expected_size`; `force=true` remains the explicit override.
+// Older clients may use `expected_size` alone, but size cannot detect equal-length
+// edits. Successful saves return the successor `digest`.
+//
+// `GET /api/workspace/tree` returns at most 2000 entries under a bounded filesystem
+// work budget. `truncated: true` and `limit: 2000` make a partial listing explicit;
+// ignored build/VCS directories do not consume the useful entry budget.
+//
+// `/api/workspace/preview/<path>` treats workspace HTML as **untrusted**, permits
+// its scripts only in an opaque sandbox, and allows only same-origin relative
+// workspace assets plus inline `data:`/`blob:` resources. Remote images, scripts,
+// styles, fonts, media, fetch/XHR/WebSocket and forms are blocked. Opening a preview
+// is not authorization for network egress. Chat artifacts are stricter still: they
+// cannot load workspace siblings.
+//
+// Uploads without an explicit `project` use the session's recorded project or, for
+// a control/project-less session, its recorded private workspace. They never fall
+// back to the install's default project for such a session.
 //
 // # Chat artifacts
 //
@@ -245,8 +271,12 @@
 //
 // The response carries `point`, `preview`, `outcomes` (`restored`, `removed`,
 // `not_captured` or `failed`, one per journal row, newest first), `run_id` (set
-// by `retry` and `note`), and `files_restored` / `files_skipped`. Every client
-// on `/api/events` also receives `session_rewound`.
+// by `retry` and `note`), `committed`, `start_error`, and `files_restored` /
+// `files_skipped`. A replacement-start failure after commit is still HTTP 200 with
+// `committed: true`, `run_id: null` and actionable `start_error`: the rewind is not
+// rolled back or silently retried. Every client on `/api/events` receives exactly
+// one `session_rewound`, carrying `point.user_message_id` (the normalized prompt id,
+// even when the caller selected an assistant message).
 //
 // ### What a rewind does and does not do
 //
@@ -438,6 +468,64 @@
 //
 // A plugin that declares no panels produces no `plugin_panels` entries and no
 // error, so an older plugin needs no change.
+//
+// # Plugin UI controls
+//
+// The `ui` array of a manifest is the rest of the chrome: buttons in named slots,
+// command-palette entries, and built-in controls the plugin asks the app to hide.
+// Everything arrives in `GET /api/config` under `plugin_ui`:
+//
+// ```json
+// "plugin_ui": {
+//   "contributions": [
+//     { "plugin": "kc-focus", "version": "1.0.0", "kind": "button", "id": "focus",
+//       "hosted_id": "plugin__kc-focus__focus", "slot": "composer.toolbar",
+//       "label": "Focus mode", "action": "focus" },
+//     { "plugin": "kc-todo", "version": "0.2.0", "kind": "command", "id": "plan",
+//       "hosted_id": "plugin__kc-todo__plan", "label": "Ask about the plan",
+//       "message": "Summarise the plan." }
+//   ],
+//   "hidden": [ { "target": "inspector.tab.agents", "plugins": ["kc-focus"] } ],
+//   "slots": ["composer.toolbar", "inspector.header", "session.header"],
+//   "hideable": ["composer.attach", "inspector.tab.workspace", "..."]
+// }
+// ```
+//
+// The catalogues travel with the payload so a client never hard-codes a mount
+// point or a hideable name. A contribution is a *description*: `kind`, `slot`,
+// `icon` and `target` are names the app owns, `label`/`title` are plain text, and
+// nothing is markup, a URL or a selector. `slot` is absent on a command and on a
+// `keybinding`, which carries `keys` instead — a canonical chord such as
+// `mod+shift+f`, already checked against the app's own shortcuts and against every
+// other plugin's, so two plugins can never answer one keystroke.
+//
+// Activating one posts to
+// `POST /api/plugins/:name/ui/actions/:action[?project=<id>&session=<id>]`:
+//
+// ```bash
+// curl -s -X POST "localhost:8787/api/plugins/kc-focus/ui/actions/focus?session=s_ab12" \
+//   -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' -d '{}' | jq
+// # {"ok":true,"message":"Focusing 3 files","refresh":["todo"],"open_url":null}
+// ```
+//
+// * `action` is the **action id**, not the contribution id: two controls may share
+//   one handler. An action no contribution declares is `404 not_found` and the
+//   message lists the ids the plugin does offer, so a stale page cannot make an
+//   installed plugin run something it no longer exposes;
+// * `message` is the toast a person sees, capped by the host; `ok: false` renders
+//   it as an error. `refresh` names this plugin's **panels** to re-read (bare ids,
+//   capped and filtered). `open_url` is only ever an absolute `http`/`https` URL —
+//   anything else is dropped by the host, and the browser checks again;
+// * unknown plugin or action is `404`, a disabled or unusable plugin `400`, and a
+//   plugin that fails to answer `502 plugin`, exactly like a panel read.
+//
+// A UI action is **not** a tool call: it runs because a person activated a control
+// the plugin itself contributed, so it does not go through the approval policy (the
+// click is the approval), it never reaches the model, and it cannot change the
+// tool registry. Hiding a built-in control is app-wide and allowlisted; the app
+// refuses to hide its last inspector tab, and a control that stops a run or answers
+// an approval is not on the list at all. A plugin with no `ui` produces an empty
+// `contributions` list, so an older plugin needs no change.
 //
 // # Attachments
 //
@@ -711,19 +799,48 @@
 // and results, approval requests, agent progress, run completion and errors. Each
 // frame is `{"seq","ts_ms","session_id","run_id","type",...}`.
 //
-// The stream is live only: there is no replay cursor. `seq` is monotonic within
-// one server process, so a jump means frames were dropped - refetch the session
-// (`GET /api/sessions/:id`), whose messages, runs and agents are persisted in
-// SQLite. The pump says so explicitly with `stream_lagged` (`skipped` = frames
-// lost, and a `seq` that is the last dropped one, so it never shadows a live
-// event); that marker is transport, not session, and is exempt from `seq` dedupe.
-// On a `?session=` stream, holes are normal because other sessions' frames are
-// stamped and then filtered. `: keepalive` comments go out every 15 s and count as
-// traffic: a client that receives no byte for about 45 s should treat the
-// connection as dead and reconnect, because a half-open socket never reports an
-// error by itself. A client that cannot drain its buffer for 5 s is disconnected
-// rather than slowing the agent loop. A refetch must not replace a transcript that
-// is still streaming - the snapshot only has persisted messages.
+// The stream is **replayable**. Every ordinary event has `id: <seq>`; reconnect
+// with `Last-Event-ID: <seq>` (or `?last_event_id=<seq>` for a client that cannot
+// set the header). One FIFO replay ring per runtime retains at most 1000 envelopes
+// and 8 MiB of encoded frames, including session metadata, and is filled even while
+// no browser is connected. Session filters are applied to replay exactly as live.
+// A cursor older than the ring (or one cut by recorder lag) gets a `resync` frame
+// instead of a silent gap; refetch the persisted session once in that case.
+//
+// Every response also carries `X-Karucode-Event-Epoch`, a random value stable for
+// this server process. `seq` is monotonic only within that epoch and restarts at 1
+// after a restart. If the epoch changes, clear the old cursor/dedupe watermark and
+// refetch rather than letting a high old seq suppress new events. On a filtered
+// stream, ordinary seq holes are normal because other sessions' frames were stamped
+// before filtering.
+//
+// `stream_lagged` (`skipped` = frames this client's pump lost) explicitly requests
+// a refetch and cannot shadow the next live event. `: keepalive` comments go out
+// every 15 s: no byte for about 45 s means the client should reconnect. A client
+// that cannot drain for 5 s, or exceeds its 4 MiB queued-byte budget, is
+// disconnected rather than slowing the agent loop. A refetch must not replace a
+// transcript that is still streaming - the snapshot only has persisted messages.
+//
+// Past 64 simultaneous streams, a refused connection receives SSE field
+// `event: karucode.transport` and JSON
+// `{"type":"connection_cap","message":"...","retry_after_ms":1000}`. It deliberately
+// has no `id` or `seq`: display it directly, do not run ordinary sequence dedupe or
+// advance the persisted cursor, and retry with the existing reconnect/backoff.
+// This transport control is not recorded in the replay ring.
+//
+// An existing stream that exceeds its 4 MiB queue similarly ends with
+// `event: karucode.transport` and
+// `{"type":"stream_overflow","message":"...","retry_after_ms":1000}`. It also has
+// no `id` or `seq`: the event that tripped the limit was rejected, so a synthetic
+// notice at that sequence or the next one would make replay discard real data.
+// Show the saturation error, keep the last genuinely delivered cursor, request an
+// authoritative session/list refetch immediately, then use the normal reconnect.
+// Queue-overflow controls are transport-only and are not recorded in the ring.
+//
+// `text_replaced` carries `{content}` only when final normalization changed text
+// previously delivered by deltas. Its content is the complete final/persisted
+// response: replace the assembled deltas rather than appending, so live and reload
+// agree.
 //
 // # Errors
 //

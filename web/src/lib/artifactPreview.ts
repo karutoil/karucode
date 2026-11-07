@@ -13,9 +13,9 @@ import { createArtifact } from '../api/endpoints';
  * from racing each other with two identical posts.
  *
  * The cache is bounded and deliberately lossy. An entry that is gone costs one
- * round trip, and a server restart empties its side while this side still has
- * ids - so a frame that 404s is not an error the reader has to act on: the card
- * posts again (see `ArtifactCard`'s reload path).
+ * round trip. A server restart can evict its side while this side still has a
+ * scoped URL, so an explicit **Render again** or **Try again** invalidates that
+ * URL and posts the source again instead of reloading a dead id.
  */
 
 /** How many `(source, theme)` → scoped frame URLs to remember. */
@@ -23,6 +23,8 @@ const MAX_CACHED = 128;
 
 const cache = new Map<string, string>();
 const inflight = new Map<string, Promise<string>>();
+/** Per-key invalidation clock; an older POST must not refill a cleared entry. */
+const generations = new Map<string, number>();
 
 export type ArtifactThemeName = 'light' | 'dark';
 
@@ -42,6 +44,18 @@ function remember(map: Map<string, string>, lookupKey: string, url: string): voi
 }
 
 /**
+ * Forget a possibly server-evicted capability before an explicit retry. An
+ * in-flight older request still finishes for its original caller, but cannot put
+ * its now-suspect URL back into either cache.
+ */
+export function invalidateArtifact(source: string, theme: ArtifactThemeName): void {
+  const lookupKey = key(source, theme);
+  cache.delete(lookupKey);
+  inflight.delete(lookupKey);
+  generations.set(lookupKey, (generations.get(lookupKey) ?? 0) + 1);
+}
+
+/**
  * Publish one artifact (or return its cached capability URL) and resolve to the URL
  * an `<iframe>` should load.
  */
@@ -50,20 +64,23 @@ export async function publishArtifact(
   theme: ArtifactThemeName,
 ): Promise<string> {
   const lookupKey = key(source, theme);
+  const generation = generations.get(lookupKey) ?? 0;
   const cached = cache.get(lookupKey);
   if (cached !== undefined) return cached;
   const pending = inflight.get(lookupKey);
   if (pending !== undefined) return pending;
 
-  const task = createArtifact({ html: source, theme })
+  const task: Promise<string> = createArtifact({ html: source, theme })
     .then((response) => {
       // Use the server-issued URL verbatim. In particular, never reconstruct it
       // with the master bearer: this URL is exposed to the artifact's own JS.
-      remember(cache, lookupKey, response.url);
+      if ((generations.get(lookupKey) ?? 0) === generation) {
+        remember(cache, lookupKey, response.url);
+      }
       return response.url;
     })
     .finally(() => {
-      inflight.delete(lookupKey);
+      if (inflight.get(lookupKey) === task) inflight.delete(lookupKey);
     });
   inflight.set(lookupKey, task);
   return task;
@@ -73,4 +90,5 @@ export async function publishArtifact(
 export function resetArtifactCache(): void {
   cache.clear();
   inflight.clear();
+  generations.clear();
 }

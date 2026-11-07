@@ -135,8 +135,13 @@ Startup (`PluginHost::start_all`) spawns every enabled plugin **concurrently**
 and runs the handshake per plugin. One broken plugin cannot delay or break the
 others.
 
-Shutdown sends `shutdown`, waits briefly, then kills the process; a plugin that
-ignores `shutdown` is still killed.
+Host shutdown sends `shutdown`, waits briefly, then kills and reaps the process; a
+plugin that ignores `shutdown` is still killed. Reload, removal and host shutdown
+permanently retire that slot generation: a tool handle retained by an in-flight run
+fails without executing or spawning the old code again. Dropping a live
+`PluginHost` synchronously signals each process group and leaves its retained
+supervisor to reap the child. Ordinary enable/disable is different: disabling
+stops the current generation without retiring it, and enabling starts it again.
 
 ### Restart policy
 
@@ -188,8 +193,11 @@ re-enables a plugin the operator switched off. The config file decides what a
 
 Both routes rebuild the runtime's tool registry before they answer, so the model
 sees the new tools on its next call. A run already in flight keeps the registry it
-started with: a call into a replaced plugin fails with `plugin `x` was stopped`
-rather than hanging, and the next run is clean.
+started with: its old tool handle is permanently retired and fails with
+`generation was permanently retired` rather than hanging or
+respawning replaced code. The next run sees the fresh registry. Long-lived hook and
+panel handles are different again: they dynamically follow the host's current slot
+membership across reload/rescan, while filtering each generation's readiness.
 
 **Automatic reloads.** To skip the curl entirely:
 
@@ -267,6 +275,8 @@ Result: the **manifest**:
 * `panels` is optional and **every field in it has a default**, so a manifest
   that declares none (or omits the key entirely) behaves exactly as before —
   this is additive and did not bump the protocol version. See §4.8 and §8.
+* `ui` is optional in the same way: declarative buttons, palette commands and
+  hide requests, each field defaulted. See §4.9 and §8.
 * Budget: **10 s** (`PluginTimeouts::handshake`).
 
 ### 4.2 `tools/list` (host → plugin)
@@ -455,7 +465,47 @@ The host asks for the payload of a panel the manifest declared:
 
 ---
 
-### 4.9 Error codes
+### 4.9 `ui/action` (host → plugin)
+
+The host runs an action a **person activated** — a contributed button or a
+command-palette entry:
+
+```json
+{"jsonrpc":"2.0","id":13,"method":"ui/action",
+ "params":{"action":"run-check",
+           "contribution":{"kind":"button","id":"check","label":"Run check",
+                           "slot":"composer.toolbar"},
+           "session_id":"s_1","project":"p_1","workspace":"/w"}}
+```
+
+```json
+{"jsonrpc":"2.0","id":13,
+ "result":{"ok":true,"message":"Checked 3 files","refresh":["todo"],"open_url":null}}
+```
+
+* `action` is the **action id** from the manifest, not the contribution id: two
+  contributions may share one handler. An action no contribution declares is
+  `-32601`, so a stale page cannot make the plugin run something it no longer
+  offers.
+* `message` is a toast a person reads. It is capped at 2 000 bytes by the host.
+* `refresh` names this plugin's **panels** to re-read afterwards (bare ids, at
+  most 16, non-panel-id entries dropped).
+* `open_url` opens a tab, and only an absolute `http`/`https` URL survives; the
+  browser re-checks it before calling `window.open`.
+* `ok: false` renders the message as an error. Omitting `ok` means success, so
+  `{"message": "done"}` is enough.
+* Budget: the **60 s** call timeout. A click that takes that long is a click
+  nobody makes twice — use `notify` or a tool for long work.
+
+This is **not** a tool call. It runs because somebody clicked a control the
+plugin itself contributed, so it does not go through the approval policy (the
+click is the approval), it never reaches the model, and it cannot change the tool
+registry. It is also the only way a panel button can make the plugin *do*
+something — before this method, the only option was to post a user turn.
+
+---
+
+### 4.10 Error codes
 
 | Code | Meaning |
 | --- | --- |
@@ -471,19 +521,27 @@ surfaced in the tool failure, so write something actionable.
 
 * Name: `plugin__<plugin>__<tool>`. The prefix makes collisions with first-party
   tools impossible.
-* Description: your `description` plus an origin note —
-  `[plugin: <name> v<version>] Runs out of process, supervised by karucode; its
-  output is untrusted. Calls go through the approval policy like any external
-  tool.` — and the effective (config-authoritative) permissions if any.
+* Description: your `description`, trimmed, or `Plugin tool \`<tool>\`.` when it
+  is empty. The host does **not** append an origin/trust/permission paragraph to
+  every tool. Instead the system prompt names the plugins whose tools are exposed
+  (sorted and deduplicated) and states once that plugin tools run out of process
+  under host supervision, return untrusted output and follow the approval policy.
+  A plugin with no exposed tools gets no prompt note. Version and manifest
+  metadata remain visible in `GET /api/plugins`; the config-authoritative
+  permissions in §6 still gate which tools are exposed. Removing the per-tool
+  copies keeps a 55-tool plugin set from spending thousands of tokens repeating
+  the same paragraph in the request's `tools` JSON on every model call.
 * Parameters: your `parameters` schema, unchanged.
-* Class: from `class` (default `external`). The class and the tool's
-  `requires_approval()` declaration drive the **runtime** approval policy exactly
-  like a first-party tool: in `ask`/`ask_commands` the user is asked, in `auto`
-  the call is allowed (and audited), and in `read_only` mode every external,
-  mutating or shell tool is **denied**. Plugin tools do not prompt themselves and
-  cannot exempt themselves from the policy; only a read-only tool is
-  auto-allowed. (An MCP server's `require_approval = false` skips only the prompt;
-  `read_only` still denies it — see [`MCP.md` §4](./MCP.md#4-approval-behaviour).)
+* Class: the plugin's `class` declaration is only a **permission-gating hint**;
+  every exposed plugin tool is actually `external`. A plugin therefore cannot
+  skip approval by declaring itself `read_only`. Only the operator's
+  `[[plugins]]` entry can name specific bare or namespaced tools in
+  `settings.read_only_tools = [...]` to downgrade them to `read_only`. In
+  `ask`/`ask_commands` external tools prompt, in `auto` they are allowed and
+  audited, and in `read_only` mode external/mutating/shell tools are denied. An
+  operator-downgraded read-only tool is auto-allowed. (An MCP server's
+  `require_approval = false` is the analogous explicit exception; `read_only`
+  still denies it — see [`MCP.md` §4](./MCP.md#4-approval-behaviour).)
 * Every failure — dead process, timeout, malformed response, remote error — is a
   failed `ToolOutcome` with text that says what happened and what to try. A
   broken plugin can never panic the host or corrupt the tool registry.
@@ -496,15 +554,22 @@ surfaced in the tool failure, so write something actionable.
 Reserved values: `files.read`, `files.write`, `shell`, `network`,
 `session.read` (free-form strings are allowed).
 
-**The config entry is authoritative.** Effective permissions are:
+**The host configuration is authoritative and fail-closed.** Effective
+permissions are:
 
-* `PluginConfig.permissions` when the entry lists any; otherwise
-* `manifest.permissions` (the backwards-compatible fallback).
+* exactly the explicit narrow `PluginConfig.permissions` names (`files.read`,
+  `shell`, …); an empty list grants **none**, with no fallback to the runtime
+  manifest's `permissions`;
+* when the operator's own `[[plugins]]` entry in `config.toml` uses `permissions =
+  ["*"]` or `settings.trust = true`, the runtime manifest declaration instead;
+* the wildcard and both approval-exemption settings (`trust`, `read_only_tools`)
+  are ignored in a plugin-shipped disk `plugin.toml`, with a warning in diagnostics.
+  Narrow names in that disk manifest remain deliberate reviewed grants, but they
+  cannot delegate whatever the running process later chooses to declare.
 
-A manifest can therefore never grant itself a permission the operator did not
-configure. Manifest permissions that the config does not grant are kept out of
-the effective set, and the ignored names are reported in `GET /api/plugins` (in
-the plugin's `error` field, with status still `ready`) and logged at debug level.
+Runtime-manifest permissions outside the effective set are ignored and reported
+in `GET /api/plugins` (in the plugin's `error` field, with status still `ready`)
+and logged. The ignored-wildcard warning is also retained there.
 
 Enforcement happens **at the tool-exposure layer**: a tool whose declared class
 needs a permission that is not in the effective set is **not exposed** at all
@@ -567,8 +632,11 @@ nothing today. `kc_core::plugin::hooks::IMPLEMENTED` is the authoritative list.
 `PluginHost` implements `kc_core::hooks::Hooks`. It also offers a cheap, live
 `hooks_handle()` so the server can keep the host (for `set_enabled` / `shutdown`,
 which need `&mut self`) while handing an `Arc<dyn Hooks>` to the runtime. The
-handle shares the per-plugin state, so enable/disable/restart are visible to it
-immediately.
+handle shares both per-plugin state and dynamic slot membership: enable/disable is
+immediate, and a handle created before `reload`/`rescan` follows the new generation
+instead of going stale. `panels_handle()` has the same semantics. Calls snapshot
+only the current Arc list, then drop the membership mutex before plugin I/O. Old
+tool objects deliberately do not follow replacements; their generation is retired.
 
 ```rust
 let mut host = kc_plugin_host::PluginHost::discover(&config.plugins, &config.data_dir);
@@ -616,12 +684,171 @@ Validation happens at the handshake, so a broken declaration is a readable
 | no `panels` key at all | accepted; the plugin contributes no tabs |
 
 Panel ids are hosted as `plugin__<plugin>__<id>`, so they cannot collide with the
-built-in inspector tabs (`workspace`, `changes`, `commands`, `agents`) or with
-another plugin's panel. The icon is a *name* from the app's own icon set
+built-in inspector tabs (`workspace`, `changes`, `commands`, `agents`). Delimiters
+are not an injective encoding across plugins: plugin `a` with panel `b__c` and
+plugin `a__b` with panel `c` both produce `plugin__a__b__c`. As with colliding
+tools, the first plugin in discovery order keeps the hosted id; every later
+claimant is omitted from panel lists and its reads are refused without calling the
+plugin. The refusal is logged and reported in that plugin's diagnostics, naming
+both the id and the owner. This prevents tabs, caches and payloads from aliasing.
+The icon is a *name* from the app's own icon set
 (`check`, `circle-check`, `clipboard`, `copy`, `layers`, `list`, `eye`, `search`,
 `spark`, `folder`, `folder-open`, `file`, `file-code`, `git`, `branch`,
 `terminal`, `agents`, `bolt`, `cpu`, `chat`, `lock`, `alert`, `upload`,
 `download`, `thumb`); an unknown name draws a neutral glyph rather than failing.
+
+### UI contributions: buttons, commands and hides
+
+A panel is a tab. The `ui` array in the manifest is the rest of the chrome: a
+button in a named slot, an entry in the command palette, and a request to hide
+one of the app's own controls. Everything is **declarative** — a name from a set
+the app owns — so a plugin still ships no markup, no CSS and no script, and the
+app is the only thing that draws.
+
+```json
+{"name":"kc-focus","version":"1.0.0","protocol":"1",
+ "ui":[
+   {"kind":"button","id":"focus","label":"Focus mode","icon":"bolt",
+    "slot":"composer.toolbar","action":"focus"},
+   {"kind":"command","id":"plan","label":"Ask about the plan",
+    "message":"Summarise the plan for this workspace."},
+   {"kind":"keybinding","id":"focus-key","label":"Focus mode shortcut",
+    "keys":"mod+shift+f","action":"focus"},
+   {"kind":"hide","target":"inspector.tab.agents"}
+ ]}
+```
+
+In Rust the SDK supplies `.button(slot, id, label, handler)`,
+`.button_with(…)`, `.message_button(…)`, `.command(…)`, `.command_with(…)`,
+`.message_command(…)`, `.keybinding(id, label, keys, handler)`,
+`.message_keybinding(…)`, `.hide(target)` and `.on_ui_action(action, handler)`; the
+raw `.ui(PluginUiContribution { … })` is there for anything they do not cover.
+
+**Two ways to activate a control.** `action` names a `ui/action` handler inside
+the plugin (§4.9) and can answer with a toast, panels to refresh and a URL to
+open. `message` posts that text as a user turn — the agent does the work, so no
+handler is needed. Exactly one of the two; declaring both or neither fails the
+handshake. Two controls may share one action: a button and a chord over the same
+code is the normal case, not a special one.
+
+**Slots** — the closed list of places a button may land:
+
+| Slot | Where it is drawn |
+| --- | --- |
+| `composer.toolbar` | the composer's action row, beside the model controls |
+| `inspector.header` | the results dock header, beside **Context** |
+| `session.header` | the session header, before the built-in chips |
+
+**Keybindings** — a `keybinding` is not drawn anywhere; the app matches it:
+
+* `keys` is `+`-joined: one or more of `mod` (Ctrl on Windows/Linux, Cmd on macOS),
+  `ctrl`, `alt`, `shift`, then a single key — a letter, a digit, or one of `enter`,
+  `escape`, `space`, `/`, `[`, `]`, `,`, `.`, `-`. `Shift+Mod+F` and `mod+shift+f`
+  are the same binding; the host canonicalises it.
+* **A modifier is required.** A bare key is typing, and `shift` alone is still
+  typing, so neither is accepted.
+* The app's own shortcuts are refused: `mod+k` (palette), `mod+b` (sessions rail),
+  `mod+n` (new session), `mod+j` (context), `mod+shift+t` (theme studio),
+  `mod+enter` (send). A contribution naming one is skipped with a note.
+* One chord, one handler: if two plugins bind the same chord the first in
+  discovery order keeps it and the other is skipped — the keystroke can never run
+  two plugins.
+* A binding never fires while the caret is in a field (a chord with a modifier is
+  still a text-editing key there) or while a dialog is open.
+* The palette row of a command whose action is also bound shows the chord, which
+  is how a person discovers it.
+
+**Hideable targets** — the closed list of built-in controls a plugin may hide:
+
+| Target | What it hides |
+| --- | --- |
+| `composer.attach` | the paperclip / attach-files button |
+| `inspector.tab.workspace` | the **Files** tab |
+| `inspector.tab.changes` | the **Git** tab |
+| `inspector.tab.session` | the **Session usage** tab |
+| `inspector.tab.agents` | the **Agents** tab |
+| `inspector.context` | the **Context** button in the results header |
+
+Hiding is **app-wide** (every session, every project) and it is an allowlist on
+both sides: the host refuses anything else, and the browser refuses it again. A
+control that stops a run, sends a message or answers an approval is deliberately
+absent from the list, so a plugin cannot remove a safety control. The inspector
+also refuses to hide its last remaining tab: an unanswered hide request is better
+than an empty dock, and the request is reported in the plugin's diagnostics.
+
+Validation, at the handshake (`PluginDiagnostics.error`):
+
+| Declaration | Result |
+| --- | --- |
+| unknown `kind` | skipped, with a note in the diagnostics |
+| unknown `slot` on a button, or no `slot` | skipped / handshake error naming the slot |
+| `hide` target not on the list | skipped, with the list in the note |
+| `keys` that is not a usable chord, or no `keys` | handshake error naming the accepted shape |
+| `keys` the app already uses | skipped, with the app's shortcut list in the note |
+| id with anything but `a-z0-9-_.`, or declared twice | handshake error |
+| blank label, or a label over 80 bytes | handshake error |
+| both `action` and `message`, or neither | handshake error |
+| `action` not following the id rule | handshake error |
+| more than 64 contributions | handshake error |
+
+The split is deliberate: an item this *build* cannot place (a slot or target from
+a newer release) is skipped so the plugin keeps running, while a shape error is
+refused loudly so the author fixes it.
+
+A contributed control is always **attributed**: it carries a dot and a tooltip
+naming its plugin and version, because a plugin must not be able to pass its
+button off as a built-in one. The payload reaches the browser as
+`GET /api/config`'s `plugin_ui` (contributions, hidden targets with the plugins
+that asked, and the catalogues above), the click goes to
+`POST /api/plugins/:name/ui/actions/:action`, and the frontend re-validates
+everything before drawing a single control.
+
+### The person's side of it
+
+Adding a control and hiding one are both *requests*. Whoever is looking at the
+screen can switch a contributed control off, or put a hidden built-in back,
+without disabling the plugin — **Settings → Plugins & MCP → Controls in the
+interface** lists every contribution per plugin and every hidden built-in with
+the plugin that hid it. The choice is stored in that browser (`localStorage`), so
+it needs no approval, no round trip and no config reload; the trade-off is that it
+does not follow you to another machine.
+
+The overrides are applied to the same model every component reads, so nothing
+downstream knows whether a control is absent because no plugin declared it, because
+its plugin was disabled, or because somebody switched it off.
+
+### Rich panels: the `view` vocabulary
+
+A panel payload is data, and the app draws it. Without help that means the generic
+JSON tree — correct, and not much of a panel. So the app understands a small set of
+**shapes**: return one of these and it is drawn with the product's own components.
+Return anything else and the JSON view takes over, which is what keeps an older app
+and a newer plugin readable to each other.
+
+```json
+{"view": "stat",     "label": "Words in prose", "value": "12,408", "detail": "across 31 files", "tone": "ok"}
+{"view": "list",     "title": "Recently touched", "items": [{"text": "docs/PLUGINS.md", "detail": "2 min ago"}]}
+{"view": "bars",     "label": "Weight by area", "bars": [{"label": "src", "value": 134413, "display": "131.3 kB"}]}
+{"view": "progress", "label": "Snapshots taken", "fraction": 0.3, "detail": "3 of 10"}
+{"view": "clock",    "label": "Writing", "remaining_secs": 932, "running": true}
+{"view": "stack",    "views": [ …any of the above… ]}
+```
+
+* every field is plain text or a number — never markup, a URL, a class name or a
+  style;
+* `tone` is one of `neutral`, `ok`, `warn`, `bad`, `accent`, and it colours an edge
+  or a bar, not the whole card;
+* a `bars` entry's `value` decides the width; `display` is what gets printed beside
+  it, so a plugin counting bytes can print `131.3 kB`;
+* `fraction` is clamped to `0..=1`, `remaining_secs` to a day, text to 120
+  characters and a `stack` to three levels — a payload that breaks those rules is
+  drawn smaller, never a broken tab;
+* give the panel a `refresh_ms` and a **`clock`** really ticks, because each poll
+  is a fresh payload. That is the only real-time surface a plugin has, and it is
+  enough for a timer, a countdown or a build status.
+
+`view` is optional and additive: a panel that returns `{"items": […]}` still
+renders exactly as before.
 
 ---
 

@@ -1165,4 +1165,67 @@ describe('Composer', () => {
       await waitFor(() => expect(textarea.value).toBe('new thought\n\nold thought'));
     });
   });
+
+  describe('plugin-contributed controls', () => {
+    function withUi(ui: unknown): void {
+      store.config.value = { ...configFixture, plugin_ui: ui as never };
+    }
+
+    it('draws a plugin button in its action row and sends exactly one action per click', async () => {
+      withUi({
+        contributions: [
+          {
+            plugin: 'kc-focus',
+            version: '1.0.0',
+            kind: 'button',
+            id: 'focus',
+            hosted_id: 'plugin__kc-focus__focus',
+            slot: 'composer.toolbar',
+            label: 'Focus mode',
+            title: 'Focus mode',
+            action: 'focus',
+          },
+        ],
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          new Response(
+            JSON.stringify({ ok: true, message: 'Focused', refresh: [], open_url: null }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+        ),
+      );
+      try {
+        const { container } = renderComposer();
+        const row = container.querySelector('.compose-bar-left');
+        if (!row) throw new Error('the composer action row did not render');
+        expect(within(row as HTMLElement).getByRole('button', { name: 'Focus mode' })).toBeTruthy();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Focus mode' }));
+        await waitFor(() =>
+          expect(store.toasts.value.map((toast) => toast.message)).toContain('Focused'),
+        );
+        // One click, one request: the control locks itself while it waits.
+        expect((window.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(1);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('lets a plugin hide the attach button without touching the rest of the row', () => {
+      withUi({ hidden: [{ target: 'composer.attach', plugins: ['kc-focus'] }] });
+      const { container } = renderComposer();
+      expect(container.querySelector('.compose-plus')).toBeNull();
+      expect(screen.getByLabelText('Message karucode')).toBeTruthy();
+      // Model controls are not hideable, so they stay.
+      expect(container.querySelector('.composer-session-pins')).not.toBeNull();
+    });
+
+    it('keeps the attach button when nothing is hidden', () => {
+      withUi(undefined);
+      const { container } = renderComposer();
+      expect(container.querySelector('.compose-plus')).not.toBeNull();
+    });
+  });
 });

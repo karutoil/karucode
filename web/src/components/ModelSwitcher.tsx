@@ -73,7 +73,12 @@ function effectiveSelection(): ModelSelection {
 }
 
 /** Close a popover on outside pointer-down or Escape. */
-function usePopover(open: boolean, close: () => void, root: { current: HTMLElement | null }): void {
+function usePopover(
+  open: boolean,
+  close: () => void,
+  root: { current: HTMLElement | null },
+  trigger: { current: HTMLButtonElement | null },
+): void {
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: PointerEvent): void => {
@@ -84,8 +89,10 @@ function usePopover(open: boolean, close: () => void, root: { current: HTMLEleme
     };
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
+        event.preventDefault();
         event.stopPropagation();
         close();
+        trigger.current?.focus();
       }
     };
     document.addEventListener('pointerdown', onPointerDown);
@@ -94,21 +101,75 @@ function usePopover(open: boolean, close: () => void, root: { current: HTMLEleme
       document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKeyDown);
     };
-  }, [open, close, root]);
+  }, [open, close, root, trigger]);
+}
+
+/** Focus one real option and keep exactly that option in the listbox tab order. */
+function useRovingOptions(
+  open: boolean,
+  selectedKey: string,
+  keys: readonly string[],
+  listbox: { current: HTMLElement | null },
+): { activeKey: string; onKeyDown: (event: KeyboardEvent) => void } {
+  const [traversalKey, setTraversalKey] = useState(selectedKey);
+  const signature = keys.join('\0');
+  const fallback = keys.includes(selectedKey) ? selectedKey : (keys[0] ?? '');
+  const activeKey = keys.includes(traversalKey) ? traversalKey : fallback;
+
+  useEffect(() => {
+    if (!open) setTraversalKey(fallback);
+  }, [open, fallback]);
+
+  useEffect(() => {
+    if (!open) return;
+    const option = Array.from(listbox.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])
+      .find((candidate) => candidate.dataset.optionKey === activeKey);
+    option?.focus();
+  }, [open, activeKey, signature, listbox]);
+
+  const onKeyDown = (event: KeyboardEvent): void => {
+    const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
+    if (step === 0 && event.key !== 'Home' && event.key !== 'End') return;
+    const options = keys.filter((key) => {
+      const element = Array.from(listbox.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])
+        .find((candidate) => candidate.dataset.optionKey === key);
+      return element && !element.hasAttribute('disabled');
+    });
+    if (options.length === 0) return;
+    event.preventDefault();
+    const current = Math.max(0, options.indexOf(activeKey));
+    const next = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? options.length - 1
+        : (current + step + options.length) % options.length;
+    setTraversalKey(options[next] ?? options[0] ?? '');
+  };
+
+  return { activeKey, onKeyDown };
 }
 
 /** Per-session model picker; opens upward from the composer. */
 export function ModelSwitcher(): JSX.Element | null {
   const config = store.config.value;
+  const sessionId = store.currentSessionId.value;
   const [open, setOpen] = useState(false);
-  const [pending, setPending] = useState<string | null>(null);
+  const [pendingTarget, setPendingTarget] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
-  usePopover(open, () => setOpen(false), root);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const listbox = useRef<HTMLDivElement>(null);
+  const mutationPending = sessionId !== null && store.sessionModelMutationPending.value === sessionId;
+  const { providerId, modelId, pinned, effort } = effectiveSelection();
+  const selectedKey = providerId && modelId ? `${providerId}:${modelId}` : '';
+  const optionKeys = (config?.providers ?? []).flatMap((profile) =>
+    profile.models.map((model) => `${profile.id}:${model.id}`),
+  );
+  const roving = useRovingOptions(open, selectedKey, optionKeys, listbox);
+  usePopover(open, () => setOpen(false), root, trigger);
 
   // A session is open: the pills stay mounted, whether or not the session
   // happens to have a row in a list right now.
-  if (!config || store.currentSessionId.value === null || config.providers.length === 0) return null;
-  const { providerId, modelId, pinned, effort } = effectiveSelection();
+  if (!config || sessionId === null || config.providers.length === 0) return null;
 
   const provider = providerId ? config.providers.find((profile) => profile.id === providerId) ?? null : null;
   const entry = provider?.models.find((model) => model.id === modelId);
@@ -136,39 +197,45 @@ export function ModelSwitcher(): JSX.Element | null {
       : 'No model configured yet';
   const pinSuffix = dangling ? ' · unavailable' : pinned ? ' · this session' : '';
 
+  const closeAndRestoreFocus = (): void => {
+    setOpen(false);
+    trigger.current?.focus();
+  };
+
   const choose = async (nextProviderId: string, nextModelId: string): Promise<void> => {
-    if (nextProviderId === providerId && nextModelId === modelId) {
-      setOpen(false);
-      return;
-    }
-    setPending(`${nextProviderId}:${nextModelId}`);
+    if (mutationPending) return;
+    closeAndRestoreFocus();
+    if (nextProviderId === providerId && nextModelId === modelId) return;
+    setPendingTarget(`${nextProviderId}:${nextModelId}`);
     try {
       // The pinned effort (when there is one) carries over to the new model.
-      const ok = await actions.setSessionModelSelection(nextProviderId, nextModelId, effort);
-      if (ok) setOpen(false);
+      await actions.setSessionModelSelection(nextProviderId, nextModelId, effort);
     } finally {
-      setPending(null);
+      setPendingTarget(null);
     }
   };
 
   const followDefault = async (): Promise<void> => {
-    setPending('default');
+    if (mutationPending) return;
+    closeAndRestoreFocus();
+    setPendingTarget('default');
     try {
-      const ok = await actions.clearSessionModelSelection();
-      if (ok) setOpen(false);
+      await actions.clearSessionModelSelection();
     } finally {
-      setPending(null);
+      setPendingTarget(null);
     }
   };
 
   return (
     <div class="model-switcher" ref={root}>
       <button
+        ref={trigger}
         type="button"
         class="model-switcher-button"
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="listbox"
         aria-expanded={open}
+        disabled={mutationPending}
         title={title}
         aria-label={`Model for this session: ${label} on ${providerLabel}. Switch model`}
       >
@@ -184,7 +251,13 @@ export function ModelSwitcher(): JSX.Element | null {
       </button>
 
       {open ? (
-        <div class="model-switcher-menu dropup" role="listbox" aria-label="Choose a model for this session">
+        <div
+          ref={listbox}
+          class="model-switcher-menu dropup"
+          role="listbox"
+          aria-label="Choose a model for this session"
+          onKeyDown={roving.onKeyDown}
+        >
           {config.providers.map((profile) => (
             <div class="model-switcher-group" key={profile.id}>
               {config.providers.length > 1 ? (
@@ -198,15 +271,18 @@ export function ModelSwitcher(): JSX.Element | null {
               ) : null}
               {profile.models.map((model) => {
                 const active = profile.id === providerId && model.id === modelId;
-                const busy = pending === `${profile.id}:${model.id}`;
+                const optionKey = `${profile.id}:${model.id}`;
+                const busy = mutationPending && pendingTarget === optionKey;
                 return (
                   <button
                     type="button"
                     role="option"
                     aria-selected={active}
                     class={`model-switcher-option${active ? ' is-active' : ''}`}
-                    key={`${profile.id}:${model.id}`}
-                    disabled={busy}
+                    key={optionKey}
+                    data-option-key={optionKey}
+                    tabIndex={roving.activeKey === optionKey ? 0 : -1}
+                    disabled={mutationPending}
                     onClick={() => void choose(profile.id, model.id)}
                   >
                     <span class="model-switcher-option-main">
@@ -238,15 +314,16 @@ export function ModelSwitcher(): JSX.Element | null {
               <button
                 type="button"
                 class="link-button"
-                disabled={pending === 'default'}
+                disabled={mutationPending}
                 onClick={() => void followDefault()}
               >
-                {pending === 'default' ? 'Resetting…' : 'Follow install default'}
+                {mutationPending && pendingTarget === 'default' ? 'Resetting…' : 'Follow install default'}
               </button>
             ) : null}
             <button
               type="button"
               class="link-button"
+              disabled={mutationPending}
               onClick={() => {
                 setOpen(false);
                 actions.openSettings();
@@ -264,14 +341,20 @@ export function ModelSwitcher(): JSX.Element | null {
 /** Per-session reasoning effort picker; hidden when the model cannot reason. */
 export function ReasoningSelector(): JSX.Element | null {
   const config = store.config.value;
+  const sessionId = store.currentSessionId.value;
   const [open, setOpen] = useState(false);
-  const [pending, setPending] = useState(false);
   const root = useRef<HTMLDivElement>(null);
-  usePopover(open, () => setOpen(false), root);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const listbox = useRef<HTMLDivElement>(null);
+  const mutationPending = sessionId !== null && store.sessionModelMutationPending.value === sessionId;
+  const { providerId, modelId, pinned, effort } = effectiveSelection();
+  const DEFAULT_OPTION = REASONING_OPTIONS[0] as ReasoningOption;
+  const current = REASONING_OPTIONS.find((option) => option.value === (effort ?? 'default')) ?? DEFAULT_OPTION;
+  const roving = useRovingOptions(open, current.value, REASONING_OPTIONS.map((option) => option.value), listbox);
+  usePopover(open, () => setOpen(false), root, trigger);
 
   // Same gate as the model picker: a session is open, so the picker is there.
-  if (!config || store.currentSessionId.value === null || config.providers.length === 0) return null;
-  const { providerId, modelId, pinned, effort } = effectiveSelection();
+  if (!config || sessionId === null || config.providers.length === 0) return null;
 
   // The capability is looked up through the config, not through the session
   // row: the row may not exist, and the picker must not come and go with it.
@@ -285,45 +368,33 @@ export function ReasoningSelector(): JSX.Element | null {
   // (null) stays selectable and the endpoint validates at run time.
   if (entry?.reasoning === false) return null;
 
-  // The list is non-empty by construction, and index 0 is the "no preference"
-  // entry: a stored effort this build has never heard of falls back to it.
-  const DEFAULT_OPTION = REASONING_OPTIONS[0] as ReasoningOption;
-  const current = REASONING_OPTIONS.find((option) => option.value === (effort ?? 'default')) ?? DEFAULT_OPTION;
+  const closeAndRestoreFocus = (): void => {
+    setOpen(false);
+    trigger.current?.focus();
+  };
 
   const choose = async (value: string): Promise<void> => {
+    if (mutationPending) return;
+    closeAndRestoreFocus();
     const nextEffort = value === 'default' ? null : value;
-    if (nextEffort === effort) {
-      setOpen(false);
-      return;
-    }
-    if (nextEffort === null && !pinned) {
-      // Already following the install default with no override: nothing to do.
-      setOpen(false);
-      return;
-    }
-    if (dangling || !providerId || !modelId) {
-      // No usable model to pin the effort to: the server would refuse the patch.
-      setOpen(false);
-      return;
-    }
-    setPending(true);
-    try {
-      const ok = await actions.setSessionModelSelection(providerId, modelId, nextEffort);
-      if (ok) setOpen(false);
-    } finally {
-      setPending(false);
-    }
+    if (nextEffort === effort) return;
+    if (nextEffort === null && !pinned) return;
+    if (dangling || !providerId || !modelId) return;
+    // The state owner's per-session generation rejects a late answer after a
+    // session/project change; this component never applies that answer locally.
+    await actions.setSessionModelSelection(providerId, modelId, nextEffort);
   };
 
   return (
     <div class="model-switcher reasoning-selector" ref={root}>
       <button
+        ref={trigger}
         type="button"
         class="model-switcher-button reasoning-selector-button"
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        disabled={dangling}
+        disabled={dangling || mutationPending}
         title={dangling
           ? 'This session is pinned to a model that is no longer available; its effort cannot be changed until you pick a model.'
           : 'Reasoning effort for this session'}
@@ -344,7 +415,13 @@ export function ReasoningSelector(): JSX.Element | null {
       </button>
 
       {open ? (
-        <div class="model-switcher-menu dropup" role="listbox" aria-label="Choose a reasoning effort">
+        <div
+          ref={listbox}
+          class="model-switcher-menu dropup"
+          role="listbox"
+          aria-label="Choose a reasoning effort"
+          onKeyDown={roving.onKeyDown}
+        >
           {REASONING_OPTIONS.map((option) => {
             const active = option.value === current.value;
             return (
@@ -354,7 +431,9 @@ export function ReasoningSelector(): JSX.Element | null {
                 aria-selected={active}
                 class={`model-switcher-option${active ? ' is-active' : ''}`}
                 key={option.value}
-                disabled={pending}
+                data-option-key={option.value}
+                tabIndex={roving.activeKey === option.value ? 0 : -1}
+                disabled={mutationPending}
                 onClick={() => void choose(option.value)}
               >
                 <span class="model-switcher-option-main">

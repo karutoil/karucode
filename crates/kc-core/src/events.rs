@@ -93,6 +93,14 @@ pub enum Event {
     TextDelta {
         delta: String,
     },
+    /// Replace the complete live answer with its final persisted content.
+    ///
+    /// Emitted after deltas only when final normalization changed their assembled
+    /// text. Clients replace rather than append `content`, so the live transcript
+    /// converges atomically to what a reload will show.
+    TextReplaced {
+        content: String,
+    },
     ReasoningDelta {
         delta: String,
     },
@@ -315,6 +323,31 @@ mod tests {
         match back.event {
             Event::Notification { notification } => assert_eq!(notification, notify),
             other => panic!("expected a notification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_replacement_serialises_as_an_additive_complete_content_event() {
+        let envelope = EventEnvelope {
+            seq: 8,
+            ts_ms: 42,
+            session_id: Some("s_1".into()),
+            run_id: Some("r_1".into()),
+            agent_id: None,
+            event: Event::TextReplaced {
+                content: "final answer".into(),
+            },
+        };
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["type"], serde_json::json!("text_replaced"));
+        assert_eq!(json["content"], serde_json::json!("final answer"));
+        assert_eq!(json["session_id"], serde_json::json!("s_1"));
+        assert_eq!(json["run_id"], serde_json::json!("r_1"));
+
+        let back: EventEnvelope = serde_json::from_value(json).unwrap();
+        match back.event {
+            Event::TextReplaced { content } => assert_eq!(content, "final answer"),
+            other => panic!("expected text_replaced, got {other:?}"),
         }
     }
 

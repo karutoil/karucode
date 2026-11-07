@@ -220,6 +220,7 @@ export function ControlOverview({
         <SparkIcon size={16} class="cp-launch-spark" />
         <select
           class="input cp-launch-project"
+          title={projects.find((item) => item.id === launchProject)?.name ?? undefined}
           aria-label="Project for control chat"
           value={launchProject}
           onChange={(event) => onLaunchProject(event.currentTarget.value)}
@@ -330,13 +331,20 @@ export function ControlOverview({
                 title={session.title}
                 onClick={() => onNavigate(session)}
               >
-                <span class="session-head">
+                <span class="cp-row-body">
                   <span class="rail-avatar" data-tone={tone(session.project_id)} aria-hidden="true">{initials(projectName(session.project_id))}</span>
+                  <span class="cp-row-text">
+                <span class="session-head">
                   <span class="session-title">{session.title}</span>
                 </span>
                 <span class="session-meta">
-                  <span class="status-dot status-warn" aria-hidden="true" />
-                  <span>Needs you · {projectName(session.project_id)} · {absoluteTime(session.updated_at)}</span>
+                  <span class="session-state session-state-warn"><span class="status-dot status-warn" aria-hidden="true" />Needs you</span>
+                  <span class="meta-dot" aria-hidden="true" />
+                  <span>{projectName(session.project_id)}</span>
+                  <span class="meta-dot" aria-hidden="true" />
+                  <span>{absoluteTime(session.updated_at)}</span>
+                </span>
+                  </span>
                 </span>
               </button>
             </li>)}

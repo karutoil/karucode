@@ -262,7 +262,8 @@ Install source:
   --version <VER>        release to install, without the leading "v"
                          (default: "latest")
   --binary <PATH>        install this locally built binary instead of downloading
-  --tarball <PATH>       install from a local release tarball instead of downloading
+  --tarball <PATH>       install a local release tarball; if a sibling SHA256SUMS
+                          exists, it must list and authenticate this archive
 
 Layout:
   --prefix <DIR>         install the binary to <DIR>/bin (default: /usr/local)
@@ -1099,16 +1100,15 @@ The download is corrupt or has been tampered with. Nothing was installed."
         if [ -f "$sums" ]; then
             base="$(basename "$src")"
             expected="$(awk -v f="$base" '$2 == f || $2 == "*" f {print $1; exit}' "$sums")"
-            if [ -n "$expected" ]; then
-                actual="$(sha256_of "$src")"
-                if [ "$expected" != "$actual" ]; then
-                    die "checksum mismatch for ${base}
+            [ -n "$expected" ] || die "${base} is not listed in ${sums}; refusing to install an unverified local tarball"
+            actual="$(sha256_of "$src")"
+            if [ "$expected" != "$actual" ]; then
+                die "checksum mismatch for ${base}
   expected: ${expected}
   actual:   ${actual}
 Nothing was installed."
-                fi
-                info "checksum verified (${actual})"
             fi
+            info "checksum verified (${actual})"
         fi
         tar -xzf "$src" -C "$TMPDIR_" || die "could not unpack ${src}"
         NEW_BINARY="$(find "$TMPDIR_" -type f -name karucode | head -n 1)"

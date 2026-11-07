@@ -279,9 +279,14 @@ async fn retries_a_body_that_dies_before_any_content() {
         async move {
             let n = counter.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
-                // 200 + event-stream headers, then nothing at all: EOF before
-                // data, the signature that reports as a decode error.
+                // A cut frame before any model content is transient. This must
+                // use a partial data field: an actually zero-byte body is now a
+                // permanent empty answer and is covered separately below.
                 socket.write_all(SSE_HEAD.as_bytes()).await.unwrap();
+                socket
+                    .write_all(b"data: {\"choices\":[{\"delta\":")
+                    .await
+                    .unwrap();
                 let _ = socket.shutdown().await;
             } else {
                 write_sse(&mut socket, SSE_OK).await;
@@ -575,6 +580,31 @@ async fn an_empty_body_is_not_retried() {
     assert!(stream.next().await.is_none());
 }
 
+/// Without Content-Length, emptiness is known only when the close-delimited body
+/// returns EOF. That first EOF must already carry the permanent verdict.
+#[tokio::test]
+async fn a_close_delimited_empty_body_is_not_retried() {
+    let server = spawn(move |_req, mut socket| async move {
+        socket.write_all(SSE_HEAD.as_bytes()).await.unwrap();
+        let _ = socket.shutdown().await;
+    })
+    .await;
+
+    let mut stream = retrying(&server, 5)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+    match stream.next().await.expect("a terminal error") {
+        Ok(ProviderChunk::Error { message, retryable }) => {
+            assert!(message.contains("empty response body"), "{message}");
+            assert!(!retryable, "the empty body must not be retried: {message}");
+        }
+        other => panic!("expected a permanent error chunk, got {other:?}"),
+    }
+    assert_eq!(hit_count(&server), 1, "one empty answer, one request");
+    assert!(stream.next().await.is_none());
+}
+
 /// A successful completion delivered only as `[DONE]` is a finished (empty)
 /// answer. It used to be read as "the stream died before sending anything" and
 /// regenerated four times for one turn.
@@ -660,6 +690,78 @@ async fn a_splash_page_still_retries_and_recovers() {
 
     assert_eq!(texts(stream).await, "ok", "the retry must recover the turn");
     assert_eq!(hit_count(&server), 3, "two splashes then the winner");
+}
+
+#[tokio::test]
+async fn in_stream_code_wins_even_when_type_is_tokens() {
+    let failure = response(
+        "200 OK",
+        "text/event-stream",
+        "data: {\"error\":{\"message\":\"slow down\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}\n\n",
+    );
+    let server = flaky_server(1, failure).await;
+    let stream = retrying(&server, 2)
+        .stream_chat(chat_request(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(texts(stream).await, "ok");
+    assert_eq!(hit_count(&server), 2, "the rate-limit code must retry");
+}
+
+#[tokio::test]
+async fn exhausted_408_and_504_keep_their_structured_transient_status() {
+    for (status_line, status) in [("408 Request Timeout", 408), ("504 Gateway Timeout", 504)] {
+        let failure = response(
+            status_line,
+            "application/json",
+            "{\"error\":{\"message\":\"busy upstream: too many tokens at the gateway\"}}",
+        );
+        let server = flaky_server(usize::MAX, failure).await;
+        let mut stream = retrying(&server, 2)
+            .stream_chat(chat_request(), CancellationToken::new())
+            .await
+            .unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("an exhausted status response must be bounded")
+            .expect("a terminal item")
+            .expect_err("retry exhaustion returns the last failure");
+        assert!(matches!(err, kc_core::Error::Provider(_)), "{err:?}");
+        let text = err.to_string();
+        assert!(text.contains(&format!("[http {status}]")), "{text}");
+        assert!(text.contains("gave up after 3 attempts"), "{text}");
+        assert!(!kc_provider::is_context_overflow_error(&err), "{text}");
+        assert!(kc_provider::retry::retryable(&err), "{text}");
+        assert_eq!(hit_count(&server), 3, "initial attempt plus two retries");
+        assert!(stream.next().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn redirects_are_permanent_and_never_repost_or_retry() {
+    for status_line in ["302 Found", "307 Temporary Redirect"] {
+        let response = format!(
+            "HTTP/1.1 {status_line}\r\nlocation: /v1/chat/completions\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        let server = flaky_server(usize::MAX, response.into_bytes()).await;
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            retrying(&server, 5).stream_chat(chat_request(), CancellationToken::new()),
+        )
+        .await
+        .expect("redirect handling must not enter a redirect loop")
+        .unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("a redirect must fail immediately")
+            .expect("a terminal item")
+            .expect_err("redirect is not a completion");
+        let text = err.to_string();
+        assert!(text.contains("3") && text.contains("[permanent]"), "{text}");
+        assert!(!kc_provider::retry::retryable(&err));
+        assert_eq!(hit_count(&server), 1, "{status_line} caused a repost/retry");
+        assert!(stream.next().await.is_none());
+    }
 }
 
 #[tokio::test]

@@ -1,6 +1,5 @@
 import type { JSX } from 'preact';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { workspaceRawUrl } from '../api/endpoints';
 import {
   MAX_TABLE_CHARS,
   buildTable,
@@ -9,7 +8,7 @@ import {
   type ArtifactSpec,
   type ArtifactView,
 } from '../lib/artifacts';
-import { publishArtifact } from '../lib/artifactPreview';
+import { invalidateArtifact, publishArtifact } from '../lib/artifactPreview';
 import { copyText } from '../lib/clipboard';
 import { downloadText, safeFilename } from '../lib/download';
 import { renderCodeBlock, renderMarkdown } from '../lib/markdown';
@@ -18,6 +17,7 @@ import { hasSvgElement, sanitizeSvg } from '../lib/svg';
 import * as store from '../state/store';
 import { activeTheme } from '../theme';
 import { Dialog } from './Dialog';
+import { useWorkspaceObjectUrl } from './FilePreview';
 import {
   AlertIcon,
   ArtifactIcon,
@@ -194,7 +194,10 @@ function HtmlPreview({
     return (
       <Failure
         message={state.message}
-        onRetry={() => setAttempt((value) => value + 1)}
+        onRetry={() => {
+          invalidateArtifact(spec.source, theme);
+          setAttempt((value) => value + 1);
+        }}
         onShowSource={onShowSource}
       />
     );
@@ -469,17 +472,15 @@ function TablePreview({ spec }: { spec: ArtifactSpec }): JSX.Element {
   );
 }
 
-/** An image artifact: a `data:` URL, or a file in the workspace. */
+/** An image artifact: a `data:` URL, or an authenticated workspace object URL. */
 function ImagePreview({ spec }: { spec: ArtifactSpec }): JSX.Element {
   const source = spec.source.trim();
-  const external = /^[a-z][a-z0-9+.-]*:/i.test(source) && !/^data:image\//i.test(source);
-  const src = external
-    ? ''
-    : /^data:image\//i.test(source)
-      ? source
-      : workspaceRawUrl(source, store.currentProjectId.value);
+  const dataUrl = /^data:image\//i.test(source);
+  const external = /^[a-z][a-z0-9+.-]*:/i.test(source) && !dataUrl;
+  const project = store.currentProjectId.value;
+  const media = useWorkspaceObjectUrl(!external && !dataUrl ? source : null, project);
 
-  if (src === '') {
+  if (external) {
     return (
       <p class="artifact-notice" data-testid="artifact-error">
         An image artifact must be a <code>data:image/…</code> URL or a path inside the
@@ -487,11 +488,21 @@ function ImagePreview({ spec }: { spec: ArtifactSpec }): JSX.Element {
       </p>
     );
   }
+  if (media.error) {
+    return (
+      <p class="artifact-notice" role="alert" data-testid="artifact-error">
+        Could not load {source}: {media.error}
+      </p>
+    );
+  }
+  if (!dataUrl && !media.url) {
+    return <p class="artifact-notice" role="status">Loading artifact image…</p>;
+  }
   return (
     <img
       class="artifact-image"
       data-testid="artifact-image"
-      src={src}
+      src={dataUrl ? source : (media.url ?? undefined)}
       alt={spec.title || 'Artifact image'}
       loading="lazy"
     />
@@ -685,7 +696,10 @@ export function ArtifactCard({ spec }: { spec: ArtifactSpec }): JSX.Element {
               class="artifact-tool"
               title="Render again"
               aria-label="Render this artifact again"
-              onClick={() => setNonce((value) => value + 1)}
+              onClick={() => {
+                if (spec.kind === 'html') invalidateArtifact(spec.source, theme);
+                setNonce((value) => value + 1);
+              }}
             >
               <RefreshIcon size={13} />
             </button>

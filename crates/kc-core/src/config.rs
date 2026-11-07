@@ -1777,6 +1777,7 @@ impl Config {
         let env_model = env_str("KARUCODE_MODEL");
         let env_base_url = env_str("KARUCODE_BASE_URL").or_else(|| env_str("OPENAI_BASE_URL"));
         let env_api_key = env_str("KARUCODE_API_KEY").or_else(|| env_str("OPENAI_API_KEY"));
+        let env_request_timeout = env_parse("KARUCODE_REQUEST_TIMEOUT_SECS");
         if let Some(v) = env_model.clone() {
             cfg.model.model = v;
         }
@@ -1792,7 +1793,7 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_MAX_TOKENS") {
             cfg.model.max_tokens = Some(v);
         }
-        if let Some(v) = env_parse("KARUCODE_REQUEST_TIMEOUT_SECS") {
+        if let Some(v) = env_request_timeout {
             cfg.model.request_timeout_secs = v;
         }
         if let Some(v) = env_parse("KARUCODE_RETRY_MAX_RETRIES") {
@@ -1823,6 +1824,9 @@ impl Config {
         // normalisation. The flat file's remaining connection options still apply
         // to this endpoint; do not reset them to ProviderProfile::default().
         if env_model.is_some() || env_base_url.is_some() || env_api_key.is_some() {
+            let mut entry = ModelEntry::new(cfg.model.model.clone());
+            entry.context_window = cfg.model.context_window;
+            entry.max_output_tokens = cfg.model.max_output_tokens;
             cfg.providers.retain(|profile| profile.id != ENV_PROFILE_ID);
             cfg.providers.push(ProviderProfile {
                 id: ENV_PROFILE_ID.to_string(),
@@ -1830,7 +1834,7 @@ impl Config {
                 provider: cfg.model.provider.clone(),
                 base_url: cfg.model.base_url.clone(),
                 api_key: cfg.model.api_key.clone(),
-                models: vec![ModelEntry::new(cfg.model.model.clone())],
+                models: vec![entry],
                 request_timeout_secs: cfg.model.request_timeout_secs,
                 extra_headers: cfg.model.extra_headers.clone(),
                 extra_body: cfg.model.extra_body.clone(),
@@ -1838,6 +1842,14 @@ impl Config {
             });
             cfg.active_provider = Some(ENV_PROFILE_ID.to_string());
             cfg.active_model = Some(cfg.model.model.clone());
+        }
+        // The environment outranks file profiles even when no endpoint variable
+        // synthesizes the reserved env profile. Apply it to every profile so a
+        // session pinned away from the active profile observes the same override.
+        if let Some(timeout) = env_request_timeout {
+            for profile in &mut cfg.providers {
+                profile.request_timeout_secs = timeout;
+            }
         }
 
         if let Some(v) = env_parse("KARUCODE_MAX_ITERATIONS") {
@@ -2033,7 +2045,9 @@ impl Config {
     /// Idempotent: calling it twice yields the same config.
     pub fn normalize_providers(&mut self) {
         if self.providers.is_empty() {
-            let entry = ModelEntry::new(self.model.model.clone());
+            let mut entry = ModelEntry::new(self.model.model.clone());
+            entry.context_window = self.model.context_window;
+            entry.max_output_tokens = self.model.max_output_tokens;
             self.providers.push(ProviderProfile {
                 id: DEFAULT_PROFILE_ID.to_string(),
                 name: "Default".into(),
@@ -2171,12 +2185,23 @@ impl Config {
     /// session pinned to a vision model was told it could not see images.
     pub fn model_for(&self, profile: &ProviderProfile, model_id: &str) -> ModelConfig {
         let entry = self.model_entry_for(profile, model_id);
+        // Synthesized default/environment entries already carry the original flat
+        // limits. A real legacy fallback has no model declarations at all and is
+        // resolving the flat id itself; any declared model with missing metadata
+        // must remain unknown rather than borrow another model's capabilities.
+        let legacy_flat_model =
+            profile.models.is_empty() && model_id.trim() == self.model.model.trim();
+        let (context_window, max_output_tokens) = match entry {
+            Some(entry) => (entry.context_window, entry.max_output_tokens),
+            None if legacy_flat_model => (self.model.context_window, self.model.max_output_tokens),
+            None => (None, None),
+        };
         ModelConfig {
             provider: profile.provider.clone(),
             base_url: profile.base_url.clone(),
             api_key: profile.api_key.clone(),
-            context_window: entry.and_then(|entry| entry.context_window),
-            max_output_tokens: entry.and_then(|entry| entry.max_output_tokens),
+            context_window,
+            max_output_tokens,
             model: model_id.trim().to_string(),
             temperature: self.model.temperature,
             send_temperature: self.model.send_temperature,
@@ -2403,6 +2428,8 @@ mod tests {
         let mut cfg = Config::default();
         cfg.model.model = "qwen3-32b".into();
         cfg.model.base_url = "http://127.0.0.1:8000/v1".into();
+        cfg.model.context_window = Some(131_072);
+        cfg.model.max_output_tokens = Some(16_384);
         cfg.model.aggregator = true;
         cfg.normalize_providers();
 
@@ -2412,8 +2439,12 @@ mod tests {
         assert_eq!(active.base_url, "http://127.0.0.1:8000/v1");
         assert_eq!(active.models.len(), 1);
         assert_eq!(active.models[0].id, "qwen3-32b");
+        assert_eq!(active.models[0].context_window, Some(131_072));
+        assert_eq!(active.models[0].max_output_tokens, Some(16_384));
         assert!(active.aggregator);
         assert!(cfg.effective_model().aggregator);
+        assert_eq!(cfg.effective_model().context_window, Some(131_072));
+        assert_eq!(cfg.effective_model().max_output_tokens, Some(16_384));
         assert_eq!(cfg.active_model.as_deref(), Some("qwen3-32b"));
 
         // Idempotent: normalising again changes nothing.
@@ -2454,6 +2485,40 @@ mod tests {
     }
 
     #[test]
+    fn effective_model_does_not_lend_flat_limits_to_other_declared_models() {
+        let mut cfg = Config::default();
+        cfg.model.model = "flat-only".into();
+        cfg.model.context_window = Some(1_000_000);
+        cfg.model.max_output_tokens = Some(64_000);
+        cfg.limits.context_max_chars = 47_000;
+
+        let mut gateway = profile("gateway", &["declared-default", "hand-added"]);
+        gateway.models[0].context_window = Some(200_000);
+        gateway.models[0].max_output_tokens = Some(8_000);
+        cfg.providers = vec![gateway];
+        cfg.active_provider = Some("gateway".into());
+        cfg.active_model = Some("declared-default".into());
+        cfg.normalize_providers();
+
+        let default = cfg.effective_model();
+        assert_eq!(default.model, "declared-default");
+        assert_eq!(default.context_window, Some(200_000));
+        assert_eq!(default.max_output_tokens, Some(8_000));
+        assert_eq!(cfg.model.model, "declared-default");
+        assert_eq!(
+            cfg.model.context_window,
+            Some(1_000_000),
+            "normalization mirrors the active id but leaves the old flat limits in place"
+        );
+
+        let hand_added = cfg.model_for(&cfg.providers[0], "hand-added");
+        assert_eq!(hand_added.model, "hand-added");
+        assert_eq!(hand_added.context_window, None);
+        assert_eq!(hand_added.max_output_tokens, None);
+        assert_eq!(cfg.limits.context_chars_for(&hand_added), 47_000);
+    }
+
+    #[test]
     fn normalize_repairs_a_stale_selection() {
         let mut cfg = Config {
             providers: vec![profile("gateway", &["model-a"])],
@@ -2471,6 +2536,8 @@ mod tests {
     fn a_profile_with_no_models_falls_back_to_the_flat_model_id() {
         let mut cfg = Config::default();
         cfg.model.model = "legacy-id".into();
+        cfg.model.context_window = Some(65_536);
+        cfg.model.max_output_tokens = Some(4_096);
         cfg.providers = vec![profile("empty", &[])];
         cfg.active_provider = Some("empty".into());
         cfg.active_model = None;
@@ -2478,6 +2545,12 @@ mod tests {
 
         assert_eq!(cfg.active_model.as_deref(), Some("legacy-id"));
         assert_eq!(cfg.effective_model().model, "legacy-id");
+        assert_eq!(cfg.effective_model().context_window, Some(65_536));
+        assert_eq!(cfg.effective_model().max_output_tokens, Some(4_096));
+
+        let unrelated = cfg.model_for(&cfg.providers[0], "different-id");
+        assert_eq!(unrelated.context_window, None);
+        assert_eq!(unrelated.max_output_tokens, None);
     }
 
     /// The reported bug: a session pinned to a vision model on a profile whose
@@ -2749,6 +2822,8 @@ retry_max_stream_restarts = 0
         let file = ConfigFile {
             model: Some(ModelConfig {
                 request_timeout_secs: 900,
+                context_window: Some(98_765),
+                max_output_tokens: Some(9_876),
                 extra_headers: headers.clone(),
                 extra_body: body.clone(),
                 aggregator: true,
@@ -2769,6 +2844,8 @@ retry_max_stream_restarts = 0
         let profile = cfg.active_profile().expect("environment profile");
         assert_eq!(profile.base_url, "http://127.0.0.1:9999/v1");
         assert_eq!(profile.models[0].id, "from-env");
+        assert_eq!(profile.models[0].context_window, Some(98_765));
+        assert_eq!(profile.models[0].max_output_tokens, Some(9_876));
         assert_eq!(
             profile.request_timeout_secs, 37,
             "the env profile must be built after KARUCODE_REQUEST_TIMEOUT_SECS"
@@ -2779,11 +2856,70 @@ retry_max_stream_restarts = 0
 
         let effective = cfg.effective_model();
         assert_eq!(effective.request_timeout_secs, 37);
+        assert_eq!(effective.context_window, Some(98_765));
+        assert_eq!(effective.max_output_tokens, Some(9_876));
         assert_eq!(effective.extra_headers, headers);
         assert_eq!(effective.extra_body, body);
         assert!(effective.aggregator);
         assert_eq!(cfg.model.request_timeout_secs, 37);
         assert!(cfg.model.aggregator);
+    }
+
+    #[test]
+    fn request_timeout_environment_overrides_file_profiles_without_an_env_profile() {
+        let _guard = EnvVars::set([
+            "KARUCODE_MODEL",
+            "KARUCODE_BASE_URL",
+            "OPENAI_BASE_URL",
+            "KARUCODE_API_KEY",
+            "OPENAI_API_KEY",
+            "KARUCODE_REQUEST_TIMEOUT_SECS",
+        ]);
+        for name in [
+            "KARUCODE_MODEL",
+            "KARUCODE_BASE_URL",
+            "OPENAI_BASE_URL",
+            "KARUCODE_API_KEY",
+            "OPENAI_API_KEY",
+        ] {
+            std::env::remove_var(name);
+        }
+        std::env::set_var("KARUCODE_REQUEST_TIMEOUT_SECS", "41");
+
+        let file = ConfigFile {
+            providers: Some(vec![
+                ProviderProfile {
+                    id: "one".into(),
+                    request_timeout_secs: 900,
+                    models: vec![ModelEntry::new("model-one")],
+                    ..ProviderProfile::default()
+                },
+                ProviderProfile {
+                    id: "two".into(),
+                    request_timeout_secs: 901,
+                    models: vec![ModelEntry::new("model-two")],
+                    ..ProviderProfile::default()
+                },
+            ]),
+            active_provider: Some("one".into()),
+            active_model: Some("model-one".into()),
+            ..ConfigFile::default()
+        };
+        let cfg = Config::from_parts(file, None).expect("config loads");
+        assert_eq!(cfg.active_provider.as_deref(), Some("one"));
+        assert_eq!(cfg.effective_model().request_timeout_secs, 41);
+        assert_eq!(cfg.model.request_timeout_secs, 41);
+        assert!(
+            cfg.providers
+                .iter()
+                .all(|profile| profile.request_timeout_secs == 41),
+            "a session pinned to another file profile still gets the env timeout"
+        );
+        assert_eq!(
+            cfg.model_for(&cfg.providers[1], "model-two")
+                .request_timeout_secs,
+            41
+        );
     }
 
     #[test]
