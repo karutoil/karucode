@@ -19,7 +19,11 @@
  */
 
 
-/* The rail's k. button: a plain button that inherits the brand mark's paint. */
+/* The rail's k. button: a plain button that inherits the brand mark's paint.
+ * Rendered by `ProjectRail.tsx`, outside `.control-plane.cp` - this sheet styles
+ * the workbench's own rail button whether or not the plane is ever opened, which
+ * is intentional (the mark must look the same from both surfaces) and why the
+ * rule cannot be scoped under the plane. */
 .control-plane-trigger { border: 0; background: transparent; cursor: pointer; }
 
 
@@ -129,6 +133,12 @@
  * genuine viewport concerns (a whole-window layout and `dvh`), so they stay
  * `@media` - §5A allows that; it is the *regions'* internal layout that must be
  * container-driven. */
+/* The shell stacks below a 900px *window*; the rail fills the plane below a
+ * 780px *container* (control-rail.css). The container tier is safe only because
+ * the window tier always fires first: the plane is the window minus the project
+ * rail, so a 780px container implies a window well above 900px. If the plane is
+ * ever rendered full-window, or the surrounding chrome shrinks past that
+ * headroom, move the stacking into the container query too. */
 @media (max-width: 900px) {
   .control-plane.cp { display: block; overflow: auto; }
 
