@@ -1,7 +1,10 @@
 import type { JSX } from 'preact';
-import { useState } from 'preact/hooks';
+import { useRef, useState } from 'preact/hooks';
 import type { GitCommit, GitStash, GitStatus } from '../../api/types';
+import { copyText } from '../../lib/clipboard';
 import { relativeTime } from '../../lib/format';
+import { contextMenuProps, Menu, MenuItem, useMenu } from '../../lib/menu';
+import * as store from '../../state/store';
 import { CommitIcon, LayersIcon, PlusIcon, TrashIcon, UndoIcon } from '../icons';
 
 export interface GitHistoryProps {
@@ -34,6 +37,89 @@ function stateSummary(commits: GitCommit[] | null): string {
   if (commits === null) return 'not loaded';
   if (commits.length === 0) return 'no commits yet';
   return `${commits.length}${commits.length === 30 ? '+' : ''} commits`;
+}
+
+/**
+ * One commit row.
+ *
+ * The row is a single button (open the commit) with the sha and the subject
+ * selectable as text, so the right-click menu adds nothing but convenience: the
+ * full sha — the row only shows the short one — and the subject without having
+ * to drag a selection across it. Both copy through `copyText` and report the
+ * result as a toast, the way `SessionsRail`'s "Copy title" does, because a copy
+ * the clipboard refused must not look like one that worked.
+ */
+function CommitRow({
+  commit,
+  active,
+  onSelect,
+}: {
+  commit: GitCommit;
+  active: boolean;
+  onSelect: () => void;
+}): JSX.Element {
+  const menu = useMenu();
+  // Focus returns to the row's main button: the menu has no kebab of its own, so
+  // without this Escape would leave focus wherever the browser last had it.
+  const mainRef = useRef<HTMLButtonElement>(null);
+
+  const copy = async (text: string, what: string): Promise<void> => {
+    const copied = await copyText(text);
+    store.pushToast(copied ? `${what} copied.` : `Could not copy the ${what.toLowerCase()}.`,
+      copied ? 'success' : 'error');
+  };
+
+  return (
+    <li
+      class={`gitm-row gitm-commit-row${active ? ' is-active' : ''}`}
+      {...contextMenuProps(menu, undefined, () => mainRef.current)}
+    >
+      <button
+        ref={mainRef}
+        type="button"
+        class="gitm-row-main"
+        aria-pressed={active}
+        onClick={onSelect}
+        title={`${commit.short_id} ${commit.subject}`}
+      >
+        <span class="gitm-badge is-info" aria-hidden="true">
+          <CommitIcon size={11} />
+        </span>
+        <span class="gitm-name">
+          <span class="gitm-file">{commit.subject || '(no message)'}</span>
+          <span class="gitm-dir">
+            {commit.author} · {relativeTime(commit.timestamp * 1000)}
+          </span>
+        </span>
+        <span class="gitm-commit-meta">
+          {refChips(commit.refs).map((ref) => (
+            <span class="gitm-ref" key={ref}>
+              {ref}
+            </span>
+          ))}
+          <code class="gitm-sha">{commit.short_id}</code>
+        </span>
+      </button>
+      <Menu menu={menu} float label={`Commit actions for ${commit.short_id}`}>
+        <MenuItem
+          menu={menu}
+          action={{
+            label: 'Copy sha',
+            // The full sha when the log gave us one; the short one the row shows
+            // is still better than nothing.
+            onSelect: () => void copy(commit.id || commit.short_id, 'Commit sha'),
+          }}
+        />
+        <MenuItem
+          menu={menu}
+          action={{
+            label: 'Copy subject',
+            onSelect: () => void copy(commit.subject || '(no message)', 'Commit subject'),
+          }}
+        />
+      </Menu>
+    </li>
+  );
 }
 
 /**
@@ -106,36 +192,12 @@ export function GitHistory({
           ) : (
             <ul class="gitm-rows gitm-commits">
               {commits.map((commit) => (
-                <li
-                  class={`gitm-row gitm-commit-row${selectedSha === commit.id ? ' is-active' : ''}`}
+                <CommitRow
                   key={commit.id}
-                >
-                  <button
-                    type="button"
-                    class="gitm-row-main"
-                    aria-pressed={selectedSha === commit.id}
-                    onClick={() => onSelectCommit(commit)}
-                    title={`${commit.short_id} ${commit.subject}`}
-                  >
-                    <span class="gitm-badge is-info" aria-hidden="true">
-                      <CommitIcon size={11} />
-                    </span>
-                    <span class="gitm-name">
-                      <span class="gitm-file">{commit.subject || '(no message)'}</span>
-                      <span class="gitm-dir">
-                        {commit.author} · {relativeTime(commit.timestamp * 1000)}
-                      </span>
-                    </span>
-                    <span class="gitm-commit-meta">
-                      {refChips(commit.refs).map((ref) => (
-                        <span class="gitm-ref" key={ref}>
-                          {ref}
-                        </span>
-                      ))}
-                      <code class="gitm-sha">{commit.short_id}</code>
-                    </span>
-                  </button>
-                </li>
+                  commit={commit}
+                  active={selectedSha === commit.id}
+                  onSelect={() => onSelectCommit(commit)}
+                />
               ))}
             </ul>
           )

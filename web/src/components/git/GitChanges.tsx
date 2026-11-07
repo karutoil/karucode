@@ -1,6 +1,9 @@
 import type { JSX } from 'preact';
-import { useState } from 'preact/hooks';
+import { useRef, useState } from 'preact/hooks';
 import type { GitFile } from '../../api/types';
+import { copyText } from '../../lib/clipboard';
+import { contextMenuProps, Menu, MenuItem, useMenu } from '../../lib/menu';
+import * as store from '../../state/store';
 import {
   MinusIcon,
   PlusIcon,
@@ -40,7 +43,12 @@ function rowKey(file: GitFile, group: GitGroupId): string {
   return `${group}:${file.path}`;
 }
 
-/** One file: badge, name over its directory, and the actions for its group. */
+/** One file: badge, name over its directory, and the actions for its group.
+ *
+ *  The row's right-click menu copies the path and nothing else. Stage, unstage
+ *  and discard stay out of it: they are one click away on the row itself, and a
+ *  destructive action duplicated in a pointer menu is a mis-click waiting to
+ *  happen. */
 function FileRow({
   file,
   group,
@@ -63,9 +71,26 @@ function FileRow({
   const { name, dir } = splitPath(file.path);
   const tone = statusTone(file);
   const label = statusLabel(file);
+  const menu = useMenu();
+  // Focus returns to the row's main button: the menu has no kebab of its own, so
+  // without this Escape would leave focus wherever the browser last had it.
+  const mainRef = useRef<HTMLButtonElement>(null);
+
+  /** The path is selectable text; the menu copies the row's own spelling, which
+   *  is what a terminal command wants, and says when the clipboard refused. */
+  const copyPath = async (): Promise<void> => {
+    const copied = await copyText(file.path);
+    store.pushToast(copied ? 'Path copied.' : 'Could not copy the path.',
+      copied ? 'success' : 'error');
+  };
+
   return (
-    <li class={`gitm-row${active ? ' is-active' : ''}`}>
+    <li
+      class={`gitm-row${active ? ' is-active' : ''}`}
+      {...contextMenuProps(menu, undefined, () => mainRef.current)}
+    >
       <button
+        ref={mainRef}
         type="button"
         class="gitm-row-main"
         aria-pressed={active}
@@ -119,6 +144,9 @@ function FileRow({
           </button>
         ) : null}
       </span>
+      <Menu menu={menu} float label={`File actions for ${file.path}`}>
+        <MenuItem menu={menu} action={{ label: 'Copy path', onSelect: () => void copyPath() }} />
+      </Menu>
     </li>
   );
 }

@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/preact';
 import { GitManager } from './GitManager';
+import { GitChanges } from './GitChanges';
 import { GitCommitBox } from './GitCommitBox';
+import { GitHistory } from './GitHistory';
+import { groupFiles } from './gitModel';
 import { useGitRepo } from './useGitRepo';
+import { copyText } from '../../lib/clipboard';
 import type {
   GitBranchList,
   GitCommitDetail,
@@ -13,6 +17,13 @@ import type {
 } from '../../api/types';
 import { jsonResponse, resetAppState } from '../../test/fixtures';
 import * as store from '../../state/store';
+
+// The row menus copy through `lib/clipboard`, which in jsdom has no Clipboard API
+// and no working `execCommand`. Mocked here so the tests can assert what was
+// copied rather than whether the browser allowed it.
+vi.mock('../../lib/clipboard', () => ({ copyText: vi.fn() }));
+
+const copyTextMock = vi.mocked(copyText);
 
 const STATUS: GitStatus = {
   is_repo: true,
@@ -752,6 +763,211 @@ describe('GitManager — inspector panel', () => {
 
     expect(await screen.findByText('Working tree clean')).not.toBeNull();
     expect(document.body.textContent).toContain('Nothing is staged or modified');
+  });
+});
+
+/**
+ * Right-click menus on the two git row surfaces.
+ *
+ * Both rows already show everything they can do — a commit row opens the commit,
+ * a file row carries its stage/unstage/discard buttons — so the menus are pure
+ * convenience copies of text the row displays. What they must not be is the only
+ * path to an action, and what they must be is keyboard-honest: Escape closes and
+ * puts focus back on the row's own button, because there is no kebab here.
+ */
+function renderHistory(commits = LOG.commits): void {
+  render(
+    <GitHistory
+      variant="page"
+      commits={commits}
+      stashes={[]}
+      status={STATUS}
+      selectedSha={null}
+      busy={false}
+      defaultOpen
+      onLoadHistory={vi.fn()}
+      onLoadStashes={vi.fn()}
+      onSelectCommit={vi.fn()}
+      onStash={vi.fn()}
+      onStashEntry={vi.fn()}
+    />,
+  );
+}
+
+function renderChanges(files = STATUS.files): void {
+  render(
+    <GitChanges
+      variant="page"
+      groups={groupFiles(files)}
+      selection={null}
+      busy={false}
+      onSelectFile={vi.fn()}
+      onStage={vi.fn()}
+      onUnstage={vi.fn()}
+      onDiscard={vi.fn()}
+      onStageGroup={vi.fn()}
+      onUnstageGroup={vi.fn()}
+      onDiscardGroup={vi.fn()}
+    />,
+  );
+}
+
+describe('GitHistory — commit row context menu', () => {
+  it('opens on a right-click with the two copy items, suppressing the native menu', () => {
+    renderHistory();
+    const row = containerRow('abc1234');
+
+    // `fireEvent` returns false when the event was cancelled: our menu replaces
+    // the browser's, so the browser's must not also appear.
+    expect(fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })).toBe(false);
+
+    const menu = screen.getByRole('menu', { name: 'Commit actions for abc1234' });
+    expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent))
+      .toEqual(['Copy sha', 'Copy subject']);
+    // Opening focuses the first item: a menu the keyboard cannot reach is not one.
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Copy sha' }));
+    // Portalled onto the menu layer, so no group's overflow can clip it.
+    expect(menu.closest('.menu-layer')?.parentElement).toBe(document.body);
+  });
+
+  it('returns focus to the commit row button when Escape closes the menu', () => {
+    renderHistory();
+    const row = containerRow('abc1234');
+    const main = row.querySelector('.gitm-row-main') as HTMLButtonElement;
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
+    const menu = screen.getByRole('menu');
+
+    fireEvent.keyDown(menu, { key: 'Escape' });
+
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.activeElement).toBe(main);
+  });
+
+  it('copies the full sha rather than the short one the row shows', async () => {
+    copyTextMock.mockResolvedValue(true);
+    renderHistory();
+    fireEvent.contextMenu(containerRow('abc1234'), { clientX: 40, clientY: 60 });
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy sha' }));
+
+    await waitFor(() => expect(copyTextMock).toHaveBeenCalledWith('abc1234aaa'));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(store.toasts.value.at(-1)).toMatchObject({ message: 'Commit sha copied.', tone: 'success' });
+  });
+
+  it('falls back to the short sha when the log gave no full one', async () => {
+    copyTextMock.mockResolvedValue(true);
+    renderHistory([{ ...LOG.commits[0]!, id: '', short_id: 'abc1234' }]);
+
+    fireEvent.contextMenu(containerRow('abc1234'), { clientX: 40, clientY: 60 });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy sha' }));
+
+    await waitFor(() => expect(copyTextMock).toHaveBeenCalledWith('abc1234'));
+  });
+
+  it('copies the subject line', async () => {
+    copyTextMock.mockResolvedValue(true);
+    renderHistory();
+    fireEvent.contextMenu(containerRow('abc1234'), { clientX: 40, clientY: 60 });
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy subject' }));
+
+    await waitFor(() => expect(copyTextMock).toHaveBeenCalledWith('feat: git manager'));
+    expect(store.toasts.value.at(-1)).toMatchObject({ message: 'Commit subject copied.', tone: 'success' });
+  });
+
+  it('says so when the clipboard refuses the copy', async () => {
+    copyTextMock.mockResolvedValue(false);
+    renderHistory();
+    fireEvent.contextMenu(containerRow('abc1234'), { clientX: 40, clientY: 60 });
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy sha' }));
+
+    await waitFor(() =>
+      expect(store.toasts.value.at(-1)).toMatchObject({
+        message: 'Could not copy the commit sha.',
+        tone: 'error',
+      }),
+    );
+  });
+
+  it('leaves the row itself doing what it always did', () => {
+    const onSelectCommit = vi.fn();
+    render(
+      <GitHistory
+        variant="page"
+        commits={LOG.commits}
+        stashes={[]}
+        status={STATUS}
+        selectedSha={null}
+        busy={false}
+        defaultOpen
+        onLoadHistory={vi.fn()}
+        onLoadStashes={vi.fn()}
+        onSelectCommit={onSelectCommit}
+        onStash={vi.fn()}
+        onStashEntry={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(containerRow('abc1234').querySelector('.gitm-row-main') as HTMLElement);
+
+    expect(onSelectCommit).toHaveBeenCalledWith(LOG.commits[0]);
+  });
+});
+
+describe('GitChanges — changed-file row context menu', () => {
+  it('offers Copy path only: staging and discarding stay on the row, not in a menu', () => {
+    renderChanges();
+    const row = containerRow('loader.rs');
+
+    expect(fireEvent.contextMenu(row, { clientX: 40, clientY: 60 })).toBe(false);
+
+    const menu = screen.getByRole('menu', { name: 'File actions for src/plugins/loader.rs' });
+    // A destructive action duplicated behind a right-click is a mis-click; the
+    // row's own buttons remain the one path to it.
+    expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Copy path']);
+    expect(within(row).getByRole('button', { name: 'Stage src/plugins/loader.rs' })).not.toBeNull();
+    expect(within(row).getByRole('button', { name: 'Discard changes in src/plugins/loader.rs' })).not.toBeNull();
+  });
+
+  it('returns focus to the file row button when Escape closes the menu', () => {
+    renderChanges();
+    const row = containerRow('loader.rs');
+    const main = row.querySelector('.gitm-row-main') as HTMLButtonElement;
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 60 });
+
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.activeElement).toBe(main);
+  });
+
+  it('copies the path the row shows', async () => {
+    copyTextMock.mockResolvedValue(true);
+    renderChanges();
+    fireEvent.contextMenu(containerRow('loader.rs'), { clientX: 40, clientY: 60 });
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy path' }));
+
+    await waitFor(() => expect(copyTextMock).toHaveBeenCalledWith('src/plugins/loader.rs'));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(store.toasts.value.at(-1)).toMatchObject({ message: 'Path copied.', tone: 'success' });
+  });
+
+  it('says so when the clipboard refuses the copy', async () => {
+    copyTextMock.mockResolvedValue(false);
+    renderChanges();
+    fireEvent.contextMenu(containerRow('loader.rs'), { clientX: 40, clientY: 60 });
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy path' }));
+
+    await waitFor(() =>
+      expect(store.toasts.value.at(-1)).toMatchObject({
+        message: 'Could not copy the path.',
+        tone: 'error',
+      }),
+    );
   });
 });
 
