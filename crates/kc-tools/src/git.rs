@@ -136,7 +136,10 @@ async fn git_with_env(
     let status = status.map_err(|e| Error::Tool(format!("failed to wait for git: {e}")))?;
     let mut stderr = String::from_utf8_lossy(&stderr).trim().to_string();
     if stderr_truncated {
-        stderr.push_str("\n[git stderr truncated]");
+        stderr.push_str(&format!(
+            "\n[git stderr was cut at its {GIT_STDERR_LIMIT}-byte limit; the rest of the diagnostic \
+             is not in this result]"
+        ));
     }
     Ok(GitRun {
         code: status.code(),
@@ -551,9 +554,11 @@ pub async fn status(ws: &Workspace, path: Option<&str>) -> Result<StatusReport> 
     }
 
     if run.stdout_truncated {
-        return Err(Error::Tool(
-            "git status exceeded its output limit; narrow the path".into(),
-        ));
+        return Err(Error::Tool(format!(
+            "git status exceeded the {GIT_STDOUT_LIMIT}-byte git output limit, so no status was \
+             returned: narrow `path`, or write it out with run_command (`git status --porcelain=v1 \
+             -b > status.txt`) and read `status.txt` with read_file `offset=`/`limit=`"
+        )));
     }
     let (branch, entries) = parse_status_records(&run.stdout, &scope);
 
@@ -746,7 +751,15 @@ pub async fn diff(
 
     let mut text = run.stdout;
     if run.stdout_truncated {
-        text.push_str("\n[git diff output truncated]\n");
+        // A bare "truncated" leaves the model unable to say what is missing or
+        // what to do; the patch has no `offset` argument, so the recovery is to
+        // narrow the diff or to write it out and page the file.
+        text.push_str(&format!(
+            "\n[the patch was cut at the {GIT_STDOUT_LIMIT}-byte git output limit, so it continues \
+             past what this call captured: narrow it with `path`, `base` or `staged`, or write it \
+             out with run_command (`git diff > patch.diff`) and read `patch.diff` with read_file \
+             `offset=`/`limit=`]\n"
+        ));
     }
     if scope.confined() && !text.ends_with('\n') {
         text.push('\n');
@@ -874,9 +887,12 @@ pub async fn log(
         )));
     }
     if run.stdout_truncated {
-        return Err(Error::Tool(
-            "git log exceeded its output limit; ask for fewer commits or narrow the path".into(),
-        ));
+        return Err(Error::Tool(format!(
+            "git log exceeded the {GIT_STDOUT_LIMIT}-byte git output limit, so the history was not \
+             returned at all: ask for fewer commits (`max_count`), narrow `path`, or write it out \
+             with run_command (`git log --oneline > log.txt`) and read `log.txt` with read_file \
+             `offset=`/`limit=`"
+        )));
     }
 
     let mut commits: Vec<Commit> = Vec::new();
@@ -1050,8 +1066,22 @@ mod tests {
         std::fs::write(dir.join("a"), "new line\n".repeat(200000)).unwrap();
         let ws = Workspace::new(&dir).unwrap();
         let report = diff(&ws, None, false, None).await.unwrap();
-        assert!(report.text.contains("[git diff output truncated]"));
-        assert!(report.text.len() < GIT_STDOUT_LIMIT + 100);
+        assert!(
+            report.text.contains(&format!(
+                "cut at the {GIT_STDOUT_LIMIT}-byte git output limit"
+            )),
+            "the marker must state the size of the cut"
+        );
+        assert!(
+            report.text.contains("read_file") && report.text.contains("offset="),
+            "the marker must name the call that pages the rest"
+        );
+        assert!(
+            report.text.contains("patch.diff"),
+            "and the concrete way to write it out: {}",
+            &report.text[report.text.len().saturating_sub(300)..]
+        );
+        assert!(report.text.len() < GIT_STDOUT_LIMIT + 400);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

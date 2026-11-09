@@ -7,7 +7,7 @@
 
 - **Slug:** `prompt-cache`
 - **Tags:** cache, caching, cost, context, compaction, tokens, performance, provider
-- **Applies to:** `config:limits.context_max_chars`, `config:limits.max_context_messages`, `config:limits.max_tool_output_bytes`, `config:limits.max_tool_calls_per_turn`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_MAX_TOOL_OUTPUT_BYTES`, `route:GET /api/events`, `ui:ChatView`, `tool:note`
+- **Applies to:** `config:limits.context_max_chars`, `config:limits.max_context_messages`, `config:limits.max_tool_output_bytes`, `config:limits.max_image_read_bytes`, `config:limits.max_tool_calls_per_turn`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_MAX_TOOL_OUTPUT_BYTES`, `route:GET /api/events`, `ui:ChatView`, `tool:note`
 - **Source:** `crates/kc-runtime/src/context.rs:89`
 
 ---
@@ -196,6 +196,32 @@ walking into the same refusal. Nothing was persisted for the refused attempt,
 so the transcript never carries the same assistant turn twice - and if the
 attempt had already streamed text, the client is told to drop it
 (`StreamRetry`) exactly as it is for a stream that dies mid-answer.
+
+## What is left when nothing can be dropped, and what gets shortened
+
+The pinned task and the exchange in flight are never *dropped*, but they are
+not a licence to send any size: when they alone are over the budget the largest
+bodies keep a head and a tail around a marker instead. Three kinds of body can
+do that to a request, and all three are shortened:
+
+* message text and tool-result text;
+* `reasoning_content`. A reasoning model's chain of thought is persisted with
+  its turn and written back into every later request, so it is charged against
+  `context_max_chars` like any other text - and therefore cut like any other
+  text. Leaving it out was a real hole: a window whose characters were mostly
+  reasoning was reported over budget, sent over budget, and refused by the
+  provider.
+* images, which are charged **8,000 characters each** (their token cost, not
+  their byte cost). A turn that attached more pictures than the budget can pay
+  for loses its oldest ones and says so in the result body
+  (`[N image(s) omitted: ...]`). Encoded image bytes are bounded separately, at
+  20 MiB per request, because that is a memory bound rather than a window one.
+
+Tool-call **arguments** are never cut: shortening a call's arguments changes
+what the call means and can leave invalid JSON for the tool's schema. A turn's
+arguments are bounded by the model's own output limit, so if a single turn's
+arguments alone exceed `context_max_chars` the request is sent as it is and
+logged - the one case a budget cannot fix without inventing a different call.
 
 ## Gotchas
 

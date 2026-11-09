@@ -56,6 +56,21 @@ is the guard against a feature quietly losing its documentation.
 
 The system prompt lists every doc slug, and the `karucode_docs` tool offers
 three actions: `list`, `search` (ranked over title, tags, applies-to, summary
-and body) and `read` (the full markdown plus its source location). The tool is
-read-only and never touches the workspace, so it works in any project and
+and body) and `read` (the topic's markdown plus its source location). The tool
+is read-only and never touches the workspace, so it works in any project and
 needs no approval.
+
+`read` is paged, because a long topic is more than one result's worth of
+markdown:
+
+```json
+{"action":"read","doc":"builtin-tools","offset":1,"limit":400}
+```
+
+`offset` is the 1-based first line (default 1) and `limit` the maximum lines
+(default 400, max 2000). The first line of the answer states the range -
+`` `builtin-tools` — lines 1-400 of 612 `` - and, when the topic continues,
+the last line is the exact call that reads the next page:
+`[next 212 lines omitted; continue with {"action":"read","doc":"builtin-tools","offset":401}]`.
+Follow that offset instead of re-reading from the top: a page that runs past
+the end says so and names the last line, rather than returning an empty body.

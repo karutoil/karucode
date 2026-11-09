@@ -532,6 +532,24 @@ pub struct Limits {
     #[serde(default = "d_run_secs")]
     pub max_run_secs: u64,
     /// Bytes of a single tool result kept for the model (rest is truncated).
+    ///
+    /// It applies to **every** tool result, whatever produced it: a built-in
+    /// (`read_file`, `run_command`), a plugin tool, an MCP tool, or a subagent's
+    /// report arriving as the answer to `spawn_agent`/`wait_for_agents`. The
+    /// result is cut before it is persisted, so the transcript and every later
+    /// request carry the same bytes, and a re-read of the session cannot resurrect
+    /// the rest.
+    ///
+    /// It is a per-result ceiling, not the per-turn one: a turn's tool output is
+    /// additionally bounded by half the conversation budget
+    /// (`limits.context_max_chars` / 2), which is what stops 32 calls at 24 KB
+    /// each from spending 768 KB of a 240 KB window. A sequential turn takes each
+    /// result from what is left of that share; a parallel turn divides it between
+    /// the calls before they start. Either way a result never gets less than
+    /// 2,000 bytes, so a late call still shows what came back. Base64 images a
+    /// result attaches are *not* measured by this key - see
+    /// `limits.max_image_read_bytes` and the 20 MiB encoded-image budget per
+    /// request.
     #[serde(default = "d_tool_output")]
     pub max_tool_output_bytes: usize,
     /// Bytes of streamed command output kept for the UI.
@@ -554,6 +572,13 @@ pub struct Limits {
     /// PNG does not, and `read_file` refuses it with the size and this key's name
     /// so the model can ask for a smaller file instead of silently burning the
     /// context window.
+    ///
+    /// Two other bounds sit on top of it, and neither is this key: a request keeps
+    /// at most **20 MiB** of encoded image data (newest first, the rest omitted
+    /// with a note in the result), and every image is charged **8,000 characters**
+    /// against `limits.context_max_chars`, which is its token cost rather than its
+    /// byte cost. A turn that carries more pictures than that budget can pay for
+    /// loses the oldest ones.
     #[serde(default = "d_image_read")]
     pub max_image_read_bytes: usize,
     /// Maximum results returned by the search tool.
@@ -566,6 +591,16 @@ pub struct Limits {
     /// characters per token. A non-zero value is an explicit ceiling for the
     /// whole install (it can only lower the derived budget, never raise it past
     /// what the model can actually take).
+    ///
+    /// It bounds the **messages** - the system prompt, the compaction digest, every
+    /// turn and every tool result, with an image charged 8,000 characters for its
+    /// token cost. The serialized tool catalogue is sent beside them and is *not*
+    /// in this number: a plugin or an MCP server declares its own names,
+    /// descriptions and schemas in another process, and a large catalogue (55
+    /// plugin tools measured ~40,900 bytes of JSON) is real cost that this budget
+    /// does not see. A caller that knows the catalogue reserves it out of the same
+    /// window: `crates/kc-runtime/src/context.rs` exposes `tool_payload_chars` and
+    /// `ContextLimits::reserving` for exactly that.
     #[serde(default = "d_context_chars")]
     pub context_max_chars: usize,
     /// Ceiling on the number of **messages** one request may carry.
@@ -703,6 +738,18 @@ impl Default for Limits {
 /// Characters per token used to turn a model's token window into a character
 /// budget. Four is the usual English/code estimate; the safety factor below
 /// absorbs the cases where it is optimistic.
+///
+/// It is an **estimate of the content, not a measurement of it**. A request
+/// whose text is JSON, tool output, diffs or logs tokenizes far denser than
+/// English prose: a real install hit `prompt is too long: 1052770 / 1048573` on
+/// a request that filled its own derived budget, which puts the ratio of that
+/// content at ~2.4 characters per token - so the derived budget represented 1.6x
+/// the tokens it assumed, and [`CONTEXT_SAFETY`] (0.95) could not absorb it.
+/// Structure-heavy content is the normal case for this harness, not the corner.
+///
+/// Nothing divides by this to *recover* a token count, so it only ever decides
+/// how large a budget a window earns: a lower number compacts earlier and costs
+/// cache hits, a higher one risks a refused turn. Do not raise it.
 const CHARS_PER_TOKEN: f64 = 4.0;
 /// Shrink the derived budget a little: token counts are estimates, and a request
 /// that overruns the window is rejected outright rather than truncated.
@@ -1223,9 +1270,8 @@ impl AccessConfig {
             if entry.trim().is_empty() {
                 continue;
             }
-            crate::cidr::CidrRange::parse(entry).map_err(|error| {
-                crate::Error::Config(format!("trusted_proxies: {error}"))
-            })?;
+            crate::cidr::CidrRange::parse(entry)
+                .map_err(|error| crate::Error::Config(format!("trusted_proxies: {error}")))?;
         }
         Ok(())
     }
@@ -1312,9 +1358,10 @@ fn split_public_url(url: &str) -> Result<(String, Option<u16>), String> {
         (format!("[{host}]"), port)
     } else {
         match authority.rsplit_once(':') {
-            Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
-                (host.to_string(), Some(parse_port(&format!(":{port}"), text)?))
-            }
+            Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => (
+                host.to_string(),
+                Some(parse_port(&format!(":{port}"), text)?),
+            ),
             _ => (authority.to_string(), None),
         }
     };
@@ -1615,7 +1662,6 @@ pub struct PluginConfig {
     #[serde(default)]
     pub settings: BTreeMap<String, serde_json::Value>,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpServerConfig {
@@ -2650,7 +2696,10 @@ mod tests {
     #[test]
     fn access_is_off_by_default_and_no_url_is_assumed() {
         let config = Config::default();
-        assert!(!config.access.enabled, "a loopback install needs no sign-in");
+        assert!(
+            !config.access.enabled,
+            "a loopback install needs no sign-in"
+        );
         assert_eq!(config.access.public_url, None);
         assert_eq!(config.access.tunnel, TunnelKind::None);
         assert_eq!(config.access.session_days, 30);
@@ -2759,7 +2808,10 @@ mod tests {
             ..AccessConfig::default()
         };
         let ranges = cloudflare.trusted_proxy_ranges().unwrap();
-        assert_eq!(ranges.len(), 2 + crate::cidr::CLOUDFLARE_V4.len() + crate::cidr::CLOUDFLARE_V6.len() + 1);
+        assert_eq!(
+            ranges.len(),
+            2 + crate::cidr::CLOUDFLARE_V4.len() + crate::cidr::CLOUDFLARE_V6.len() + 1
+        );
         assert!(cloudflare.trusts_forwarded_headers());
 
         let custom = AccessConfig {
@@ -2773,9 +2825,18 @@ mod tests {
 
     #[test]
     fn tunnel_kinds_parse_the_spellings_the_ui_and_env_accept() {
-        assert_eq!(TunnelKind::parse("cloudflare"), Some(TunnelKind::Cloudflare));
-        assert_eq!(TunnelKind::parse("cloudflared"), Some(TunnelKind::Cloudflare));
-        assert_eq!(TunnelKind::parse("CLOUDFLARE"), Some(TunnelKind::Cloudflare));
+        assert_eq!(
+            TunnelKind::parse("cloudflare"),
+            Some(TunnelKind::Cloudflare)
+        );
+        assert_eq!(
+            TunnelKind::parse("cloudflared"),
+            Some(TunnelKind::Cloudflare)
+        );
+        assert_eq!(
+            TunnelKind::parse("CLOUDFLARE"),
+            Some(TunnelKind::Cloudflare)
+        );
         assert_eq!(TunnelKind::parse("none"), Some(TunnelKind::None));
         assert_eq!(TunnelKind::parse(""), Some(TunnelKind::None));
         assert_eq!(TunnelKind::parse("custom"), Some(TunnelKind::Custom));
@@ -2859,6 +2920,39 @@ mod tests {
             (90_000..130_000).contains(&small),
             "a 32k-token model should get ~110k chars, got {small}"
         );
+    }
+
+    /// The derived budget converted back at the ratio it was derived with must
+    /// leave room for the answer inside the window.
+    ///
+    /// This is the arithmetic the whole budget rests on, stated as a test so the
+    /// assumption cannot drift silently: text→tokens at [`CHARS_PER_TOKEN`], then
+    /// [`CONTEXT_SAFETY`] on top. It is honest *for that ratio* - a request whose
+    /// text tokenizes denser (JSON, diffs, tool output) can still overrun the
+    /// window, which is what the runtime's one forced compaction exists to
+    /// recover from. See [`CHARS_PER_TOKEN`].
+    #[test]
+    fn the_derived_budget_converts_back_inside_the_window() {
+        for (window, output) in [
+            (1_048_576u64, 384_000u64),
+            (200_000, 8_000),
+            (128_000, 16_384),
+            (32_768, 4_096),
+        ] {
+            let model = model_with_window(Some(window), Some(output));
+            let chars = Limits::default().context_chars_for(&model) as f64;
+            let prompt_tokens = chars / CHARS_PER_TOKEN;
+            assert!(
+                prompt_tokens + output as f64 <= window as f64,
+                "a {window}-token window was given {chars} chars = {prompt_tokens:.0} tokens \
+                 plus a {output}-token answer"
+            );
+            // ... and the safety factor is actually in play, not rounded away.
+            assert!(
+                prompt_tokens <= (window - output) as f64 * CONTEXT_SAFETY,
+                "the derived budget ignored CONTEXT_SAFETY for a {window}-token window"
+            );
+        }
     }
 
     #[test]
@@ -2945,7 +3039,10 @@ mod tests {
         assert!(s.max_concurrent >= 1);
         // A delegated task is a whole piece of work, so the same rule holds:
         // `timeout_secs` ends it, not a count of turns.
-        assert_eq!(s.max_iterations, 0, "no per-subagent turn ceiling by default");
+        assert_eq!(
+            s.max_iterations, 0,
+            "no per-subagent turn ceiling by default"
+        );
         assert!(s.timeout_secs >= 3600);
     }
 

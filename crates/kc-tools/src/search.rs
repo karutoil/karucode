@@ -129,6 +129,50 @@ impl SearchResult {
         }
         out
     }
+
+    /// [`SearchResult::body`] rendered within `max_bytes`, plus how many entries
+    /// (matches, context lines or paths) it really contains.
+    ///
+    /// A search whose result list does not fit the call's output budget used to be
+    /// head+tail spliced: the model saw the first lines, the last lines, and no
+    /// statement of how many matching lines were in between. Bounding the render
+    /// here lets the caller say "showing the first K of M" and name the narrowing
+    /// that finds the rest.
+    pub fn body_bounded(&self, max_bytes: usize) -> (String, usize) {
+        if self.matches.is_empty() {
+            return ("no matches".to_string(), 0);
+        }
+        let rows: Vec<String> = if self.files_only {
+            self.files().into_iter().map(str::to_string).collect()
+        } else {
+            self.matches
+                .iter()
+                .map(|m| {
+                    format!(
+                        "{}:{}{} {}",
+                        m.path,
+                        m.line,
+                        if m.is_context { '-' } else { ':' },
+                        m.text
+                    )
+                })
+                .collect()
+        };
+        let mut out = String::new();
+        let mut shown = 0usize;
+        for row in &rows {
+            let cost = row.len() + usize::from(shown > 0);
+            if shown > 0 && out.len() + cost > max_bytes {
+                break;
+            }
+            if shown > 0 {
+                out.push('\n');
+            }
+            out.push_str(row);
+            shown += 1;
+        }
+        (out, shown)
+    }
 }
 
 /// Search the workspace, preferring ripgrep and falling back to the built-in

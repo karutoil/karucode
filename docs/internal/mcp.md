@@ -100,6 +100,13 @@ one broken server never delays startup or the others. SSE retains raw bytes unti
 a complete UTF-8 line arrives and drains the consumed prefix once per network
 chunk, so many short lines take linear work rather than quadratic copying.
 
+A tool result larger than `limits.max_tool_output_bytes` (24000 by default) is
+cut by karucode on its way to the model, not by the server: the text ends with a
+marker stating how many bytes and lines were dropped and naming that key. MCP
+has no argument karucode can narrow for you, so a server whose tool returns
+something huge should page it itself (take its own `offset`/`limit`) or return a
+file path the agent can open with `read_file`.
+
 ## Not supported
 
 Server-to-client requests (sampling, roots, elicitation), MCP resources/prompts

@@ -90,7 +90,7 @@ use std::sync::{Arc, Mutex};
 // @kc-title: Keep the prompt cache hitting (cheap long runs)
 // @kc-summary: Why a long run can re-bill its whole context every turn, what karucode does to keep the cached prefix stable, and how to read the hit rate.
 // @kc-tags: cache, caching, cost, context, compaction, tokens, performance, provider
-// @kc-applies-to: config:limits.context_max_chars, config:limits.max_context_messages, config:limits.max_tool_output_bytes, config:limits.max_tool_calls_per_turn, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_MAX_TOOL_OUTPUT_BYTES, route:GET /api/events, ui:ChatView, tool:note
+// @kc-applies-to: config:limits.context_max_chars, config:limits.max_context_messages, config:limits.max_tool_output_bytes, config:limits.max_image_read_bytes, config:limits.max_tool_calls_per_turn, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_MAX_TOOL_OUTPUT_BYTES, route:GET /api/events, ui:ChatView, tool:note
 //
 // # What the provider caches
 //
@@ -277,6 +277,32 @@ use std::sync::{Arc, Mutex};
 // attempt had already streamed text, the client is told to drop it
 // (`StreamRetry`) exactly as it is for a stream that dies mid-answer.
 //
+// # What is left when nothing can be dropped, and what gets shortened
+//
+// The pinned task and the exchange in flight are never *dropped*, but they are
+// not a licence to send any size: when they alone are over the budget the largest
+// bodies keep a head and a tail around a marker instead. Three kinds of body can
+// do that to a request, and all three are shortened:
+//
+// * message text and tool-result text;
+// * `reasoning_content`. A reasoning model's chain of thought is persisted with
+//   its turn and written back into every later request, so it is charged against
+//   `context_max_chars` like any other text - and therefore cut like any other
+//   text. Leaving it out was a real hole: a window whose characters were mostly
+//   reasoning was reported over budget, sent over budget, and refused by the
+//   provider.
+// * images, which are charged **8,000 characters each** (their token cost, not
+//   their byte cost). A turn that attached more pictures than the budget can pay
+//   for loses its oldest ones and says so in the result body
+//   (`[N image(s) omitted: ...]`). Encoded image bytes are bounded separately, at
+//   20 MiB per request, because that is a memory bound rather than a window one.
+//
+// Tool-call **arguments** are never cut: shortening a call's arguments changes
+// what the call means and can leave invalid JSON for the tool's schema. A turn's
+// arguments are bounded by the model's own output limit, so if a single turn's
+// arguments alone exceed `context_max_chars` the request is sent as it is and
+// logged - the one case a budget cannot fix without inventing a different call.
+//
 // # Gotchas
 //
 // * Compaction is the only thing that costs a full miss; if the hit rate is low,
@@ -450,8 +476,9 @@ pub fn provider_message_count(messages: &[Message]) -> usize {
 
 /// Number of characters a message contributes to the budget.
 ///
-/// Public because the context report must count exactly what the budget counts;
-/// a second formula would disagree with the thing it is describing.
+/// Public because anything that reports on the budget must count exactly what the
+/// budget counts; a second formula would disagree with the thing it is
+/// describing.
 pub fn message_chars(message: &Message) -> usize {
     let calls: usize = message
         .tool_calls
@@ -467,6 +494,40 @@ pub fn message_chars(message: &Message) -> usize {
         + calls
         + reasoning
         + message.images.len().saturating_mul(IMAGE_CONTEXT_CHARS)
+}
+
+/// Characters the tool catalogue costs in a request body.
+///
+/// A request is `messages` **plus** `tools`, and only the messages are inside
+/// [`ContextLimits::max_chars`]. The catalogue is not a rounding error: a real
+/// install with 55 plugin tools measured ~40,900 bytes of JSON schema, and
+/// nothing bounds a plugin or an MCP server from declaring longer descriptions,
+/// bigger schemas or more tools - they arrive from another process. Two runs on
+/// that install died at `prompt is too long: 1052770 / 1048573` with a window
+/// that fitted its own character budget, because the catalogue and the prompt
+/// envelope sat beside it uncounted.
+///
+/// [`ContextLimits::reserving`] is what puts this inside the budget:
+///
+/// ```ignore
+/// let limits = spec.context_limits().reserving(context::tool_payload_chars(&tool_specs));
+/// ```
+///
+/// Counted as `name + description + serialized parameters`, which is what
+/// `kc_provider::request` writes per tool, minus the JSON scaffolding around it
+/// (a few bytes per tool, so the count is a slight under-estimate and never an
+/// over-estimate of the payload).
+pub fn tool_payload_chars(tools: &[kc_core::tool::ToolSpec]) -> usize {
+    tools
+        .iter()
+        .map(|tool| {
+            tool.name.chars().count()
+                + tool.description.chars().count()
+                + serde_json::to_string(&tool.parameters)
+                    .map(|schema| schema.chars().count())
+                    .unwrap_or(0)
+        })
+        .sum()
 }
 
 /// The two ceilings one request must satisfy: **how much text** it may carry and
@@ -503,6 +564,31 @@ impl ContextLimits {
     /// (a historical entry point, a test, a provider with no item limit).
     pub fn chars_only(max_chars: usize) -> Self {
         Self::new(max_chars, 0)
+    }
+
+    /// These ceilings with `chars` taken off the character budget for what the
+    /// request carries **besides** the conversation.
+    ///
+    /// Today that is the serialized tool catalogue (see [`tool_payload_chars`]),
+    /// which the provider writes beside the messages and which nothing else
+    /// bounds: a plugin or an MCP server declares its own descriptions and
+    /// schemas in another process. Reserving it is what makes "the request fits
+    /// the model's window" true rather than true-of-the-messages-only.
+    ///
+    /// The reservation never takes more than half the budget: a catalogue larger
+    /// than that leaves no conversation to send, and an empty conversation is not
+    /// a smaller request - it is a run that cannot work. The remaining window
+    /// then holds the task and the turn in flight, compacts hard, and says so
+    /// through the usual over-budget warnings.
+    pub fn reserving(self, chars: usize) -> Self {
+        if chars == 0 {
+            return self;
+        }
+        let reserved = chars.min(self.max_chars / 2);
+        Self::new(
+            self.max_chars.saturating_sub(reserved).max(1),
+            self.max_messages,
+        )
     }
 
     /// Is `count` messages inside the item ceiling?
@@ -556,10 +642,10 @@ const REQUEST_SYSTEM_MESSAGES: usize = 1;
 
 /// The result of fitting a conversation into a character budget.
 ///
-/// [`fit`] only needs [`FitOutcome::messages`]. The rest exists so the context
-/// report (`crate::context_report`) can explain *why* a request looks the way it
-/// does without re-implementing the compaction rules - a second implementation
-/// would drift from this one and then confidently report the wrong thing.
+/// [`fit`] only needs [`FitOutcome::messages`]. The rest exists so a caller (or a
+/// test) can explain *why* a request looks the way it does without
+/// re-implementing the compaction rules - a second implementation would drift
+/// from this one and then confidently report the wrong thing.
 #[derive(Debug, Clone)]
 pub struct FitOutcome {
     /// The list that will be sent: truncated, superseded, compacted, digest
@@ -1752,14 +1838,91 @@ fn shrink_bodies(window: &mut [Message], dropped: &[bool], budget: usize) -> usi
         }
     }
 
+    // Still over: images. One is charged [`IMAGE_CONTEXT_CHARS`] against the
+    // budget (that is its token cost, not its byte cost) and no text elision can
+    // shorten one, so a turn that attached more pictures than the budget can pay
+    // for otherwise rides along at several times the budget while every body in
+    // it is already a head and a tail. The newest images are kept - the last page
+    // a read returned is the one being reasoned about - and the omission is
+    // stated in the body, exactly as the byte cap states its own.
+    if total > budget {
+        total = drop_images(window, dropped, total, budget);
+    }
+
     before.saturating_sub(total)
 }
 
-/// Replace the middle of one message body with [`ELIDED_MARKER`], keeping
+/// Characters the [`drop_images`] notice costs, charged before it is written so
+/// the loop cannot end a few characters over the budget it just met.
+const IMAGE_OMIT_MARKER_CHARS: usize = 96;
+
+/// Drop images the budget cannot pay for, until `total` fits `budget`.
+///
+/// Carriers with more images give first, and the pinned task's own images go
+/// last: what the run was *asked* to look at outlives what it merely looked at.
+/// Only images are touched - removing a message is compaction's job, and it does
+/// it in whole exchanges.
+fn drop_images(window: &mut [Message], dropped: &[bool], mut total: usize, budget: usize) -> usize {
+    let pin = pinned_prefix(window);
+    let mut order: Vec<usize> = (0..window.len())
+        .filter(|i| !dropped[*i] && !window[*i].images.is_empty())
+        .collect();
+    order.sort_by_key(|&i| (i < pin, std::cmp::Reverse(window[i].images.len())));
+    for i in order {
+        let mut omitted = 0usize;
+        while !window[i].images.is_empty() && total.saturating_add(IMAGE_OMIT_MARKER_CHARS) > budget
+        {
+            // Oldest first inside one message: the tail is what was read last.
+            window[i].images.remove(0);
+            total = total.saturating_sub(IMAGE_CONTEXT_CHARS);
+            omitted += 1;
+        }
+        if omitted > 0 {
+            let marker =
+                format!("\n[{omitted} image(s) omitted: the request was over the context budget]");
+            total = total.saturating_add(marker.chars().count());
+            window[i].content.push_str(&marker);
+        }
+        if total <= budget {
+            break;
+        }
+    }
+    total
+}
+
+/// Replace the middle of one message's bodies with [`ELIDED_MARKER`], keeping
 /// `keep` characters at each end (UTF-8 safe). Returns the characters saved, or
-/// `None` when the body is already short enough to leave alone.
+/// `None` when every body is already short enough to leave alone.
+///
+/// Both charged bodies are shortened: `content` **and** `reasoning_content`.
+/// A reasoning model's chain of thought is persisted with its turn and written
+/// back into every later request (`kc_provider::request` re-emits
+/// `reasoning_content`), and [`message_chars`] charges it against
+/// `limits.context_max_chars` - so a pass that could only shorten `content`
+/// would report a window as over budget and then send it that way, because the
+/// only characters above the budget were reasoning it was not allowed to touch.
+///
+/// Tool-call *arguments* are deliberately not elided: cutting a call's arguments
+/// changes what the call means and can leave invalid JSON, so they keep their
+/// total budget even when that is what pushes a window over (and a turn's
+/// arguments are bounded by the model's own output limit).
 fn elide_body(message: &mut Message, keep: usize) -> Option<usize> {
-    let chars: Vec<char> = message.content.chars().collect();
+    let mut saved = 0usize;
+    if let Some(chars) = elide_text(&mut message.content, keep) {
+        saved += chars;
+    }
+    if let Some(reasoning) = message.reasoning_content.as_mut() {
+        if let Some(chars) = elide_text(reasoning, keep) {
+            saved += chars;
+        }
+    }
+    (saved > 0).then_some(saved)
+}
+
+/// One body, head + [`ELIDED_MARKER`] + tail. `None` when the body is short
+/// enough to leave alone.
+fn elide_text(text: &mut String, keep: usize) -> Option<usize> {
+    let chars: Vec<char> = text.chars().collect();
     let marker_chars = ELIDED_MARKER.chars().count();
     if chars.len() <= keep * 2 + marker_chars {
         return None;
@@ -1771,7 +1934,7 @@ fn elide_body(message: &mut Message, keep: usize) -> Option<usize> {
     if saved == 0 {
         return None;
     }
-    message.content = body;
+    *text = body;
     Some(saved)
 }
 
@@ -4518,5 +4681,471 @@ mod item_ceiling_tests {
         // ... and the character floor never exceeds a tiny explicit budget.
         let forced = ContextLimits::new(600, 900).forced_smaller();
         assert_eq!(forced.max_chars, 600);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// request-bound proofs
+// ---------------------------------------------------------------------------
+//
+// Every test here answers one question about a *request*: how large can one
+// tolerated insertion point make it, and which key bounds it. They exist because
+// "the budget is enforced by `fit`" is a claim, and a claim about bytes is only
+// worth what a serialized request says it is worth.
+
+#[cfg(test)]
+mod request_bound_tests {
+    use super::*;
+    use kc_core::config::Limits;
+    use kc_core::message::{ImageAttachment, ToolCall};
+
+    fn image(size: usize) -> ImageAttachment {
+        ImageAttachment {
+            data: "a".repeat(size),
+            media_type: "image/png".into(),
+            ..Default::default()
+        }
+    }
+
+    fn total(messages: &[Message]) -> usize {
+        messages.iter().map(message_chars).sum()
+    }
+
+    fn tool(messages: &[Message]) -> &Message {
+        messages
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("a tool result")
+    }
+
+    /// A reasoning model's chain of thought is persisted with its turn and
+    /// **re-sent** on every later request (`kc_provider::request` writes
+    /// `reasoning_content` back into the body). `message_chars` charges it
+    /// against `limits.context_max_chars`, so the elision pass has to be able to
+    /// reclaim it - otherwise a window whose characters are mostly reasoning is
+    /// sent over budget, which is the one outcome the budget exists to prevent.
+    #[test]
+    fn a_reasoning_body_is_elided_rather_than_sent_over_budget() {
+        let messages = vec![
+            Message::system("SYSTEM"),
+            Message::user("TASK: audit the runtime"),
+            Message::assistant_with_reasoning(
+                "weighing the options",
+                Some("r".repeat(200_000)),
+                vec![],
+            ),
+        ];
+        let out = fit_with_limits(messages, ContextLimits::new(20_000, 900), 24_000);
+
+        assert!(
+            total(&out) <= 20_000,
+            "a 200,000-character reasoning body was sent against a 20,000 budget: {} chars",
+            total(&out)
+        );
+        let assistant = out
+            .iter()
+            .find(|m| m.role == Role::Assistant)
+            .expect("the turn stays");
+        let reasoning = assistant.reasoning_content.as_deref().unwrap_or_default();
+        assert!(
+            reasoning.len() < 200_000,
+            "reasoning was not shortened at all: {} bytes",
+            reasoning.len()
+        );
+        assert!(
+            reasoning.contains("elided"),
+            "the cut reasoning says so: {reasoning:?}"
+        );
+    }
+
+    /// An image is charged [`IMAGE_CONTEXT_CHARS`] against the character budget,
+    /// so the number of images a window may keep is a budget question. The byte
+    /// cap alone (`IMAGE_BYTES_BUDGET`, 20 MiB) let a single turn of small
+    /// screenshots hold a request far over its own character budget, and no
+    /// elision can shorten an image.
+    #[test]
+    fn images_cannot_hold_a_window_over_its_own_budget() {
+        let mut task = Message::user("TASK: tidy up the dashboard");
+        task.images = (0..64).map(|_| image(1_000)).collect();
+        let messages = vec![Message::system("SYSTEM"), task];
+
+        let out = fit_with_limits(messages, ContextLimits::new(40_000, 900), 24_000);
+
+        assert!(
+            total(&out) <= 40_000,
+            "64 images cost {} charged chars against a 40,000 budget",
+            total(&out)
+        );
+        let kept = out[1].images.len();
+        assert!(kept > 0, "the newest images still reach the model");
+        assert!(
+            out[1].content.contains("image(s) omitted"),
+            "the omission is stated, not silent: {:?}",
+            out[1].content
+        );
+        // The byte bound is unchanged and independent of the character one.
+        let bytes: usize = out
+            .iter()
+            .flat_map(|m| &m.images)
+            .map(|i| i.data.len())
+            .sum();
+        assert!(bytes <= IMAGE_BYTES_BUDGET);
+    }
+
+    /// The same rule on the window the loop *holds*: what is held is re-cloned
+    /// into every request, so an over-budget image set must not survive there
+    /// either.
+    #[test]
+    fn the_held_window_drops_images_it_cannot_afford() {
+        let mut task = Message::user("TASK: tidy up");
+        task.images = (0..64).map(|_| image(1_000)).collect();
+        let mut history = vec![task];
+
+        compact_run_window_with_limits(&mut history, ContextLimits::new(40_000, 900), &[]);
+
+        assert!(
+            total(&history) <= 40_000,
+            "held window is {} chars against a 40,000 budget",
+            total(&history)
+        );
+        assert!(!history[0].images.is_empty());
+    }
+
+    /// A tool result trimmed by the tool's own cap and then again by the context
+    /// cap must still end with the tail it ended with. Two markers, one marker
+    /// per cut, and the bytes at the end are the bytes the tool produced.
+    #[test]
+    fn a_result_cut_twice_keeps_its_tail() {
+        let raw = format!("HEAD-{}-TAIL-SENTINEL", "m".repeat(200_000));
+        // What the tool handed the transcript: already cut at the 24,000-byte
+        // default. A session resumed under a smaller `max_tool_output_bytes`
+        // (or one persisted when the cap was larger) is cut a second time here.
+        let (stored, cut) = kc_core::tool::truncate_output(&raw, 24_000);
+        assert!(cut);
+        assert!(stored.ends_with("TAIL-SENTINEL"));
+
+        let out = fit_with_limits(
+            vec![
+                Message::system("S"),
+                Message::user("T"),
+                Message::tool_result("c1", "read_file", stored.clone()),
+            ],
+            ContextLimits::chars_only(1_000_000),
+            8_000,
+        );
+        let body = &tool(&out).content;
+        assert!(
+            body.len() <= 8_000,
+            "the second cut is inside the cap: {}",
+            body.len()
+        );
+        assert!(
+            body.ends_with("TAIL-SENTINEL"),
+            "the second cut must keep the tail the first one kept"
+        );
+        // The first cut's marker sits at the seam, which is exactly what the
+        // second cut removes, so the model reads one marker - not a stack of
+        // them - and the numbers in it describe the splice it is looking at.
+        assert_eq!(
+            body.matches("[truncated:").count(),
+            stored.matches("[truncated:").count(),
+            "a second cut must not add a second marker: {body:?}"
+        );
+    }
+
+    /// The tools catalogue is written beside the messages (`kc_provider::request`
+    /// serializes `tools` next to `messages`) and is bounded by nothing that
+    /// context.rs can see: a plugin or an MCP server declares its own names,
+    /// descriptions and schemas in another process. So the budget has to reserve
+    /// it, or "the request fits the model's window" is a claim about the messages
+    /// alone.
+    ///
+    /// This is the whole request, serialized by the provider, against the budget:
+    /// what the model is billed for is the body, not our accounting of it.
+    #[test]
+    fn the_serialized_request_includes_the_tools_catalogue_in_its_budget() {
+        let tools = catalogue(48, 300);
+        let payload = tool_payload_chars(&tools);
+        assert!(
+            payload > 25_000,
+            "fixture: a realistic plugin catalogue is tens of KB, got {payload}"
+        );
+        let budget = 120_000;
+        let limits = ContextLimits::new(budget, 900).reserving(payload);
+
+        let messages = pathological_turn();
+        let out = fit_with_limits(messages, limits, 24_000);
+
+        assert!(
+            out.iter().map(message_chars).sum::<usize>() + payload <= budget,
+            "messages {} + catalogue {payload} against a {budget} budget",
+            out.iter().map(message_chars).sum::<usize>()
+        );
+        let bytes = body_bytes(&out, &tools);
+        assert!(
+            bytes <= budget + envelope_slack(&out),
+            "the serialized request is {bytes} bytes against a {budget}-character budget \
+             (scaffolding allowance {})",
+            envelope_slack(&out)
+        );
+    }
+
+    /// Nothing can make `reserving` hand the conversation a budget of nothing:
+    /// a catalogue bigger than the window leaves half of it for the task and the
+    /// turn in flight instead of zero.
+    #[test]
+    fn a_catalogue_cannot_take_the_whole_budget() {
+        assert_eq!(
+            ContextLimits::new(100_000, 900).reserving(0).max_chars,
+            100_000
+        );
+        assert_eq!(
+            ContextLimits::new(100_000, 900).reserving(10_000).max_chars,
+            90_000
+        );
+        assert_eq!(
+            ContextLimits::new(100_000, 900)
+                .reserving(400_000)
+                .max_chars,
+            50_000
+        );
+    }
+
+    /// The pathological turn, end to end: a plugin fan-out whose results are
+    /// megabytes, a subagent report pasted into the parent as a tool result, the
+    /// notebook at its own ceiling, and a user task the size of a log file.
+    /// Everything the user can make large at once, then serialized.
+    #[test]
+    fn a_pathological_window_serializes_inside_its_budget() {
+        let budget = 240_000;
+        let limits = ContextLimits::new(budget, 900);
+        let notes: Vec<String> = (0..NOTE_MAX_ENTRIES)
+            .map(|i| format!("{i}: {}", "n".repeat(NOTE_ENTRY_MAX_CHARS)))
+            .collect();
+
+        let input = pathological_turn();
+        let before: usize = input.iter().map(message_chars).sum();
+        assert!(
+            before > 10 * budget,
+            "fixture: {before} chars is not the pathological case for a {budget} budget"
+        );
+        let task = input[1].content.clone();
+
+        let out = fit_with_notes_and_limits(
+            input,
+            limits,
+            Limits::default().max_tool_output_bytes,
+            &notes,
+        )
+        .messages;
+
+        // The two things a compaction may never lose: the harness's own prompt,
+        // byte for byte, and the instruction the run was given.
+        assert_eq!(out[0].role, Role::System);
+        assert_eq!(out[0].content, "SYSTEM PROMPT");
+        let head: String = task.chars().take(200).collect();
+        assert!(
+            out.iter()
+                .any(|m| m.role == Role::User && m.content.starts_with(&head)),
+            "the task survived, at least as a head"
+        );
+        assert_eq!(out.last().map(|m| m.role), Some(Role::Tool));
+
+        for message in out.iter().filter(|m| m.role == Role::Tool) {
+            assert!(
+                message.content.len() <= Limits::default().max_tool_output_bytes,
+                "a tool result escaped the per-result cap: {} bytes",
+                message.content.len()
+            );
+        }
+        let chars: usize = out.iter().map(message_chars).sum();
+        assert!(chars <= budget, "{chars} chars against a {budget} budget");
+        // The notebook is replayed inside the digest, not appended, and is
+        // charged like everything else: 64 findings at 2,000 characters cannot
+        // add 128,000 characters to the request.
+        let bytes = body_bytes(&out, &[]);
+        assert!(
+            bytes <= budget + envelope_slack(&out),
+            "the serialized request is {bytes} bytes against a {budget}-character budget"
+        );
+        // ... and every tool call is still answered, so the request is valid.
+        let calls: Vec<&str> = out
+            .iter()
+            .flat_map(|m| m.tool_calls.iter().map(|c| c.id.as_str()))
+            .collect();
+        let results: Vec<&str> = out
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.tool_call_id.as_deref().unwrap_or_default())
+            .collect();
+        for id in results {
+            assert!(calls.contains(&id), "orphaned tool result {id}");
+        }
+    }
+
+    /// The item ceiling counts **every** wire item: the system prompt the loop
+    /// prepends, every tool result, the turns, and (after a compaction) the digest
+    /// that replaces the dropped ones.
+    ///
+    /// The proof is the pair of assertions: a window of exactly `n` items is left
+    /// alone, and the same window at `n - 1` compacts. Drop the system prompt or a
+    /// tool result from the count and the second case would fit, so this is what
+    /// pins `limits.max_context_messages` to what the request really carries.
+    #[test]
+    fn the_item_ceiling_counts_the_system_prompt_and_every_tool_result() {
+        let mut messages = vec![Message::system("SYSTEM"), Message::user("TASK: audit")];
+        for i in 0..10 {
+            messages.push(Message::assistant(
+                "",
+                vec![ToolCall {
+                    id: format!("c{i}"),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }],
+            ));
+            messages.push(Message::tool_result(
+                format!("c{i}"),
+                "read_file",
+                format!("{i}: ok"),
+            ));
+            messages.push(Message::user(format!("next {i}")));
+            messages.push(Message::assistant(format!("done {i}"), vec![]));
+        }
+        let n = provider_message_count(&messages);
+        assert_eq!(n, 42, "2 + 10 exchanges of 4 items");
+        const HUGE: usize = 10_000_000;
+
+        let at_ceiling = fit_with_limits(messages.clone(), ContextLimits::new(HUGE, n), 24_000);
+        assert_eq!(
+            at_ceiling.len(),
+            messages.len(),
+            "a window at exactly the ceiling must be sent byte-identical"
+        );
+
+        let over = fit_detailed_with_limits(messages, ContextLimits::new(HUGE, n - 1), 24_000);
+        assert!(
+            over.notice.is_some(),
+            "one item over the ceiling must compact, not fail the turn"
+        );
+        assert!(
+            provider_message_count(&over.messages) < n,
+            "compacted to {} items against a {} ceiling",
+            provider_message_count(&over.messages),
+            n - 1
+        );
+    }
+
+    /// A catalogue of `count` tools whose descriptions and schemas are as large as
+    /// a plugin process cares to make them.
+    fn catalogue(count: usize, description: usize) -> Vec<kc_core::tool::ToolSpec> {
+        (0..count)
+            .map(|i| kc_core::tool::ToolSpec {
+                name: format!("plugin__server_{i}__do_the_thing"),
+                description: "d".repeat(description),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "p".repeat(description)},
+                        "mode": {"type": "string", "enum": ["a", "b", "c"]}
+                    },
+                    "required": ["path"]
+                }),
+                origin: kc_core::tool::ToolOrigin::Plugin {
+                    name: format!("server_{i}"),
+                },
+            })
+            .collect()
+    }
+
+    /// The worst window a user can build in one run: a task that is a pasted log,
+    /// a fan-out of 32 huge plugin results plus an MCP result and a one-megabyte
+    /// subagent report, and old exchanges behind it.
+    fn pathological_turn() -> Vec<Message> {
+        let mut messages = vec![
+            Message::system("SYSTEM PROMPT"),
+            Message::user(format!("TASK: read this log {}", "L".repeat(200_000))),
+        ];
+        for exchange in 0..8 {
+            messages.push(Message::assistant(
+                "",
+                vec![ToolCall {
+                    id: format!("old-{exchange}"),
+                    name: "read_file".into(),
+                    arguments: format!(r#"{{"path":"src/{exchange}.rs"}}"#),
+                }],
+            ));
+            messages.push(Message::tool_result(
+                format!("old-{exchange}"),
+                "read_file",
+                format!("old page {exchange}: {}", "o".repeat(300_000)),
+            ));
+            messages.push(Message::user(format!("step {exchange}")));
+        }
+        let mut calls = Vec::new();
+        for call in 0..32 {
+            calls.push(ToolCall {
+                id: format!("fan-{call}"),
+                name: "plugin__atlas__atlas_scan".into(),
+                arguments: "{}".into(),
+            });
+        }
+        calls.push(ToolCall {
+            id: "mcp".into(),
+            name: "mcp__srv__query".into(),
+            arguments: "{}".into(),
+        });
+        calls.push(ToolCall {
+            id: "subagent".into(),
+            name: "spawn_agent".into(),
+            arguments: "{}".into(),
+        });
+        messages.push(Message::assistant("", calls));
+        for call in 0..32 {
+            messages.push(Message::tool_result(
+                format!("fan-{call}"),
+                "plugin__atlas__atlas_scan",
+                format!("plugin result {call}: {}", "p".repeat(400_000)),
+            ));
+        }
+        messages.push(Message::tool_result(
+            "mcp",
+            "mcp__srv__query",
+            format!("mcp result: {}", "m".repeat(500_000)),
+        ));
+        messages.push(Message::tool_result(
+            "subagent",
+            "spawn_agent",
+            format!("the child's report: {}", "s".repeat(1_000_000)),
+        ));
+        messages
+    }
+
+    /// Characters of JSON scaffolding the provider writes around the content and
+    /// that [`message_chars`] does not charge for: `role`, `content`,
+    /// `tool_call_id` and `name` keys per message, the `id`/`type`/`function`
+    /// wrapper per call, and the body's own fixed keys.
+    fn envelope_slack(messages: &[Message]) -> usize {
+        let calls: usize = messages.iter().map(|m| m.tool_calls.len()).sum();
+        messages.len() * 96 + calls * 128 + 1_024
+    }
+
+    /// The whole request, serialized exactly as `kc_provider` sends it.
+    fn body_bytes(messages: &[Message], tools: &[kc_core::tool::ToolSpec]) -> usize {
+        let request = kc_core::provider::ChatRequest {
+            admission: None,
+            model: "test-model".into(),
+            messages: messages.to_vec(),
+            tools: tools.to_vec(),
+            temperature: 0.2,
+            send_temperature: true,
+            max_tokens: None,
+            top_p: None,
+            parallel_tool_calls: true,
+            extra_headers: Vec::new(),
+            extra_body: serde_json::Map::new(),
+        };
+        serde_json::to_string(&kc_provider::request::build_chat_body(&request))
+            .expect("serializes")
+            .len()
     }
 }

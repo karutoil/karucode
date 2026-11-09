@@ -309,6 +309,15 @@ async fn start_run_with_lifecycle_policy(
     ));
     let key = state.key();
 
+    // A stop the person already pressed does not free the session instantly: the
+    // cancelled run is still writing its last tool results and its run row while
+    // the composer is enabled again, and the next message arrives in exactly that
+    // window. Waiting it out is what keeps that message from being refused with
+    // "a run is already active" - a 409 that names the run they just stopped.
+    // Bounded, and only entered while a *cancelled* run is registered, so a
+    // second message against a healthy run is still refused at once.
+    runtime.wait_for_unwinding_run(session_id).await;
+
     {
         let mut runs = inner.runs.lock().expect("runs lock");
         // Only a *user run* blocks a new one. A subagent (in particular a
@@ -1838,7 +1847,13 @@ is {})",
         // to, and paying for every one - so the run stops instead of grinding.
         // One new answer, or a write (which changes what the calls return),
         // resets the streak.
+        //
+        // A turn made *only* of wait-shaped calls is neither: its unchanged answer
+        // is the expected outcome, not a re-asked question (see
+        // `is_wait_shaped`). The streak is left exactly as it was, so polling
+        // neither earns a strike nor wipes one the run had already collected.
         let mut fresh = false;
+        let (mut waited, mut asked) = (0usize, 0usize);
         for message in &history[turn_start..] {
             let Some(id) = message.tool_call_id.as_deref() else {
                 continue;
@@ -1846,9 +1861,19 @@ is {})",
             let Some(call) = calls.iter().find(|call| call.id == id) else {
                 continue;
             };
+            asked += 1;
+            if is_wait_shaped(call) {
+                waited += 1;
+                continue;
+            }
             fresh |= answers_seen.insert(answered_key(call, message));
         }
-        if fresh {
+        if asked > 0 && waited == asked {
+            // Polling, not looping: the model is watching something it started.
+            // Nothing is recorded, because the identical answer it just got is
+            // not a duplicate - it is the next observation of a process that has
+            // not changed yet.
+        } else if fresh {
             no_news = 0;
         } else {
             no_news += 1;
@@ -1918,8 +1943,49 @@ fn answered_key(call: &ToolCall, message: &Message) -> [u8; 32] {
 /// the model ignores that and keeps asking. It is a count of *no new
 /// information*, not of identical turns, so a model cycling through three
 /// questions with the same three answers is caught too - and a write, or one
-/// answer it had not seen, resets it.
+/// answer it had not seen, resets it. A turn spent waiting never counts at all:
+/// see [`is_wait_shaped`].
 const NO_NEWS_TURNS: u32 = 4;
+
+/// Calls that are a **wait**, not a question.
+///
+/// The guard above assumes an unchanged answer means the model re-asked something
+/// it already knew. That is true for a question - re-reading a file it just read
+/// costs a generation and teaches nothing - and false for a poll: these tools
+/// watch something that is still running, so an unchanged answer is the *expected*
+/// outcome and calling again is the only way to notice the change. A run that
+/// polled a background terminal while a test suite compiled was stopped with
+/// "the last 4 turns produced no new information" and lost its work, while the
+/// suite it was waiting for was still running: a wait is not a loop.
+///
+/// A turn whose calls are *all* wait-shaped therefore leaves the streak alone
+/// (see the guard in `run_loop_inner`), while one repeated read-only call - or a
+/// wait mixed with one - still counts and still stops the run at
+/// `NO_NEWS_TURNS`. One new answer, or a write, still resets the streak.
+///
+/// Names are the last segment, so a plugin or MCP tool matches too
+/// (`plugin__background-terminals__terminal_read`).
+const WAIT_SHAPED_TOOLS: &[&str] = &[
+    // Blocks until the named children settle or its timeout expires.
+    "wait_for_agents",
+    // Reads what a live process has printed so far; identical while it runs.
+    "terminal_read",
+    // The roster of live children: identical until one of them progresses.
+    "list_subagents",
+];
+
+/// Would re-issuing this exact call be a way of *waiting* rather than a repeat?
+///
+/// Deliberately a short, named list and not a guess about the answer: a tool that
+/// blocks on a human, a build or a child process says so in its name, while a
+/// `read_file` that happens to return an unchanged page is the case the guard is
+/// for. The cost of a wrong omission is one guard strike (four are needed); the
+/// cost of a wrong inclusion would be a run that can grind forever, which is why
+/// nothing that merely *might* be a poll is listed here.
+fn is_wait_shaped(call: &ToolCall) -> bool {
+    let base = call.name.rsplit("__").next().unwrap_or(&call.name);
+    WAIT_SHAPED_TOOLS.contains(&base)
+}
 
 /// Store what a turn had produced when it stopped early.
 ///
@@ -2612,6 +2678,23 @@ async fn run_one_tool(
                         problems.join("\n- "),
                         tool_spec.example_call()
                     ))
+                } else if spec.cancel.is_cancelled() {
+                    // A stop that already landed must never be paid for with a
+                    // *new* tool run. The grace period below exists for a call
+                    // that is already in flight - a shell command killing its
+                    // process group, a plugin returning what it observed before
+                    // it noticed - and driving it is exactly what lets that
+                    // happen. A call that has not started yet gets the same
+                    // placeholder the sequential path writes for a call it
+                    // reaches after the stop, so the transcript still answers
+                    // every `tool_call`.
+                    //
+                    // The sequential path refuses these calls before reaching
+                    // here; a concurrent batch that was planned while the token
+                    // was still live can still be holding them when it fires,
+                    // which is why the check sits at the invocation rather than
+                    // only at the plan.
+                    kc_core::tool::ToolOutcome::err(format!("{SKIPPED_PREFIX}run cancelled]"))
                 } else if let Some(denied) =
                     gate_external_tool(inner, spec, call, &tool, &arguments).await
                 {
@@ -4338,5 +4421,217 @@ mod current_runtime_regressions {
         assert!(runtime.queued_all(&session).follow_ups.is_empty());
         drop(runtime);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+/// The stop paths a person actually uses, asserted end to end.
+///
+/// "The run ended as cancelled" is not the whole promise: the session has to be
+/// usable again, no tool may start after the stop, and the persisted run row must
+/// agree with what the browser was told.
+#[cfg(test)]
+mod stop_semantics_tests {
+    use super::*;
+    use crate::tests_support::{HarnessBuilder, Script};
+    use kc_core::tool::{Tool, ToolCallRequest, ToolCtx, ToolOrigin, ToolOutcome, ToolSpec};
+    use std::sync::atomic::AtomicUsize;
+
+    /// A read-only built-in tool that stops the run the first time its **class**
+    /// is asked for.
+    ///
+    /// `plan_parallel_turn` asks every call for its class before the batch runs,
+    /// so this lands the cancel in the one window a person cannot reach by hand:
+    /// the batch is already planned and its futures have not been polled yet. A
+    /// stop there must produce "this call was skipped", not "this call ran for
+    /// the 500ms grace period".
+    struct CancelWhilePlanningTool {
+        name: String,
+        runtime: std::sync::OnceLock<Arc<Runtime>>,
+        armed: std::sync::atomic::AtomicBool,
+        invocations: Arc<AtomicUsize>,
+    }
+
+    impl CancelWhilePlanningTool {
+        fn new(name: &str) -> Arc<Self> {
+            Arc::new(Self {
+                name: name.to_string(),
+                runtime: std::sync::OnceLock::new(),
+                armed: std::sync::atomic::AtomicBool::new(false),
+                invocations: Arc::new(AtomicUsize::new(0)),
+            })
+        }
+
+        fn invocations(&self) -> usize {
+            self.invocations.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for CancelWhilePlanningTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name.clone(),
+                description: "read something, once".into(),
+                parameters: serde_json::json!({ "type": "object" }),
+                origin: ToolOrigin::Builtin,
+            }
+        }
+
+        fn class(&self) -> kc_core::tool::ToolClass {
+            if !self.armed.swap(true, Ordering::SeqCst) {
+                if let (Some(runtime), Some(run)) =
+                    (self.runtime.get(), self.runtime.get().and_then(|r| {
+                        r.active_runs().into_iter().next()
+                    }))
+                {
+                    runtime.cancel(&run.session_id);
+                }
+            }
+            kc_core::tool::ToolClass::ReadOnly
+        }
+
+        async fn invoke(&self, _request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            ToolOutcome::ok("ran")
+        }
+    }
+
+    /// Pressing stop and typing the next message must not be answered with "a run
+    /// is already active".
+    ///
+    /// The stopped run is held inside its final `finish_run` write - the exact
+    /// state the browser is in when `run_finished` (published *before*
+    /// deregistration) re-enables the composer.
+    #[tokio::test]
+    async fn a_message_sent_while_the_stopped_run_unwinds_is_accepted() {
+        let mut h = HarnessBuilder::new(vec![Script::Hang(vec![]), Script::text("second")])
+            .build()
+            .await;
+        h.submit("first").await;
+
+        // The stop has to land while the first run is *streaming*. A run stopped
+        // before its first provider call never takes the hanging script, and the
+        // follow-up run inherits it - waiting out a stream that never ends
+        // instead of answering. One recorded request proves it is spoken for.
+        while h.factory.requests().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let finish_gate = h.store.gate_next("finish_run");
+        assert!(h.runtime.cancel(h.session()), "cancel should find the run");
+        finish_gate.wait_entered().await;
+        // Exactly the window: the run is stopped, the session still owns it.
+        assert!(h.runtime.has_unwinding_top_level_run(h.session()));
+        assert!(
+            !h.runtime.has_active_run(h.session()),
+            "the composer is enabled in this window"
+        );
+
+        let runtime = Arc::clone(&h.runtime);
+        let session = h.session().to_string();
+        let waiting =
+            tokio::spawn(async move { runtime.submit(&session, "second".into()).await });
+        // Long enough for the submit to reach the wait, short enough that the
+        // gate is still holding the run.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !waiting.is_finished(),
+            "the message must wait for the unwind instead of being refused"
+        );
+
+        finish_gate.release();
+        waiting
+            .await
+            .expect("submit task")
+            .expect("a message sent after a stop must be accepted");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Run one: the stopped one.
+        let first = h.collect_until_finished().await;
+        assert_eq!(
+            first.iter().find_map(|event| match &event.event {
+                Event::RunFinished { status, .. } => Some(status.clone()),
+                _ => None,
+            }),
+            Some("cancelled".to_string()),
+            "the stopped run stays cancelled: {:?}",
+            kinds_for(&first)
+        );
+        // Run two: the message sent during the unwind.
+        let second = h.collect_until_finished().await;
+        assert_eq!(
+            second.iter().find_map(|event| match &event.event {
+                Event::RunFinished { status, .. } => Some(status.clone()),
+                _ => None,
+            }),
+            Some("completed".to_string()),
+            "the message sent after a stop must actually run: {:?}",
+            kinds_for(&second)
+        );
+
+        let runs = h.store.runs();
+        assert_eq!(runs[0].status, "cancelled");
+        assert_eq!(runs[1].status, "completed");
+        assert!(h.wait_idle().await.is_empty());
+    }
+
+    /// A tool that had not started when the stop arrived must never start.
+    #[tokio::test]
+    async fn a_stop_does_not_start_the_tool_calls_it_was_about_to_run() {
+        let mut h = HarnessBuilder::new(vec![Script::call(&[
+            ("call_a", "plan_a", "{}"),
+            ("call_b", "plan_b", "{}"),
+        ])])
+        .build()
+        .await;
+
+        let first = CancelWhilePlanningTool::new("plan_a");
+        let second = CancelWhilePlanningTool::new("plan_b");
+        let _ = first.runtime.set(Arc::clone(&h.runtime));
+        let _ = second.runtime.set(Arc::clone(&h.runtime));
+        let mut registry = kc_core::tool::ToolRegistry::new();
+        registry.register(Arc::clone(&first) as Arc<dyn Tool>);
+        registry.register(Arc::clone(&second) as Arc<dyn Tool>);
+        h.runtime.set_tools(Arc::new(registry));
+
+        let events = h.run_to_finish("use both tools").await;
+
+        assert_eq!(
+            first.invocations(),
+            0,
+            "a tool that had not started must not run after a stop"
+        );
+        assert_eq!(second.invocations(), 0);
+        assert_eq!(finished_status_of(&events), "cancelled");
+        // The transcript still answers every call the assistant asked for.
+        let tools: Vec<String> = h
+            .session_messages()
+            .await
+            .into_iter()
+            .filter(|message| message.role == "tool")
+            .map(|message| message.content)
+            .collect();
+        assert_eq!(tools.len(), 2, "one result per call: {tools:?}");
+        assert!(
+            tools.iter().all(|text| text.contains("run cancelled")),
+            "the skipped calls must say why: {tools:?}"
+        );
+        assert!(h.wait_idle().await.is_empty());
+    }
+
+    fn finished_status_of(events: &[kc_core::events::EventEnvelope]) -> String {
+        events
+            .iter()
+            .find_map(|event| match &event.event {
+                Event::RunFinished { status, .. } => Some(status.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn kinds_for(events: &[kc_core::events::EventEnvelope]) -> Vec<String> {
+        events
+            .iter()
+            .map(|event| format!("{:?}", event.event).split_whitespace().next().unwrap_or("?").to_string())
+            .collect()
     }
 }

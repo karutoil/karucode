@@ -709,6 +709,87 @@ mod tests {
         );
     }
 
+    /// A provider that fails every attempt, counting them.
+    ///
+    /// The point of the test below is the *sleep* between attempts, so the
+    /// failure has to be the cheap, always-retryable kind.
+    #[derive(Default)]
+    struct AlwaysFails {
+        attempts: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait]
+    impl Provider for AlwaysFails {
+        fn id(&self) -> &str {
+            "always-fails"
+        }
+
+        async fn stream_chat(
+            &self,
+            _request: ChatRequest,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderStream> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(Error::Provider("upstream broke".into()))
+        }
+    }
+
+    /// A stop that lands inside the retry backoff must not wait the backoff out.
+    ///
+    /// The default policy's first delay is half to full of `retry_base_delay_ms`,
+    /// which an operator can set to thirty seconds. Without the cancel arm on the
+    /// sleep, pressing stop during a retry would leave the run (and the session)
+    /// waiting for a timer nobody is interested in any more.
+    #[tokio::test]
+    async fn cancelling_during_a_retry_sleep_returns_at_once() {
+        let inner = Arc::new(AlwaysFails::default());
+        let provider = RetryingProvider::new(
+            Arc::clone(&inner) as Arc<dyn Provider>,
+            RetryPolicy::new(50, Duration::from_secs(30), Duration::from_secs(30)),
+        );
+        let cancel = CancellationToken::new();
+        let request = ChatRequest {
+            admission: None,
+            model: "test-model".into(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            temperature: 0.0,
+            send_temperature: true,
+            max_tokens: None,
+            top_p: None,
+            parallel_tool_calls: false,
+            extra_headers: Vec::new(),
+            extra_body: serde_json::Map::new(),
+        };
+        let mut stream = provider
+            .stream_chat(request, cancel.clone())
+            .await
+            .expect("the retry layer opens a stream immediately");
+
+        let started = tokio::time::Instant::now();
+        let read = tokio::spawn(async move { stream.next().await });
+        // Let the first attempt fail and the backoff start before stopping.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.cancel();
+        let item = tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .expect("the stop must not wait out a 15-30s backoff")
+            .expect("read task");
+        let elapsed = started.elapsed();
+
+        assert!(matches!(item, Some(Err(Error::Cancelled))), "{item:?}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a cancelled retry returned after {elapsed:?}"
+        );
+        assert_eq!(
+            inner.attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a cancelled retry must not start another attempt"
+        );
+    }
+
     #[test]
     fn content_classes_stop_retrying() {
         assert!(is_content(&ProviderChunk::Text("hi".into())));

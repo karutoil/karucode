@@ -87,6 +87,21 @@ pub const SKIP_RECOVERY_ENV: &str = "KARUCODE_SKIP_RECOVERY";
 /// than blocking the run.
 pub const EVENT_CHANNEL_CAPACITY: usize = 2048;
 
+/// How long a new message waits for a stopped run to finish unwinding.
+///
+/// Firing the cancel token is not the same as the run being gone: its loop still
+/// writes the tool results it already has, its run row and its terminal frames
+/// before it deregisters. A person who presses stop and types again does so in
+/// that window, so the runtime waits it out instead of answering "a run is
+/// already active" - which names the one run they just stopped. Cancelled
+/// teardown skips the run-end hook and only writes local rows, so this is two
+/// orders of magnitude longer than it takes; it is bounded so a genuinely stuck
+/// teardown still gets an answer rather than hanging the request.
+pub(crate) const UNWIND_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Poll interval while waiting for a stopped run to deregister.
+pub(crate) const UNWIND_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
 pub struct RuntimeDeps {
     pub store: Arc<dyn Store>,
     pub providers: Arc<dyn ProviderFactory>,
@@ -1152,6 +1167,45 @@ impl Runtime {
             .any(|s| s.top_level && s.session_id.0 == session_id)
     }
 
+    /// Is a **user run** for this session still registered *after* a stop?
+    ///
+    /// This is the exact window between "the token fired" and "the run is
+    /// gone": the loop is writing its last tool results, its run row and its
+    /// terminal frames. [`Runtime::has_active_run`] already reports the session
+    /// as idle then - the composer is enabled - while `start_run` would still
+    /// refuse a new prompt, which is the 409 a person gets when they press stop
+    /// and immediately type again. Naming the window is what lets a new run wait
+    /// it out instead of refusing.
+    pub(crate) fn has_unwinding_top_level_run(&self, session_id: &str) -> bool {
+        let runs = self.inner.runs.lock().expect("runs lock");
+        runs.values()
+            .any(|s| s.top_level && s.session_id.0 == session_id && s.cancel.is_cancelled())
+    }
+
+    /// Wait (bounded) for a stopped run of this session to deregister.
+    ///
+    /// Returns as soon as the registration is gone. Gives up after
+    /// [`UNWIND_WAIT`] so a teardown that is genuinely stuck is reported (the
+    /// caller then refuses with the same 409 as before) rather than hanging the
+    /// request for as long as the stuck run lives.
+    pub(crate) async fn wait_for_unwinding_run(&self, session_id: &str) {
+        if !self.has_unwinding_top_level_run(session_id) {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + UNWIND_WAIT;
+        while self.has_unwinding_top_level_run(session_id) {
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    session = %session_id,
+                    "a cancelled run did not deregister within {}ms; a new message may be refused",
+                    UNWIND_WAIT.as_millis()
+                );
+                return;
+            }
+            tokio::time::sleep(UNWIND_POLL).await;
+        }
+    }
+
     /// Close queue admission, convert any final-turn steers into follow-ups and
     /// remove the run as one registry critical section. Queue admission takes
     /// the same registry lock, so an accepted message cannot be stranded between
@@ -1259,11 +1313,17 @@ impl Runtime {
     /// True while a **user run** for this session is in flight.
     ///
     /// This is the question the composer and `POST .../messages` ask: "would a
-    /// new prompt be refused right now?". A detached subagent is deliberately not
+    /// new prompt have to wait right now?". A detached subagent is deliberately not
     /// counted - it outlives the turn that started it, and a session that looked
     /// busy for as long as a background agent ran would silently refuse every
     /// prompt the user typed in the meantime. Use [`Runtime::is_running`] for
     /// "is anything at all still writing in here" (rewind, deletion).
+    ///
+    /// A run that has been **cancelled but has not deregistered yet** is also not
+    /// counted: it is finishing its last writes, and the person who stopped it
+    /// must not be told the session is busy. `start_run` bridges the difference
+    /// by waiting that unwind out (see [`Runtime::has_unwinding_top_level_run`])
+    /// instead of refusing the message.
     pub fn has_active_run(&self, session_id: &str) -> bool {
         let runs = self.inner.runs.lock().expect("runs lock");
         runs.values()

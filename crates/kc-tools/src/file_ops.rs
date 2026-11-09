@@ -74,12 +74,13 @@ pub fn read_file(
     limit: Option<u64>,
     max_bytes: usize,
 ) -> Result<Rendered> {
-    read_file_cancellable(
+    read_file_budgeted(
         ws,
         path,
         offset,
         limit,
         max_bytes,
+        usize::MAX,
         &CancellationToken::new(),
     )
 }
@@ -94,6 +95,38 @@ pub fn read_file_cancellable(
     max_bytes: usize,
     cancel: &CancellationToken,
 ) -> Result<Rendered> {
+    read_file_budgeted(ws, path, offset, limit, max_bytes, usize::MAX, cancel)
+}
+
+/// Smallest per-call output budget that gets a budget-aware render.
+///
+/// Below this the header and the continuation hint alone would consume the whole
+/// result, so the read renders as it always did and the shared truncation marker
+/// explains the cut (it names the same key).
+const MIN_BUDGETED_READ: usize = 512;
+
+/// [`read_file_cancellable`] with the call's own output budget.
+///
+/// `budget` is `limits.max_tool_output_bytes`: the rendered body - header, notes,
+/// numbered lines and the continuation hint - is kept inside it by returning
+/// fewer *whole* lines, so the header's `lines A-B` range and the
+/// `continue with offset=N` hint stay exact instead of being spliced by a later
+/// head+tail cut. `max_bytes` keeps its own meaning: how many bytes one read will
+/// stream through (`limits.max_file_read_bytes`), which bounds work, not output.
+pub fn read_file_budgeted(
+    ws: &Workspace,
+    path: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+    max_bytes: usize,
+    budget: usize,
+    cancel: &CancellationToken,
+) -> Result<Rendered> {
+    let budget = if budget >= MIN_BUDGETED_READ {
+        budget
+    } else {
+        usize::MAX
+    };
     let abs = ws.resolve_existing(path)?;
     let rel = ws.relative(&abs);
     let meta = std::fs::metadata(&abs).map_err(|e| Error::io(&abs, e))?;
@@ -118,7 +151,7 @@ pub fn read_file_cancellable(
     // the lines that fit in the first N bytes". The cap bounds bytes *returned*,
     // so a later window is streamed to (bounded, cancellable) instead of refused.
     if offset > 1 && size > max_bytes as u64 {
-        return read_window(&abs, &rel, size, offset, limit, max_bytes, cancel);
+        return read_window(&abs, &rel, size, offset, limit, max_bytes, budget, cancel);
     }
 
     // One open, one pass. The prefix is read first (that is what gets returned);
@@ -176,67 +209,62 @@ pub fn read_file_cancellable(
     // Never index past the bytes that were actually read.
     let shown_end = end.min(available);
 
-    let (first, last) = if total == 0 {
-        (0, 0)
-    } else if start >= total {
-        (total, total)
-    } else if start >= available {
-        // Inside the file, but past the bytes the cap let us read.
-        (start + 1, available)
-    } else {
-        (start + 1, shown_end)
-    };
     let mut out = String::new();
     // A capped count is a lower bound, so it is written `N+` and explained rather
     // than presented as the file's real length.
-    let total_label = if total_capped {
-        format!("{total}+")
-    } else {
-        total.to_string()
-    };
-    out.push_str(&format!(
-        "{rel} — lines {first}-{last} of {total_label} ({size} bytes)"
-    ));
-
-    // Explain the (rare) byte cap before the content so it survives output
-    // truncation of a huge file.
-    if byte_limited {
-        out.push_str(&format!(
-            "\n[note: only the first {max_bytes} of {size} bytes were read (limits.max_file_read_bytes); \
-             raise the limit to see the rest]"
-        ));
-        if total_capped {
-            out.push_str(&format!(
-                "\n[note: the line count stopped at {MAX_COUNTED_LINES} lines, so `{total}+` is a \
-                 lower bound]"
-            ));
-        }
-    }
+    let total_label = total_label(total, total_capped);
 
     if total == 0 {
+        out.push_str(&header(&rel, 0, 0, &total_label, size));
         out.push_str("\n[file is empty]");
     } else if start >= total {
-        out.push_str(&format!(
-            "\n[offset {offset} is past the end of the file ({total} lines); start at or before {total}]"
-        ));
+        out.push_str(&header(&rel, total, total, &total_label, size));
+        out.push_str(&past_end_note(offset, total));
     } else if start >= available {
+        out.push_str(&header(&rel, start + 1, available, &total_label, size));
+        push_read_notes(&mut out, byte_limited, max_bytes, size, total_capped);
         out.push_str(&format!(
             "\n[offset {offset} is beyond the {available} lines that fit in the first {max_bytes} bytes; \
              raise limits.max_file_read_bytes to read further]"
         ));
     } else {
-        for (i, line) in lines[start..shown_end].iter().enumerate() {
-            out.push_str(&format!("\n{:>5}\t{}", start + i + 1, line));
-        }
+        // The lines are rendered before the header: how many fit the call's
+        // output budget decides the `lines A-B` range, so the header cannot
+        // promise lines this result does not carry.
+        let mut body = String::new();
         // Only offer "continue with offset" when the window was not cut short by
-        // the byte cap; otherwise the note above already explains the limit.
-        if shown_end < total && shown_end == end {
-            out.push_str(&format!(
-                "\n[next {} lines omitted; continue with offset={}]",
-                total - shown_end,
-                shown_end + 1
-            ));
-        }
+        // the byte cap; otherwise no offset reaches past that cap and the note
+        // above is the whole story. A *budget* cut still gets the hint - that is
+        // exactly the case the hint exists for - so the reservation is made
+        // whenever the window itself ended at `limit` or at the end of the file.
+        let more_after = shown_end == end;
+        let (shown, budget_cut) = push_numbered(
+            &mut body,
+            &lines[start..shown_end],
+            start + 1,
+            total,
+            more_after,
+            budget.saturating_sub(READ_HEADER_RESERVE),
+        );
+        out.push_str(&header(&rel, start + 1, start + shown, &total_label, size));
+        push_read_notes(&mut out, byte_limited, max_bytes, size, total_capped);
+        out.push_str(&body);
+
+        return Ok(Rendered {
+            text: out,
+            truncated: byte_limited || end < total || budget_cut,
+            meta: serde_json::json!({
+                "path": rel,
+                "lines_total": total,
+                "lines_total_is_lower_bound": total_capped,
+                "lines_from": start + 1,
+                "lines_to": start + shown,
+                "bytes": size,
+                "byte_limited": byte_limited,
+                "offset": offset,
+                "limit": limit,
+            }),
+        });
     }
 
     Ok(Rendered {
@@ -246,14 +274,155 @@ pub fn read_file_cancellable(
             "path": rel,
             "lines_total": total,
             "lines_total_is_lower_bound": total_capped,
-            "lines_from": first,
-            "lines_to": last,
+            "lines_from": first_line(start, total),
+            "lines_to": last_line(start, total, available),
             "bytes": size,
             "byte_limited": byte_limited,
             "offset": offset,
             "limit": limit,
         }),
     })
+}
+
+/// Room reserved for the header line and its notes when deciding how many
+/// numbered lines fit the call's output budget.
+const READ_HEADER_RESERVE: usize = 320;
+/// Room reserved for the continuation hint, so the exact next call is never the
+/// first thing the output budget removes.
+const READ_HINT_RESERVE: usize = 160;
+
+fn total_label(total: usize, capped: bool) -> String {
+    if capped {
+        format!("{total}+")
+    } else {
+        total.to_string()
+    }
+}
+
+fn header(rel: &str, first: usize, last: usize, total_label: &str, size: u64) -> String {
+    format!("{rel} — lines {first}-{last} of {total_label} ({size} bytes)")
+}
+
+fn past_end_note(offset: usize, total: usize) -> String {
+    format!(
+        "\n[offset {offset} is past the end of the file ({total} lines); start at or before {total}]"
+    )
+}
+
+/// The notes that explain a read cut short by `limits.max_file_read_bytes`.
+/// They are written before the content so a huge file cannot truncate the
+/// explanation of why it is incomplete.
+fn push_read_notes(
+    out: &mut String,
+    byte_limited: bool,
+    max_bytes: usize,
+    size: u64,
+    total_capped: bool,
+) {
+    if byte_limited {
+        out.push_str(&format!(
+            "\n[note: only the first {max_bytes} of {size} bytes were read (limits.max_file_read_bytes); \
+             raise the limit to see the rest]"
+        ));
+        if total_capped {
+            out.push_str(&format!(
+                "\n[note: the line count stopped at {MAX_COUNTED_LINES} lines, so `{total_capped}` is a \
+                 lower bound]"
+            ));
+        }
+    }
+}
+
+/// What the result actually carried, for the no-content branches.
+fn first_line(start: usize, total: usize) -> usize {
+    if total == 0 {
+        0
+    } else if start >= total {
+        total
+    } else {
+        start + 1
+    }
+}
+
+fn last_line(start: usize, total: usize, available: usize) -> usize {
+    if total == 0 || start >= total {
+        total
+    } else if start >= available {
+        available
+    } else {
+        (start + 1).min(available)
+    }
+}
+
+/// Append `\n{number}\t{line}` for as many of `lines` as fit `budget`, then the
+/// exact call that continues the omission.
+///
+/// Returns how many lines were written and whether the *budget* (rather than
+/// `limit` or the end of the file) stopped the window. A line too long for the
+/// whole budget is shown by its head with a note, because "continue with offset"
+/// cannot reach the rest of a single line.
+fn push_numbered(
+    body: &mut String,
+    lines: &[&str],
+    first_number: usize,
+    total: usize,
+    more_after: bool,
+    budget: usize,
+) -> (usize, bool) {
+    let stop = if more_after {
+        budget.saturating_sub(READ_HINT_RESERVE)
+    } else {
+        budget
+    };
+    let mut shown = 0usize;
+    let mut cut = false;
+    for (i, line) in lines.iter().enumerate() {
+        let number = first_number + i;
+        // `\n` + right-aligned number + `\t`
+        let prefix = 2 + number.to_string().len().max(5);
+        let cost = prefix + line.len();
+        if body.len() + cost > stop {
+            if shown > 0 {
+                cut = true;
+                break;
+            }
+            let room = stop.saturating_sub(body.len() + prefix);
+            let piece = clip_chars(line, room);
+            body.push_str(&format!("\n{number:>5}\t{piece}"));
+            body.push_str(&format!(
+                "\n[line {number} is {} bytes and alone exceeds this call's output budget; only its \
+                 first {} bytes are shown. Use search_files to find a position in it, or read a \
+                 different range.]",
+                line.len(),
+                piece.len()
+            ));
+            cut = true;
+            shown = 1;
+            break;
+        }
+        body.push_str(&format!("\n{number:>5}\t{line}"));
+        shown += 1;
+    }
+    if more_after {
+        let next = first_number + shown;
+        // Nothing to continue when the window already reached the last line.
+        if next <= total {
+            body.push_str(&format!(
+                "\n[next {} lines omitted; continue with offset={next}]",
+                total.saturating_sub(next.saturating_sub(1))
+            ));
+        }
+    }
+    (shown, cut)
+}
+
+/// The first `max_bytes` of `text`, on a char boundary.
+fn clip_chars(text: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// Bytes read per step when a file is streamed rather than read whole.
@@ -270,6 +439,7 @@ const SCAN_CHUNK_BYTES: usize = 64 * 1024;
 /// real `lines_total`, the byte-cap note when the cap (not `limit`) ended the
 /// window, the "past the end of the file" note, the absolute NUL offset of the
 /// binary sniff, and the same `meta` keys.
+#[allow(clippy::too_many_arguments)]
 fn read_window(
     abs: &Path,
     rel: &str,
@@ -277,6 +447,7 @@ fn read_window(
     offset: usize,
     limit: usize,
     max_bytes: usize,
+    budget: usize,
     cancel: &CancellationToken,
 ) -> Result<Rendered> {
     let mut file = std::fs::File::open(abs).map_err(|e| Error::io(abs, e))?;
@@ -428,46 +599,54 @@ fn read_window(
     };
 
     let mut out = String::new();
-    let total_label = if total_capped {
-        format!("{total}+")
-    } else {
-        total.to_string()
-    };
-    out.push_str(&format!(
-        "{rel} — lines {first}-{last} of {total_label} ({size} bytes)"
-    ));
-    if byte_limited {
-        out.push_str(&format!(
-            "\n[note: only the first {max_bytes} of {size} bytes were read \
-             (limits.max_file_read_bytes); raise the limit to see the rest]"
-        ));
-    }
-    if total_capped {
-        out.push_str(&format!(
-            "\n[note: the line count stopped at {MAX_COUNTED_LINES} lines, so `{total}+` is a \
-             lower bound]"
-        ));
-    }
+    let total_label = total_label(total, total_capped);
 
     if total == 0 {
+        out.push_str(&header(rel, 0, 0, &total_label, size));
         out.push_str("\n[file is empty]");
     } else if available == 0 {
-        out.push_str(&format!(
-            "\n[offset {offset} is past the end of the file ({total} lines); start at or before {total}]"
-        ));
+        out.push_str(&header(rel, total, total, &total_label, size));
+        out.push_str(&past_end_note(offset, total));
     } else {
-        for (i, line) in lines.iter().enumerate() {
-            out.push_str(&format!("\n{:>5}\t{}", offset + i, line));
-        }
-        // Only offer "continue with offset" when the window was not cut short by
-        // the byte cap; otherwise the note above already explains the limit.
-        if last < total && last == end {
-            out.push_str(&format!(
-                "\n[next {} lines omitted; continue with offset={}]",
-                total - last,
-                last + 1
-            ));
-        }
+        // Numbered lines first, then the header: the range the header reports is
+        // the range that actually fit the call's output budget.
+        let mut body = String::new();
+        // The window was not cut by the byte cap, so an offset can reach what it
+        // did not show.
+        let more_after = last == end;
+        let (shown, budget_cut) = push_numbered(
+            &mut body,
+            &lines,
+            offset,
+            total,
+            more_after,
+            budget.saturating_sub(READ_HEADER_RESERVE),
+        );
+        out.push_str(&header(
+            rel,
+            offset,
+            offset + shown.saturating_sub(1),
+            &total_label,
+            size,
+        ));
+        push_read_notes(&mut out, byte_limited, max_bytes, size, total_capped);
+        out.push_str(&body);
+        let last = offset + shown.saturating_sub(1);
+        return Ok(Rendered {
+            text: out,
+            truncated: byte_limited || end < total || budget_cut,
+            meta: serde_json::json!({
+                "path": rel,
+                "lines_total": total,
+                "lines_total_is_lower_bound": total_capped,
+                "lines_from": offset,
+                "lines_to": last,
+                "bytes": size,
+                "byte_limited": byte_limited,
+                "offset": offset,
+                "limit": limit,
+            }),
+        });
     }
 
     Ok(Rendered {
@@ -754,8 +933,25 @@ pub fn read_image(
 /// List a directory tree, honouring `.gitignore` rules.
 ///
 /// `depth` is clamped to `1..=3`; directories sort before files and carry a
-/// trailing `/`.
+/// trailing `/`. The whole tree is rendered, so the caller's output budget is not
+/// considered - use [`list_dir_budgeted`] for a tool call.
 pub fn list_dir(ws: &Workspace, path: &str, depth: u32, max_entries: usize) -> Result<Rendered> {
+    list_dir_budgeted(ws, path, depth, max_entries, usize::MAX)
+}
+
+/// [`list_dir`] with the call's output budget (`limits.max_tool_output_bytes`).
+///
+/// Entries are rendered until the budget is spent, and the note reports how many
+/// of how many were shown plus how to narrow the request - a listing cut by a
+/// head+tail splice used to claim "showing the first 500" while the middle of the
+/// list was gone.
+pub fn list_dir_budgeted(
+    ws: &Workspace,
+    path: &str,
+    depth: u32,
+    max_entries: usize,
+    budget: usize,
+) -> Result<Rendered> {
     let abs = ws.resolve_existing(path)?;
     let rel = ws.relative(&abs);
     let meta = std::fs::metadata(&abs).map_err(|e| Error::io(&abs, e))?;
@@ -835,22 +1031,47 @@ pub fn list_dir(ws: &Workspace, path: &str, depth: u32, max_entries: usize) -> R
         entries.to_string()
     };
 
+    // Render the entries against the call's output budget *before* the header, so
+    // "N shown" and the truncation note describe what the model really received.
+    // A 500-entry listing of long paths is easily bigger than
+    // `limits.max_tool_output_bytes`, and a head+tail cut of it would make the
+    // old "showing the first 500" note a lie about a spliced list.
+    const LIST_RESERVE: usize = 420;
+    let stop = budget.saturating_sub(LIST_RESERVE);
+    let mut body = String::new();
+    let mut shown = 0usize;
+    let mut budget_cut = false;
+    for item in &items {
+        let row = if item.is_dir {
+            format!("\n{}/", item.rel)
+        } else {
+            format!("\n{} ({})", item.rel, format_size(item.size))
+        };
+        if shown > 0 && body.len() + row.len() > stop {
+            budget_cut = true;
+            break;
+        }
+        body.push_str(&row);
+        shown += 1;
+    }
+    let truncated = truncated || budget_cut;
+
     let mut out = format!(
         "Listing {rel} (depth {depth}, {total_label} entr{}, {} shown)",
         if items.len() == 1 { "y" } else { "ies" },
-        items.len()
+        shown
     );
     if items.is_empty() {
         out.push_str("\n[empty]");
     }
-    for item in &items {
-        if item.is_dir {
-            out.push_str(&format!("\n{}/", item.rel));
-        } else {
-            out.push_str(&format!("\n{} ({})", item.rel, format_size(item.size)));
-        }
-    }
-    if truncated {
+    out.push_str(&body);
+    if budget_cut {
+        out.push_str(&format!(
+            "\n[truncated: showing {shown} of {total_label} entries; the {budget}-byte output \
+             budget (limits.max_tool_output_bytes) cut the list - narrow `path` or lower \
+             `depth` to see the rest]"
+        ));
+    } else if truncated {
         out.push_str(&format!(
             "\n[truncated: showing the first {max_entries} of {total_label} entries; \
              raise the path or depth narrowing instead of increasing the cap]"
@@ -872,7 +1093,7 @@ pub fn list_dir(ws: &Workspace, path: &str, depth: u32, max_entries: usize) -> R
             // the directory has; `entries_capped` says which.
             "entries": entries,
             "entries_capped": capped,
-            "shown": items.len(),
+            "shown": shown,
             "errors": skipped_errors,
         }),
     })
@@ -901,12 +1122,27 @@ pub fn glob(ws: &Workspace, pattern: &str, path: &str, max_entries: usize) -> Re
 }
 
 /// [`glob`] with the run's real cancellation token, checked before every yielded
-/// directory entry or walk error.
+/// directory entry or walk error. No output budget is applied: the caller renders
+/// with as many paths as the walk found.
 pub(crate) fn glob_cancellable(
     ws: &Workspace,
     pattern: &str,
     path: &str,
     max_entries: usize,
+    cancel: &CancellationToken,
+) -> Result<Rendered> {
+    glob_cancellable_budgeted(ws, pattern, path, max_entries, usize::MAX, cancel)
+}
+
+/// [`glob_cancellable`] with the call's output budget
+/// (`limits.max_tool_output_bytes`), so a wide walk reports how many paths it
+/// really showed instead of being spliced by a later head+tail cut.
+pub(crate) fn glob_cancellable_budgeted(
+    ws: &Workspace,
+    pattern: &str,
+    path: &str,
+    max_entries: usize,
+    budget: usize,
     cancel: &CancellationToken,
 ) -> Result<Rendered> {
     let pattern = pattern.trim();
@@ -943,11 +1179,21 @@ pub(crate) fn glob_cancellable(
         .follow_links(false)
         .filter_entry(|entry| !is_skipped_dir(entry.file_name()))
         .build();
-    glob_from_walker(ws, pattern, &rel_root, &set, max_entries, walker, cancel)
+    glob_from_walker(
+        ws,
+        pattern,
+        &rel_root,
+        &set,
+        max_entries,
+        walker,
+        budget,
+        cancel,
+    )
 }
 
 /// Process an existing walker separately so a test can cancel from an iterator's
 /// second yield, proving the check runs mid-walk rather than only before it.
+#[allow(clippy::too_many_arguments)]
 fn glob_from_walker(
     ws: &Workspace,
     pattern: &str,
@@ -955,6 +1201,7 @@ fn glob_from_walker(
     set: &globset::GlobSet,
     max_entries: usize,
     walker: impl IntoIterator<Item = std::result::Result<ignore::DirEntry, ignore::Error>>,
+    budget: usize,
     cancel: &CancellationToken,
 ) -> Result<Rendered> {
     struct Found {
@@ -1005,6 +1252,28 @@ fn glob_from_walker(
     let total = found.len();
     found.truncate(max_entries);
 
+    // Paths are rendered against the call's budget before the header, so the
+    // "N path(s)" count and the truncation note describe the real result.
+    const GLOB_RESERVE: usize = 420;
+    let stop = budget.saturating_sub(GLOB_RESERVE);
+    let mut body = String::new();
+    let mut shown = 0usize;
+    let mut budget_cut = false;
+    for item in &found {
+        let row = if item.is_dir {
+            format!("\n{}/", item.rel)
+        } else {
+            format!("\n{}", item.rel)
+        };
+        if shown > 0 && body.len() + row.len() > stop {
+            budget_cut = true;
+            break;
+        }
+        body.push_str(&row);
+        shown += 1;
+    }
+    let capped = capped || budget_cut;
+
     let mut out = format!(
         "{rel_root}: {} path(s) matching `{pattern}`",
         if capped {
@@ -1018,14 +1287,14 @@ fn glob_from_walker(
             "\n[no path matches this glob; the pattern is matched against names and paths]",
         );
     }
-    for item in &found {
-        if item.is_dir {
-            out.push_str(&format!("\n{}/", item.rel));
-        } else {
-            out.push_str(&format!("\n{}", item.rel));
-        }
-    }
-    if capped {
+    out.push_str(&body);
+    if budget_cut {
+        out.push_str(&format!(
+            "\n[truncated: showing {shown} of the {max_entries}+ paths this walk reached; the \
+             {budget}-byte output budget (limits.max_tool_output_bytes) cut the list - narrow the \
+             pattern or the `path`]"
+        ));
+    } else if capped {
         out.push_str(&format!(
             "\n[truncated: showing the first {max_entries} of {max_entries}+ matching paths; \
              narrow the pattern or the path]"
@@ -1044,7 +1313,7 @@ fn glob_from_walker(
             "pattern": pattern,
             "path": rel_root,
             "matches": total,
-            "shown": found.len(),
+            "shown": shown,
             "capped": capped,
             "errors": walk_errors,
         }),
@@ -1397,8 +1666,12 @@ pub fn render_diff(old: &[&str], new: &[&str], max_lines: usize) -> String {
         }
     }
     if truncated {
+        // Say what is missing and where the rest is: the write already happened,
+        // so the full change is on disk - `git_diff` shows it against HEAD and
+        // `read_file` shows the changed region.
         out.push_str(&format!(
-            "\n[... diff preview truncated at {max_lines} lines]"
+            "\n[... diff preview truncated at {max_lines} lines; the file itself was written in \
+             full - use git_diff, or read_file on the changed region, for the whole change]"
         ));
     }
     out
@@ -1445,8 +1718,12 @@ fn render_block_diff(old: &[&str], new: &[&str], prefix: usize, max_lines: usize
         }
     }
     if truncated {
+        // Say what is missing and where the rest is: the write already happened,
+        // so the full change is on disk - `git_diff` shows it against HEAD and
+        // `read_file` shows the changed region.
         out.push_str(&format!(
-            "\n[... diff preview truncated at {max_lines} lines]"
+            "\n[... diff preview truncated at {max_lines} lines; the file itself was written in \
+             full - use git_diff, or read_file on the changed region, for the whole change]"
         ));
     }
     out
@@ -1995,7 +2272,8 @@ mod tests {
                 during_walk.cancel();
             }
         });
-        let err = glob_from_walker(&ws, "*", ".", &set, 200, walker, &cancel).unwrap_err();
+        let err =
+            glob_from_walker(&ws, "*", ".", &set, 200, walker, usize::MAX, &cancel).unwrap_err();
         assert!(matches!(err, Error::Cancelled), "{err}");
     }
 
@@ -2116,6 +2394,11 @@ mod tests {
         assert!(
             plan.diff.contains("diff preview truncated"),
             "{}",
+            plan.diff
+        );
+        assert!(
+            plan.diff.contains("git_diff") && plan.diff.contains("read_file"),
+            "a truncated preview must name where the whole change is:\n{}",
             plan.diff
         );
         assert!(

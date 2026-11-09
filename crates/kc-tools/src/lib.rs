@@ -8,21 +8,21 @@
 // @kc-title: The built-in tools the agent can call
 // @kc-summary: What each first-party tool does, how it is gated, and the limits and gotchas that shape its output.
 // @kc-tags: tools, agent, files, search, shell, git
-// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:glob, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:git_log, tool:karucode_docs, tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, route:POST /api/sessions/:id/rewind, config:[limits], config:limits.max_file_read_bytes, config:limits.search_max_results, config:limits.max_tool_output_bytes, config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:limits.parallel_tool_calls, env:KARUCODE_PARALLEL_TOOL_CALLS, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:RIPGREP_CONFIG_PATH
+// @kc-applies-to: tool:read_file, tool:list_dir, tool:search_files, tool:glob, tool:write_file, tool:edit_file, tool:run_command, tool:git_status, tool:git_diff, tool:git_log, tool:karucode_docs, tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, route:POST /api/sessions/:id/rewind, config:[limits], config:limits.max_file_read_bytes, config:limits.max_command_output_bytes, config:limits.search_max_results, config:limits.max_tool_output_bytes, config:allow_temp_dir, env:KARUCODE_ALLOW_TEMP_DIR, config:limits.parallel_tool_calls, env:KARUCODE_PARALLEL_TOOL_CALLS, config:[model], config:model.supports_images, config:limits.max_image_read_bytes, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:RIPGREP_CONFIG_PATH
 //
 // | Tool | Class | Approval | What it does |
 // | --- | --- | --- | --- |
 // | `read_file` | read_only | none | UTF-8 text with numbered lines and a `path - lines A-B of N` header; `offset`/`limit` (default 400, max 2000 lines). One call reads one file (`path`), several files (`paths`) or several windows of one file (`ranges`); a bad path or range is reported inline and the other reads still return. `limits.max_file_read_bytes` bounds the bytes one read *returns*, not the offsets it can reach, so any line of a huge file is readable. A PNG/JPEG/GIF/WebP given as `path` is attached as an image for a model that takes image input; a text-only model gets a refusal it can pass on |
-// | `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries; the walk stops at the cap and a truncated listing reports the total as a lower bound (`500+`) |
+// | `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries; the walk stops at the cap and a truncated listing reports the total as a lower bound (`500+`). Rows are rendered within the call's output budget, so the "N shown" in its header is the number of rows really there |
 // | `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`, plus `path:line- text` context lines with `context`, or one path per line with `files_only`. The result cap is global across files, `max_matches_per_file` stops one noisy file spending it, and long matching lines keep their first 300 characters in both engines |
-// | `glob` | read_only | none | name-based finder (not a content search): a glob over the same `.gitignore`-aware walker the search fallback uses. Directories carry a trailing `/`; bounded at 200 paths and a truncated walk says so |
+// | `glob` | read_only | none | name-based finder (not a content search): a glob over the same `.gitignore`-aware walker the search fallback uses. Directories carry a trailing `/`; bounded at 200 paths, rendered within the call's output budget, and a truncated walk says how many paths it really showed |
 // | `write_file` | mutating | policy | create/overwrite atomically, max 2 MiB per call; journals the previous bytes for a rewind |
 // | `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff; revalidates the file after approval and journals the previous bytes |
 // | `run_command` | shell | policy | `/bin/sh -c` in the workspace, incrementally UTF-8-decoded streamed output, timeout, own process group. On timeout or cancellation the whole group gets SIGTERM, then SIGKILL after a grace period, so a child that ignores SIGTERM cannot survive |
 // | `git_status` | read_only | none | branch + porcelain status for the workspace or a subdirectory, **confined to the workspace** |
 // | `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref, **confined to the workspace** (paths are workspace-relative) |
 // | `git_log` | read_only | none | bounded commit history: one line per commit (`sha date subject`), `max_count` default 20 and hard-capped at 200, optional `path` narrowing, **confined to the workspace** |
-// | `karucode_docs` | read_only | none | search and read karucode's own documentation (this system) |
+// | `karucode_docs` | read_only | none | search and read karucode's own documentation (this system); `read` is paged with `offset`/`limit` and ends with the exact offset that continues a long topic |
 //
 // The delegate family - `spawn_agent`, `spawn_agents`, `send_message`,
 // `wait_for_agents`, `list_subagents`, `agent_history`, `pause_agents`,
@@ -52,16 +52,60 @@
 // # Output limits
 //
 // Tool output kept for the model is bounded by `limits.max_tool_output_bytes`
-// (default 24000), **including the truncation marker**. A cut retains head+tail so
-// a final runtime-budget reduction does not discard a trailing error; unusually
-// tiny budgets that cannot fit the explanatory marker retain a UTF-8-safe prefix.
-// `run_command` retains raw stdout head+tail and trailing stderr within that final
-// budget rather than front-truncating an already-rendered marker. Capture is first
-// bounded per stream by `max_command_output_bytes`; long command lines in the
-// result header are previewed at 512 characters (metadata still has the command).
+// (default 24000), **including the truncation marker**. That key is the
+// per-**result** ceiling for every origin; a turn's total tool output is
+// additionally bounded by half the conversation budget
+// (`limits.context_max_chars` / 2, never less than 2 000 bytes per result), so a
+// late result in a busy turn can be squeezed below the per-result key.
+//
+// A cut result keeps the head and the tail (so a final squeeze never discards a
+// trailing error) and lands on **line boundaries** whenever the payload has one
+// within 2 KiB of the seam. The marker then reports how many bytes *and lines*
+// were kept and dropped, so a numbered region is never spliced mid-line and the
+// numbers describe the splice the reader is actually looking at:
+//
+// ```text
+// [truncated: 23574-byte, 354-line result; result lines 118-238 (8107 bytes, 121
+//  lines) omitted from the middle; kept the first 7711 and the last 7756 bytes as
+//  whole lines. re-issue the call with a narrower request (offset=/limit= where
+//  the tool takes them, a smaller max_results, a narrower path, glob or pattern)
+//  or raise limits.max_tool_output_bytes]
+// ```
+//
+// Every marker names the bound it hit and part of the next call that would avoid
+// it (`limits.max_tool_output_bytes`, or `limits.max_command_output_bytes` for a
+// command capture): "raise the limit" without a key name is a dead end for a
+// model that cannot edit the operator's config. A payload with no newline near
+// the seam (minified output, one long record) is reported in bytes instead of
+// pretending to line numbers. Unusually tiny budgets get the most compact marker
+// that fits, and one too small for any marker keeps a UTF-8-safe prefix. Cutting
+// is deterministic for a given `(text, budget)`, and a *second* cut of an
+// already-cut body does not stack a second marker: the old one sits at the seam
+// and is dropped with it (the tail the first cut kept survives).
+//
+// The tools that can page do their own cut and say exactly where it ended:
+// `read_file`, `list_dir`, `glob`, `search_files` and `karucode_docs` render
+// *against* the budget - whole lines, then the exact continuation - so a cut
+// result is resumable rather than merely smaller. `read_file` ends with
+// `[next N lines omitted; continue with offset=X]` and `karucode_docs` with the
+// `{"action":"read","offset":N}` that reads the next page. A multi-file
+// `read_file` divides the budget before rendering anything and leaves what one
+// section did not use for the rest, so no section is spliced by a later head+tail
+// cut. `run_command` retains raw stdout head+tail and trailing stderr within that
+// final budget rather than front-truncating an already-rendered marker, and its
+// header repeats the recovery (`cmd > out.txt 2>&1`, then `read_file` on it).
+// Capture is first bounded per stream by `max_command_output_bytes`; long command
+// lines in the result header are previewed at 512 characters (metadata still has
+// the command).
 //
 // # Gotchas
 //
+// * Three arguments are refused before the tool does any work, and the refusal
+//   names the cap: `edit_file`'s `old_string` and `new_string` (2 MiB each),
+//   `run_command`'s `command` (32 KiB) and `search_files`'s `pattern` (4 KiB). A
+//   generated blob that large is a broken call, and past the OS `ARG_MAX` the
+//   spawn would fail with an opaque errno - the refusal says to write a script and
+//   run that instead.
 // * `edit_file` is exact-match and ambiguity-safe: it refuses when the old string
 //   appears twice (pass `replace_all`) or not at all. Read the region first. After
 //   approval it re-reads and re-plans with a SHA-256 fingerprint; if the file
@@ -100,6 +144,10 @@
 //   meaning there and is ignored. Both engines produce the **same shape** for
 //   all three - the crate's promise is that the model cannot tell them apart
 //   except by the engine label in the header.
+// * `search_files` renders as many match lines as fit the output budget and then
+//   says `[showing the first K of M result lines; ...]` with the narrowing that
+//   finds the rest (a narrower pattern, a `glob`), instead of letting a head+tail
+//   cut hide the middle of a match list.
 // * `search_files` keeps the first 300 **characters** of a very long matching
 //   line rather than replacing it with a placeholder; the cap is counted in
 //   characters, not bytes, so a line of multi-byte text is cut in the same place
@@ -113,7 +161,8 @@
 // * `glob` matches an entry's file name, its path relative to `path` and its
 //   workspace-relative path, so `*.rs`, `src/**/*.rs` and `crates/*/src/lib.rs`
 //   all work. It lists directories too, with a trailing `/`, and its walk stops
-//   at 200 paths (the note says the cap cut it). The run's cancellation token is
+//   at 200 paths (the note says what the cap or the output budget cut, and names
+//   the narrowing: a narrower pattern or `path`). The run's cancellation token is
 //   checked on every yielded entry or error. Read-only, no approval.
 // * `run_command` reports a **success** when the command exits 0 and leaves a
 //   child running in the background (`build & exit 0`) instead of waiting for that
@@ -154,6 +203,12 @@
 //   the check covers the whole window that would be returned, and the offset in
 //   the message is the byte offset in the file, even for a far window; so a NUL
 //   deep in a large file cannot reach the model as U+0000.
+// * `git_diff` captures at most 1 MiB from git. A patch past that ends with a
+//   note stating the limit and the recovery - narrow `path`/`base`/`staged`, or
+//   write it out with `run_command` (`git diff > patch.diff`) and page
+//   `patch.diff` with `read_file offset=/limit=`. `git_status` and `git_log`
+//   refuse rather than return a partial answer when their capture is cut, with
+//   the same alternatives in the message.
 // * `git_log` runs with the same hardened config as `git_status`/`git_diff` and
 //   additionally disables signature display, because showing a signature runs the
 //   repository's own `gpg` program. It prints `sha date subject` per commit and
@@ -249,7 +304,8 @@ use async_trait::async_trait;
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, AutoDecision};
 use kc_core::config::ApprovalPolicy;
 use kc_core::tool::{
-    truncate_output, Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOutcome, ToolSpec,
+    truncate_output, truncate_output_with_advice, Tool, ToolCallRequest, ToolClass, ToolCtx,
+    ToolOutcome, ToolSpec,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -374,6 +430,27 @@ pub struct ReadFile;
 /// A batch is not refused for being large; it is cut and says so. The cap exists
 /// so one call cannot ask the filesystem for a thousand files.
 const MAX_MULTI_READS: usize = 32;
+
+/// Longest single `edit_file` string (`old_string` or `new_string`).
+///
+/// These are input tokens as much as content is: a multi-megabyte replacement is
+/// a broken call long before it reaches the file, and refusing it here names the
+/// cap instead of loading the target and running the diff planner over it.
+pub const MAX_EDIT_ARG_BYTES: usize = 2 * 1024 * 1024;
+
+/// Longest `run_command` command line accepted.
+///
+/// A command that long is almost always generated output pasted into an argument;
+/// past the OS `ARG_MAX` the spawn would fail with an opaque errno, and below it
+/// the shell would still be doing something no one can review in an approval
+/// prompt. The refusal names the cap and the way to run a real script.
+pub const MAX_COMMAND_BYTES: usize = 32 * 1024;
+
+/// Longest `search_files` pattern accepted.
+///
+/// A regex past a few kilobytes is a generated blob, and the result it would
+/// match is not a search anyone can act on.
+pub const MAX_PATTERN_BYTES: usize = 4 * 1024;
 
 /// One requested read of one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -654,13 +731,22 @@ impl Tool for ReadFile {
         // Each file is read and (when the byte cap cut it) scanned to count lines:
         // blocking work that must not run on a runtime worker. One read failing
         // must not discard the ones that worked.
+        //
+        // The output budget is divided *before* each render, so every section is a
+        // whole-line window with its own exact `continue with offset=` hint. A
+        // first-come-first-served render followed by one head+tail cut would
+        // splice the middle of a numbered file and leave the model no offset to
+        // resume from.
         let entries = match blocking("read_file", &ctx.cancel, {
             let ws = ctx.workspace.clone();
             let cancel = ctx.cancel.clone();
             let max_bytes = limits.max_file_read_bytes;
+            let output_budget = limits.max_tool_output_bytes;
             move || {
                 let mut out = Vec::with_capacity(reads.len());
-                for planned in reads {
+                let count = reads.len();
+                let mut remaining = output_budget;
+                for (i, planned) in reads.into_iter().enumerate() {
                     let request = match planned {
                         PlannedRead::Read(request) => request,
                         // A malformed entry keeps its place and is not attempted.
@@ -676,18 +762,26 @@ impl Tool for ReadFile {
                         });
                         continue;
                     }
-                    match file_ops::read_file_cancellable(
+                    // Whatever this section does not use is left for the rest.
+                    let share = (remaining / (count - i).max(1)).max(1);
+                    let overhead = request.path.len() + 16;
+                    match file_ops::read_file_budgeted(
                         &ws,
                         &request.path,
                         request.offset,
                         request.limit,
                         max_bytes,
+                        share.saturating_sub(overhead),
                         &cancel,
                     ) {
-                        Ok(rendered) => out.push(ReadEntry::Read {
-                            path: request.path,
-                            rendered,
-                        }),
+                        Ok(rendered) => {
+                            remaining = remaining
+                                .saturating_sub(rendered.text.len().saturating_add(overhead));
+                            out.push(ReadEntry::Read {
+                                path: request.path,
+                                rendered,
+                            })
+                        }
                         Err(kc_core::Error::Cancelled) => out.push(ReadEntry::Failed {
                             label: request.path,
                             message: "cancelled during this read".into(),
@@ -728,41 +822,30 @@ impl Tool for ReadFile {
 /// own header and numbered lines, then the next. A failed entry keeps its place
 /// with the reason, so the model can fix just that one.
 ///
-/// The per-call byte cap is divided across the sections *before* anything is
-/// rendered, because a first-come-first-served cap would return the first file
-/// in full and drop the rest - the batch would then be no better than a single
-/// read. The division is recomputed from what is left as each section is written,
-/// so the finished text fits the cap without the final head+tail cut removing a
-/// section in the middle.
+/// Each section was rendered against its own share of the call's output budget
+/// (see [`ReadFile::invoke`]), so the join is a concatenation rather than a cut:
+/// every section keeps its whole-line range and its exact `continue with offset=`
+/// hint. The final `truncate_output` is a safety net for the pathological case
+/// where a section's own header did not fit its share.
 fn render_batch(entries: Vec<ReadEntry>, dropped: usize, max_bytes: usize) -> ToolOutcome {
     let mut text = String::new();
     let mut reads = Vec::with_capacity(entries.len());
     let mut failures = 0usize;
     let mut any_truncated = false;
     let total = entries.len();
-    // Reserve the truncation note up front: the last file must not push it out.
-    let mut remaining = max_bytes.saturating_sub(if dropped > 0 { 160 } else { 0 });
     for (i, entry) in entries.iter().enumerate() {
-        let newline = usize::from(i > 0);
-        let before = text.len();
+        if i > 0 {
+            text.push('\n');
+        }
         let header = match entry {
             ReadEntry::Read { path, .. } => format!("--- {path} ---\n"),
             ReadEntry::Failed { label, .. } => format!("--- {label} ---\n"),
         };
-        if newline == 1 {
-            text.push('\n');
-        }
-        // The separator and the numbered header are part of the cost of this
-        // section; they are subtracted before the budget is divided so four
-        // sections plus four separators still fit the call's cap exactly.
-        let overhead = newline + header.len();
-        let share = remaining.saturating_sub(overhead) / (total - i).max(1);
         text.push_str(&header);
         match entry {
             ReadEntry::Read { rendered, .. } => {
-                let (body, cut) = truncate_output(&rendered.text, share.max(1));
-                any_truncated |= cut;
-                text.push_str(&body);
+                any_truncated |= rendered.truncated;
+                text.push_str(&rendered.text);
                 reads.push(rendered.meta.clone());
             }
             ReadEntry::Failed { label, message } => {
@@ -771,7 +854,6 @@ fn render_batch(entries: Vec<ReadEntry>, dropped: usize, max_bytes: usize) -> To
                 reads.push(json!({"path": label, "error": message}));
             }
         }
-        remaining = remaining.saturating_sub(text.len() - before);
     }
     if failures == entries.len() {
         // Nothing worked: a failure, not a success with notes in it.
@@ -785,7 +867,9 @@ fn render_batch(entries: Vec<ReadEntry>, dropped: usize, max_bytes: usize) -> To
     }
     let (text, cut) = truncate_output(&text, max_bytes);
     ToolOutcome::ok(text)
-        .truncated(cut || any_truncated)
+        // A dropped *request* is a cut result too: the note says so, and the flag
+        // keeps the transcript from presenting it as complete.
+        .truncated(cut || any_truncated || dropped > 0)
         .with_meta(json!({
             "reads": reads,
             "read_count": total,
@@ -821,10 +905,13 @@ impl Tool for ListDir {
         let limits = ctx.limits().await;
         // The walk stats every entry it visits; on a runtime worker that stalls
         // every other task on the thread for as long as the directory takes.
+        let budget = limits.max_tool_output_bytes;
         let rendered = match blocking("list_dir", &ctx.cancel, {
             let ws = ctx.workspace.clone();
             let path = path.to_string();
-            move || file_ops::list_dir(&ws, &path, depth, file_ops::MAX_LIST_ENTRIES)
+            move || {
+                file_ops::list_dir_budgeted(&ws, &path, depth, file_ops::MAX_LIST_ENTRIES, budget)
+            }
         })
         .await
         {
@@ -832,7 +919,11 @@ impl Tool for ListDir {
             Ok(Err(e)) => return ToolOutcome::err(e.to_string()),
             Ok(Ok(rendered)) => rendered,
         };
-        let (text, cut) = truncate_output(&rendered.text, limits.max_tool_output_bytes);
+        let (text, cut) = truncate_output_with_advice(
+            &rendered.text,
+            limits.max_tool_output_bytes,
+            "narrow `path` or lower `depth`, or raise limits.max_tool_output_bytes",
+        );
         ToolOutcome::ok(text)
             .truncated(cut || rendered.truncated)
             .with_meta(rendered.meta)
@@ -876,6 +967,15 @@ impl Tool for SearchFiles {
         };
         if pattern.is_empty() {
             return ToolOutcome::err("pattern may not be empty");
+        }
+        if pattern.len() > MAX_PATTERN_BYTES {
+            return ToolOutcome::err(format!(
+                "the pattern is {} bytes; search_files accepts at most {} bytes. Split it into \
+                 several searches, or put the pattern in a file and run \
+                 `rg -f pattern.txt` (with the `run_command` tool).",
+                pattern.len(),
+                MAX_PATTERN_BYTES
+            ));
         }
         let limits = ctx.limits().await;
         let requested = request
@@ -927,7 +1027,27 @@ impl Tool for SearchFiles {
                 if per_file > 0 {
                     header.push_str(&format!(", max {per_file} match(es) per file"));
                 }
-                let mut text = format!("{header}\n\n{}", result.body());
+                // Reserve the notes, so the sentence that explains an incomplete
+                // list is never the thing the budget removes.
+                let notes_reserve = 640;
+                let body_budget = limits
+                    .max_tool_output_bytes
+                    .saturating_sub(header.len() + 2 + notes_reserve);
+                let (body, shown) = result.body_bounded(body_budget);
+                let mut text = format!("{header}\n\n{body}");
+                let entries = if files_only {
+                    result.files().len()
+                } else {
+                    result.matches.len()
+                };
+                if shown < entries {
+                    let what = if files_only { "path" } else { "result line" };
+                    text.push_str(&format!(
+                        "\n\n[showing the first {shown} of {entries} {what}s; the rest did not fit \
+                         the output budget (limits.max_tool_output_bytes) - narrow the pattern, add \
+                         a `glob`, or raise limits.max_tool_output_bytes]"
+                    ));
+                }
                 if result.hit_limit {
                     let what = if files_only { "file" } else { "match" };
                     text.push_str(&format!(
@@ -938,14 +1058,19 @@ impl Tool for SearchFiles {
                 if let Some(warning) = &result.warning {
                     text.push_str(&format!("\n\n[warning: {warning}]"));
                 }
-                let (text, cut) = truncate_output(&text, limits.max_tool_output_bytes);
+                let (text, cut) = truncate_output_with_advice(
+                    &text,
+                    limits.max_tool_output_bytes,
+                    "narrow the pattern, add a `glob`, or raise limits.max_tool_output_bytes",
+                );
                 ToolOutcome::ok(text)
-                    .truncated(cut || result.hit_limit)
+                    .truncated(cut || result.hit_limit || shown < entries)
                     .with_meta(json!({
                         "engine": result.engine.label(),
                         "matches": result.matched,
                         "lines": result.matches.len(),
                         "files": result.files().len(),
+                        "shown": shown,
                         "files_only": files_only,
                         "context": context,
                         "max_matches_per_file": per_file,
@@ -996,11 +1121,12 @@ impl Tool for Glob {
             .unwrap_or(file_ops::MAX_GLOB_ENTRIES as u64)
             .clamp(1, file_ops::MAX_GLOB_ENTRIES as u64) as usize;
         let limits = ctx.limits().await;
+        let budget = limits.max_tool_output_bytes;
         let rendered = match blocking("glob", &ctx.cancel, {
             let ws = ctx.workspace.clone();
             let path = path.clone();
             let cancel = ctx.cancel.clone();
-            move || file_ops::glob_cancellable(&ws, &pattern, &path, max, &cancel)
+            move || file_ops::glob_cancellable_budgeted(&ws, &pattern, &path, max, budget, &cancel)
         })
         .await
         {
@@ -1008,7 +1134,11 @@ impl Tool for Glob {
             Ok(Err(e)) => return ToolOutcome::err(e.to_string()),
             Ok(Ok(rendered)) => rendered,
         };
-        let (text, cut) = truncate_output(&rendered.text, limits.max_tool_output_bytes);
+        let (text, cut) = truncate_output_with_advice(
+            &rendered.text,
+            limits.max_tool_output_bytes,
+            "narrow the pattern or the `path`, or raise limits.max_tool_output_bytes",
+        );
         ToolOutcome::ok(text)
             .truncated(cut || rendered.truncated)
             .with_meta(rendered.meta)
@@ -1168,6 +1298,17 @@ impl Tool for EditFile {
             (Ok(o), Ok(n)) => (o, n),
             (Err(e), _) | (_, Err(e)) => return ToolOutcome::err(e.to_string()),
         };
+        if old.len() > MAX_EDIT_ARG_BYTES || new.len() > MAX_EDIT_ARG_BYTES {
+            return ToolOutcome::err(format!(
+                "edit_file strings are capped at {} KiB each; this call has old_string = {} bytes \
+                 and new_string = {} bytes. Nothing was read or written. Split the change into \
+                 smaller edits, or use write_file (cap {} MiB) to rewrite the whole file.",
+                MAX_EDIT_ARG_BYTES / 1024,
+                old.len(),
+                new.len(),
+                file_ops::MAX_FILE_WRITE_BYTES / (1024 * 1024)
+            ));
+        }
         let replace_all = request.opt_bool("replace_all").unwrap_or(false);
 
         // Edit planning reads the whole file, finds every match and builds the
@@ -1339,6 +1480,15 @@ impl Tool for RunCommand {
         if command.trim().is_empty() {
             return ToolOutcome::err("command may not be empty");
         }
+        if command.len() > MAX_COMMAND_BYTES {
+            return ToolOutcome::err(format!(
+                "the command is {} bytes; run_command accepts at most {} bytes per call. Nothing \
+                 was run. Write the script with write_file and run it (`sh script.sh`), or split \
+                 the command.",
+                command.len(),
+                MAX_COMMAND_BYTES
+            ));
+        }
         let cwd_arg = request.opt_str("cwd").unwrap_or(".");
         let limits = ctx.limits().await;
         let requested = request
@@ -1429,6 +1579,22 @@ impl Tool for RunCommand {
                     .unwrap_or_else(|| "without a status".to_string())
             ));
         }
+        if outcome.truncated() && limits.max_tool_output_bytes >= 4_000 {
+            // The recovery goes near the *top* as well as in the stream marker: a
+            // later runtime-budget cut keeps the head and the tail of this text,
+            // and the middle - where a capture marker sits - is exactly what it
+            // drops. A command has no `offset` argument, so this sentence is the
+            // only continuation the model will see. It is skipped for a budget so
+            // small that it would evict the trailing stderr this retention exists
+            // for; there the stream marker (which names the key) carries it.
+            text.push_str(&format!(
+                "\n[stdout/stderr were cut at {} bytes per stream: to read the omitted output, \
+                 re-run it with the output redirected to a file (`cmd > out.txt 2>&1`) and read \
+                 `out.txt` with read_file `offset=`/`limit=`, or raise \
+                 limits.max_command_output_bytes]",
+                limits.max_command_output_bytes
+            ));
+        }
         let (text, output_cut) =
             render_command_output(text, &outcome, limits.max_tool_output_bytes);
         ToolOutcome {
@@ -1459,6 +1625,14 @@ fn command_stream_heading(label: &str, stream: &command::FinishedStream) -> Stri
         if stream.truncated { ", truncated" } else { "" }
     )
 }
+
+/// What a `run_command` result says when even its own rendering had to be cut.
+///
+/// A command's output cannot be paged with a tool argument: the recovery is to
+/// redirect it to a file and page *that* with `read_file`, or to raise the key.
+const COMMAND_CONTINUE_ADVICE: &str =
+    "re-run it as `cmd > out.txt 2>&1` and read `out.txt` with read_file \
+     `offset=`/`limit=`, or raise limits.max_command_output_bytes";
 
 /// Assemble a command result whose marker and section headers are included in
 /// the real final byte budget. Stream bodies are re-rendered from raw retained
@@ -1495,7 +1669,7 @@ fn render_command_output(
             full.push_str(&stderr_heading);
             full.push_str(&outcome.stderr.text);
         }
-        return truncate_output(&full, max_bytes);
+        return truncate_output_with_advice(&full, max_bytes, COMMAND_CONTINUE_ADVICE);
     }
 
     let available = max_bytes - fixed;

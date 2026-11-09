@@ -135,6 +135,31 @@ describe('AuthScreen', () => {
     render(<AuthScreen />);
     expect(await screen.findByText('https://karucode.example.com')).toBeTruthy();
   });
+
+  it('lets the password be revealed and hidden again', async () => {
+    stubApi(authStatus({ password_set: true }));
+    render(<AuthScreen />);
+    const field = (await screen.findByLabelText('Password')) as HTMLInputElement;
+    expect(field.type).toBe('password');
+    const reveal = screen.getByRole('button', { name: 'Show password' });
+    expect(reveal.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(reveal);
+    expect((screen.getByLabelText('Password') as HTMLInputElement).type).toBe('text');
+    const hide = screen.getByRole('button', { name: 'Hide password' });
+    expect(hide.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(hide);
+    expect((screen.getByLabelText('Password') as HTMLInputElement).type).toBe('password');
+  });
+
+  it('separates the passkey from the password instead of stacking two equal actions', async () => {
+    stubCredentials({ get: async () => null, create: async () => null });
+    vi.stubGlobal('PublicKeyCredential', class {});
+    stubApi(authStatus({ password_set: true, passkey_count: 1 }));
+    const { container } = render(<AuthScreen />);
+    await screen.findByLabelText('Password');
+    expect(screen.getByText(/Sign in with a passkey/)).toBeTruthy();
+    expect(container.querySelector('.auth-or')).not.toBeNull();
+  });
 });
 
 function stubbedRejection(): void {

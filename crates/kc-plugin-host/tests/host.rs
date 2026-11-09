@@ -277,6 +277,42 @@ async fn tools_call_round_trips_arguments_and_meta() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The host is not a truncator: a plugin's result reaches the runtime exactly as
+/// the plugin sent it, so the only cut a model ever sees is the runtime's shared
+/// marker (which names `limits.max_tool_output_bytes` and the way to narrow). A
+/// host-side cap here would have to invent its own marker - the old silent one.
+#[tokio::test]
+async fn a_large_plugin_result_is_passed_through_uncut() {
+    let dir = temp_dir("call-large");
+    let mut host = PluginHost::discover(&[plugin("fake", "fake")], &dir);
+    host.start_all().await;
+    let tools = host.tools();
+
+    // Far past `limits.max_tool_output_bytes` (24 000 by default).
+    let payload = "x".repeat(80_000);
+    let out = call(
+        find(&tools, "plugin__fake__echo"),
+        &dir,
+        serde_json::json!({"text": payload}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert_eq!(out.content.len(), "echo: ".len() + 80_000);
+    assert_eq!(out.content, format!("echo: {}", "x".repeat(80_000)));
+    assert!(
+        !out.truncated,
+        "the host leaves cutting to the shared tool-output cap"
+    );
+    assert!(
+        !out.content.contains("truncated"),
+        "no host-side marker may be invented: {}",
+        &out.content[..out.content.len().min(200)]
+    );
+
+    host.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[tokio::test]
 async fn remote_tool_errors_become_failed_outcomes() {
     let dir = temp_dir("remote-error");

@@ -7,7 +7,7 @@
 
 - **Slug:** `builtin-tools`
 - **Tags:** tools, agent, files, search, shell, git
-- **Applies to:** `tool:read_file`, `tool:list_dir`, `tool:search_files`, `tool:glob`, `tool:write_file`, `tool:edit_file`, `tool:run_command`, `tool:git_status`, `tool:git_diff`, `tool:git_log`, `tool:karucode_docs`, `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `route:POST /api/sessions/:id/rewind`, `config:[limits]`, `config:limits.max_file_read_bytes`, `config:limits.search_max_results`, `config:limits.max_tool_output_bytes`, `config:allow_temp_dir`, `env:KARUCODE_ALLOW_TEMP_DIR`, `config:limits.parallel_tool_calls`, `env:KARUCODE_PARALLEL_TOOL_CALLS`, `config:[model]`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:RIPGREP_CONFIG_PATH`
+- **Applies to:** `tool:read_file`, `tool:list_dir`, `tool:search_files`, `tool:glob`, `tool:write_file`, `tool:edit_file`, `tool:run_command`, `tool:git_status`, `tool:git_diff`, `tool:git_log`, `tool:karucode_docs`, `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `route:POST /api/sessions/:id/rewind`, `config:[limits]`, `config:limits.max_file_read_bytes`, `config:limits.max_command_output_bytes`, `config:limits.search_max_results`, `config:limits.max_tool_output_bytes`, `config:allow_temp_dir`, `env:KARUCODE_ALLOW_TEMP_DIR`, `config:limits.parallel_tool_calls`, `env:KARUCODE_PARALLEL_TOOL_CALLS`, `config:[model]`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:RIPGREP_CONFIG_PATH`
 - **Source:** `crates/kc-tools/src/lib.rs:7`
 
 ---
@@ -15,16 +15,16 @@
 | Tool | Class | Approval | What it does |
 | --- | --- | --- | --- |
 | `read_file` | read_only | none | UTF-8 text with numbered lines and a `path - lines A-B of N` header; `offset`/`limit` (default 400, max 2000 lines). One call reads one file (`path`), several files (`paths`) or several windows of one file (`ranges`); a bad path or range is reported inline and the other reads still return. `limits.max_file_read_bytes` bounds the bytes one read *returns*, not the offsets it can reach, so any line of a huge file is readable. A PNG/JPEG/GIF/WebP given as `path` is attached as an image for a model that takes image input; a text-only model gets a refusal it can pass on |
-| `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries; the walk stops at the cap and a truncated listing reports the total as a lower bound (`500+`) |
+| `list_dir` | read_only | none | directory listing, `.gitignore`-aware, directories first, max depth 3, 500 entries; the walk stops at the cap and a truncated listing reports the total as a lower bound (`500+`). Rows are rendered within the call's output budget, so the "N shown" in its header is the number of rows really there |
 | `search_files` | read_only | none | content search via ripgrep, with a pure-Rust regex fallback; returns `path:line: text`, plus `path:line- text` context lines with `context`, or one path per line with `files_only`. The result cap is global across files, `max_matches_per_file` stops one noisy file spending it, and long matching lines keep their first 300 characters in both engines |
-| `glob` | read_only | none | name-based finder (not a content search): a glob over the same `.gitignore`-aware walker the search fallback uses. Directories carry a trailing `/`; bounded at 200 paths and a truncated walk says so |
+| `glob` | read_only | none | name-based finder (not a content search): a glob over the same `.gitignore`-aware walker the search fallback uses. Directories carry a trailing `/`; bounded at 200 paths, rendered within the call's output budget, and a truncated walk says how many paths it really showed |
 | `write_file` | mutating | policy | create/overwrite atomically, max 2 MiB per call; journals the previous bytes for a rewind |
 | `edit_file` | mutating | policy | exact-string replace, refuses an ambiguous or missing match, returns a diff; revalidates the file after approval and journals the previous bytes |
 | `run_command` | shell | policy | `/bin/sh -c` in the workspace, incrementally UTF-8-decoded streamed output, timeout, own process group. On timeout or cancellation the whole group gets SIGTERM, then SIGKILL after a grace period, so a child that ignores SIGTERM cannot survive |
 | `git_status` | read_only | none | branch + porcelain status for the workspace or a subdirectory, **confined to the workspace** |
 | `git_diff` | read_only | none | working-tree or `--staged` diff, optionally against a ref, **confined to the workspace** (paths are workspace-relative) |
 | `git_log` | read_only | none | bounded commit history: one line per commit (`sha date subject`), `max_count` default 20 and hard-capped at 200, optional `path` narrowing, **confined to the workspace** |
-| `karucode_docs` | read_only | none | search and read karucode's own documentation (this system) |
+| `karucode_docs` | read_only | none | search and read karucode's own documentation (this system); `read` is paged with `offset`/`limit` and ends with the exact offset that continues a long topic |
 
 The delegate family - `spawn_agent`, `spawn_agents`, `send_message`,
 `wait_for_agents`, `list_subagents`, `agent_history`, `pause_agents`,
@@ -54,16 +54,60 @@ surface. Plugin tools are namespaced `plugin__<plugin>__<tool>` and MCP tools
 ## Output limits
 
 Tool output kept for the model is bounded by `limits.max_tool_output_bytes`
-(default 24000), **including the truncation marker**. A cut retains head+tail so
-a final runtime-budget reduction does not discard a trailing error; unusually
-tiny budgets that cannot fit the explanatory marker retain a UTF-8-safe prefix.
-`run_command` retains raw stdout head+tail and trailing stderr within that final
-budget rather than front-truncating an already-rendered marker. Capture is first
-bounded per stream by `max_command_output_bytes`; long command lines in the
-result header are previewed at 512 characters (metadata still has the command).
+(default 24000), **including the truncation marker**. That key is the
+per-**result** ceiling for every origin; a turn's total tool output is
+additionally bounded by half the conversation budget
+(`limits.context_max_chars` / 2, never less than 2 000 bytes per result), so a
+late result in a busy turn can be squeezed below the per-result key.
+
+A cut result keeps the head and the tail (so a final squeeze never discards a
+trailing error) and lands on **line boundaries** whenever the payload has one
+within 2 KiB of the seam. The marker then reports how many bytes *and lines*
+were kept and dropped, so a numbered region is never spliced mid-line and the
+numbers describe the splice the reader is actually looking at:
+
+```text
+[truncated: 23574-byte, 354-line result; result lines 118-238 (8107 bytes, 121
+ lines) omitted from the middle; kept the first 7711 and the last 7756 bytes as
+ whole lines. re-issue the call with a narrower request (offset=/limit= where
+ the tool takes them, a smaller max_results, a narrower path, glob or pattern)
+ or raise limits.max_tool_output_bytes]
+```
+
+Every marker names the bound it hit and part of the next call that would avoid
+it (`limits.max_tool_output_bytes`, or `limits.max_command_output_bytes` for a
+command capture): "raise the limit" without a key name is a dead end for a
+model that cannot edit the operator's config. A payload with no newline near
+the seam (minified output, one long record) is reported in bytes instead of
+pretending to line numbers. Unusually tiny budgets get the most compact marker
+that fits, and one too small for any marker keeps a UTF-8-safe prefix. Cutting
+is deterministic for a given `(text, budget)`, and a *second* cut of an
+already-cut body does not stack a second marker: the old one sits at the seam
+and is dropped with it (the tail the first cut kept survives).
+
+The tools that can page do their own cut and say exactly where it ended:
+`read_file`, `list_dir`, `glob`, `search_files` and `karucode_docs` render
+*against* the budget - whole lines, then the exact continuation - so a cut
+result is resumable rather than merely smaller. `read_file` ends with
+`[next N lines omitted; continue with offset=X]` and `karucode_docs` with the
+`{"action":"read","offset":N}` that reads the next page. A multi-file
+`read_file` divides the budget before rendering anything and leaves what one
+section did not use for the rest, so no section is spliced by a later head+tail
+cut. `run_command` retains raw stdout head+tail and trailing stderr within that
+final budget rather than front-truncating an already-rendered marker, and its
+header repeats the recovery (`cmd > out.txt 2>&1`, then `read_file` on it).
+Capture is first bounded per stream by `max_command_output_bytes`; long command
+lines in the result header are previewed at 512 characters (metadata still has
+the command).
 
 ## Gotchas
 
+* Three arguments are refused before the tool does any work, and the refusal
+  names the cap: `edit_file`'s `old_string` and `new_string` (2 MiB each),
+  `run_command`'s `command` (32 KiB) and `search_files`'s `pattern` (4 KiB). A
+  generated blob that large is a broken call, and past the OS `ARG_MAX` the
+  spawn would fail with an opaque errno - the refusal says to write a script and
+  run that instead.
 * `edit_file` is exact-match and ambiguity-safe: it refuses when the old string
   appears twice (pass `replace_all`) or not at all. Read the region first. After
   approval it re-reads and re-plans with a SHA-256 fingerprint; if the file
@@ -102,6 +146,10 @@ result header are previewed at 512 characters (metadata still has the command).
   meaning there and is ignored. Both engines produce the **same shape** for
   all three - the crate's promise is that the model cannot tell them apart
   except by the engine label in the header.
+* `search_files` renders as many match lines as fit the output budget and then
+  says `[showing the first K of M result lines; ...]` with the narrowing that
+  finds the rest (a narrower pattern, a `glob`), instead of letting a head+tail
+  cut hide the middle of a match list.
 * `search_files` keeps the first 300 **characters** of a very long matching
   line rather than replacing it with a placeholder; the cap is counted in
   characters, not bytes, so a line of multi-byte text is cut in the same place
@@ -115,7 +163,8 @@ result header are previewed at 512 characters (metadata still has the command).
 * `glob` matches an entry's file name, its path relative to `path` and its
   workspace-relative path, so `*.rs`, `src/**/*.rs` and `crates/*/src/lib.rs`
   all work. It lists directories too, with a trailing `/`, and its walk stops
-  at 200 paths (the note says the cap cut it). The run's cancellation token is
+  at 200 paths (the note says what the cap or the output budget cut, and names
+  the narrowing: a narrower pattern or `path`). The run's cancellation token is
   checked on every yielded entry or error. Read-only, no approval.
 * `run_command` reports a **success** when the command exits 0 and leaves a
   child running in the background (`build & exit 0`) instead of waiting for that
@@ -156,6 +205,12 @@ result header are previewed at 512 characters (metadata still has the command).
   the check covers the whole window that would be returned, and the offset in
   the message is the byte offset in the file, even for a far window; so a NUL
   deep in a large file cannot reach the model as U+0000.
+* `git_diff` captures at most 1 MiB from git. A patch past that ends with a
+  note stating the limit and the recovery - narrow `path`/`base`/`staged`, or
+  write it out with `run_command` (`git diff > patch.diff`) and page
+  `patch.diff` with `read_file offset=/limit=`. `git_status` and `git_log`
+  refuse rather than return a partial answer when their capture is cut, with
+  the same alternatives in the message.
 * `git_log` runs with the same hardened config as `git_status`/`git_diff` and
   additionally disables signature display, because showing a signature runs the
   repository's own `gpg` program. It prints `sha date subject` per commit and

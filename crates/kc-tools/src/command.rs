@@ -242,11 +242,16 @@ impl BoundedOutput {
         let tail = &self.tail[ceil_char_boundary(&self.tail, 0)..];
         let dropped = self.total.saturating_sub(head.len() + tail.len());
         let text = format!(
-            "{}\n[... {dropped} of {} bytes omitted (kept the first {} and last {}) ...]\n{}",
+            "{}\n{}\n{}",
             String::from_utf8_lossy(head),
-            self.total,
-            head.len(),
-            tail.len(),
+            capture_marker(
+                dropped,
+                self.total,
+                head.len(),
+                tail.len(),
+                &format!("limits.max_command_output_bytes = {}", self.max),
+                self.max,
+            ),
             String::from_utf8_lossy(tail),
         );
         FinishedStream {
@@ -261,6 +266,44 @@ impl BoundedOutput {
     pub fn total_bytes(&self) -> usize {
         self.total
     }
+}
+
+/// The marker a bounded command stream carries where its middle bytes were
+/// dropped.
+///
+/// It states how much is missing, names the key that bounds capture, and gives
+/// the one recovery that actually works for a pipe: write the output to a file
+/// and read *that* with `read_file`, whose `offset=`/`limit=` can page through it.
+/// Re-running a command with a bigger cap is the other option, and the key name
+/// is what makes it possible to ask for it.
+fn capture_marker(
+    dropped: usize,
+    total: usize,
+    head: usize,
+    tail: usize,
+    bounds: &str,
+    budget: usize,
+) -> String {
+    if budget >= 1_200 {
+        return format!(
+            "[... {dropped} of {total} bytes omitted (kept the first {head} and the last {tail}; \
+             {bounds}): re-run it with the output redirected to a file, e.g. \
+             `cmd > out.txt 2>&1`, then read `out.txt` with read_file `offset=`/`limit=`, or raise \
+             limits.max_command_output_bytes ...]"
+        );
+    }
+    if budget >= 512 {
+        // A tighter budget still names the key and the recovery, in fewer bytes.
+        return format!(
+            "[... {dropped} of {total} bytes omitted (kept {head}+{tail}); redirect the command \
+             (`cmd > out.txt 2>&1`) and read `out.txt` with read_file offset=/limit=, or raise \
+             limits.max_command_output_bytes ...]"
+        );
+    }
+    // The tightest budget keeps only what makes the cut recoverable at all: the
+    // amount and the key. Anything longer would evict the trailing error this
+    // retention exists for.
+    format!("[... {dropped} of {total} bytes omitted; raise limits.max_command_output_bytes]")
 }
 
 /// Largest index `<= idx` that is a UTF-8 char boundary in `bytes`.
@@ -294,16 +337,50 @@ fn render_raw_stream(
     was_truncated: bool,
     max_bytes: usize,
 ) -> String {
-    let marker = format!(
-        "[... bytes omitted from {total} original bytes; retained the raw head and tail ...]"
-    );
-    if marker.len() + 2 > max_bytes {
-        return clip_text(&marker, max_bytes);
+    // Both caps are in play here: capture kept `limits.max_command_output_bytes`
+    // of each stream and this final fit stays inside the tool-output budget.
+    const BOUNDS: &str =
+        "limits.max_command_output_bytes caps capture; limits.max_tool_output_bytes caps this result";
+    // The marker reports the geometry it produces and its own length decides that
+    // geometry, so estimate the marker, then rebuild it from the split it actually
+    // made. Each pass that fits is kept so the seam uses every byte available.
+    let mut reserve = 420.min(max_bytes);
+    let mut best: Option<String> = None;
+    let mut last_marker = String::new();
+    for _ in 0..4 {
+        // `+ 2` for the newlines that separate the marker from each half.
+        let payload = max_bytes.saturating_sub(reserve + 2);
+        let (head, tail, dropped) = split_stream(raw_head, raw_tail, total, was_truncated, payload);
+        let marker = capture_marker(dropped, total, head.len(), tail.len(), BOUNDS, max_bytes);
+        if head.len() + marker.len() + tail.len() + 2 <= max_bytes {
+            best = Some(format!("{head}\n{marker}\n{tail}"));
+        }
+        let next = marker.len();
+        last_marker = marker;
+        if next == reserve {
+            break;
+        }
+        reserve = next;
     }
-    let payload = max_bytes - marker.len() - 2;
+    if let Some(out) = best {
+        return out;
+    }
+    // Even the marker alone does not fit: a clipped marker still says the result
+    // was cut, which is better than a silent prefix.
+    clip_text(&last_marker, max_bytes)
+}
+
+/// Split one stream's retained bytes into a head and a tail of at most `payload`
+/// bytes together, reporting how many bytes of the original stream that drops.
+fn split_stream(
+    raw_head: &[u8],
+    raw_tail: &[u8],
+    total: usize,
+    was_truncated: bool,
+    payload: usize,
+) -> (String, String, usize) {
     let head_budget = payload / 2;
     let tail_budget = payload - head_budget;
-
     // Before the first cut, `raw_head` is the complete stream and `raw_tail` is
     // empty. Create a genuine tail from its final bytes rather than duplicating
     // the prefix or dropping the trailing diagnostic.
@@ -315,7 +392,8 @@ fn render_raw_stream(
         &String::from_utf8_lossy(&tail_source[tail_start..]),
         tail_budget,
     );
-    format!("{head}\n{marker}\n{tail}")
+    let dropped = total.saturating_sub(head.len() + tail.len());
+    (head, tail, dropped)
 }
 
 fn clip_text(text: &str, max_bytes: usize) -> String {

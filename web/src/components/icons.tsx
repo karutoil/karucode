@@ -441,6 +441,18 @@ export function EyeIcon(props: IconProps): JSX.Element {
   );
 }
 
+/** The eye with a slash: "hide what I just typed". */
+export function EyeOffIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M10.6 6.1A9.9 9.9 0 0 1 12 5c6 0 10 7 10 7a17 17 0 0 1-3.2 3.9" />
+      <path d="M6.5 6.6C3.8 8.3 2 12 2 12s4 7 10 7a9.7 9.7 0 0 0 4-.86" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+      <path d="m3 3 18 18" />
+    </svg>
+  );
+}
+
 export function LayersIcon(props: IconProps): JSX.Element {
   return (
     <svg {...svgProps(props)}>

@@ -265,6 +265,20 @@ is a runaway-batch guard, not a work budget - calls past it are skipped with a
 placeholder result. How compaction interacts with provider prompt caching is
 documented under `prompt-cache`.
 
+The budget covers the **messages**, and images a read attached are charged
+8,000 characters each there (their token cost, not their byte cost): a turn
+that attached more pictures than the budget can pay for loses its oldest ones
+and says so in the result. The serialized **tool catalogue** is sent beside the
+messages and is not in this number at all - a plugin or an MCP server declares
+its own names, descriptions and schemas in another process - so the runtime
+measures it (`tool_payload_chars`) and reserves it out of the same window
+before it packs the conversation. When what remains cannot be dropped (the
+pinned task and the turn in flight), its largest bodies keep a head and a tail
+around a marker instead, reasoning text included; tool-call arguments are never
+shortened, because that changes what the call means. Encoded image bytes are
+bounded separately at 20 MiB per request, a memory bound rather than a window
+one.
+
 ## Running tool calls in parallel
 
 ```toml

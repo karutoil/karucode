@@ -557,9 +557,308 @@ async fn read_file_output_is_capped_by_the_tool_limit() {
     );
 }
 
+/// The measured failure: a read whose content exceeds `limits.max_tool_output_bytes`
+/// used to be spliced head+tail, its `lines A-B` header naming a range it did not
+/// carry and no offset that resumes it. Now the read returns whole numbered lines
+/// and names the exact `offset=` that continues them - and asking for that offset
+/// really returns the next line of the file.
+#[tokio::test]
+async fn a_read_cut_by_the_output_budget_names_an_offset_that_resumes_it() {
+    let limits = Limits {
+        max_tool_output_bytes: 1_200,
+        ..Default::default()
+    };
+    let env = env_with("read-budget", ask(), limits, ApprovalDecision::AllowOnce);
+    let body: String = (1..=300)
+        .map(|i| format!("line {i} has enough padding to make the byte budget bite\n"))
+        .collect();
+    env.tmp.write("big.txt", &body);
+
+    let out = call(&ReadFile, &env.ctx, json!({"path": "big.txt"})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.truncated);
+    assert!(
+        out.content.len() <= 1_200,
+        "the call's own budget must hold: {} bytes\n{}",
+        out.content.len(),
+        out.content
+    );
+    // One truncation marker at most: the read fits itself, so the generic
+    // head+tail marker must not make a second appearance.
+    assert!(
+        !out.content.contains("[truncated:"),
+        "a budgeted read needs no head+tail splice:\n{}",
+        out.content
+    );
+    let offset = resume_offset(&out.content).unwrap_or_else(|| {
+        panic!(
+            "the result must name the call that continues it:\n{}",
+            out.content
+        )
+    });
+    assert!(offset > 1, "no lines were shown: {}", out.content);
+
+    // Nothing was shown twice and nothing was hidden: the last numbered line is
+    // exactly the line before the reported resume offset.
+    let shown = numbered_lines(&out.content);
+    assert_eq!(*shown.last().unwrap(), offset - 1, "{}", out.content);
+    assert_eq!(shown.first(), Some(&1), "{}", out.content);
+
+    // The header must describe what was really returned, not what was requested.
+    let header = out.content.lines().next().unwrap();
+    assert!(
+        header.contains(&format!("lines 1-{} of 300", offset - 1)),
+        "header lies about the returned range: {header}"
+    );
+
+    // The reported offset lands inside the unread region and returns it.
+    let next = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"path": "big.txt", "offset": offset}),
+    )
+    .await;
+    assert!(next.ok, "{}", next.content);
+    let file_lines: Vec<&str> = body.lines().collect();
+    assert!(
+        next.content
+            .contains(&format!("{:>5}\t{}", offset, file_lines[offset - 1])),
+        "offset={offset} must resume at line {offset}:\n{}",
+        next.content
+    );
+    assert_eq!(numbered_lines(&next.content).first(), Some(&offset));
+
+    // The meta agrees with the text, so an agent reading either sees the same range.
+    let meta = out.meta.unwrap();
+    assert_eq!(meta["lines_from"], json!(1));
+    assert_eq!(meta["lines_to"], json!(offset - 1));
+}
+
+/// A single line longer than the whole output budget: the head+tail splice used to
+/// cut it mid-line with no way forward. The result now says which line it is and
+/// what to use instead, because no `offset` reaches the rest of one line.
+#[tokio::test]
+async fn a_read_of_one_oversized_line_says_what_can_reach_it() {
+    let limits = Limits {
+        max_tool_output_bytes: 900,
+        ..Default::default()
+    };
+    let env = env_with("read-long-line", ask(), limits, ApprovalDecision::AllowOnce);
+    let long = format!("MINIFIED={}", "a".repeat(20_000));
+    env.tmp.write(
+        "bundle.js",
+        &format!("short first line\n{long}\nshort last line\n"),
+    );
+
+    let out = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"path": "bundle.js", "offset": 2, "limit": 1}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.len() <= 900, "{} bytes", out.content.len());
+    assert!(
+        out.content
+            .contains(&format!("line 2 is {} bytes", long.len())),
+        "the note must name the offending line: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("search_files"),
+        "and the tool that can reach into it: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("continue with offset=3"),
+        "the next whole line is still reachable: {}",
+        out.content
+    );
+}
+
+/// Batched reads: every section is a whole-line window with its own resumable
+/// offset, instead of one head+tail splice over the concatenation.
+#[tokio::test]
+async fn a_batched_read_keeps_every_section_whole_and_resumable() {
+    let limits = Limits {
+        max_tool_output_bytes: 3_000,
+        ..Default::default()
+    };
+    let env = env_with(
+        "read-batch-budget",
+        ask(),
+        limits,
+        ApprovalDecision::AllowOnce,
+    );
+    for name in ["a.txt", "b.txt"] {
+        let body: String = (1..=200)
+            .map(|i| format!("{name} row {i} padded padded padded padded\n"))
+            .collect();
+        env.tmp.write(name, &body);
+    }
+
+    let out = call(&ReadFile, &env.ctx, json!({"paths": ["a.txt", "b.txt"]})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.len() <= 3_000, "{} bytes", out.content.len());
+    assert!(
+        !out.content.contains("[truncated:"),
+        "each section fits its share:\n{}",
+        out.content
+    );
+    // Each section keeps its own "continue with offset" - a batch is not one
+    // anonymous splice.
+    assert_eq!(
+        out.content.matches("continue with offset=").count(),
+        2,
+        "{}",
+        out.content
+    );
+    for path in ["a.txt", "b.txt"] {
+        let section = section_of(&out.content, path);
+        let offset = resume_offset(section)
+            .unwrap_or_else(|| panic!("{path} has no resume offset:\n{section}"));
+        let next = call(&ReadFile, &env.ctx, json!({"path": path, "offset": offset})).await;
+        assert!(next.ok, "{}", next.content);
+        assert_eq!(
+            numbered_lines(&next.content).first(),
+            Some(&offset),
+            "{} offset={offset}\n{}",
+            path,
+            next.content
+        );
+        // Whole lines only: every line in the section is a full file line.
+        let body = env.tmp.read(path);
+        for (number, text) in numbered_pairs(section) {
+            assert_eq!(
+                body.lines().nth(number - 1).unwrap(),
+                text,
+                "{path} line {number} was spliced"
+            );
+        }
+    }
+}
+
+/// The `offset=` a `[next N lines omitted; continue with offset=X]` hint names.
+fn resume_offset(text: &str) -> Option<usize> {
+    let tail = text.rsplit("continue with offset=").next()?;
+    let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// 1-based numbers of the `%5d\t` numbered lines in a rendered read.
+fn numbered_lines(text: &str) -> Vec<usize> {
+    numbered_pairs(text)
+        .into_iter()
+        .map(|(number, _)| number)
+        .collect()
+}
+
+/// `(number, text)` for every numbered line in a rendered read.
+fn numbered_pairs(text: &str) -> Vec<(usize, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let (number, rest) = line.split_once('\t')?;
+            let number: usize = number.trim().parse().ok()?;
+            Some((number, rest.to_string()))
+        })
+        .collect()
+}
+
+/// The `--- path ---` section of a batched read.
+fn section_of<'a>(text: &'a str, path: &str) -> &'a str {
+    let start = text
+        .find(&format!("--- {path} ---"))
+        .unwrap_or_else(|| panic!("no section for {path}:\n{text}"));
+    let rest = &text[start..];
+    match rest[1..].find("--- ") {
+        Some(next) => &rest[..next + 1],
+        None => rest,
+    }
+}
+
 /// The measured failure at the tool boundary: a file over
 /// `limits.max_file_read_bytes` must still be readable past the byte cap, so the
 /// model does not shell out to `sed -n` for one window.
+/// Argument count is a cap too: more than 32 reads per call are not attempted,
+/// and the result says how many were dropped rather than looking complete.
+#[tokio::test]
+async fn a_read_batch_over_the_call_cap_says_how_many_it_dropped() {
+    let env = env("read-batch-dropped");
+    for i in 0..40 {
+        env.tmp
+            .write(&format!("f{i:02}.txt"), &format!("body {i}\n"));
+    }
+    let paths: Vec<String> = (0..40).map(|i| format!("f{i:02}.txt")).collect();
+    let out = call(&ReadFile, &env.ctx, json!({"paths": paths})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(
+        out.content.contains("8 more read(s) were not attempted"),
+        "the drop must be stated: {}",
+        &out.content[out.content.len().saturating_sub(300)..]
+    );
+    assert_eq!(out.meta.as_ref().unwrap()["dropped_count"], json!(8));
+    assert!(out.truncated);
+}
+
+/// A `limit` beyond the hard cap is clamped, and the header shows the clamp so the
+/// model is not left believing it received the 5 000 lines it asked for.
+#[tokio::test]
+async fn a_read_limit_over_the_hard_cap_is_visible_in_the_header() {
+    // A budget large enough that the 2000-line hard cap, not the output budget,
+    // is what ends the window.
+    let limits = Limits {
+        max_tool_output_bytes: 1_000_000,
+        ..Default::default()
+    };
+    let env = env_with("read-limit-cap", ask(), limits, ApprovalDecision::AllowOnce);
+    let body: String = (1..=2_500).map(|i| format!("row {i}\n")).collect();
+    env.tmp.write("long.txt", &body);
+
+    let out = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"path": "long.txt", "limit": 5_000}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(
+        out.content.starts_with("long.txt — lines 1-2000 of 2500"),
+        "the header must report the clamped window: {}",
+        out.content.lines().next().unwrap()
+    );
+    assert!(
+        out.content.contains("continue with offset=2001"),
+        "and the next call: {}",
+        &out.content[out.content.len().saturating_sub(200)..]
+    );
+}
+
+/// With default limits the output budget, not `limit`, ends a wide read - and the
+/// header and hint describe the window that was really returned.
+#[tokio::test]
+async fn a_read_window_ends_on_a_line_the_header_and_the_hint_agree_on() {
+    let env = env("read-window-agree");
+    let body: String = (1..=2_500).map(|i| format!("row {i}\n")).collect();
+    env.tmp.write("long.txt", &body);
+
+    let out = call(
+        &ReadFile,
+        &env.ctx,
+        json!({"path": "long.txt", "limit": 5_000}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.len() <= 24_000, "{} bytes", out.content.len());
+    let last = *numbered_lines(&out.content).last().unwrap();
+    assert!(
+        out.content
+            .starts_with(&format!("long.txt — lines 1-{last} of 2500")),
+        "header and body disagree: {}",
+        out.content.lines().next().unwrap()
+    );
+    assert_eq!(resume_offset(&out.content), Some(last + 1));
+}
+
 #[tokio::test]
 async fn read_file_reaches_a_line_past_the_byte_cap() {
     let env = env("read-past-cap");
@@ -914,6 +1213,66 @@ async fn list_dir_sorts_dirs_first_and_skips_noise() {
     let deep = call(&ListDir, &env.ctx, json!({"path": "src", "depth": 9})).await;
     assert!(deep.ok, "{}", deep.content);
     assert!(deep.content.contains("depth 3"), "{}", deep.content);
+}
+
+/// A listing bigger than the call's output budget used to be head+tail spliced
+/// while its header still claimed to show every entry. The budget is now applied
+/// to the entries themselves: every row is a whole entry, the count is the real
+/// number shown, and the note says how to narrow.
+#[tokio::test]
+async fn a_listing_cut_by_the_output_budget_reports_what_it_really_showed() {
+    let limits = Limits {
+        max_tool_output_bytes: 2_000,
+        ..Default::default()
+    };
+    let env = env_with("list-budget", ask(), limits, ApprovalDecision::AllowOnce);
+    for i in 0..300 {
+        env.tmp
+            .write(&format!("a-rather-long-file-name-{i:03}.txt"), "x");
+    }
+
+    let out = call(&ListDir, &env.ctx, json!({})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.truncated);
+    assert!(out.content.len() <= 2_000, "{} bytes", out.content.len());
+    assert!(
+        !out.content.contains("[truncated: 2"),
+        "the listing must fit itself rather than be spliced:\n{}",
+        out.content
+    );
+    let header = out.content.lines().next().unwrap();
+    let shown: usize = header
+        .rsplit(", ")
+        .next()
+        .and_then(|tail| tail.trim_end_matches(" shown)").parse().ok())
+        .unwrap_or_else(|| panic!("no shown count in header: {header}"));
+    let rows: Vec<&str> = out
+        .content
+        .lines()
+        .skip(1)
+        .filter(|line| !line.starts_with('['))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        shown,
+        "the header must report the rows that are really there:\n{}",
+        out.content
+    );
+    assert!(shown < 300, "{}", out.content);
+    // Whole rows only: no row is a fragment of an entry.
+    for row in &rows {
+        assert!(
+            row.starts_with("a-rather-long-file-name-") && row.ends_with(".txt (1 B)"),
+            "a spliced row reached the model: {row:?}"
+        );
+    }
+    let meta = out.meta.unwrap();
+    assert_eq!(meta["shown"], json!(shown));
+    assert!(
+        out.content.contains("narrow `path` or lower `depth`"),
+        "the note must name the narrowing: {}",
+        out.content
+    );
 }
 
 #[tokio::test]
@@ -1850,6 +2209,68 @@ async fn a_long_stdout_does_not_evict_stderr() {
     assert!(out.truncated);
 }
 
+/// A command whose output exceeds `limits.max_command_output_bytes` used to say
+/// only "N of M bytes omitted". The model could not tell whether to re-run, how,
+/// or which key to name for the user. The marker now carries all three, and the
+/// trailing stderr line still survives at default limits.
+#[tokio::test]
+async fn a_noisy_command_names_the_knob_and_the_way_to_read_the_rest() {
+    // Default limits: 32 000 bytes captured per stream, 24 000 kept for the model.
+    let env = env_with(
+        "cmd-knob",
+        ask(),
+        Limits::default(),
+        ApprovalDecision::AllowOnce,
+    );
+    let out = call(
+        &RunCommand,
+        &env.ctx,
+        json!({"command": "seq 1 40000; printf 'STDERR-TRAILING\\n' >&2"}),
+    )
+    .await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.content.len() <= 24_000, "{} bytes", out.content.len());
+    assert!(
+        out.content.contains("STDERR-TRAILING"),
+        "the trailing error must survive a noisy stdout:\n{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("limits.max_command_output_bytes"),
+        "the marker must name the key that bounds it:\n{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("> out.txt 2>&1"),
+        "the marker must give the recovery that works for a pipe:\n{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("read_file"),
+        "and the tool that pages the redirected file:\n{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("bytes omitted"),
+        "the amount dropped is stated:\n{}",
+        out.content
+    );
+    // The recovery must also survive a *later* runtime-budget cut, which keeps the
+    // head and the tail and drops the middle: the capture marker sits in the
+    // middle, so the same sentence is repeated near the top.
+    let head = &out.content[..out.content.len().min(1_200)];
+    assert!(
+        head.contains("cmd > out.txt 2>&1") && head.contains("read_file"),
+        "the recovery must be in the head, where a budget cut keeps it:\n{head}"
+    );
+    // The header still reports the real size of each stream.
+    assert!(
+        out.content.contains("--- stdout (") && out.content.contains("--- stderr ("),
+        "{}",
+        out.content
+    );
+}
+
 #[tokio::test]
 async fn command_result_retains_raw_stream_ends_inside_the_final_runtime_budget() {
     let limits = Limits {
@@ -2025,6 +2446,70 @@ async fn search_files_finds_matches_and_reports_engine() {
     assert!(out.ok, "{}", out.content);
     assert!(out.content.contains("src/a.rs"), "{}", out.content);
     assert!(!out.content.contains("src/b.txt"), "{}", out.content);
+}
+
+/// A result list bigger than the call's output budget used to be spliced
+/// head+tail, so the model saw the first matches and the last matches with no
+/// statement of how many were in between. The list is now rendered within the
+/// budget and the note says how many of how many, and how to see the rest.
+#[tokio::test]
+async fn a_search_cut_by_the_output_budget_says_how_many_it_showed() {
+    let limits = Limits {
+        max_tool_output_bytes: 2_000,
+        ..Default::default()
+    };
+    let env = env_with("search-budget", ask(), limits, ApprovalDecision::AllowOnce);
+    // More files than `limits.search_max_results` (200), so both the match cap
+    // and the output budget are exercised.
+    for i in 0..250 {
+        env.tmp
+            .write(&format!("mod{i:03}.rs"), &format!("needle in module {i}\n"));
+    }
+
+    let out = call(&SearchFiles, &env.ctx, json!({"pattern": "needle"})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.truncated);
+    assert!(out.content.len() <= 2_000, "{} bytes", out.content.len());
+    let note_start = out
+        .content
+        .find("[showing the first ")
+        .unwrap_or_else(|| panic!("no shown-count note:\n{}", out.content));
+    let note: &str = &out.content[note_start..];
+    let note_end = note.find(']').unwrap();
+    let note = &note[..=note_end];
+    let shown: usize = note
+        .trim_start_matches("[showing the first ")
+        .split(' ')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no count in {note}"));
+    let body = &out.content[..note_start];
+    let rows: Vec<&str> = body
+        .lines()
+        .skip(1)
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(
+        rows.len(),
+        shown,
+        "the note must report the rows that are really there:\n{}",
+        out.content
+    );
+    for row in &rows {
+        assert!(
+            row.starts_with("mod") && row.contains(".rs:1: needle in module "),
+            "a spliced match line reached the model: {row:?}"
+        );
+    }
+    assert!(
+        note.contains("limits.max_tool_output_bytes"),
+        "the note must name the key: {note}"
+    );
+    assert!(
+        out.content.contains("hit the 200-match cap"),
+        "the match cap is still reported: {}",
+        out.content
+    );
 }
 
 #[tokio::test]
@@ -2267,6 +2752,51 @@ async fn glob_finds_names_honours_gitignore_and_marks_directories() {
     assert!(!out.ok, "{}", out.content);
 }
 
+/// A glob whose paths do not fit the call's budget keeps whole paths and reports
+/// the real number shown, instead of a spliced list under a count it did not meet.
+#[tokio::test]
+async fn a_glob_cut_by_the_output_budget_reports_what_it_really_showed() {
+    let limits = Limits {
+        max_tool_output_bytes: 1_500,
+        ..Default::default()
+    };
+    let env = env_with("glob-budget", ask(), limits, ApprovalDecision::AllowOnce);
+    for i in 0..150 {
+        env.tmp
+            .write(&format!("a-fairly-long-module-name-{i:03}.rs"), "x\n");
+    }
+
+    let out = call(&Glob, &env.ctx, json!({"pattern": "*.rs"})).await;
+    assert!(out.ok, "{}", out.content);
+    assert!(out.truncated);
+    assert!(out.content.len() <= 1_500, "{} bytes", out.content.len());
+    let rows: Vec<&str> = out
+        .content
+        .lines()
+        .skip(1)
+        .filter(|line| !line.starts_with('['))
+        .collect();
+    assert!(rows.len() < 150, "{}", out.content);
+    for row in &rows {
+        assert!(
+            row.starts_with("a-fairly-long-module-name-") && row.ends_with(".rs"),
+            "a spliced path reached the model: {row:?}"
+        );
+    }
+    let meta = out.meta.unwrap();
+    assert_eq!(meta["shown"], json!(rows.len()));
+    assert!(
+        out.content.contains(&format!("showing {} of", rows.len())),
+        "the note must agree with the rows: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("narrow the pattern or the `path`"),
+        "the note must name the narrowing: {}",
+        out.content
+    );
+}
+
 #[tokio::test]
 async fn glob_stops_at_the_cap_and_says_so() {
     let env = env("glob-cap");
@@ -2298,7 +2828,91 @@ async fn glob_stops_at_the_cap_and_says_so() {
     );
 }
 
-// --------------------------------------------------------------------- git ---
+// -------------------------------------------------------- argument caps ---
+//
+// Arguments are input tokens too: a pathological call must be refused with the
+// cap named *before* the tool starts work, because by the time the request is
+// parsed the bytes have already been paid for.
+
+#[tokio::test]
+async fn oversized_edit_strings_are_refused_before_the_file_is_touched() {
+    let env = env("edit-arg-cap");
+    // The path does not exist: the refusal below must come from the argument
+    // guard, not from a failed read, which proves the guard runs first.
+    let huge = "x".repeat(MAX_EDIT_ARG_BYTES + 1);
+    let out = call(
+        &EditFile,
+        &env.ctx,
+        json!({"path": "missing.txt", "old_string": huge, "new_string": "y"}),
+    )
+    .await;
+    assert!(!out.ok, "{}", out.content);
+    assert!(
+        out.content.contains("capped at 2048 KiB"),
+        "the refusal must name the cap: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("Nothing was read or written"),
+        "{}",
+        out.content
+    );
+    assert!(
+        !out.content.contains("does not exist"),
+        "the guard must run before the file is read: {}",
+        out.content
+    );
+
+    // Just under the cap is not refused by the guard (the file read reports next).
+    let big = "x".repeat(MAX_EDIT_ARG_BYTES);
+    let out = call(
+        &EditFile,
+        &env.ctx,
+        json!({"path": "missing.txt", "old_string": big, "new_string": "y"}),
+    )
+    .await;
+    assert!(!out.ok, "{}", out.content);
+    assert!(
+        !out.content.contains("capped at"),
+        "a string at the cap is allowed through to the read: {}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn an_oversized_command_is_refused_with_the_cap_named() {
+    let env = env("cmd-arg-cap");
+    let huge = format!("echo {}", "a".repeat(MAX_COMMAND_BYTES));
+    let out = call(&RunCommand, &env.ctx, json!({"command": huge})).await;
+    assert!(!out.ok, "{}", out.content);
+    assert!(
+        out.content.contains(&format!(
+            "run_command accepts at most {MAX_COMMAND_BYTES} bytes"
+        )),
+        "the refusal must name the cap: {}",
+        out.content
+    );
+    assert!(out.content.contains("Nothing was run"), "{}", out.content);
+    // No approval was requested for a call that never ran.
+    assert!(env.gate.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_oversized_search_pattern_is_refused_with_the_cap_named() {
+    let env = env("search-arg-cap");
+    let huge = "a".repeat(MAX_PATTERN_BYTES + 1);
+    let out = call(&SearchFiles, &env.ctx, json!({"pattern": huge})).await;
+    assert!(!out.ok, "{}", out.content);
+    assert!(
+        out.content.contains(&format!(
+            "search_files accepts at most {MAX_PATTERN_BYTES} bytes"
+        )),
+        "the refusal must name the cap: {}",
+        out.content
+    );
+}
+
+// ---------------------------------------------------------------- git ---
 
 fn git_available() -> bool {
     std::process::Command::new("git")

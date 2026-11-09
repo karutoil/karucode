@@ -1035,42 +1035,297 @@ impl ToolRegistry {
     }
 }
 
+/// The configuration key whose bound cuts a tool result that has no narrower
+/// request of its own.
+///
+/// Every truncation marker names it: "raise the limit" without a key name is a
+/// dead end for a model that cannot edit the operator's config, while the name
+/// lets it tell the user exactly what to change.
+pub const TOOL_OUTPUT_LIMIT_KEY: &str = "limits.max_tool_output_bytes";
+
+/// What a generic cut tells the model to do next: this is the part that turns
+/// "your result is incomplete" into a next call. A tool with a better answer
+/// passes its own sentence to [`truncate_output_with_advice`].
+pub const TOOL_OUTPUT_LIMIT_ADVICE: &str = "re-issue the call with a narrower request \
+     (offset=/limit= where the tool takes them, a smaller max_results, a narrower path, glob or \
+     pattern) or raise limits.max_tool_output_bytes";
+
+/// How far a cut may move to land on a line boundary before the payload counts as
+/// long-line data. A 12 KiB half-window that has no newline within 2 KiB of its
+/// middle is minified output or a single record; there the honest report is bytes.
+const MAX_LINE_SEAM_SHIFT: usize = 2 * 1024;
+
+/// Geometry of one truncation, in the units a reader can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cut {
+    /// Bytes of the complete result.
+    pub total_bytes: usize,
+    /// Lines of the complete result.
+    pub total_lines: usize,
+    /// Bytes kept from the head.
+    pub head_bytes: usize,
+    /// Bytes kept from the tail.
+    pub tail_bytes: usize,
+    /// Bytes dropped from the middle.
+    pub dropped_bytes: usize,
+    /// Whole lines dropped from the middle; `0` when the seam is not line-aligned.
+    pub dropped_lines: usize,
+    /// 1-based number of the first dropped line, when the cut is line-aligned.
+    pub first_dropped_line: Option<usize>,
+    /// Both seams sit on line boundaries, so no line is half-delivered.
+    pub line_aligned: bool,
+}
+
 /// Truncate a tool result to a byte budget without splitting a UTF-8 character.
 ///
 /// The complete return value - marker included - fits the budget. Keeping a tail
 /// matters for shell output: a final runtime-budget cut must not remove the error
-/// that a command printed to stderr after a noisy stdout stream. Tiny budgets too
-/// small for the explanatory marker keep a valid prefix; `cut` still reports it.
+/// that a command printed to stderr after a noisy stdout stream.
+///
+/// The marker is not just a flag. It reports the size of both what was kept and
+/// what was dropped, in bytes *and* lines, and says what to do next - because a
+/// cut the model cannot resume from costs a whole re-read (or a wrong answer).
+/// Line-oriented payloads are cut on line boundaries, so a numbered region is
+/// never spliced mid-line; the reported line numbers are then exact. Very small
+/// budgets get the most compact marker that still fits, and a budget too small
+/// for any marker keeps a valid prefix (`cut` still reports it).
 pub fn truncate_output(text: &str, max_bytes: usize) -> (String, bool) {
+    truncate_output_with_advice(text, max_bytes, TOOL_OUTPUT_LIMIT_ADVICE)
+}
+
+/// [`truncate_output`] with the caller's own "what to do next" sentence.
+///
+/// `advice` must name a real next call or the key that governs the bound; it is
+/// reserved out of the byte budget like the rest of the marker.
+pub fn truncate_output_with_advice(text: &str, max_bytes: usize, advice: &str) -> (String, bool) {
     if text.len() <= max_bytes {
         return (text.to_string(), false);
     }
-    let marker = format!(
-        "\n\n[truncated: {}-byte result; middle bytes omitted; kept head+tail]\n\n",
-        text.len()
-    );
-    if marker.len() >= max_bytes {
-        let mut end = max_bytes.min(text.len());
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
+    // Richest first. Each attempt renders its own marker from the geometry that
+    // attempt actually produces, so the byte and line numbers in the text always
+    // describe the splice the reader is looking at.
+    for detail in [Detail::Full, Detail::Short, Detail::Minimal] {
+        if let Some(out) = assemble_cut(text, max_bytes, advice, detail) {
+            return (out, true);
         }
-        return (text[..end].to_string(), true);
     }
-    let payload = max_bytes - marker.len();
-    let mut head_end = payload / 2;
-    while head_end > 0 && !text.is_char_boundary(head_end) {
-        head_end -= 1;
+    // No marker fits: a valid prefix is all a budget this small can carry, and
+    // the caller still reports `cut`. This is the only remaining silent case and
+    // it needs a budget below one short sentence.
+    let mut end = max_bytes.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
     }
-    let tail_bytes = payload - (payload / 2);
-    let mut tail_start = text.len().saturating_sub(tail_bytes);
-    while tail_start < text.len() && !text.is_char_boundary(tail_start) {
-        tail_start += 1;
+    (text[..end].to_string(), true)
+}
+
+/// How much the marker says, in decreasing order of usefulness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Detail {
+    Full,
+    Short,
+    Minimal,
+}
+
+/// One candidate result: pick a seam that leaves room for a marker of `detail`,
+/// render that marker, and accept it when the whole thing fits the budget.
+///
+/// The marker's own length depends on the numbers it reports, which depend on the
+/// room it leaves - so the length is estimated, then recomputed from what was
+/// actually rendered until it settles. Every step is a pure function of
+/// `(text, max_bytes, advice)`, which keeps a cut result byte-identical between
+/// runs: provider prefix caching depends on that.
+fn assemble_cut(text: &str, max_bytes: usize, advice: &str, detail: Detail) -> Option<String> {
+    let mut reserve = match detail {
+        Detail::Full => 480,
+        Detail::Short => 160,
+        Detail::Minimal => 64,
+    };
+    // The marker explains a cut; it must not become most of what is left. A tiny
+    // budget gets the compact marker so the content - and the tail, where a
+    // command's error usually is - keeps the room.
+    let marker_share = (max_bytes / 2).max(80);
+    for _ in 0..4 {
+        let (head_end, tail_start, cut) = cut_at(text, max_bytes.saturating_sub(reserve));
+        let marker = render_marker(&cut, advice, detail);
+        if marker.len() > marker_share {
+            return None;
+        }
+        let total = head_end + marker.len() + (text.len() - tail_start);
+        if total <= max_bytes {
+            return Some(format!(
+                "{}{}{}",
+                &text[..head_end],
+                marker,
+                &text[tail_start..]
+            ));
+        }
+        if marker.len() <= reserve {
+            // Shrinking the estimate cannot help any more; this detail is too
+            // verbose for the budget.
+            return None;
+        }
+        reserve = marker.len();
     }
-    debug_assert!(head_end <= tail_start);
-    (
-        format!("{}{}{}", &text[..head_end], marker, &text[tail_start..]),
-        true,
-    )
+    None
+}
+
+/// Where a cut with `payload` bytes for content lands, and what it drops.
+fn cut_at(text: &str, payload: usize) -> (usize, usize, Cut) {
+    let payload = payload.min(text.len());
+    let head_target = payload / 2;
+    let tail_bytes = payload - head_target;
+    let tail_target = text.len().saturating_sub(tail_bytes);
+    let mut tail_start =
+        line_start_near(text, tail_target).unwrap_or_else(|| floor_char(text, tail_target));
+    let mut head_end = line_end_near(text, head_target.min(tail_start))
+        .unwrap_or_else(|| floor_char(text, head_target));
+    head_end = head_end.min(tail_start);
+
+    // A body that was already cut carries a marker of its own. Keeping it would
+    // stack two markers around one seam - the older numbers describe a splice the
+    // reader can no longer see - so the seam moves past it. The kept bytes are
+    // still a contiguous head and tail; only the superseded marker is dropped.
+    if let Some((start, end)) = marker_overlapping(text, head_end, tail_start) {
+        if start < head_end {
+            // The old marker sits inside the kept head. Never spend the whole head
+            // on removing it: what the reader can still use beats a tidier count.
+            if start > 0 {
+                head_end = start;
+            }
+        } else {
+            // It starts inside the kept tail: resume after it, at the next line.
+            tail_start = end;
+            while text.as_bytes().get(tail_start) == Some(&b'\n') {
+                tail_start += 1;
+            }
+        }
+    }
+
+    let tail_line_start = tail_start == 0
+        || tail_start == text.len()
+        || text.as_bytes().get(tail_start - 1) == Some(&b'\n');
+    let head_line_end = head_end == 0
+        || text.as_bytes().get(head_end.wrapping_sub(1)) == Some(&b'\n')
+        || head_end == text.len();
+    let line_aligned = head_line_end && tail_line_start;
+
+    let dropped = text.get(head_end..tail_start).unwrap_or("");
+    let mut dropped_lines = if line_aligned {
+        dropped.matches('\n').count()
+    } else {
+        0
+    };
+    // A final partial line (no trailing newline) is still a whole line to a
+    // reader, and `str::lines` counts it as one.
+    if line_aligned && tail_start == text.len() && !dropped.is_empty() && !dropped.ends_with('\n') {
+        dropped_lines += 1;
+    }
+    let cut = Cut {
+        total_bytes: text.len(),
+        total_lines: text.lines().count(),
+        head_bytes: head_end,
+        tail_bytes: text.len() - tail_start,
+        dropped_bytes: dropped.len(),
+        dropped_lines,
+        first_dropped_line: line_aligned.then(|| 1 + text[..head_end].matches('\n').count()),
+        line_aligned: line_aligned && head_end < tail_start,
+    };
+    (head_end, tail_start, cut)
+}
+
+/// The `(start, end)` of a truncation marker this module wrote that the kept head
+/// or tail of a re-cut would otherwise include.
+///
+/// Only the exact shape [`render_marker`] emits is recognised - a blank line, the
+/// `[truncated:` opener and the closing bracket - so ordinary text that merely
+/// mentions the word is left alone.
+fn marker_overlapping(text: &str, head_end: usize, tail_start: usize) -> Option<(usize, usize)> {
+    const OPENER: &str = "\n\n[truncated:";
+    let mut from = 0usize;
+    while let Some(pos) = text[from..].find(OPENER) {
+        let start = from + pos;
+        let body = start + OPENER.len();
+        let close = text[body..].find(']')?;
+        let end = body + close + 1;
+        if start < head_end || end > tail_start {
+            return Some((start, end));
+        }
+        from = end;
+    }
+    None
+}
+
+/// The marker text for one cut at one level of detail.
+fn render_marker(cut: &Cut, advice: &str, detail: Detail) -> String {
+    let total = cut.total_bytes;
+    let dropped = cut.dropped_bytes;
+    match detail {
+        Detail::Full if cut.line_aligned => {
+            let first = cut.first_dropped_line.unwrap_or(0);
+            let last = first + cut.dropped_lines.saturating_sub(1);
+            format!(
+                "\n\n[truncated: {total}-byte, {}-line result; result lines {first}-{last} \
+                 ({dropped} bytes, {} lines) omitted from the middle; kept the first {} and the last \
+                 {} bytes as whole lines. {advice}]\n\n",
+                cut.total_lines, cut.dropped_lines, cut.head_bytes, cut.tail_bytes
+            )
+        }
+        Detail::Full => format!(
+            "\n\n[truncated: {total}-byte, {}-line result; {dropped} bytes omitted from the middle \
+             (the cut falls inside a line); kept the first {} and the last {} bytes. {advice}]\n\n",
+            cut.total_lines, cut.head_bytes, cut.tail_bytes
+        ),
+        Detail::Short if cut.line_aligned => {
+            let first = cut.first_dropped_line.unwrap_or(0);
+            let last = first + cut.dropped_lines.saturating_sub(1);
+            format!(
+                "\n\n[truncated: lines {first}-{last} ({dropped} bytes) omitted from the middle of \
+                 this {total}-byte result; raise {TOOL_OUTPUT_LIMIT_KEY} or narrow the \
+                 request]\n\n"
+            )
+        }
+        Detail::Short => format!(
+            "\n\n[truncated: {dropped} of {total} bytes omitted from the middle; raise \
+             {TOOL_OUTPUT_LIMIT_KEY} or narrow the request]\n\n"
+        ),
+        Detail::Minimal => format!(
+            "\n\n[truncated: {dropped} of {total} bytes omitted; raise {TOOL_OUTPUT_LIMIT_KEY}]\n\n"
+        ),
+    }
+}
+
+/// Largest char boundary `<= idx`.
+fn floor_char(text: &str, idx: usize) -> usize {
+    let mut end = idx.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// The end of the line at or before `idx` (itself a char boundary), when the
+/// nearest newline is close enough to be a deliberate seam.
+fn line_end_near(text: &str, idx: usize) -> Option<usize> {
+    let idx = floor_char(text, idx);
+    let window_start = idx.saturating_sub(MAX_LINE_SEAM_SHIFT);
+    let pos = text.as_bytes()[window_start..idx]
+        .iter()
+        .rposition(|b| *b == b'\n')?;
+    Some(window_start + pos + 1)
+}
+
+/// The start of the first whole line at or after `idx`.
+fn line_start_near(text: &str, idx: usize) -> Option<usize> {
+    let idx = floor_char(text, idx);
+    if idx >= text.len() {
+        return Some(text.len());
+    }
+    let window_end = (idx + MAX_LINE_SEAM_SHIFT).min(text.len());
+    let pos = text.as_bytes()[idx..window_end]
+        .iter()
+        .position(|b| *b == b'\n')?;
+    Some(idx + pos + 1)
 }
 
 #[cfg(test)]
@@ -1099,6 +1354,169 @@ mod tests {
         let (out, cut) = truncate_output("abc", 10);
         assert!(!cut);
         assert_eq!(out, "abc");
+    }
+
+    /// A numbered, line-oriented payload of `n` lines.
+    fn numbered(n: usize) -> String {
+        (1..=n)
+            .map(|i| format!("line {i}: {}", "x".repeat(20)))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    /// `(head, marker, tail)` split out of a cut result. The marker owns the
+    /// blank lines that separate it from the content on both sides.
+    fn split_marker(out: &str) -> (&str, &str, &str) {
+        let start = out.find("[truncated:").expect("a cut carries a marker");
+        let end = out[start..].find(']').map(|i| start + i + 1).expect("]");
+        let before = &out[..start];
+        let after = &out[end..];
+        (
+            before.strip_suffix("\n\n").unwrap_or(before),
+            &out[start..end],
+            after.strip_prefix("\n\n").unwrap_or(after),
+        )
+    }
+
+    #[test]
+    fn a_line_cut_reports_the_exact_line_range_it_dropped() {
+        let text = numbered(2_000);
+        let (out, cut) = truncate_output(&text, 1_200);
+        assert!(cut);
+        assert!(out.len() <= 1_200, "{} bytes", out.len());
+        let (head, marker, tail) = split_marker(&out);
+        assert!(marker.contains("omitted from the middle"), "{marker}");
+        assert!(
+            marker.contains(TOOL_OUTPUT_LIMIT_KEY),
+            "the marker must name the key that bounds it: {marker}"
+        );
+        assert!(
+            marker.contains("offset=/limit="),
+            "the marker must name the call that continues it: {marker}"
+        );
+        // Never a mid-line fragment: the head is a prefix of the payload, the
+        // tail is a suffix of it, and both seams sit on line boundaries.
+        assert!(text.starts_with(head), "head is not a prefix: {head:?}");
+        assert!(text.ends_with(tail), "tail is not a suffix: {tail:?}");
+        assert!(head.ends_with('\n'), "head ends mid-line: {head:?}");
+        assert!(
+            tail.is_empty() || text[text.len() - tail.len() - 1..].starts_with('\n'),
+            "tail starts mid-line: {tail:?}"
+        );
+
+        // The reported range really is the range that is missing.
+        let head_lines = head.matches('\n').count();
+        let dropped_lines = text.lines().count() - head_lines - tail.matches('\n').count();
+        let first = head_lines + 1;
+        let last = first + dropped_lines - 1;
+        assert!(
+            marker.contains(&format!("lines {first}-{last}")),
+            "marker must report lines {first}-{last}: {marker}"
+        );
+        let payload: Vec<&str> = text.lines().collect();
+        let tail_first = payload.len() - tail.matches('\n').count() + 1;
+        assert_eq!(
+            tail_first,
+            last + 1,
+            "the tail must resume exactly after the reported last dropped line"
+        );
+    }
+
+    #[test]
+    fn a_cut_is_deterministic() {
+        let text = numbered(1_000);
+        let a = truncate_output(&text, 900);
+        let b = truncate_output(&text, 900);
+        assert_eq!(a, b, "the same input must produce the same bytes");
+    }
+
+    #[test]
+    fn a_tiny_budget_still_names_the_key_and_keeps_the_tail() {
+        // One long line: there is no line boundary to land on, so the marker
+        // reports bytes rather than pretending to know a line range.
+        let text = format!("head-{}-TAIL-SENTINEL", "x".repeat(4_000));
+        let (out, cut) = truncate_output(&text, 180);
+        assert!(cut);
+        assert!(out.len() <= 180, "{} bytes", out.len());
+        assert!(out.ends_with("TAIL-SENTINEL"), "{out}");
+        assert_eq!(out.matches("[truncated:").count(), 1, "{out}");
+        assert!(
+            out.contains(TOOL_OUTPUT_LIMIT_KEY),
+            "even a compact marker names the key: {out}"
+        );
+        assert!(
+            !out.contains("lines "),
+            "a mid-line cut must not claim a line range: {out}"
+        );
+    }
+
+    #[test]
+    fn a_caller_can_supply_the_next_step_instead_of_the_generic_one() {
+        let text = numbered(500);
+        let advice = "re-run it as `cmd > /tmp/out.txt 2>&1` and read_file that file with offset=";
+        let (out, cut) = truncate_output_with_advice(&text, 800, advice);
+        assert!(cut);
+        assert!(out.len() <= 800);
+        assert!(out.contains(advice), "{out}");
+        assert!(
+            !out.contains("re-issue the call with a narrower request"),
+            "the caller's advice replaces the generic sentence: {out}"
+        );
+    }
+
+    #[test]
+    fn a_payload_without_newlines_is_reported_in_bytes() {
+        let text = "y".repeat(10_000);
+        let (out, cut) = truncate_output(&text, 600);
+        assert!(cut);
+        assert!(out.len() <= 600);
+        let (_, marker, _) = split_marker(&out);
+        assert!(marker.contains("bytes"), "{marker}");
+        assert!(!marker.contains("lines 1-"), "{marker}");
+    }
+
+    /// A result that is cut again - a turn-budget squeeze, or a lowered key -
+    /// must not end up with two markers around one seam, and must keep the tail
+    /// the first cut kept. The context budget depends on this, and so does a
+    /// reader: the older marker's numbers describe a splice that is no longer
+    /// visible in the text.
+    #[test]
+    fn a_second_cut_does_not_stack_a_second_marker() {
+        let text = numbered(400);
+        let (once, cut) = truncate_output(&text, 1_600);
+        assert!(cut);
+        assert_eq!(once.matches("[truncated:").count(), 1);
+        let kept_tail = &once[once.len() - 40..];
+
+        let (twice, cut) = truncate_output(&once, 900);
+        assert!(cut);
+        assert!(twice.len() <= 900, "{} bytes", twice.len());
+        assert_eq!(
+            twice.matches("[truncated:").count(),
+            1,
+            "a re-cut stacks a second marker:\n{twice}"
+        );
+        assert!(
+            twice.ends_with(kept_tail),
+            "the tail the first cut kept must survive:\n{twice}"
+        );
+
+        // Same for a squeeze that keeps most of the body.
+        let (thrice, cut) = truncate_output(&once, 1_400);
+        assert!(cut);
+        assert!(thrice.len() <= 1_400);
+        assert_eq!(thrice.matches("[truncated:").count(), 1, "{thrice}");
+        assert!(thrice.ends_with(kept_tail), "{thrice}");
+    }
+
+    #[test]
+    fn a_cut_is_stable_across_repeated_runs() {
+        let text = numbered(300);
+        let first = truncate_output(&text, 1_000);
+        for _ in 0..8 {
+            assert_eq!(truncate_output(&text, 1_000), first);
+        }
     }
 
     fn temp_file(tag: &str, bytes: &[u8]) -> std::path::PathBuf {

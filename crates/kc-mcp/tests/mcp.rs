@@ -272,6 +272,32 @@ async fn stdio_tools_call_joins_text_content() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// An MCP server's text result reaches the runtime exactly as it was sent: the
+/// server is not a truncator, so the only cut a model sees is the shared
+/// tool-output marker (which names the key and how to narrow).
+#[tokio::test]
+async fn a_large_mcp_result_is_passed_through_uncut() {
+    let dir = temp_dir("stdio-large");
+    let mut manager = McpManager::new(&[stdio_server("fake")]);
+    manager.connect_all().await;
+    let echo = find(&manager.tools(), "mcp__fake__echo");
+
+    // Far past `limits.max_tool_output_bytes` (24 000 by default).
+    let payload = "x".repeat(80_000);
+    let out = call_tool(echo, &dir, json!({"text": payload})).await;
+    assert!(out.ok, "{}", &out.content[..out.content.len().min(200)]);
+    assert_eq!(out.content.len(), "mcp echo: ".len() + 80_000);
+    assert!(!out.truncated, "no server-side cut");
+    assert!(
+        !out.content.contains("truncated"),
+        "no invented marker: {}",
+        &out.content[..out.content.len().min(200)]
+    );
+
+    manager.shutdown().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[tokio::test]
 async fn stdio_is_error_and_jsonrpc_errors_become_failed_outcomes() {
     let dir = temp_dir("stdio-errors");
