@@ -144,6 +144,21 @@
   **windowed**: only the rows around the viewport are mounted, with padding
   standing in for the rest, so a fully loaded conversation does not mount
   thousands of Markdown blocks at once (see `web/src/lib/virtualWindow.ts`).
+  Scrolling it is meant to be *still*: the window is sized from measured row
+  **extents** (border box plus the row's own bottom margin, with
+  `content-visibility` off inside the window so every mounted row - the
+  overscan included - reports the box it really has), and when a measurement
+  does move the layout the scroll is moved by exactly that shift, anchored on
+  the row at the top of the viewport. What it must never do is derive the
+  correction from the *estimate* it is replacing: Chromium had already laid the
+  row out at its real height, so that "correction" threw the reader hundreds of
+  pixels for a layout that had not moved (measured: a 120px wheel step became
+  267px of visible jump scrolling up and 32px scrolling down). The transcript also opts out
+  of the browser's native scroll anchoring (`overflow-anchor: none`), which
+  would compensate a second time for the same shift. The entry animation
+  belongs to a row that has just **arrived** (`.msg.is-fresh`): when it lived on
+  `.msg`, every row the window remounted replayed it and rows the reader was
+  looking at faded in from transparent under the wheel.
   Opening a session lands on its **newest** content without a gesture: the
   viewport is pinned to the tail before the first paint, even when the newest
   page is taller than the screen.

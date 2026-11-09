@@ -19,7 +19,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .msg {
+  .msg.is-fresh {
     animation-duration: 0.001ms;
   }
 }
@@ -55,6 +55,12 @@
 .transcript {
   display: block;
   min-width: 0;
+  /* The transcript anchors itself. Two places move the scroll by exactly the
+   * layout shift they caused — the measuring effect below the window and the
+   * history loader's reveal (`lib/historyLoader.ts`) — and the browser's own
+   * scroll anchoring compensates a second time for the same shift, which reads
+   * as a wheel tick that goes nowhere. */
+  overflow-anchor: none;
 }
 
 /* ---------- history sentinel ---------- */
@@ -99,7 +105,12 @@
   }
 }
 
-.transcript > :last-child {
+/* Only the unwindowed transcript trims the last row's trailing gap. A windowed
+ * one measures every row's extent to size its padding, so a margin that changes
+ * with the row's place in the *rendered window* would make the same row a
+ * different height as the window moved - which is a measurement feedback loop,
+ * not a layout. `.is-windowed` rows keep their margin wherever they land. */
+.transcript:not(.is-windowed) > :last-child {
   margin-bottom: 0;
 }
 
@@ -153,6 +164,25 @@
   padding: 0;
   content-visibility: auto;
   contain-intrinsic-size: auto 160px;
+}
+
+/* A windowed transcript measures every row it mounts, and `content-visibility:
+ * auto` makes that measurement a lie: an off-screen row is laid out at its
+ * `contain-intrinsic-size`, and then the browser re-lays it out for real as it
+ * comes into view, shifting everything below it by the difference with no render
+ * to compensate (rows are already few - the window is the bound - so there is
+ * nothing left for content-visibility to save here). The unwindowed transcript
+ * (an embedded renderer, the test environment) still gets the optimisation. */
+.transcript.is-windowed .msg {
+  content-visibility: visible;
+}
+
+/* The entry animation belongs to a row that has just joined the conversation,
+ * not to the row itself. A windowed transcript unmounts and remounts rows as the
+ * reader scrolls; when the animation lived on `.msg`, every remount replayed it
+ * and rows the reader was looking at faded in from transparent under the wheel
+ * (`ChatTranscript` decides `is-fresh`: new entry, never mounted before). */
+.msg.is-fresh {
   animation: msg-fade-up 0.26s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 }
 

@@ -378,6 +378,27 @@ under **Changed**.
 
 ### Fixed
 
+- **The conversation no longer glitches while it scrolls.** A windowed transcript
+  only mounts the rows around the viewport, and it sized its padding from an
+  estimate of each row's height. Two things went wrong with that. First, the
+  entry animation lived on `.msg`, so every row the window remounted replayed it:
+  rows the reader was looking at faded in from transparent and slid 5px as they
+  came into view, in both directions. It is now `.msg.is-fresh`, applied only to a
+  row that has just joined the conversation (an opening session draws as it is,
+  without every row announcing itself). Second, when a row was measured the view
+  was moved by the difference between its real height and the *estimate* it
+  replaced — but Chromium had already laid that row out at its real height, so the
+  correction moved the reader for a layout that never changed. In a browser with
+  a 163 000px transcript, a 120px wheel step became 267px of visible jump
+  scrolling up and 32px scrolling down. The window is now sized from each row's
+  measured *extent* (border box plus its own bottom margin, `content-visibility`
+  off inside the window so even the overscan reports a real box), the correction
+  is the layout shift itself, anchored on the row at the top of the viewport, and
+  the transcript opts out of the browser's native scroll anchoring so the shift is
+  not compensated twice. Same measurement: 0.5px up, 0.0px down, nothing fading
+  and nothing moving once the input stops. `ChatTranscript.window.test.tsx` pins
+  both halves (it fails on the previous code with a 3864px scroll where the 300px
+  layout shift was, and with no `.is-fresh` at all).
 - **Paging back through a huge session shows the page it just loaded.** A page of
   a long conversation is a window of stored bytes (5000 rows or 1 MiB of text), so
   one page can be tens of thousands of pixels tall. When the reader was at the very

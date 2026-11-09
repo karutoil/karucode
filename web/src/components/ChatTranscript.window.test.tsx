@@ -163,4 +163,107 @@ describe('windowed transcript', () => {
     unmount();
     expect(content.current).toBeNull();
   });
+
+  it('fades in a row that just arrived, not one the window remounts', async () => {
+    // The entry animation lived on `.msg`, so every row the window remounted
+    // replayed it: rows the reader was looking at faded in from transparent
+    // while scrolling (measured in Chromium: a visible row at opacity 0.69).
+    const { container, rerender } = render(<Harness items={conversation(100)} />);
+    await waitFor(() => expect(rows(container).length).toBeGreaterThan(0));
+
+    // Opening a conversation draws it as it is: no row announces itself.
+    expect(rows(container).some((row) => row.classList.contains('is-fresh'))).toBe(false);
+
+    // Scrolling mounts different rows. They were already part of the transcript,
+    // so none of them may animate.
+    const viewport = container.querySelector('#probe-viewport') as HTMLElement;
+    viewport.scrollTop = 0;
+    fireEvent.scroll(viewport);
+    await waitFor(() => expect(container.textContent).toContain('question 0'));
+    expect(rows(container).filter((row) => row.classList.contains('is-fresh'))).toHaveLength(0);
+
+    // A turn that really is new fades in.
+    viewport.scrollTop = 1_000_000;
+    fireEvent.scroll(viewport);
+    rerender(
+      <Harness
+        items={[...conversation(100), message({ id: 'brand_new', role: 'user', content: 'a brand new question' })]}
+      />,
+    );
+    await waitFor(() => expect(container.textContent).toContain('a brand new question'));
+    const fresh = rows(container).filter((row) => row.classList.contains('is-fresh'));
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0]?.textContent).toContain('a brand new question');
+  });
+
+  it('moves the scroll by the layout shift a measurement caused, not by its estimate', async () => {
+    // The old correction moved the scroll by (measured height - estimate) for
+    // rows above the viewport. On a real session the estimate is wrong by
+    // hundreds of pixels and the row was already laid out at its real height, so
+    // the "correction" threw the reader hundreds of pixels while scrolling
+    // (measured in Chromium: +267px of visible movement for a 120px wheel step).
+    // The scroll must move by what the *layout* did, which is what this pins.
+    const layout = { shift: 0, heights: {} as Record<string, number> };
+    const realRect = HTMLElement.prototype.getBoundingClientRect;
+    const realClientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight');
+    const realScrollHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight');
+    HTMLElement.prototype.getBoundingClientRect = function getBoundingClientRect(this: HTMLElement) {
+      if (this.id === 'anchor-viewport' || this.classList.contains('transcript')) return box(0, 600);
+      const key = this.getAttribute('data-entry-key');
+      if (key) {
+        const height = layout.heights[key] ?? 100;
+        return box(layout.shift, layout.shift + height);
+      }
+      return realRect.call(this);
+    };
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.id === 'anchor-viewport' ? 600 : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.id === 'anchor-viewport' ? 100_000 : 0;
+      },
+    });
+
+    function AnchorHarness({ items }: { items: ChatItem[] }): JSX.Element {
+      const viewport = useRef<HTMLDivElement>(null);
+      return (
+        <div id="anchor-viewport" ref={viewport}>
+          <ChatTranscript
+            items={items}
+            resolvingApprovals={{}}
+            onApprovalDecision={() => undefined}
+            viewportRef={viewport}
+          />
+        </div>
+      );
+    }
+
+    try {
+      const { container, rerender } = render(<AnchorHarness items={conversation(50)} />);
+      const viewport = container.querySelector('#anchor-viewport') as HTMLElement;
+      viewport.scrollTop = 4_000;
+      fireEvent.scroll(viewport);
+      await waitFor(() => expect(rows(container).length).toBeGreaterThan(0));
+      await waitFor(() => expect(viewport.scrollTop).toBe(4_000));
+      const before = viewport.scrollTop;
+
+      // Older content above grew by 300px. Appending an item runs the measuring
+      // pass without changing any mounted row's height, so the correction below
+      // is the only thing that can move the scroll.
+      layout.shift = 300;
+      rerender(<AnchorHarness items={[...conversation(50), message({ id: 'tail', content: 'tail' })]} />);
+      await waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(before + 200));
+      // Exactly the shift: the reader's row stays where it was on screen.
+      expect(Math.abs(viewport.scrollTop - (before + 300))).toBeLessThanOrEqual(1);
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = realRect;
+      if (realClientHeight) Object.defineProperty(HTMLElement.prototype, 'clientHeight', realClientHeight);
+      if (realScrollHeight) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', realScrollHeight);
+    }
+  });
 });

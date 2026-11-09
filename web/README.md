@@ -396,6 +396,15 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
    the view by the page's height and past it. The session page carries
    the session's own rows only; a subagent's transcript is `GET /api/agents/:id`.
    Truncated command output is labelled from the server's `truncated` flag.
+   A windowed transcript has to keep the scroll *still*, which is the hard part:
+   it sizes its padding from each row's measured extent (border box plus the row's
+   own bottom margin), measures every mounted row including the overscan (so
+   `content-visibility` is off inside `.transcript.is-windowed`), corrects a
+   measurement by the layout shift itself — anchored on the row at the top of the
+   viewport, never by the estimate it replaces — and sets `overflow-anchor: none`
+   so the browser does not compensate for the same shift again. The entry
+   animation is `.msg.is-fresh` (a row that just joined the conversation), not
+   `.msg`, so a remount while scrolling does not replay it.
 10. **Plugin/MCP status** is read-only in the UI by design; no enable toggles are
     exposed even though `POST /api/plugins/:name/enable` exists.
 11. **Auth token**: stored in `localStorage` (`karucode.token`) and sent as a bearer
