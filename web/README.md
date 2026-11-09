@@ -402,7 +402,12 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
    `content-visibility` is off inside `.transcript.is-windowed`), corrects a
    measurement by the layout shift itself — anchored on the row at the top of the
    viewport, never by the estimate it replaces — and sets `overflow-anchor: none`
-   so the browser does not compensate for the same shift again. The entry
+   so the browser does not compensate for the same shift again. It re-reads the
+   window on the scroll event itself rather than on the next animation frame, so
+   a long programmatic jump (the **Jump to latest** button) changes the scroll and
+   the mounted rows in the same commit instead of showing a frame of the old
+   window's padding. That jump snaps when it is more than three viewports away
+   (`jumpBehavior`); a shorter one animates. The entry
    animation is `.msg.is-fresh` (a row that just joined the conversation), not
    `.msg`, so a remount while scrolling does not replay it.
 10. **Plugin/MCP status** is read-only in the UI by design; no enable toggles are

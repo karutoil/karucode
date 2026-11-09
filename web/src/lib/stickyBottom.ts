@@ -111,6 +111,25 @@ export function shouldFollow(
   return isGrowthAfterFollow(metrics, anchor);
 }
 
+/** How many viewports a jump may still travel with the smooth animation. */
+export const JUMP_ANIMATE_VIEWPORTS = 3;
+
+/**
+ * How "Jump to latest" should move the view.
+ *
+ * Smooth scrolling reads as motion over a screen or two and as a strobe over a
+ * whole history: asked for 150 000px, Chromium covers it in one or two enormous
+ * steps, and every step mounts a screenful of rows it has never drawn. A jump
+ * that far is a jump - snap it, and let the window and the scroll position change
+ * in the same commit.
+ */
+export function jumpBehavior(element: HTMLElement): 'auto' | 'smooth' {
+  if (!canSmoothScroll(element)) return 'auto';
+  return distanceFromBottom(readMetrics(element)) > element.clientHeight * JUMP_ANIMATE_VIEWPORTS
+    ? 'auto'
+    : 'smooth';
+}
+
 /** Native smooth scrolling is unavailable in jsdom and old browsers, and unwanted when motion is reduced. */
 export function canSmoothScroll(element: HTMLElement | null): boolean {
   return (
@@ -228,7 +247,7 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
 
   const jumpToLatest = useCallback(() => {
     const element = scrollRef.current;
-    pinToBottom('smooth');
+    pinToBottom(element ? jumpBehavior(element) : 'smooth');
     // The button unmounts on click; keep keyboard users inside the transcript
     // instead of dropping focus back to the document.
     if (element && typeof element.focus === 'function') element.focus({ preventScroll: true });

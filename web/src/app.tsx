@@ -147,7 +147,11 @@
 //   pixels for a layout that had not moved (measured: a 120px wheel step became
 //   267px of visible jump scrolling up and 32px scrolling down). The transcript also opts out
 //   of the browser's native scroll anchoring (`overflow-anchor: none`), which
-//   would compensate a second time for the same shift. The entry animation
+//   would compensate a second time for the same shift. The window is re-read **on
+//   the scroll itself**, not on the next frame: a long programmatic jump sets the
+//   scroll to the tail and, one frame later, the viewport would still be covered
+//   by the padding of the window that was there before - an empty screen between
+//   two frames, which is what flashed when jumping to the latest message. The entry animation
 //   belongs to a row that has just **arrived** (`.msg.is-fresh`): when it lived on
 //   `.msg`, every row the window remounted replayed it and rows the reader was
 //   looking at faded in from transparent under the wheel.
@@ -231,7 +235,10 @@
 //   backlog as you scrolling away. Instead it records where following left the
 //   viewport and treats a gap no wider than the content that has arrived since
 //   then as its own to close. Any movement of the scroll position is yours, and
-//   is never overridden.
+//   is never overridden. **Jump to latest** animates a short distance and snaps
+//   beyond three viewports (`jumpBehavior`): asked for 150 000px, Chromium covers
+//   a "smooth" scroll in one or two enormous steps, and each step mounts a
+//   screenful of rows it has never drawn - a strobe, not an animation.
 // * **Workspace views**: *Conversation*, full-width *Source control* and
 //   *Terminal* when the server enables terminals, all inside the main task header
 //   with their real changed-file/terminal counts, plus **one closable tab per open

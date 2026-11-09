@@ -895,7 +895,6 @@ export function ChatTranscript({
   useEffect(() => {
     const element = viewportRef?.current;
     if (!element) return;
-    let frame = 0;
     /**
      * Record the row at the top of the viewport *before* the next render moves
      * anything, so the measuring effect can put it back where it was.
@@ -924,18 +923,24 @@ export function ChatTranscript({
       const top = box.height > 0 ? view.top - box.top : element.scrollTop;
       setWindowReading({ key: sessionKeyRef.current, top });
     };
-    const read = (): void => {
-      frame = 0;
+    /**
+     * Re-read the window on the scroll itself, not on the next animation frame.
+     *
+     * A frame of delay is invisible while the wheel moves the view a little, and
+     * obvious when something moves it a long way at once: "Jump to latest" sets
+     * the scroll to the tail and, one frame later, the viewport is still covered
+     * by the padding of the window that was there before - an empty screen
+     * between two frames. Reading synchronously means the row set and the scroll
+     * position change in the same commit, before the frame is painted.
+     *
+     * The anchor is read first and in the same handler: a measurement commit can
+     * land between the scroll and the next frame, and it must see an anchor that
+     * already includes this scroll (otherwise the correction adds the scroll
+     * delta on top of the layout shift).
+     */
+    const onScroll = (): void => {
       anchor();
       readWindow();
-    };
-    const onScroll = (): void => {
-      // Synchronously: a measurement commit can land between the scroll and the
-      // next frame, and it must see an anchor that already includes this scroll
-      // (otherwise the correction adds the scroll delta on top of the shift).
-      anchor();
-      if (frame !== 0) return;
-      frame = requestAnimationFrame(read);
     };
     const measure = (): void => {
       const height = element.clientHeight;
@@ -962,7 +967,6 @@ export function ChatTranscript({
     return () => {
       element.removeEventListener('scroll', onScroll);
       observer?.disconnect();
-      if (frame !== 0) cancelAnimationFrame(frame);
     };
   }, [viewportRef]);
 

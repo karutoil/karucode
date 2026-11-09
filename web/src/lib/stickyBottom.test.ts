@@ -3,6 +3,7 @@ import {
   distanceFromBottom,
   isGrowthAfterFollow,
   isPinnedToBottom,
+  jumpBehavior,
   shouldFollow,
   type FollowAnchor,
   type ScrollMetrics,
@@ -11,6 +12,16 @@ import {
 /** A viewport of 400px showing 1200px of content, scrolled to `scrollTop`. */
 function view(scrollTop: number, scrollHeight = 1200, clientHeight = 400): ScrollMetrics {
   return { scrollTop, scrollHeight, clientHeight };
+}
+
+/** A scroller element with the two fields `jumpBehavior` reads. */
+function scroller(scrollTop: number, clientHeight = 400, scrollHeight = 1_000_000): HTMLElement {
+  return {
+    scrollTop,
+    clientHeight,
+    scrollHeight,
+    scrollTo: () => undefined,
+  } as unknown as HTMLElement;
 }
 
 /** What following a 1200px transcript left behind: at the bottom, gap 0. */
@@ -120,5 +131,27 @@ describe('shouldFollow', () => {
     const anchored = anchoredAtBottom();
     expect(shouldFollow(view(200, 4000), anchored, false, false)).toBe(false);
     expect(shouldFollow(view(200, 4000), null, false, false)).toBe(false);
+  });
+});
+
+describe('jumpBehavior', () => {
+  it('animates a jump across a screen or two', () => {
+    // 1_000_000px of content, 400px viewport: 600px from the bottom is a
+    // screen and a half, which reads as motion.
+    expect(jumpBehavior(scroller(999_600 - 600))).toBe('smooth');
+  });
+
+  it('snaps over a long jump instead of strobing through the history', () => {
+    // Chromium covers a 150 000px "smooth" scroll in one or two enormous steps,
+    // each of which mounts a screenful of rows it has never drawn: a strobe, not
+    // an animation.
+    expect(jumpBehavior(scroller(0))).toBe('auto');
+    expect(jumpBehavior(scroller(500_000))).toBe('auto');
+  });
+
+  it('snaps when the browser cannot animate or motion is reduced', () => {
+    const element = scroller(999_600 - 600);
+    // No `scrollTo` is exactly the old browser / jsdom shape.
+    expect(jumpBehavior({ ...element, scrollTo: undefined } as unknown as HTMLElement)).toBe('auto');
   });
 });

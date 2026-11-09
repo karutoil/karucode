@@ -378,6 +378,20 @@ under **Changed**.
 
 ### Fixed
 
+- **"Jump to latest" no longer flashes an empty transcript.** The scroll was moved
+  to the tail and the windowed transcript only re-read its row set on the next
+  animation frame, so for a frame the viewport sat inside the padding of the
+  window that had been there before — measured in Chromium: one frame with zero
+  rows covering the viewport, after the scroll had already moved 157 000px. The
+  window is now read on the scroll event itself, so the scroll position and the
+  mounted rows change in the same commit. The jump also **snaps** when it is more
+  than three viewports away (`stickyBottom.jumpBehavior`): Chromium covers a
+  "smooth" scroll of that length in one or two enormous steps, each mounting a
+  screenful of rows it has never drawn, which is a strobe rather than an
+  animation. A short jump still animates. Measured after the change: 0 blank
+  frames from 4 000px, 120 000px and 2 900px away, a far jump lands directly
+  (`distanceFromBottom` 0) and a 200px one still moves in 56px frames, with the
+  scroll still holding at 0.5px/0.0px of reader-visible jump.
 - **The conversation no longer glitches while it scrolls.** A windowed transcript
   only mounts the rows around the viewport, and it sized its padding from an
   estimate of each row's height. Two things went wrong with that. First, the
