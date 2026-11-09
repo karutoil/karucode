@@ -523,6 +523,10 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
   // Marks the top of the loaded transcript: the history loader watches it and
   // fetches the next older page when the reader reaches it.
   const historySentinelRef = useRef<HTMLDivElement>(null);
+  // The transcript element itself. Its top edge is the start of the loaded rows,
+  // which is what the loader reveals when a page arrives while the reader is
+  // scrolled above every row (see `lib/historyLoader.ts`).
+  const transcriptRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void terminalState.loadTerminals();
@@ -581,6 +585,7 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
   useHistoryLoader({
     scroller: scroller.scrollRef,
     sentinel: historySentinelRef,
+    content: transcriptRef,
     canLoad: history !== null && history.before !== null,
     loading: history?.loading ?? false,
     load: actions.loadOlderSession,
@@ -683,6 +688,7 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
                         onApprovalDecision={decideApproval}
                         onRewind={actions.openRewind}
                         viewportRef={scroller.scrollRef}
+                        contentRef={transcriptRef}
                         sessionKey={chat.sessionId}
                       />
                     </ErrorBoundary>

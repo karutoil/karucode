@@ -302,6 +302,27 @@ def main() -> int:
         check("the newest page renders", NEWEST in bottom)
         check("the oldest page is not loaded yet", OLDER not in bottom)
 
+        # "Newest first" is a scroll position, not just text in the document: the
+        # opened transcript has to be showing its tail, without a gesture.
+        opened = session.evaluate(
+            """
+            const node = document.querySelector('.chat-scroll');
+            const rows = [...node.querySelectorAll('.transcript > *')];
+            const view = node.getBoundingClientRect();
+            const last = rows[rows.length - 1].getBoundingClientRect();
+            return {
+              distance: Math.round(node.scrollHeight - node.scrollTop - node.clientHeight),
+              tailInView: last.bottom > view.top + 40 && last.top < view.bottom,
+              height: Math.round(node.clientHeight),
+            };
+            """
+        )
+        check(
+            "opening a huge session lands on the newest content",
+            opened["distance"] <= 2 and opened["tailInView"],
+            json.dumps(opened),
+        )
+
         # The transcript is windowed: a long conversation mounts only the rows
         # around the viewport, so opening it is not proportional to its history.
         mounted = session.evaluate(
@@ -323,24 +344,47 @@ def main() -> int:
         )
 
         # Scroll to the top. The history loader requests the next page on its own
-        # and anchors the scroll, so repeat the gesture until the oldest message
-        # (the third page) is in the document.
+        # and reveals it at the top of the viewport, so repeat the gesture until
+        # the oldest message (the third page) is in the document.
+        #
+        # Every gesture is also checked for the regression this covers: on a page
+        # taller than the screen, an anchor that moves the reader by the height of
+        # the page carries them thousands of pixels into history, so the page that
+        # arrived is never seen. The reader must stay at the top of the transcript,
+        # with the first loaded row on screen.
         for attempt in range(1, 9):
-            top = session.evaluate(
+            state = session.evaluate(
                 """
                 for (const node of document.querySelectorAll('*')) {
                   if (node.scrollHeight > node.clientHeight && node.clientHeight > 0) node.scrollTop = 0;
                 }
                 await window.__kc.sleep(900);
-                return document.body.innerText;
+                const node = document.querySelector('.chat-scroll');
+                const view = node.getBoundingClientRect();
+                const rows = [...node.querySelectorAll('.transcript > *')];
+                const first = rows[0].getBoundingClientRect();
+                return {
+                  text: document.body.innerText,
+                  scrollTop: Math.round(node.scrollTop),
+                  clientHeight: Math.round(node.clientHeight),
+                  firstRowTop: Math.round(first.top),
+                  viewTop: Math.round(view.top),
+                  viewBottom: Math.round(view.bottom),
+                };
                 """
+            )
+            top = state["text"]
+            check(
+                f"the page that arrived is on screen (scroll {attempt})",
+                state["scrollTop"] <= state["clientHeight"]
+                and state["viewTop"] - 8 <= state["firstRowTop"] <= state["viewBottom"],
+                json.dumps({key: value for key, value in state.items() if key != "text"}),
             )
             if OLDER in top:
                 print(f"ok   auto-loaded the start after {attempt} scroll(s)")
                 break
         else:
             check("the start auto-loads while scrolling back", False, "no OLDER marker")
-
         check("the first message rendered after paging back", OLDER in top)
         check(
             "the missing-start notice is gone",

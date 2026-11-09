@@ -46,6 +46,12 @@ export interface ChatTranscriptProps {
    */
   viewportRef?: RefObject<HTMLElement>;
   /**
+   * Filled with the transcript element itself, whose top edge is the start of
+   * the loaded rows. The history loader anchors on it to reveal a page that
+   * arrived while the reader was above every row (`lib/historyLoader.ts`).
+   */
+  contentRef?: RefObject<HTMLElement>;
+  /**
    * Which conversation the rows belong to. A change resets the window to the
    * tail before the sticky-bottom pin moves the viewport, so a session opened
    * with a long history never paints the previous session's scroll position.
@@ -758,6 +764,7 @@ export function ChatTranscript({
   onApprovalDecision,
   onRewind,
   viewportRef,
+  contentRef,
   sessionKey = null,
 }: ChatTranscriptProps): JSX.Element {
   const theme = activeTheme.value;
@@ -783,6 +790,17 @@ export function ChatTranscript({
   }, [items]);
 
   const transcriptRef = useRef<HTMLDivElement>(null);
+  // The transcript element is the start of the loaded rows: the history loader
+  // anchors on its top edge when it has to reveal a page that arrived while the
+  // reader was above every row. Published rather than passed as a callback ref so
+  // the internal ref above stays the one that measures rows.
+  useLayoutEffect(() => {
+    if (!contentRef) return;
+    contentRef.current = transcriptRef.current;
+    return () => {
+      contentRef.current = null;
+    };
+  }, [contentRef]);
   /** Last measured height per entry key; estimates fill the gaps. */
   const measured = useRef(new Map<string, number>());
   const [measuredTick, setMeasuredTick] = useState(0);

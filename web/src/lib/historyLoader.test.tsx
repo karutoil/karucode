@@ -144,3 +144,134 @@ describe('useHistoryLoader', () => {
     expect(load).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * A scroller with a marker and a content element, both measured.
+ *
+ * `contentTop` is where the start of the loaded rows sits in viewport
+ * coordinates: below the viewport top means the reader has scrolled above every
+ * row, above it means they are reading inside the list.
+ */
+function AnchorProbe(props: {
+  scrollTop: number;
+  scrollHeight: number;
+  contentTop: number;
+  contentHeight: number;
+  canLoad: boolean;
+  version: number;
+  load: () => Promise<void>;
+}): JSX.Element {
+  const scroller = useRef<HTMLDivElement>(null);
+  const sentinel = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const started = useRef(false);
+  useEffect(() => {
+    const host = scroller.current;
+    if (host) {
+      setBox(host, 0, 800);
+      setScrollHeight(host, props.scrollHeight);
+      // The reader's position is the setup, not a re-render side effect: the
+      // hook moves scrollTop itself and the probe must not undo that.
+      if (!started.current) {
+        started.current = true;
+        host.scrollTop = props.scrollTop;
+      }
+    }
+    if (sentinel.current) setBox(sentinel.current, 20, 40);
+    if (content.current) setBox(content.current, props.contentTop, props.contentTop + props.contentHeight);
+  });
+  useHistoryLoader({
+    scroller,
+    sentinel,
+    content,
+    canLoad: props.canLoad,
+    loading: false,
+    version: props.version,
+    load: props.load,
+  });
+  return (
+    <div id="anchor-scroller" ref={scroller}>
+      <div id="anchor-marker" ref={sentinel} />
+      <div id="anchor-content" ref={content} />
+    </div>
+  );
+}
+
+describe('useHistoryLoader with a content anchor', () => {
+  it('shows the page that arrived when the reader is above every row', async () => {
+    // A huge session: the reader dragged the scrollbar to the top, where only the
+    // marker is, and one page of older history is a whole screen and a half.
+    let height = 1_000_000;
+    const load = vi.fn();
+
+    function Harness(): JSX.Element {
+      const [canLoad, setCanLoad] = useState(true);
+      const [version, setVersion] = useState(0);
+      return (
+        <AnchorProbe
+          scrollTop={0}
+          scrollHeight={height}
+          contentTop={60}
+          contentHeight={height}
+          canLoad={canLoad}
+          version={version}
+          load={async () => {
+            load();
+            height += 400_000;
+            setVersion((value) => value + 1);
+            setCanLoad(false);
+          }}
+        />
+      );
+    }
+
+    render(<Harness />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    // The page starts at the top of the viewport: the reader reads it from its
+    // first row, not 400 000px into history, and the band above the marker is the
+    // room they scroll into for the next page.
+    await waitFor(() => {
+      const scroller = document.getElementById('anchor-scroller') as HTMLDivElement;
+      expect(scroller.scrollTop).toBe(60);
+    });
+    // The page in front of them is not replaced by the next one in the same
+    // frame; the next gesture asks for it.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the row being read in place when the reader is inside the rows', async () => {
+    let height = 1_000_000;
+    const load = vi.fn();
+
+    function Harness(): JSX.Element {
+      const [canLoad, setCanLoad] = useState(true);
+      const [version, setVersion] = useState(0);
+      return (
+        <AnchorProbe
+          scrollTop={4_000}
+          scrollHeight={height}
+          contentTop={-20_000}
+          contentHeight={height}
+          canLoad={canLoad}
+          version={version}
+          load={async () => {
+            load();
+            height += 900;
+            setVersion((value) => value + 1);
+            setCanLoad(false);
+          }}
+        />
+      );
+    }
+
+    render(<Harness />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    // 900px of older rows were inserted above the reader's line of sight, so the
+    // scroll moves by exactly that much and the row stays where it was.
+    await waitFor(() => {
+      const scroller = document.getElementById('anchor-scroller') as HTMLDivElement;
+      expect(scroller.scrollTop).toBe(4_900);
+    });
+  });
+});

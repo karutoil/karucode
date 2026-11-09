@@ -507,12 +507,17 @@ function AgentDetail({
   const rootRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLElement>(null);
   const historySentinelRef = useRef<HTMLDivElement>(null);
+  // The loaded steps are the start of the range: pages are prepended inside this
+  // element, so the loader can reveal one that arrived while the reader was above
+  // every step (`lib/historyLoader.ts`).
+  const stepsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     panelRef.current = rootRef.current?.closest('.tab-panel') ?? null;
   }, [agent.id]);
   useHistoryLoader({
     scroller: panelRef,
     sentinel: historySentinelRef,
+    content: stepsRef,
     canLoad: history !== null && history.before !== null,
     loading: history?.loading ?? false,
     load: actions.loadOlderAgent,
@@ -646,7 +651,11 @@ function AgentDetail({
               : 'No transcript was stored for this agent.'}
           </p>
         ) : (
-          steps.map((item) => <ActivityItemView key={item.id} item={item} />)
+          <div class="agent-steps" ref={stepsRef}>
+            {steps.map((item) => (
+              <ActivityItemView key={item.id} item={item} />
+            ))}
+          </div>
         )}
       </div>
 

@@ -143,4 +143,24 @@ describe('windowed transcript', () => {
     );
     expect(rows(container).length).toBe(25);
   });
+
+  it('publishes the transcript element as the start of the loaded rows', () => {
+    // The history loader anchors on this element to reveal a page that arrived
+    // while the reader was scrolled above every row. Losing the publication
+    // reverts that fix in the app without failing any loader test.
+    const content = { current: null as HTMLElement | null };
+    const { container, unmount } = render(
+      <ChatTranscript
+        items={conversation(3)}
+        resolvingApprovals={{}}
+        onApprovalDecision={() => undefined}
+        contentRef={content}
+      />,
+    );
+    const transcript = container.querySelector('.transcript');
+    expect(transcript).not.toBeNull();
+    expect(content.current).toBe(transcript);
+    unmount();
+    expect(content.current).toBeNull();
+  });
 });

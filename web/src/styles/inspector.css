@@ -1397,6 +1397,16 @@
   line-height: 1.5;
 }
 
+/* The loaded steps, as one block. The wrapper is the anchor the paged history
+ * reveals when a page arrives while the reader is above every step
+ * (`lib/historyLoader.ts`), and it repeats the column and gap the parent used to
+ * put between the steps themselves, so the list looks exactly as it did. */
+.agent-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
 /* The marker above the oldest loaded step. Pacing is the scroll's job (the
  * shared `lib/historyLoader.ts`), so there is no control here. */
 .agent-history {

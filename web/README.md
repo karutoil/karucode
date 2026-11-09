@@ -387,7 +387,13 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
    `messages_before` as the exclusive cursor. The transcript loads older pages
    automatically when the reader reaches the top (`src/lib/historyLoader.ts`),
    keeps the pages it already loaded across a silent refresh, and mounts only the
-   rows around the viewport (`src/lib/virtualWindow.ts`). The session page carries
+   rows around the viewport (`src/lib/virtualWindow.ts`). Opening a session lands
+   on that newest page. A page can be much taller than the screen, so what the
+   loader does with the scroll depends on where the reader was: inside the rows it
+   keeps their row in place, and above every row (only the *Scroll up to load
+   earlier messages* line on screen) it reveals the page that arrived with its
+   first row at the top of the viewport, one page per gesture, instead of moving
+   the view by the page's height and past it. The session page carries
    the session's own rows only; a subagent's transcript is `GET /api/agents/:id`.
    Truncated command output is labelled from the server's `truncated` flag.
 10. **Plugin/MCP status** is read-only in the UI by design; no enable toggles are
