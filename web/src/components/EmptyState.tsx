@@ -33,8 +33,8 @@ export const QUICK_PROMPTS: readonly QuickPrompt[] = [
 
 export interface EmptyStateProps {
   /**
-   * `empty` — the open session has no messages yet.
-   * `no-session` — nothing is open, so a prompt opens the session first.
+   * `empty` — the open session has no messages yet, so a prompt fills the box.
+   * `no-session` — nothing is open, so a prompt opens a draft conversation first.
    */
   variant?: 'empty' | 'no-session';
 }
@@ -47,12 +47,10 @@ export interface EmptyStateProps {
  */
 export function EmptyState({ variant = 'empty' }: EmptyStateProps): JSX.Element {
   const usePrompt = (prompt: string): void => {
-    if (variant === 'no-session') {
-      void actions.createSession().then((session) => {
-        if (session) actions.fillComposer(prompt);
-      });
-      return;
-    }
+    // A starter prompt begins a conversation, so with nothing open it opens a
+    // draft first - the same draft "New session" starts - and only the send
+    // creates a session row. Nothing is written to the server here.
+    if (variant === 'no-session') actions.startDraftSession();
     actions.fillComposer(prompt);
   };
 

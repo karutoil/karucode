@@ -449,9 +449,10 @@
   line-height: 15px;
 }
 
-/* Live throughput beside the Working chip: how much the turn has produced and
- * how fast it is arriving. Mounted only while the turn works, so it never
- * outlives the run it describes.
+/* Live throughput for one block that is producing text: a reasoning block, a
+ * streaming message, or a running call. It says how much that block has produced
+ * and how fast it is arriving, and it is mounted only while the block works, so
+ * it never outlives the stream it describes.
  *
  * The count is mono and tabular so the badge does not jitter as digits change;
  * the rate pill is painted by tone, which is a *speed* band, not a judgement.
@@ -516,8 +517,8 @@
   color: var(--chip-ink);
 }
 
-/* A phone has no room for both the chip and the rate. The chip says what the
- * turn is doing; the rate is a desktop nicety, so it goes first. */
+/* A phone has no room for both the count and the rate. The count is what shows
+ * the block is producing; the rate is a desktop nicety, so it goes first. */
 @media (max-width: 640px) {
   .tps-badge-rate {
     display: none;
@@ -539,6 +540,12 @@
   background: var(--accent);
   vertical-align: -0.14em;
   animation: blink 1.1s steps(1) infinite;
+}
+
+/* The streaming message's throughput follows its caret: the caret says text is
+ * still arriving, the badge says how fast. */
+.stream-caret + .tps-badge {
+  margin-left: var(--space-3);
 }
 
 .thinking-placeholder {
@@ -598,6 +605,45 @@
 
 .markdown > :last-child {
   margin-bottom: 0;
+}
+
+/* ---------- a message that is still arriving ---------- */
+
+/* A live message is drawn in two halves (`web/src/lib/streamingMarkdown.ts`):
+ * the blocks that are finished are Markdown rendered once, the block still being
+ * written is re-rendered per delta. Two boxes instead of one HTML string is what
+ * keeps a token cheap; their margins collapse into each other like any two
+ * adjacent blocks, so the rhythm is unchanged. The rule above only has to be
+ * restated for whichever box comes first. */
+.markdown-streaming > :first-child > :first-child {
+  margin-top: 0;
+}
+
+.markdown-live {
+  overflow-wrap: anywhere;
+}
+
+/* The fallbacks. A tail too big to re-parse per token - a very long list, one
+ * enormous paragraph, or an unterminated fence - is drawn as the text it is. */
+.markdown-live-raw {
+  white-space: pre-wrap;
+}
+
+/* An unterminated fence, on the surface it is about to become but without
+ * syntax colour: highlighting half-written code again on every delta is the
+ * cost the split exists to avoid, and the fence is highlighted properly once it
+ * closes. */
+.markdown-live-code {
+  margin: var(--space-6) 0;
+  padding: var(--space-6) var(--space-7);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--code-bg);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  line-height: 1.75;
+  tab-size: 2;
 }
 
 .markdown p {
@@ -701,6 +747,85 @@
   font-weight: 550;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+/* ---------- GFM: task lists, footnotes, images ---------- */
+
+/* A task item has a checkbox where its marker would be, so the marker goes. The
+ * list keeps a small indent: the boxes are the markers now. */
+.markdown .contains-task-list {
+  padding-left: var(--space-5);
+}
+
+.markdown .task-list-item {
+  list-style: none;
+}
+
+.markdown .task-list-item-checkbox {
+  margin: 0 var(--space-3) 0 0;
+  /* Inherit the theme's ink: a native checkbox is drawn by the OS and would stay
+   * light-mode grey on a dark transcript. */
+  accent-color: var(--accent);
+  vertical-align: -1px;
+}
+
+/* Footnotes: the reference marker, then the notes at the end of the document. */
+.markdown .footnote-ref a {
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  text-decoration: none;
+}
+
+.markdown .footnotes-sep {
+  margin: var(--space-8) 0 var(--space-5);
+}
+
+.markdown .footnotes {
+  color: var(--muted);
+  font-size: var(--fs-label);
+}
+
+.markdown .footnotes-list {
+  padding-left: var(--space-7);
+}
+
+.markdown .footnote-item p {
+  margin-bottom: var(--space-2);
+}
+
+.markdown .footnote-backref {
+  margin-left: var(--space-2);
+  text-decoration: none;
+}
+
+/* An image this deployment cannot load is drawn as a link, not as a broken
+ * image: the app allows no remote image, so `![](https://…)` would otherwise be
+ * a glyph that reads as "this app is broken". */
+.markdown .markdown-image-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-4);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  text-decoration: none;
+}
+
+.markdown .markdown-image-link:hover {
+  border-color: var(--accent-line);
+  color: var(--accent-text);
+}
+
+/* A reference that escapes the workspace, or one whose bytes could not be read. */
+.markdown .markdown-image-missing {
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  font-style: italic;
 }
 
 /* ---------- the recess ladder ----------
@@ -981,6 +1106,13 @@
   border-radius: 50%;
   background: var(--accent);
   animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+/* A live thought's throughput sits at the right edge of its header, beside the
+ * pulsing dot, so the rate is level with the label that says what it is. */
+.thinking-summary .tps-badge {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .thinking-body {

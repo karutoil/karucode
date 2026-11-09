@@ -42,6 +42,7 @@ If answer text degenerates into a repetition, old deltas cannot be unsent. Once
 the trimmed final answer is known, the runtime emits `text_replaced` with that
 whole content; a client replaces its live text atomically instead of appending
 the correction. The replacement equals the persisted assistant text. Reasoning
-loops instead use the bounded restart path because reasoning is not persisted.
+has no such replacement event, so a reasoning loop abandons the attempt and
+uses the bounded restart path instead: the partial thought is never persisted.
 Provider configuration and retry classifications are covered by
 `provider-profiles`; the SSE transport is described by `http-api`.

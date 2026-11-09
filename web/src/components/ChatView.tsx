@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import type { ChatItem } from '../state/chat';
 import { copyText } from '../lib/clipboard';
 import { useHeightVariable } from '../lib/dockHeight';
+import { fileName } from '../lib/fileKind';
 import { useHistoryLoader } from '../lib/historyLoader';
 import { modKey } from '../lib/platform';
 import { useStickyBottom } from '../lib/stickyBottom';
@@ -13,11 +14,13 @@ import * as terminalState from '../state/terminals';
 import { contextUsage, formatContextPercent, totalUsage } from '../state/selectors';
 import * as store from '../state/store';
 import * as workbench from '../state/workbench';
+import * as workspaceTabs from '../state/workspaceTabs';
 import { GitManager } from './git/GitManager';
 import { ChatTranscript } from './ChatTranscript';
 import { Composer } from './Composer';
 import { EmptyState } from './EmptyState';
 import { ErrorBoundary } from './ErrorBoundary';
+import { FileTabView } from './FileViewer';
 import { Inspector } from './Inspector';
 import { ResultResizer } from './ResultResizer';
 import { ContextDrawer } from './ContextDrawer';
@@ -33,6 +36,7 @@ import {
   BranchIcon,
   ChatIcon,
   ChevronDownIcon,
+  FileCodeIcon,
   GitIcon,
   MenuIcon,
   RefreshIcon,
@@ -40,13 +44,16 @@ import {
   TerminalIcon,
 } from './icons';
 /**
- * The centre-pane views of the workspace (the mock's workspace tabs).
+ * The centre-pane views of the workspace (the mock's workspace tabs), plus one
+ * tab per open file.
  *
  * `terminal` is the odd one out: it is a real shell, not a view over the
  * session, so it works with no session open and its state belongs to the server
- * rather than to the conversation.
+ * rather than to the conversation. A `file:` view carries its workspace path in
+ * the id, so one strip can hold any number of open documents
+ * (`state/workspaceTabs.ts` owns the list and the selection).
  */
-export type WorkspaceView = 'chat' | 'changes' | 'terminal';
+export type WorkspaceView = workspaceTabs.WorkspaceView;
 
 /**
  * Plain-text transcript for the "Copy" header action: speaker, message text,
@@ -208,6 +215,7 @@ function SessionHeader({
   controlPlane: boolean;
 }): JSX.Element {
   const session = store.activeSession.value;
+  const drafting = store.draftSession.value !== null;
   const activity = store.activity.value;
   const narrow = store.narrowViewport.value;
   const project = store.currentProject.value;
@@ -218,14 +226,21 @@ function SessionHeader({
   const contextExpanded = workbench.contextOpen.value;
   const usage = contextUsage(store.chat.value, store.activeContextWindow.value);
 
+  // A file tab is the document the reader is looking at, so the breadcrumb names
+  // the file rather than the session behind it.
+  const openFilePath = workspaceTabs.fileViewPath(view);
   const title =
-    view === 'changes'
-      ? 'Source control'
-      : view === 'terminal'
-        ? 'Terminal'
-        : session
-          ? session.title || 'Untitled session'
-          : 'karucode';
+    openFilePath !== null
+      ? fileName(openFilePath)
+      : view === 'changes'
+        ? 'Source control'
+        : view === 'terminal'
+          ? 'Terminal'
+          : session
+            ? session.title || 'Untitled session'
+            : drafting
+              ? 'New session'
+              : 'karucode';
   const activityWord = activity.kind === 'idle' ? 'ready' : activity.kind;
 
   const copyConversation = async (): Promise<void> => {
@@ -266,7 +281,7 @@ function SessionHeader({
         <span class={`head-activity status-${activity.kind}`}>{activityWord}</span>
       </div>
 
-      <WorkspaceTabs view={view} onChange={onSelectView} />
+      <WorkspaceTabs view={view} onChange={onSelectView} controlPlane={controlPlane} />
 
       <div class="header-buttons">
         {/* Controls plugins contributed to the session header. Before the
@@ -343,7 +358,15 @@ function SessionHeader({
   );
 }
 
-function WorkspaceTabs({ view, onChange }: { view: WorkspaceView; onChange: (next: WorkspaceView) => void }): JSX.Element {
+function WorkspaceTabs({
+  view,
+  onChange,
+  controlPlane,
+}: {
+  view: WorkspaceView;
+  onChange: (next: WorkspaceView) => void;
+  controlPlane: boolean;
+}): JSX.Element {
   const changeCount = useChangeCount();
   const items: TabItem<WorkspaceView>[] = [
     { id: 'chat', label: 'Conversation', icon: <ChatIcon size={15} /> },
@@ -364,12 +387,29 @@ function WorkspaceTabs({ view, onChange }: { view: WorkspaceView; onChange: (nex
       count: terminalState.terminals.value.length || undefined,
     });
   }
+  // Open files join the strip as closable tabs. They are a workspace-project
+  // surface: a control chat has no project files to show, so it never lists them.
+  if (!controlPlane) {
+    for (const path of workspaceTabs.openFileTabs.value) {
+      items.push({
+        id: workspaceTabs.fileView(path),
+        label: fileName(path),
+        icon: <FileCodeIcon size={15} />,
+        title: path,
+        closable: true,
+      });
+    }
+  }
 
   return (
     <Tabs
       items={items}
       active={view}
       onChange={onChange}
+      onClose={(id) => {
+        const path = workspaceTabs.fileViewPath(id);
+        if (path !== null) workspaceTabs.requestCloseFileTab(path);
+      }}
       label="Workspace views"
       idPrefix="workspace"
       variant="workspace"
@@ -436,8 +476,19 @@ export function projectMentionLoader(projects: { id: string; name: string }[]): 
 export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: ChatViewProps = {}): JSX.Element {
   const isWorkbench = mode === 'workspace';
   const currentId = store.currentSessionId.value;
+  // A draft is a conversation with no server row yet: it renders as the open
+  // conversation (composer enabled, starter prompts filling it) and is created by
+  // the first message. See `startDraftSession` in `state/actions.ts`.
+  const drafting = store.draftSession.value !== null;
   const chat = store.chat.value;
-  const [view, setView] = useState<WorkspaceView>('chat');
+  // The selected view is module state (`state/workspaceTabs.ts`): the file
+  // viewer's toolbar and the explorer open a file tab from outside this tree.
+  // A control chat has no project workspace, so it never shows a file panel.
+  const selected = workspaceTabs.workspaceView.value;
+  const view: WorkspaceView =
+    !isWorkbench && workspaceTabs.isFileView(selected) ? 'chat' : selected;
+  const openFiles = isWorkbench ? workspaceTabs.openFileTabs.value : [];
+  const setView = workspaceTabs.selectWorkspaceView;
   // Stable approval callback: an inline arrow here is a new prop identity on
   // every render, which would make the transcript's memo boundaries compare
   // unequal and re-render every row on every streamed token.
@@ -483,6 +534,26 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
     if (next === 'changes') setChangesMounted(true);
     if (next === 'terminal') setTerminalMounted(true);
   };
+
+  // A file panel is kept mounted once it has been shown: its reads, its scroll
+  // position and an unsaved draft all live inside it, and switching to the
+  // conversation and back must not throw any of that away. A tab that was opened
+  // and never selected has read nothing yet, so it mounts on first selection.
+  const [mountedFiles, setMountedFiles] = useState<readonly string[]>([]);
+  const selectedFile = workspaceTabs.fileViewPath(view);
+  useEffect(() => {
+    if (selectedFile === null) return;
+    setMountedFiles((current) =>
+      current.includes(selectedFile) ? current : [...current, selectedFile],
+    );
+  }, [selectedFile]);
+  // Closing a tab unmounts its panel - the one moment that state is meant to go.
+  useEffect(() => {
+    setMountedFiles((current) => {
+      const next = current.filter((path) => openFiles.includes(path));
+      return next.length === current.length ? current : next;
+    });
+  }, [openFiles]);
 
   // A tab that disappears (the server disabled the terminal while this page was
   // open) must not leave the pane pointing at a view that no longer exists.
@@ -593,9 +664,15 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
                 ) : null}
                 {!showLoading && !store.chatError.value ? (
                   currentId === null ? (
-                    // Nothing open: the same mock empty state, but a prompt opens
-                    // the session first before filling the composer.
-                    emptyContent ?? <EmptyState variant="no-session" />
+                    drafting ? (
+                      // An unsent draft: same empty state, but a prompt fills the
+                      // box directly - there is already a conversation to type in.
+                      emptyContent ?? <EmptyState variant="empty" />
+                    ) : (
+                      // Nothing open: the same mock empty state, but a prompt
+                      // opens a draft first before filling the composer.
+                      emptyContent ?? <EmptyState variant="no-session" />
+                    )
                   ) : hasItems ? (
                     // A malformed item that slipped past the reducer must not take
                     // the composer and the rails down with it.
@@ -676,6 +753,28 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
             <TerminalTab />
           </div>
         ) : null}
+
+        {openFiles.map((path) => {
+          const panelView = workspaceTabs.fileView(path);
+          return (
+            <div
+              key={path}
+              class="center-panel file-workspace"
+              id={`workspace-panel-${panelView}`}
+              role="tabpanel"
+              aria-labelledby={`workspace-tab-${panelView}`}
+              hidden={view !== panelView}
+            >
+              {mountedFiles.includes(path) ? (
+                // One bad document must not take the tabs beside it down: the
+                // viewer fetches and renders a file someone else wrote.
+                <ErrorBoundary scope={`The ${fileName(path)} tab`}>
+                  <FileTabView path={path} />
+                </ErrorBoundary>
+              ) : null}
+            </div>
+          );
+        })}
 
         {isWorkbench ? (
           <>

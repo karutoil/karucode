@@ -8,7 +8,8 @@ a workspace/git/session/subagent inspector, and a settings sheet. Built against
 
 - Vite 6 + Preact 10 + TypeScript (strict, no `any` in public interfaces)
 - `@preact/signals` for small, colocated state
-- `markdown-it` (raw HTML disabled) + DOMPurify + selected highlight.js languages
+- `markdown-it` (raw HTML disabled) with `markdown-it-task-lists` and
+  `markdown-it-footnote` for GFM, plus DOMPurify and selected highlight.js languages
 - Hand-written CSS with design tokens; no UI/CSS framework and no third-party webfonts
   (Inter and JetBrains Mono are self-hosted from `public/fonts/`, see below)
 - Vitest + @testing-library/preact + jsdom for tests
@@ -117,13 +118,15 @@ rules live in `src/state/transcriptLayout.ts` as pure functions over
 `foldTurn`), so they are unit-tested without a DOM and `ChatTranscript.tsx` only
 renders what they return.
 
-Built-in themes start with `toolStyle: "rows"`, `grouping: "turns"` and collapsed
-reasoning. Explicitly stored transcript preferences remain authoritative.
+Built-in themes start with `toolStyle: "rows"`, `grouping: "turns"`,
+`working: "open"` and collapsed reasoning. Explicitly stored transcript
+preferences remain authoritative.
 
 | Option | Values | Effect |
 | --- | --- | --- |
 | `toolStyle` | `rows` (built-in default), `cards` | `rows` is one quiet line per call (`ToolCard variant="row"`) that expands into numbered tool output or command stdout/stderr. `cards` retains the full card treatment. |
-| `grouping` | `turns` (built-in default), `tools`, `none` | `turns` folds a completed turn's working steps behind **Show the working**; `tools` folds only a run of *consecutive* calls (`ToolGroup`); `none` is the explicit full-activity option with every call where it happened. |
+| `grouping` | `turns` (built-in default), `tools`, `none` | `turns` groups a completed turn's working steps under one **Show the working** / **Hide the working** line; `tools` folds only a run of *consecutive* calls (`ToolGroup`); `none` is the explicit full-activity option with every call where it happened. |
+| `working` | `open` (built-in default), `folded` | Where those working steps start. `open` shows the narration, the runs of calls and the calls inside them, with the summary line still on top as the header that folds them away. `folded` hides them behind **Show the working**. The state is per turn and per run (`AssistantTurn`, `ToolGroup`), never transcript-wide, so a reader's click on one row leaves the others alone and a theme change only moves rows nobody clicked. |
 | `thinking` | `collapsed` (default), `preview`, `expanded` | `preview` shows the first line of reasoning under a `Thought` label; `expanded` renders it open. A streaming model is always open. |
 
 The invariant that makes folding safe is enforced in `turnFoldable` and
@@ -283,10 +286,11 @@ Agents tab).
 - Themes: eight built-in palettes, live editing of 18 colours, dark/light mode,
   three densities, interface/code fonts, corner radius, custom CSS, contrast
   readout, save/delete/import/export and per-browser persistence.
-- Workspace views: Conversation, Source control (the real git manager, full width)
-  and Terminal when the server enables it. Once opened, Source control and Terminal
-  stay mounted across view changes; Context can overlay them without discarding
-  their state.
+- Workspace views: Conversation, Source control (the real git manager, full width),
+  Terminal when the server enables it, and one closable tab per open file. Once
+  opened, Source control, Terminal and each file tab stay mounted across view
+  changes; Context can overlay them without discarding their state. File tabs are
+  project-scoped: switching projects closes them.
 - Sessions: client-side session search (`/`), sessions grouped by day, running
   and failure state.
 - Source control: the same real git manager in the full-width workspace view and
@@ -310,13 +314,27 @@ Agents tab).
   (project- or session-scoped, status filters, live per-agent transcripts with
   drill-in).
 - File viewer: Markdown and HTML open on a rendered preview with a Preview/Source
-  toggle (HTML runs in a fully sandboxed iframe — no scripts, no same-origin
-  access, its own CSP), images and PDFs render from `GET /api/workspace/raw`, and
-  any complete text file can be edited and saved with `PUT /api/workspace/file`.
-  `Ctrl/Cmd+S` saves, the Preview follows the draft while you type, a save whose
-  `expected_size` no longer matches offers *Overwrite anyway* instead of
-  clobbering the agent's work, and closing with unsaved changes asks first.
-  Binary and server-truncated files are read-only and the Edit button says why.
+  toggle (HTML runs as a real page in an opaque-origin iframe — its own scripts and
+  relative workspace assets load, no same-origin access, no network egress), images
+  and PDFs render from `GET /api/workspace/raw`, and any complete text file can be
+  edited and saved with `PUT /api/workspace/file`. It opens as a modal by default,
+  and **Open in tab** (or the explorer's row menu, *Open in a tab*) moves the same
+  document into the workspace strip beside the conversation: each tab stays mounted
+  with its read, scroll position and draft, selection falls to a neighbour when one
+  closes, and a tab with unsaved edits asks before it goes. `Ctrl/Cmd+S` saves, the
+  Preview follows the draft while you type, a save whose `expected_size` no longer
+  matches offers *Overwrite anyway* instead of clobbering the agent's work, and
+  closing with unsaved changes asks first. Binary and server-truncated files are
+  read-only and the Edit button says why.
+- Markdown is GitHub's: tables, strikethrough, task lists, footnotes, fenced code
+  with highlighting and bare-URL autolinks, rendered by `markdown-it` with raw HTML
+  off and DOMPurify on (the one form control it may emit is a disabled task
+  checkbox). Images are resolved at render time (`lib/markdownImages.ts`): a
+  workspace path is fetched with the session's credentials and shown from a shared,
+  ref-counted `blob:` URL (`lib/workspaceImages.ts`, one fetch per file so a
+  windowed transcript does not re-download it), an `https:` image becomes a link
+  because the CSP allows no remote image, and a reference that escapes the workspace
+  says so instead of rendering a broken glyph.
 - Settings: provider fields, write-only API key with clear, provider test, approval
   mode/allowlists/timeouts, limits, subagent controls, read-only plugin/MCP status,
   lock notice and the shell-sandbox security note.
@@ -349,8 +367,9 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
    codes are encoded in the tool message's report text rather than separate
    columns. Restored command cards parse the stable report header/sections to
    recover the exit code, duration and streams; if the text does not match, the
-   raw report is shown. Stored messages also have no reasoning or usage fields,
-   so those appear live only.
+   raw report is shown. Stored assistant rows do carry `reasoning_content`, so a
+   restored transcript re-renders its thinking blocks; `usage` is not persisted,
+   so the context and throughput pills fill in from the next live call.
 5. **Git status granularity**: the contract has one `staged` boolean per file. A file
    with both staged and unstaged edits cannot be represented twice; the UI groups by
    the flag it receives. (The server's porcelain parser also emits one row per path.)

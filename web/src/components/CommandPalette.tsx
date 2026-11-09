@@ -47,7 +47,7 @@ export function CommandPalette(): JSX.Element | null {
         group: 'Actions',
         hint: 'Cmd/Ctrl+N',
         icon: <PlusIcon size={15} />,
-        run: () => void actions.createSession(),
+        run: () => actions.startDraftSession(),
       },
       {
         id: 'toggle-rail',

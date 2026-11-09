@@ -159,6 +159,48 @@ export const sessions = signal<SessionSummary[]>([]);
 export const sessionsLoading = signal(true);
 export const currentSessionId = signal<string | null>(null);
 
+/**
+ * A conversation the reader has started but not sent anything into yet.
+ *
+ * "New session" used to `POST /api/sessions` on the click, so every press - and
+ * every change of mind - left a real, empty row behind. The draft is that press
+ * held in the client instead: no session exists until the first message is sent,
+ * and the send is what creates it (`sendChatMessage` in `state/actions.ts`).
+ *
+ * While a draft is open `currentSessionId` is `null`, so every surface that
+ * already knows how to render "nothing open" keeps working; what changes is that
+ * the composer may be typed in.
+ *
+ * * `id` - a client-side nonce. It is not a session id and is never sent to the
+ *   server; it exists so a second draft is a *different* conversation for the
+ *   composer's per-scope draft text (and for the generation checks in
+ *   `createDraftSession`).
+ * * `projectId` - the project the session will be created in. A project switch
+ *   discards the draft rather than moving it: the composer, the file tree and the
+ *   tools are all project-scoped.
+ * * `model` - the model pin chosen before the session existed. It rides along in
+ *   the create request (`POST /api/sessions` accepts `model`), so the first
+ *   message already runs on the model the pills showed.
+ */
+export interface DraftSession {
+  id: number;
+  projectId: string | null;
+  model: SessionModelSelection | null;
+}
+
+export const draftSession = signal<DraftSession | null>(null);
+
+/**
+ * The draft that has just been created into a session.
+ *
+ * The composer keeps one form (text, chips) per (project, session, draft), so a
+ * draft becoming a real session changes the key under the box the reader is
+ * typing in. This records which pair to carry across, so the half-written message
+ * follows its conversation instead of being left in a record nothing renders.
+ * `Composer.tsx` consumes it; nothing else needs it.
+ */
+export const draftToSession = signal<{ draftId: number; sessionId: string } | null>(null);
+
 /** Projects (workspaces) and the one the rail is currently showing. */
 export const projects = signal<Project[]>([]);
 export const projectsLoading = signal(true);
@@ -814,6 +856,19 @@ export interface ModelSelection {
 export const modelSelection = computed<ModelSelection>(() => {
   const current = config.value;
   const open = openSessionModel.value;
+  // A draft's pin is a choice for a session that does not exist yet. It comes
+  // first because while a draft is open there is no session id to key anything
+  // else on - and the pill the reader just clicked must not spring back to the
+  // install default while the conversation is still unsent.
+  const drafted = draftSession.value?.model ?? null;
+  if (drafted) {
+    return {
+      providerId: drafted.provider,
+      modelId: drafted.model,
+      pinned: true,
+      effort: drafted.reasoning_effort ?? null,
+    };
+  }
   // The open session's own record comes first, because it is the only source
   // that survives the session having no row in any list (a control chat) or a
   // list refresh that dropped the row. `undefined` is "not read yet" and falls
@@ -868,7 +923,11 @@ export const activity = computed(() => agentActivity(chat.value));
 export const pendingApprovalList = computed(() => pendingApprovals(chat.value));
 
 export const composerDisabledReason = computed<string | null>(() => {
-  if (!currentSessionId.value) return 'Create or select a session to start.';
+  // A draft is a conversation that does not exist on the server yet: the first
+  // message creates it, so the box has to be usable before there is an id.
+  if (!currentSessionId.value && draftSession.value === null) {
+    return 'Create or select a session to start.';
+  }
   if (!providerConfigured.value) return 'No model provider configured. Add one in Settings.';
   return null;
 });

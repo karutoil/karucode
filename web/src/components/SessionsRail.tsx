@@ -785,9 +785,9 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
     else void actions.openSessionInProject(projectId, id);
   };
 
-  const createSession = (): void => {
+  const startDraft = (): void => {
     railPeek.closePeek();
-    // `actions.createSession()` creates in `store.currentProjectId`, which is
+    // `actions.startDraftSession()` drafts in `store.currentProjectId`, which is
     // *not* the project this preview belongs to while the fly-out covers another
     // one. Switch first so the empty state's "New session" starts a conversation
     // in the project the reader is looking at, not silently in the open one.
@@ -795,10 +795,10 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
       if (!isCurrent) {
         await actions.switchProject(projectId);
         // A newer navigation may have completed while this switch was pending.
-        // Never let the stale continuation create in that newer project.
+        // Never let the stale continuation draft in that newer project.
         if (store.currentProjectId.value !== projectId) return;
       }
-      await actions.createSession();
+      actions.startDraftSession();
     })();
   };
 
@@ -863,7 +863,7 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
           <button
             type="button"
             class="new-session"
-            onClick={createSession}
+            onClick={startDraft}
             aria-label={`New session (${modKey()} + N)`}
           >
             <span class="new-left">
@@ -907,7 +907,7 @@ export function RailPeek({ projectId }: { projectId: string }): JSX.Element {
               now={store.clock.value}
               loading={loading}
               workspace={project?.path}
-              onCreate={createSession}
+              onCreate={startDraft}
               onSelect={openSession}
               onRename={async (id, title) => {
                 const ok = await actions.renameSessionById(id, title);
@@ -1055,7 +1055,7 @@ export function SessionsRail(): JSX.Element {
         <button
           type="button"
           class="new-session"
-          onClick={() => void actions.createSession()}
+          onClick={() => actions.startDraftSession()}
           aria-label={`New session (${modKey()} + N)`}
         >
           <span class="new-left">
@@ -1141,7 +1141,7 @@ export function SessionsRail(): JSX.Element {
             }
             query={query}
             filter={sessionFilter}
-            onCreate={() => void actions.createSession()}
+            onCreate={() => actions.startDraftSession()}
             onSelect={actions.switchSession}
             onRename={actions.renameSessionById}
             onDelete={actions.deleteSessionById}

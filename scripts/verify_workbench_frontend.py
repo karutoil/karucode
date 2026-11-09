@@ -365,18 +365,29 @@ def main() -> int:
         """)
         click_button("Send message (Command or Control + Enter)")
         wait_for_text("Done. The mock provider finished the task.")
-        check("default completed work has no permanently mounted tool output", evaluate("return document.querySelectorAll('.tool-body').length === 0;"))
-        evaluate("""
-        const candidates = [...document.querySelectorAll('.process-fold,.tool-group-head')];
-        const fold = candidates.find(b => b.getBoundingClientRect().width>0 && b.getBoundingClientRect().height>0 && b.getAttribute('aria-expanded')!=='true') || candidates[0];
-        if(fold)fold.click(); return fold ? fold.outerHTML : 'no fold';
-        """)
+        # Built-in themes start with the working steps open: a finished turn
+        # arrives with its narration, its run of calls and the calls inside that
+        # run on screen, and the summary line is the header that folds it away.
+        check("completed work starts expanded", evaluate("""
+        const fold=document.querySelector('.process-fold');
+        const group=document.querySelector('.tool-group-head');
+        return !!fold && fold.getAttribute('aria-expanded')==='true' &&
+          !!group && group.getAttribute('aria-expanded')==='true' &&
+          fold.textContent.includes('Hide the working');
+        """))
+        check("an open turn has no permanently mounted tool output", evaluate("return document.querySelectorAll('.tool-body').length === 0;"))
+        # Folding the summary hides that turn's work; it does not touch another row.
+        evaluate("document.querySelector('.process-fold').click(); return true;")
         time.sleep(0.35)
-        evaluate("""
-        const grouped = document.querySelector('.tool-group-head');
-        if (grouped && grouped.getAttribute('aria-expanded') !== 'true') grouped.click();
-        return grouped ? { expanded: grouped.getAttribute('aria-expanded'), width: grouped.getBoundingClientRect().width, height: grouped.getBoundingClientRect().height } : null;
-        """)
+        check("the summary line folds the working away", evaluate("""
+        const fold=document.querySelector('.process-fold');
+        return !!fold && fold.getAttribute('aria-expanded')==='false' &&
+          fold.textContent.includes('Show the working') && !document.querySelector('.tool-group-head');
+        """))
+        evaluate("document.querySelector('.process-fold').click(); return true;")
+        time.sleep(0.35)
+        check("the same line opens it again", evaluate(
+            "return document.querySelector('.process-fold')?.getAttribute('aria-expanded')==='true';"))
         until = time.time() + 10
         while time.time() < until and not evaluate("return [...document.querySelectorAll('.tool-row-head,.tool-expand,.command-summary')].some(e => e.getBoundingClientRect().width>0)"):
             time.sleep(0.1)
@@ -416,8 +427,9 @@ def main() -> int:
         wait_project_width(580)
         session._send("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 1000, "deviceScaleFactor": 1, "mobile": False})
 
-        # A real command turn, then open its completed-work fold and the command
-        # row. Compact rows historically nested .cmd-output and .command-scroll.
+        # A real command turn, then read its (already expanded) working and open
+        # the command row. Compact rows historically nested .cmd-output and
+        # .command-scroll.
         folds_before = evaluate("return document.querySelectorAll('.process-fold').length;")
         evaluate("""
         const input = document.querySelector('#composer-input');
@@ -430,7 +442,13 @@ def main() -> int:
         until = time.time() + 12
         while time.time() < until and evaluate("return document.querySelectorAll('.process-fold').length;") <= folds_before:
             time.sleep(0.1)
-        evaluate("[...document.querySelectorAll('.process-fold')].filter(e=>e.getBoundingClientRect().width>0).at(-1)?.click(); return true;")
+        # New turns arrive expanded; make sure the one about to be read is open.
+        evaluate("""
+        const fold=[...document.querySelectorAll('.process-fold')].filter(e=>e.getBoundingClientRect().width>0).at(-1);
+        if(fold && fold.getAttribute('aria-expanded')!=='true')fold.click();
+        return fold?.getAttribute('aria-expanded');
+        """)
+        time.sleep(0.35)
         until = time.time() + 10
         while time.time() < until and not evaluate("return !!document.querySelector('.command-row-head');"):
             time.sleep(0.1)

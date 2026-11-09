@@ -109,10 +109,12 @@ function builtin(spec: BuiltinSpec): Theme {
     colors: completeColors(spec.colors, spec.mode),
     customCSS: '',
     // Workbench reading density is the built-in starting point: compact calls,
-    // completed work folded by turn, and a quiet reasoning chip. Full cards and
-    // no grouping remain explicit theme options; stored choices are not changed.
+    // completed work grouped by turn and shown **open**, and a quiet reasoning
+    // chip. Full cards, no grouping and a folded turn remain explicit theme
+    // options; stored choices are not changed.
     toolStyle: 'rows',
     grouping: 'turns',
+    working: 'open',
     thinking: 'collapsed',
   };
 }

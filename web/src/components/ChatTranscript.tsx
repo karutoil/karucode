@@ -15,7 +15,6 @@ import {
   countDuration,
   foldTurn,
   turnFoldable,
-  turnOutputChars,
   turnRows,
   turnWorking,
   type Turn,
@@ -24,7 +23,7 @@ import {
 import { clockTime, formatDuration } from '../lib/format';
 import { clampEstimate, prefixHeights, visibleRange } from '../lib/virtualWindow';
 import * as store from '../state/store';
-import { activeTheme, type ThemeGrouping, type ThemeThinking, type ThemeToolStyle } from '../theme';
+import { activeTheme, type ThemeGrouping, type ThemeThinking, type ThemeToolStyle, type ThemeWorking } from '../theme';
 import { ApprovalCard } from './ApprovalCard';
 import { CommandCard } from './CommandCard';
 import { Markdown } from './Markdown';
@@ -58,6 +57,8 @@ export interface ChatTranscriptProps {
 interface ViewOptions {
   toolStyle: ThemeToolStyle;
   grouping: ThemeGrouping;
+  /** Whether a finished turn's working steps start expanded. */
+  working: ThemeWorking;
   thinking: ThemeThinking;
 }
 
@@ -146,9 +147,9 @@ function isStreamingPart(part: ChatItem): boolean {
  * The status chip after the author name. Ordinary completion needs no badge;
  * only live, failed and interrupted turns add a state to the reading flow.
  *
- * It uses the same "is this turn still doing something" test as the throughput
- * badge and the fold: a turn whose prose has finished but whose tool call is
- * still running is *working*, not completed.
+ * It uses the same "is this turn still doing something" test as the fold: a turn
+ * whose prose has finished but whose tool call is still running is *working*,
+ * not completed.
  */
 function turnTag(parts: readonly ChatItem[]): JSX.Element | null {
   const turn: Turn = { key: 'tag', at: 0, parts: [...parts] };
@@ -181,10 +182,20 @@ function MessageBodyImpl({ item, options }: { item: MessageItem; options: ViewOp
       ) : null}
       {/* A streaming message renders no artifact cards: a fence is content only
           once it is closed, and markdown-it closes one at the end of its input,
-          so every token of a half-written mock would paint and relayout a frame. */}
-      {item.content ? <Markdown text={item.content} artifacts={!item.streaming} /> : null}
+          so every token of a half-written mock would paint and relayout a frame.
+          `streaming` also makes the re-render per token proportional to the
+          block being written, not to the whole answer (lib/streamingMarkdown). */}
+      {item.content ? (
+        <Markdown text={item.content} artifacts={!item.streaming} streaming={item.streaming} />
+      ) : null}
       {item.streaming && item.content !== '' ? (
-        <span class="stream-caret" aria-hidden="true" />
+        <>
+          <span class="stream-caret" aria-hidden="true" />
+          {/* Prose that is still arriving carries its own throughput, right
+              where the text stops. It goes when this block stops streaming, so
+              it cannot outlive the paragraph it describes. */}
+          <TpsBadge chars={item.content.length} working source="text" />
+        </>
       ) : null}
       {item.streaming && item.content === '' && item.reasoning === '' ? (
         <p class="thinking-placeholder" aria-hidden="true">
@@ -299,7 +310,11 @@ function Row({
 }): JSX.Element {
   if (row.kind === 'group') {
     return (
-      <ToolGroup calls={row.parts} variant={options.toolStyle === 'rows' ? 'row' : 'card'} />
+      <ToolGroup
+        calls={row.parts}
+        variant={options.toolStyle === 'rows' ? 'row' : 'card'}
+        defaultOpen={options.working === 'open'}
+      />
     );
   }
   return (
@@ -365,8 +380,10 @@ function ProcessFold({
  * One assistant turn: prose, tool calls, commands, approvals and notices in the
  * order they happened, laid out according to the theme's transcript options.
  *
- * The fold is per turn (this component owns its own `open` state), so opening one
- * turn's working steps leaves the others alone.
+ * The fold is per turn (this component owns its own open state), so opening one
+ * turn's working steps leaves the others alone. The theme's `working` option only
+ * decides where that state starts — `open` for the built-in themes, `folded` for
+ * a stored theme that predates the option.
  */
 function AssistantTurn({
   turnKey,
@@ -382,7 +399,14 @@ function AssistantTurn({
   resolvingApprovals: ChatTranscriptProps['resolvingApprovals'];
 }): JSX.Element {
   const rows = useMemo(() => turnRows(parts, options.grouping), [parts, options.grouping]);
-  const [processOpen, setProcessOpen] = useState(false);
+  /**
+   * The theme's `working` option says where a finished turn *starts*; a click on
+   * this turn's summary is a choice for this turn alone, so opening one turn's
+   * working never expands another. `null` means "nobody has chosen here yet", so
+   * a later theme change still repaints the turns the reader left alone.
+   */
+  const [processChoice, setProcessChoice] = useState<boolean | null>(null);
+  const processOpen = processChoice ?? (options.working === 'open');
   const bodyId = `turn-body-${turnKey}`;
 
   // Folding a whole turn only applies to `turns` grouping, and only once the turn
@@ -414,7 +438,7 @@ function AssistantTurn({
         open={false}
         calls={countCalls(fold.hidden)}
         durationMs={countDuration(fold.hidden)}
-        onToggle={() => setProcessOpen(true)}
+        onToggle={() => setProcessChoice(true)}
       />,
       ...fold.shown.map(renderRow),
     ];
@@ -427,7 +451,7 @@ function AssistantTurn({
           open
           calls={countCalls(fold.hidden)}
           durationMs={countDuration(fold.hidden)}
-          onToggle={() => setProcessOpen(false)}
+          onToggle={() => setProcessChoice(false)}
         />,
       ] : []),
       ...rows.map(renderRow),
@@ -606,13 +630,19 @@ function buildEntries(items: readonly ChatItem[], previous: readonly Entry[] = [
 }
 
 /**
- * One assistant row: avatar, author line (live state, throughput, rewind)
- * and the turn body.
+ * One assistant row: avatar, author line (live state, time, rewind) and the
+ * turn body.
  *
- * Memoised so the header work (`turnTag`, `turnOutputChars`, `turnWorking`) and
- * the `<AssistantTurn>` beneath it are skipped for every turn that did not
- * change. The transcript itself only has to map over `entries` and hand each one
- * to this boundary.
+ * The row's header says *whether* the turn is still working (the chip) and keeps
+ * nothing else live: throughput belongs to the block that is producing text, so
+ * a reasoning block, a streaming message and a running call each carry their own
+ * badge (see `TpsBadge`). A single turn-level readout sat above the whole turn,
+ * where a long run scrolled it out of view.
+ *
+ * Memoised so the header work (`turnTag`, `turnWorking`) and the
+ * `<AssistantTurn>` beneath it are skipped for every turn that did not change.
+ * The transcript itself only has to map over `entries` and hand each one to this
+ * boundary.
  */
 function AssistantRow({
   entry,
@@ -658,7 +688,6 @@ function AssistantRow({
             </time>
           ) : null}
           {turnTag(entry.parts)}
-          <TpsBadge chars={turnOutputChars(turn)} working={working} />
           {answer ? <RewindButton item={answer} isAssistant onRewind={onRewind} /> : null}
         </div>
         <MemoAssistantTurn
@@ -738,9 +767,10 @@ export function ChatTranscript({
     () => ({
       toolStyle: theme.toolStyle,
       grouping: theme.grouping,
+      working: theme.working,
       thinking: theme.thinking,
     }),
-    [theme.toolStyle, theme.grouping, theme.thinking],
+    [theme.toolStyle, theme.grouping, theme.working, theme.thinking],
   );
   // Rebuilt only when the item list changes, and reusing the previous entry
   // objects for every row that did not: the memo boundaries below compare by

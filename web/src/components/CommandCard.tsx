@@ -4,6 +4,7 @@ import { formatDuration } from '../lib/format';
 import type { CommandItem } from '../state/chat';
 import { toolStatusLabel } from '../state/selectors';
 import { AlertIcon, CheckIcon, ChevronDownIcon } from './icons';
+import { TpsBadge } from './TpsBadge';
 
 export interface CommandCardProps {
   item: CommandItem;
@@ -163,6 +164,14 @@ export function CommandCard({
           ) : null}
           {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
           <span class="command-row-meta">
+            {/* A command's stdio is what arrives while it runs, so its own
+                throughput is measured on that - not on the model, which is
+                idle until the command returns. */}
+            <TpsBadge
+              chars={item.stdout.length + item.stderr.length}
+              working={item.status === 'running'}
+              source="result"
+            />
             <CommandOutcome item={item} />
             {duration ? <span class="command-duration">{duration}</span> : null}
             <span class="disclosure" aria-hidden="true">
@@ -206,6 +215,11 @@ export function CommandCard({
           </span>
         ) : null}
         {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
+        <TpsBadge
+          chars={item.stdout.length + item.stderr.length}
+          working={item.status === 'running'}
+          source="result"
+        />
         <CommandOutcome item={item} />
         {duration ? <span class="command-duration">{duration}</span> : null}
         <span class="disclosure" aria-hidden="true">

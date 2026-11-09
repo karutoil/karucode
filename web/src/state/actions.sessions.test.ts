@@ -42,6 +42,37 @@ beforeEach(() => {
 });
 
 describe('refreshing a project session list', () => {
+  it('does not re-read the whole agent list when only a run boundary changed', async () => {
+    // A busy project re-reads the session list on every `run_started` and
+    // `run_finished`. The agent list is the whole project's agents - several
+    // megabytes on a project with history - and nothing about a run boundary
+    // changes its membership or its labels.
+    store.sessions.value = [projectSession] as never;
+    vi.mocked(api.listSessions).mockResolvedValue([
+      { ...projectSession, running: true, message_count: 9, updated_at: 5 },
+    ] as never);
+
+    await actions.refreshSessions();
+
+    expect(api.listAgents).not.toHaveBeenCalled();
+  });
+
+  it('re-reads the agent list when a session is added, removed or renamed', async () => {
+    store.sessions.value = [projectSession] as never;
+    vi.mocked(api.listSessions).mockResolvedValue([
+      { ...projectSession, title: 'Project work, renamed' },
+    ] as never);
+    await actions.refreshSessions();
+    expect(api.listAgents).toHaveBeenCalledTimes(1);
+
+    // A project switch clears the list first, so the new project's agents are
+    // always read.
+    store.sessions.value = [];
+    vi.mocked(api.listSessions).mockResolvedValue([projectSession] as never);
+    await actions.refreshSessions();
+    expect(api.listAgents).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the open, project-less control chat instead of closing it', async () => {
     store.currentSessionId.value = 's-control';
     vi.mocked(api.listSessions).mockImplementation((async (projectId?: string) =>

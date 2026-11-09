@@ -31,6 +31,17 @@ export type ThemeToolStyle = 'cards' | 'rows';
  * turn always stay on screen.
  */
 export type ThemeGrouping = 'none' | 'tools' | 'turns';
+/**
+ * Whether a finished turn's working steps start expanded.
+ *
+ * `open` shows the work — the narration, the groups and the calls inside them —
+ * and keeps the summary line as a header that folds it again. `folded` is the
+ * terse view: a finished turn's work sits behind **Show the working**.
+ *
+ * The expansion is never global: each turn and each run of calls owns its own
+ * open state, so opening one row never expands another.
+ */
+export type ThemeWorking = 'open' | 'folded';
 /** How much of the model's reasoning is visible before it is opened. */
 export type ThemeThinking = 'collapsed' | 'preview' | 'expanded';
 
@@ -46,6 +57,7 @@ export const THEME_FONTS: readonly ThemeFont[] = [
 export const THEME_MONO_FONTS: readonly ThemeMono[] = ['default', 'system', 'classic'];
 export const THEME_TOOL_STYLES: readonly ThemeToolStyle[] = ['cards', 'rows'];
 export const THEME_GROUPINGS: readonly ThemeGrouping[] = ['none', 'tools', 'turns'];
+export const THEME_WORKING_MODES: readonly ThemeWorking[] = ['open', 'folded'];
 export const THEME_THINKING_MODES: readonly ThemeThinking[] = ['collapsed', 'preview', 'expanded'];
 
 /** One option in a Theme Studio segmented control. */
@@ -71,6 +83,19 @@ export const THEME_GROUPING_CHOICES: readonly ThemeChoice<ThemeGrouping>[] = [
     value: 'turns',
     label: 'Turns',
     hint: 'Also fold a finished turn’s working steps.',
+  },
+];
+
+export const THEME_WORKING_CHOICES: readonly ThemeChoice<ThemeWorking>[] = [
+  {
+    value: 'open',
+    label: 'Open',
+    hint: 'A finished turn’s working steps are shown, the calls inside them too.',
+  },
+  {
+    value: 'folded',
+    label: 'Folded',
+    hint: 'The working sits behind a “Show the working” line.',
   },
 ];
 
@@ -152,6 +177,7 @@ export interface Theme {
   /** Transcript view options (see `ThemeToolStyle` and friends). */
   toolStyle: ThemeToolStyle;
   grouping: ThemeGrouping;
+  working: ThemeWorking;
   thinking: ThemeThinking;
 }
 
@@ -194,6 +220,7 @@ export interface ThemeOptionsPatch {
   colors?: ThemeColorsPatch;
   toolStyle?: ThemeToolStyle;
   grouping?: ThemeGrouping;
+  working?: ThemeWorking;
   thinking?: ThemeThinking;
 }
 

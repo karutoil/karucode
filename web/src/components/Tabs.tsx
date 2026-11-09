@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef } from 'preact/hooks';
 import type { JSX } from 'preact';
+import { CloseIcon } from './icons';
 
 export interface TabItem<T extends string> {
   id: T;
@@ -8,6 +9,11 @@ export interface TabItem<T extends string> {
   icon?: JSX.Element;
   /** Optional trailing count pill, e.g. the number of changed files. */
   count?: number;
+  /**
+   * Offer a close button beside the label. Only callers that pass `onClose` can
+   * act on it; the strip is otherwise the built-in, permanently-open views.
+   */
+  closable?: boolean;
   /**
    * Hover text for the tab button.
    *
@@ -30,6 +36,8 @@ export interface TabsProps<T extends string> {
   items: readonly TabItem<T>[];
   active: T;
   onChange: (id: T) => void;
+  /** Called by a `closable` item's close button (and by Delete/Backspace). */
+  onClose?: (id: T) => void;
   label: string;
   idPrefix?: string;
   variant?: TabVariant;
@@ -48,6 +56,7 @@ export function Tabs<T extends string>({
   items,
   active,
   onChange,
+  onClose,
   label,
   idPrefix,
   variant = 'default',
@@ -77,19 +86,38 @@ export function Tabs<T extends string>({
   // the page and the inspector around the strip. A tab that already fits leaves
   // `scrollLeft` untouched, so selecting a visible tab never nudges the strip;
   // jsdom reports zero rects, which makes this a no-op there.
+  //
+  // It also runs on resize: a strip that was wide when the tab was selected can be
+  // a 390px scrollport a moment later (a phone rotation, the rail collapsing), and
+  // the selected tab would then sit outside it with nothing having selected it
+  // since.
   useEffect(() => {
-    const list = listRef.current;
-    const tab = document.getElementById(`${prefix}-tab-${active}`);
-    if (!list || !tab || !list.contains(tab)) return;
-    const listBox = list.getBoundingClientRect();
-    const tabBox = tab.getBoundingClientRect();
-    if (tabBox.left < listBox.left) list.scrollLeft -= listBox.left - tabBox.left;
-    else if (tabBox.right > listBox.right) list.scrollLeft += tabBox.right - listBox.right;
+    const reveal = (): void => {
+      const list = listRef.current;
+      const tab = document.getElementById(`${prefix}-tab-${active}`);
+      if (!list || !tab || !list.contains(tab)) return;
+      const listBox = list.getBoundingClientRect();
+      const tabBox = tab.getBoundingClientRect();
+      if (tabBox.left < listBox.left) list.scrollLeft -= listBox.left - tabBox.left;
+      else if (tabBox.right > listBox.right) list.scrollLeft += tabBox.right - listBox.right;
+    };
+    reveal();
+    window.addEventListener('resize', reveal);
+    return () => window.removeEventListener('resize', reveal);
   }, [active, prefix, items.length]);
 
   const onKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
     const index = items.findIndex((item) => item.id === active);
     if (index === -1) return;
+    // Delete/Backspace closes the selected tab, the way a browser's own tab strip
+    // does. Only for a tab that offers a close button, so the built-in views can
+    // never be removed with a stray keystroke.
+    const current = items[index];
+    if ((event.key === 'Delete' || event.key === 'Backspace') && current?.closable && onClose) {
+      event.preventDefault();
+      onClose(current.id);
+      return;
+    }
     let next = index;
     if (event.key === 'ArrowRight') next = (index + 1) % items.length;
     else if (event.key === 'ArrowLeft') next = (index - 1 + items.length) % items.length;
@@ -114,7 +142,7 @@ export function Tabs<T extends string>({
     >
       {items.map((item) => {
         const selected = item.id === active;
-        return (
+        const tab = (
           <button
             key={item.id}
             id={`${prefix}-tab-${item.id}`}
@@ -134,6 +162,24 @@ export function Tabs<T extends string>({
               <span class="tab-count">{item.count}</span>
             ) : null}
           </button>
+        );
+        if (!item.closable || !onClose) return tab;
+        // A close button cannot live *inside* the tab button - a button inside a
+        // button is invalid markup and the inner click would also activate the
+        // tab - so a closable tab is the tab plus a sibling in a neutral wrapper.
+        return (
+          <div key={item.id} class="tab-slot" role="presentation">
+            {tab}
+            <button
+              type="button"
+              class="tab-close"
+              aria-label={`Close ${item.label}`}
+              title={`Close ${item.label}`}
+              onClick={() => onClose(item.id)}
+            >
+              <CloseIcon size={11} />
+            </button>
+          </div>
         );
       })}
     </div>

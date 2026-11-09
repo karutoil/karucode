@@ -12,6 +12,7 @@ import type {
   ToolCall,
   Usage,
 } from '../api/types';
+import { preserveIterations } from '../lib/agentIterations';
 
 export type ToolStatus = 'running' | 'ok' | 'error' | 'stopped';
 
@@ -467,14 +468,21 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
         agentId: message.agent_id ?? null,
       });
     } else if (message.role === 'assistant') {
-      if (message.content.trim() !== '') {
+      // The turn's reasoning is stored beside its prose, so a reloaded or
+      // re-opened transcript shows the same thinking block that streamed live.
+      // A turn that thought and then called a tool has no prose at all; the
+      // reasoning is then the whole message, and dropping it would erase what
+      // the model worked out before acting.
+      const storedReasoning = message.reasoning_content ?? '';
+      const reasoning = storedReasoning.trim() === '' ? '' : storedReasoning;
+      if (message.content.trim() !== '' || reasoning !== '') {
         items.push({
           kind: 'message',
           id: `msg:${message.id}`,
           at: message.created_at,
           role: 'assistant',
           content: message.content,
-          reasoning: '',
+          reasoning,
           streaming: false,
           runId: message.run_id ?? null,
           agentId: message.agent_id ?? null,
@@ -628,10 +636,19 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
 
   if (livePlaceholder) ordered.push(livePlaceholder);
 
+  // A refetch while a subagent is running returns the row as it was last
+  // persisted, which can be older than the `agent_progress` frames already on
+  // screen (and is `0` for an agent that has only just started). Keep the larger
+  // count for the same session; a different session's agents are not carried over.
+  const agents = preserveIterations(
+    sameSession ? previous.agents : [],
+    detail.agents.map(normalizeAgentRecord).sort((a, b) => a.created_at - b.created_at),
+  );
+
   return {
     sessionId: detail.session.id,
     items: ordered,
-    agents: detail.agents.map(normalizeAgentRecord).sort((a, b) => a.created_at - b.created_at),
+    agents,
     running,
     runId: lastRunId,
     runStatus: lastRun?.status ?? null,

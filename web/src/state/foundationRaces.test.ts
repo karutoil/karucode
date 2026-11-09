@@ -306,7 +306,29 @@ describe('recovery after the reader moved on', () => {
 });
 
 describe('current navigation and request ownership', () => {
-  it('lets a later create win over its destination switch automatic selection', async () => {
+  it('lets a later draft win over its destination switch automatic selection', async () => {
+    const projectRead = deferred<Response>();
+    const fetchMock = stubFetch((url) => {
+      if (url === '/api/sessions?project=p_two') return projectRead.promise;
+      if (url.startsWith('/api/agents')) return jsonResponse({ agents: [] });
+      if (url === '/api/sessions/s_existing') return jsonResponse(detail('s_existing', 'p_two'));
+      throw new Error(`unexpected ${url}`);
+    });
+    store.sessions.value = [summary('s_one', 'p_one')];
+    const switching = actions.switchProject('p_two');
+    await vi.waitFor(() => expect(store.currentProjectId.value).toBe('p_two'));
+
+    // The draft is later than the switch and is aimed at that same destination.
+    actions.startDraftSession();
+    projectRead.resolve(jsonResponse({ sessions: [summary('s_existing', 'p_two')] }));
+    await switching;
+    // Defer/cancel the old automatic open instead of letting it close the draft.
+    expect(store.currentSessionId.value).toBeNull();
+    expect(store.draftSession.value).not.toBeNull();
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/sessions/s_existing')).toBe(false);
+  });
+
+  it('reports a failed first send without reviving the superseded automatic open', async () => {
     const projectRead = deferred<Response>();
     const created = deferred<Response>();
     const fetchMock = stubFetch((url, init) => {
@@ -317,59 +339,28 @@ describe('current navigation and request ownership', () => {
       }
       if (url.startsWith('/api/agents')) return jsonResponse({ agents: [] });
       if (url === '/api/sessions/s_existing') return jsonResponse(detail('s_existing', 'p_two'));
-      if (url === '/api/sessions/s_new') return jsonResponse(detail('s_new', 'p_two'));
-      throw new Error(`unexpected ${url}`);
-    });
-    store.sessions.value = [summary('s_one', 'p_one')];
-    const switching = actions.switchProject('p_two');
-    await vi.waitFor(() => expect(store.currentProjectId.value).toBe('p_two'));
-
-    // The create is later than the switch and is aimed at that same destination.
-    const creating = actions.createSession();
-    projectRead.resolve(jsonResponse({ sessions: [summary('s_existing', 'p_two')] }));
-    await switching;
-    // Defer/cancel the old automatic open instead of letting it invalidate create.
-    expect(store.currentSessionId.value).toBeNull();
-    expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/sessions/s_existing')).toBe(false);
-
-    created.resolve(jsonResponse({
-      ...detailFixture.session,
-      id: 's_new',
-      project_id: 'p_two',
-      title: '',
-    }));
-    expect(await creating).toMatchObject({ id: 's_new', project_id: 'p_two' });
-    expect(store.currentProjectId.value).toBe('p_two');
-    expect(store.currentSessionId.value).toBe('s_new');
-    expect(store.sessions.value.map((session) => session.id)).toContain('s_new');
-  });
-
-  it('reports a failed later create without reviving the superseded automatic open', async () => {
-    const projectRead = deferred<Response>();
-    const created = deferred<Response>();
-    const fetchMock = stubFetch((url, init) => {
-      if (url === '/api/sessions?project=p_two') return projectRead.promise;
-      if (url === '/api/sessions' && init?.method === 'POST') return created.promise;
-      if (url.startsWith('/api/agents')) return jsonResponse({ agents: [] });
-      if (url === '/api/sessions/s_existing') return jsonResponse(detail('s_existing', 'p_two'));
       throw new Error(`unexpected ${url}`);
     });
     const switching = actions.switchProject('p_two');
     await vi.waitFor(() => expect(store.currentProjectId.value).toBe('p_two'));
-    const creating = actions.createSession();
+    actions.startDraftSession();
+    const sending = actions.sendChatMessage('hello there');
     projectRead.resolve(jsonResponse({ sessions: [summary('s_existing', 'p_two')] }));
     await switching;
 
     created.resolve(errorResponse('offline', 'new session could not be created', 500));
-    expect(await creating).toBeNull();
+    expect(await sending).toBe(false);
     expect(store.toasts.value.some((toast) => toast.message === 'new session could not be created')).toBe(true);
     expect(store.currentProjectId.value).toBe('p_two');
+    // The message is still the reader's: the draft survives the failure, so the
+    // composer keeps its text and sending again is the whole retry.
     expect(store.currentSessionId.value).toBeNull();
+    expect(store.draftSession.value).not.toBeNull();
     expect(store.sessions.value.map((session) => session.id)).toEqual(['s_existing']);
     expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/sessions/s_existing')).toBe(false);
   });
 
-  it('does not merge or open a late create response after moving to another project', async () => {
+  it('does not merge or open a late draft create after moving to another project', async () => {
     const created = deferred<Response>();
     const fetchMock = stubFetch((url, init) => {
       if (url === '/api/sessions' && init?.method === 'POST') return created.promise;
@@ -382,7 +373,8 @@ describe('current navigation and request ownership', () => {
     });
     store.sessions.value = [summary('s_old_create', 'p_one')];
 
-    const creating = actions.createSession();
+    actions.startDraftSession();
+    const sending = actions.sendChatMessage('hello there');
     await actions.switchProject('p_two');
     expect(store.currentSessionId.value).toBe('s_two');
 
@@ -391,7 +383,7 @@ describe('current navigation and request ownership', () => {
       id: 's_late_create',
       project_id: 'p_one',
     }));
-    expect(await creating).toBeNull();
+    expect(await sending).toBe(false);
 
     expect(store.currentProjectId.value).toBe('p_two');
     expect(store.currentSessionId.value).toBe('s_two');
@@ -399,7 +391,7 @@ describe('current navigation and request ownership', () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/sessions/s_late_create')).toBe(false);
   });
 
-  it('lets a later same-project selection win over a late create response', async () => {
+  it('lets a later same-project selection win over a late draft create', async () => {
     const created = deferred<Response>();
     stubFetch((url, init) => {
       if (url === '/api/sessions' && init?.method === 'POST') return created.promise;
@@ -407,14 +399,15 @@ describe('current navigation and request ownership', () => {
       throw new Error(`unexpected ${url}`);
     });
 
-    const creating = actions.createSession();
+    actions.startDraftSession();
+    const sending = actions.sendChatMessage('hello there');
     await actions.openSession('s_chosen');
     created.resolve(jsonResponse({
       ...detailFixture.session,
       id: 's_late_same_project',
       project_id: 'p_one',
     }));
-    expect(await creating).toBeNull();
+    expect(await sending).toBe(false);
     expect(store.currentSessionId.value).toBe('s_chosen');
     expect(store.sessions.value.map((session) => session.id)).toEqual(['s_chosen']);
   });

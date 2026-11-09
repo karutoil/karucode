@@ -18,6 +18,7 @@ import {
   type MessageItem,
   type ToolItem,
 } from './chat';
+import { preserveIterations } from '../lib/agentIterations';
 
 /**
  * Live transcript of one subagent.
@@ -657,7 +658,10 @@ export function mergeAgentList(
   if (incoming.length === 0) return current;
   const byId = new Map<string, AgentSummary>();
   for (const agent of current) byId.set(agent.id, normalizeAgentRecord(agent));
-  for (const agent of incoming) byId.set(agent.id, normalizeAgentRecord(agent));
+  // A fetched row is authoritative for everything except a count this page has
+  // already watched advance: a refresh must not undo a live `agent_progress`.
+  const fetched = preserveIterations(current, incoming.map(normalizeAgentRecord));
+  for (const agent of fetched) byId.set(agent.id, agent);
   return [...byId.values()].sort((a, b) => b.created_at - a.created_at);
 }
 
@@ -736,14 +740,18 @@ export function activityFromMessages(
         agentId,
       });
     } else if (message.role === 'assistant') {
-      if (message.content.trim() !== '') {
+      // Reasoning is stored on the assistant row, so a reloaded (or drilled-in)
+      // subagent transcript still shows what it thought before it acted.
+      const storedReasoning = message.reasoning_content ?? '';
+      const reasoning = storedReasoning.trim() === '' ? '' : storedReasoning;
+      if (message.content.trim() !== '' || reasoning !== '') {
         items.push({
           kind: 'message',
           id: `msg:${message.id}`,
           at: message.created_at,
           role: 'assistant',
           content: message.content,
-          reasoning: '',
+          reasoning,
           streaming: false,
           runId: message.run_id ?? null,
           agentId,

@@ -412,6 +412,35 @@ body
   min-height: 0;
 }
 
+/* The workspace-tab host has no dialog header, so the path gets its own line and
+ * a close button. The dialog keeps the path in its title bar instead. */
+.file-view-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: 0 0 auto;
+  padding: var(--space-3) var(--space-6);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-menu);
+}
+
+.file-view-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-user);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The centre pane a file tab controls. The viewer owns the column layout inside
+ * it, so the panel only has to stop the page from scrolling behind it. */
+.file-workspace {
+  overflow: hidden;
+}
+
 .file-toolbar {
   display: flex;
   align-items: center;

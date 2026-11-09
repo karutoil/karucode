@@ -1,6 +1,7 @@
 import { ApiError, getAuthToken, onUnauthorized, setAuthToken, toErrorMessage } from '../api/client';
 import * as api from '../api/endpoints';
-import { startEventStream, type EventStreamHandle } from '../api/events';
+import { startSharedEventStream } from '../api/sharedStream';
+import type { EventStreamHandle } from '../api/events';
 import type {
   AgentAction,
   AgentSummary,
@@ -21,6 +22,7 @@ import type {
   RewindPreview,
   Session,
   SessionDetail,
+  SessionModelSelection,
   SessionSummary,
 } from '../api/types';
 import { isNarrowViewport } from '../lib/dom';
@@ -34,6 +36,7 @@ import {
   type TranscriptRows,
 } from './chat';
 import * as agentConsole from './agentConsole';
+import { preserveIterations } from '../lib/agentIterations';
 import { applyEventToChat, applyEventToSessions, markUserRun, sessionAgentFromRecord } from './eventReducer';
 import { syncProjectIcons } from './projectIcons';
 import { controlPlaneOpen } from './controlPlane';
@@ -41,6 +44,7 @@ import * as railPeek from './railPeek';
 import * as notifyWiring from './notifyWiring';
 import * as promptTokens from './promptTokens';
 import * as workbench from './workbench';
+import * as workspaceTabs from './workspaceTabs';
 import { summaryFromDetail } from './selectors';
 import * as store from './store';
 
@@ -55,12 +59,13 @@ let sessionGeneration = 0;
 let projectGeneration = 0;
 /** User navigation intents, including time spent waiting for a project switch. */
 let navigationGeneration = 0;
-let createGeneration = 0;
 let healthGeneration = 0;
 // Independent read generations handle overlapping reads even within one project;
 // projectGeneration handles the more dangerous A -> B -> A stale-response case.
 let sessionListReadGeneration = 0;
 let agentListReadGeneration = 0;
+/** The project whose agent list is being read, so two reads cannot overlap. */
+let agentsReadInFlight: string | null = null;
 let agentDetailGeneration = 0;
 let refreshingSessionId: string | null = null;
 let refreshQueue: KarucodeEvent[] = [];
@@ -219,7 +224,11 @@ function summaryFromSession(session: Session): SessionSummary {
 function clearSelection(): void {
   if (store.currentSessionId.value !== null) resetPluginPanelData();
   store.currentSessionId.value = null;
-  // Nothing is open, so there is no session whose pin the pills may show.
+  // Nothing is open, so there is no session whose pin the pills may show - and no
+  // draft either: every caller of this is saying "the thing that was here is
+  // gone", which includes the unsent conversation.
+  store.draftSession.value = null;
+  store.draftToSession.value = null;
   store.rememberSessionModel(null, null);
   store.chat.value = emptyChatState(null);
   store.chatLoading.value = false;
@@ -232,6 +241,142 @@ function clearSelection(): void {
   store.sessionInfoError.value = null;
   store.sessionInfoLoading.value = false;
   store.writeLastSessionId(null);
+}
+
+/** Client-side identity for a draft; it never reaches the server. */
+let draftSequence = 0;
+
+/**
+ * Start a new conversation without creating it.
+ *
+ * This is what every "New session" entry point calls: the rail, the collapsed
+ * rail's fly-out, the palette and `Ctrl/Cmd+N`. Nothing is written to the server
+ * here - a press that is immediately abandoned must not leave an empty session
+ * behind, which is exactly what creating on the click used to do. The session is
+ * created by `sendChatMessage` when the first message is sent.
+ *
+ * It is still a navigation intent: it supersedes a pending create or a project
+ * switch's automatic "open latest", so a stale continuation cannot open a session
+ * over the draft the reader just started.
+ */
+export function startDraftSession(options: { projectId?: string | null } = {}): void {
+  const projectId = options.projectId === undefined ? store.currentProjectId.value : options.projectId;
+  if (
+    store.draftSession.value !== null &&
+    store.currentSessionId.value === null &&
+    store.currentProjectId.value === projectId
+  ) {
+    // Already drafting in this project: a second press is "focus the box", not a
+    // second draft (and must not throw away anything already typed).
+    store.mobileSheet.value = null;
+    store.composerFocusTick.value += 1;
+    return;
+  }
+  navigationGeneration += 1;
+  sessionGeneration += 1;
+  clearSelection();
+  store.draftSession.value = { id: ++draftSequence, projectId, model: null };
+  store.mobileSheet.value = null;
+  workspaceTabs.selectWorkspaceView('chat');
+  store.composerFocusTick.value += 1;
+}
+
+/**
+ * Create the session a draft promised and make it the open one.
+ *
+ * Returns the new id, or `null` when the row could not be created or when the
+ * reader navigated away while it was being written. In both cases the caller must
+ * not send: a failure keeps the draft (and the composer's text) exactly where it
+ * was so the message can be tried again.
+ *
+ * At most one create is in flight per draft: the first send and a binary
+ * attachment uploaded at the same moment must not create two sessions.
+ *
+ * The generation checks are deliberately the same ones an eager create used: a
+ * create that lands after a project switch, a deliberate close or a later
+ * selection is not allowed to yank the workspace back to it.
+ */
+function createDraftSession(draft: store.DraftSession): Promise<string | null> {
+  if (draftCreation?.draftId !== draft.id) {
+    const promise = createDraftSessionOnce(draft);
+    draftCreation = { draftId: draft.id, promise };
+    void promise.finally(() => {
+      if (draftCreation?.promise === promise) draftCreation = null;
+    });
+  }
+  return draftCreation.promise;
+}
+
+/** The create currently on the wire for a draft; see `createDraftSession`. */
+let draftCreation: { draftId: number; promise: Promise<string | null> } | null = null;
+
+async function createDraftSessionOnce(draft: store.DraftSession): Promise<string | null> {
+  const projectRead = projectGeneration;
+  const sessionRead = sessionGeneration;
+  const navigationOwner = navigationGeneration;
+  try {
+    // The pin (when the reader chose one) rides in the create request, so the
+    // first message already runs on the model the pills showed.
+    const session = await api.createSession(
+      undefined,
+      draft.projectId,
+      draft.model ? { model: draft.model } : {},
+    );
+    if (
+      store.draftSession.value?.id !== draft.id ||
+      projectRead !== projectGeneration ||
+      sessionRead !== sessionGeneration ||
+      navigationOwner !== navigationGeneration ||
+      draft.projectId !== store.currentProjectId.value
+    ) {
+      // The row exists on the server, so the next list read shows it, but this
+      // browser is no longer looking at that conversation. Leave navigation alone.
+      return null;
+    }
+    // The creation is the newest owner of this workspace's chat reads: anything
+    // still in flight for the previous selection must not be committed over it.
+    sessionGeneration += 1;
+    store.draftSession.value = null;
+    store.currentSessionId.value = session.id;
+    // The box the reader was typing in moves with the conversation: the composer
+    // keys its draft text and chips by (project, session, draft), so it is told
+    // which pair to carry across.
+    store.draftToSession.value = { draftId: draft.id, sessionId: session.id };
+    store.writeLastSessionId(session.id);
+    store.chat.value = emptyChatState(session.id);
+    store.chatLoading.value = false;
+    store.chatError.value = null;
+    store.sessionInfo.value = null;
+    store.sessionInfoFor.value = null;
+    store.sessionInfoError.value = null;
+    // The create response carries the pin (when one was sent) and `mergeSummary`
+    // is the one place that records a session's answer for the pills.
+    mergeSummary(summaryFromSession(session));
+    return session.id;
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+      return null;
+    }
+    store.pushToast(toErrorMessage(error));
+    return null;
+  }
+}
+
+/**
+ * Create the draft's session now, for a surface that cannot work without an id.
+ *
+ * The composer calls this when a file has to be *uploaded* rather than inlined:
+ * `POST /api/workspace/upload` stores it under `.karucode/attachments/<session>/`,
+ * so the session has to exist before the bytes can be sent. Attaching a real file
+ * is already work the reader means to keep, so this is the one way a conversation
+ * can be created without a message. It returns the open session's id unchanged
+ * when there is no draft (or no session at all, which the caller reports).
+ */
+export function materializeDraftSession(): Promise<string | null> {
+  const draft = store.draftSession.value;
+  if (!draft) return Promise.resolve(store.currentSessionId.value);
+  return createDraftSession(draft);
 }
 
 /**
@@ -277,7 +422,7 @@ function openStream(duringBootstrap: boolean): void {
   stopStream();
   if (!duringBootstrap && store.boot.value !== 'ready') return;
   let opens = 0;
-  stream = startEventStream({
+  stream = startSharedEventStream({
     token: getAuthToken(),
     onEvent: receiveRawEvent,
     // Normal reconnects resume from Last-Event-ID. A remaining seq hole, an
@@ -644,6 +789,23 @@ function drainRefreshQueue(settled = false): void {
   }
 }
 
+/**
+ * Did the session list gain, lose or rename a row?
+ *
+ * Order and the counters inside a row - message count, running, last status -
+ * change on every run boundary and are already carried by the event stream.
+ * Only ids and titles decide whether the *agents* view, which is grouped and
+ * labelled by session, has to be re-read from the server.
+ */
+function sessionsChanged(
+  before: readonly SessionSummary[],
+  after: readonly SessionSummary[],
+): boolean {
+  if (before.length !== after.length) return true;
+  const titles = new Map(before.map((session) => [session.id, session.title]));
+  return after.some((session) => titles.get(session.id) !== session.title);
+}
+
 async function doRefreshSessions(): Promise<void> {
   const projectId = store.currentProjectId.value;
   const projectRead = projectGeneration;
@@ -658,11 +820,17 @@ async function doRefreshSessions(): Promise<void> {
     // Even an unscoped read (no open project) must not put a control chat or
     // another project's session into the rail: see `projectSessionsOnly`.
     const rows = projectSessionsOnly(list);
+    const membershipChanged = sessionsChanged(store.sessions.value, rows);
     store.sessions.value = rows;
     store.sessionsLoading.value = false;
     // Agents belong to sessions: a deleted or renamed session changes both the
-    // list and the labels the Agents view groups by.
-    void refreshAgents();
+    // list and the labels the Agents view groups by. Nothing else about a run
+    // boundary does - status and notes arrive on the event stream - and this read
+    // is the whole project's agent list, which on a busy project is a multi-
+    // megabyte response. Re-reading it after every `run_started`/`run_finished`
+    // was a large, repeated transfer for data nothing could have changed. A
+    // project switch re-reads it explicitly, because that list is project-scoped.
+    if (membershipChanged) void refreshAgents();
     const current = store.currentSessionId.value;
     if (current && !rows.some((session) => session.id === current)) {
       // A project-less session (the control chat) is never in a project's list, so
@@ -838,6 +1006,10 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
 
   const generation = (sessionGeneration += 1);
   const sessionChanged = store.currentSessionId.value !== id;
+  // Opening a session is a navigation intent too: an unsent draft is abandoned
+  // rather than kept in the background, so "New session" never haunts a session
+  // the reader went back to.
+  store.draftSession.value = null;
   // Pages the reader already paged back to belong to this same session; a later
   // silent refresh merges its newest tail into them instead of throwing them
   // away (see `mergeTranscriptRows`). A forced read is the exception: it is how
@@ -964,42 +1136,6 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
   return applied;
 }
 
-export async function createSession(): Promise<Session | null> {
-  const projectId = store.currentProjectId.value;
-  const projectRead = projectGeneration;
-  const sessionRead = sessionGeneration;
-  // Create is itself a navigation intent. In particular it supersedes the
-  // automatic "open latest" step of a project switch whose list is still loading.
-  const navigationOwner = ++navigationGeneration;
-  const intent = ++createGeneration;
-  try {
-    const session = await api.createSession(undefined, projectId);
-    if (
-      intent !== createGeneration ||
-      projectRead !== projectGeneration ||
-      sessionRead !== sessionGeneration ||
-      navigationOwner !== navigationGeneration ||
-      projectId !== store.currentProjectId.value
-    ) {
-      // Creation succeeded remotely, but this response no longer owns navigation.
-      // In particular do not insert A's row into B's newly loaded project list.
-      return null;
-    }
-    mergeSummary(summaryFromSession(session));
-    store.mobileSheet.value = null;
-    await openSession(session.id, { navigationOwner });
-    if (store.currentProjectId.value === projectId && store.currentSessionId.value === session.id) {
-      store.composerFocusTick.value += 1;
-      return session;
-    }
-    return null;
-  } catch (error) {
-    if (isUnauthorized(error)) enterAuthState();
-    else store.pushToast(toErrorMessage(error));
-    return null;
-  }
-}
-
 export async function renameSessionById(id: string, title: string): Promise<boolean> {
   const trimmed = title.trim();
   if (trimmed === '') return false;
@@ -1046,79 +1182,103 @@ export async function deleteSessionById(id: string): Promise<boolean> {
 }
 
 export async function sendChatMessage(content: string): Promise<boolean> {
-  const sessionId = store.currentSessionId.value;
-  const generation = sessionGeneration;
-  const projectRead = projectGeneration;
   const trimmed = content.trim();
-  if (!sessionId || trimmed === '') return false;
-  if (store.chat.value.running || sendInFlight.has(sessionId)) return false;
+  if (trimmed === '') return false;
+  const draft = store.draftSession.value;
+  const openId = store.currentSessionId.value;
+  // Nothing to send into: no open session and no draft to create one from.
+  if (!openId && !draft) return false;
+  // The draft has no id yet, so it gets the guard key instead: a second submit
+  // while the create is in flight must not create a second session.
+  const guard = openId ?? 'draft';
+  if (store.chat.value.running || sendInFlight.has(guard)) return false;
 
-  sendInFlight.add(sessionId);
-  localMessageSequence += 1;
-  const localId = `local:${Date.now()}:${localMessageSequence}`;
-  const optimistic: MessageItem = {
-    kind: 'message',
-    id: localId,
-    at: Date.now(),
-    role: 'user',
-    content: trimmed,
-    reasoning: '',
-    streaming: false,
-    runId: null,
-    agentId: null,
-  };
-  store.chat.value = {
-    ...store.chat.value,
-    items: [...store.chat.value.items, optimistic],
-    running: true,
-    runStatus: 'running',
-    runError: null,
-    iteration: 0,
-  };
-  // The reader wants to see the answer, so the transcript re-pins to the bottom.
-  store.sentMessageTick.value += 1;
-
+  sendInFlight.add(guard);
+  let sessionId: string | null = openId;
   try {
-    const result = await api.sendMessage(sessionId, trimmed);
-    if (store.currentSessionId.value === sessionId) {
+    if (sessionId === null) {
+      // The first message is what creates the session: see `startDraftSession`.
+      // A failure returns `false` and leaves the draft (and the typed text)
+      // exactly as it was, so sending again is the whole retry.
+      const created = draft ? await createDraftSession(draft) : null;
+      if (created === null) return false;
+      sessionId = created;
+      sendInFlight.add(sessionId);
+    }
+
+    const generation = sessionGeneration;
+    const projectRead = projectGeneration;
+    localMessageSequence += 1;
+    const localId = `local:${Date.now()}:${localMessageSequence}`;
+    const optimistic: MessageItem = {
+      kind: 'message',
+      id: localId,
+      at: Date.now(),
+      role: 'user',
+      content: trimmed,
+      reasoning: '',
+      streaming: false,
+      runId: null,
+      agentId: null,
+    };
+    store.chat.value = {
+      ...store.chat.value,
+      items: [...store.chat.value.items, optimistic],
+      running: true,
+      runStatus: 'running',
+      runError: null,
+      iteration: 0,
+    };
+    // The reader wants to see the answer, so the transcript re-pins to the bottom.
+    store.sentMessageTick.value += 1;
+
+    try {
+      const result = await api.sendMessage(sessionId, trimmed);
+      if (store.currentSessionId.value === sessionId) {
+        const current = store.chat.value;
+        store.chat.value = {
+          ...current,
+          runId: result.run_id,
+          items: markUserRun(current.items, result.run_id),
+        };
+      }
+      // The new row (a draft's first send included) belongs in the rail now: the
+      // first message is also what titles an untitled session.
+      scheduleSessionsRefresh();
+      return true;
+    } catch (error) {
+      // A silent same-session snapshot is a newer owner too. Check everything before
+      // removing the optimistic row, changing run state, reporting an old error, or
+      // launching another read: doing that afterwards already clipped the new run.
+      if (
+        generation !== sessionGeneration ||
+        projectRead !== projectGeneration ||
+        store.currentSessionId.value !== sessionId
+      ) {
+        return false;
+      }
       const current = store.chat.value;
       store.chat.value = {
         ...current,
-        runId: result.run_id,
-        items: markUserRun(current.items, result.run_id),
+        items: current.items.filter((item) => item.id !== localId),
+        running: false,
+        runStatus: null,
       };
-    }
-    scheduleSessionsRefresh();
-    return true;
-  } catch (error) {
-    // A silent same-session snapshot is a newer owner too. Check everything before
-    // removing the optimistic row, changing run state, reporting an old error, or
-    // launching another read: doing that afterwards already clipped the new run.
-    if (
-      generation !== sessionGeneration ||
-      projectRead !== projectGeneration ||
-      store.currentSessionId.value !== sessionId
-    ) {
+      if (isUnauthorized(error)) {
+        enterAuthState();
+      } else if (error instanceof ApiError && error.status === 409) {
+        store.pushToast('A run is already active in this session.', 'info');
+      } else {
+        store.pushToast(toErrorMessage(error));
+      }
+      void openSession(sessionId, { silent: true });
       return false;
     }
-    const current = store.chat.value;
-    store.chat.value = {
-      ...current,
-      items: current.items.filter((item) => item.id !== localId),
-      running: false,
-      runStatus: null,
-    };
-    if (isUnauthorized(error)) {
-      enterAuthState();
-    } else if (error instanceof ApiError && error.status === 409) {
-      store.pushToast('A run is already active in this session.', 'info');
-    } else {
-      store.pushToast(toErrorMessage(error));
-    }
-    void openSession(sessionId, { silent: true });
-    return false;
   } finally {
-    sendInFlight.delete(sessionId);
+    sendInFlight.delete(guard);
+    // For a draft the guard is not the session id, so the id it just became is
+    // released separately (for a normal send the two are the same key).
+    if (sessionId) sendInFlight.delete(sessionId);
   }
 }
 
@@ -1500,6 +1660,10 @@ function finishSessionModelMutation(mutation: SessionModelMutation): void {
  * Pin the current session to a provider + model. `reasoningEffort` rides along
  * (`none` turns reasoning off; absent keeps the endpoint's default). Pass no
  * model at all (clear) to follow the install-wide default again.
+ *
+ * On an unsent draft there is no session to PATCH: the choice is held in the
+ * draft and sent as part of `POST /api/sessions`, so the first message already
+ * runs on it.
  */
 export async function setSessionModelSelection(
   providerId: string,
@@ -1507,13 +1671,21 @@ export async function setSessionModelSelection(
   reasoningEffort?: string | null,
 ): Promise<boolean> {
   const sessionId = store.currentSessionId.value;
-  if (!sessionId) return false;
-  const mutation = beginSessionModelMutation(sessionId);
-  const selection = {
+  const selection: SessionModelSelection = {
     provider: providerId,
     model: modelId,
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
   };
+  const draft = store.draftSession.value;
+  if (!sessionId) {
+    if (!draft) return false;
+    store.draftSession.value = { ...draft, model: selection };
+    const provider = store.config.value?.providers.find((profile) => profile.id === providerId);
+    const label = provider?.models.find((model) => model.id === modelId)?.name ?? modelId;
+    store.pushToast(`New conversations will use ${label}.`, 'success');
+    return true;
+  }
+  const mutation = beginSessionModelMutation(sessionId);
   try {
     const session = await api.setSessionModel(sessionId, selection);
     if (!ownsVisibleSessionModelMutation(mutation)) return false;
@@ -1543,7 +1715,15 @@ export async function setSessionModelSelection(
 /** Drop the session's model pin so it follows the install-wide default. */
 export async function clearSessionModelSelection(): Promise<boolean> {
   const sessionId = store.currentSessionId.value;
-  if (!sessionId) return false;
+  if (!sessionId) {
+    // A draft that chose "follow the default" simply forgets the pin; there is no
+    // server row to clear.
+    const draft = store.draftSession.value;
+    if (!draft) return false;
+    store.draftSession.value = { ...draft, model: null };
+    store.pushToast('New conversations follow the install default again.', 'success');
+    return true;
+  }
   const mutation = beginSessionModelMutation(sessionId);
   try {
     const session = await api.setSessionModel(sessionId, null);
@@ -1667,7 +1847,14 @@ async function switchProjectInternal(id: string, options: ProjectSwitchOptions =
   store.sessionInfoFor.value = null;
   store.sessionInfoError.value = null;
   store.fileViewerPath.value = null;
+  // File tabs belong to the project whose workspace they read: the same relative
+  // path in another project is a different file, so the strip starts empty.
+  workspaceTabs.resetWorkspaceTabs();
   clearSelection();
+  // The agent list is project-scoped, and the rows above were just dropped, so it
+  // is read again here rather than waiting for a session to change. A refresh
+  // that the session read below also asks for is dropped as a duplicate.
+  void refreshAgents();
   await refreshSessions();
   if (generation !== projectGeneration || store.currentProjectId.value !== id) return;
   // A later create, close or manual selection owns navigation now. The switch's
@@ -1781,7 +1968,13 @@ export async function refreshSessionAgents(): Promise<void> {
   try {
     const detail = await api.getSession(sessionId);
     if (current()) {
-      store.chat.value = { ...store.chat.value, agents: detail.agents.map(sessionAgentFromRecord) };
+      // Keep counts this page already watched advance: the snapshot is written
+      // between iterations, so it can be older than the live progress frames.
+      const agents = preserveIterations(
+        store.chat.value.agents,
+        detail.agents.map(sessionAgentFromRecord),
+      );
+      store.chat.value = { ...store.chat.value, agents };
     }
   } catch (error) {
     if (!current()) return;
@@ -1796,22 +1989,33 @@ export async function refreshSessionAgents(): Promise<void> {
  * Only the list comes from the server; each agent's live feed keeps streaming in
  * over SSE, so a refresh corrects membership and status without touching the
  * transcript already on screen.
+ *
+ * A second read of the *same* project while one is in flight is dropped: a
+ * project switch and the session refresh that follows it both ask for it, and
+ * that response is every agent the project ever spawned - on a project with
+ * history, several megabytes. Two identical downloads change nothing.
  */
 export async function refreshAgents(): Promise<void> {
   const projectId = store.currentProjectId.value;
+  if (agentsReadInFlight === projectId) return;
   const projectRead = projectGeneration;
   const read = ++agentListReadGeneration;
   const current = () =>
     projectId === store.currentProjectId.value &&
     projectRead === projectGeneration &&
     read === agentListReadGeneration;
+  agentsReadInFlight = projectId;
   store.agentsLoading.value = true;
   try {
     const list = await api.listAgents({ project: projectId });
     if (!current()) return;
     // The server omits `note`, `progress` and `owned_paths` when empty; normalise
-    // here so every row in the store is fully populated.
-    store.agentsAll.value = list.map(sessionAgentFromRecord);
+    // here so every row in the store is fully populated. A running agent's row
+    // can lag its live progress frame, so a refresh must not lower the count.
+    store.agentsAll.value = preserveIterations(
+      store.agentsAll.value,
+      list.map(sessionAgentFromRecord),
+    );
     store.agentsError.value = null;
   } catch (error) {
     if (!current()) return;
@@ -1821,6 +2025,7 @@ export async function refreshAgents(): Promise<void> {
     }
     store.agentsError.value = toErrorMessage(error);
   } finally {
+    if (agentsReadInFlight === projectId) agentsReadInFlight = null;
     if (current()) store.agentsLoading.value = false;
   }
 }
@@ -2422,6 +2627,19 @@ export function closeFileViewer(): void {
 }
 
 /**
+ * Open a workspace file as a tab in the centre pane, beside the conversation.
+ *
+ * The tab is not an overlay: it is a view of the same workspace strip as
+ * Conversation, Source control and Terminal, so no other surface is replaced and
+ * the modal that may have offered this is closed (the file is now visible where
+ * the reader asked to see it).
+ */
+export function openFileInTab(path: string): void {
+  store.fileViewerPath.value = null;
+  workspaceTabs.openFileTab(path);
+}
+
+/**
  * Tell the workspace explorer that a file changed on disk from the UI itself, so
  * its cached listing (sizes, and a file the editor just created) catches up.
  */
@@ -2612,9 +2830,9 @@ export function resetRuntimeForTests(): void {
   sessionGeneration += 1;
   projectGeneration += 1;
   navigationGeneration += 1;
-  createGeneration += 1;
   healthGeneration += 1;
   modelMutationGeneration += 1;
+  draftCreation = null;
   modelMutationGenerations.clear();
   modelMutationOwner = null;
   store.sessionModelMutationPending.value = null;
@@ -2624,6 +2842,9 @@ export function resetRuntimeForTests(): void {
   resultPanelWidthWrites.clear();
   sessionListReadGeneration += 1;
   agentListReadGeneration += 1;
+  // A read whose response never arrives would otherwise block the next one for
+  // the same project - which, in a shared module, means the next test.
+  agentsReadInFlight = null;
   sendInFlight.clear();
   refreshingSessionId = null;
   refreshQueue = [];
@@ -2645,4 +2866,7 @@ export function resetRuntimeForTests(): void {
     window.clearTimeout(sessionsRefreshTimer);
     sessionsRefreshTimer = null;
   }
+  // Open file tabs and close guards are module state too: a test that opened one
+  // must not leave it (or the selected view) for the next.
+  workspaceTabs.resetWorkspaceTabs();
 }

@@ -73,25 +73,31 @@ describe('sanitizeTheme', () => {
       ...customTheme(),
       toolStyle: 'rows',
       grouping: 'turns',
+      working: 'open',
       thinking: 'expanded',
     });
     expect(theme?.toolStyle).toBe('rows');
     expect(theme?.grouping).toBe('turns');
+    expect(theme?.working).toBe('open');
     expect(theme?.thinking).toBe('expanded');
   });
 
   it('loads a theme saved before the view options existed', () => {
-    // Every saved theme in every browser predates these three keys; dropping the
+    // Every saved theme in every browser predates these keys; dropping the
     // whole theme (or throwing) would take the user's palette with it.
     const legacy = { ...customTheme() };
     delete (legacy as Record<string, unknown>).toolStyle;
     delete (legacy as Record<string, unknown>).grouping;
+    delete (legacy as Record<string, unknown>).working;
     delete (legacy as Record<string, unknown>).thinking;
 
     const theme = sanitizeTheme(legacy);
     expect(theme).not.toBeNull();
     expect(theme?.toolStyle).toBe('cards');
     expect(theme?.grouping).toBe('none');
+    // A theme written when a finished turn was always folded keeps that look:
+    // only the built-ins start open.
+    expect(theme?.working).toBe('folded');
     expect(theme?.thinking).toBe('collapsed');
   });
 
@@ -100,10 +106,12 @@ describe('sanitizeTheme', () => {
       ...customTheme(),
       toolStyle: 'holographic',
       grouping: 42,
+      working: 'sometimes',
       thinking: null,
     });
     expect(theme?.toolStyle).toBe('cards');
     expect(theme?.grouping).toBe('none');
+    expect(theme?.working).toBe('folded');
     expect(theme?.thinking).toBe('collapsed');
   });
 });
@@ -119,6 +127,8 @@ describe('import and export', () => {
     expect(parsed.mode).toBe('dark');
     expect(parsed.customCSS).toBe('.x{}');
     expect(parsed.colors).toEqual(DEFAULT_THEME.colors);
+    // The transcript view options travel with the theme, working steps included.
+    expect(parsed.working).toBe(DEFAULT_THEME.working);
     // Imports never reuse the exported id.
     expect(parsed.id).not.toBe(DEFAULT_THEME.id);
   });

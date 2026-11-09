@@ -79,6 +79,59 @@ describe('seedChatState', () => {
     expect(tool?.kind === 'tool' ? tool.images : undefined).toEqual([]);
   });
 
+  it('restores stored reasoning so a reload still shows what the model thought', () => {
+    // Switching sessions or reloading the page refetches the stored rows; the
+    // thinking block the reader watched arrive must come back with them.
+    const state = seedChatState(
+      sessionWith([
+        storedMessage({ id: 1, role: 'user', content: 'Find the login bug.' }),
+        storedMessage({
+          id: 2,
+          role: 'assistant',
+          content: 'The bug is in auth.',
+          reasoning_content: 'Read the auth module first.',
+        }),
+      ]),
+    );
+
+    const answer = state.items.find((item) => item.kind === 'message' && item.role === 'assistant');
+    expect(answer?.kind === 'message' ? answer.reasoning : '').toBe('Read the auth module first.');
+    expect(answer?.kind === 'message' ? answer.content : '').toBe('The bug is in auth.');
+  });
+
+  it('keeps the reasoning of a tool-calling turn that produced no prose', () => {
+    // A reasoning model that thinks and then calls a tool writes an assistant row
+    // with `content: ""`. That thought is the only record of the turn, and it has
+    // to sit above the tool row it explains after a reload too.
+    const state = seedChatState(
+      sessionWith([
+        storedMessage({
+          id: 1,
+          role: 'assistant',
+          tool_calls: [call],
+          reasoning_content: 'Look at the screenshot before answering.',
+        }),
+      ]),
+    );
+
+    expect(state.items.map((item) => item.kind).slice(0, 2)).toEqual(['message', 'tool']);
+    const thought = state.items[0];
+    expect(thought?.kind === 'message' ? thought.reasoning : '').toBe(
+      'Look at the screenshot before answering.',
+    );
+    expect(thought?.kind === 'message' ? thought.content : 'x').toBe('');
+  });
+
+  it('does not render a blank thinking block for whitespace-only reasoning', () => {
+    const state = seedChatState(
+      sessionWith([
+        storedMessage({ id: 1, role: 'assistant', content: 'Done.', reasoning_content: '  \n ' }),
+      ]),
+    );
+    const answer = state.items.find((item) => item.kind === 'message');
+    expect(answer?.kind === 'message' ? answer.reasoning : 'x').toBe('');
+  });
+
   it('fills in the agent fields serde omits from a session snapshot', () => {
     // `note`, `progress` and `owned_paths` are all `skip_serializing_if`/`default`
     // on the server, so a snapshot can carry none of them. Components read them
@@ -97,6 +150,23 @@ describe('seedChatState', () => {
     expect(agent?.note).toBe('');
     expect(agent?.progress).toBeNull();
     expect(agent?.owned_paths).toEqual([]);
+  });
+
+  it('keeps a live iteration count when a refetch returns an older subagent row', () => {
+    // A snapshot is written between iterations, so a reseed during a run can
+    // carry a count the live progress frames have already passed.
+    const live = seedChatState({
+      ...detailFixture,
+      agents: [wireAgentSummary('a_running', { iterations: 9 })],
+    });
+    const refetched = seedChatState(
+      {
+        ...detailFixture,
+        agents: [wireAgentSummary('a_running', { iterations: 4 })],
+      },
+      live,
+    );
+    expect(refetched.agents[0]?.iterations).toBe(9);
   });
 });
 

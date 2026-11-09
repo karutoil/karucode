@@ -5,6 +5,7 @@ import { workspacePreviewUrl, workspaceRawUrl } from '../api/endpoints';
 import { copyText } from '../lib/clipboard';
 import { isExternalReference, resolveRelativePath, type FileRender } from '../lib/fileKind';
 import { renderMarkdown } from '../lib/markdown';
+import { useResolvedMarkdownImages } from '../lib/markdownImages';
 
 export interface FilePreviewProps {
   /** Workspace-relative path of the file being previewed. */
@@ -72,60 +73,6 @@ export function useWorkspaceObjectUrl(
   return state.key === identity ? state : { key: identity, url: null, error: null };
 }
 
-/** Resolve sanitized Markdown's relative-image markers without a raw navigation. */
-function useMarkdownWorkspaceImages(
-  root: { current: HTMLDivElement | null },
-  html: string,
-  project: string | null,
-  enabled: boolean,
-): void {
-  useEffect(() => {
-    const container = root.current;
-    if (!enabled || !container) return undefined;
-    let cancelled = false;
-    const requests: {
-      image: HTMLImageElement;
-      controller: AbortController;
-      objectUrl: string | null;
-    }[] = [];
-    for (const image of Array.from(container.querySelectorAll<HTMLImageElement>('img[data-workspace-image-path]'))) {
-      const path = image.dataset.workspaceImagePath;
-      if (!path) continue;
-      const controller = new AbortController();
-      const request: { image: HTMLImageElement; controller: AbortController; objectUrl: string | null } = {
-        image,
-        controller,
-        objectUrl: null,
-      };
-      requests.push(request);
-      apiRequestBlob(workspaceRawUrl(path, project), { signal: controller.signal })
-        .then((blob) => {
-          if (cancelled) return;
-          request.objectUrl = URL.createObjectURL(blob);
-          if (cancelled || !container.contains(image)) {
-            URL.revokeObjectURL(request.objectUrl);
-            request.objectUrl = null;
-            return;
-          }
-          image.src = request.objectUrl;
-          image.removeAttribute('aria-busy');
-        })
-        .catch((cause: unknown) => {
-          if (cancelled || controller.signal.aborted) return;
-          image.removeAttribute('aria-busy');
-          image.dataset.workspaceImageError = toErrorMessage(cause);
-        });
-    }
-    return () => {
-      cancelled = true;
-      for (const request of requests) {
-        request.controller.abort();
-        if (request.objectUrl !== null) URL.revokeObjectURL(request.objectUrl);
-      }
-    };
-  }, [root, html, project, enabled]);
-}
-
 /**
  * The rendered half of the file viewer.
  *
@@ -151,7 +98,7 @@ export function FilePreview({
     [render, content, path, project],
   );
   const markdownRef = useRef<HTMLDivElement>(null);
-  useMarkdownWorkspaceImages(markdownRef, markdownHtml, project, render === 'markdown');
+  useResolvedMarkdownImages(markdownRef, markdownHtml, project, render === 'markdown');
   const media = useWorkspaceObjectUrl(render === 'image' || render === 'pdf' ? path : null, project);
 
   if (render === 'markdown') {

@@ -178,8 +178,9 @@ describe('Workspace tree row context menu', () => {
     expect(fireEvent.contextMenu(fileRow, { clientX: 40, clientY: 60 })).toBe(false);
 
     const menu = screen.getByRole('menu', { name: 'File actions for README.md' });
+    // A file offers the workspace tab beside the dialog: same document, no modal.
     expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent))
-      .toEqual(['Open', 'Copy path', 'Copy relative path']);
+      .toEqual(['Open', 'Open in a tab', 'Copy path', 'Copy relative path']);
     // Opening focuses the first item, and the menu is portalled onto the menu
     // layer, where no scroller in the inspector can clip it.
     expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Open' }));
@@ -259,7 +260,7 @@ describe('Workspace tree row context menu', () => {
 
     const menu = screen.getByRole('menu', { name: 'File actions for README.md' });
     expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent))
-      .toEqual(['Open', 'Copy path']);
+      .toEqual(['Open', 'Open in a tab', 'Copy path']);
 
     // The one item that is left copies the row's own path, and still says so.
     copyTextMock.mockResolvedValue(true);
@@ -302,7 +303,7 @@ describe('Workspace tree row context menu', () => {
 
     const menu = screen.getByRole('menu', { name: 'File actions for guide.md' });
     expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent))
-      .toEqual(['Open', 'Copy path', 'Copy relative path']);
+      .toEqual(['Open', 'Open in a tab', 'Copy path', 'Copy relative path']);
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy path' }));
     await waitFor(() => expect(copyTextMock).toHaveBeenCalledWith('/work/karucode/docs/guide.md'));
 

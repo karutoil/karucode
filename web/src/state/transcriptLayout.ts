@@ -83,10 +83,13 @@ function isRunning(item: ChatItem): boolean {
  * True while the turn is doing anything at all: streaming an answer, thinking,
  * or waiting on a call.
  *
- * This is the condition for the throughput badge. It is deliberately broader
- * than [`turnStreaming`]: a turn that has finished its prose and moved on to a
- * long `run_command` is still working, and the token count it reached is the
- * only live evidence of how much the model produced before it did.
+ * This is the condition for the **Working** chip and for keeping a turn
+ * unfolded. It is deliberately broader than [`turnStreaming`]: a turn that has
+ * finished its prose and moved on to a long `run_command` is still working.
+ *
+ * Throughput is *not* derived from this any more: each block that produces text
+ * carries its own badge (`components/TpsBadge`), so the rate sits beside the
+ * reasoning, the prose or the call it describes rather than in the turn header.
  */
 export function turnWorking(turn: Turn): boolean {
   return turn.parts.some(
@@ -95,23 +98,6 @@ export function turnWorking(turn: Turn): boolean {
       isRunning(part) ||
       isPendingApproval(part),
   );
-}
-
-/**
- * Estimated output tokens the turn has produced: its prose and its reasoning.
- *
- * Reasoning is streamed and then dropped, but it is still tokens the model spent,
- * so it counts toward the rate while it is arriving; once the turn settles the
- * badge is gone either way.
- */
-export function turnOutputChars(turn: Turn): number {
-  let chars = 0;
-  for (const part of turn.parts) {
-    if (part.kind === 'message' && part.role === 'assistant') {
-      chars += part.content.length + part.reasoning.length;
-    }
-  }
-  return chars;
 }
 
 /**

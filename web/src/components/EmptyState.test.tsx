@@ -3,19 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/preact';
 import { EmptyState, QUICK_PROMPTS } from './EmptyState';
 import { Composer } from './Composer';
-import * as actions from '../state/actions';
 import * as store from '../state/store';
 import type { Activity } from '../state/selectors';
-
-// Only `createSession` is replaced: the real `fillComposer` is what the prompts
-// must exercise, and the no-session path needs a session before it can fill.
-vi.mock('../state/actions', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../state/actions')>();
-  return {
-    ...actual,
-    createSession: vi.fn(async () => ({ id: 's_new', title: 'New session' }) as never),
-  };
-});
 
 const IDLE: Activity = { kind: 'idle', label: 'Ready' };
 
@@ -127,14 +116,18 @@ describe('EmptyState', () => {
 
   it('does not create a session just by rendering the empty state', () => {
     render(<Harness />);
-    expect(vi.mocked(actions.createSession)).not.toHaveBeenCalled();
+    expect(store.currentSessionId.value).toBeNull();
+    expect(store.draftSession.value).toBeNull();
   });
 
-  it('opens a session before filling the composer when nothing is open', async () => {
+  it('starts a draft — not a session — before filling the composer when nothing is open', async () => {
     render(<Harness variant="no-session" />);
     fireEvent.click(prompt(/Review this project/));
 
-    await vi.waitFor(() => expect(vi.mocked(actions.createSession)).toHaveBeenCalledTimes(1));
+    // The press is a conversation, so it starts one - but only in the client: the
+    // first message is what creates the session (`sendChatMessage`).
+    await vi.waitFor(() => expect(store.draftSession.value).not.toBeNull());
+    expect(store.currentSessionId.value).toBeNull();
     await vi.waitFor(() => expect(textarea().value).toBe(REVIEW));
   });
 });

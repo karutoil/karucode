@@ -33,13 +33,13 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`prompt-cache`](prompt-cache.md) | Why a long run can re-bill its whole context every turn, what karucode does to keep the cached prefix stable, and how to read the hit rate. | `crates/kc-runtime/src/context.rs:89` |
 | [`provider-profiles`](provider-profiles.md) | Point karucode at any OpenAI-compatible endpoint, by environment or as named profiles, and choose the active model. | `crates/kc-provider/src/lib.rs:8` |
 | [`provider-stream-recovery`](provider-stream-recovery.md) | Pre-content provider retries and post-content runtime restarts are separate, deadline-bounded layers. | `crates/kc-runtime/src/agent.rs:13` |
-| [`queued-run-recovery`](queued-run-recovery.md) | Accepted input is applied, converted to an ordered follow-up, or remains recallable after submission conflicts. | `crates/kc-runtime/src/agent.rs:53` |
+| [`queued-run-recovery`](queued-run-recovery.md) | Accepted input is applied, converted to an ordered follow-up, or remains recallable after submission conflicts. | `crates/kc-runtime/src/agent.rs:54` |
 | [`run-server`](run-server.md) | Build the UI and the binary, start it against a workspace, and know what each CLI flag and startup failure means. | `crates/kc-server/src/bootstrap.rs:8` |
 | [`security`](security.md) | What karucode protects by default, what it explicitly does not, and the recipe for safe remote access. | `crates/kc-server/src/app.rs:16` |
 | [`session-titles`](session-titles.md) | Sessions are titled from their first message; with `[titles]` on (the default) a model writes a short, plain-language title instead, using the session's own model or a cheaper one you pick. | `crates/kc-server/src/titles.rs:1` |
 | [`subagents`](subagents.md) | How spawn_agent, spawn_agents and the control tools work - blocking and background, sequential and parallel - and the limits they run under. | `crates/kc-runtime/src/subagent.rs:20` |
 | [`terminals`](terminals.md) | A real shell in the browser that survives a reload, another browser and a cleared cache - and the honest limit of what survives a restart. | `crates/kc-server/src/terminals.rs:1` |
-| [`themes`](themes.md) | Built-in palettes, live colour and density editing, fonts and custom CSS, the transcript view options (cards or rows, grouped calls, folded turns), saved in the browser and shareable as a theme JSON file. | `web/src/theme/engine.ts:1` |
+| [`themes`](themes.md) | Built-in palettes, live colour and density editing, fonts and custom CSS, the transcript view options (cards or rows, grouped calls, working steps folded or open), saved in the browser and shareable as a theme JSON file. | `web/src/theme/engine.ts:1` |
 | [`tool-call-errors`](tool-call-errors.md) | A call that fails because of how it was written comes back with a working version of itself, so the next attempt is correct instead of another guess. | `crates/kc-core/src/tool.rs:1` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 

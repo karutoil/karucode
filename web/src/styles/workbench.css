@@ -316,10 +316,22 @@
   container-type: inline-size;
 }
 
-/* Use a readable conversation measure, never cap diffs, artifacts or terminals. */
+/* The readable measure belongs to the *split*, not to every centre pane.
+ *
+ * Side by side, the conversation is the narrow half, so prose is held to 70ch
+ * and the dock to the same box (that rule lives in the wide container query
+ * below). Applying the cap to the whole pane as well made collapsing the Results
+ * dock *shrink* the conversation: measured in Chromium at a 1920px viewport,
+ * `.chat-inner` and `.composer-inner` went 820px -> 638px the moment the dock was
+ * collapsed, so asking for the freed space cost the reader 182px of text and left
+ * a 434px gutter either side. Every tier that is not the side-by-side split - the
+ * collapsed dock, the <=1100px overlay and the phone sheet - sizes the
+ * conversation to the app's own content measure instead, which is also the width
+ * of the `.composer` box it has to line up with (`layout.css`; diffs, artifacts
+ * and terminals are never capped by it). */
 .chat-main.is-workbench .chat-inner,
 .chat-main.is-workbench .composer-inner {
-  max-width: calc(var(--workbench-reading-w) + var(--space-10) + var(--space-10));
+  max-width: var(--content-max);
 }
 
 .chat-main.is-workbench .msg-body {
@@ -379,6 +391,15 @@
     /* Fractional grow would leave part of a resized Results pane's width to the
      * separator's auto margin; Conversation must consume the entire remainder. */
     flex: 1 1 0;
+  }
+
+  .chat-main.is-workbench .center-body.has-result .chat-inner,
+  .chat-main.is-workbench .center-body.has-result .composer-inner {
+    /* The split's conversation half is the narrow one, so prose keeps a readable
+     * 70ch measure there; the resized split below opens the box out to the
+     * composer's own width. Nothing outside this container query is a split, so
+     * nothing outside it gets the narrow measure (see the rule above). */
+    max-width: calc(var(--workbench-reading-w) + var(--space-10) + var(--space-10));
   }
 
   .chat-main.is-workbench .center-body.has-result[style*='--workbench-result-w'] .chat-inner,

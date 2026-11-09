@@ -203,6 +203,19 @@ describe('ToolCard', () => {
     expect(screen.queryByTestId('tool-image')).toBeNull();
     expect(screen.getByText('image/svg+xml cannot be previewed here')).not.toBeNull();
   });
+
+  it('rates a running call on its own output and drops the badge when it settles', () => {
+    const { rerender } = render(
+      <ToolCard item={tool({ status: 'running', output: 'y'.repeat(4_000), durationMs: null })} />,
+    );
+    // 4 000 characters of the call's own output, at four chars per token.
+    const badge = document.querySelector('.tool-head .tps-badge');
+    expect(badge?.querySelector('.tps-badge-count')?.textContent).toBe('1000');
+
+    rerender(<ToolCard item={tool({ output: 'y'.repeat(4_000) })} />);
+    // The call finished, so nothing is still arriving to rate.
+    expect(document.querySelector('.tps-badge')).toBeNull();
+  });
 });
 
 describe('ToolCard row variant', () => {
@@ -277,5 +290,12 @@ describe('ToolCard row variant', () => {
   it('shows "Waiting for output…" when a running row is opened', () => {
     render(<ToolCard item={tool({ status: 'running', output: '', durationMs: null })} variant="row" defaultOpen />);
     expect(document.querySelector('.tool-body')?.textContent).toContain('Waiting for output…');
+  });
+
+  it('carries the live throughput in the row meta, next to the status', () => {
+    render(
+      <ToolCard item={tool({ status: 'running', output: 'y'.repeat(4_000), durationMs: null })} variant="row" />,
+    );
+    expect(row().querySelector('.tool-row-meta .tps-badge-count')?.textContent).toBe('1000');
   });
 });

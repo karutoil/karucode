@@ -141,9 +141,10 @@ use std::sync::{Arc, Mutex};
 //   once the header is gone, so a later compaction would trade `lines 1-400 of
 //   812` for a vaguer sentence (caught on a live run).
 // * **The model can keep its own notes.** A reasoning model streams its analysis
-//   as `reasoning_content`, which is shown and not persisted, so most of what it
-//   worked out never reaches the transcript (8,216 of 11,137 assistant turns in
-//   those sessions were under 40 characters of text). The `note` tool appends a
+//   as `reasoning_content`, which is persisted with the turn but still ages out
+//   with it: 8,216 of 11,137 assistant turns in those sessions were under 40
+//   characters of text, so the prose left in the transcript is thin, and a
+//   compaction drops whole exchanges. The `note` tool appends a
 //   finding to a per-run notebook, and the notebook is replayed inside the
 //   compaction digest, so the finding outlives the messages that carried it.
 // * **Nothing is appended after the conversation.** No runtime note, no nudge,

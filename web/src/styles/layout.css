@@ -1430,6 +1430,58 @@
   color: var(--accent-on-tint);
 }
 
+/* A closable workspace tab - an open file - is the tab button plus its own close
+ * button. A button cannot be nested inside the tab button (invalid markup, and
+ * the inner click would also activate the tab), so the pair shares a neutral
+ * wrapper that stretches across the strip's height and keeps the underline
+ * anchored to the label. */
+.tab-slot {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  min-width: 0;
+  max-width: 240px;
+}
+
+.tab-slot > .workspace-tab {
+  min-width: 0;
+  padding-right: var(--space-2);
+}
+
+/* A long file name truncates instead of pushing the other tabs off the strip. */
+.tab-slot > .workspace-tab > span:not(.tab-icon) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-close {
+  display: inline-flex;
+  align-self: center;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.tab-close:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.tab-close:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-offset));
+}
+
 /* The mock's `.c-tabs-meta`: what the model is doing, right-aligned in mono. */
 .tab-note {
   display: flex;

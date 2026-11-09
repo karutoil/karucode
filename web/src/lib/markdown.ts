@@ -1,5 +1,7 @@
 import MarkdownIt from 'markdown-it';
 import DOMPurify from 'dompurify';
+import footnote from 'markdown-it-footnote';
+import taskLists from 'markdown-it-task-lists';
 import { parseFence, type ArtifactSpec } from './artifacts';
 import { escapeHtml, highlightCode, languageLabel, normaliseLanguage } from './highlight';
 
@@ -10,10 +12,32 @@ const md = new MarkdownIt({
   typographer: false,
 });
 
+/*
+ * GitHub's Markdown, less the parts that need raw HTML.
+ *
+ * markdown-it's default preset already covers tables, `~~strikethrough~~`,
+ * images, fenced code and (with `linkify`) bare-URL autolinks. What it does not
+ * implement are the two block extensions GitHub added on top: task lists
+ * (`- [ ] thing`) and footnotes (`text[^1]`). Without them an agent writing GFM -
+ * which it has, product-wide, in its own docs and in almost every repository it
+ * reads - got literal `[x]` and a stray `[^1]` in the answer.
+ *
+ * Both run before sanitising, so their output goes through the same DOMPurify
+ * pass as everything else. `enabled: false` keeps the checkboxes read-only: this
+ * is a rendered document, not a form, and a clickable box would promise a state
+ * change that nothing stores.
+ */
+md.use(taskLists, { enabled: false, label: false });
+md.use(footnote);
+
 const defaultLinkOpen = md.renderer.rules.link_open;
 md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   const token = tokens[idx];
-  if (token) {
+  const href = token?.attrGet('href') ?? '';
+  // A fragment ("#fn1") is a place in *this* document - a footnote reference or
+  // its way back. Opening it in a new tab would show the reader a second copy of
+  // the page instead of taking them to the note.
+  if (token && !href.startsWith('#')) {
     token.attrSet('target', '_blank');
     token.attrSet('rel', 'noopener noreferrer');
   }
@@ -34,6 +58,8 @@ interface RenderEnv {
   artifacts: ArtifactSpec[];
   /** Off while a message is streaming: a half-written fence is not content yet. */
   allowArtifacts: boolean;
+  /** Off for the block still being written: it is re-rendered on every delta. */
+  allowHighlight: boolean;
 }
 
 /** The attribute a card is mounted into, and the index that finds its spec. */
@@ -44,9 +70,21 @@ function codeBlockHtml(
   source: string,
   language: string,
   label: string,
-  options: { head?: string; languageClass?: boolean; copy?: boolean; chrome?: boolean } = {},
+  options: {
+    head?: string;
+    languageClass?: boolean;
+    copy?: boolean;
+    chrome?: boolean;
+    /**
+     * Run the syntax highlighter. Off for the block being written: tokenising a
+     * half-written fence again on every delta is one of the costs the streaming
+     * split exists to avoid, and the finished fence is highlighted once.
+     */
+    highlight?: boolean;
+  } = {},
 ): string {
-  const highlighted = highlightCode(source, language);
+  const highlighted =
+    options.highlight === false ? escapeHtml(source) : highlightCode(source, language);
   const languageClass =
     options.languageClass === false || language === '' ? '' : ` language-${escapeHtml(language)}`;
   const safeLabel = escapeHtml(label);
@@ -105,17 +143,22 @@ md.renderer.rules.fence = (tokens, idx, _options, env) => {
   }
 
   const language = normaliseLanguage(rawLanguage);
-  return codeBlockHtml(token.content, language, languageLabel(rawLanguage));
+  return codeBlockHtml(token.content, language, languageLabel(rawLanguage), {
+    highlight: renderEnv?.allowHighlight !== false,
+  });
 };
 
 const SANITIZE_CONFIG = {
   USE_PROFILES: { html: true },
-  ADD_ATTR: ['target', 'rel', 'data-lang', 'data-copy', ARTIFACT_SLOT_ATTRIBUTE],
-  ADD_TAGS: ['button'],
+  // `class` is what gives a task item its checkbox and a footnote its list; the
+  // checkbox itself is the only form control the renderer can produce, and the
+  // hook below refuses every other `<input>`. Raw HTML is off (`html: false`), so
+  // nothing else can introduce one.
+  ADD_ATTR: ['target', 'rel', 'data-lang', 'data-copy', ARTIFACT_SLOT_ATTRIBUTE, 'type', 'checked', 'disabled'],
+  ADD_TAGS: ['button', 'input'],
   FORBID_TAGS: [
     'style',
     'form',
-    'input',
     'textarea',
     'select',
     'option',
@@ -128,6 +171,30 @@ const SANITIZE_CONFIG = {
   ],
   FORBID_ATTR: ['style'],
 };
+
+/**
+ * A task list is the only reason an `<input>` exists in rendered Markdown, so
+ * anything that is not a (disabled) checkbox is dropped.
+ *
+ * The sanitiser's tag allow-list is per-page, and this one is shared by the chat,
+ * the file preview and the artifact cards. Narrowing the *element* here keeps
+ * the allow-list usable by the task-list renderer without letting a text field,
+ * a submit button or an interactive checkbox through with it.
+ */
+if (typeof DOMPurify.addHook === 'function') {
+  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+    if (node.nodeName !== 'INPUT') return;
+    const type = node.getAttribute('type');
+    if (type !== 'checkbox') {
+      node.parentNode?.removeChild(node);
+      return;
+    }
+    // Read-only regardless of what the renderer asked for.
+    node.setAttribute('disabled', '');
+    node.removeAttribute('name');
+    node.removeAttribute('value');
+  });
+}
 
 export function renderMarkdown(source: string): string {
   const rendered = md.render(source);
@@ -150,6 +217,15 @@ export interface MarkdownRenderOptions {
    * settles, which is one render later.
    */
   artifacts?: boolean;
+  /**
+   * Run the syntax highlighter over fenced code. Default `true`.
+   *
+   * Turned off for the block that is still being written, which is re-rendered on
+   * every delta: tokenising half-written code again each time is one of the costs
+   * the streaming split exists to remove, and a fence that has closed is in the
+   * settled prefix, where it is highlighted normally.
+   */
+  highlight?: boolean;
 }
 
 /**
@@ -166,7 +242,11 @@ export function renderMarkdownDocument(
   options: MarkdownRenderOptions = {},
 ): MarkdownDocument {
   const artifacts: ArtifactSpec[] = [];
-  const env: RenderEnv = { artifacts, allowArtifacts: options.artifacts !== false };
+  const env: RenderEnv = {
+    artifacts,
+    allowArtifacts: options.artifacts !== false,
+    allowHighlight: options.highlight !== false,
+  };
   const rendered = md.render(source, env);
   return { html: DOMPurify.sanitize(rendered, SANITIZE_CONFIG), artifacts };
 }

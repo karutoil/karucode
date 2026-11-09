@@ -13,7 +13,10 @@ export interface FileTreeProps {
   expanded: Set<string>;
   loading: Set<string>;
   onToggleDir: (entry: WorkspaceEntry) => void;
+  /** Open a file in the viewer dialog (a click, or Enter on the row). */
   onOpenFile: (path: string) => void;
+  /** Open a file as a tab in the centre pane; omitted hides that menu item. */
+  onOpenFileInTab?: (path: string) => void;
 }
 
 interface FlatNode {
@@ -102,6 +105,7 @@ interface TreeRowProps {
   selected: boolean;
   onActivate: (node: FlatNode) => void;
   onFocusRow: (path: string) => void;
+  onOpenInTab?: (path: string) => void;
 }
 
 /**
@@ -127,6 +131,7 @@ function TreeRow({
   selected,
   onActivate,
   onFocusRow,
+  onOpenInTab,
 }: TreeRowProps): JSX.Element {
   const { entry, depth } = node;
   const isDir = entry.kind === 'dir';
@@ -199,6 +204,12 @@ function TreeRow({
         {isDir ? null : (
           <MenuItem menu={menu} action={{ label: 'Open', onSelect: () => onActivate(node) }} />
         )}
+        {isDir || !onOpenInTab ? null : (
+          <MenuItem
+            menu={menu}
+            action={{ label: 'Open in a tab', onSelect: () => onOpenInTab(entry.path) }}
+          />
+        )}
         <MenuItem
           menu={menu}
           action={{
@@ -231,6 +242,7 @@ export function FileTree({
   loading,
   onToggleDir,
   onOpenFile,
+  onOpenFileInTab,
 }: FileTreeProps): JSX.Element {
   const [focusedPath, setFocusedPath] = useState<string | null>(null);
   const container = useRef<HTMLUListElement>(null);
@@ -340,6 +352,7 @@ export function FileTree({
             selected={focusedPath === node.entry.path}
             onActivate={activate}
             onFocusRow={setFocusedPath}
+            onOpenInTab={onOpenFileInTab}
           />
         );
       })}

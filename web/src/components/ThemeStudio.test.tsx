@@ -382,12 +382,13 @@ describe('interface settings', () => {
 });
 
 describe('transcript settings', () => {
-  it('offers the three view options with the defaults selected', () => {
+  it('offers the four view options with the defaults selected', () => {
     renderOpen();
 
     for (const [testId, value] of [
       ['theme-tool-style', 'rows'],
       ['theme-grouping', 'turns'],
+      ['theme-working', 'open'],
       ['theme-thinking', 'collapsed'],
     ] as const) {
       expect(screen.getByTestId(`${testId}-${value}`).getAttribute('aria-pressed')).toBe('true');
@@ -407,13 +408,23 @@ describe('transcript settings', () => {
     expect(document.documentElement.dataset.grouping).toBe('none');
     expect(document.querySelector('.theme-preview-narration')?.getAttribute('data-on')).toBe('shown');
 
+    // Open working keeps the miniature's narration on screen even under `turns`.
+    fireEvent.click(screen.getByTestId('theme-grouping-turns'));
+    expect(document.querySelector('.theme-preview-narration')?.getAttribute('data-on')).toBe('shown');
+    fireEvent.click(screen.getByTestId('theme-working-folded'));
+    expect(document.documentElement.dataset.working).toBe('folded');
+    expect(document.querySelector('.theme-preview-narration')?.getAttribute('data-on')).toBe('folded');
+    fireEvent.click(screen.getByTestId('theme-working-open'));
+    expect(document.documentElement.dataset.working).toBe('open');
+
     fireEvent.click(screen.getByTestId('theme-thinking-preview'));
     expect(document.documentElement.dataset.thinking).toBe('preview');
     expect(document.querySelector('.theme-preview-thought')?.textContent).toContain('view options');
 
     expect(persisted().draft).toMatchObject({
       toolStyle: 'cards',
-      grouping: 'none',
+      grouping: 'turns',
+      working: 'open',
       thinking: 'preview',
     });
   });
@@ -439,10 +450,12 @@ describe('transcript settings', () => {
     renderOpen();
     fireEvent.click(screen.getByTestId('theme-tool-style-rows'));
     fireEvent.click(screen.getByTestId('theme-grouping-turns'));
+    fireEvent.click(screen.getByTestId('theme-working-folded'));
 
     initTheme();
     expect(document.documentElement.dataset.toolStyle).toBe('rows');
     expect(document.documentElement.dataset.grouping).toBe('turns');
+    expect(document.documentElement.dataset.working).toBe('folded');
     expect(document.documentElement.dataset.thinking).toBe('collapsed');
   });
 
@@ -451,11 +464,13 @@ describe('transcript settings', () => {
       ...DEFAULT_THEME,
       toolStyle: 'rows',
       grouping: 'tools',
+      working: 'folded',
       thinking: 'expanded',
     });
     const imported = parseThemeFile(json);
     expect(imported.toolStyle).toBe('rows');
     expect(imported.grouping).toBe('tools');
+    expect(imported.working).toBe('folded');
     expect(imported.thinking).toBe('expanded');
   });
 });
@@ -719,6 +734,7 @@ describe('control descriptions are wired to their controls', () => {
     const groups = [
       'theme-tool-style',
       'theme-grouping',
+      'theme-working',
       'theme-thinking',
     ].map((testId) => screen.getByTestId(testId));
     for (const group of groups) {

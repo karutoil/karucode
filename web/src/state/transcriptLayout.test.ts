@@ -12,7 +12,6 @@ import {
   isNarration,
   splitTurns,
   turnFoldable,
-  turnOutputChars,
   turnWorking,
   turnRows,
 } from './transcriptLayout';
@@ -259,7 +258,7 @@ describe('turnFoldable', () => {
   });
 });
 
-describe('turnWorking and turnOutputChars', () => {
+describe('turnWorking', () => {
   it('counts a streaming turn as working', () => {
     const [turn] = splitTurns([user(), assistant('half', { streaming: true })]);
     expect(turn && turnWorking(turn)).toBe(true);
@@ -300,21 +299,6 @@ describe('turnWorking and turnOutputChars', () => {
   it('is done once every call has settled', () => {
     const [turn] = splitTurns([user(), assistant('done'), tool()]);
     expect(turn && turnWorking(turn)).toBe(false);
-  });
-
-  it('adds prose and reasoning into one character count', () => {
-    const [turn] = splitTurns([
-      user('count me not'),
-      assistant('abc', { reasoning: '12345' }),
-      assistant('de'),
-    ]);
-    expect(turn && turnOutputChars(turn)).toBe(10);
-  });
-
-  it('ignores user text and tool output', () => {
-    const [turn] = splitTurns([user('x'.repeat(500)), tool({ output: 'y'.repeat(900) })]);
-    // A turn with no assistant prose has nothing to count.
-    expect(turn && turnOutputChars(turn)).toBe(0);
   });
 });
 

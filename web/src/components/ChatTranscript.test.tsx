@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen } from '@testing-library/preact';
 import { ChatTranscript } from './ChatTranscript';
 import type { ApprovalView, ChatItem, CommandItem, MessageItem, ToolItem } from '../state/chat';
 import { approvalFixture, NOW } from '../test/fixtures';
-import { resetTheme, THEME_GROUPINGS, THEME_THINKING_MODES, THEME_TOOL_STYLES, updateTheme } from '../theme';
+import { resetTheme, THEME_GROUPINGS, THEME_THINKING_MODES, THEME_TOOL_STYLES, THEME_WORKING_MODES, updateTheme } from '../theme';
 import * as store from '../state/store';
 
 /* `turnRows` is the per-turn layout pass. It is imported by `ChatTranscript`
@@ -190,24 +190,41 @@ describe('ChatTranscript', () => {
   });
 
   describe('throughput badge', () => {
-    it('appears beside the Working chip while the turn produces text', () => {
+    it('rides the streaming message it measures, not the turn header', () => {
       renderTranscript([user(), message({ streaming: true, content: 'x'.repeat(8_000) })]);
-      const badge = document.querySelector('.msg-assistant .tps-badge');
-      expect(badge, 'the badge is mounted').not.toBeNull();
+      // The header only says *whether* the turn works; the number belongs to the
+      // block that is producing text, where the reader is already looking.
+      expect(document.querySelector('.msg-assistant .msg-top .tps-badge')).toBeNull();
+      const badge = document.querySelector('.msg-assistant .msg-body .tps-badge');
+      expect(badge, 'the badge is mounted on the message').not.toBeNull();
       // 8 000 characters at four chars per token, sampled on mount. Exact below
       // 10k, so the count reads as itself rather than a rounded "2k".
       expect(badge?.querySelector('.tps-badge-count')?.textContent).toBe('2000');
     });
 
-    it('stays while the turn is running a tool call', () => {
-      // The prose is finished but the turn is not: the count is still the only
-      // evidence of what the model produced, so the badge stays.
+    it('gives a streaming thought its own badge, measured on the reasoning', () => {
+      renderTranscript([
+        user(),
+        message({ streaming: true, content: '', reasoning: 'r'.repeat(2_000) }),
+      ]);
+      const thinking = document.querySelector('.thinking');
+      expect(thinking?.querySelector('.tps-badge-count')?.textContent).toBe('500');
+      // Exactly one badge on the turn: the prose block has no text yet, so it
+      // claims nothing.
+      expect(document.querySelectorAll('.tps-badge')).toHaveLength(1);
+    });
+
+    it('moves to a running call, measuring that call and not the turn', () => {
+      // The prose is finished but the call is not: the badge on the card counts
+      // the output the call is producing, which is the only stream still live.
       renderTranscript([
         user(),
         message({ content: 'Running the suite.' }),
-        tool({ status: 'running' }),
+        tool({ status: 'running', output: 'y'.repeat(4_000) }),
       ]);
-      expect(document.querySelector('.msg-assistant .tps-badge')).not.toBeNull();
+      expect(document.querySelector('.msg-assistant .msg-top .tps-badge')).toBeNull();
+      const card = document.querySelector('.tool-card');
+      expect(card?.querySelector('.tps-badge-count')?.textContent).toBe('1000');
       // …and the turn is not reported as finished while a call is in flight.
       expect(document.querySelector('.msg-assistant .tag')?.textContent).toContain('Working');
     });
@@ -296,20 +313,22 @@ describe('ChatTranscript view options', () => {
   beforeEach(() => {
     localStorage.clear();
     resetTheme();
-    act(() => updateTheme({ toolStyle: 'cards', grouping: 'none' }));
+    // These tests are about the folded idiom; the open default has its own
+    // tests below and each one names the option it needs.
+    act(() => updateTheme({ toolStyle: 'cards', grouping: 'none', working: 'folded' }));
   });
 
   afterEach(() => {
     resetTheme();
   });
 
-  function setOptions(patch: { toolStyle?: 'cards' | 'rows'; grouping?: 'none' | 'tools' | 'turns'; thinking?: 'collapsed' | 'preview' | 'expanded' }) {
+  function setOptions(patch: { toolStyle?: 'cards' | 'rows'; grouping?: 'none' | 'tools' | 'turns'; working?: 'open' | 'folded'; thinking?: 'collapsed' | 'preview' | 'expanded' }) {
     act(() => {
       updateTheme(patch);
     });
   }
 
-  it('uses compact rows and completed-turn grouping as the built-in default', () => {
+  it('uses compact rows, completed-turn grouping and open working as the built-in default', () => {
     act(() => resetTheme());
     renderTranscript([
       user(),
@@ -320,15 +339,21 @@ describe('ChatTranscript view options', () => {
 
     expect(document.documentElement.dataset.toolStyle).toBe('rows');
     expect(document.documentElement.dataset.grouping).toBe('turns');
+    expect(document.documentElement.dataset.working).toBe('open');
     expect(screen.getByText('The pool size is 16.')).not.toBeNull();
-    expect(screen.queryByText('Reading the config.')).toBeNull();
-    const fold = document.querySelector('.process-fold');
-    expect(fold?.getAttribute('aria-expanded')).toBe('false');
-
-    fireEvent.click(fold as Element);
+    // The working is expanded out of the box: the narration and the call are on
+    // screen, and the summary line is a header that folds them away again.
+    expect(screen.getByText('Reading the config.')).not.toBeNull();
     expect(document.querySelector('.msg-body .tool-row')).not.toBeNull();
     expect(document.querySelector('.tool-card')).toBeNull();
-    expect(screen.getByText('Reading the config.')).not.toBeNull();
+    const fold = document.querySelector('.process-fold');
+    expect(fold?.getAttribute('aria-expanded')).toBe('true');
+    expect(fold?.textContent).toContain('Hide the working');
+
+    fireEvent.click(fold as Element);
+    expect(screen.queryByText('Reading the config.')).toBeNull();
+    expect(document.querySelector('.msg-body .tool-row')).toBeNull();
+    expect(document.querySelector('.process-fold')?.getAttribute('aria-expanded')).toBe('false');
   });
 
   it('draws tool calls as compact rows when the theme asks for it', () => {
@@ -415,6 +440,76 @@ describe('ChatTranscript view options', () => {
     expect(document.querySelector('.process-fold')?.getAttribute('aria-expanded')).toBe('true');
   });
 
+  it('starts a finished turn open when the theme asks for open working', () => {
+    setOptions({ grouping: 'turns', working: 'open' });
+    renderTranscript([
+      user(),
+      message({ id: 'n1', content: 'Reading the config.' }),
+      tool(),
+      message({ id: 'fin', content: 'The pool size is 16.' }),
+    ]);
+
+    const fold = document.querySelector('.process-fold');
+    expect(fold?.getAttribute('aria-expanded')).toBe('true');
+    expect(fold?.textContent).toContain('Hide the working');
+    expect(screen.getByText('Reading the config.')).not.toBeNull();
+    expect(screen.getByText('The pool size is 16.')).not.toBeNull();
+  });
+
+  it('expands the calls inside a run, not just the run itself', () => {
+    setOptions({ grouping: 'tools', working: 'open', toolStyle: 'rows' });
+    renderTranscript([
+      user(),
+      tool({ id: 't1' }),
+      tool({ id: 't2', callId: 'c2', name: 'grep' }),
+      message({ id: 'fin', content: 'Both read.' }),
+    ]);
+
+    // A run asked to show its work shows the calls inside it, rather than
+    // stopping one level short at another summary line.
+    const head = document.querySelector('.tool-group-head') as HTMLButtonElement;
+    expect(head.getAttribute('aria-expanded')).toBe('true');
+    expect(document.querySelectorAll('.tool-row')).toHaveLength(2);
+
+    // The group's own header still folds just this run.
+    fireEvent.click(head);
+    expect(document.querySelectorAll('.tool-row')).toHaveLength(0);
+  });
+
+  it('keeps one turn’s expansion to that turn', () => {
+    setOptions({ grouping: 'turns', working: 'folded' });
+    renderTranscript([
+      user(),
+      tool({ id: 't1' }),
+      message({ id: 'a1', content: 'First answer.' }),
+      user('second', { id: 'u2' }),
+      tool({ id: 't2', callId: 'c2' }),
+      message({ id: 'a2', content: 'Second answer.' }),
+    ]);
+
+    const folds = document.querySelectorAll('.process-fold');
+    expect(folds).toHaveLength(2);
+    fireEvent.click(folds[0] as Element);
+    expect(document.querySelectorAll('.process-fold')[0]?.getAttribute('aria-expanded')).toBe('true');
+    // The other turn is untouched: the fold is per row, never transcript-wide.
+    expect(document.querySelectorAll('.process-fold')[1]?.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('repaints a turn whose working the reader never touched', () => {
+    setOptions({ grouping: 'turns', working: 'folded' });
+    renderTranscript([
+      user(),
+      message({ id: 'n1', content: 'Reading the config.' }),
+      tool(),
+      message({ id: 'fin', content: 'The pool size is 16.' }),
+    ]);
+    expect(screen.queryByText('Reading the config.')).toBeNull();
+
+    // Changing the option is not defeated by a choice nobody made.
+    setOptions({ working: 'open' });
+    expect(screen.getByText('Reading the config.')).not.toBeNull();
+  });
+
   it('never folds a turn that is still working', () => {
     setOptions({ grouping: 'turns' });
     renderTranscript([
@@ -480,6 +575,7 @@ describe('ChatTranscript option matrix', () => {
   function setOptions(patch: {
     toolStyle?: 'cards' | 'rows';
     grouping?: 'none' | 'tools' | 'turns';
+    working?: 'open' | 'folded';
     thinking?: 'collapsed' | 'preview' | 'expanded';
   }) {
     act(() => {
@@ -487,10 +583,12 @@ describe('ChatTranscript option matrix', () => {
     });
   }
 
-  /** Every toolStyle × grouping × thinking combination: 2 × 3 × 3 = 18. */
+  /** Every toolStyle × grouping × working × thinking combination: 2 × 3 × 2 × 3 = 36. */
   const combinations = THEME_TOOL_STYLES.flatMap((toolStyle) =>
     THEME_GROUPINGS.flatMap((grouping) =>
-      THEME_THINKING_MODES.map((thinking) => ({ toolStyle, grouping, thinking })),
+      THEME_WORKING_MODES.flatMap((working) =>
+        THEME_THINKING_MODES.map((thinking) => ({ toolStyle, grouping, working, thinking })),
+      ),
     ),
   );
 
@@ -514,16 +612,18 @@ describe('ChatTranscript option matrix', () => {
     ];
   }
 
-  it('has all eighteen combinations to cover', () => {
-    expect(combinations).toHaveLength(18);
-    const keys = combinations.map(({ toolStyle, grouping, thinking }) => `${toolStyle}/${grouping}/${thinking}`);
-    expect(new Set(keys).size).toBe(18);
+  it('has all thirty-six combinations to cover', () => {
+    expect(combinations).toHaveLength(36);
+    const keys = combinations.map(
+      ({ toolStyle, grouping, working, thinking }) => `${toolStyle}/${grouping}/${working}/${thinking}`,
+    );
+    expect(new Set(keys).size).toBe(36);
   });
 
   it.each(combinations)(
-    '$toolStyle calls · $grouping grouping · $thinking reasoning',
-    ({ toolStyle, grouping, thinking }) => {
-      setOptions({ toolStyle, grouping, thinking });
+    '$toolStyle calls · $grouping grouping · $working working · $thinking reasoning',
+    ({ toolStyle, grouping, working, thinking }) => {
+      setOptions({ toolStyle, grouping, working, thinking });
       renderTranscript(turnItems());
 
       // ---- the answer is never lost ------------------------------------
@@ -531,14 +631,28 @@ describe('ChatTranscript option matrix', () => {
 
       // ---- only `turns` folds, and it never folds the answer away -------
       const fold = document.querySelector<HTMLButtonElement>('.process-fold');
-      if (grouping === 'turns') {
+      if (grouping !== 'turns') {
+        expect(fold).toBeNull();
+      } else if (working === 'open') {
+        // Open by default, but still a disclosure: the summary says what is on
+        // screen and folding it away is one click, on this turn only.
+        expect(fold, 'an open turn still names what it holds').not.toBeNull();
+        expect(fold?.getAttribute('aria-expanded')).toBe('true');
+        expect(fold?.textContent).toContain('Hide the working');
+        expect(screen.getByText('Let me check the config.')).not.toBeNull();
+        fireEvent.click(fold as HTMLButtonElement);
+        expect(screen.queryByText('Let me check the config.')).toBeNull();
+        expect(document.querySelector('.process-fold')?.textContent).toContain('Show the working');
+        fireEvent.click(document.querySelector('.process-fold') as HTMLButtonElement);
+        expect(screen.getByText('Let me check the config.')).not.toBeNull();
+      } else {
         expect(fold, 'a finished turn folds its working steps').not.toBeNull();
+        expect(fold?.getAttribute('aria-expanded')).toBe('false');
         // The narration is part of the working, so it is behind the summary.
         expect(screen.queryByText('Let me check the config.')).toBeNull();
         expect(fold?.textContent).toContain('Show the working');
         fireEvent.click(fold as HTMLButtonElement);
-      } else {
-        expect(fold).toBeNull();
+        expect(screen.getByText('Let me check the config.')).not.toBeNull();
       }
 
       // ---- the reasoning is available in the mode the theme asked for ---
@@ -559,7 +673,7 @@ describe('ChatTranscript option matrix', () => {
         expect(reasoning?.querySelector('.thinking-hint')?.textContent).toBe('Show reasoning');
       }
 
-      // ---- once the working is on screen, the style decides its shape ----
+      // ---- the group starts in the state the working option asked for ----
       if (grouping === 'none') {
         expect(document.querySelector('.tool-group')).toBeNull();
       } else {
@@ -568,7 +682,11 @@ describe('ChatTranscript option matrix', () => {
         // The summary names what ran, so folding does not hide *what* happened.
         expect(group?.querySelector('.tool-group-summary')?.textContent).toContain('read_file');
         expect(group?.querySelector('.tool-group-summary')?.textContent).toContain('run_command');
-        fireEvent.click(group?.querySelector('.tool-group-head') as HTMLElement);
+        const head = group?.querySelector('.tool-group-head') as HTMLButtonElement;
+        // Open working opens the run too, so the calls themselves are on screen
+        // rather than one more summary line the reader has to click through.
+        expect(head.getAttribute('aria-expanded')).toBe(working === 'open' ? 'true' : 'false');
+        if (working === 'folded') fireEvent.click(head);
       }
 
       const rows = toolStyle === 'rows';
@@ -593,7 +711,7 @@ describe('ChatTranscript option matrix', () => {
     }
 
     it('opens a collapsed tool group when a member starts running', () => {
-      setOptions({ grouping: 'tools' });
+      setOptions({ grouping: 'tools', working: 'folded' });
       const items = turnItems();
       const rendered = view(items);
       const head = () => document.querySelector('.tool-group-head') as HTMLButtonElement;
@@ -613,7 +731,7 @@ describe('ChatTranscript option matrix', () => {
     });
 
     it('opens a collapsed tool group when a member fails, output and all', () => {
-      setOptions({ grouping: 'tools' });
+      setOptions({ grouping: 'tools', working: 'folded' });
       const items = turnItems();
       const rendered = view(items);
       expect(
@@ -849,5 +967,52 @@ describe('ChatTranscript rerender cost', () => {
     // out every turn, which is the first-render cost over again (measured in this
     // tree: 143 ms/rerender on 1552 items, against 10.9 ms with the boundaries).
     expect(perRerenderMs).toBeLessThan(firstRenderMs / 4);
+  });
+
+  it('streams a long answer at the same cost per token as a short one', () => {
+    // The other half of the hot path, and the one that used to grow without
+    // bound: `Markdown` re-parsed the *whole* message on every delta, so a token
+    // cost more the longer the answer got (measured in the shipped bundle: 120
+    // KiB of answer was ~50 ms per render, which is a 14 fps tab). With the
+    // settled/live split a token costs the block being written, so the ratio
+    // between the end of a long answer and its beginning stays flat. Before the
+    // split this ratio tracked the answer's length (~30x by 150 KiB).
+    const paragraph = 'A sentence of the answer that keeps going. '.repeat(6) + '\n\n';
+    let content = paragraph.repeat(10);
+    const items = (): ChatItem[] => [
+      message({ id: 'stream:r1:1:1', at: NOW + 10_000, streaming: true, content }),
+    ];
+    const approvals = {};
+    const onApprovalDecision = vi.fn();
+    const view = render(
+      <ChatTranscript items={items()} resolvingApprovals={approvals} onApprovalDecision={onApprovalDecision} />,
+    );
+    const perToken = (): number => {
+      const start = performance.now();
+      for (let index = 0; index < 10; index += 1) {
+        content += 'token ';
+        act(() => {
+          view.rerender(
+            <ChatTranscript
+              items={items()}
+              resolvingApprovals={approvals}
+              onApprovalDecision={onApprovalDecision}
+            />,
+          );
+        });
+      }
+      return (performance.now() - start) / 10;
+    };
+
+    const early = perToken();
+    while (content.length < 150_000) content += paragraph;
+    act(() => {
+      view.rerender(
+        <ChatTranscript items={items()} resolvingApprovals={approvals} onApprovalDecision={onApprovalDecision} />,
+      );
+    });
+    const late = perToken();
+
+    expect(late).toBeLessThan(Math.max(early * 3, early + 2));
   });
 });

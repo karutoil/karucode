@@ -314,7 +314,7 @@ describe('Shell shortcuts', () => {
     expect(document.activeElement).toBe(composer);
   });
 
-  it('creates a session with Ctrl/Cmd+N, but not while typing in the composer', async () => {
+  it('starts a draft with Ctrl/Cmd+N, but not while typing in the composer', async () => {
     const fetchMock = installFetch();
     render(<App />);
     await waitFor(() => expect(store.boot.value).toBe('ready'));
@@ -327,7 +327,7 @@ describe('Shell shortcuts', () => {
       }).length;
 
     // Typing in the composer: Ctrl+N is a text-editing key, so it must be left
-    // alone — no session, and the browser default is not swallowed.
+    // alone — no draft, and the browser default is not swallowed.
     const composer = screen.getByLabelText('Message karucode');
     composer.focus();
     const typing = new KeyboardEvent('keydown', {
@@ -339,9 +339,14 @@ describe('Shell shortcuts', () => {
     composer.dispatchEvent(typing);
     expect(typing.defaultPrevented).toBe(false);
     expect(sessionPosts()).toBe(0);
+    expect(store.draftSession.value).toBeNull();
 
-    // Anywhere else it still creates one.
+    // Anywhere else it starts a conversation - in the client only. The session row
+    // is written by the first message, so an abandoned press leaves nothing behind.
     fireEvent.keyDown(window, { key: 'n', ctrlKey: true });
-    await waitFor(() => expect(sessionPosts()).toBe(1));
+    await waitFor(() => expect(store.draftSession.value).not.toBeNull());
+    expect(store.currentSessionId.value).toBeNull();
+    await flushEffects();
+    expect(sessionPosts()).toBe(0);
   });
 });

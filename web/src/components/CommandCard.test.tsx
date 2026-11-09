@@ -197,6 +197,24 @@ describe('CommandCard', () => {
     expect(document.querySelector('.cmd-output script')).toBeNull();
     expect(screen.getByLabelText('stderr').textContent).toContain('<script>bad()</script>');
   });
+
+  it('rates a running command on its own output and drops the badge when it settles', () => {
+    const running = command({
+      status: 'running',
+      exitCode: null,
+      durationMs: null,
+      stdout: 'x'.repeat(8_000),
+    });
+    const { rerender } = render(<CommandCard item={running} />);
+    // The command's stdio is the only text still arriving while it runs, so the
+    // card measures that: 8 000 characters at the server's four-per-token ratio.
+    const badge = document.querySelector('.command-summary .tps-badge');
+    expect(badge?.querySelector('.tps-badge-count')?.textContent).toBe('2000');
+
+    rerender(<CommandCard item={command({ stdout: 'x'.repeat(8_000) })} />);
+    // Settled: the stream it described is over, so the badge goes with it.
+    expect(document.querySelector('.tps-badge')).toBeNull();
+  });
 });
 
 describe('CommandCard row variant', () => {
@@ -280,6 +298,16 @@ describe('CommandCard row variant', () => {
     render(<CommandCard item={command({ status: 'stopped', exitCode: null, durationMs: null })} variant="row" />);
     expect(head().textContent).toContain('Stopped');
     expect(screen.queryByText(/exit/)).toBeNull();
+  });
+
+  it('carries the same live throughput as the card, in the row meta', () => {
+    render(
+      <CommandCard
+        item={command({ status: 'running', exitCode: null, durationMs: null, stdout: 'x'.repeat(8_000) })}
+        variant="row"
+      />,
+    );
+    expect(row().querySelector('.command-row-meta .tps-badge-count')?.textContent).toBe('2000');
   });
 
   it('keeps the truncated badge and the full command in the row', () => {

@@ -18,6 +18,7 @@ import {
   THEME_COLOR_KEYS,
   THEME_THINKING_MODES,
   THEME_TOOL_STYLES,
+  THEME_WORKING_MODES,
   type Theme,
   type ThemeColors,
   type ThemeDensity,
@@ -27,6 +28,7 @@ import {
   type ThemeMono,
   type ThemeThinking,
   type ThemeToolStyle,
+  type ThemeWorking,
 } from './types';
 
 export const THEME_STORAGE_KEY = 'karucode.theme-studio.v3';
@@ -128,6 +130,10 @@ function readTheme(input: unknown, options: ReadOptions = {}): Theme | string {
   // missing value falls back to the defaults instead of failing the theme.
   const toolStyle = oneOf<ThemeToolStyle>(input.toolStyle, THEME_TOOL_STYLES, 'cards');
   const grouping = oneOf<ThemeGrouping>(input.grouping, THEME_GROUPINGS, 'none');
+  // A theme stored before the working-steps option existed was written when a
+  // finished turn's work was always folded, so that is the fallback that keeps
+  // it looking the way its author left it; only built-ins start open.
+  const working = oneOf<ThemeWorking>(input.working, THEME_WORKING_MODES, 'folded');
   const thinking = oneOf<ThemeThinking>(input.thinking, THEME_THINKING_MODES, 'collapsed');
   const rounding =
     typeof input.rounding === 'number' && Number.isFinite(input.rounding)
@@ -148,6 +154,7 @@ function readTheme(input: unknown, options: ReadOptions = {}): Theme | string {
     customCSS: sanitizeCustomCSS(input.customCSS),
     toolStyle,
     grouping,
+    working,
     thinking,
   };
   if (description) theme.description = description;
@@ -209,6 +216,7 @@ export function exportThemeJSON(theme: Theme): string {
     customCSS: theme.customCSS,
     toolStyle: theme.toolStyle,
     grouping: theme.grouping,
+    working: theme.working,
     thinking: theme.thinking,
   };
   return `${JSON.stringify(document, null, 2)}\n`;

@@ -97,9 +97,11 @@ describe('the HTML preview is a real document, not srcdoc', () => {
     expect(frame?.getAttribute('srcdoc')).toBeNull();
   });
 
-  it('passes the project through so a file outside the default root renders', () => {
+  it('keeps the project in the path so the page’s own relative assets stay scoped', () => {
+    // A relative `href="style.css"` drops the query string, so `?project=` scoped
+    // only the entry document and every asset of a previewed page 404'd.
     const frame = preview('index.html', 'p_1')?.querySelector('iframe');
-    expect(frame?.getAttribute('src')).toBe('/api/workspace/preview/index.html?project=p_1');
+    expect(frame?.getAttribute('src')).toBe('/api/workspace/preview-project/p_1/index.html');
   });
 
   it('encodes each path segment but keeps the separators', () => {
@@ -181,7 +183,7 @@ describe('authenticated workspace media', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:workspace-1');
   });
 
-  it('loads and revokes a Markdown-relative image without ever assigning the raw src', async () => {
+  it('loads a Markdown-relative image without ever assigning the raw src, and reuses it', async () => {
     const view = render(
       <FilePreview path="docs/guide.md" content="![logo](assets/logo.png)" render="markdown" project="p_1" />,
     );
@@ -194,7 +196,18 @@ describe('authenticated workspace media', () => {
     expect(String(url)).toBe('/api/workspace/raw?path=docs%2Fassets%2Flogo.png&project=p_1');
     expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer browser-test-secret');
     expect(document.body.innerHTML).not.toContain('browser-test-secret');
+
+    // The bytes are cached per (project, path): the same image rendered again -
+    // another preview, or a transcript row scrolling back into the window - is
+    // handed the same object URL instead of being downloaded and decoded again.
+    // That is why unmounting does not revoke it; the cache's own cap does.
     view.unmount();
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:workspace-1');
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    const again = render(
+      <FilePreview path="docs/guide.md" content="![logo](assets/logo.png)" render="markdown" project="p_1" />,
+    );
+    const second = again.container.querySelector<HTMLImageElement>('img[data-workspace-image-path]')!;
+    await waitFor(() => expect(second.getAttribute('src')).toBe('blob:workspace-1'));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

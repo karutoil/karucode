@@ -63,6 +63,17 @@ export interface CallOptions {
   token?: string | null;
 }
 
+/** `POST /api/sessions` body extras: the pin a draft chose before it existed. */
+export interface CreateSessionOptions extends CallOptions {
+  /**
+   * Per-session model pin, sent with the creation.
+   *
+   * `undefined` (the default) omits the field, which is what an unpinned session
+   * wants; `null` would ask the server to clear a pin a new session cannot have.
+   */
+  model?: SessionModelSelection | null;
+}
+
 export function getHealth(options: CallOptions = {}): Promise<Health> {
   return apiRequest<Health>('/api/health', options);
 }
@@ -132,13 +143,18 @@ export function listSessions(
 export function createSession(
   title?: string,
   projectId?: string | null,
-  options: CallOptions = {},
+  options: CreateSessionOptions = {},
 ): Promise<Session> {
-  const body: Record<string, string> = {};
+  const { model, ...call } = options;
+  const body: Record<string, unknown> = {};
   if (title) body.title = title;
   if (projectId) body.project = projectId;
+  // `POST /api/sessions` validates the pin before it creates anything, so a draft
+  // that picked a model is created already pinned: the first message runs on the
+  // model the composer showed, with no second request in between.
+  if (model !== undefined) body.model = model;
   return apiRequest<Session>('/api/sessions', {
-    ...options,
+    ...call,
     method: 'POST',
     body,
   });
@@ -573,7 +589,8 @@ export function workspaceRawUrl(path: string, project?: string | null): string {
 
 /**
  * URL for one workspace HTML file rendered as a **document** (`GET
- * /api/workspace/preview/<path>`).
+ * /api/workspace/preview/<path>` or
+ * `/api/workspace/preview-project/<project>/<path>`).
  *
  * The path is in the URL, not a query parameter, because the page resolves its
  * own relative references (`./style.css`, `../img/logo.png`, `./app.js`) against
@@ -581,6 +598,12 @@ export function workspaceRawUrl(path: string, project?: string | null): string {
  * `default-src 'self'` policy while running in an opaque origin where `'self'
  * matches nothing - so its inline scripts, sibling stylesheets and relative
  * images were all refused and the preview came up nearly blank.
+ *
+ * The project is in the **path** for the same reason. A relative reference drops
+ * the query string, so `?project=<id>` scoped only the entry document: the page's
+ * own `style.css` was requested without a project, resolved against the default
+ * workspace and came back 404 (measured in Chromium - the preview rendered its
+ * HTML and none of its assets).
  *
  * Each segment is encoded separately: a path with a space or `#` must survive
  * the trip, but a literal `/` is a directory separator the browser has to see.
@@ -591,8 +614,8 @@ export function workspacePreviewUrl(path: string, project?: string | null): stri
     .filter((segment) => segment !== '')
     .map((segment) => encodeURIComponent(segment))
     .join('/');
-  const query = project ? `?project=${encodeURIComponent(project)}` : '';
-  return `/api/workspace/preview/${encoded}${query}`;
+  if (!project) return `/api/workspace/preview/${encoded}`;
+  return `/api/workspace/preview-project/${encodeURIComponent(project)}/${encoded}`;
 }
 
 /**

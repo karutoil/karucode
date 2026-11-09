@@ -664,9 +664,12 @@
   margin-top: 2px;
 }
 
-/* The Reasoning control sits under the two-column grid rather than inside it,
- * so it needs the same breathing room the grid's row gap gives its own cells. */
-.theme-setting-grid + .theme-field {
+/* The controls that sit under the two-column grid rather than inside it need the
+ * same breathing room the grid's row gap gives its own cells; they are stacked
+ * rather than one per selector so a third one cannot lose its spacing. */
+.theme-transcript-stack {
+  display: grid;
+  gap: var(--space-7);
   margin-top: var(--space-7);
 }
 

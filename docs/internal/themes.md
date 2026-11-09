@@ -3,11 +3,11 @@
 
 # Theme the workspace
 
-> Built-in palettes, live colour and density editing, fonts and custom CSS, the transcript view options (cards or rows, grouped calls, folded turns), saved in the browser and shareable as a theme JSON file.
+> Built-in palettes, live colour and density editing, fonts and custom CSS, the transcript view options (cards or rows, grouped calls, working steps folded or open), saved in the browser and shareable as a theme JSON file.
 
 - **Slug:** `themes`
-- **Tags:** theme, themes, appearance, colors, density, fonts, css, customization, ui, transcript, tool-calls, grouping, thinking
-- **Applies to:** `ui:ThemeStudio`, `ui:ChatTranscript`, `ui:ToolCard`, `ui:ToolGroup`, `ui:ThinkingBlock`, `storage:karucode.theme-studio.v3`, `file:web/src/theme/engine.ts`, `file:web/src/theme/types.ts`, `file:web/src/state/transcriptLayout.ts`, `file:web/src/components/ThemeStudio.tsx`, `file:web/src/components/ChatTranscript.tsx`, `cmd:npm run dev`
+- **Tags:** theme, themes, appearance, colors, density, fonts, css, customization, ui, transcript, tool-calls, grouping, thinking, working-steps, show-the-working
+- **Applies to:** `ui:ThemeStudio`, `ui:ChatTranscript`, `ui:ToolCard`, `ui:ToolGroup`, `ui:ProcessFold`, `ui:ThinkingBlock`, `storage:karucode.theme-studio.v3`, `file:web/src/theme/engine.ts`, `file:web/src/theme/types.ts`, `file:web/src/state/transcriptLayout.ts`, `file:web/src/components/ThemeStudio.tsx`, `file:web/src/components/ChatTranscript.tsx`, `file:web/src/components/ToolGroup.tsx`, `cmd:npm run dev`
 - **Source:** `web/src/theme/engine.ts:1`
 
 ---
@@ -37,8 +37,9 @@ whole workspace immediately, before you save anything.
   radius. Code uses the bundled JetBrains Mono by default; the other two
   choices are the operating system's own mono stack and Courier New.
 * **Transcript** — how much of the agent's work the conversation shows at
-  once. Built-in themes start with compact rows and completed-turn grouping;
-  full cards and no grouping remain available below.
+  once. Built-in themes start with compact rows, completed-turn grouping and
+  the working steps open; full cards, no grouping and a folded turn remain
+  available below.
 * **Advanced** — custom CSS applied live after the application stylesheet, for
   effects the controls do not cover.
 
@@ -47,9 +48,9 @@ a theme repaints the UI without a reload.
 
 ## Transcript view options
 
-Three settings, saved with the theme (so they export and import with it) and
-applied as `data-tool-style`, `data-grouping` and `data-thinking` on `<html>`
-next to `data-density`:
+Four settings, saved with the theme (so they export and import with it) and
+applied as `data-tool-style`, `data-grouping`, `data-working` and
+`data-thinking` on `<html>` next to `data-density`:
 
 * **Tool calls** — `rows` (built-in default) draws one quiet ~26 px line per
   call (symbol, name, arguments, duration, status) that expands into numbered
@@ -58,11 +59,18 @@ next to `data-density`:
   retain their live preview, returned images stay visible, and failures open to
   their explanation. A turn with twenty calls reads as a list instead of twenty
   blocks.
-* **Grouping** — `turns` (built-in default) folds a finished turn's working
-  steps behind a "Show the working · N tool calls" line, leaving the answer and
-  actionable notices. `tools` folds only a run of *consecutive* calls into one
-  summary line ("read_file, grep +1 more · 3 calls · 1.2 s"). `none` shows every
-  call where it happened.
+* **Grouping** — `turns` (built-in default) puts a finished turn's working
+  steps under one summary line ("Show the working · N tool calls · 1.2 s"),
+  leaving the answer and actionable notices. `tools` groups only a run of
+  *consecutive* calls ("read_file, grep +1 more · 3 calls · 1.2 s"). `none`
+  shows every call where it happened.
+* **Working steps** — `open` (built-in default) starts that work expanded: the
+  narration, the runs of calls and the calls inside them. The summary line stays
+  as the **Hide the working** header that folds it away. `folded` is the terse
+  view, where a finished turn is one **Show the working** line to click. Either
+  way the state is per row — one turn, one run of calls — so opening one leaves
+  every other row as it was, and switching the option repaints only the rows you
+  have not clicked yourself.
 * **Reasoning** — `collapsed` (default) is a `Thought` chip that opens to the
   reasoning. `preview` adds the first line of the thought, in italics, so a
   glance shows what the agent was working out. `expanded` shows it in full,
@@ -85,16 +93,16 @@ The selection, your saved custom themes and the unsaved draft live in
 `localStorage` under `karucode.theme-studio.v3`. That is per browser profile:
 themes are not stored in the karucode config, do not follow you to another
 machine and are not shared between browsers. Up to 60 custom themes are kept.
-Stored `cards` / `rows`, grouping and reasoning values always win over the new
-built-in defaults. A saved custom theme or imported file from before those
-fields existed keeps the legacy `cards` + `none` fallback; only built-ins move
-to `rows` + `turns`.
+Stored `cards` / `rows`, grouping, working-steps and reasoning values always
+win over the new built-in defaults. A saved custom theme or imported file from
+before those fields existed keeps the legacy `cards` + `none` fallback and a
+folded turn; only built-ins move to `rows` + `turns` + `open`.
 
 * **Save as new** stores the current draft under a name you type.
 * **Export** downloads `karucode-theme.json` (`format: "karucode-theme"`,
   `version: 1`, plus `mode`, `density`, `font`, `mono`, `rounding`, `colors`,
-  `customCSS` and the three transcript options `toolStyle`, `grouping` and
-  `thinking`).
+  `customCSS` and the four transcript options `toolStyle`, `grouping`,
+  `working` and `thinking`).
 * **Import** reads such a file (maximum 150 KB) and rejects it with a toast if
   a colour is not a 6-digit hex value, the mode/density/font is unknown, or the
   file is larger than the limit.
@@ -116,13 +124,13 @@ to `rows` + `turns`.
   applied — the derived ones, not the raw hex you typed — and warns below the
   4.5:1 AA ratio for body text.
 * The engine writes `data-theme`, `data-mode`, `data-density`,
-  `data-tool-style`, `data-grouping` and `data-thinking` on `<html>`;
-  component CSS may branch on those, so a theme with a broken value can look
-  worse than the default without any error.
-* The three transcript options are read at render time from `activeTheme`, and
-  `web/src/state/transcriptLayout.ts` owns the rules. Changing a default there
-  changes every user's transcript; the built-ins are the place to change what
-  a *theme* starts with.
+  `data-tool-style`, `data-grouping`, `data-working` and `data-thinking` on
+  `<html>`; component CSS may branch on those, so a theme with a broken value
+  can look worse than the default without any error.
+* The four transcript options are read at render time from `activeTheme`, and
+  `web/src/state/transcriptLayout.ts` owns the grouping and folding rules.
+  Changing a default there changes every user's transcript; the built-ins are
+  the place to change what a *theme* starts with.
 * A theme saved before these options existed still loads: `readTheme()` falls
   back per field, so an unknown or missing value becomes the default rather
   than rejecting the user's palette.

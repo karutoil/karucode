@@ -325,13 +325,13 @@ describe('SessionsRail shell', () => {
     expect(document.activeElement).toBe(trigger);
   });
 
-  it('creates a session from the rail button', () => {
-    const create = vi.spyOn(actions, 'createSession').mockResolvedValue(null);
+  it('starts a draft from the rail button', () => {
+    const draft = vi.spyOn(actions, 'startDraftSession').mockImplementation(() => {});
     render(<SessionsRail />);
 
     fireEvent.click(screen.getByRole('button', { name: /New session/ }));
-    expect(create).toHaveBeenCalledTimes(1);
-    create.mockRestore();
+    expect(draft).toHaveBeenCalledTimes(1);
+    draft.mockRestore();
   });
 
   it('wraps the search input in the field box so the whole row is the target', () => {
@@ -932,48 +932,47 @@ describe('the collapsed rail’s fly-out (RailPeek)', () => {
     project.mockRestore();
   });
 
-  it('creates a session from the peek when it is already the open project', () => {
-    const create = vi.spyOn(actions, 'createSession').mockResolvedValue(null);
+  it('starts a draft from the peek when it is already the open project', () => {
+    const draft = vi.spyOn(actions, 'startDraftSession').mockImplementation(() => {});
     railPeek.peekProjectId.value = 'p_karucode';
     render(<SessionsRail />);
 
     fireEvent.click(screen.getByRole('button', { name: /New session/ }));
-    expect(create).toHaveBeenCalledTimes(1);
+    expect(draft).toHaveBeenCalledTimes(1);
     expect(railPeek.peekProjectId.value).toBeNull();
-    create.mockRestore();
+    draft.mockRestore();
   });
 
-  it('switches to the peeked project before creating in it', async () => {
-    // `createSession()` creates in the *open* project. An empty preview of
-    // another project offered "New session" that would silently start the
-    // conversation somewhere else; the switch has to happen first.
+  it('switches to the peeked project before drafting in it', async () => {
+    // A draft belongs to the *open* project. An empty preview of another project
+    // offered "New session" that would silently start the conversation somewhere
+    // else; the switch has to happen first.
     const order: string[] = [];
     const project = vi.spyOn(actions, 'switchProject').mockImplementation(async (id) => {
       order.push(`switch:${id}`);
       store.currentProjectId.value = id;
     });
-    const create = vi.spyOn(actions, 'createSession').mockImplementation(async () => {
-      order.push('create');
-      return null;
+    const draft = vi.spyOn(actions, 'startDraftSession').mockImplementation(() => {
+      order.push('draft');
     });
     railPeek.peekProjectId.value = 'p_docs';
     railPeek.peekSessions.value = { p_docs: [] };
     render(<SessionsRail />);
 
     fireEvent.click(screen.getByRole('button', { name: 'New session' }));
-    await vi.waitFor(() => expect(order).toEqual(['switch:p_docs', 'create']));
+    await vi.waitFor(() => expect(order).toEqual(['switch:p_docs', 'draft']));
     expect(railPeek.peekProjectId.value).toBeNull();
     project.mockRestore();
-    create.mockRestore();
+    draft.mockRestore();
   });
 
-  it('aborts creation when another project wins while the peeked switch is pending', async () => {
+  it('aborts the draft when another project wins while the peeked switch is pending', async () => {
     let resolveSwitch!: () => void;
     const switching = new Promise<void>((resolve) => {
       resolveSwitch = resolve;
     });
     const project = vi.spyOn(actions, 'switchProject').mockImplementation(() => switching);
-    const create = vi.spyOn(actions, 'createSession').mockResolvedValue(null);
+    const draft = vi.spyOn(actions, 'startDraftSession').mockImplementation(() => {});
     store.projects.value = [
       ...store.projects.value,
       {
@@ -991,18 +990,18 @@ describe('the collapsed rail’s fly-out (RailPeek)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'New session' }));
     expect(project).toHaveBeenCalledWith('p_docs');
-    expect(create).not.toHaveBeenCalled();
+    expect(draft).not.toHaveBeenCalled();
 
     // A newer navigation finishes first. When the stale Docs switch resolves,
-    // creating now would put the session in Other rather than the previewed one.
+    // drafting now would start the conversation in Other, not the previewed one.
     store.currentProjectId.value = 'p_other';
     resolveSwitch();
     await switching;
     await Promise.resolve();
 
-    expect(create).not.toHaveBeenCalled();
+    expect(draft).not.toHaveBeenCalled();
     project.mockRestore();
-    create.mockRestore();
+    draft.mockRestore();
   });
 
   it('closes on Escape, which must not also stop the run', () => {

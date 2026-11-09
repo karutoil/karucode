@@ -25,7 +25,18 @@ FAIL: list[str] = []
 FINDINGS: dict[str, object] = {}
 
 OPEN_STUDIO = """
-const button = document.querySelector('.theme-header-btn');
+let button = document.querySelector('.theme-header-btn') ||
+  document.querySelector('[aria-label="Open theme studio"]');
+if (!button) {
+  // The Workbench header folds its secondary actions into one menu.
+  document.querySelector('[aria-label="Task actions"]')?.click();
+  for (let i = 0; i < 40; i++) {
+    button = [...document.querySelectorAll('[role=menuitem],button')]
+      .find((el) => /theme studio/i.test(el.textContent || ''));
+    if (button) break;
+    await new Promise(r => setTimeout(r, 50));
+  }
+}
 if (!button) return 'missing opener';
 button.click();
 for (let i = 0; i < 60; i++) {
@@ -90,7 +101,7 @@ return {
   dataset:{...root.dataset}, overflow,
   selectedTheme:drawer.querySelector('.theme-preset[aria-pressed=true]')?.dataset.testid,
   colourInputs:drawer.querySelectorAll('input[type=color]').length,
-  selected:Object.fromEntries(['tool-style','grouping','thinking'].flatMap(axis=>
+  selected:Object.fromEntries(['tool-style','grouping','working','thinking'].flatMap(axis=>
     [...drawer.querySelectorAll(`[data-testid^=theme-${axis}-]`)].filter(b=>b.getAttribute('aria-pressed')==='true')
       .map(b=>[axis,b.dataset.testid.replace(`theme-${axis}-`,'')]))),
   controls:Object.fromEntries(['density','font','mono','radius'].map(axis=>[axis,drawer.querySelector(`[data-testid=theme-${axis}]`)?.value])),
@@ -226,20 +237,23 @@ def main() -> int:
         set_controls(session, 1920, **{"preset-ember": ""})
         for tool in ("cards", "rows"):
             for grouping in ("none", "tools", "turns"):
-                for thinking in ("collapsed", "preview", "expanded"):
-                    state = set_controls(session, 1920, **{
-                        "tool-style": tool, "grouping": grouping, "thinking": thinking,
-                    })
-                    name = f"transcript-{tool}-{grouping}-{thinking}"
-                    check(f"{name}: applied", state["dataset"].get("toolStyle") == tool and state["dataset"].get("grouping") == grouping and state["dataset"].get("thinking") == thinking)
-                    transcript = state.get("transcript", {})
-                    painted = transcript.get("groups", 0) + transcript.get("rows" if tool == "rows" else "cards", 0)
-                    grouping_ok = grouping == "none" or transcript.get("groups", 0) > 0
-                    # The real session supplies the tools; the component suite owns
-                    # settled/streaming/pending-state assertions. Here we prove the
-                    # clicked option changes actual transcript DOM, not just data-*.
-                    check(f"{name}: transcript paints", painted > 0 and grouping_ok, transcript)
-                    audit(session, name, state, contrast=grouping == "none" and thinking == "collapsed")
+                for working in ("open", "folded"):
+                    for thinking in ("collapsed", "preview", "expanded"):
+                        state = set_controls(session, 1920, **{
+                            "tool-style": tool, "grouping": grouping,
+                            "working": working, "thinking": thinking,
+                        })
+                        name = f"transcript-{tool}-{grouping}-{working}-{thinking}"
+                        check(f"{name}: applied", state["dataset"].get("toolStyle") == tool and state["dataset"].get("grouping") == grouping and state["dataset"].get("working") == working and state["dataset"].get("thinking") == thinking)
+                        transcript = state.get("transcript", {})
+                        painted = (transcript.get("groups", 0) + transcript.get("folds", 0) +
+                                   transcript.get("rows" if tool == "rows" else "cards", 0))
+                        grouping_ok = grouping == "none" or transcript.get("groups", 0) > 0 or transcript.get("folds", 0) > 0
+                        # The real session supplies the tools; the component suite owns
+                        # settled/streaming/pending-state assertions. Here we prove the
+                        # clicked option changes actual transcript DOM, not just data-*.
+                        check(f"{name}: transcript paints", painted > 0 and grouping_ok, transcript)
+                        audit(session, name, state, contrast=grouping == "none" and thinking == "collapsed")
 
         sizes = {"compact": "12px", "comfortable": "13px", "spacious": "13.25px"}
         for density, body in sizes.items():

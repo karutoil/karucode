@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { Composer, type ComposerProps } from './Composer';
 import type { Activity } from '../state/selectors';
@@ -481,7 +481,60 @@ describe('Composer', () => {
     });
   });
 
+  describe('drafts', () => {
+    beforeEach(() => {
+      store.currentSessionId.value = null;
+      store.draftSession.value = null;
+      store.draftToSession.value = null;
+    });
+    afterEach(() => {
+      store.currentSessionId.value = null;
+      store.draftSession.value = null;
+      store.draftToSession.value = null;
+    });
+
+    it('carries the typed message across when its draft becomes a session', () => {
+      store.draftSession.value = { id: 11, projectId: null, model: null };
+      const { rerender, props, textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'half-written message' } });
+      expect(textarea.value).toBe('half-written message');
+
+      // The send (or an attachment that had to be uploaded) created the session:
+      // same conversation, new scope key, so the box must follow it rather than
+      // come back empty with the reader's text stranded in a record nothing draws.
+      store.draftSession.value = null;
+      store.currentSessionId.value = 's_new';
+      store.draftToSession.value = { draftId: 11, sessionId: 's_new' };
+      rerender(<Composer {...props} />);
+
+      expect(textarea.value).toBe('half-written message');
+    });
+
+    it('gives a brand-new draft an empty box', () => {
+      store.draftSession.value = { id: 21, projectId: null, model: null };
+      const { rerender, props, textarea } = renderComposer();
+      fireEvent.input(textarea, { target: { value: 'something else entirely' } });
+
+      // A second conversation: nothing of the first one's text may follow.
+      store.draftSession.value = { id: 22, projectId: null, model: null };
+      rerender(<Composer {...props} />);
+
+      expect(textarea.value).toBe('');
+    });
+  });
+
   describe('attachments', () => {
+    // An upload lands under the session's own directory
+    // (`POST /api/workspace/upload?session=`), so these are a session's composer.
+    // An unsent draft creates its session on the first upload instead - see
+    // `state/draftSession.test.ts`.
+    beforeEach(() => {
+      store.currentSessionId.value = 's_1';
+    });
+    afterEach(() => {
+      store.currentSessionId.value = null;
+    });
+
     it('inlines a small text file and puts it in the send payload', async () => {
       const { props, textarea, fileInput } = renderComposer();
       fireEvent.change(fileInput, { target: { files: [textFile('notes.md', '# Note\nbody')] } });

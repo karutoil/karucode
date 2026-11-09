@@ -85,6 +85,7 @@ export {
   setThemeMode,
   setThinking,
   setToolStyle,
+  setWorking,
   themeContrast,
   themeLibrary,
   updateColors,

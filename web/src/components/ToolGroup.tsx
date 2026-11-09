@@ -11,6 +11,11 @@ export interface ToolGroupProps {
   calls: CallItem[];
   /** How each call is drawn inside the group (the transcript's tool style). */
   variant: 'card' | 'row';
+  /**
+   * Whether the group starts expanded — the theme's `working` option. A group is
+   * its own disclosure either way: opening this run of calls never opens another.
+   */
+  defaultOpen?: boolean;
 }
 
 /** The group's one-line verdict: outcome glyph plus "3 calls · 1.2s". */
@@ -34,7 +39,9 @@ function GroupGlyph({ totals }: { totals: ReturnType<typeof callTotals> }): JSX.
  * The summary says what happened ("read_file, grep +1 more · 4 calls · 1.2s")
  * and opens to the individual calls, each with its own output disclosure. It
  * opens itself while a member is still running or after a failure: those are the
- * two states a reader must not have to click to discover.
+ * two states a reader must not have to click to discover. `defaultOpen` is the
+ * theme's **Working steps** option, so a transcript asked to show the work shows
+ * the calls inside a run too rather than stopping at another summary line.
  *
  * The run is live - calls arrive, start and fail after this group is mounted - so
  * the initial state is not enough. The effect below watches the *shape* of the
@@ -44,10 +51,15 @@ function GroupGlyph({ totals }: { totals: ReturnType<typeof callTotals> }): JSX.
  * opened it for. Nothing runs on a shape the reader collapsed by hand while the
  * same call is still in flight - only a *new* running/failed member does.
  */
-export function ToolGroup({ calls, variant }: ToolGroupProps): JSX.Element {
+export function ToolGroup({ calls, variant, defaultOpen = false }: ToolGroupProps): JSX.Element {
   const totals = callTotals(calls);
   const urgent = totals.running > 0 || totals.failed > 0;
-  const [open, setOpen] = useState(urgent);
+  // `choice` is what the reader clicked; `trouble` latches the automatic opening
+  // so a group that failed and then settled stays open. Until either exists the
+  // theme's option decides, which is what makes switching it repaint every group.
+  const [choice, setChoice] = useState<boolean | null>(null);
+  const [trouble, setTrouble] = useState(urgent);
+  const open = choice ?? (defaultOpen || trouble);
   const previousStatuses = useRef(
     new Map(calls.map((call) => [call.id, call.status] as const)),
   );
@@ -66,7 +78,12 @@ export function ToolGroup({ calls, variant }: ToolGroupProps): JSX.Element {
       return previousStatuses.current.get(call.id) !== call.status;
     });
     previousStatuses.current = new Map(calls.map((call) => [call.id, call.status] as const));
-    if (newlyUrgent) setOpen(true);
+    if (newlyUrgent) {
+      // A call lit up: open, and drop a collapse the reader made before it
+      // existed, because the new call is not the one they were looking at.
+      setTrouble(true);
+      setChoice(null);
+    }
   }, [calls]);
 
   return (
@@ -76,7 +93,7 @@ export function ToolGroup({ calls, variant }: ToolGroupProps): JSX.Element {
         class="tool-group-head"
         aria-expanded={open}
         aria-controls={bodyId}
-        onClick={() => setOpen((previous) => !previous)}
+        onClick={() => setChoice(!open)}
       >
         <span class={`tool-group-glyph ${tone}`} aria-hidden="true">
           <GroupGlyph totals={totals} />

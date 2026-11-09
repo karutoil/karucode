@@ -167,9 +167,12 @@ export function ModelSwitcher(): JSX.Element | null {
   const roving = useRovingOptions(open, selectedKey, optionKeys, listbox);
   usePopover(open, () => setOpen(false), root, trigger);
 
-  // A session is open: the pills stay mounted, whether or not the session
-  // happens to have a row in a list right now.
-  if (!config || sessionId === null || config.providers.length === 0) return null;
+  // A session is open - or a draft, which is a conversation that has not been
+  // created yet: the pills stay mounted, and a choice made here travels in the
+  // create request so the first message already runs on it.
+  if (!config || (sessionId === null && store.draftSession.value === null) || config.providers.length === 0) {
+    return null;
+  }
 
   const provider = providerId ? config.providers.find((profile) => profile.id === providerId) ?? null : null;
   const entry = provider?.models.find((model) => model.id === modelId);
@@ -353,8 +356,11 @@ export function ReasoningSelector(): JSX.Element | null {
   const roving = useRovingOptions(open, current.value, REASONING_OPTIONS.map((option) => option.value), listbox);
   usePopover(open, () => setOpen(false), root, trigger);
 
-  // Same gate as the model picker: a session is open, so the picker is there.
-  if (!config || sessionId === null || config.providers.length === 0) return null;
+  // Same gate as the model picker: a session (or a draft) is open, so the picker
+  // is there.
+  if (!config || (sessionId === null && store.draftSession.value === null) || config.providers.length === 0) {
+    return null;
+  }
 
   // The capability is looked up through the config, not through the session
   // row: the row may not exist, and the picker must not come and go with it.
@@ -453,7 +459,13 @@ export function ReasoningSelector(): JSX.Element | null {
 /** The composer's model row; renders nothing when no session is open. */
 export function ModelControls(): JSX.Element | null {
   const config = store.config.value;
-  if (!config || store.currentSessionId.value === null || config.providers.length === 0) return null;
+  if (
+    !config ||
+    (store.currentSessionId.value === null && store.draftSession.value === null) ||
+    config.providers.length === 0
+  ) {
+    return null;
+  }
   return (
     <div class="composer-controls">
       <ModelSwitcher />

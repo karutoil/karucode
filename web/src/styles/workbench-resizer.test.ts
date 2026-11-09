@@ -25,6 +25,29 @@ describe('Workbench result resizing', () => {
     expect(wide).toMatch(/\.chat-inner,\s*[^\{]*\.composer-inner \{[^}]*max-width:\s*var\(--content-max\);/s);
   });
 
+  it('never narrows the conversation by collapsing the results dock', () => {
+    // The 70ch reading measure is a *split* rule: side by side, the conversation
+    // is the narrow half. Applying it to the whole centre pane as well made
+    // collapsing the dock shrink the transcript - measured in Chromium at a
+    // 1920px viewport, `.chat-inner` and `.composer-inner` went 820px -> 638px
+    // when the reader collapsed the dock to get more room. So the measure may
+    // only appear inside the wide container query, and every other tier keeps
+    // the content measure that `.composer-inner` already carries.
+    const wide = workbench.indexOf('@container workbench (min-width: 1100.01px)');
+    const reading = workbench.indexOf('--workbench-reading-w');
+    expect(reading).toBeGreaterThan(wide);
+
+    const split = workbench.slice(wide, workbench.indexOf('@container workbench (max-width: 1100px)'));
+    expect(split).toMatch(
+      /\.center-body\.has-result \.chat-inner,\s*\.chat-main\.is-workbench \.center-body\.has-result \.composer-inner \{[^}]*max-width:\s*calc\(var\(--workbench-reading-w\)/s,
+    );
+
+    const base = workbench.slice(0, wide);
+    expect(base).toMatch(
+      /\.chat-main\.is-workbench \.chat-inner,\s*\.chat-main\.is-workbench \.composer-inner \{\s*max-width:\s*var\(--content-max\);/s,
+    );
+  });
+
   it('removes the separator from intermediate overlay and phone layouts', () => {
     const containerTier = workbench.indexOf('@container workbench (max-width: 1100px)');
     const phoneTier = workbench.indexOf('@media (max-width: 1023px)');

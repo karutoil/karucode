@@ -33,6 +33,7 @@ import {
   THEME_THINKING_CHOICES,
   THEME_TOKEN_ENTRIES,
   THEME_TOOL_STYLE_CHOICES,
+  THEME_WORKING_CHOICES,
   ThemeFileError,
   activeTheme,
   autosaveError,
@@ -55,6 +56,7 @@ import {
   setThemeMode,
   setThinking,
   setToolStyle,
+  setWorking,
   themeContrast,
   themeFileSlug,
   themeLibrary,
@@ -69,6 +71,7 @@ import {
   type ThemeMono,
   type ThemeThinking,
   type ThemeToolStyle,
+  type ThemeWorking,
 } from '../theme';
 import {
   AlertIcon,
@@ -152,7 +155,10 @@ function TranscriptPreview(): JSX.Element {
   const theme = activeTheme.value;
   return (
     <div class="theme-preview" data-testid="theme-transcript-preview" aria-hidden="true">
-      <p class="theme-preview-narration" data-on={theme.grouping === 'turns' ? 'folded' : 'shown'}>
+      <p
+        class="theme-preview-narration"
+        data-on={theme.grouping === 'turns' && theme.working === 'folded' ? 'folded' : 'shown'}
+      >
         Reading the transcript layout…
       </p>
       <div class="theme-preview-row" hidden={theme.toolStyle === 'cards'}>
@@ -750,14 +756,25 @@ export function ThemeStudio(): JSX.Element | null {
               />
             </div>
 
-            <TranscriptChoice
-              label="Reasoning"
-              value={theme.thinking}
-              choices={THEME_THINKING_CHOICES}
-              onChange={(next) => setThinking(next as ThemeThinking)}
-              testId="theme-thinking"
-              describedBy={`${titleId}-thinking-hint`}
-            />
+            <div class="theme-transcript-stack">
+              <TranscriptChoice
+                label="Working steps"
+                value={theme.working}
+                choices={THEME_WORKING_CHOICES}
+                onChange={(next) => setWorking(next as ThemeWorking)}
+                testId="theme-working"
+                describedBy={`${titleId}-working-hint`}
+              />
+
+              <TranscriptChoice
+                label="Reasoning"
+                value={theme.thinking}
+                choices={THEME_THINKING_CHOICES}
+                onChange={(next) => setThinking(next as ThemeThinking)}
+                testId="theme-thinking"
+                describedBy={`${titleId}-thinking-hint`}
+              />
+            </div>
 
             <p class="theme-transcript-note">
               The transcript keeps anything you must act on visible whatever you choose here: a

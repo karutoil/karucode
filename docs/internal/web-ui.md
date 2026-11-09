@@ -7,7 +7,7 @@
 
 - **Slug:** `web-ui`
 - **Tags:** ui, web, frontend, workbench, panels, context, shortcuts, preact, plugins, buttons
-- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `ui:mobile-touch-target`, `ui:mobile-keyboard-inset`, `env:interactive-widget`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:RailPeek`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:ResultResizer`, `route:PATCH /api/projects/:id/preferences`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:notification-bell`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `route:POST /api/plugins/:name/ui/actions/:action`, `config:plugin_ui`, `config:ui`, `file:web/src/components/PluginSlot.tsx`, `file:web/src/components/uiContributions.ts`, `file:web/src/components/PluginControls.tsx`, `file:web/src/state/pluginUiPreferences.ts`, `file:web/src/components/PluginViews.tsx`, `file:web/src/components/viewPanelRegister.ts`, `file:web/src/styles/plugin-views.css`, `dir:plugins/demos`, `file:plugins/demos/README.md`, `file:scripts/verify_plugin_demos.py`, `cmd:python3 scripts/verify_plugin_demos.py`, `file:web/src/styles/plugin-slots.css`, `file:scripts/verify_plugin_ui.py`, `cmd:python3 scripts/verify_plugin_ui.py`, `fn:matchUiKeybinding`, `fn:applyUiPreferences`, `ui:keybinding`, `ui:plugin-controls`, `fn:registerPluginPanelRenderer`, `ui:PluginSlot`, `ui:plugin-slot-button`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/state/railPeek.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/components/SessionsRail.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `file:web/src/lib/viewportInset.ts`, `file:web/src/lib/menu.tsx`, `ui:context-menu`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`, `ui:GitManager`, `ui:GitChanges`, `ui:GitCommitBox`, `ui:GitBranchDialog`, `ui:GitHistory`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `file:web/src/components/git/GitManager.tsx`, `file:web/src/styles/git.css`, `ui:WorkbenchTaskMenu`, `ui:ContextDrawer`, `file:web/src/components/WorkbenchTaskMenu.tsx`, `file:web/src/components/ContextDrawer.tsx`, `file:web/src/state/workbench.ts`, `file:web/src/lib/approvalCopy.ts`, `file:web/src/styles/workbench.css`, `file:web/src/styles/workbench-navigation.css`, `file:scripts/verify_workbench_frontend.py`, `cmd:python3 scripts/verify_workbench_frontend.py`, `ui:ControlPlane`, `route:GET /api/control/overview`, `route:GET /api/control/sessions`, `file:web/src/state/controlPlane.ts`, `file:web/src/components/control-plane/ControlPlane.tsx`, `file:web/src/components/control-plane/ControlRail.tsx`, `file:web/src/components/control-plane/ControlOverview.tsx`, `file:web/src/components/control-plane/ControlSession.tsx`, `file:web/src/components/control-plane/controlModel.ts`, `file:web/src/styles/control-shared.css`, `file:web/src/styles/control-rail.css`, `file:web/src/styles/control-overview.css`, `file:web/src/styles/control-session.css`, `file:web/src/lib/historyLoader.ts`, `file:web/src/lib/virtualWindow.ts`, `file:web/src/components/ChatTranscript.tsx`, `file:web/src/state/chat.ts`
+- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `ui:mobile-touch-target`, `ui:mobile-keyboard-inset`, `env:interactive-widget`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:RailPeek`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:ResultResizer`, `route:PATCH /api/projects/:id/preferences`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:notification-bell`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `route:POST /api/plugins/:name/ui/actions/:action`, `config:plugin_ui`, `config:ui`, `file:web/src/components/PluginSlot.tsx`, `file:web/src/components/uiContributions.ts`, `file:web/src/components/PluginControls.tsx`, `file:web/src/state/pluginUiPreferences.ts`, `file:web/src/components/PluginViews.tsx`, `file:web/src/components/viewPanelRegister.ts`, `file:web/src/styles/plugin-views.css`, `dir:plugins/demos`, `file:plugins/demos/README.md`, `file:scripts/verify_plugin_demos.py`, `cmd:python3 scripts/verify_plugin_demos.py`, `file:web/src/styles/plugin-slots.css`, `file:scripts/verify_plugin_ui.py`, `cmd:python3 scripts/verify_plugin_ui.py`, `fn:matchUiKeybinding`, `fn:applyUiPreferences`, `ui:keybinding`, `ui:plugin-controls`, `fn:registerPluginPanelRenderer`, `ui:PluginSlot`, `ui:plugin-slot-button`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/state/railPeek.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/components/SessionsRail.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `file:web/src/lib/viewportInset.ts`, `file:web/src/lib/menu.tsx`, `ui:context-menu`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`, `ui:GitManager`, `ui:GitChanges`, `ui:GitCommitBox`, `ui:GitBranchDialog`, `ui:GitHistory`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `file:web/src/components/git/GitManager.tsx`, `file:web/src/styles/git.css`, `ui:WorkbenchTaskMenu`, `ui:ContextDrawer`, `file:web/src/components/WorkbenchTaskMenu.tsx`, `file:web/src/components/ContextDrawer.tsx`, `file:web/src/state/workbench.ts`, `file:web/src/lib/approvalCopy.ts`, `file:web/src/styles/workbench.css`, `file:web/src/styles/workbench-navigation.css`, `file:scripts/verify_workbench_frontend.py`, `cmd:python3 scripts/verify_workbench_frontend.py`, `ui:ControlPlane`, `route:GET /api/control/overview`, `route:GET /api/control/sessions`, `file:web/src/state/controlPlane.ts`, `file:web/src/components/control-plane/ControlPlane.tsx`, `file:web/src/components/control-plane/ControlRail.tsx`, `file:web/src/components/control-plane/ControlOverview.tsx`, `file:web/src/components/control-plane/ControlSession.tsx`, `file:web/src/components/control-plane/controlModel.ts`, `file:web/src/styles/control-shared.css`, `file:web/src/styles/control-rail.css`, `file:web/src/styles/control-overview.css`, `file:web/src/styles/control-session.css`, `file:web/src/lib/historyLoader.ts`, `file:web/src/lib/virtualWindow.ts`, `file:web/src/components/ChatTranscript.tsx`, `file:web/src/state/chat.ts`, `file:web/src/lib/streamingMarkdown.ts`, `file:web/src/components/Markdown.tsx`, `file:web/src/components/ThinkingBlock.tsx`, `ui:streaming-render`, `file:web/src/api/sharedStream.ts`, `ui:shared-event-stream`, `route:GET /api/events`, `file:web/src/components/ToolCard.tsx`, `file:web/src/components/CommandCard.tsx`, `file:scripts/verify_tps_badge.py`, `cmd:python3 scripts/verify_tps_badge.py`, `file:web/src/state/draftSession.test.ts`, `file:scripts/verify_draft_session.py`, `cmd:python3 scripts/verify_draft_session.py`
 - **Source:** `web/src/app.tsx:1`
 
 ---
@@ -81,8 +81,11 @@
   read-only, not a link to a project drawer.
 * **Sessions rail**: the current project's disclosure and management actions,
   session search (`/`), available status filters and sessions grouped by last
-  activity with running/failure indicators. Create a session with
-  `Ctrl/Cmd+N`. On a phone it is a full-height sheet, headed by the project
+  activity with running/failure indicators. **New session** (`Ctrl/Cmd+N`, the
+  rail button, the palette row, a starter prompt) starts a **draft** — see
+  **Starting a conversation** below; nothing is written until the first
+  message, so an abandoned press leaves no empty session behind. On a phone it
+  is a full-height sheet, headed by the project
   switcher and including **Control plane** and **Settings**. The rail holds the
   open project's sessions and nothing else: a control chat is never listed
   there, and opening a conversation that belongs to another project (a
@@ -110,18 +113,27 @@
 * **Conversation and progressive disclosure**: streaming Markdown, the model /
   reasoning selectors, @-file mentions, attachments, diff review and approval
   controls remain real. Built-in themes start with compact tool/command **rows**
-  and **completed-turn grouping**. **Show the working** opens a finished turn,
-  an expanded call group reveals its rows, and a row opens its actual tool output
-  or separate command stdout/stderr. Expanded command output owns one bounded
-  scrolling region; its wrapper does not add a second nested scrollbar.
+  and **completed-turn grouping** whose working steps are **open**: the model's
+  narration, the folded runs of calls and the calls inside them are on screen,
+  with **Hide the working** as the header that folds them away again. Each turn
+  and each run of calls keeps its own state, so folding one row never collapses
+  the rest. A row opens its actual tool output or separate command stdout/stderr.
+  Expanded command output owns one bounded scrolling region; its wrapper does
+  not add a second nested scrollbar.
   Tool failures open to their explanation;
   running work, pending approvals, errors, interruptions and notices remain
   discoverable rather than disappearing into a fold. Full activity remains an
   explicit **Grouping → None** option; **Cards** remains the alternate presentation
-  in Settings → General → Transcript or Theme Studio.
+  in Settings → General → Transcript or Theme Studio, which also offers
+  **Working steps → Folded** for the terse view where a finished turn sits behind
+  **Show the working**.
   Returned images stay visible above the output disclosure and open in the real
   lightbox; their bytes come from `tool_call_finished.images` live and stored
-  `messages.images` after reload.
+  `messages.images` after reload. A model's reasoning is stored on the same
+  assistant row (`reasoning_content`), so the **Thought** block a turn streamed
+  is still there when the session is re-opened, switched to, or the page is
+  reloaded - including a turn that only thought and then called a tool, which
+  has no prose of its own.
 * **Long transcripts**: opening a session, scrolling a history of thousands of
   rows and keeping up with a live run are all bounded. The transcript is
   **windowed**: only the rows around the viewport are mounted, with padding
@@ -137,6 +149,23 @@
   after a rewind replaces them. Only the session's own rows are paged: a
   subagent's transcript belongs to `GET /api/agents/:id`, so a long subagent
   cannot consume the parent's page.
+* **A live answer stays cheap to draw**: while a message is still arriving it
+  is rendered in two parts - the blocks that have finished, as Markdown parsed
+  once, and the block still being written, re-parsed per delta
+  (`web/src/lib/streamingMarkdown.ts`). Re-parsing the whole message on every
+  token made a long answer cost more per token than the one before it: measured
+  in the shipped bundle, 120 KiB of answer was ~50 ms per render and the tab
+  dropped to 14 fps, which is what "the frontend starts to lag while a run is
+  going" actually was. The split keeps a token's cost at the size of the block
+  being written; the finished message renders once, fully, when it settles, so
+  nothing about the settled transcript changes. Three things are deliberately
+  coarser while live, because each is re-done per token: a fence that has not
+  closed is drawn unhighlighted, a tail longer than 4 096 characters is drawn as
+  text, and artifact cards wait for the fence to close. The reasoning block
+  follows the same rule: a live thought shows its newest 6 000 characters
+  instead of re-laying out the whole thing per delta, and it follows the newest
+  line on an animation frame rather than per token - and stops following once
+  the reader has scrolled up to read an earlier line.
 * **Rewind**: every persisted user message and every assistant turn carries a
   **Rewind** button in its header (hover or keyboard focus reveals it). It
   opens a dialog that hides the conversation from that message onwards and
@@ -179,7 +208,8 @@
   is never overridden.
 * **Workspace views**: *Conversation*, full-width *Source control* and
   *Terminal* when the server enables terminals, all inside the main task header
-  with their real changed-file/terminal counts. The standalone workspace strip is
+  with their real changed-file/terminal counts, plus **one closable tab per open
+  file** (see *File tabs* below). The standalone workspace strip is
   gone; when the container is constrained, the same tablist wraps to a second row
   inside that header without dropping branch, notification, Context, command or
   task actions. ChatView mounts Source control and Terminal on demand, then keeps
@@ -221,6 +251,10 @@
   `store.inspectorTab`. The selected result and the desktop collapse preference
   (`karucode.inspectorCollapsed`) survive opening and closing Context; collapse /
   reveal uses the existing `toggleInspector` action and persisted preference.
+  Collapsing it hands the whole centre pane back to the conversation, which then
+  keeps the app's content measure (the composer's own 820px box); the narrower
+  70ch reading measure belongs to the side-by-side split alone, so hiding the
+  dock never narrows the transcript.
 * **Result resizing**: the wide split has a focusable 24px separator. Drag with a
   mouse or touch; **Left/Right** resize by 10px, **Shift+Left/Right** by 50px and
   **Home/End** choose the safe bounds. The preference is a project property saved
@@ -285,7 +319,12 @@
   shows what the agent last reported about itself (`report_status`) with a
   progress bar, and a `background` badge when the spawn detached. Its **Open
   details** button opens the live transcript without overloading the row's
-  independent Pause/Stop controls.
+  independent Pause/Stop controls. The list itself is read from
+  `GET /api/agents?project=` when the tab opens, when it is asked to refresh,
+  and whenever the session list gains, loses or renames a row - the rows are
+  grouped and labelled by session. A run boundary does not re-read it: status
+  and notes arrive on the event stream, and that response is every agent the
+  project ever spawned.
 * **Session tab** (inspector): what this session *is* and what it *cost*,
   read from `GET /api/sessions/:id/info` rather than folded from the
   transcript on screen, because the transcript is a bounded window and the
@@ -301,20 +340,28 @@
   report reads as "—" or "Not reported", never as 0 — an unknown prompt-cache
   rate is not a 0% hit, and a model with no declared window gets no
   percentage.
-* **File viewer** (modal): Markdown and HTML open on a rendered preview (with a
+* **File viewer** (modal or workspace tab): Markdown and HTML open on a rendered
+  preview (with a
   *Preview*/*Source* toggle), images and PDFs render from
   `GET /api/workspace/raw`, and every complete text file can be edited and
   saved. An HTML file is previewed as a **real page**, loaded from
-  `GET /api/workspace/preview/<path>` in an `<iframe sandbox="allow-scripts">`
-  (never `srcdoc`): that gives it a base URL inside the workspace, so its own
-  `./style.css`, `../img/logo.png` and `./app.js` load, and the server's
-  `sandbox allow-scripts; …` policy keeps it an opaque origin with
-  `connect-src 'none'`, so it still cannot reach the app, its storage or the
-  network. The preview shows the *saved* page - an unsaved draft says so and
+  `GET /api/workspace/preview[‑project]/<path>` in an `<iframe
+  sandbox="allow-scripts">` (never `srcdoc`): that gives it a base URL inside the
+  workspace, so its own `./style.css`, `../img/logo.png` and `./app.js` load, and
+  the server's policy names *this server's own origin* as the only allowed
+  resource source while keeping the document an opaque origin with
+  `connect-src 'none'` - so it still cannot reach the app, its storage or the
+  network. (`'self'` cannot do that job: inside an opaque origin it matches
+  nothing, which is why every relative asset of every preview used to be
+  refused.) The project, when there is one, travels in the **path**
+  (`/api/workspace/preview-project/<project>/<path>`) because a relative asset
+  reference drops the query string. Fonts and ES modules still cannot load: both
+  need `Access-Control-Allow-Origin`, which this route deliberately does not send.
+  The preview shows the *saved* page - an unsaved draft says so and
   needs a save - and on a `KARUCODE_AUTH_TOKEN` deployment, where an `<iframe>`
   cannot present a bearer header, it explains that instead of showing a blank
   frame. Markdown follows your edits live, so *Preview* is a live preview of the
-  draft. Every preview kind fills the dialog: no `max-width` measure on the
+  draft. Every preview kind fills its host: no `max-width` measure on the
   scrolling surface, because a `ch` cap there shrinks the pane itself and
   leaves a blank strip beside the prose. `Ctrl/Cmd+S` saves; a save whose
   `expected_size` no longer matches the
@@ -322,6 +369,28 @@
   closing with unsaved changes asks first. Binary and server-truncated files
   cannot be edited (a truncated save would discard everything past the read
   limit) and the *Edit* button's tooltip says which case applies.
+* **File tabs**: the explorer's row menu (**Open in a tab**) and the viewer's
+  own **Open in tab** button put the same document in the workspace strip beside
+  the conversation instead of the modal; **Open in dialog** puts it back. A tab
+  keeps its read, its scroll position and an unsaved draft while you visit
+  another tab or the conversation, and closing it - the strip's ✕, the panel's
+  close button, or **Delete**/**Backspace** on the selected tab - either drops it
+  (selection moves to the tab that took its place) or, with unsaved edits, asks
+  first. Moving a file between the dialog and a tab is refused while it has
+  unsaved edits, since the other host would reload it from disk. A link inside a
+  rendered preview replaces the dialog's document but opens its own tab from a
+  tab, so following a link never overwrites the page being read. File tabs belong
+  to the project: switching projects closes them.
+* **Rendered Markdown** is GitHub's: tables, `~~strikethrough~~`, task lists
+  (`- [ ]`, read-only checkboxes), footnotes with in-page references,
+  fenced code, and bare-URL autolinks that open in a new tab. An image in a reply
+  is fetched through the API when it points into the workspace and shown from a
+  `blob:` URL (one fetch per file, shared by every rendered copy, so a
+  scroll-windowed transcript does not re-download it); an `https:` image becomes
+  a link, because this app's policy allows no remote image, and a reference that
+  escapes the workspace says so instead of rendering a broken glyph. The chat
+  transcript and the file viewer's Markdown preview are the same renderer, so a
+  document reads identically in both.
 * **Dialogs and the image lightbox**: clicking a tool card's image thumbnail
   opens a lightbox with the full image. Every dialog (`Dialog.tsx`) renders
   through a portal into `document.body` rather than in place: `.dialog-layer`
@@ -393,6 +462,37 @@ browser that refused notifications still plays the cue.
 from the settings button, report "insecure context" instead of failing silently,
 and report "limited" where a mobile browser would need a service worker.
 
+## Starting a conversation
+
+**New session** does not create a session. The rail button, `Ctrl/Cmd+N`, the
+palette row, the collapsed rail's fly-out, a starter prompt and the empty
+state's **New session** all open a **draft** — an empty conversation the client
+holds in memory. Nothing is written to the server until there is something to
+keep, so a press that is immediately abandoned cannot leave another empty row in
+the rail (or on disk).
+
+* The first message creates the session (`POST /api/sessions`) and is sent into
+  it; the server titles the untitled session from that message. The model and
+  reasoning effort chosen in the composer before sending ride along in the same
+  create request, so the first turn already runs on the model the pills showed.
+* A file large enough to be **uploaded** also creates it: an upload lives under
+  `.karucode/attachments/<session>/`, so the session must exist first. A small
+  text file that is inlined into the message does not.
+* Opening any other session, or switching project, discards the draft — the
+  conversation, the file tree and the terminals are all project-scoped.
+* A second **New session** press keeps the draft you have and only puts the
+  caret back in the box; it never throws away what is already typed.
+* A create that fails is reported as a toast and the draft stays, text and
+  attachment chips included: sending again is the whole retry.
+
+While a draft is open the header names it **New session**, the starter prompts
+fill the box instead of opening a session, and the composer, model and reasoning
+controls work exactly as they do in a saved conversation.
+`web/src/state/draftSession.test.ts` pins "the button writes nothing" and "the
+first message writes exactly one session"; `python3 scripts/verify_draft_session.py`
+proves both in real Chromium against a real server (including that the model
+picked while drafting is the model the session is created with).
+
 ## Composer
 
 The box floats over the transcript as a *dock* instead of occupying its own
@@ -456,16 +556,21 @@ Two readouts answer the questions a long run raises: *is the model actually
 producing anything*, and *how close is this conversation to its window*.
 
 **Throughput badge.** While a turn is doing something — streaming prose,
-streaming reasoning, running a tool or command, or blocked on an approval — its
-header carries `↓ <tokens> <rate> t/s` beside the **Working** chip. Both halves
-are estimates from the characters arriving so far (`chars / 4`, the same ratio
-`kc-core` budgets with; the tooltip says so), because the provider's own
-`usage` block only arrives once the call is over. The rate is averaged over the
-last ~3 s of *growth*: when the stream stops growing the number disappears and
-the token count stays, so a 40 s `cargo test` shows `↓ 12.4k` with no invented
-speed. The badge is mounted only while the turn works, so it cannot outlive the
-run, and the **Completed** chip uses the same rule — a turn whose prose finished
-but whose call is still running is **Working**, not **Completed**.
+streaming reasoning, running a tool or command, or blocked on an approval —
+**each block that is producing text carries its own badge**, `↓ <tokens>
+<rate> t/s`. It rides the reasoning block's header, the streaming message's
+prose (beside its caret), the tool card's header and the command card's summary
+— never the turn header and never a folded group, which are exactly where a
+long run's reader is not looking. Each badge counts the characters of the block
+it sits on (`chars / 4`, the same ratio `kc-core` budgets with; the tooltip says
+so and names what it counted: prose, reasoning or a call's output), because the
+provider's own `usage` block only arrives once the call is over. The rate is
+averaged over the last ~3 s of *growth*: when a block stops growing its badge
+loses the rate and keeps the count, so a 40 s `cargo test` shows `↓ 12.4k` with
+no invented speed. A block's badge is mounted only while that block works, so
+none of them can outlive the stream they describe. The **Completed** chip still
+uses the turn-wide rule — a turn whose prose finished but whose call is still
+running is **Working**, not **Completed**.
 
 **Usage / context pill.** The composer shows the provider-reported newest prompt
 (`usage.input_tokens`) over the selected model's declared `context_window`, with
@@ -596,7 +701,7 @@ a slot with no contributions draws nothing at all, not an empty row.
 | Keys | Action |
 | --- | --- |
 | `Ctrl/Cmd+K` | command palette |
-| `Ctrl/Cmd+N` | new session |
+| `Ctrl/Cmd+N` | new conversation (a draft until its first message) |
 | `Ctrl/Cmd+B` | collapse/restore the task rail; collapsed desktop keeps project peeking |
 | `Ctrl/Cmd+J` | open/close Workbench Context (Now / Usage / Access), outside the control plane |
 | `Ctrl/Cmd+Shift+T` | open or close the Theme studio |
@@ -710,6 +815,19 @@ then follows one SSE stream (`/api/events`) and reduces events into the store
 (`src/state/eventReducer.ts`). Session events do not use a general WebSocket;
 the only WebSocket is the terminal's attach socket. Polling is the 20 s health
 check plus the explicitly configured plugin-panel refresh intervals.
+
+**One stream serves every tab of the browser**, not one per tab: the first tab
+takes a Web Lock (`karucode.event-stream`), opens `/api/events`, and relays
+every frame - events, connection status, gaps and resync requests - to its
+siblings over the `karucode.events` BroadcastChannel
+(`src/api/sharedStream.ts`). That is what leaves the browser's
+six-connections-per-origin budget for ordinary requests: with a stream per tab,
+six open tabs held the whole pool and the seventh could not boot (`Could not
+reach karucode - the server did not answer within 30s` on `/api/health`) while
+the server was answering in 1.6 ms. When the leading tab closes or is discarded
+its lock is released and the next waiting tab opens the stream. A browser
+without Web Locks or `BroadcastChannel` - and the test environment - falls back
+to a stream per tab.
 
 The stream watches itself so live updates never need a page reload: 45 s without
 a byte (keepalives included) means the connection is dead and it reconnects with

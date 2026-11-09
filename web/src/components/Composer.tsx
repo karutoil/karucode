@@ -2,6 +2,7 @@ import type { JSX } from 'preact';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { Activity } from '../state/selectors';
 import * as store from '../state/store';
+import * as actions from '../state/actions';
 import * as api from '../api/endpoints';
 import { toErrorMessage } from '../api/client';
 import type { QueuedAttachment, QueuedKind, QueuedMessage } from '../api/types';
@@ -378,10 +379,29 @@ export function Composer({
   // One record per project/session: a different session in the same project must
   // not inherit a draft, just as the same session must not follow a later project.
   // Async upload/send continuations retain this record, not the next visible one.
+  //
+  // An unsent draft has no session id, so it is keyed by the draft's own nonce:
+  // "New session" twice must be two empty boxes, and a fresh draft must not
+  // inherit the text of the one that was just sent.
   const sessionId = store.currentSessionId.value;
+  const draftId = store.draftSession.value?.id ?? null;
   const projectId = store.currentProjectId.value;
-  const scopeKey = JSON.stringify([projectId, sessionId]);
+  const scopeKey = JSON.stringify([projectId, sessionId, draftId]);
   const forms = useRef(new Map<string, ScopedComposerForm>());
+  // A draft that becomes a real session (its first send, or a binary attachment
+  // that had to create it) is the same conversation under a new key, so the
+  // half-written message and its chips move with it. `store.draftToSession` names
+  // exactly that transition; any other key change - opening another session,
+  // switching project - is a different conversation and starts clean.
+  const carry = store.draftToSession.value;
+  if (carry !== null && carry.sessionId === sessionId) {
+    const from = JSON.stringify([projectId, null, carry.draftId]);
+    const carried = forms.current.get(from);
+    if (carried) {
+      forms.current.set(scopeKey, carried);
+      forms.current.delete(from);
+    }
+  }
   let scopedForm = forms.current.get(scopeKey);
   if (!scopedForm) {
     scopedForm = {
@@ -436,6 +456,14 @@ export function Composer({
       if (form.render === render) form.render = undefined;
     };
   }, [form]);
+
+  // The carry above has been applied, so forget it: a later navigation must not
+  // replay it. Clearing it in an effect rather than during render keeps the write
+  // out of the render that reads it (that is a render loop waiting to happen).
+  useEffect(() => {
+    const pending = store.draftToSession.value;
+    if (pending !== null && pending.sessionId === sessionId) store.draftToSession.value = null;
+  }, [sessionId, carry]);
 
   // `store.composerDraft` is how another surface (the empty state's quick
   // prompts) hands text to the composer; it is consumed once and cleared.
@@ -611,8 +639,15 @@ export function Composer({
     try {
       // The ids are captured before classification, file reads and the upload.
       // Reading them after an await can upload A's file into B's session.
+      //
+      // An unsent draft has no id yet, and an uploaded file lives under the
+      // session's own directory (`POST /api/workspace/upload?session=`), so the
+      // conversation is created here. Attaching a real file is deliberate work,
+      // and a chip that cannot be sent would block the composer.
+      const target = sessionId ?? (await actions.materializeDraftSession());
+      if (!target) throw new Error('Open a session before attaching files.');
       const result = await upload(file, {
-        session: sessionId,
+        session: target,
         project: projectId,
       });
       updateAttachment(attachment.id, { status: 'ready', path: result.path });

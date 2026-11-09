@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { ChatView, projectMentionLoader } from './ChatView';
 import type { ChatItem } from '../state/chat';
+import * as actions from '../state/actions';
 import * as store from '../state/store';
 import * as terminalState from '../state/terminals';
 import { configFixture, resetAppState } from '../test/fixtures';
@@ -496,6 +497,36 @@ describe('ChatView workspace tabs', () => {
     expect(screen.getByRole('heading', { name: 'What are we building?' })).not.toBeNull();
     expect(screen.getByText(/Start with an idea or a task/)).not.toBeNull();
     expect(container.querySelectorAll('.quick-prompt')).toHaveLength(3);
+  });
+
+  it('treats an unsent draft as the open conversation', () => {
+    // "New session" writes nothing until the first message, so the draft has no
+    // session id. It must still render as the open conversation - the header names
+    // it, the starter prompts fill the box - and not as "nothing is open".
+    store.currentSessionId.value = null;
+    store.config.value = configFixture;
+    store.health.value = {
+      status: 'ok',
+      version: '0.1.0',
+      uptime_secs: 12,
+      workspace: '/home/me/project',
+      projects: [],
+      auth_required: false,
+      provider_configured: true,
+      db: 'ok',
+    };
+    actions.startDraftSession();
+
+    const { container } = render(<ChatView />);
+    expect(container.querySelector('.empty-state')).not.toBeNull();
+    expect(screen.getByRole('heading', { name: 'New session' })).not.toBeNull();
+
+    const box = screen.getByLabelText('Message karucode') as HTMLTextAreaElement;
+    expect(box.disabled).toBe(false);
+    expect(box.placeholder).toBe('Ask karucode anything, or describe a change...');
+
+    fireEvent.click(screen.getByRole('button', { name: /Explore the codebase/ }));
+    expect(box.value).toBe('Explore this codebase and suggest the highest-impact improvements.');
   });
 
   it('renders the project / session breadcrumb and the activity chip', () => {

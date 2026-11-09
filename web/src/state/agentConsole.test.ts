@@ -404,6 +404,18 @@ describe('agent registry', () => {
     );
     expect(merged.map((entry) => entry.id)).toEqual(['a_live', 'a_server']);
   });
+
+  it('does not let a refreshed row lower an iteration count this page watched advance', () => {
+    // The server row is written between iterations, so a list read that races a
+    // progress frame carries an older count. Replacing the row wholesale made
+    // the number fall back (to `0` for a run that had only just started).
+    const merged = mergeAgentList(
+      [{ ...agent('a_live', NOW), iterations: 9 }],
+      [{ ...agent('a_live', NOW), iterations: 4 }],
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.iterations).toBe(9);
+  });
 });
 
 describe('stored agent transcripts', () => {
@@ -437,6 +449,29 @@ describe('stored agent transcripts', () => {
     );
     expect(activity.items).toHaveLength(1);
     expect(activity.items[0]?.kind === 'message' ? activity.items[0].content : '').toBe('mine');
+  });
+
+  it('restores a stored thought so a reloaded transcript still shows it', () => {
+    // A subagent's reasoning is persisted on its assistant row; opening the agent
+    // after the fact (or reloading) must not turn the thought into prose-free
+    // nothing.
+    const activity = activityFromMessages(
+      [
+        message({ id: 1, role: 'user', content: 'review the diff' }),
+        message({
+          id: 2,
+          role: 'assistant',
+          content: 'looks fine',
+          reasoning_content: 'Read the test names before judging the diff.',
+        }),
+      ],
+      'a_child',
+    );
+    const answer = activity.items.find((item) => item.kind === 'message' && item.role === 'assistant');
+    expect(answer?.kind === 'message' ? answer.reasoning : '').toBe(
+      'Read the test names before judging the diff.',
+    );
+    expect(answer?.kind === 'message' ? answer.content : '').toBe('looks fine');
   });
 
   it('merges stored history with live frames without duplicating a call', () => {

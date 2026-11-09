@@ -332,6 +332,7 @@ export function WorkspaceTab(): JSX.Element {
             setLastOpened(path);
             actions.openFileViewer(path);
           }}
+          onOpenFileInTab={actions.openFileInTab}
         />
       ) : null}
 

@@ -6,6 +6,7 @@ import { imageDataUrl, imageLabel } from '../lib/images';
 import type { ToolItem } from '../state/chat';
 import { toolStatusLabel } from '../state/selectors';
 import { Dialog } from './Dialog';
+import { TpsBadge } from './TpsBadge';
 import {
   AlertIcon,
   BoltIcon,
@@ -226,6 +227,9 @@ export function ToolCard({ item, defaultOpen = false, variant = 'card' }: ToolCa
           {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
           <span class="tool-row-meta">
             {duration ? <span class="tool-row-duration">{duration}</span> : null}
+            {/* The call's own output is the only text it produces while it
+                runs, so that is what its throughput measures. */}
+            <TpsBadge chars={item.output.length} working={item.status === 'running'} source="result" />
             <span class={`tool-row-status tool-success-${item.status}`}>
               <StatusGlyph status={item.status} />
               {toolStatusLabel(item.status)}
@@ -272,6 +276,10 @@ export function ToolCard({ item, defaultOpen = false, variant = 'card' }: ToolCa
           {summary !== '' ? <span class="tool-args">{summary}</span> : null}
         </span>
         {item.truncated ? <span class="badge badge-warn">truncated</span> : null}
+        {/* Live output throughput for the call itself: a tool's result is the
+            text it produces, so that is what the badge counts while it runs.
+            It goes the moment the call settles, with the running state. */}
+        <TpsBadge chars={item.output.length} working={item.status === 'running'} source="result" />
         <span class={`tool-success tool-success-${item.status}`}>
           <StatusGlyph status={item.status} />
           {toolStatusLabel(item.status)}

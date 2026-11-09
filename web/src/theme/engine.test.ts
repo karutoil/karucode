@@ -26,6 +26,7 @@ import {
   setThemeMode,
   setThinking,
   setToolStyle,
+  setWorking,
   themeContrast,
   themeLibrary,
   updateColors,
@@ -156,18 +157,22 @@ describe('editing a draft', () => {
     initTheme();
     expect(root().dataset.toolStyle).toBe('rows');
     expect(root().dataset.grouping).toBe('turns');
+    expect(root().dataset.working).toBe('open');
     expect(root().dataset.thinking).toBe('collapsed');
 
     setToolStyle('cards');
     setGrouping('none');
+    setWorking('folded');
     setThinking('preview');
 
     expect(root().dataset.toolStyle).toBe('cards');
     expect(root().dataset.grouping).toBe('none');
+    expect(root().dataset.working).toBe('folded');
     expect(root().dataset.thinking).toBe('preview');
     expect(persisted()?.draft).toMatchObject({
       toolStyle: 'cards',
       grouping: 'none',
+      working: 'folded',
       thinking: 'preview',
     });
   });
@@ -188,6 +193,7 @@ describe('editing a draft', () => {
     expect(root().dataset.theme).toBe('forest');
     expect(root().dataset.toolStyle).toBe('rows');
     expect(root().dataset.grouping).toBe('turns');
+    expect(root().dataset.working).toBe('open');
     expect(root().dataset.thinking).toBe('collapsed');
   });
 
