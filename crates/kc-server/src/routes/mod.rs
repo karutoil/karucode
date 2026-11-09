@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod approvals;
 pub mod artifacts;
+pub mod auth;
 pub mod config;
 pub mod events;
 pub mod git;
@@ -10,6 +11,7 @@ pub mod health;
 pub mod info;
 pub mod missions;
 pub mod models;
+pub mod onboarding;
 pub mod plugins;
 pub mod projects;
 pub mod rewind;
@@ -66,6 +68,39 @@ pub fn api_router() -> Router<AppState> {
             get(config::get_config).patch(patch_config_guarded),
         )
         .route("/provider/test", post(config::provider_test))
+        // Web-UI sign-in. `status`, `login` and the passkey sign-in steps are
+        // reachable without a credential (`auth::is_public_path`); everything
+        // else in this group needs one.
+        .route("/auth/status", get(auth::status))
+        .route("/auth/login", post(auth::login))
+        .route("/auth/passkey/options", post(auth::passkey_options))
+        .route("/auth/passkey/login", post(auth::passkey_login))
+        .route("/auth/me", get(auth::me))
+        .route("/auth/logout", post(auth::logout))
+        .route(
+            "/auth/password",
+            post(auth::set_password).delete(auth::delete_password),
+        )
+        .route(
+            "/auth/passkeys",
+            get(auth::list_passkeys).post(auth::register_passkey),
+        )
+        .route("/auth/passkeys/options", post(auth::register_options))
+        .route(
+            "/auth/passkeys/:id",
+            axum::routing::patch(auth::rename_passkey).delete(auth::delete_passkey),
+        )
+        .route("/auth/sessions", get(auth::list_sessions))
+        .route(
+            "/auth/sessions/revoke-all",
+            post(auth::revoke_all_sessions),
+        )
+        .route(
+            "/auth/sessions/:id",
+            axum::routing::delete(auth::revoke_session),
+        )
+        .route("/onboarding", get(onboarding::get))
+        .route("/onboarding/complete", post(onboarding::complete))
         .route("/models/catalog", get(models::catalog))
         .route("/models/lookup", get(models::lookup))
         .route("/stats", get(config::stats))
@@ -264,6 +299,9 @@ async fn patch_config_guarded(
         ));
     }
     let patch: ConfigPatch = parse_body(&body)?;
+    // A patch that turns sign-in on with nothing to sign in with is a lockout;
+    // the credential store is only visible here, so the check is here.
+    auth::check_access_patch(&state, &patch)?;
     let presented = admin_token_from(&headers);
     let config = state.settings().snapshot();
     let security_fields = authorize_patch(&config, &patch, presented).map_err(ApiError::from)?;

@@ -7,7 +7,7 @@
 
 - **Slug:** `builtin-tools`
 - **Tags:** tools, agent, files, search, shell, git
-- **Applies to:** `tool:read_file`, `tool:list_dir`, `tool:search_files`, `tool:glob`, `tool:write_file`, `tool:edit_file`, `tool:run_command`, `tool:git_status`, `tool:git_diff`, `tool:git_log`, `tool:karucode_docs`, `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `route:POST /api/sessions/:id/rewind`, `config:[limits]`, `config:limits.max_file_read_bytes`, `config:limits.search_max_results`, `config:limits.max_tool_output_bytes`, `config:allow_temp_dir`, `env:KARUCODE_ALLOW_TEMP_DIR`, `config:[model]`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:RIPGREP_CONFIG_PATH`
+- **Applies to:** `tool:read_file`, `tool:list_dir`, `tool:search_files`, `tool:glob`, `tool:write_file`, `tool:edit_file`, `tool:run_command`, `tool:git_status`, `tool:git_diff`, `tool:git_log`, `tool:karucode_docs`, `tool:spawn_agent`, `tool:spawn_agents`, `tool:send_message`, `tool:wait_for_agents`, `tool:list_subagents`, `tool:agent_history`, `tool:pause_agents`, `tool:resume_agents`, `tool:kill_agents`, `tool:report_status`, `route:POST /api/sessions/:id/rewind`, `config:[limits]`, `config:limits.max_file_read_bytes`, `config:limits.search_max_results`, `config:limits.max_tool_output_bytes`, `config:allow_temp_dir`, `env:KARUCODE_ALLOW_TEMP_DIR`, `config:limits.parallel_tool_calls`, `env:KARUCODE_PARALLEL_TOOL_CALLS`, `config:[model]`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:RIPGREP_CONFIG_PATH`
 - **Source:** `crates/kc-tools/src/lib.rs:7`
 
 ---
@@ -127,6 +127,15 @@ result header are previewed at 512 characters (metadata still has the command).
   tracked file (or one whose parent directory was deleted). The path is checked
   lexically and through its deepest existing ancestor, so symlink escapes are
   still refused.
+* A turn's calls are **not always one at a time**. With
+  `limits.parallel_tool_calls` on (the default) a turn runs its independent
+  calls together: read-only approval-free calls, and built-in writes/edits whose
+  paths are disjoint when the approval policy would not prompt for them. Results
+  still reach the transcript in call order, so the next request is unchanged;
+  only the wall clock is. `run_command`, plugin and MCP tools, subagent spawns,
+  the `note` tool and anything that has to ask for approval always run in call
+  order. Set the key to `false` for strict one-at-a-time execution - the
+  behaviour before the switch existed.
 * `read_file` reports the file's real line count in its header even when the
   byte cap truncated the content. The cap bounds the bytes *returned* by one
   read, not the offsets that can be asked for: an `offset` past what

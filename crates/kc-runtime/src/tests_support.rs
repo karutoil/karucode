@@ -2348,9 +2348,15 @@ impl Tool for ProbeTool {
         ToolSpec {
             name: self.name.clone(),
             description: "Report how many probe calls are in flight at once.".into(),
+            // `path` is optional and unused: it is here so a test can hand the
+            // planner a path without widening the tool's own behaviour.
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": { "sleep_ms": { "type": "integer" }, "tag": { "type": "string" } }
+                "properties": {
+                    "sleep_ms": { "type": "integer" },
+                    "tag": { "type": "string" },
+                    "path": { "type": "string" }
+                }
             }),
             origin: kc_core::tool::ToolOrigin::Builtin,
         }
@@ -2382,6 +2388,102 @@ impl Tool for ProbeTool {
         tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
         ToolOutcome::ok(format!("probe:{tag}"))
+    }
+}
+
+/// A mutating call that names its target in the arguments, the way the real file
+/// tools do.
+///
+/// [`ProbeTool`] cannot stand in for one: the runtime places a mutating call by
+/// the path it names, and a mutating probe with no path is (correctly) never run
+/// beside its siblings. This one takes `path`, records how many invocations
+/// overlapped, and writes its `tag` there.
+pub(crate) struct PathProbeTool {
+    pub name: String,
+    in_flight: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+}
+
+impl PathProbeTool {
+    pub(crate) fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub(crate) fn boxed(name: &str) -> Arc<dyn Tool> {
+        Arc::new(Self::new(name))
+    }
+
+    /// The most calls this tool ever had in flight at once.
+    pub(crate) fn peak(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.peak)
+    }
+}
+
+#[async_trait]
+impl Tool for PathProbeTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "Write one workspace file, naming it in the arguments.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "sleep_ms": { "type": "integer" },
+                    "tag": { "type": "string" }
+                },
+                "required": ["path"]
+            }),
+            origin: kc_core::tool::ToolOrigin::Builtin,
+        }
+    }
+
+    fn class(&self) -> ToolClass {
+        ToolClass::Mutating
+    }
+
+    fn requires_approval(&self) -> bool {
+        false
+    }
+
+    async fn invoke(&self, request: ToolCallRequest, ctx: ToolCtx) -> ToolOutcome {
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        let path = request
+            .arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let tag = request
+            .arguments
+            .get("tag")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?")
+            .to_string();
+        let sleep_ms = request
+            .arguments
+            .get("sleep_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        // Like `write_file`: parent directories are created, so two writes into a
+        // new directory are two independent writes.
+        let target = ctx.workspace.root().join(&path);
+        if let Some(parent) = target.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return ToolOutcome::err(format!("could not create {}: {e}", parent.display()));
+            }
+        }
+        match std::fs::write(&target, &tag) {
+            Ok(()) => ToolOutcome::ok(format!("wrote {path}")),
+            Err(e) => ToolOutcome::err(format!("could not write {path}: {e}")),
+        }
     }
 }
 

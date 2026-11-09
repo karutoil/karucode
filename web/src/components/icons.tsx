@@ -359,6 +359,16 @@ export function LockIcon(props: IconProps): JSX.Element {
   );
 }
 
+/** A key, for passkeys and the sign-in screen. */
+export function KeyIcon(props: IconProps): JSX.Element {
+  return (
+    <svg {...svgProps(props)}>
+      <circle cx="7.5" cy="15.5" r="3.5" />
+      <path d="m10 13 9-9 2 2-3 3 2 2-2.5 2.5-2-2-2 2" />
+    </svg>
+  );
+}
+
 /** The mock's `#i-paperclip`. */
 export function PaperclipIcon(props: IconProps): JSX.Element {
   return (

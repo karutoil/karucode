@@ -10,6 +10,63 @@ under **Changed**.
 
 ### Added
 
+- **A first-run setup wizard, and a real sign-in screen instead of a pasted
+  token.** A fresh install now opens six steps - welcome, model provider (base
+  URL, key, model, with a live **Test connection**), appearance (theme, density,
+  tool-call style as rows or cards, reasoning visibility), the default approval
+  mode, access (password or passkey, public address, tunnel and proxy list) and a
+  summary - each writing through the API that already owns that setting. It runs
+  once: **Skip** records the same completion marker as finishing
+  (`GET /api/onboarding`, `POST /api/onboarding/complete`).
+- **Web-UI sign-in with a password or a passkey.** `[access] enabled = true` puts
+  a sign-in screen in front of the app and exchanges a credential for an
+  `HttpOnly` session cookie, so the browser no longer needs a bearer token pasted
+  into `localStorage`. The password is Argon2id (only the hash is stored, in the
+  SQLite settings table - never in `config.toml` or `GET /api/config`); a session
+  cookie is 32 random bytes of which only the SHA-256 is persisted; eight wrong
+  attempts from one address in 15 minutes lock that address out for 5. Passkeys
+  are WebAuthn **ES256** with the full ceremony checked (single-use challenge,
+  origin, rp id hash, user-present, non-decreasing counter) and attestation
+  deliberately not. Creating the first credential turns sign-in on and signs that
+  browser in, so setting a password cannot lock you out; removing the last
+  credential turns it off; `[access] enabled` with no credential is a `400`.
+  Settings → **Access** manages all of it: the switch, the password
+  (set/change/remove), the passkey list, the signed-in browsers (sign one out, or
+  everywhere), and the address/tunnel policy.
+- **`[access]`: the address this server answers to, and which proxy may speak for
+  a client.** `public_url` is added to the `Host` allowlist (so a tunnel's name is
+  served without `KARUCODE_ALLOWED_HOSTS`), decides `Secure` on the cookie and is
+  the origin a passkey is bound to; `tunnel = "cloudflare" | "custom" | "none"`
+  and `trusted_proxies` decide whose `X-Forwarded-For` / `-Proto` / `-Host` are
+  believed - **only the direct peer is checked**, loopback is always trusted, and
+  `cloudflare` adds Cloudflare's published ranges automatically. `session_days`
+  (30, 1..=365) bounds a sign-in. All of it is hot-swappable through
+  `PATCH /api/config`. A non-loopback bind is now allowed on a password/passkey
+  alone, provided the credential really exists.
+
+- **A switch for parallel tool calls: `limits.parallel_tool_calls` (on by
+  default).** A turn used to run every call one at a time except a batch of
+  read-only ones, which ran concurrently as long as no mutating call was anywhere
+  in the turn. Now a turn runs the calls that cannot see each other's effects at
+  the same time: the read-only, approval-free ones, and **built-in file writes and
+  edits whose paths are disjoint** when the approval policy would not prompt for
+  them (`ask_commands`, `auto`, or an `auto_approve_paths` prefix in `ask`). Two
+  writes to one path, or a read of a path the turn also writes, are not
+  independent - the whole turn goes back to strict call order, because `write_file
+  a` then `read_file a` has an order. `run_command`, plugin and MCP tools, subagent
+  spawns, the `note` tool and anything that would park a worker on a human
+  approval are never batched. Whatever overlaps, results are persisted and folded
+  in **call order**, so the transcript and the next request are byte-identical to
+  the sequential path. `parallel_tool_calls = false` (or
+  `KARUCODE_PARALLEL_TOOL_CALLS=0`) is the strict-order escape hatch and runs every
+  call on its own. It is on the settings screen ("Run independent tool calls in
+  parallel"), in `GET`/`PATCH /api/config`, and distinct from
+  `model.parallel_tool_calls`, which only asks the endpoint to let the model emit
+  several calls per turn. Five runtime tests pin it: the switch off, disjoint
+  writes overlapping, one path staying ordered (including the `./same.txt`
+  spelling), a read/write pair staying ordered, and a write that would prompt
+  keeping the turn sequential.
+
 - **"New session" no longer creates an empty session.** The rail button,
   `Ctrl/Cmd+N`, the palette row, a starter prompt and the collapsed rail's fly-out
   all open a **draft** instead: an empty conversation the client holds, with the

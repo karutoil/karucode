@@ -7,7 +7,7 @@
 
 - **Slug:** `security`
 - **Tags:** security, auth, csrf, sandbox, remote, trust
-- **Applies to:** `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_ALLOWED_HOSTS`, `header:X-Karucode-Client`, `header:Authorization`, `config:auth_token`, `config:allow_temp_dir`, `doc:docs/SECURITY.md`, `concept:approvals`, `concept:workspace containment`
+- **Applies to:** `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_ALLOWED_HOSTS`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `header:X-Karucode-Client`, `header:Authorization`, `header:Cookie`, `config:auth_token`, `config:allow_temp_dir`, `config:[access]`, `config:access.public_url`, `config:access.tunnel`, `config:access.trusted_proxies`, `doc:docs/SECURITY.md`, `concept:approvals`, `concept:workspace containment`, `concept:sign-in`
 - **Source:** `crates/kc-server/src/app.rs:16`
 
 ---
@@ -36,13 +36,28 @@ the whole security story on a laptop.
   A missing or wrong token for a non-`/api` path therefore never yields a
   `401`: it yields the shell. The fallback can only ever serve the frontend,
   so nothing else is reachable without the token.
+* **Web-UI sign-in** - a password or a passkey (`[access] enabled = true`)
+  exchanges a credential for an `HttpOnly` session cookie, which the app then
+  sends on its own; the bearer token keeps working beside it. Only three paths
+  are public while this is on - `/api/auth/status`, `/api/auth/login` and the
+  two passkey sign-in steps - because a sign-in screen that needs a sign-in
+  cannot exist. `[access] enabled` with no credential is **refused**, and the
+  same rule gates a non-loopback bind, so the two ways to lock yourself out are
+  both blocked at the door. See the `web-auth` topic for the settings, the
+  lockout and what a passkey ceremony actually verifies.
 * **Transport surface** - the API is same-origin only. No `Access-Control-*`
   header is ever sent.
 * **CSRF** - `POST`/`PATCH`/`PUT`/`DELETE` require
   `X-Karucode-Client: web`; a present `Origin` must match `Host`.
 * **DNS rebinding** - on a loopback bind without a token, only `Host:
-  127.0.0.1`, `localhost`, `[::1]` (any port) and entries in
-  `KARUCODE_ALLOWED_HOSTS` are served. Everything else gets `403`.
+  127.0.0.1`, `localhost`, `[::1]` (any port), entries in
+  `KARUCODE_ALLOWED_HOSTS` and the configured `[access] public_url` are
+  served. Everything else gets `403`. The guard is **not** skipped for a
+  password deployment: a cookie, unlike a bearer header, is sent automatically
+  by a browser, so a page whose DNS record is re-pointed at this machine would
+  otherwise carry the session with it. Behind a proxy that rewrites `Host`, an
+  `X-Forwarded-Host` from a **trusted** peer is accepted as a fallback - and it
+  is still checked against the same allowlist, so it cannot widen the guard.
 * **Path confinement** - read/write/edit/list/search resolve through the project
   workspace, plus the system temporary directory (see below); `..`,
   outside-absolute paths and symlink escapes are refused.

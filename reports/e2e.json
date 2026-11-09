@@ -23,6 +23,8 @@
     "approved command runs and streams output",
     "denied command is not executed",
     "parallel tool calls in one turn both execute",
+    "two file writes in one turn both land, in call order",
+    "parallel write results are folded in call order",
     "a tool call written as DSML text is executed",
     "DSML markup never reaches the transcript",
     "unknown tool fails visibly, run continues",
@@ -53,7 +55,7 @@
   ],
   "failed": [],
   "skipped": [],
-  "events": 445,
-  "server_log": "/tmp/kc-e2e-d0i7tm__/server.log",
-  "mock_requests": 47
+  "events": 467,
+  "server_log": "/tmp/kc-e2e-ac5uhb2n/server.log",
+  "mock_requests": 40
 }

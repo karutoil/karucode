@@ -31,6 +31,7 @@ import type {
   ThemeWorking,
 } from '../theme';
 import { SettingsAdvanced } from './SettingsAdvanced';
+import { AccessSettings } from './AccessSettings';
 import { Dialog } from './Dialog';
 import {
   NotificationsDeliverySection,
@@ -49,8 +50,15 @@ const DENSITY_LABELS: Record<ThemeDensity, string> = {
   spacious: 'Spacious',
 };
 
-/** Every limit the sheet edits, as a number in the form. */
-type NumericLimitKey = keyof Limits;
+/**
+ * Every limit the sheet edits, as a number in the form.
+ *
+ * Only the numeric ones: `parallel_tool_calls` is a switch and is edited as a
+ * toggle, so it must not be a key of this record.
+ */
+type NumericLimitKey = {
+  [K in keyof Limits]: Limits[K] extends number ? K : never;
+}[keyof Limits];
 
 interface FormState {
   /** Whether a temperature is sent at all; when off, the field is not sent. */
@@ -60,6 +68,8 @@ interface FormState {
   topP: string;
   requestTimeout: string;
   parallelToolCalls: boolean;
+  /** Run a turn's independent tool calls at the same time (limits). */
+  parallelExecution: boolean;
   /** Install-wide default for image input; a per-model `vision` wins. */
   supportsImages: boolean;
   approvalMode: ApprovalMode;
@@ -152,6 +162,7 @@ function formFromConfig(config: Config): FormState {
     topP: config.model.top_p === null ? '' : String(config.model.top_p),
     requestTimeout: String(config.model.request_timeout_secs),
     parallelToolCalls: config.model.parallel_tool_calls,
+    parallelExecution: config.limits.parallel_tool_calls,
     supportsImages: config.model.supports_images,
     approvalMode: config.approvals.mode,
     allowCommands: [...config.approvals.allow_commands],
@@ -287,6 +298,8 @@ function buildPatch(form: FormState): ConfigPatch {
   for (const field of LIMIT_FIELDS) {
     limits[field.key] = Number(form.limits[field.key]);
   }
+  // A switch, not a bound: no validity rule, so it is set directly.
+  limits.parallel_tool_calls = form.parallelExecution;
   return {
     // Connection details live on provider profiles now; only the sampling
     // tunables (which are install-wide) stay in the flat model section.
@@ -1913,12 +1926,19 @@ function ProvidersSection({ disabled }: { disabled: boolean }): JSX.Element | nu
     </section>
   );
 }
-export type SettingsTab = 'general' | 'models' | 'agent' | 'notifications' | 'plugins';
+export type SettingsTab =
+  | 'general'
+  | 'models'
+  | 'agent'
+  | 'access'
+  | 'notifications'
+  | 'plugins';
 
 const SETTINGS_TABS: readonly TabItem<SettingsTab>[] = [
   { id: 'general', label: 'General' },
   { id: 'models', label: 'Models' },
   { id: 'agent', label: 'Agent' },
+  { id: 'access', label: 'Access' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'plugins', label: 'Plugins & MCP' },
 ];
@@ -2878,8 +2898,24 @@ export function SettingsSheet(): JSX.Element | null {
                         </Field>
                       ))}
                     </div>
+                    <div class="field field-toggle">
+                      <Toggle
+                        label="Run independent tool calls in parallel"
+                        description="A turn's reads, and its file writes to different paths, run at the same time instead of one after another. Results still land in the transcript in call order. Shell commands, plugin and MCP tools, and anything that has to ask for approval always run in order. Off runs every call one at a time."
+                        checked={form.parallelExecution}
+                        disabled={disabled}
+                        onChange={(checked) => update({ parallelExecution: checked })}
+                      />
+                    </div>
                   </section>
                 </SettingsAdvanced>
+              </TabPanel>
+
+              <TabPanel idPrefix="settings" id="access" active={tab === 'access'} persist>
+                {/* Self-contained: it loads its own state from /api/auth and
+                    patches `access` itself, so it never touches this sheet's
+                    form or its Save button. */}
+                <AccessSettings />
               </TabPanel>
 
               <TabPanel

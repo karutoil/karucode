@@ -15,7 +15,7 @@
 // @kc-title: Change karucode's configuration
 // @kc-summary: The four config layers, which settings apply live, and how secrets and invalid values are handled.
 // @kc-tags: config, settings, configuration, toml, env
-// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:notifications.enabled, config:notifications.min_run_secs, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings
+// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_PARALLEL_TOOL_CALLS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:limits.parallel_tool_calls, config:notifications.enabled, config:notifications.min_run_secs, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings
 //
 // # Where the settings come from
 //
@@ -80,6 +80,42 @@
 // `403 permission_denied`, and the change is not applied. The comparison is
 // constant-time, and the token is never logged or echoed. Every authorised
 // security change is logged at `info` with the field *names* only.
+//
+// `[access]` is on that list too: switching sign-in off, or repointing the
+// public URL a passkey is bound to, is as sensitive as disabling approvals.
+//
+// # Web-UI access
+//
+// `[access]` is how people reach the browser UI: a password and/or passkey, the
+// address it answers to, and which proxy may speak for a client. The *credentials*
+// are not configuration - the password hash and the passkeys live in the
+// SQLite `settings` table and are managed from Settings -> Access or the
+// onboarding wizard - so this section only holds the policy:
+//
+// ```toml
+// [access]
+// enabled = true                               # require sign-in; default false
+// public_url = "https://karucode.example.com"  # added to the Host allowlist
+// session_days = 30                            # 1..=365, how long a browser stays in
+// tunnel = "cloudflare"                        # none | cloudflare | custom
+// trusted_proxies = ["10.0.0.0/8", "172.17.0.1"]
+// ```
+//
+// Environment: `KARUCODE_ACCESS_ENABLED`, `KARUCODE_PUBLIC_URL`,
+// `KARUCODE_SESSION_DAYS`, `KARUCODE_TUNNEL`, `KARUCODE_TRUSTED_PROXIES`
+// (comma-separated). Changing any of them through `PATCH /api/config` applies on
+// the next request - no restart. There is deliberately **no environment spelling
+// for the password**: a hash in `KARUCODE_*` ends up in a unit file and in
+// `systemctl show`.
+//
+// `enabled = true` with no credential is refused with `400`, because that edit
+// would leave a login screen nobody can pass. `tunnel = "none"` ignores
+// `X-Forwarded-*` entirely; `cloudflare` trusts Cloudflare's published proxy
+// ranges as well as `trusted_proxies`; `custom` trusts only the list. Only the
+// direct peer of a request is compared against it.
+//
+// The full procedure, the lockout and what a passkey ceremony verifies are in
+// the `web-auth` topic.
 //
 // With no admin token configured the gate is off and any API client can change
 // those fields; the server logs a warning at startup when that is the case.
@@ -185,7 +221,7 @@
 // `subagents.timeout_secs`.
 //
 // Environment: `KARUCODE_MAX_ITERATIONS`, `KARUCODE_MAX_RUN_SECS`,
-// `KARUCODE_CONTEXT_MAX_CHARS`.
+// `KARUCODE_CONTEXT_MAX_CHARS`, `KARUCODE_PARALLEL_TOOL_CALLS`.
 //
 // ```toml
 // [subagents]
@@ -233,6 +269,38 @@
 // is a runaway-batch guard, not a work budget - calls past it are skipped with a
 // placeholder result. How compaction interacts with provider prompt caching is
 // documented under `prompt-cache`.
+//
+// # Running tool calls in parallel
+//
+// ```toml
+// [limits]
+// parallel_tool_calls = true     # KARUCODE_PARALLEL_TOOL_CALLS=1, on by default
+// ```
+//
+// A turn that asks for several tool calls runs them **at the same time** when
+// they cannot see each other's effects: read-only approval-free calls (reads,
+// listings, searches, git inspections), and built-in file writes and edits whose
+// paths are disjoint when the approval policy would not ask about them. Results
+// are persisted and folded into the transcript in **call order**, so the
+// transcript and the next request are exactly what the sequential path would
+// have produced - only the wall clock changes.
+//
+// `false` is the strict-order escape hatch: every call runs on its own, in order,
+// exactly as karucode did before this switch existed. Reach for it when a turn's
+// writes must be observed in sequence, on a machine where a burst of concurrent
+// tool processes is unwelcome, or when a provider or plugin misbehaves under
+// concurrent calls.
+//
+// This key is **not** `model.parallel_tool_calls`: that one asks the endpoint to
+// let the model emit several calls in one turn, and it lives on the Models tab.
+// This one decides how the calls the model did emit are run. Anything the
+// runtime cannot prove independent of its siblings always runs in call order -
+// `run_command` (a shell can touch anything), plugin and MCP tools, subagent
+// spawns, the `note` tool, and every call that would park a worker on a human
+// approval. The switch is read when a run starts, so a change applies to the
+// next run; it is also on the settings screen ("Run independent tool calls in
+// parallel") and in `PATCH /api/config` as
+// `{"limits":{"parallel_tool_calls":false}}`.
 //
 // # Images (vision models)
 //
@@ -325,9 +393,10 @@
 use crate::error::ApiError;
 use async_trait::async_trait;
 use kc_core::config::{
-    ApprovalMode, ApprovalPolicy, Config, Limits, ModelConfig, ModelEntry, ProviderProfile,
-    SessionModelSelection, SubagentConfig, TerminalConfig, TitlesConfig, MAX_TERMINALS_HINT,
-    MAX_TERMINAL_SCROLLBACK, MAX_TITLE_CHARS_HINT, MIN_TERMINAL_SCROLLBACK,
+    AccessConfig, ApprovalMode, ApprovalPolicy, Config, Limits, ModelConfig, ModelEntry,
+    ProviderProfile, SessionModelSelection, SubagentConfig, TerminalConfig, TitlesConfig,
+    TunnelKind, MAX_TERMINALS_HINT, MAX_TERMINAL_SCROLLBACK, MAX_TITLE_CHARS_HINT,
+    MIN_TERMINAL_SCROLLBACK,
 };
 use kc_core::error::{Error, Result};
 use kc_core::settings::Settings;
@@ -368,6 +437,10 @@ mod keys {
     pub const LIMITS_SEARCH_MAX_RESULTS: &str = "limits.search_max_results";
     pub const LIMITS_CONTEXT_MAX_CHARS: &str = "limits.context_max_chars";
     pub const LIMITS_MAX_TOOL_CALLS_PER_TURN: &str = "limits.max_tool_calls_per_turn";
+    /// Whether a turn's independent calls run at the same time. Distinct from
+    /// [`MODEL_PARALLEL_TOOL_CALLS`], which asks the endpoint to let the model
+    /// emit several calls in one turn.
+    pub const LIMITS_PARALLEL_TOOL_CALLS: &str = "limits.parallel_tool_calls";
 
     pub const APPROVALS_MODE: &str = "approvals.mode";
     pub const APPROVALS_ALLOW_COMMANDS: &str = "approvals.allow_commands";
@@ -397,6 +470,13 @@ mod keys {
     pub const NOTIFICATIONS_PLUGIN: &str = "notifications.plugin";
     pub const NOTIFICATIONS_MIN_RUN_SECS: &str = "notifications.min_run_secs";
     pub const NOTIFICATIONS_SAY_BODY: &str = "notifications.say_body";
+
+    pub const ACCESS_ENABLED: &str = "access.enabled";
+    pub const ACCESS_PUBLIC_URL: &str = "access.public_url";
+    pub const ACCESS_SESSION_DAYS: &str = "access.session_days";
+    pub const ACCESS_TUNNEL: &str = "access.tunnel";
+    /// JSON array of CIDR/IP strings.
+    pub const ACCESS_TRUSTED_PROXIES: &str = "access.trusted_proxies";
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +529,9 @@ pub struct LimitsPatch {
     pub search_max_results: Option<usize>,
     pub context_max_chars: Option<usize>,
     pub max_tool_calls_per_turn: Option<usize>,
+    /// Run a turn's independent calls at the same time. Only meaningful for a
+    /// session run's execution order; a boolean has no invalid value.
+    pub parallel_tool_calls: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -542,6 +625,22 @@ pub struct ActivePatch {
     pub model: Option<String>,
 }
 
+/// `[access]` section of `PATCH /api/config`.
+///
+/// `public_url` is `Option<Option<String>>`-shaped in spirit: an empty string
+/// clears it (that is the documented "same origin as the browser" spelling), and
+/// omitting the field leaves it alone. One `Option<String>` carries both because
+/// `None` already means "unchanged" and `Some("")` unambiguously means "clear".
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessPatch {
+    pub enabled: Option<bool>,
+    pub public_url: Option<String>,
+    pub session_days: Option<u64>,
+    pub tunnel: Option<String>,
+    pub trusted_proxies: Option<Vec<String>>,
+}
+
 /// Body of `PATCH /api/config`. Every section is optional; unknown fields are
 /// rejected so a typo in the browser cannot silently do nothing.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -555,6 +654,7 @@ pub struct ConfigPatch {
     pub subagents: Option<SubagentsPatch>,
     pub titles: Option<TitlesPatch>,
     pub notifications: Option<NotificationsPatch>,
+    pub access: Option<AccessPatch>,
 }
 
 impl ConfigPatch {
@@ -596,6 +696,12 @@ impl ConfigPatch {
             if active.model.is_some() {
                 fields.push("active_model");
             }
+        }
+        // `[access]` decides who can reach the UI at all: switching sign-in off -
+        // or repointing the public URL a passkey is bound to - is as sensitive as
+        // disabling approvals.
+        if self.access.is_some() {
+            fields.push("access");
         }
         fields
     }
@@ -762,6 +868,11 @@ impl SettingsHandle {
         self.read().auth_token.clone()
     }
 
+    /// A copy of the `[access]` policy. Cheap: a few strings, no provider list.
+    pub fn access(&self) -> AccessConfig {
+        self.read().access.clone()
+    }
+
     /// Every secret that must not appear in an outgoing error message.
     pub fn secrets(&self) -> Vec<String> {
         let cfg = self.read();
@@ -898,6 +1009,22 @@ impl SettingsHandle {
                 "idle_timeout_secs": cfg.terminals.idle_timeout_secs,
             },
             "settings_locked": cfg.lock_settings,
+            // The web-UI access policy. Credentials live in the `web_auth`
+            // section of `GET /api/auth/status`, never here: this payload is the
+            // ordinary config document, and a password hash has no business in it.
+            "access": {
+                "enabled": cfg.access.enabled,
+                "public_url": cfg.access.public_url,
+                "session_days": cfg.access.session_days,
+                "tunnel": cfg.access.tunnel.as_str(),
+                "trusted_proxies": cfg.access.trusted_proxies,
+                // Derived, so the UI can explain what the tunnel setting implies
+                // without re-implementing the rule.
+                "trusts_forwarded_headers": cfg.access.trusts_forwarded_headers(),
+                "cloudflare_ranges": cfg.access.tunnel
+                    == kc_core::config::TunnelKind::Cloudflare,
+                "public_authority": cfg.access.public_authority(),
+            },
             "version": crate::VERSION,
         })
     }
@@ -1342,6 +1469,9 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         if let Some(v) = limits.max_tool_calls_per_turn {
             config.limits.max_tool_calls_per_turn = v;
         }
+        if let Some(v) = limits.parallel_tool_calls {
+            config.limits.parallel_tool_calls = v;
+        }
     }
 
     if let Some(approvals) = &patch.approvals {
@@ -1440,6 +1570,30 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         }
     }
 
+    if let Some(access) = &patch.access {
+        let target = &mut config.access;
+        if let Some(v) = access.enabled {
+            target.enabled = v;
+        }
+        if let Some(url) = &access.public_url {
+            let trimmed = url.trim().trim_end_matches('/');
+            target.public_url = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        }
+        if let Some(days) = access.session_days {
+            target.session_days = days;
+        }
+        if let Some(kind) = &access.tunnel {
+            target.tunnel = TunnelKind::parse(kind).ok_or_else(|| {
+                Error::BadRequest(format!(
+                    "access.tunnel `{kind}` is not a known tunnel: use none, cloudflare or custom"
+                ))
+            })?;
+        }
+        if let Some(proxies) = &access.trusted_proxies {
+            target.trusted_proxies = clean_list("access.trusted_proxies", proxies)?;
+        }
+    }
+
     // Repair a missing selection (first profile added, active profile deleted)
     // and mirror the active connection into the flat section. An explicit but
     // wrong selection is an error, not something to silently rewrite.
@@ -1495,7 +1649,19 @@ pub fn validate_settings(config: &Config) -> Result<()> {
     validate_subagents(&config.subagents)?;
     validate_titles(&config.titles)?;
     validate_notifications(&config.notifications)?;
-    validate_terminals(&config.terminals)
+    validate_terminals(&config.terminals)?;
+    validate_access(&config.access)
+}
+
+/// Validate `[access]`.
+///
+/// The URL, the session lifetime and every proxy entry are checked here rather
+/// than only at request time, so a mistyped CIDR is a 400 in the settings screen
+/// instead of a trust rule that silently matches nothing.
+fn validate_access(access: &AccessConfig) -> Result<()> {
+    access
+        .validate()
+        .map_err(|error| Error::BadRequest(error.to_string()))
 }
 
 /// Validate `[notifications]`.
@@ -2249,6 +2415,10 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
         keys::LIMITS_MAX_TOOL_CALLS_PER_TURN,
         limits.max_tool_calls_per_turn.to_string(),
     );
+    rows.insert(
+        keys::LIMITS_PARALLEL_TOOL_CALLS,
+        limits.parallel_tool_calls.to_string(),
+    );
 
     let approvals = &config.approvals;
     rows.insert(keys::APPROVALS_MODE, approvals.mode.as_str().to_string());
@@ -2326,6 +2496,19 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
     rows.insert(
         keys::NOTIFICATIONS_SAY_BODY,
         notifications.say_body.to_string(),
+    );
+
+    let access = &config.access;
+    rows.insert(keys::ACCESS_ENABLED, access.enabled.to_string());
+    rows.insert(
+        keys::ACCESS_PUBLIC_URL,
+        access.public_url.clone().unwrap_or_default(),
+    );
+    rows.insert(keys::ACCESS_SESSION_DAYS, access.session_days.to_string());
+    rows.insert(keys::ACCESS_TUNNEL, access.tunnel.as_str().to_string());
+    rows.insert(
+        keys::ACCESS_TRUSTED_PROXIES,
+        serde_json::to_string(&access.trusted_proxies).unwrap_or_else(|_| "[]".into()),
     );
 
     rows
@@ -2504,6 +2687,11 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
                 config.limits.max_tool_calls_per_turn = v;
             }
         }
+        keys::LIMITS_PARALLEL_TOOL_CALLS => {
+            if let Some(v) = parse_bool(key, value) {
+                config.limits.parallel_tool_calls = v;
+            }
+        }
 
         keys::APPROVALS_MODE => match ApprovalMode::parse(value) {
             Some(mode) => config.approvals.mode = mode,
@@ -2625,6 +2813,31 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
         keys::NOTIFICATIONS_SAY_BODY => {
             if let Some(v) = parse_value(key, value) {
                 config.notifications.say_body = v;
+            }
+        }
+
+        keys::ACCESS_ENABLED => {
+            if let Some(v) = parse_value(key, value) {
+                config.access.enabled = v;
+            }
+        }
+        keys::ACCESS_PUBLIC_URL => {
+            let trimmed = value.trim().trim_end_matches('/');
+            config.access.public_url = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        }
+        keys::ACCESS_SESSION_DAYS => {
+            if let Some(v) = parse_value(key, value) {
+                config.access.session_days = v;
+            }
+        }
+        keys::ACCESS_TUNNEL => {
+            if let Some(kind) = TunnelKind::parse(value) {
+                config.access.tunnel = kind;
+            }
+        }
+        keys::ACCESS_TRUSTED_PROXIES => {
+            if let Ok(list) = serde_json::from_str::<Vec<String>>(value) {
+                config.access.trusted_proxies = list;
             }
         }
 
@@ -3006,6 +3219,50 @@ mod tests {
     #[test]
     fn default_settings_satisfy_the_bounds() {
         assert!(validate_settings(&Config::default()).is_ok());
+    }
+
+    /// The parallel-execution switch is a boolean, so it has no bounds to
+    /// validate - what it needs is to survive the trip a real change makes:
+    /// `PATCH /api/config` -> the in-memory config -> the `settings` row -> a
+    /// fresh config on the next start.
+    #[test]
+    fn the_parallel_tool_switch_is_patched_and_persisted_as_a_row() {
+        let mut cfg = Config::default();
+        assert!(
+            cfg.limits.parallel_tool_calls,
+            "parallel execution is the default"
+        );
+
+        let patch = ConfigPatch {
+            limits: Some(LimitsPatch {
+                parallel_tool_calls: Some(false),
+                ..LimitsPatch::default()
+            }),
+            ..ConfigPatch::default()
+        };
+        apply_patch(&mut cfg, &patch).expect("a boolean switch applies");
+        assert!(!cfg.limits.parallel_tool_calls);
+        assert!(validate_settings(&cfg).is_ok(), "false is a valid value");
+
+        let rows: Vec<(String, String)> = rows_for(&cfg)
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect();
+        let row = rows
+            .iter()
+            .find(|(key, _)| key == keys::LIMITS_PARALLEL_TOOL_CALLS)
+            .expect("the switch gets a row")
+            .clone();
+        assert_eq!(row.1, "false");
+
+        let mut restored = Config::default();
+        apply_rows(&mut restored, &[row]);
+        assert!(
+            !restored.limits.parallel_tool_calls,
+            "a restart must keep the switch off"
+        );
+        // ...and it is not the endpoint switch, which keeps its own default.
+        assert!(restored.model.parallel_tool_calls);
     }
 
     fn set_limit(cfg: &mut Config, field: &str, value: u64) {

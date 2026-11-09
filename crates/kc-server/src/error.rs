@@ -42,8 +42,18 @@ impl ApiError {
         Self::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
-            "authentication required: send `Authorization: Bearer <token>`",
+            "authentication required: sign in, or send `Authorization: Bearer <token>`",
         )
+    }
+
+    /// A 401 that says *why* without revealing whether a credential exists.
+    pub fn unauthorized_message(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", message)
+    }
+
+    /// `429 too_many_requests`, used for a sign-in lockout.
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, "too_many_requests", message)
     }
 
     pub fn conflict(message: impl Into<String>) -> Self {

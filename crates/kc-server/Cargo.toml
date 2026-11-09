@@ -24,11 +24,16 @@ kc-plugin-host.workspace = true
 kc-plugin-sdk.workspace = true
 kc-mcp.workspace = true
 anyhow.workspace = true
+argon2 = "0.5"
 async-trait.workspace = true
 axum.workspace = true
+base64.workspace = true
+ciborium = "0.2"
 futures-util.workspace = true
+getrandom = "0.2"
 libc.workspace = true
 mime_guess.workspace = true
+p256 = { version = "0.13", features = ["ecdsa"] }
 reqwest.workspace = true
 rust-embed = { workspace = true, optional = true }
 serde.workspace = true

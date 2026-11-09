@@ -132,6 +132,7 @@ use crate::host::HostAllowlist;
 use crate::settings::SettingsHandle;
 use crate::static_ui::WebAssets;
 use crate::terminals::TerminalRegistry;
+use crate::web_auth::WebAuth;
 use async_trait::async_trait;
 use kc_core::error::{Error, Result};
 use kc_core::hooks::Hooks;
@@ -410,6 +411,8 @@ pub struct AppStateDeps {
     /// Raw `KARUCODE_ALLOWED_HOSTS` value; `None` when unset. Parsed once here so
     /// a malformed entry cannot be re-interpreted later.
     pub allowed_hosts: Option<String>,
+    /// Web-UI credentials and sessions.
+    pub web_auth: Arc<WebAuth>,
 }
 
 pub struct AppStateInner {
@@ -442,6 +445,21 @@ pub struct AppStateInner {
     /// One scheduler supervisor per mission, shared by all state clones.
     pub(crate) mission_schedulers:
         std::sync::Mutex<HashMap<String, Arc<crate::routes::missions::SchedulerWake>>>,
+    /// Web-UI credentials and sessions (password, passkeys, cookies).
+    pub web_auth: Arc<WebAuth>,
+    /// The trusted-proxy policy, rebuilt when `[access]` changes.
+    pub proxy: RwLock<CachedProxy>,
+}
+
+/// The trusted-proxy policy plus the `[access]` fingerprint it was built from.
+///
+/// Rebuilding on every request would parse 24 CIDR blocks for each one; not
+/// rebuilding at all would make the "tunnel" setting a restart-only switch. The
+/// fingerprint is the settings that feed the policy, so an in-place change is
+/// picked up on the next request and an unchanged one costs a string compare.
+pub struct CachedProxy {
+    fingerprint: String,
+    trust: crate::proxy::ProxyTrust,
 }
 
 #[derive(Clone)]
@@ -451,6 +469,9 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(deps: AppStateDeps) -> Self {
+        let web_auth = deps.web_auth;
+        let trust = crate::proxy::ProxyTrust::from_access(&deps.settings.snapshot().access)
+            .unwrap_or_else(|_| crate::proxy::ProxyTrust::disabled());
         Self {
             inner: Arc::new(AppStateInner {
                 settings: deps.settings,
@@ -470,6 +491,11 @@ impl AppState {
                 started: Instant::now(),
                 shutdown: CancellationToken::new(),
                 mission_schedulers: std::sync::Mutex::new(HashMap::new()),
+                web_auth,
+                proxy: RwLock::new(CachedProxy {
+                    fingerprint: String::new(),
+                    trust,
+                }),
             }),
         }
     }
@@ -575,6 +601,53 @@ impl AppState {
 
     pub fn auth_token(&self) -> Option<String> {
         self.inner.settings.auth_token().filter(|t| !t.is_empty())
+    }
+
+    /// The web-UI credential store (password, passkeys, sessions).
+    pub fn web_auth(&self) -> &Arc<WebAuth> {
+        &self.inner.web_auth
+    }
+
+    /// The current `[access]` policy.
+    pub fn access(&self) -> kc_core::config::AccessConfig {
+        self.inner.settings.access()
+    }
+
+    /// Whether the web UI requires a password or passkey.
+    ///
+    /// True when `[access] enabled` is on **or** a bearer token is configured -
+    /// either way the browser has to prove something before `/api` answers. The
+    /// second half keeps a token-only deployment behaving exactly as before.
+    pub fn sign_in_required(&self) -> bool {
+        self.access().enabled || self.auth_token().is_some()
+    }
+
+    /// The trusted-proxy policy, rebuilt when the relevant settings change.
+    pub fn proxy_trust(&self) -> crate::proxy::ProxyTrust {
+        let access = self.access();
+        let fingerprint = format!(
+            "{}|{}|{}",
+            access.tunnel.as_str(),
+            access.public_url.as_deref().unwrap_or_default(),
+            access.trusted_proxies.join(",")
+        );
+        {
+            let cached = self.inner.proxy.read().unwrap_or_else(|e| e.into_inner());
+            if cached.fingerprint == fingerprint {
+                return cached.trust.clone();
+            }
+        }
+        let trust = crate::proxy::ProxyTrust::from_access(&access)
+            .unwrap_or_else(|_| crate::proxy::ProxyTrust::disabled());
+        let mut cached = self.inner.proxy.write().unwrap_or_else(|e| e.into_inner());
+        cached.fingerprint = fingerprint;
+        cached.trust = trust.clone();
+        trust
+    }
+
+    /// The configured `host[:port]` people reach this server at, if any.
+    pub fn public_authority(&self) -> Option<String> {
+        self.access().public_authority()
     }
 
     /// The parsed `Host` allowlist (loopback bind + `KARUCODE_ALLOWED_HOSTS`).

@@ -76,6 +76,17 @@ export interface RequestOptions {
   token?: string | null;
   fetchImpl?: typeof fetch;
   headers?: Record<string, string>;
+  /**
+   * Do not run the global "we got a 401, show the sign-in screen" handler.
+   *
+   * The sign-in routes need this. `GET /api/auth/status` answering 401 (an
+   * external auth proxy in front of the server, say) used to call
+   * `enterAuthState`, which asks for the status again - an unbounded loop of
+   * requests that exhausted the heap. A rejected `POST /api/auth/login` has the
+   * mirror problem: treating a wrong password as "session expired" clears the
+   * very message that explains it.
+   */
+  skipAuthHandler?: boolean;
 }
 
 function isErrorBody(value: unknown): value is ApiErrorBody {
@@ -115,6 +126,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     signal: options.signal,
     token: options.token,
     fetchImpl: options.fetchImpl,
+    skipAuthHandler: options.skipAuthHandler,
   });
 }
 
@@ -126,6 +138,8 @@ interface PerformOptions {
   signal?: AbortSignal;
   token?: string | null;
   fetchImpl?: typeof fetch;
+  /** See [`RequestOptions.skipAuthHandler`]. */
+  skipAuthHandler?: boolean;
 }
 
 /**
@@ -162,7 +176,7 @@ async function performRequest<T>(path: string, options: PerformOptions): Promise
     }
   }
 
-  if (!response.ok) throw responseError(response, parsed, path);
+  if (!response.ok) throw responseError(response, parsed, path, options.skipAuthHandler);
   return parsed as T;
 }
 
@@ -180,6 +194,7 @@ export async function apiRequestBlob(path: string, options: RequestOptions = {})
     signal: options.signal,
     token: options.token,
     fetchImpl: options.fetchImpl,
+    skipAuthHandler: options.skipAuthHandler,
   });
   if (!response.ok) {
     const text = await response.text().catch(() => '');
@@ -191,14 +206,19 @@ export async function apiRequestBlob(path: string, options: RequestOptions = {})
         // A non-JSON error body is handled by `responseError` below.
       }
     }
-    throw responseError(response, parsed, path);
+    throw responseError(response, parsed, path, options.skipAuthHandler);
   }
   return response.blob();
 }
 
 /** The documented error for a failed response, from its JSON body when there is one. */
-function responseError(response: Response, parsed: unknown, path: string): ApiError {
-  if (response.status === 401) unauthorizedHandler?.();
+function responseError(
+  response: Response,
+  parsed: unknown,
+  path: string,
+  skipAuthHandler = false,
+): ApiError {
+  if (response.status === 401 && !skipAuthHandler) unauthorizedHandler?.();
   if (isErrorBody(parsed)) {
     return new ApiError(parsed.error.message, response.status, parsed.error.code);
   }

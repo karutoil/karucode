@@ -22,9 +22,9 @@
 // @kc-title: Call the HTTP API
 // @kc-summary: Authenticate, send the CSRF header, and find the endpoint for sessions, config, approvals, files, git, plugins, MCP and the event stream.
 // @kc-tags: api, http, rest, sse, curl, endpoints
-// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:PATCH /api/projects/:id/preferences, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/control/sessions, route:POST /api/control/sessions, route:GET /api/control/overview, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:GET /api/workspace/preview-project/:project/*rest, route:POST /api/workspace/upload, route:POST /api/artifacts, route:GET /api/artifacts/:id, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, config:plugin_panels, route:GET /api/events, header:X-Karucode-Event-Epoch, event:notification, event:queued_messages, event:session_rewound, event:karucode.transport, event:connection_cap, event:stream_overflow, event:text_replaced, field:expected_digest, config:[notifications], header:X-Karucode-Client, env:KARUCODE_AUTH_TOKEN, doc:docs/API.md
+// @kc-applies-to: route:GET /api/health, route:GET /api/config, route:PATCH /api/config, route:POST /api/provider/test, route:GET /api/models/catalog, route:GET /api/models/lookup, route:GET /api/stats, route:GET /api/projects, route:POST /api/projects, route:PATCH /api/projects/:id/preferences, route:GET /api/projects/:id/favicon, route:GET /api/sessions, route:POST /api/sessions, route:GET /api/sessions/:id, route:GET /api/sessions/:id/info, route:PATCH /api/sessions/:id, route:PATCH /api/sessions/:id/model, route:POST /api/sessions/:id/messages, route:GET /api/sessions/:id/queues, route:DELETE /api/sessions/:id/queues/:queued_id, route:POST /api/sessions/:id/cancel, route:GET /api/sessions/:id/rewind, route:POST /api/sessions/:id/rewind, route:GET /api/control/sessions, route:POST /api/control/sessions, route:GET /api/control/overview, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, route:GET /api/approvals, route:POST /api/approvals/:id, route:GET /api/workspace/tree, route:GET /api/workspace/file, route:PUT /api/workspace/file, route:GET /api/workspace/raw, route:GET /api/workspace/preview/*rest, route:GET /api/workspace/preview-project/:project/*rest, route:POST /api/workspace/upload, route:POST /api/artifacts, route:GET /api/artifacts/:id, route:GET /api/git/status, route:GET /api/git/diff, route:GET /api/git/branches, route:POST /api/git/branches, route:POST /api/git/branches/delete, route:POST /api/git/checkout, route:GET /api/git/log, route:GET /api/git/commits/:sha, route:POST /api/git/stage, route:POST /api/git/unstage, route:POST /api/git/discard, route:POST /api/git/commit, route:GET /api/git/stash, route:POST /api/git/stash, route:GET /api/plugins, route:POST /api/plugins/reload, route:POST /api/plugins/:name/reload, route:POST /api/plugins/:name/enable, route:GET /api/plugins/:name/panels/:panel, route:GET /api/mcp, config:plugin_panels, route:GET /api/events, header:X-Karucode-Event-Epoch, event:notification, event:queued_messages, event:session_rewound, event:karucode.transport, event:connection_cap, event:stream_overflow, event:text_replaced, field:expected_digest, config:[notifications], header:X-Karucode-Client, header:Cookie, env:KARUCODE_AUTH_TOKEN, route:GET /api/auth/status, route:POST /api/auth/login, route:POST /api/auth/logout, route:GET /api/auth/me, route:POST /api/auth/password, route:DELETE /api/auth/password, route:GET /api/auth/passkeys, route:POST /api/auth/passkeys, route:POST /api/auth/passkeys/options, route:PATCH /api/auth/passkeys/:id, route:DELETE /api/auth/passkeys/:id, route:POST /api/auth/passkey/options, route:POST /api/auth/passkey/login, route:GET /api/auth/sessions, route:DELETE /api/auth/sessions/:id, route:POST /api/auth/sessions/revoke-all, route:GET /api/onboarding, route:POST /api/onboarding/complete, config:[access], config:access.enabled, doc:docs/API.md
 //
-// The API is same-origin only; there is no CORS surface. Two rules matter:
+// The API is same-origin only; there is no CORS surface. Three rules matter:
 //
 // 1. **Auth** - with `KARUCODE_AUTH_TOKEN` set, every request needs
 //    `Authorization: Bearer <token>`. Two paths also accept master `?token=`,
@@ -32,6 +32,10 @@
 //    (a stream fetch) and `GET /api/terminals/:id/socket` (a websocket handshake).
 //    Artifact iframes instead use the random per-artifact `?capability=` returned
 //    by their publishing POST; the master bearer is never put in those URLs.
+//    With web-UI sign-in on (`[access] enabled = true`), an `HttpOnly`
+//    `karucode_session` cookie authenticates too, and three routes are public so
+//    the sign-in screen can exist: `GET /api/auth/status`, `POST /api/auth/login`
+//    and the two passkey sign-in steps. See the `web-auth` topic.
 // 2. **CSRF** - every `POST`/`PATCH`/`PUT`/`DELETE` must send
 //    `X-Karucode-Client: web`, and a present `Origin` must match `Host`.
 //
@@ -49,6 +53,11 @@
 // | --- | --- |
 // | `GET /api/health`, `/api/stats` | liveness, version, tool and process counts |
 // | `GET`/`PATCH /api/config` | effective settings; validated, hot-swapped patches |
+// | `GET /api/auth/status` | public: which sign-in methods exist, the rp id and origin a passkey binds to, and whether the browser is signed in |
+// | `POST`/`DELETE /api/auth/password`, `GET`/`POST`/`PATCH`/`DELETE /api/auth/passkeys…` | set or remove the password, register/rename/remove passkeys |
+// | `POST /api/auth/login`, `/api/auth/logout`, `/api/auth/passkey/options`, `/api/auth/passkey/login` | sign in with a password or a passkey (sets/clears the session cookie) |
+// | `GET /api/auth/me`, `GET /api/auth/sessions`, `DELETE /api/auth/sessions/:id`, `POST /api/auth/sessions/revoke-all` | who this request is, the signed-in browsers, and sign-out |
+// | `GET /api/onboarding`, `POST /api/onboarding/complete` | whether the first-run wizard should run, and its completion marker |
 // | `POST /api/provider/test` | live probe of a profile, base_url or model |
 // | `GET /api/models/catalog`, `/api/models/lookup` | models.dev metadata, cached |
 // | `GET`/`POST /api/projects` | list and create projects; `PATCH /api/projects/:id/preferences` stores the Workbench result width; `GET /api/projects/:id/favicon` serves the project's own `favicon.ico` (`204` when it has none) |
@@ -902,6 +911,8 @@
 //
 // Full reference: `docs/API.md` (request and response shapes for every route).
 
+pub mod web_auth;
+pub mod webauthn;
 pub mod app;
 pub mod artifacts;
 pub mod bootstrap;
@@ -912,6 +923,7 @@ pub mod metrics;
 mod mission_coordinator;
 pub mod plugin_notifications;
 pub mod plugins_watch;
+pub mod proxy;
 pub mod retention;
 pub mod routes;
 pub mod scaffold;

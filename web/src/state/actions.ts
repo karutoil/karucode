@@ -1,17 +1,21 @@
 import { ApiError, getAuthToken, onUnauthorized, setAuthToken, toErrorMessage } from '../api/client';
 import * as api from '../api/endpoints';
 import { startSharedEventStream } from '../api/sharedStream';
+import { getPasskeyAssertion, PasskeyError } from '../lib/passkey';
 import type { EventStreamHandle } from '../api/events';
 import type {
+  AccessSettingsSummary,
   AgentAction,
   AgentSummary,
   ApprovalDecision,
+  AuthStatus,
   Config,
   ConfigPatch,
   CatalogLookupResponse,
   CatalogResponse,
   KarucodeEvent,
   NotifyPayload,
+  OnboardingState,
   Project,
   ProviderTestRequest,
   ProviderTestResult,
@@ -128,6 +132,163 @@ function replaceOverlay(next: ReplaceableOverlay | null): void {
 function enterAuthState(): void {
   store.boot.value = 'auth';
   replaceOverlay(null);
+  // The sign-in screen needs to know *how* to sign in (password? passkey? token?).
+  // Asking on entry keeps a token-only deployment showing the token field and a
+  // password deployment showing its form, without guessing.
+  void refreshAuthStatus();
+}
+
+/**
+ * Fetch `GET /api/auth/status` into the store.
+ *
+ * Public on the server, so this is safe to call while signed out - and it is the
+ * only way the screen learns which methods exist. Concurrent callers share one
+ * request: the sign-in state is asked for on boot, on a 401 and by the screen
+ * itself, and three identical round trips would only make the screen flicker.
+ */
+let authStatusInFlight: Promise<AuthStatus | null> | null = null;
+
+export function refreshAuthStatus(): Promise<AuthStatus | null> {
+  if (authStatusInFlight) return authStatusInFlight;
+  authStatusInFlight = (async () => {
+    try {
+      const status = await api.getAuthStatus();
+      store.authStatus.value = status;
+      return status;
+    } catch {
+      // A server old enough not to have the route, or a transient failure: the
+      // screen falls back to the token form, which every version supports.
+      store.authStatus.value = null;
+      return null;
+    } finally {
+      authStatusInFlight = null;
+    }
+  })();
+  return authStatusInFlight;
+}
+
+/** Sign in with the password. Returns whether the session was established. */
+export async function signInWithPassword(password: string): Promise<boolean> {
+  if (store.authPending.value) return false;
+  store.authError.value = null;
+  const trimmed = password;
+  if (trimmed === '') {
+    store.authError.value = 'Enter the password for this server.';
+    return false;
+  }
+  store.authPending.value = true;
+  try {
+    await api.login({ password: trimmed });
+    // A cookie was set - and it is the credential from here on. Any stale bearer
+    // token in local storage is dropped: it is not what just authenticated us, and
+    // leaving it would send it on every request for no reason.
+    setAuthToken(null);
+    store.boot.value = 'loading';
+    await bootstrap(true);
+    return true;
+  } catch (error) {
+    store.authError.value = toErrorMessage(error);
+    return false;
+  } finally {
+    store.authPending.value = false;
+  }
+}
+
+/** Sign in with a passkey. Returns whether the session was established. */
+export async function signInWithPasskey(): Promise<boolean> {
+  if (store.authPending.value) return false;
+  store.authError.value = null;
+  store.authPending.value = true;
+  try {
+    const options = await api.passkeyLoginOptions();
+    const assertion = await getPasskeyAssertion(options);
+    await api.passkeyLogin({ ...assertion, challenge_id: options.challenge_id });
+    setAuthToken(null);
+    store.boot.value = 'loading';
+    await bootstrap(true);
+    return true;
+  } catch (error) {
+    store.authError.value =
+      error instanceof PasskeyError ? error.message : toErrorMessage(error);
+    return false;
+  } finally {
+    store.authPending.value = false;
+  }
+}
+
+/** Sign this browser out and show the sign-in screen again. */
+export async function signOut(): Promise<void> {
+  try {
+    await api.logout();
+  } catch (error) {
+    if (!isUnauthorized(error)) {
+      store.pushToast(`Could not sign out: ${toErrorMessage(error)}`, 'error');
+    }
+  }
+  setAuthToken(null);
+  store.authStatus.value = null;
+  store.config.value = null;
+  store.sessions.value = [];
+  store.currentSessionId.value = null;
+  stopStream();
+  enterAuthState();
+}
+
+/** The Access tab's payload (password state, passkeys, sessions, policy). */
+export async function refreshAccessSettings(): Promise<AccessSettingsSummary | null> {
+  try {
+    const state = await api.getOnboarding();
+    store.accessSettings.value = state.access as AccessSettingsSummary;
+    return store.accessSettings.value;
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+      return null;
+    }
+    return null;
+  }
+}
+
+/** Re-fetch the onboarding state (after a step, or after finishing). */
+export async function refreshOnboarding(): Promise<OnboardingState | null> {
+  try {
+    const state = await api.getOnboarding();
+    store.onboarding.value = state;
+    return state;
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+      return null;
+    }
+    return null;
+  }
+}
+
+/**
+ * Finish (or skip) the wizard.
+ *
+ * The marker is written on the server, so this is what makes it stay finished:
+ * a reload, another browser and a restart all see `completed`.
+ */
+export async function finishOnboarding(skipped = false): Promise<void> {
+  try {
+    await api.completeOnboarding({ skipped });
+    if (store.onboarding.value) {
+      store.onboarding.value = { ...store.onboarding.value, completed: true, needed: false };
+    }
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      enterAuthState();
+      return;
+    }
+    store.pushToast(`Could not record setup: ${toErrorMessage(error)}`, 'error');
+    return;
+  }
+  store.onboardingStep.value = 0;
+  if (store.boot.value === 'onboarding') {
+    store.boot.value = 'loading';
+    await bootstrap(true);
+  }
 }
 
 function isUnauthorized(error: unknown): boolean {
@@ -927,6 +1088,15 @@ export async function bootstrap(force = false): Promise<void> {
         checkedAt: Date.now(),
       };
       const target = pickSession();
+      // The wizard runs before the workspace does, and only once: the server
+      // persists the completion marker, so an established install is never
+      // interrupted by it.
+      const onboardingState = await refreshOnboarding();
+      if (onboardingState?.needed) {
+        store.boot.value = 'onboarding';
+        store.onboardingStep.value = 0;
+        return;
+      }
       store.boot.value = 'ready';
       if (target) await openSession(target.id);
       else clearSelection();
@@ -1562,6 +1732,20 @@ export async function saveConfig(patch: ConfigPatch): Promise<Config> {
   const result = await api.patchConfig(patch);
   store.config.value = result;
   store.pushToast('Settings saved.', 'success');
+  void checkHealth();
+  return result;
+}
+
+/**
+ * Apply a config patch without a toast.
+ *
+ * The onboarding wizard saves several steps in a row; five "Settings saved."
+ * toasts would bury the one message that matters. It still refreshes the health
+ * probe, because a provider key change moves the connection badge.
+ */
+export async function applyConfig(patch: ConfigPatch): Promise<Config> {
+  const result = await api.patchConfig(patch);
+  store.config.value = result;
   void checkHealth();
   return result;
 }

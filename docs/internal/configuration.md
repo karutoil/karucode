@@ -7,7 +7,7 @@
 
 - **Slug:** `configuration`
 - **Tags:** config, settings, configuration, toml, env
-- **Applies to:** `env:KARUCODE_MALLOC_ARENA_MAX`, `env:KARUCODE_MALLOC_TRIM_SECS`, `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_concurrent`, `config:subagents.max_iterations`, `config:subagents.max_depth`, `config:subagents.timeout_secs`, `config:[notifications]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `config:notifications.enabled`, `config:notifications.min_run_secs`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`
+- **Applies to:** `env:KARUCODE_MALLOC_ARENA_MAX`, `env:KARUCODE_MALLOC_TRIM_SECS`, `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_PARALLEL_TOOL_CALLS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_concurrent`, `config:subagents.max_iterations`, `config:subagents.max_depth`, `config:subagents.timeout_secs`, `config:[notifications]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `config:limits.parallel_tool_calls`, `config:notifications.enabled`, `config:notifications.min_run_secs`, `config:[access]`, `config:access.enabled`, `config:access.public_url`, `config:access.session_days`, `config:access.tunnel`, `config:access.trusted_proxies`, `env:KARUCODE_ACCESS_ENABLED`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_SESSION_DAYS`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`
 - **Source:** `crates/kc-server/src/settings.rs:14`
 
 ---
@@ -75,6 +75,42 @@ ordinary bearer token. A missing or wrong admin credential is
 `403 permission_denied`, and the change is not applied. The comparison is
 constant-time, and the token is never logged or echoed. Every authorised
 security change is logged at `info` with the field *names* only.
+
+`[access]` is on that list too: switching sign-in off, or repointing the
+public URL a passkey is bound to, is as sensitive as disabling approvals.
+
+## Web-UI access
+
+`[access]` is how people reach the browser UI: a password and/or passkey, the
+address it answers to, and which proxy may speak for a client. The *credentials*
+are not configuration - the password hash and the passkeys live in the
+SQLite `settings` table and are managed from Settings -> Access or the
+onboarding wizard - so this section only holds the policy:
+
+```toml
+[access]
+enabled = true                               # require sign-in; default false
+public_url = "https://karucode.example.com"  # added to the Host allowlist
+session_days = 30                            # 1..=365, how long a browser stays in
+tunnel = "cloudflare"                        # none | cloudflare | custom
+trusted_proxies = ["10.0.0.0/8", "172.17.0.1"]
+```
+
+Environment: `KARUCODE_ACCESS_ENABLED`, `KARUCODE_PUBLIC_URL`,
+`KARUCODE_SESSION_DAYS`, `KARUCODE_TUNNEL`, `KARUCODE_TRUSTED_PROXIES`
+(comma-separated). Changing any of them through `PATCH /api/config` applies on
+the next request - no restart. There is deliberately **no environment spelling
+for the password**: a hash in `KARUCODE_*` ends up in a unit file and in
+`systemctl show`.
+
+`enabled = true` with no credential is refused with `400`, because that edit
+would leave a login screen nobody can pass. `tunnel = "none"` ignores
+`X-Forwarded-*` entirely; `cloudflare` trusts Cloudflare's published proxy
+ranges as well as `trusted_proxies`; `custom` trusts only the list. Only the
+direct peer of a request is compared against it.
+
+The full procedure, the lockout and what a passkey ceremony verifies are in
+the `web-auth` topic.
 
 With no admin token configured the gate is off and any API client can change
 those fields; the server logs a warning at startup when that is the case.
@@ -180,7 +216,7 @@ numbers: `subagents.max_iterations` (0 = no ceiling) and
 `subagents.timeout_secs`.
 
 Environment: `KARUCODE_MAX_ITERATIONS`, `KARUCODE_MAX_RUN_SECS`,
-`KARUCODE_CONTEXT_MAX_CHARS`.
+`KARUCODE_CONTEXT_MAX_CHARS`, `KARUCODE_PARALLEL_TOOL_CALLS`.
 
 ```toml
 [subagents]
@@ -228,6 +264,38 @@ turn and the exchange in flight are never compacted away. `limits.max_tool_calls
 is a runaway-batch guard, not a work budget - calls past it are skipped with a
 placeholder result. How compaction interacts with provider prompt caching is
 documented under `prompt-cache`.
+
+## Running tool calls in parallel
+
+```toml
+[limits]
+parallel_tool_calls = true     # KARUCODE_PARALLEL_TOOL_CALLS=1, on by default
+```
+
+A turn that asks for several tool calls runs them **at the same time** when
+they cannot see each other's effects: read-only approval-free calls (reads,
+listings, searches, git inspections), and built-in file writes and edits whose
+paths are disjoint when the approval policy would not ask about them. Results
+are persisted and folded into the transcript in **call order**, so the
+transcript and the next request are exactly what the sequential path would
+have produced - only the wall clock changes.
+
+`false` is the strict-order escape hatch: every call runs on its own, in order,
+exactly as karucode did before this switch existed. Reach for it when a turn's
+writes must be observed in sequence, on a machine where a burst of concurrent
+tool processes is unwelcome, or when a provider or plugin misbehaves under
+concurrent calls.
+
+This key is **not** `model.parallel_tool_calls`: that one asks the endpoint to
+let the model emit several calls in one turn, and it lives on the Models tab.
+This one decides how the calls the model did emit are run. Anything the
+runtime cannot prove independent of its siblings always runs in call order -
+`run_command` (a shell can touch anything), plugin and MCP tools, subagent
+spawns, the `note` tool, and every call that would park a worker on a human
+approval. The switch is read when a run starts, so a change applies to the
+next run; it is also on the settings screen ("Run independent tool calls in
+parallel") and in `PATCH /api/config` as
+`{"limits":{"parallel_tool_calls":false}}`.
 
 ## Images (vision models)
 

@@ -146,6 +146,28 @@ def decide(messages):
                 )
             ],
         )
+    if "[tool:writes]" in last_user:
+        # Two independent writes in one turn. With `limits.parallel_tool_calls` on
+        # (the default) the runtime runs them together; both results must still
+        # reach the transcript in call order.
+        return (
+            "tools",
+            [
+                call(
+                    "call_writes_1",
+                    "write_file",
+                    {"path": "parallel-one.txt", "content": "first write\n"},
+                ),
+                call(
+                    "call_writes_2",
+                    "write_file",
+                    {
+                        "path": "parallel-nested/parallel-two.txt",
+                        "content": "second write\n",
+                    },
+                ),
+            ],
+        )
     if "[tool:image]" in last_user:
         # A vision read: the runtime attaches the pixels only when the model says
         # it accepts images, which is what this marker exercises end to end.

@@ -6,6 +6,7 @@
 
 pub mod approval;
 pub mod checkpoint;
+pub mod cidr;
 pub mod config;
 pub mod error;
 pub mod events;
@@ -33,6 +34,7 @@ pub const PLUGIN_PROTOCOL_SOURCE: &str = include_str!("plugin.rs");
 
 pub use approval::{ApprovalDecision, ApprovalKind, ApprovalRequest};
 pub use checkpoint::{FileCheckpoint, RewindFile, RewindPreview, UndoOutcome};
+pub use cidr::{cloudflare_ranges, CidrRange, CidrSet};
 pub use error::{Error, Result};
 pub use events::{Event, EventEnvelope, EventSink};
 pub use ids::{AgentId, ApprovalId, RunId, SessionId};

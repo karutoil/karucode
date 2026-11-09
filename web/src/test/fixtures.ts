@@ -82,6 +82,7 @@ export const configFixture: Config = {
     search_max_results: 200,
     context_max_chars: 240000,
     max_tool_calls_per_turn: 8,
+    parallel_tool_calls: true,
   },
   approvals: {
     mode: 'ask',
@@ -312,6 +313,13 @@ export function resetAppState(): void {
   store.health.value = null;
   store.config.value = null;
   store.authError.value = null;
+  // The sign-in and setup state is module state too: a test that signed in or
+  // finished the wizard must not hand the next one a half-filled form.
+  store.authStatus.value = null;
+  store.authPending.value = false;
+  store.onboarding.value = null;
+  store.onboardingStep.value = 0;
+  store.accessSettings.value = null;
   store.sessions.value = [];
   store.sessionsLoading.value = true;
   store.currentSessionId.value = null;

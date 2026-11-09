@@ -10,8 +10,8 @@ use crate::subagent::SPAWN_AGENT_TOOL;
 use crate::tests_support::{
     test_inner_with_settings, ApprovalTool, BigOutputTool, EchoTool, ExternalTool, FailingTool,
     FakeSettings, FollowUpTool, GateTool, Harness, HarnessBuilder, ImageTool, LegacyPromptHook,
-    PanicTool, ProbeTool, RequiredArgsTool, Script, ScriptedFactory, SlowCancelTool, SteerTool,
-    TurnRecordingHook, WriteWorkspaceFileTool,
+    PanicTool, PathProbeTool, ProbeTool, RequiredArgsTool, Script, ScriptedFactory, SlowCancelTool,
+    SteerTool, TurnRecordingHook, WriteWorkspaceFileTool,
 };
 use crate::{ActiveRun, QueuedInput, QueuedKind, RecoveryReport, Runtime, RuntimeDeps};
 use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, ApprovalRequest};
@@ -1487,6 +1487,311 @@ async fn a_turn_with_one_mutating_call_stays_sequential() {
     assert_eq!(messages[2].content, "probe:a");
     assert_eq!(messages[3].content, "probe:b");
     assert_eq!(messages[4].content, "probe:w");
+}
+
+#[tokio::test]
+async fn switching_parallel_execution_off_runs_every_call_in_order() {
+    // The switch is the only difference from
+    // `a_read_only_turn_runs_concurrently_but_persists_in_call_order`: same
+    // three independent reads, one call at a time.
+    let probe = ProbeTool::read_only("probe");
+    let peak = probe.peak();
+    let limits = Limits {
+        parallel_tool_calls: false,
+        ..Limits::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            ("call_a", "probe", "{\"sleep_ms\":120,\"tag\":\"a\"}"),
+            ("call_b", "probe", "{\"sleep_ms\":0,\"tag\":\"b\"}"),
+            ("call_c", "probe", "{\"sleep_ms\":0,\"tag\":\"c\"}"),
+        ]),
+        Script::text("done"),
+    ])
+    .tool(probe.boxed())
+    .settings(FakeSettings::default().with_limits(limits))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("three reads, one at a time").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        1,
+        "limits.parallel_tool_calls = false must run every call on its own"
+    );
+
+    // Call order, not completion order: the 120ms read still reports first.
+    let finished: Vec<String> = tool_finished(&events).into_iter().map(|f| f.0).collect();
+    assert_eq!(finished, vec!["call_a", "call_b", "call_c"]);
+    let messages = h.session_messages().await;
+    assert_eq!(messages[2].content, "probe:a");
+    assert_eq!(messages[3].content, "probe:b");
+    assert_eq!(messages[4].content, "probe:c");
+}
+
+#[tokio::test]
+async fn file_writes_to_different_paths_run_at_the_same_time() {
+    // Two writes that touch nothing in common commute, so with the switch on
+    // they overlap - and the transcript is still in call order.
+    let write = PathProbeTool::new("write_probe");
+    let peak = write.peak();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            (
+                "call_a",
+                "write_probe",
+                "{\"path\":\"a.txt\",\"sleep_ms\":120,\"tag\":\"a\"}",
+            ),
+            (
+                "call_b",
+                "write_probe",
+                "{\"path\":\"dir/b.txt\",\"sleep_ms\":0,\"tag\":\"b\"}",
+            ),
+        ]),
+        Script::text("done"),
+    ])
+    .tool(Arc::new(write))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("write two files").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        2,
+        "two writes to different paths must not wait for each other"
+    );
+    let messages = h.session_messages().await;
+    assert_eq!(messages[2].content, "wrote a.txt");
+    assert_eq!(messages[3].content, "wrote dir/b.txt");
+    assert_eq!(
+        std::fs::read_to_string(h.workspace_dir.join("a.txt")).unwrap(),
+        "a"
+    );
+    assert_eq!(
+        std::fs::read_to_string(h.workspace_dir.join("dir/b.txt")).unwrap(),
+        "b"
+    );
+}
+
+#[tokio::test]
+async fn two_writes_to_one_file_stay_in_call_order() {
+    // `./same.txt` and `same.txt` are the same file. Two edits to one path do not
+    // commute, so the turn takes the sequential path and the second write wins -
+    // which is the order the model asked for.
+    let write = PathProbeTool::new("write_probe");
+    let peak = write.peak();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            (
+                "call_a",
+                "write_probe",
+                "{\"path\":\"same.txt\",\"sleep_ms\":80,\"tag\":\"first\"}",
+            ),
+            (
+                "call_b",
+                "write_probe",
+                "{\"path\":\"./same.txt\",\"sleep_ms\":0,\"tag\":\"second\"}",
+            ),
+        ]),
+        Script::text("done"),
+    ])
+    .tool(Arc::new(write))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("write the same file twice").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        1,
+        "two writes to one path must not run at the same time"
+    );
+    assert_eq!(
+        std::fs::read_to_string(h.workspace_dir.join("same.txt")).unwrap(),
+        "second",
+        "the second write must land last"
+    );
+}
+
+#[tokio::test]
+async fn a_read_of_a_path_the_turn_writes_stays_in_call_order() {
+    // A read and a write of one path have an order even though a read is
+    // read-only: whichever ran first would be what the model saw.
+    let read = ProbeTool::read_only("probe");
+    let write = PathProbeTool::new("write_probe");
+    let read_peak = read.peak();
+    let write_peak = write.peak();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            (
+                "call_r",
+                "probe",
+                "{\"path\":\"a.txt\",\"sleep_ms\":20,\"tag\":\"r\"}",
+            ),
+            (
+                "call_w",
+                "write_probe",
+                "{\"path\":\"a.txt\",\"sleep_ms\":20,\"tag\":\"w\"}",
+            ),
+        ]),
+        Script::text("done"),
+    ])
+    .tool(read.boxed())
+    .tool(Arc::new(write))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("read then write one file").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(read_peak.load(Ordering::SeqCst), 1);
+    assert_eq!(write_peak.load(Ordering::SeqCst), 1);
+    let messages = h.session_messages().await;
+    assert_eq!(messages[2].content, "probe:r");
+    assert_eq!(messages[3].content, "wrote a.txt");
+}
+
+#[tokio::test]
+async fn a_write_the_policy_would_prompt_for_keeps_the_turn_sequential() {
+    // Ask mode with no pre-approved paths: each write would wait on a human, and
+    // a batch of workers parked on approvals is not parallel work.
+    let write = PathProbeTool::new("write_probe");
+    let peak = write.peak();
+    let policy = ApprovalPolicy {
+        mode: ApprovalMode::Ask,
+        ..ApprovalPolicy::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            (
+                "call_a",
+                "write_probe",
+                "{\"path\":\"a.txt\",\"sleep_ms\":40,\"tag\":\"a\"}",
+            ),
+            (
+                "call_b",
+                "write_probe",
+                "{\"path\":\"b.txt\",\"sleep_ms\":0,\"tag\":\"b\"}",
+            ),
+        ]),
+        Script::text("done"),
+    ])
+    .tool(Arc::new(write))
+    .settings(FakeSettings::default().with_policy(policy))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("write two files under ask mode").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        1,
+        "a write that would prompt must not overlap its siblings"
+    );
+
+    // The same turn runs the two writes together once the policy stops asking:
+    // the difference is the policy, not the calls.
+    let write = PathProbeTool::new("write_probe");
+    let peak = write.peak();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            (
+                "call_a",
+                "write_probe",
+                "{\"path\":\"a.txt\",\"sleep_ms\":40,\"tag\":\"a\"}",
+            ),
+            (
+                "call_b",
+                "write_probe",
+                "{\"path\":\"b.txt\",\"sleep_ms\":0,\"tag\":\"b\"}",
+            ),
+        ]),
+        Script::text("done"),
+    ])
+    .tool(Arc::new(write))
+    .build()
+    .await;
+    h.run_to_finish("write two files with no prompts").await;
+    assert_eq!(peak.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_batched_write_counts_as_a_mutation_for_what_follows() {
+    // The repeat guard refuses the fourth identical answer only while nothing has
+    // been written since that answer first appeared. A write that ran *inside a
+    // concurrent batch* must count like any other, or the read after it is refused
+    // as a repeat of an answer the write invalidated.
+    let read = ProbeTool::read_only("probe");
+    let write = PathProbeTool::new("write_probe");
+    let write_peak = write.peak();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            (
+                "r1",
+                "probe",
+                "{\"path\":\"a.txt\",\"sleep_ms\":0,\"tag\":\"a\"}",
+            ),
+            (
+                "r2",
+                "probe",
+                "{\"path\":\"a.txt\",\"sleep_ms\":0,\"tag\":\"a\"}",
+            ),
+            (
+                "r3",
+                "probe",
+                "{\"path\":\"a.txt\",\"sleep_ms\":0,\"tag\":\"a\"}",
+            ),
+        ]),
+        Script::call(&[
+            (
+                "w1",
+                "write_probe",
+                "{\"path\":\"a.txt\",\"sleep_ms\":40,\"tag\":\"new\"}",
+            ),
+            (
+                "w2",
+                "write_probe",
+                "{\"path\":\"b.txt\",\"sleep_ms\":0,\"tag\":\"new\"}",
+            ),
+        ]),
+        Script::call(&[(
+            "r4",
+            "probe",
+            "{\"path\":\"a.txt\",\"sleep_ms\":0,\"tag\":\"a\"}",
+        )]),
+        Script::text("done"),
+    ])
+    .tool(read.boxed())
+    .tool(Arc::new(write))
+    .build()
+    .await;
+
+    let events = h
+        .run_to_finish("read three times, write twice, read again")
+        .await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(
+        write_peak.load(Ordering::SeqCst),
+        2,
+        "the writes must have run as a batch, or this test proves nothing"
+    );
+
+    let messages = h.session_messages().await;
+    let tools: Vec<&str> = messages
+        .iter()
+        .filter(|m| m.role == "tool")
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(tools.len(), 6, "{tools:?}");
+    assert_eq!(
+        tools[5], "probe:a",
+        "the read after the batched write must be allowed: the file changed"
+    );
+    assert!(
+        !tools.iter().any(|t| t.starts_with("[blocked:")),
+        "nothing should have been refused: {tools:?}"
+    );
 }
 
 #[tokio::test]

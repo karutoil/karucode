@@ -49,7 +49,7 @@
 // | Flag | Default | Meaning |
 // | --- | --- | --- |
 // | `--workspace <PATH>` | none | optional default workspace; without it the server starts with no project and you create the first one in the web UI |
-// | `--host <ADDR>` | `127.0.0.1` | bind address; a non-loopback bind requires `KARUCODE_AUTH_TOKEN` |
+// | `--host <ADDR>` | `127.0.0.1` | bind address; a non-loopback bind requires `KARUCODE_AUTH_TOKEN`, or a password/passkey with `[access] enabled = true` |
 // | `--port <PORT>` | `8787` | listen port |
 // | `--data-dir <PATH>` | `~/.local/share/karucode` | SQLite database and plugin data, forced to `0700` |
 // | `--config <PATH>` | `$KARUCODE_CONFIG` or `~/.config/karucode/config.toml` | config file; must exist |
@@ -106,7 +106,10 @@
 //   (`--workspace`, `KARUCODE_WORKSPACE`, or `workspace =` in the config file).
 //   Fix the path, or drop it and start with no project.
 // * `refusing to bind ... without KARUCODE_AUTH_TOKEN` - remote binds need a
-//   token of at least 16 characters.
+//   token of at least 16 characters, or `[access] enabled = true` with a password
+//   or passkey already set. The second form is checked after the credential store
+//   is loaded, so "I turned sign-in on" without a credential fails here rather
+//   than leaving a server whose login screen nobody can pass.
 // * `could not open the database at ...`, including `database ... failed its
 //   integrity check` - permissions, structural corruption, or foreign-key
 //   violations in an existing/restored file. Integrity and foreign-key checks run
@@ -129,8 +132,10 @@
 //
 // # Gotchas
 //
-// * There is no built-in TLS. Bind loopback, or put a reverse proxy in front and
-//   set `KARUCODE_ALLOWED_HOSTS` for its host names.
+// * There is no built-in TLS. Bind loopback, or put a reverse proxy in front: set
+//   `[access] public_url` (which also adds that name to the `Host` allowlist) and
+//   pick `tunnel` so the forwarded headers are believable, or use
+//   `KARUCODE_ALLOWED_HOSTS` for the host names alone.
 // * `--workspace` sets the *default* workspace; projects created in the UI have
 //   their own directories.
 // * The UI embed is a compile-time snapshot in debug builds too: after changing
@@ -521,6 +526,14 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow!("invalid settings: {e}"))?;
 
+    // Web-UI credentials and sessions. Loaded before the bind check because a
+    // remote bind is allowed on a password/passkey alone, and "is a credential
+    // configured?" is answered by the database, not by the config file.
+    let web_auth = crate::web_auth::WebAuth::load(Arc::clone(&store))
+        .await
+        .map_err(|e| anyhow!("could not load the web-UI credentials: {e}"))?;
+    check_remote_bind(&settings.snapshot(), &web_auth)?;
+
     let providers: Arc<dyn ProviderFactory> = Arc::new(ProviderFactoryImpl);
 
     // Plugin host and MCP manager start concurrently: a slow plugin must not
@@ -592,6 +605,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         db_path: db_path.clone(),
         bind_host: config.host.clone(),
         allowed_hosts: std::env::var(crate::host::ALLOWED_HOSTS_ENV).ok(),
+        web_auth,
     });
     state.reload_tools().await;
     for mission_id in state
@@ -765,7 +779,15 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let signal_task = tokio::spawn(watch_signals(shutdown.clone()));
 
     let app = crate::app::build_router(state.clone());
-    let serve = axum::serve(listener, app).with_graceful_shutdown({
+    // `ConnectInfo` gives every request the socket's peer address, which is what
+    // decides whether a forwarded header may be believed (see `crate::proxy`).
+    // Without it a proxy deployment cannot tell a real client from a spoofed
+    // `X-Forwarded-For`, so the address is carried through the whole stack.
+    let serve = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown({
         let token = shutdown.clone();
         async move { token.cancelled().await }
     });
@@ -825,12 +847,45 @@ fn validate_config(config: &Config) -> anyhow::Result<()> {
     }
     if !config.is_local_bind() && config.auth_token.as_deref().unwrap_or("").is_empty() {
         bail!(
-            "refusing to bind {} without KARUCODE_AUTH_TOKEN: remote access requires a bearer token of at least 16 characters",
+            "refusing to bind {} without authentication: remote access requires KARUCODE_AUTH_TOKEN \
+             (at least 16 characters), or a password/passkey with [access] enabled = true",
             config.host
         );
     }
     crate::settings::validate_settings(config)
         .map_err(|e| anyhow!("invalid configuration: {e}"))?;
+    Ok(())
+}
+
+/// Refuse a remote bind that no credential protects.
+///
+/// `validate_config` can only see the config file and environment; whether a
+/// password or passkey exists is a database question. So the second half of the
+/// rule is checked here, once, right after the credential store is loaded:
+///
+/// * a bearer token is enough on its own (unchanged behaviour);
+/// * otherwise `[access] enabled = true` **and** a real credential are both
+///   required, because the first alone would expose a login screen nobody can
+///   pass.
+fn check_remote_bind(config: &Config, web_auth: &crate::web_auth::WebAuth) -> anyhow::Result<()> {
+    if config.is_local_bind() || config.auth_token.is_some() {
+        return Ok(());
+    }
+    if !config.access.enabled {
+        bail!(
+            "refusing to bind {} without authentication: set KARUCODE_AUTH_TOKEN, or enable web \
+             sign-in ([access] enabled = true) and set a password or passkey",
+            config.host
+        );
+    }
+    if !web_auth.has_credential() {
+        bail!(
+            "refusing to bind {}: [access] requires sign-in but no password or passkey is set, so \
+             the login screen could not be passed. Start on 127.0.0.1 first and set a password, or \
+             set KARUCODE_AUTH_TOKEN.",
+            config.host
+        );
+    }
     Ok(())
 }
 

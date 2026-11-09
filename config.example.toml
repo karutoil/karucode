@@ -172,6 +172,17 @@ search_max_results = 200
 context_max_chars = 0
 # Safety valve against a runaway tool batch, not a work budget.
 max_tool_calls_per_turn = 32
+# Run a turn's INDEPENDENT tool calls at the same time instead of one at a time.
+# On by default: reads, and file writes to different paths that the approval
+# policy would not ask about, overlap; results still land in the transcript in
+# call order, so only the wall clock changes. Off runs every call in order (the
+# behaviour before this switch existed) - reach for it when a turn's writes must
+# be observed in sequence, or when a provider or plugin misbehaves under
+# concurrent calls. Shell commands, plugin/MCP tools, subagent spawns and
+# anything that has to ask for approval always run in order either way. Not the
+# same key as model.parallel_tool_calls (which asks the endpoint for several
+# calls in one turn). KARUCODE_PARALLEL_TOOL_CALLS sets the same value.
+parallel_tool_calls = true
 
 [approvals]
 # ask | ask_commands | auto | read_only
@@ -285,3 +296,29 @@ enabled = true
 # model = "claude-haiku"     # default = the session's model
 max_chars = 60               # hard cap on a generated title (8 .. 120)
 timeout_secs = 20            # give up and keep the derived title
+
+# --- web-UI access ---------------------------------------------------------
+# Who may use the browser UI, and the address it answers to. The *credentials*
+# (a password hash and passkey public keys) are not configuration: they live in
+# the SQLite settings table and are managed from Settings -> Access or the
+# onboarding wizard. This section is only the policy around them.
+#
+# `KARUCODE_ACCESS_ENABLED`, `KARUCODE_PUBLIC_URL`, `KARUCODE_SESSION_DAYS`,
+# `KARUCODE_TUNNEL` and `KARUCODE_TRUSTED_PROXIES` override these.
+#
+# `enabled = true` with no password or passkey is refused at startup with a
+# non-loopback bind, and `PATCH /api/config` refuses it outright: that edit would
+# leave a login screen nobody can pass. Set the credential first.
+[access]
+enabled = false                          # require a password/passkey for the web UI
+# public_url = "https://karucode.example.com"
+                                         # the address people type; added to the
+                                         # Host allowlist, sets `Secure` on the
+                                         # cookie, and is the origin a passkey is
+                                         # bound to
+session_days = 30                        # how long one browser stays signed in (1..365)
+tunnel = "none"                          # none | cloudflare | custom
+trusted_proxies = []                     # IPs/CIDRs whose X-Forwarded-* are believed
+                                         # (e.g. ["10.0.0.0/8", "172.17.0.1"]).
+                                         # Loopback is always trusted; `cloudflare`
+                                         # adds Cloudflare's published ranges.

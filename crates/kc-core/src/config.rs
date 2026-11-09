@@ -593,6 +593,33 @@ pub struct Limits {
     /// safety valve against a runaway batch, not a work budget: leave it high.
     #[serde(default = "d_parallel_calls")]
     pub max_tool_calls_per_turn: usize,
+    /// Run a turn's **independent** tool calls at the same time instead of one
+    /// at a time.
+    ///
+    /// On by default. A turn whose calls cannot see each other's effects runs
+    /// them concurrently: read-only approval-free calls (reads, listings,
+    /// searches, git inspections) and built-in file writes whose paths are
+    /// disjoint when the approval policy would not ask about them. Whatever the
+    /// overlap, results are persisted and folded into the transcript in **call
+    /// order**, so the next request is byte-identical to the sequential one -
+    /// only the wall clock changes.
+    ///
+    /// `false` runs every call one at a time, in order, exactly as karucode did
+    /// before this switch existed. Nothing overlaps. Reach for it when a turn's
+    /// writes must be observed in a strict order, on a machine where a burst of
+    /// concurrent tool processes is unwelcome, or when a provider or plugin
+    /// misbehaves under concurrent calls.
+    ///
+    /// Anything the runtime cannot prove independent of its siblings always runs
+    /// in call order: `run_command` (a shell can touch anything), plugin and MCP
+    /// tools, subagent spawns, the `note` tool, and any call that would park a
+    /// worker on a human approval. The switch is read when a run starts, so a
+    /// change applies to the next run. `KARUCODE_PARALLEL_TOOL_CALLS` sets the
+    /// same value from the environment; it is unrelated to
+    /// `model.parallel_tool_calls`, which asks the endpoint to let the model emit
+    /// several calls in one turn.
+    #[serde(default = "d_true")]
+    pub parallel_tool_calls: bool,
     /// Extra environment variable *names* passed through to `run_command`.
     ///
     /// The child never inherits the server's environment: it gets a fixed
@@ -667,6 +694,7 @@ impl Default for Limits {
             context_max_chars: d_context_chars(),
             max_context_messages: d_context_messages(),
             max_tool_calls_per_turn: d_parallel_calls(),
+            parallel_tool_calls: d_true(),
             command_env_passthrough: Vec::new(),
         }
     }
@@ -958,6 +986,360 @@ impl TerminalConfig {
     pub fn terminal_budget(&self) -> usize {
         self.max_terminals.clamp(1, MAX_TERMINALS_HINT)
     }
+}
+
+/// Which proxy sits in front of this server, when one does.
+///
+/// This is not decoration: it decides which forwarded headers are believed
+/// (`X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`) and which
+/// addresses are trusted to have written them.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelKind {
+    /// No proxy. Forwarded headers are ignored entirely.
+    #[default]
+    None,
+    /// Cloudflare, either `cloudflared` (which connects out and forwards from
+    /// loopback) or the orange-cloud proxy (which connects from Cloudflare's own
+    /// published ranges). Those ranges are trusted in addition to
+    /// [`AccessConfig::trusted_proxies`].
+    Cloudflare,
+    /// Some other reverse proxy or tunnel. Only
+    /// [`AccessConfig::trusted_proxies`] is trusted.
+    Custom,
+}
+
+impl TunnelKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" | "" => Some(TunnelKind::None),
+            "cloudflare" | "cloudflared" | "cf" => Some(TunnelKind::Cloudflare),
+            "custom" | "other" | "proxy" | "reverse_proxy" => Some(TunnelKind::Custom),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TunnelKind::None => "none",
+            TunnelKind::Cloudflare => "cloudflare",
+            TunnelKind::Custom => "custom",
+        }
+    }
+}
+
+/// `[access]`: how the web UI is reached, and whether it asks who you are.
+///
+/// The web UI is protected by a **password and/or passkeys** (WebAuthn) stored in
+/// SQLite, in addition to - never instead of - the `KARUCODE_AUTH_TOKEN` bearer
+/// token. A browser cannot attach an `Authorization` header to the document that
+/// runs the app, which is why the token-only deployment feels like an API with a
+/// website attached; a session cookie set by `POST /api/auth/login` is what makes
+/// the UI a normal sign-in.
+///
+/// Credentials are **not** configuration: a password hash and a passkey's public
+/// key live in the `settings` table (`web_auth.*`), never in `config.toml` and
+/// never in `GET /api/config`. This section only holds the policy around them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccessConfig {
+    /// Require a password or a passkey to use the web UI.
+    ///
+    /// Turning this on is refused while no credential exists: that is the one
+    /// edit that would lock the operator out of their own server. Create the
+    /// password (or register a passkey) first - the onboarding wizard does both
+    /// in one step.
+    ///
+    /// Off by default. On a loopback bind with no credential, the server stays
+    /// what it always was: one user, one machine, no sign-in.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The address people type to reach this server, e.g.
+    /// `https://karucode.example.com`.
+    ///
+    /// It is used for three things, all of them things a server behind a proxy
+    /// gets wrong otherwise:
+    ///
+    /// * it is added to the `Host` allowlist, so a request addressed to the
+    ///   public name is served (the allowlist would otherwise only know
+    ///   `127.0.0.1`/`localhost`);
+    /// * it decides `Secure` on the session cookie and the origin (`rp_id`,
+    ///   `origin`) a passkey is bound to, so `https://karucode.example.com` and
+    ///   not `http://127.0.0.1:8787` is what the authenticator signs;
+    /// * it is what the sign-in screen tells you it is protecting.
+    ///
+    /// `None` means "same origin as the browser used", which is right for
+    /// loopback. Scheme, host and optional port only: a path, query, fragment or
+    /// userinfo is a configuration error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+    /// How long a sign-in lasts, in days, before the cookie stops working.
+    ///
+    /// Default 30. Clamped to `1..=365` on save. Signing out - or revoking all
+    /// sessions from the Access settings tab - ends it immediately; the cookie is
+    /// a server-side session, so deleting the row is enough.
+    #[serde(default = "d_session_days")]
+    pub session_days: u64,
+    /// Which proxy is in front of this server. See [`TunnelKind`].
+    #[serde(default)]
+    pub tunnel: TunnelKind,
+    /// Extra proxies whose forwarded headers are believed, as IPs or CIDR blocks
+    /// (`10.0.0.0/8`, `172.17.0.1`, `2001:db8::/32`).
+    ///
+    /// Only the **direct peer** of a request is compared against this list: a
+    /// header from an address that is not in it is ignored, because otherwise any
+    /// client could claim to be `127.0.0.1` and rewrite their own origin.
+    /// Loopback is always trusted, which is what makes `cloudflared`, an nginx on
+    /// the same host and a Docker bridge work without an entry here.
+    ///
+    /// With `tunnel = "cloudflare"` the published Cloudflare ranges are trusted
+    /// automatically; this list is for everything else.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+}
+
+fn d_session_days() -> u64 {
+    30
+}
+
+/// Bounds for [`AccessConfig::session_days`].
+pub const MIN_SESSION_DAYS: u64 = 1;
+pub const MAX_SESSION_DAYS: u64 = 365;
+
+impl Default for AccessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            public_url: None,
+            session_days: d_session_days(),
+            tunnel: TunnelKind::None,
+            trusted_proxies: Vec::new(),
+        }
+    }
+}
+
+impl AccessConfig {
+    /// Whether a proxy's forwarded headers may be believed at all.
+    pub fn trusts_forwarded_headers(&self) -> bool {
+        self.tunnel != TunnelKind::None
+    }
+
+    /// `session_days` clamped to the documented range.
+    pub fn session_lifetime_days(&self) -> u64 {
+        self.session_days.clamp(MIN_SESSION_DAYS, MAX_SESSION_DAYS)
+    }
+
+    /// The public `host[:port]` from [`Self::public_url`], lowercase.
+    ///
+    /// `None` when nothing is configured; an unparseable value is a settings
+    /// error caught by [`Self::validate`], not something this hides.
+    pub fn public_authority(&self) -> Option<String> {
+        let url = self.public_url.as_deref()?.trim();
+        let (host, port) = split_public_url(url).ok()?;
+        Some(match port {
+            Some(port) if port != default_port(&url_scheme(url)) => format!("{host}:{port}"),
+            _ => host,
+        })
+    }
+
+    /// Whether the public URL is served over TLS, which decides whether the
+    /// session cookie gets `Secure`.
+    pub fn public_url_is_https(&self) -> bool {
+        self.public_url
+            .as_deref()
+            .map(|url| url_scheme(url) == "https")
+            .unwrap_or(false)
+    }
+
+    /// The passkey relying party id: the public host, else `localhost`.
+    pub fn rp_id(&self) -> String {
+        self.public_authority()
+            .map(|authority| strip_port(&authority).to_string())
+            .filter(|host| !host.is_empty())
+            .unwrap_or_else(|| "localhost".to_string())
+    }
+
+    /// The expected `Origin` for WebAuthn ceremonies.
+    pub fn expected_origin(&self) -> Option<String> {
+        let public = self.public_authority();
+        let scheme = self
+            .public_url
+            .as_deref()
+            .map(url_scheme)
+            .filter(|s| !s.is_empty())?;
+        public.map(|host| format!("{scheme}://{host}"))
+    }
+
+    /// Every address range trusted as a proxy: loopback always, Cloudflare's
+    /// published ranges when that tunnel is configured, plus the explicit list.
+    pub fn trusted_proxy_ranges(&self) -> crate::Result<Vec<crate::cidr::CidrRange>> {
+        let mut ranges = Vec::new();
+        ranges.push(crate::cidr::CidrRange::parse("127.0.0.0/8")?);
+        ranges.push(crate::cidr::CidrRange::parse("::1/128")?);
+        if self.tunnel == TunnelKind::Cloudflare {
+            ranges.extend(crate::cidr::cloudflare_ranges());
+        }
+        for entry in &self.trusted_proxies {
+            if entry.trim().is_empty() {
+                continue;
+            }
+            ranges.push(crate::cidr::CidrRange::parse(entry)?);
+        }
+        Ok(ranges)
+    }
+
+    /// Reject a `[access]` section that cannot work.
+    ///
+    /// Every message names the field and the fix, because these are the values an
+    /// operator types once and then wonders why a proxy returns 403.
+    pub fn validate(&self) -> crate::Result<()> {
+        if let Some(url) = &self.public_url {
+            let trimmed = url.trim();
+            if trimmed.is_empty() {
+                return Err(crate::Error::Config(
+                    "public_url is empty; omit it to use the browser's own origin".into(),
+                ));
+            }
+            if let Err(message) = split_public_url(trimmed) {
+                return Err(crate::Error::Config(format!("public_url {message}")));
+            }
+            if trimmed.contains('?') || trimmed.contains('#') {
+                return Err(crate::Error::Config(format!(
+                    "public_url `{trimmed}` has a query or fragment; use scheme://host[:port] only, e.g. https://karucode.example.com"
+                )));
+            }
+            if trimmed.contains('@') {
+                return Err(crate::Error::Config(format!(
+                    "public_url `{trimmed}` contains userinfo (`user@`); it must not carry a credential"
+                )));
+            }
+        }
+        if !(MIN_SESSION_DAYS..=MAX_SESSION_DAYS).contains(&self.session_days) {
+            return Err(crate::Error::Config(format!(
+                "session_days is {}; use {MIN_SESSION_DAYS}-{MAX_SESSION_DAYS}",
+                self.session_days
+            )));
+        }
+        for entry in &self.trusted_proxies {
+            if entry.trim().is_empty() {
+                continue;
+            }
+            crate::cidr::CidrRange::parse(entry).map_err(|error| {
+                crate::Error::Config(format!("trusted_proxies: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// The scheme of a `scheme://…` string, lowercase, or `""` when there is none.
+fn url_scheme(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, _)) => scheme.trim().to_ascii_lowercase(),
+        None => String::new(),
+    }
+}
+
+fn default_port(scheme: &str) -> u16 {
+    match scheme {
+        "https" => 443,
+        _ => 80,
+    }
+}
+
+fn strip_port(authority: &str) -> &str {
+    if let Some(rest) = authority.strip_prefix('[') {
+        // [::1]:8787 -> [::1]
+        return match rest.split_once(']') {
+            Some((inner, _)) => {
+                // Return a slice of the original string, not of `inner`.
+                let end = authority.len() - rest.len() + 1 + inner.len();
+                &authority[..end]
+            }
+            None => authority,
+        };
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => authority,
+    }
+}
+
+/// Split `scheme://host[:port]` into its authority parts.
+///
+/// Deliberately strict and deliberately small: `public_url` is one setting with
+/// one shape, so this accepts `http`/`https`, an IPv4/IPv6/hostname authority and
+/// an optional port, and rejects everything else with a message that says what
+/// was wrong.
+fn split_public_url(url: &str) -> Result<(String, Option<u16>), String> {
+    let text = url.trim();
+    let (scheme, rest) = match text.split_once("://") {
+        Some(parts) => parts,
+        None => {
+            return Err(format!(
+                "`{text}` has no scheme; write it as https://host[:port]"
+            ))
+        }
+    };
+    let scheme = scheme.trim().to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!(
+            "`{text}` uses scheme `{scheme}`; only http and https are supported"
+        ));
+    }
+    let authority = match rest.split_once('/') {
+        Some((_, path)) if !path.trim().is_empty() => {
+            return Err(format!(
+                "`{text}` has the path `/{path}`; use scheme://host[:port] only"
+            ))
+        }
+        Some((authority, _)) => authority,
+        None => rest,
+    };
+    if authority.trim().is_empty() {
+        return Err(format!("`{text}` has no host"));
+    }
+    let (host, port) = if let Some(after_bracket) = authority.strip_prefix('[') {
+        let (host, rest) = after_bracket
+            .split_once(']')
+            .ok_or_else(|| format!("`{text}` has an unterminated IPv6 literal"))?;
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(format!("`{text}` has an invalid IPv6 address `[{host}]`"));
+        }
+        let port = match rest {
+            "" => None,
+            rest => Some(parse_port(rest, text)?),
+        };
+        (format!("[{host}]"), port)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+                (host.to_string(), Some(parse_port(&format!(":{port}"), text)?))
+            }
+            _ => (authority.to_string(), None),
+        }
+    };
+    let host = host.trim().to_ascii_lowercase();
+    if host.is_empty() {
+        return Err(format!("`{text}` has no host"));
+    }
+    if host
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '@')
+    {
+        return Err(format!("`{text}` has an invalid host `{host}`"));
+    }
+    Ok((host, port))
+}
+
+fn parse_port(raw: &str, url: &str) -> Result<u16, String> {
+    let digits = raw.strip_prefix(':').unwrap_or(raw);
+    let port: u16 = digits
+        .parse()
+        .map_err(|_| format!("`{url}` has an invalid port `{raw}`"))?;
+    if port == 0 {
+        return Err(format!("`{url}` has port 0"));
+    }
+    Ok(port)
 }
 
 /// Smallest replay buffer worth keeping: one wide screen of dense output.
@@ -1302,6 +1684,10 @@ pub struct ConfigFile {
     /// user). On by default; see [`TerminalConfig`].
     #[serde(default)]
     pub terminals: Option<TerminalConfig>,
+    /// `[access]`: web-UI sign-in (password/passkeys), the public URL and the
+    /// tunnel/proxy trust list. See [`AccessConfig`].
+    #[serde(default)]
+    pub access: Option<AccessConfig>,
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
     /// Re-read the plugin sources in the background and apply adds, removals and
@@ -1371,6 +1757,8 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     /// The browser terminal (see [`TerminalConfig`]). On by default.
     pub terminals: TerminalConfig,
+    /// How the web UI is reached and who may use it (see [`AccessConfig`]).
+    pub access: AccessConfig,
     pub plugins: Vec<PluginConfig>,
     /// Poll the plugin sources and apply changes without a restart. Off by
     /// default: a reload replaces processes, and an operator who edits a plugin's
@@ -1416,6 +1804,7 @@ impl Default for Config {
             titles: TitlesConfig::default(),
             notifications: NotificationsConfig::default(),
             terminals: TerminalConfig::default(),
+            access: AccessConfig::default(),
             plugins: Vec::new(),
             plugins_watch: false,
             plugins_watch_secs: DEFAULT_PLUGINS_WATCH_SECS,
@@ -1468,6 +1857,16 @@ fn default_config_path() -> Option<PathBuf> {
 
 fn env_str(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// A comma- or whitespace-separated list, trimmed, with empties dropped.
+fn split_list(value: &str) -> Vec<String> {
+    value
+        .split([',', ' ', '\t'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
@@ -1611,6 +2010,9 @@ impl Config {
         if let Some(v) = file.terminals {
             cfg.terminals = v;
         }
+        if let Some(v) = file.access {
+            cfg.access = v;
+        }
         if !file.plugins.is_empty() {
             cfg.plugins = file.plugins;
         }
@@ -1735,6 +2137,29 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_TERMINAL_IDLE_SECS") {
             cfg.terminals.idle_timeout_secs = v;
         }
+        // Web-UI access: the sign-in switch, the public address, the session
+        // lifetime and the proxy/tunnel trust list. Credentials themselves have no
+        // environment spelling on purpose - a password hash in `KARUCODE_*` would
+        // end up in a unit file and in `systemctl show`.
+        if let Some(v) = env_bool("KARUCODE_ACCESS_ENABLED")? {
+            cfg.access.enabled = v;
+        }
+        if let Some(v) = env_str("KARUCODE_PUBLIC_URL") {
+            cfg.access.public_url = Some(v);
+        }
+        if let Some(v) = env_parse("KARUCODE_SESSION_DAYS") {
+            cfg.access.session_days = v;
+        }
+        if let Some(v) = env_str("KARUCODE_TUNNEL") {
+            cfg.access.tunnel = TunnelKind::parse(&v).ok_or_else(|| {
+                Error::Config(format!(
+                    "KARUCODE_TUNNEL={v:?} is not a known tunnel: use none, cloudflare or custom"
+                ))
+            })?;
+        }
+        if let Some(v) = env_str("KARUCODE_TRUSTED_PROXIES") {
+            cfg.access.trusted_proxies = split_list(&v);
+        }
         // Colon-separated so a path containing a comma still works. Unset means
         // "no allowlist", not "the default workspace only" - the latter made the
         // ordinary second project (a sibling of the workspace) a 400.
@@ -1846,6 +2271,9 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_CONTEXT_MAX_CHARS") {
             cfg.limits.context_max_chars = v;
         }
+        if let Some(v) = env_bool("KARUCODE_PARALLEL_TOOL_CALLS")? {
+            cfg.limits.parallel_tool_calls = v;
+        }
 
         if let Some(v) = env_str("KARUCODE_APPROVAL_MODE") {
             cfg.approvals.mode = ApprovalMode::parse(&v).ok_or_else(|| {
@@ -1905,12 +2333,15 @@ impl Config {
             && cfg.host != "localhost"
             && cfg.host != "::1"
             && cfg.auth_token.is_none()
+            && !cfg.access.enabled
         {
             return Err(Error::Config(format!(
-                "refusing to bind {host} without KARUCODE_AUTH_TOKEN: remote access requires authentication",
+                "refusing to bind {host} without authentication: remote access requires \
+                 KARUCODE_AUTH_TOKEN, or a password/passkey with [access] enabled = true",
                 host = cfg.host
             )));
         }
+        cfg.access.validate()?;
         // `max_concurrent = 0` and `max_background = 0` mean *no ceiling* and are
         // kept as written: the limiter and the background check read 0 as
         // "unlimited", so clamping it here would silently turn the widest setting
@@ -2214,6 +2645,164 @@ mod tests {
         }
     }
 
+    // ---- [access] ---------------------------------------------------------
+
+    #[test]
+    fn access_is_off_by_default_and_no_url_is_assumed() {
+        let config = Config::default();
+        assert!(!config.access.enabled, "a loopback install needs no sign-in");
+        assert_eq!(config.access.public_url, None);
+        assert_eq!(config.access.tunnel, TunnelKind::None);
+        assert_eq!(config.access.session_days, 30);
+        assert!(config.access.trusted_proxies.is_empty());
+        assert!(!config.access.trusts_forwarded_headers());
+    }
+
+    #[test]
+    fn a_public_url_supplies_the_authority_origin_and_relying_party() {
+        let access = AccessConfig {
+            public_url: Some("https://Karucode.Example.com/".into()),
+            ..AccessConfig::default()
+        };
+        assert_eq!(
+            access.public_authority().as_deref(),
+            Some("karucode.example.com")
+        );
+        assert_eq!(access.rp_id(), "karucode.example.com");
+        assert_eq!(
+            access.expected_origin().as_deref(),
+            Some("https://karucode.example.com")
+        );
+        assert!(access.public_url_is_https());
+        assert!(access.validate().is_ok());
+    }
+
+    #[test]
+    fn a_non_default_port_is_kept_and_a_default_one_dropped() {
+        let with_port = AccessConfig {
+            public_url: Some("http://karucode.example.com:8787".into()),
+            ..AccessConfig::default()
+        };
+        assert_eq!(
+            with_port.public_authority().as_deref(),
+            Some("karucode.example.com:8787")
+        );
+        assert_eq!(with_port.rp_id(), "karucode.example.com");
+        assert_eq!(
+            with_port.expected_origin().as_deref(),
+            Some("http://karucode.example.com:8787")
+        );
+        assert!(!with_port.public_url_is_https());
+
+        let default_port = AccessConfig {
+            public_url: Some("https://karucode.example.com:443".into()),
+            ..AccessConfig::default()
+        };
+        assert_eq!(
+            default_port.public_authority().as_deref(),
+            Some("karucode.example.com")
+        );
+    }
+
+    #[test]
+    fn a_public_url_with_a_path_or_userinfo_is_refused() {
+        for url in [
+            "https://karucode.example.com/ui",
+            "https://user:pw@karucode.example.com",
+            "https://karucode.example.com/?x=1",
+            "karucode.example.com",
+            "ftp://karucode.example.com",
+            "https://",
+        ] {
+            let access = AccessConfig {
+                public_url: Some(url.into()),
+                ..AccessConfig::default()
+            };
+            assert!(
+                access.validate().is_err(),
+                "`{url}` should be refused, got {:?}",
+                access.public_authority()
+            );
+        }
+    }
+
+    #[test]
+    fn session_days_is_bounded() {
+        for (days, ok) in [(0, false), (1, true), (365, true), (366, false)] {
+            let access = AccessConfig {
+                session_days: days,
+                ..AccessConfig::default()
+            };
+            assert_eq!(access.validate().is_ok(), ok, "session_days = {days}");
+        }
+    }
+
+    #[test]
+    fn a_bad_trusted_proxy_is_a_configuration_error_naming_the_entry() {
+        let access = AccessConfig {
+            trusted_proxies: vec!["10.0.0.0/8".into(), "proxy.local".into()],
+            ..AccessConfig::default()
+        };
+        let error = access.validate().unwrap_err().to_string();
+        assert!(error.contains("proxy.local"), "{error}");
+    }
+
+    #[test]
+    fn loopback_is_always_a_trusted_proxy_and_cloudflare_adds_its_ranges() {
+        let loopback_only = AccessConfig::default();
+        let ranges = loopback_only.trusted_proxy_ranges().unwrap();
+        assert_eq!(ranges.len(), 2, "127/8 and ::1: {ranges:?}");
+
+        let cloudflare = AccessConfig {
+            tunnel: TunnelKind::Cloudflare,
+            trusted_proxies: vec!["10.9.0.0/16".into()],
+            ..AccessConfig::default()
+        };
+        let ranges = cloudflare.trusted_proxy_ranges().unwrap();
+        assert_eq!(ranges.len(), 2 + crate::cidr::CLOUDFLARE_V4.len() + crate::cidr::CLOUDFLARE_V6.len() + 1);
+        assert!(cloudflare.trusts_forwarded_headers());
+
+        let custom = AccessConfig {
+            tunnel: TunnelKind::Custom,
+            ..AccessConfig::default()
+        };
+        let ranges = custom.trusted_proxy_ranges().unwrap();
+        assert_eq!(ranges.len(), 2, "a custom tunnel adds nothing on its own");
+        assert!(custom.trusts_forwarded_headers());
+    }
+
+    #[test]
+    fn tunnel_kinds_parse_the_spellings_the_ui_and_env_accept() {
+        assert_eq!(TunnelKind::parse("cloudflare"), Some(TunnelKind::Cloudflare));
+        assert_eq!(TunnelKind::parse("cloudflared"), Some(TunnelKind::Cloudflare));
+        assert_eq!(TunnelKind::parse("CLOUDFLARE"), Some(TunnelKind::Cloudflare));
+        assert_eq!(TunnelKind::parse("none"), Some(TunnelKind::None));
+        assert_eq!(TunnelKind::parse(""), Some(TunnelKind::None));
+        assert_eq!(TunnelKind::parse("custom"), Some(TunnelKind::Custom));
+        assert_eq!(TunnelKind::parse("nginx"), None);
+        assert_eq!(TunnelKind::Cloudflare.as_str(), "cloudflare");
+    }
+
+    #[test]
+    fn the_access_section_round_trips_through_toml() {
+        let file: ConfigFile = toml::from_str(
+            r#"
+            [access]
+            enabled = true
+            public_url = "https://karucode.example.com"
+            session_days = 7
+            tunnel = "cloudflare"
+            trusted_proxies = ["10.0.0.0/8"]
+            "#,
+        )
+        .unwrap();
+        let access = file.access.expect("[access] should parse");
+        assert!(access.enabled);
+        assert_eq!(access.session_days, 7);
+        assert_eq!(access.tunnel, TunnelKind::Cloudflare);
+        assert_eq!(access.trusted_proxies, vec!["10.0.0.0/8".to_string()]);
+    }
+
     #[test]
     fn the_temp_dir_is_an_extra_root_by_default() {
         let config = Config::default();
@@ -2343,6 +2932,9 @@ mod tests {
         assert_eq!(l.max_iterations, 0, "no per-run turn ceiling by default");
         assert!(l.max_run_secs >= 3600);
         assert!(l.max_tool_calls_per_turn >= 8);
+        // Independent calls run at the same time unless an install switches that
+        // off; the sequential path is the opt-out, not the default.
+        assert!(l.parallel_tool_calls);
         assert!(l.command_timeout_secs > 0);
         assert!(l.max_tool_output_bytes > 0);
         // The item ceiling sits under the 1,000-item limit a gateway in front of
@@ -3174,6 +3766,28 @@ retry_max_stream_restarts = 0
         assert_eq!(cfg.limits.max_context_messages, 900);
     }
 
+    /// The parallel-execution switch is readable from the config file, defaults
+    /// to on, and is independent of `model.parallel_tool_calls` (which asks the
+    /// endpoint for several calls per turn rather than saying how they run).
+    #[test]
+    fn the_parallel_tool_switch_is_read_from_the_limits_section() {
+        let _env = env_lock();
+        let file: ConfigFile = toml::from_str("[limits]\nparallel_tool_calls = false\n").unwrap();
+        let cfg = Config::from_parts(file, None).unwrap();
+        assert!(!cfg.limits.parallel_tool_calls);
+        assert!(
+            cfg.model.parallel_tool_calls,
+            "the endpoint switch is a different key and must not move"
+        );
+
+        let file: ConfigFile = toml::from_str("[limits]\nmax_iterations = 5\n").unwrap();
+        let cfg = Config::from_parts(file, None).unwrap();
+        assert!(
+            cfg.limits.parallel_tool_calls,
+            "a file that omits the key keeps the parallel default"
+        );
+    }
+
     #[test]
     fn a_config_file_without_a_notifications_section_keeps_the_defaults() {
         let _env = env_lock();
@@ -3299,6 +3913,7 @@ retry_max_stream_restarts = 0
             "KARUCODE_MODEL_SUPPORTS_IMAGES",
             "KARUCODE_ALLOW_RECURSIVE_SUBAGENTS",
             "KARUCODE_SUBAGENT_ALLOW_BACKGROUND",
+            "KARUCODE_PARALLEL_TOOL_CALLS",
         ]);
 
         let cfg = Config::from_parts(ConfigFile::default(), None).expect("config loads");
@@ -3307,6 +3922,10 @@ retry_max_stream_restarts = 0
         assert!(!cfg.model.supports_images);
         assert!(!cfg.subagents.allow_recursive);
         assert!(cfg.subagents.allow_background);
+        assert!(
+            cfg.limits.parallel_tool_calls,
+            "independent tool calls run in parallel unless switched off"
+        );
 
         for (spelling, expected) in [
             ("1", true),
@@ -3338,6 +3957,10 @@ retry_max_stream_restarts = 0
                 cfg.subagents.allow_background, expected,
                 "KARUCODE_SUBAGENT_ALLOW_BACKGROUND={spelling}"
             );
+            assert_eq!(
+                cfg.limits.parallel_tool_calls, expected,
+                "KARUCODE_PARALLEL_TOOL_CALLS={spelling}"
+            );
         }
     }
 
@@ -3368,6 +3991,7 @@ retry_max_stream_restarts = 0
             "KARUCODE_MODEL_SUPPORTS_IMAGES",
             "KARUCODE_ALLOW_RECURSIVE_SUBAGENTS",
             "KARUCODE_SUBAGENT_ALLOW_BACKGROUND",
+            "KARUCODE_PARALLEL_TOOL_CALLS",
         ] {
             let _guard = EnvVars::set([name]);
             std::env::set_var(name, "definitely-not-a-boolean");

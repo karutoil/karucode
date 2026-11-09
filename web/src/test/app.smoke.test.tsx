@@ -64,6 +64,56 @@ function installFetch(config: typeof configFixture = configFixture) {
     if (url === '/api/sessions/s_ab12') return jsonResponse(detailFixture);
     if (url === '/api/plugins') return jsonResponse({ plugins: [] });
     if (url === '/api/mcp') return jsonResponse({ servers: [] });
+    if (url === '/api/onboarding') {
+      // An established install: the smoke test is about the workspace, not the
+      // first-run wizard.
+      return jsonResponse({
+        needed: false,
+        completed: true,
+        provider_configured: true,
+        has_sessions: true,
+        project_count: 1,
+        has_credential: false,
+        access: {
+          enabled: false,
+          password_set: false,
+          passkeys: [],
+          sessions: [],
+          public_url: null,
+          session_days: 30,
+          tunnel: 'none',
+          trusted_proxies: [],
+          trusts_forwarded_headers: false,
+          cloudflare_ranges: false,
+          token_required: false,
+          settings_locked: false,
+        },
+        workspace: '/home/me/project',
+        version: '0.1.0',
+      });
+    }
+    if (url === '/api/auth/status') {
+      return jsonResponse({
+        enabled: false,
+        sign_in_required: false,
+        password_set: false,
+        passkey_count: 0,
+        needs_setup: true,
+        signed_in: false,
+        signed_in_with: null,
+        token_required: false,
+        session_days: 30,
+        public_url: null,
+        tunnel: 'none',
+        trusted_proxies: [],
+        cloudflare_proxies: false,
+        origin: 'http://127.0.0.1:8787',
+        rp_id: '127.0.0.1',
+        min_password_len: 10,
+        max_password_len: 1024,
+        passkey_challenge_ttl_secs: 300,
+      });
+    }
     return jsonResponse({ error: { code: 'not_found', message: `unmocked ${url}` } }, 404);
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -127,7 +177,30 @@ describe('App smoke render', () => {
     warnSpy.mockRestore();
   });
 
-  it('shows the token entry screen on 401', async () => {
+  it('opens the first-run wizard instead of the workspace on a fresh install', async () => {
+    // The regression this exists for: a boot that fetched `/api/onboarding` but
+    // ignored `needed` left a brand-new install staring at an empty workspace
+    // with no provider and no way to set one.
+    const fetchMock = installFetch();
+    const base = fetchMock.getMockImplementation()!;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url === '/api/onboarding') {
+          const response = await base(input, init);
+          const body = await response.json();
+          return jsonResponse({ ...body, needed: true, completed: false });
+        }
+        return base(input, init);
+      }),
+    );
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: 'Welcome to karucode' })).not.toBeNull();
+    expect(screen.queryByLabelText('Message karucode')).toBeNull();
+  });
+
+  it('shows the sign-in screen on 401', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
@@ -135,7 +208,10 @@ describe('App smoke render', () => {
       ),
     );
     render(<App />);
-    expect(await screen.findByText('Authentication required')).not.toBeNull();
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).not.toBeNull();
+    // With no /api/auth/status answer the screen cannot know which method the
+    // server offers, so it shows the bearer token form - the one method every
+    // version supports.
     expect(screen.getByLabelText('Access token')).not.toBeNull();
   });
   it('does not retain an ordinary Workbench beneath the Control Plane', async () => {

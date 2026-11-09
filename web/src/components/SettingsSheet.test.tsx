@@ -890,6 +890,34 @@ describe('SettingsSheet controls', () => {
     expect(patches[0]?.model?.parallel_tool_calls).toBe(false);
   });
 
+  /**
+   * The execution switch lives with the limits, not with the model: it decides
+   * how a turn's calls run, while `model.parallel_tool_calls` decides whether the
+   * endpoint may return several of them at all.
+   */
+  it('saves the parallel-execution switch from the limits section', async () => {
+    const config = twoProfileConfig();
+    config.limits.parallel_tool_calls = true;
+    const { patches } = installFetch(config);
+    renderSheet(config);
+
+    await settleOnTab('Agent', 'Max concurrent', config);
+    await openAdvanced();
+    const toggle = await screen.findByRole('switch', {
+      name: 'Run independent tool calls in parallel',
+    });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.limits?.parallel_tool_calls).toBe(false);
+    // The endpoint switch is a different key and must not move with it.
+    expect(patches[0]?.model?.parallel_tool_calls).toBe(true);
+  });
+
   it('saves the install-wide image default from its own switch', async () => {
     const config = twoProfileConfig();
     config.model.supports_images = false;
@@ -1279,7 +1307,7 @@ describe('SettingsSheet tabs', () => {
     vi.unstubAllGlobals();
   });
 
-  it('splits the sheet into five labelled tabs, one panel at a time', async () => {
+  it('splits the sheet into six labelled tabs, one panel at a time', async () => {
     installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
 
@@ -1288,6 +1316,7 @@ describe('SettingsSheet tabs', () => {
       'General',
       'Models',
       'Agent',
+      'Access',
       'Notifications',
       'Plugins & MCP',
     ]);
@@ -1298,13 +1327,14 @@ describe('SettingsSheet tabs', () => {
       'false',
       'false',
       'false',
+      'false',
     ]);
-    expect(tabs.map((tab) => tab.tabIndex)).toEqual([0, -1, -1, -1, -1]);
+    expect(tabs.map((tab) => tab.tabIndex)).toEqual([0, -1, -1, -1, -1, -1]);
 
     // The first tab is the one that opens, and it is the only visible panel.
     expect(tabs[0]?.getAttribute('aria-controls')).toBe('settings-panel-general');
     const panels = document.querySelectorAll('.settings-panels > .tab-panel');
-    expect(panels).toHaveLength(5);
+    expect(panels).toHaveLength(6);
     expect(panels[0]?.hasAttribute('hidden')).toBe(false);
     expect([...panels].slice(1).every((panel) => panel.hasAttribute('hidden'))).toBe(true);
 

@@ -56,6 +56,7 @@ function twoProfileConfig(): Config {
       search_max_results: 200,
       context_max_chars: 240000,
       max_tool_calls_per_turn: 8,
+      parallel_tool_calls: true,
     },
     approvals: { mode: 'ask', allow_commands: [], auto_approve_paths: [], timeout_secs: 300 },
     subagents: {

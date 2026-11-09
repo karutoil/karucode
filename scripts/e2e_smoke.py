@@ -643,6 +643,49 @@ def main():
             _assert(len(events.for_run(rid, "tool_call_finished")) >= 2, [e.get("name") for e in events.for_run(rid, "tool_call_finished")]),
             "2 tools",
         )[-1])
+
+        # Two real `write_file` calls in one turn. With
+        # `limits.parallel_tool_calls` on (the default) the turn runs them
+        # together, and both results must still reach the transcript in call
+        # order - the files prove each write happened, the indices prove the
+        # order. Auto mode is what keeps the writes off the approval gate: a
+        # write that would prompt stays sequential on purpose.
+        mode_before = client.ok("GET", "/api/config")["approvals"]["mode"]
+        client.ok("PATCH", "/api/config", {"approvals": {"mode": "auto"}})
+        try:
+            rid = run_prompt("[tool:writes] write two files")
+            finished = [
+                e for e in events.for_run(rid, "tool_call_finished")
+                if e.get("name") == "write_file"
+            ]
+            check("two file writes in one turn both land, in call order", lambda: (
+                _assert(
+                    len(finished) == 2 and all(e["ok"] for e in finished),
+                    [(e.get("name"), e.get("ok")) for e in finished],
+                ),
+                _assert(
+                    (workspace / "parallel-one.txt").read_text() == "first write\n",
+                    "parallel-one.txt missing or wrong",
+                ),
+                _assert(
+                    (workspace / "parallel-nested" / "parallel-two.txt").read_text()
+                    == "second write\n",
+                    "parallel-nested/parallel-two.txt missing or wrong",
+                ),
+                "2 files",
+            )[-1])
+            written = client.ok("GET", f"/api/sessions/{sid}")["messages"]
+            bodies = [m.get("content") or "" for m in written if m["role"] == "tool"]
+            first = next((i for i, b in enumerate(bodies) if "parallel-one.txt" in b), -1)
+            second = next((i for i, b in enumerate(bodies) if "parallel-two.txt" in b), -1)
+            check("parallel write results are folded in call order", lambda: (
+                _assert(first >= 0 and second >= 0, [b[:80] for b in bodies]),
+                _assert(first < second, f"results out of call order: {first} vs {second}"),
+                "call order kept",
+            )[-1])
+        finally:
+            client.ok("PATCH", "/api/config", {"approvals": {"mode": mode_before}})
+
         # Regression: DeepSeek-V4 writes its DSML tool-call markup into the text
         # channel and an endpoint that does not parse it forwards the markup as
         # prose, so the call never ran and the model looked broken. The markup

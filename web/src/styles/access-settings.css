@@ -1,0 +1,177 @@
+/* Access tab of the settings sheet (`components/AccessSettings.tsx`).
+ *
+ * The tab is five self-contained sections rather than one form, so this sheet
+ * only carries what those sections need and nothing else: the row layout for a
+ * list of passkeys / signed-in browsers, the inline "rename" and "remove" forms
+ * that replace a row's buttons, and the two pieces of chrome the sheet's own
+ * vocabulary does not have (a standing warning, and a saved confirmation).
+ *
+ * Everything here composes with `settings.css` instead of restyling it: `.field`,
+ * `.field-label`, `.field-hint`, `.field-error`, `.settings-subhead`,
+ * `.setting-copy` and `.button-small` are the sheet's, and this file adds no
+ * second definition of any of them.
+ */
+
+/* A stack of fields inside one section. */
+.access-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  min-width: 0;
+}
+
+/* A standing warning: the policy is not what the copy above it implies. It is
+ * not an error (nothing failed) and not a status (nothing just happened), so it
+ * gets its own shape rather than borrowing `field-error`'s bare red line. */
+.access-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: var(--fs-tiny);
+  line-height: 1.55;
+}
+
+/* A saved confirmation: the quiet counterpart of `.field-error`, with the tick
+ * inside the paragraph so the two read as the same kind of line. */
+.access-saved {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--success);
+  font-size: var(--fs-tiny);
+  line-height: 1.5;
+}
+
+/* The buttons (and their hint) under a section's editable part. */
+.access-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-6);
+}
+
+/* The destructive part of a section, boxed so "Remove password" cannot be
+ * mistaken for one more ordinary row. */
+.access-danger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-5) var(--space-6);
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger-bg) 70%, transparent);
+}
+
+/* ---------- rows: passkeys and signed-in browsers ---------------------- */
+
+.access-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.access-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-6);
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--line);
+}
+
+.access-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.access-row-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  color: var(--text);
+  font-size: var(--fs-label);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+/* "Added Nov 6, 2:15 PM · last used 2d ago" — quieter than the name it follows. */
+.access-row-meta {
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.access-row-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--space-4);
+}
+
+/* The "this is the browser you are looking at" marker beside a session's name.
+ * A pill, not a button: it is a fact about the row, not a control. */
+.access-tag {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-pill);
+  background: var(--accent-bg);
+  color: var(--accent-text);
+  font-size: var(--fs-tiny);
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+/* ---------- an inline rename / confirm form inside a row --------------- */
+
+.access-inline-form {
+  display: flex;
+  flex: 1 1 240px;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.access-inline-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+/* `.input` is `width: 100%`, which inside a flex row would push the buttons off
+ * the line, so the inline input grows instead. */
+.access-inline-row .input {
+  flex: 1 1 160px;
+  width: auto;
+  min-width: 0;
+}
+
+/* ---------- the proxy list --------------------------------------------- */
+
+/* `.input` is a 32px-high single line; a textarea has to undo that height and
+ * take `.input`'s border, fill and type scale unchanged. */
+.access-textarea {
+  height: auto;
+  min-height: 72px;
+  padding: var(--space-3) var(--space-4);
+  resize: vertical;
+  line-height: 1.6;
+}

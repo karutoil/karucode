@@ -78,6 +78,18 @@ node_modules/
 /docs/internal/design-verify/screens/
 /docs/internal/design-verify/appearance-matrix.json
 
+# --- a session's own plan and scratch notes ----------------------------------
+# An agent's working plan is not a product doc: `PLAN.md` / `NOTES.md` /
+# `SCRATCH.md` at the root, a `docs/plans/` tree, and any `*.plan.md` are written
+# for the run that wrote them and read by no build, test or link. The durable
+# version of a decision belongs in a doc block, `docs/` or a CHANGELOG entry;
+# root-anchoring keeps a project or demo directory free to keep its own notes.
+/PLAN*.md
+/NOTES*.md
+/SCRATCH*.md
+*.plan.md
+/docs/plans/
+
 # --- local research artifacts ------------------------------------------------
 # The harness-literature survey written for the agent-loop roadmap. It cites ~45
 # papers with a trailing window that goes stale, no build or test reads it, and a

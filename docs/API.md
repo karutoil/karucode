@@ -26,6 +26,64 @@ Codes: `bad_request`, `not_found`, `permission_denied`, `unauthorized`, `config`
   `127.0.0.1`, `localhost` or `[::1]` (any port), plus anything listed in
   `KARUCODE_ALLOWED_HOSTS` (`host`, `host:port`, or `*.example.com`). This is what
   defeats DNS rebinding; anything else is `403 permission_denied`.
+* Web-UI sign-in (`[access] enabled = true`) is a second credential: a password or
+  passkey exchanged for an `HttpOnly` `karucode_session` cookie on
+  `POST /api/auth/login`. The bearer token keeps working beside it. Only
+  `GET /api/auth/status`, `POST /api/auth/login` and the two passkey sign-in steps
+  are reachable while signed out. See **Web-UI sign-in** below and the `web-auth`
+  doc topic.
+
+## Web-UI sign-in
+
+```http
+GET  /api/auth/status                     # public
+POST /api/auth/login            {password}          # sets the session cookie
+POST /api/auth/logout                               # deletes it
+GET  /api/auth/me                                   # who this request is
+POST /api/auth/password         {password, current_password?}
+DELETE /api/auth/password       {current_password?} # body is optional
+GET  /api/auth/passkeys
+POST /api/auth/passkeys/options                     # registration challenge
+POST /api/auth/passkeys         {challenge_id, name, credential_id,
+                                 client_data_json, attestation_object}
+PATCH  /api/auth/passkeys/:id   {name}
+DELETE /api/auth/passkeys/:id
+POST /api/auth/passkey/options                      # sign-in challenge
+POST /api/auth/passkey/login    {challenge_id, credential_id, client_data_json,
+                                 authenticator_data, signature}
+GET  /api/auth/sessions                             # signed-in browsers
+DELETE /api/auth/sessions/:id
+POST /api/auth/sessions/revoke-all
+GET  /api/onboarding                                # should the wizard run?
+POST /api/onboarding/complete   {skipped?}
+```
+
+`GET /api/auth/status` is the only payload a signed-out browser needs:
+
+```json
+{ "enabled": true, "sign_in_required": true, "password_set": true,
+  "passkey_count": 0, "needs_setup": false, "signed_in": false,
+  "signed_in_with": null, "token_required": false, "session_days": 30,
+  "public_url": "https://karucode.example.com", "tunnel": "cloudflare",
+  "trusted_proxies": [], "cloudflare_proxies": true,
+  "origin": "https://karucode.example.com",
+  "rp_id": "karucode.example.com",
+  "min_password_len": 10, "max_password_len": 1024,
+  "passkey_challenge_ttl_secs": 300 }
+```
+
+* Creating the first credential turns `[access] enabled` on and returns
+  `enabled_now: true`; the response also carries the new session cookie, so the
+  request that set the password cannot lock itself out.
+* `[access] enabled = true` with no credential is `400 bad_request`.
+* A wrong password is `401 unauthorized`; eight failures from one address within
+  15 minutes are `429 too_many_requests` for 5 minutes, including for the correct
+  password.
+* Changing a set password requires `current_password` (`403` otherwise) and signs
+  every existing session out. Removing the last credential turns sign-in off.
+* Passkeys are ES256 only, and every ceremony is checked against a single-use
+  challenge (5 minutes), the origin, the rp id hash and a non-decreasing signature
+  counter. Attestation statements are not verified.
 
 ## Health / config
 

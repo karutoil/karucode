@@ -96,7 +96,7 @@ use crate::history::repair_history;
 use crate::restart::StreamRestarts;
 use crate::{RunHandle, RunState, Runtime, RuntimeInner, HISTORY_LIMIT};
 use futures_util::{FutureExt, StreamExt};
-use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView};
+use kc_core::approval::{ApprovalDecision, ApprovalKind, ApprovalPolicyView, AutoDecision};
 use kc_core::config::{ApprovalMode, Limits, ModelConfig};
 use kc_core::error::{Error, Result};
 use kc_core::events::Event;
@@ -1606,15 +1606,33 @@ is {})",
             );
         }
 
-        // A turn made entirely of read-only, approval-free calls runs
-        // concurrently: they touch nothing, so the only thing a strict order buys
-        // is a network round trip per call. Everything that decides *whether* to
-        // run is still evaluated in call order here, before anything starts (see
-        // `plan_parallel_turn`); anything else - a mutating call, an approval, a
-        // refused repeat, a skipped call - takes the sequential path below
-        // unchanged.
+        // A turn whose calls cannot see each other's effects runs concurrently:
+        // they touch nothing, so the only thing a strict order buys is a network
+        // round trip per call. Everything that decides *whether* to run is still
+        // evaluated in call order here, before anything starts (see
+        // `plan_parallel_turn`); anything else - a shell command, a plugin tool,
+        // an approval, a refused repeat, a skipped call, a write to a path
+        // another call in the turn also names - takes the sequential path below
+        // unchanged. `limits.parallel_tool_calls = false` turns the whole thing
+        // off and makes every turn sequential.
+        //
+        // The policy decides whether a write would park a worker on a human
+        // approval: only a call that runs without asking may join the batch.
+        let policy = inner.deps.settings.approval_policy().await;
+        let policy_view = ApprovalPolicyView {
+            mode: policy.mode.clone(),
+            allow_commands: policy.allow_commands.clone(),
+            auto_approve_paths: policy.auto_approve_paths.clone(),
+        };
         match plan_parallel_turn(
-            &spec, &calls, per_turn, &repeats, mutations, turn_cap, turn_chars,
+            &spec,
+            &calls,
+            per_turn,
+            &repeats,
+            mutations,
+            turn_cap,
+            turn_chars,
+            &policy_view,
         ) {
             Some(budgets) => {
                 if let Err(message) = run_parallel_turn(
@@ -1624,7 +1642,7 @@ is {})",
                     &calls,
                     &budgets,
                     &mut repeats,
-                    mutations,
+                    &mut mutations,
                     &mut turn_chars,
                     &mut history,
                 )
@@ -2060,13 +2078,96 @@ fn truncate_detail(text: &str, max_bytes: usize) -> String {
     format!("{}... [truncated]", &text[..end])
 }
 
-/// How many read-only calls one turn may run at once.
+/// How many calls one turn may run at once.
 ///
 /// Eight, not `calls.len()`: the win is avoiding a network round trip per call,
 /// and past eight the marginal call buys nothing while every plugin or MCP call
 /// is another process. It is also small enough that a turn cannot flood a
 /// provider or a plugin with concurrent work.
-const PARALLEL_READONLY_LIMIT: usize = 8;
+const PARALLEL_BATCH_LIMIT: usize = 8;
+
+/// The paths one call is known to touch, when the call is one this turn may run
+/// beside its siblings.
+///
+/// `writes` separates a call that changes the workspace from one that only reads
+/// it. Two reads always commute; a write conflicts with any other call that
+/// names an overlapping path, because `write_file a` and `read_file a` have an
+/// order even when neither of them fails.
+struct Footprint {
+    writes: bool,
+    paths: Vec<String>,
+}
+
+impl Footprint {
+    fn conflicts_with(&self, other: &Self) -> bool {
+        if !self.writes && !other.writes {
+            return false;
+        }
+        self.paths
+            .iter()
+            .any(|mine| other.paths.iter().any(|theirs| paths_overlap(mine, theirs)))
+    }
+}
+
+/// Whether two workspace-relative paths are the same path or one contains the
+/// other. Textual and at a `/` boundary: `a/b` is under `a`, `a/bc` is not.
+fn paths_overlap(a: &str, b: &str) -> bool {
+    a == b || is_under(a, b) || is_under(b, a)
+}
+
+fn is_under(parent: &str, child: &str) -> bool {
+    child.len() > parent.len()
+        && child.starts_with(parent)
+        && child.as_bytes().get(parent.len()) == Some(&b'/')
+}
+
+/// The paths a call's arguments name, when the runtime can place the call.
+///
+/// Only `path` and `paths` are read - the two spellings every file tool in this
+/// harness uses - and a value that is not a plain workspace-relative path makes
+/// the whole call unplaceable. `None` means "unknown", which keeps the turn on
+/// the sequential path rather than guessing where an argument lands.
+fn call_paths(arguments: &serde_json::Value) -> Option<Vec<String>> {
+    let mut paths = Vec::new();
+    match arguments.get("path") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::String(path)) => paths.push(relative_path(path)?),
+        Some(_) => return None,
+    }
+    match arguments.get("paths") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::Array(items)) => {
+            for item in items {
+                paths.push(relative_path(item.as_str()?)?);
+            }
+        }
+        Some(_) => return None,
+    }
+    Some(paths)
+}
+
+/// Normalise one path argument the way it has to be compared: `./src//lib.rs/`
+/// is `src/lib.rs`.
+///
+/// An absolute path, a `..` segment or an empty argument is `None`: the file
+/// tools refuse those as well, and the planner cannot say where they would land.
+fn relative_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.contains("..") {
+        return None;
+    }
+    let mut normal = String::with_capacity(trimmed.len());
+    for part in trimmed.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if !normal.is_empty() {
+            normal.push('/');
+        }
+        normal.push_str(part);
+    }
+    (!normal.is_empty()).then_some(normal)
+}
 
 /// Whether this turn may run its calls concurrently, and each call's byte budget
 /// when it does.
@@ -2074,6 +2175,8 @@ const PARALLEL_READONLY_LIMIT: usize = 8;
 /// Everything that decides *whether* a call runs is evaluated here, in call
 /// order, before any of them starts:
 ///
+/// * `limits.parallel_tool_calls = false` - the switch off means one call at a
+///   time, exactly how karucode ran before the switch existed;
 /// * the per-turn call cap - one call over it and the whole turn takes the
 ///   sequential path, because that path is what writes the `[skipped: ...]`
 ///   placeholders in order;
@@ -2082,6 +2185,14 @@ const PARALLEL_READONLY_LIMIT: usize = 8;
 ///   start of the turn (which is exactly what the sequential path sees for its
 ///   first call). A turn with a refused repeat runs sequentially, so the block's
 ///   own counter and `REPEAT_MAX_BLOCKS` let-through keep happening in call order;
+/// * independence. A read-only, approval-free call is placed by its arguments (a
+///   read naming nothing is still safe - it cannot conflict with a write). A
+///   **built-in** file write or edit is placed by the path it names, and only
+///   when the approval policy would not prompt for that path: a worker parked on
+///   a human answer is not concurrency. Two calls that name overlapping paths are
+///   not independent, so one conflict sends the whole turn down the sequential
+///   path. A shell command, a plugin or MCP tool and a subagent spawn are never
+///   placed at all - they can touch anything;
 /// * the per-turn byte budget: an equal share of what is left of it, so the batch
 ///   as a whole stays inside the allowance (each call still gets
 ///   `TURN_RESULT_FLOOR_BYTES`, the same floor the sequential path applies). The
@@ -2089,8 +2200,8 @@ const PARALLEL_READONLY_LIMIT: usize = 8;
 ///   that call actually returned; a concurrent batch cannot, so it reserves
 ///   before it starts.
 ///
-/// `None` means "run this turn the way it has always run": one call, a mutating
-/// call, an approval-gated call, an unknown tool, or anything above.
+/// `None` means "run this turn the way it has always run".
+#[allow(clippy::too_many_arguments)]
 fn plan_parallel_turn(
     spec: &LoopSpec,
     calls: &[ToolCall],
@@ -2099,8 +2210,13 @@ fn plan_parallel_turn(
     mutations: u64,
     turn_cap: usize,
     turn_chars: usize,
+    policy: &ApprovalPolicyView,
 ) -> Option<Vec<usize>> {
     if calls.len() < 2 || calls.len() > per_turn || spec.cancel.is_cancelled() {
+        return None;
+    }
+    // The switch. Off means one call at a time, in order.
+    if !spec.limits.parallel_tool_calls {
         return None;
     }
     let share = turn_cap
@@ -2108,12 +2224,12 @@ fn plan_parallel_turn(
         .checked_div(calls.len())?
         .max(TURN_RESULT_FLOOR_BYTES);
     let mut budgets = Vec::with_capacity(calls.len());
+    let mut footprints: Vec<Footprint> = Vec::with_capacity(calls.len());
     for call in calls {
         let tool = spec.tools.get(&call.name)?;
-        // Read-only *and* approval-free. A gated tool would park a worker on a
-        // human answer, and a mutating one must stay in call order: two writes to
-        // the same file do not commute.
-        if tool.class() != kc_core::tool::ToolClass::ReadOnly || tool.requires_approval() {
+        // Approval-free first: a gated tool would park a worker on a human
+        // answer, which is not concurrency.
+        if tool.requires_approval() {
             return None;
         }
         // The notebook is read-only by class but appends state: two notes in one
@@ -2122,6 +2238,43 @@ fn plan_parallel_turn(
         if call.name == context::NOTE_TOOL {
             return None;
         }
+        let writes = match tool.class() {
+            kc_core::tool::ToolClass::ReadOnly => false,
+            // Only a built-in file tool can be placed by the paths its arguments
+            // name: a shell command mutates anything, a plugin or MCP tool is
+            // another process, and a subagent runs a loop of its own.
+            kc_core::tool::ToolClass::Mutating if tool.spec().origin == ToolOrigin::Builtin => true,
+            _ => return None,
+        };
+        // The arguments are the JSON text the model wrote; a call whose arguments
+        // do not parse has no place in a batch (the sequential path reports the
+        // parse error back to the model).
+        let paths = match serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            Ok(arguments) => call_paths(&arguments)?,
+            Err(_) => return None,
+        };
+        if writes {
+            // A write nothing places, or one whose path would prompt, keeps the
+            // turn sequential. Two writes to the same file do not commute, and a
+            // prompt is a person in the middle of the batch.
+            if paths.is_empty() {
+                return None;
+            }
+            let prompt_free = paths
+                .iter()
+                .all(|path| policy.for_write(std::path::Path::new(path)) == AutoDecision::Allow);
+            if !prompt_free {
+                return None;
+            }
+        }
+        let footprint = Footprint { writes, paths };
+        if footprints
+            .iter()
+            .any(|other| other.conflicts_with(&footprint))
+        {
+            return None;
+        }
+        footprints.push(footprint);
         let key = repeat_fingerprint(&[&call.name, &call.arguments]);
         let refused = repeats.get(&key).is_some_and(|repeat| {
             repeat.count >= REPEAT_NOTE_AFTER
@@ -2136,7 +2289,7 @@ fn plan_parallel_turn(
     Some(budgets)
 }
 
-/// Run a turn's read-only calls concurrently, then fold the results back in.
+/// Run a turn's independent calls concurrently, then fold the results back in.
 ///
 /// **Ordering guarantee.** `ToolCallStarted` is emitted for every call in call
 /// order before any of them runs, so the UI never shows call 3 starting before
@@ -2162,7 +2315,11 @@ async fn run_parallel_turn(
     calls: &[ToolCall],
     budgets: &[usize],
     repeats: &mut std::collections::HashMap<[u8; 32], Repeat>,
-    mut mutations: u64,
+    // `&mut`, not a copy: a batch may hold file writes now, and a write has to
+    // count towards the run's mutation count outside this turn too - otherwise a
+    // later read of that file could be refused as a repeat of an answer the write
+    // had already invalidated.
+    mutations: &mut u64,
     turn_chars: &mut usize,
     history: &mut Vec<Message>,
 ) -> std::result::Result<(), String> {
@@ -2176,7 +2333,7 @@ async fn run_parallel_turn(
         });
     }
 
-    // Calls run in windows of at most `PARALLEL_READONLY_LIMIT`, and every window
+    // Calls run in windows of at most `PARALLEL_BATCH_LIMIT`, and every window
     // is folded in call order before the next one starts. `join_all` inside a
     // window (rather than a `buffer_unordered` over the whole turn) is what keeps
     // the concurrency bounded and the order deterministic - and it avoids a
@@ -2184,8 +2341,8 @@ async fn run_parallel_turn(
     // produces for these borrowed futures inside `tokio::spawn`.
     let mut done: Vec<(usize, std::result::Result<Message, String>)> =
         Vec::with_capacity(calls.len());
-    for (window, chunk) in calls.chunks(PARALLEL_READONLY_LIMIT).enumerate() {
-        let first = window * PARALLEL_READONLY_LIMIT;
+    for (window, chunk) in calls.chunks(PARALLEL_BATCH_LIMIT).enumerate() {
+        let first = window * PARALLEL_BATCH_LIMIT;
         let batch = chunk.iter().enumerate().map(|(offset, call)| {
             let index = first + offset;
             // `catch_unwind` per call, not per batch: a panic in one call becomes
@@ -2225,17 +2382,16 @@ async fn run_parallel_turn(
             // siblings'.
             Err(error) => Message::tool_result(call.id.clone(), call.name.clone(), error),
         };
+        // Per call, not per batch: a batch may hold reads *and* file writes, and
+        // the repeat ledger only tracks what a read answered (a write makes the
+        // earlier answer stale, which is the whole point of `mutations`).
+        let read_only = spec
+            .tools
+            .get(&call.name)
+            .map(|tool| tool.class() == kc_core::tool::ToolClass::ReadOnly)
+            .unwrap_or(false);
         fold_tool_result(
-            inner,
-            spec,
-            ctx,
-            call,
-            message,
-            true,
-            repeats,
-            &mut mutations,
-            turn_chars,
-            history,
+            inner, spec, ctx, call, message, read_only, repeats, mutations, turn_chars, history,
         )
         .await?;
     }

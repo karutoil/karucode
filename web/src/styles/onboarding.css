@@ -1,0 +1,356 @@
+/* ---------- first-run wizard ------------------------------------------ */
+
+/*
+ * The wizard is a full-screen flow, not a dialog: there is no workspace behind it
+ * yet. It reuses `full-screen-state` / `state-card` from `overlays.css` and only
+ * widens the card and lays out the step rail, the body and the footer.
+ */
+
+.onboarding-screen {
+  align-items: center;
+  padding: var(--space-9) var(--space-7);
+}
+
+.onboarding-card {
+  width: min(760px, 100%);
+  max-height: calc(100dvh - var(--space-9) * 2);
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-9) var(--space-10);
+}
+
+.onboarding-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-6);
+}
+
+.onboarding-progress {
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.onboarding-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-6);
+  margin: var(--space-8) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.onboarding-rail-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+}
+
+.onboarding-rail-item.is-current {
+  color: var(--text);
+}
+
+.onboarding-rail-item.is-done {
+  color: var(--text-secondary);
+}
+
+.onboarding-rail-dot {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.onboarding-rail-item.is-current .onboarding-rail-dot {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.onboarding-rail-item.is-done .onboarding-rail-dot {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.onboarding-rail-label {
+  /* The labels are for orientation, not navigation: the rail is a progress
+     indicator, so it must not steal the width the fields need. */
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.onboarding-title {
+  margin-top: var(--space-8);
+}
+
+.onboarding-title:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+/* Scrolls, so a tall step never pushes the footer off a laptop screen. */
+.onboarding-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: var(--space-7);
+  padding-right: var(--space-2);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.onboarding-points {
+  margin: 0;
+  padding-left: 1.2em;
+  color: var(--text-secondary);
+  font-size: var(--fs-message);
+  line-height: 1.75;
+}
+
+.onboarding-points li + li {
+  margin-top: var(--space-4);
+}
+
+.onboarding-points strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.onboarding-points code {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--surface-raised);
+  font-size: 0.9em;
+}
+
+.onboarding-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.onboarding-fields .field-label {
+  margin-top: var(--space-4);
+}
+
+.onboarding-fields .field-label:first-child {
+  margin-top: 0;
+}
+
+.onboarding-textarea {
+  min-height: 72px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  line-height: 1.6;
+}
+
+.onboarding-toggle-row {
+  align-items: center;
+  padding: var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+}
+
+.onboarding-test-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
+
+.onboarding-test {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-tiny);
+}
+
+.onboarding-test.is-ok {
+  color: var(--success, var(--accent));
+}
+
+.onboarding-test.is-bad {
+  color: var(--danger);
+}
+
+.onboarding-passkey-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line);
+}
+
+.onboarding-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--space-4);
+}
+
+.onboarding-choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.onboarding-choice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.onboarding-choice:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-raised);
+}
+
+.onboarding-choice.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.onboarding-choice-title {
+  color: var(--text);
+  font-size: var(--fs-label);
+  font-weight: 620;
+}
+
+.onboarding-choice-hint {
+  font-size: var(--fs-tiny);
+  line-height: 1.65;
+}
+
+.onboarding-segment {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+}
+
+.onboarding-segment button {
+  padding: var(--space-3) var(--space-6);
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--fs-tiny);
+  font-weight: 560;
+  cursor: pointer;
+}
+
+.onboarding-segment button.is-selected {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-composer);
+}
+
+.onboarding-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--text-secondary);
+  font-size: var(--fs-tiny);
+}
+
+.onboarding-summary {
+  display: grid;
+  gap: var(--space-5);
+  margin: 0;
+}
+
+.onboarding-summary > div {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: var(--space-5);
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--line);
+}
+
+.onboarding-summary > div:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.onboarding-summary dt {
+  color: var(--muted);
+  font-size: var(--fs-tiny);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.onboarding-summary dd {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-label);
+  overflow-wrap: anywhere;
+}
+
+.onboarding-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-6);
+  margin-top: var(--space-8);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--line);
+}
+
+.onboarding-footer-left {
+  display: flex;
+  gap: var(--space-3);
+}
+
+@media (max-width: 640px) {
+  .onboarding-card {
+    padding: var(--space-7) var(--space-6);
+  }
+
+  .onboarding-rail {
+    display: none;
+  }
+
+  .onboarding-summary > div {
+    grid-template-columns: 1fr;
+    gap: var(--space-2);
+  }
+
+  .onboarding-footer {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .onboarding-footer-left {
+    justify-content: space-between;
+  }
+}

@@ -50,7 +50,7 @@ of the embedded snapshot.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--workspace <PATH>` | none | optional default workspace; without it the server starts with no project and you create the first one in the web UI |
-| `--host <ADDR>` | `127.0.0.1` | bind address; a non-loopback bind requires `KARUCODE_AUTH_TOKEN` |
+| `--host <ADDR>` | `127.0.0.1` | bind address; a non-loopback bind requires `KARUCODE_AUTH_TOKEN`, or a password/passkey with `[access] enabled = true` |
 | `--port <PORT>` | `8787` | listen port |
 | `--data-dir <PATH>` | `~/.local/share/karucode` | SQLite database and plugin data, forced to `0700` |
 | `--config <PATH>` | `$KARUCODE_CONFIG` or `~/.config/karucode/config.toml` | config file; must exist |
@@ -107,7 +107,10 @@ no interrupted work auto-resumes.
   (`--workspace`, `KARUCODE_WORKSPACE`, or `workspace =` in the config file).
   Fix the path, or drop it and start with no project.
 * `refusing to bind ... without KARUCODE_AUTH_TOKEN` - remote binds need a
-  token of at least 16 characters.
+  token of at least 16 characters, or `[access] enabled = true` with a password
+  or passkey already set. The second form is checked after the credential store
+  is loaded, so "I turned sign-in on" without a credential fails here rather
+  than leaving a server whose login screen nobody can pass.
 * `could not open the database at ...`, including `database ... failed its
   integrity check` - permissions, structural corruption, or foreign-key
   violations in an existing/restored file. Integrity and foreign-key checks run
@@ -130,8 +133,10 @@ a typo in `--workspace` must not silently degrade to "start empty".
 
 ## Gotchas
 
-* There is no built-in TLS. Bind loopback, or put a reverse proxy in front and
-  set `KARUCODE_ALLOWED_HOSTS` for its host names.
+* There is no built-in TLS. Bind loopback, or put a reverse proxy in front: set
+  `[access] public_url` (which also adds that name to the `Host` allowlist) and
+  pick `tunnel` so the forwarded headers are believable, or use
+  `KARUCODE_ALLOWED_HOSTS` for the host names alone.
 * `--workspace` sets the *default* workspace; projects created in the UI have
   their own directories.
 * The UI embed is a compile-time snapshot in debug builds too: after changing

@@ -17,7 +17,7 @@
 // @kc-title: Understand the security model
 // @kc-summary: What karucode protects by default, what it explicitly does not, and the recipe for safe remote access.
 // @kc-tags: security, auth, csrf, sandbox, remote, trust
-// @kc-applies-to: env:KARUCODE_AUTH_TOKEN, env:KARUCODE_ALLOWED_HOSTS, header:X-Karucode-Client, header:Authorization, config:auth_token, config:allow_temp_dir, doc:docs/SECURITY.md, concept:approvals, concept:workspace containment
+// @kc-applies-to: env:KARUCODE_AUTH_TOKEN, env:KARUCODE_ALLOWED_HOSTS, env:KARUCODE_PUBLIC_URL, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Client, header:Authorization, header:Cookie, config:auth_token, config:allow_temp_dir, config:[access], config:access.public_url, config:access.tunnel, config:access.trusted_proxies, doc:docs/SECURITY.md, concept:approvals, concept:workspace containment, concept:sign-in
 //
 // # Default posture
 //
@@ -43,13 +43,28 @@
 //   A missing or wrong token for a non-`/api` path therefore never yields a
 //   `401`: it yields the shell. The fallback can only ever serve the frontend,
 //   so nothing else is reachable without the token.
+// * **Web-UI sign-in** - a password or a passkey (`[access] enabled = true`)
+//   exchanges a credential for an `HttpOnly` session cookie, which the app then
+//   sends on its own; the bearer token keeps working beside it. Only three paths
+//   are public while this is on - `/api/auth/status`, `/api/auth/login` and the
+//   two passkey sign-in steps - because a sign-in screen that needs a sign-in
+//   cannot exist. `[access] enabled` with no credential is **refused**, and the
+//   same rule gates a non-loopback bind, so the two ways to lock yourself out are
+//   both blocked at the door. See the `web-auth` topic for the settings, the
+//   lockout and what a passkey ceremony actually verifies.
 // * **Transport surface** - the API is same-origin only. No `Access-Control-*`
 //   header is ever sent.
 // * **CSRF** - `POST`/`PATCH`/`PUT`/`DELETE` require
 //   `X-Karucode-Client: web`; a present `Origin` must match `Host`.
 // * **DNS rebinding** - on a loopback bind without a token, only `Host:
-//   127.0.0.1`, `localhost`, `[::1]` (any port) and entries in
-//   `KARUCODE_ALLOWED_HOSTS` are served. Everything else gets `403`.
+//   127.0.0.1`, `localhost`, `[::1]` (any port), entries in
+//   `KARUCODE_ALLOWED_HOSTS` and the configured `[access] public_url` are
+//   served. Everything else gets `403`. The guard is **not** skipped for a
+//   password deployment: a cookie, unlike a bearer header, is sent automatically
+//   by a browser, so a page whose DNS record is re-pointed at this machine would
+//   otherwise carry the session with it. Behind a proxy that rewrites `Host`, an
+//   `X-Forwarded-Host` from a **trusted** peer is accepted as a fallback - and it
+//   is still checked against the same allowlist, so it cannot widen the guard.
 // * **Path confinement** - read/write/edit/list/search resolve through the project
 //   workspace, plus the system temporary directory (see below); `..`,
 //   outside-absolute paths and symlink escapes are refused.
@@ -246,11 +261,22 @@ async fn auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let Some(expected) = state.auth_token() else {
+    let path = request.uri().path();
+    // The SPA shell and its assets are always served: the sign-in screen is part
+    // of the shell, and a browser cannot put a credential on `<script src>`.
+    if !requires_auth(path) {
         return next.run(request).await;
-    };
-    if !requires_auth(request.uri().path())
-        || authorized(&request, &expected)
+    }
+    // Signing in cannot require being signed in.
+    if crate::routes::auth::is_public_path(path) {
+        return next.run(request).await;
+    }
+    // Nothing configured: the historical open loopback server.
+    if !state.sign_in_required() {
+        return next.run(request).await;
+    }
+    if bearer_authorized(&request, state.auth_token().as_deref())
+        || session_authorized(&state, &request)
         || artifact_capability_authorized(&state, &request)
     {
         next.run(request).await
@@ -259,34 +285,12 @@ async fn auth_middleware(
     }
 }
 
-/// Whether a request path is behind the bearer token.
-///
-/// True for `/api` and everything below it, and for `/metrics` (the operator
-/// endpoint registered next to the API in [`build_router`]). False for the SPA
-/// shell, its assets and client-side deep links - see [`auth_middleware`] for
-/// why. `/apifoo` is *not* an API path: it is a client-side route, and the
-/// fallback serves the shell for it.
-///
-/// The path is compared after collapsing repeated slashes and `.`/`..` segments,
-/// so a request written as `//api/config` or `/x/../api/config` is gated too even
-/// though the router would send it to the SPA fallback: the decision fails closed
-/// even if a proxy or a future layer normalises the path before matching it.
-fn requires_auth(path: &str) -> bool {
-    let mut parts: Vec<&str> = Vec::new();
-    for segment in path.split('/') {
-        match segment {
-            "" | "." => continue,
-            ".." => {
-                parts.pop();
-            }
-            other => parts.push(other),
-        }
-    }
-    let normalized = parts.join("/");
-    normalized == "metrics" || normalized == "api" || normalized.starts_with("api/")
-}
-
-fn authorized(request: &Request<Body>, expected: &str) -> bool {
+/// Whether the request carries the configured bearer token (header, or `?token=`
+/// on the two endpoints that cannot send one).
+fn bearer_authorized(request: &Request<Body>, expected: Option<&str>) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
     let header_token = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -320,6 +324,41 @@ fn authorized(request: &Request<Body>, expected: &str) -> bool {
     false
 }
 
+/// Whether the request carries a live web-UI session cookie.
+fn session_authorized(state: &AppState, request: &Request<Body>) -> bool {
+    let Some(token) = crate::routes::auth::session_cookie_from(request.headers()) else {
+        return false;
+    };
+    state.web_auth().session(&token).is_some()
+}
+
+/// Whether a request path is behind the bearer token.
+///
+/// True for `/api` and everything below it, and for `/metrics` (the operator
+/// endpoint registered next to the API in [`build_router`]). False for the SPA
+/// shell, its assets and client-side deep links - see [`auth_middleware`] for
+/// why. `/apifoo` is *not* an API path: it is a client-side route, and the
+/// fallback serves the shell for it.
+///
+/// The path is compared after collapsing repeated slashes and `.`/`..` segments,
+/// so a request written as `//api/config` or `/x/../api/config` is gated too even
+/// though the router would send it to the SPA fallback: the decision fails closed
+/// even if a proxy or a future layer normalises the path before matching it.
+fn requires_auth(path: &str) -> bool {
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    let normalized = parts.join("/");
+    normalized == "metrics" || normalized == "api" || normalized.starts_with("api/")
+}
+
 /// A frame URL carries a random read grant for one artifact, never the master
 /// bearer. The handler repeats this check so the capability remains mandatory
 /// even when the deployment has no master token configured.
@@ -336,9 +375,16 @@ fn artifact_capability_authorized(state: &AppState, request: &Request<Body>) -> 
     state.artifacts().capability_matches(id, &capability)
 }
 
-/// DNS-rebinding guard: when the process is unauthenticated and bound to
+/// DNS-rebinding guard: while the server has no bearer token and is bound to
 /// loopback, a request may only name an allowlisted `Host`. See [`crate::host`]
-/// for the rules and `KARUCODE_ALLOWED_HOSTS`.
+/// for the rules, `KARUCODE_ALLOWED_HOSTS` and `[access] public_url`.
+///
+/// A **web-UI session cookie is why this guard is not skipped for password
+/// deployments.** With a bearer token the header cannot be guessed by a
+/// rebinding page, so the guard is unnecessary; a cookie, on the other hand, is
+/// sent automatically by the browser - including to a name that just resolved to
+/// this machine. So the guard stays on, and the public URL an operator configured
+/// (plus `KARUCODE_ALLOWED_HOSTS`) is what it accepts.
 async fn host_guard_middleware(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -363,22 +409,60 @@ async fn host_guard_middleware(
             None => {
                 return ApiError::forbidden(format!(
                     "rejected request without a Host header: this server is bound to a loopback \
-                     address without KARUCODE_AUTH_TOKEN, so it only accepts Host {}",
+                     address without a bearer token, so it only accepts Host {}",
                     allowlist.description()
                 ))
                 .into_response()
             }
         },
     };
-    match allowlist.check(&authority) {
-        Ok(()) => next.run(request).await,
-        Err(message) => {
-            tracing::warn!(
-                host = %display_host(&authority),
-                "rejected request for a Host that is not allowlisted"
-            );
-            ApiError::forbidden(message).into_response()
+    if host_is_allowed(&state, &authority) {
+        return next.run(request).await;
+    }
+    // A proxy that rewrites `Host` to an internal name (a Docker service name, a
+    // compose network alias) puts the public name in `X-Forwarded-Host`. That
+    // header is only readable from a trusted peer, and the value still has to be
+    // allowlisted, so the fallback cannot widen the guard.
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
+    if let Some(forwarded) = state.proxy_trust().forwarded_authority(peer, request.headers()) {
+        let candidate = match forwarded.port {
+            Some(port) => format!("{}:{port}", forwarded.host),
+            None => forwarded.host,
+        };
+        if host_is_allowed(&state, &candidate) {
+            return next.run(request).await;
         }
+    }
+    tracing::warn!(
+        host = %display_host(&authority),
+        "rejected request for a Host that is not allowlisted"
+    );
+    ApiError::forbidden(allowlist.check(&authority).unwrap_err()).into_response()
+}
+
+/// Whether `host[:port]` is an accepted name for this server.
+///
+/// The configured public URL is accepted in addition to the `Host` allowlist: it
+/// is the one name an operator typed themselves, and it is what a tunnel forwards.
+fn host_is_allowed(state: &AppState, raw: &str) -> bool {
+    let Some(authority) = host::parse_authority(raw) else {
+        return false;
+    };
+    if state.host_allowlist().allows(&authority) {
+        return true;
+    }
+    match state.public_authority() {
+        Some(public) => match host::parse_authority(&public) {
+            Some(expected) => {
+                expected.host == authority.host
+                    && (expected.port.is_none() || expected.port == authority.port)
+            }
+            None => false,
+        },
+        None => false,
     }
 }
 

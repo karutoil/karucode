@@ -1,13 +1,16 @@
 import { computed, signal } from '@preact/signals';
 import type {
+  AccessSettingsSummary,
   AgentAction,
   AgentStatus,
   AgentSummary,
+  AuthStatus,
   Config,
   ConnectionState,
   Health,
   NotifyKind,
   NotifyPayload,
+  OnboardingState,
   PluginPanelSummary,
   Project,
   ProviderProfile,
@@ -54,7 +57,7 @@ export interface PluginPanelState {
   error: string | null;
 }
 export type MobileSheet = 'sessions' | 'inspector' | null;
-export type BootState = 'loading' | 'ready' | 'auth' | 'error';
+export type BootState = 'loading' | 'ready' | 'auth' | 'onboarding' | 'error';
 
 /** Agents are shown for the current session, or for the whole project. */
 export type AgentScope = 'workspace' | 'session';
@@ -154,6 +157,27 @@ export const bootError = signal<string | null>(null);
 export const health = signal<Health | null>(null);
 export const config = signal<Config | null>(null);
 export const authError = signal<string | null>(null);
+
+/**
+ * What the sign-in screen knows: whether sign-in is on, which methods exist, and
+ * what the passkey would be bound to. `null` while it has not been fetched, which
+ * the screen renders as "checking…" rather than guessing.
+ */
+export const authStatus = signal<AuthStatus | null>(null);
+export const authPending = signal(false);
+
+/**
+ * The first-run wizard's state, and which way it was dismissed.
+ *
+ * `needed` comes from the server (`GET /api/onboarding`), so a reload after
+ * "skip" does not put the user back on step one - the completion marker is
+ * persisted, not remembered in this browser.
+ */
+export const onboarding = signal<OnboardingState | null>(null);
+export const onboardingStep = signal(0);
+
+/** The Access settings tab's live view (password state, passkeys, sessions). */
+export const accessSettings = signal<AccessSettingsSummary | null>(null);
 
 export const sessions = signal<SessionSummary[]>([]);
 export const sessionsLoading = signal(true);

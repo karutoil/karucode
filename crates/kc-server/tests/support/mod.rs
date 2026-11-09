@@ -532,6 +532,10 @@ impl HarnessBuilder {
         });
         runtime.recover().await.expect("recover");
 
+        let web_auth = kc_server::web_auth::WebAuth::load(store.clone())
+            .await
+            .expect("web auth");
+
         let state = AppState::new(AppStateDeps {
             settings,
             store,
@@ -545,6 +549,7 @@ impl HarnessBuilder {
             db_path,
             bind_host: self.bind_host,
             allowed_hosts,
+            web_auth,
         });
         state.reload_tools().await;
         let router = build_router(state.clone());
