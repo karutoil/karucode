@@ -24,6 +24,8 @@ const tokensCss = readFileSync(new URL('./tokens.css', import.meta.url), 'utf8')
 const railCss = readFileSync(new URL('./rail.css', import.meta.url), 'utf8');
 const chatCss = readFileSync(new URL('./chat.css', import.meta.url), 'utf8');
 const composerCss = readFileSync(new URL('./composer.css', import.meta.url), 'utf8');
+const workbenchCss = readFileSync(new URL('./workbench.css', import.meta.url), 'utf8');
+const notificationsCss = readFileSync(new URL('./notifications.css', import.meta.url), 'utf8');
 
 /** Declarations of one rule, matched by its full selector text. */
 function declarations(css: string, selector: string): Record<string, string> {
@@ -108,6 +110,65 @@ describe('phone shell: the frame leaves the conversation alone', () => {
     expect(body).toMatch(/\.breadcrumb > strong,[\s\S]*?display: none/);
     expect(body).toMatch(/\.breadcrumb \{\s*\n\s*flex: 1 1 auto/);
     expect(body).not.toMatch(/\.breadcrumb \{\s*\n\s*display: none/);
+  });
+});
+
+describe('phone chrome: every control is a thumb-sized target', () => {
+  /** The body of a `@media (pointer: coarse)` block; those blocks are single-block
+   *  in this repo, so a brace-counted slice is exact where a regex is not. */
+  function coarse(css: string): string {
+    const start = css.indexOf('@media (pointer: coarse) {');
+    if (start < 0) return '';
+    let depth = 0;
+    for (let i = css.indexOf('{', start); i < css.length; i++) {
+      if (css[i] === '{') depth++;
+      else if (css[i] === '}' && --depth === 0) return css.slice(start, i);
+    }
+    return '';
+  }
+
+  it('sizes the workbench header buttons for a finger', () => {
+    // Measured on a phone before this rule: every header control was 30x30 with a
+    // 4px gap, in the corner a thumb reaches first. The rule lives in
+    // workbench.css because that file owns the 30px floor AND loads last: the
+    // same declaration in layout.css is silently outranked.
+    expect(coarse(workbenchCss)).toMatch(
+      /\.chat-main\.is-workbench \.header-buttons > \.head-btn \{[^}]*min-width: 40px;[^}]*min-height: 40px;/,
+    );
+    // ...and the floor it has to override is still there for pointer-fine.
+    expect(workbenchCss).toMatch(/\.header-buttons > \.head-btn \{\s*\n\s*min-height: 30px/);
+  });
+
+  it('covers the control-plane header too, which is not `.is-workbench`', () => {
+    expect(coarse(layoutCss)).toMatch(/\.main-head \.head-btn \{[^}]*min-height: 40px/);
+  });
+
+  it('sizes the dock controls for a finger, Stop included', () => {
+    // Stop sat at 28x28 directly beside Queue: the two most consequential
+    // neighbours in the product, 4px apart.
+    const body = coarse(composerCss);
+    expect(body).toMatch(/\.compose-bottom \.button-stop,[\s\S]*?min-height: 40px/);
+    expect(body).toMatch(/\.compose-plus \{[^}]*width: 40px;[^}]*height: 40px;/);
+    // The labelled pills only needed height: they are already 66-107px wide.
+    expect(body).toMatch(/\.compose-approvals,[\s\S]*?min-height: 32px/);
+  });
+
+  it('keeps the pointer-fine sizes the style contract pins', () => {
+    // The coarse tier is additive; the mouse numbers must not move.
+    expect(declarations(composerCss, '.compose-plus')['width']).toBe('24px');
+    expect(declarations(composerCss, '.compose-bottom .button-stop')['min-width']).toBe('28px');
+  });
+
+  it('ellipsizes the notification meta line instead of cutting a word in half', () => {
+    // `.notification-where` is `display: flex`, where `text-overflow` does
+    // nothing: on a phone the "session · project · source" line was clipped
+    // mid-word at the row edge. The children are the flex items, so they own the
+    // ellipsis.
+    expect(declarations(notificationsCss, '.notification-where > span')).toMatchObject({
+      'min-width': '0',
+      overflow: 'hidden',
+      'text-overflow': 'ellipsis',
+    });
   });
 });
 
@@ -387,6 +448,41 @@ describe('the phone frame is resolved per density, not by accident', () => {
     expect(frameAt('comfortable', 1280)).toEqual({ header: 66, tabs: 44 });
     expect(frameAt('compact', 1280)).toEqual({ header: 54, tabs: 36 });
     expect(frameAt('spacious', 1280)).toEqual({ header: 76, tabs: 51 });
+  });
+});
+
+describe('phone results dock: the conversation obeys the viewport, not its content', () => {
+  it('does not size the conversation pane by its min-content width', () => {
+    // The pane is a flex item in `.center-body.has-result`'s row. Left on the
+    // default `min-width: auto` it took its min-content width — the widest
+    // unbreakable thing in the transcript. Measured in Chromium at a 390px
+    // viewport: `.chat-panel` 638px, Stop at right 619, Queue and Approvals
+    // outside the screen. The overflow is invisible to a `scrollWidth` check
+    // (`.app` is `overflow: hidden`) and unreachable by gesture (`.chat-scroll`
+    // was 638 wide, so it never scrolled), so only this rule keeps the dock
+    // inside the frame.
+    const panel = declarations(workbenchCss, '.chat-main.is-workbench .center-body.has-result > .chat-panel');
+    expect(panel['min-width']).toBe('0');
+  });
+
+  it('declares the floor before the wide-split container query can raise it', () => {
+    // Same selector, so the later `@container workbench (min-width: 1100.01px)`
+    // block wins on source order where it applies and only there. If the floor
+    // ever moved after that block it would also flatten the desktop split.
+    const floor = workbenchCss.indexOf('\n.chat-main.is-workbench .center-body.has-result > .chat-panel {');
+    const wide = workbenchCss.indexOf('@container workbench (min-width: 1100.01px)');
+    expect(floor).toBeGreaterThan(-1);
+    expect(wide).toBeGreaterThan(floor);
+  });
+
+  it('keeps the 330px conversation floor for the real desktop split only', () => {
+    // `ResultResizer` clamps the Results width to `container - 330 - 24`, so the
+    // wide split keeps its floor without the pane ever outgrowing its container.
+    const wide = workbenchCss.slice(
+      workbenchCss.indexOf('@container workbench (min-width: 1100.01px)'),
+      workbenchCss.indexOf('@container workbench (max-width: 1100px)'),
+    );
+    expect(wide).toMatch(/> \.chat-panel \{[\s\S]*?min-width: 330px;/);
   });
 });
 

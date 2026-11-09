@@ -465,8 +465,12 @@ that project's directory. The optional `model` pins the new session immediately
   "last_rewind_at": null }
 ```
 `approvals` contains **pending** approvals only; resolved and expired decisions are
-not exposed by any endpoint yet. `messages` is the most recent page (default 5000,
-maximum 50000, controlled by `?messages=`, returned in chronological order).
+not exposed by any endpoint yet. `messages` is the most recent page of the
+session's **own** conversation (default 5000, maximum 50000, controlled by
+`?messages=`, returned in chronological order); rows a subagent wrote carry
+`agent_id` and are served by `GET /api/agents/:id` instead, so a long subagent
+never consumes the parent's page or its cursor. `system` rows are runtime
+context and are not returned.
 Both session and agent detail pages also have an approximately 1 MiB stored-payload
 budget; one oversized message is returned alone to guarantee progress.
 `messages_truncated` means older visible rows remain and `messages_before` is the

@@ -1397,6 +1397,41 @@
   line-height: 1.5;
 }
 
+/* The marker above the oldest loaded step. Pacing is the scroll's job (the
+ * shared `lib/historyLoader.ts`), so there is no control here. */
+.agent-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.agent-history-more,
+.agent-history-start {
+  margin: 0;
+  color: var(--text-kicker);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 660;
+  letter-spacing: 1.05px;
+  text-transform: uppercase;
+}
+
+.agent-history-more[role='status'] {
+  animation: agent-history-breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes agent-history-breathe {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-history-more[role='status'] {
+    animation: none;
+  }
+}
+
 .agent-bubble {
   padding: var(--space-4) var(--space-5);
   border: 1px solid var(--line-card);

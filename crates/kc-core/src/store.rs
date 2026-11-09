@@ -254,6 +254,22 @@ pub struct MessagePage {
     pub has_more: bool,
 }
 
+/// Which transcript a message page belongs to.
+///
+/// The parent conversation and every subagent share one `messages` table,
+/// separated by `agent_id`. They are also two different views: the workspace
+/// draws the session's own rows and the Agents tab draws one agent's rows. A
+/// page must name its scope, because a shared newest-window let a long subagent
+/// consume the parent's page and hide the turns the reader was looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageScope<'a> {
+    /// The session's own conversation: no `agent_id` and no `system` rows (the
+    /// system prompt is runtime context, not transcript).
+    Session,
+    /// One subagent's transcript: rows stamped with this agent id.
+    Agent(&'a str),
+}
+
 impl StoredMessage {
     pub fn to_message(&self) -> Message {
         Message {
@@ -924,12 +940,13 @@ pub trait Store: Send + Sync {
 
     async fn append_message(&self, message: &NewMessage) -> Result<i64>;
     async fn list_messages(&self, session_id: &str, limit: usize) -> Result<Vec<StoredMessage>>;
-    /// Newest visible messages before an exclusive cursor, in ascending id order.
-    /// An oversized newest message is returned alone to guarantee progress.
+    /// Newest visible messages of one transcript before an exclusive cursor, in
+    /// ascending id order. `scope` chooses the session's own rows or one agent's;
+    /// an oversized newest message is returned alone to guarantee progress.
     async fn list_message_page(
         &self,
         session_id: &str,
-        agent_id: Option<&str>,
+        scope: MessageScope<'_>,
         before_id: Option<i64>,
         limit: usize,
         max_bytes: usize,
@@ -938,8 +955,11 @@ pub trait Store: Send + Sync {
         // overrides this to avoid loading the transcript into memory.
         let mut messages = self.list_messages(session_id, usize::MAX).await?;
         messages.retain(|m| {
-            before_id.is_none_or(|id| m.id < id)
-                && agent_id.is_none_or(|id| m.agent_id.as_deref() == Some(id))
+            let in_scope = match scope {
+                MessageScope::Session => m.agent_id.is_none() && m.role != "system",
+                MessageScope::Agent(id) => m.agent_id.as_deref() == Some(id),
+            };
+            in_scope && before_id.is_none_or(|id| m.id < id)
         });
         let mut selected = Vec::new();
         let mut bytes = 0usize;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ImageAttachment, SessionDetail, StoredMessage, ToolCall } from '../api/types';
 import { detailFixture, omitFields, queuedFixture, storedMessage, wireAgentSummary } from '../test/fixtures';
-import { seedChatState } from './chat';
+import { mergeTranscriptRows, seedChatState } from './chat';
 
 const shot: ImageAttachment = {
   media_type: 'image/png',
@@ -97,5 +97,64 @@ describe('seedChatState', () => {
     expect(agent?.note).toBe('');
     expect(agent?.progress).toBeNull();
     expect(agent?.owned_paths).toEqual([]);
+  });
+});
+
+describe('mergeTranscriptRows', () => {
+  const rows = (ids: number[]): StoredMessage[] =>
+    ids.map((id) => storedMessage({ id, role: 'user', content: `message ${id}` }));
+
+  it('keeps the pages already loaded and adds the refreshed tail', () => {
+    // The tail overlaps the loaded range (id 11 is on both sides), so the union
+    // is contiguous and the cursor still points below the oldest loaded row.
+    const merged = mergeTranscriptRows(
+      { messages: rows([10, 11]), before: 10, truncated: true },
+      { messages: rows([11, 12, 13]), messages_before: 11 },
+    );
+
+    expect(merged.overlap).toBe(true);
+    expect(merged.messages.map((message) => message.id)).toEqual([10, 11, 12, 13]);
+    expect(merged.before).toBe(10);
+    expect(merged.truncated).toBe(true);
+  });
+
+  it('knows the union is complete when the start was already loaded', () => {
+    const merged = mergeTranscriptRows(
+      { messages: rows([9, 10, 11]), before: null, truncated: false },
+      { messages: rows([11, 12, 13]), messages_before: 11 },
+    );
+
+    expect(merged.messages.map((message) => message.id)).toEqual([9, 10, 11, 12, 13]);
+    expect(merged.before).toBeNull();
+    expect(merged.truncated).toBe(false);
+  });
+
+  it('takes the fresh tail when the ranges do not touch', () => {
+    const merged = mergeTranscriptRows(
+      { messages: rows([10, 11]), before: 10, truncated: true },
+      { messages: rows([20, 21]), messages_before: 20 },
+    );
+
+    expect(merged.overlap).toBe(false);
+    expect(merged.messages.map((message) => message.id)).toEqual([20, 21]);
+    expect(merged.before).toBe(20);
+  });
+
+  it('does not glue an older page in front of a newer loaded range', () => {
+    // A rewind left the server with a shorter transcript than the cached pages.
+    const merged = mergeTranscriptRows(
+      { messages: rows([20, 21]), before: 20, truncated: true },
+      { messages: rows([5]), messages_before: null },
+    );
+
+    expect(merged.overlap).toBe(false);
+    expect(merged.messages.map((message) => message.id)).toEqual([5]);
+    expect(merged.before).toBeNull();
+    expect(merged.truncated).toBe(false);
+  });
+
+  it('keeps the loaded rows when the snapshot has no messages yet', () => {
+    const loaded = { messages: rows([1, 2]), before: 1, truncated: true };
+    expect(mergeTranscriptRows(loaded, { messages: [] })).toEqual({ ...loaded, overlap: true });
   });
 });

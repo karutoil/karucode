@@ -307,7 +307,10 @@ def main() -> int:
                                 "name": "atlas_scan",
                                 "description": "Summarise how the workspace is laid out: file "
                                                "count, total size, and the heaviest areas.",
-                                "input_schema": {
+                                # `parameters`, not `input_schema`: the host reads this field
+                                # as the JSON Schema for the arguments object (docs/PLUGINS.md
+                                # §4.2). A wrong key is silently an empty schema.
+                                "parameters": {
                                     "type": "object",
                                     "properties": {
                                         "workspace": {

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Prove transcript pagination in a real Chromium against a real kc-server.
+"""Prove transcript paging and windowing in a real Chromium against a real kc-server.
 
-The unit tests cover the store page, the route cursor and the reducer, but none
-of them prove the thing a person does: open a very long session in the browser,
-notice that the start is missing, press **Load older history**, and see the
-earlier messages appear while the "Earlier history is not loaded." notice goes
-away. This does exactly that, and it is the check that would have caught a
-1 MiB response cap that arrives with no way to ask for the rest.
+The unit tests cover the store page, the route cursor, the window arithmetic and
+the return value of the loader, but none of them prove the thing a person does:
+open a very long session in the browser, scroll back, and watch earlier messages
+arrive on their own while the document stays small. This does exactly that, and
+it is the check that would have caught a 1 MiB response cap that arrives with no
+way to ask for the rest, a manual control that makes the reader re-ask page by
+page, and a fully loaded history that mounts every row.
 
 Build first: `cargo build -p kc-server --bin karucode`, `(cd web && npm run build)`.
 Run: python3 scripts/verify_transcript_pagination.py [--keep]
@@ -85,6 +86,40 @@ def seed_transcript(db: Path, session_id: str) -> None:
         body = marker + (f"message {index} " * (MESSAGE_BYTES // len(f"message {index} ")))
         rows.append((session_id, None, None, role, body, now + index))
     # The server holds the writer connection; WAL lets a second process append.
+    with sqlite3.connect(db, timeout=10) as conn:
+        conn.executemany(
+            "INSERT INTO messages (session_id, run_id, agent_id, role, content, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+
+
+def seed_subagent_window(db: Path, session_id: str) -> None:
+    """A parent conversation buried under a subagent's much larger transcript.
+
+    Under the old shared window the newest 1 MiB page was all agent rows, so the
+    parent's own beginning fell out of it and the reader was told to load older
+    history even though the parent had only two turns. The parent's rows are a
+    separate transcript and must be what the session page carries.
+    """
+    now = int(time.time() * 1000)
+    rows = [
+        (session_id, None, None, "user", "SUBAGENT-PARENT-START open the task", now),
+        (session_id, None, None, "assistant", "SUBAGENT-PARENT-ANSWER working on it", now + 1),
+    ]
+    for index in range(120):
+        rows.append(
+            (
+                session_id,
+                None,
+                "a_long",
+                "assistant",
+                f"SUBAGENT-STEP {index} " + "x" * 10_000,
+                now + 2 + index,
+            )
+        )
+    rows.append((session_id, None, None, "user", "SUBAGENT-PARENT-END done", now + 200))
     with sqlite3.connect(db, timeout=10) as conn:
         conn.executemany(
             "INSERT INTO messages (session_id, run_id, agent_id, role, content, created_at)"
@@ -218,6 +253,15 @@ def main() -> int:
         check("database present", db.exists(), str(list(data_dir.iterdir())))
         seed_transcript(db, session_id)
 
+        subagent = http_json(
+            f"{api}/api/sessions",
+            "POST",
+            {"title": "Subagent window", "project": project_id},
+        )
+        subagent_id = subagent.get("id") or (subagent.get("session") or {}).get("id")
+        check("the subagent session is created", bool(subagent_id), json.dumps(subagent)[:300])
+        seed_subagent_window(db, subagent_id)
+
         detail = http_json(f"{api}/api/sessions/{session_id}")
         print(
             "newest page from the API:",
@@ -226,6 +270,14 @@ def main() -> int:
             detail.get("messages_truncated"),
             "before:",
             detail.get("messages_before"),
+        )
+        parent_page = http_json(f"{api}/api/sessions/{subagent_id}")
+        check(
+            "agent rows do not consume the parent session page",
+            len(parent_page.get("messages") or []) == 3
+            and parent_page.get("messages_truncated") is False,
+            f"{len(parent_page.get('messages') or [])} rows, "
+            f"truncated {parent_page.get('messages_truncated')}",
         )
 
         with urllib.request.urlopen(f"http://127.0.0.1:{cdp_port}/json/list", timeout=5) as response:
@@ -250,79 +302,54 @@ def main() -> int:
         check("the newest page renders", NEWEST in bottom)
         check("the oldest page is not loaded yet", OLDER not in bottom)
 
-        # The transcript is windowed: the head of the conversation exists in the
-        # DOM only once it is scrolled to, exactly like a person pressing Home.
-        top = session.evaluate(
-            """
-            for (const node of document.querySelectorAll('*')) {
-              if (node.scrollHeight > node.clientHeight && node.clientHeight > 0) node.scrollTop = 0;
-            }
-            await window.__kc.sleep(500);
-            return document.body.innerText;
-            """
+        # The transcript is windowed: a long conversation mounts only the rows
+        # around the viewport, so opening it is not proportional to its history.
+        mounted = session.evaluate(
+            "return document.querySelectorAll('.transcript > *').length;"
         )
-        check("the missing-start notice is shown", "Earlier history is not loaded." in top)
         check(
-            "the load-older control is offered",
-            bool(
-                session.evaluate(
-                    """
-                    return !![...document.querySelectorAll('button')].find((b) =>
-                      (b.textContent || '').trim() === 'Load older history');
-                    """
-                )
+            "the transcript mounts a window, not every row",
+            0 < mounted < MESSAGE_COUNT,
+            f"{mounted} rows for {MESSAGE_COUNT} messages",
+        )
+        check(
+            "there is no manual load-older control",
+            not session.evaluate(
+                """
+                return !![...document.querySelectorAll('button')].find((b) =>
+                  /load older history/i.test((b.textContent || '').trim()));
+                """
             ),
         )
 
-        # Press the control a person presses - repeatedly, because 60 large
-        # messages are more than two pages: the control must stay offered while
-        # older pages remain and disappear once the first message is in.
-        for page_number in range(1, 8):
-            clicked = session.evaluate(
-                """
-                const button = [...document.querySelectorAll('button')].find((b) =>
-                  (b.textContent || '').trim() === 'Load older history');
-                if (!button) return false;
-                button.click();
-                await window.__kc.sleep(1200);
-                return true;
-                """
-            )
-            if not clicked:
-                break
-            session.evaluate(
+        # Scroll to the top. The history loader requests the next page on its own
+        # and anchors the scroll, so repeat the gesture until the oldest message
+        # (the third page) is in the document.
+        for attempt in range(1, 9):
+            top = session.evaluate(
                 """
                 for (const node of document.querySelectorAll('*')) {
                   if (node.scrollHeight > node.clientHeight && node.clientHeight > 0) node.scrollTop = 0;
                 }
-                await window.__kc.sleep(400);
-                return true;
+                await window.__kc.sleep(900);
+                return document.body.innerText;
                 """
             )
-            print(f"ok   loaded older page {page_number}")
+            if OLDER in top:
+                print(f"ok   auto-loaded the start after {attempt} scroll(s)")
+                break
+        else:
+            check("the start auto-loads while scrolling back", False, "no OLDER marker")
 
-        seen = session.evaluate(
-            """
-            for (const node of document.querySelectorAll('*')) {
-              if (node.scrollHeight > node.clientHeight && node.clientHeight > 0) node.scrollTop = 0;
-            }
-            await window.__kc.sleep(400);
-            return document.body.innerText;
-            """
-        )
-        check("the first message rendered after paging back", OLDER in seen)
-        check(
-            "the load-older control is gone once the start is loaded",
-            not session.evaluate(
-                """
-                return !![...document.querySelectorAll('button')].find((b) =>
-                  (b.textContent || '').trim() === 'Load older history');
-                """
-            ),
-        )
+        check("the first message rendered after paging back", OLDER in top)
         check(
             "the missing-start notice is gone",
             "Earlier history is not loaded." not in session.evaluate("return document.body.innerText;"),
+        )
+        check(
+            "the start marker is shown once the beginning is loaded",
+            "beginning of the conversation"
+                in session.evaluate("return document.body.innerText;").lower(),
         )
         bottom = session.evaluate(
             """
@@ -334,6 +361,42 @@ def main() -> int:
             """
         )
         check("the newest message is still the tail", NEWEST in bottom)
+        still_mounted = session.evaluate(
+            "return document.querySelectorAll('.transcript > *').length;"
+        )
+        check(
+            "a fully loaded history still mounts only a window",
+            still_mounted < MESSAGE_COUNT,
+            f"{still_mounted} rows for {MESSAGE_COUNT} messages",
+        )
+
+        # The reported regression: a long subagent wrote more than a page of rows
+        # under the parent's session id. The parent has two turns, so its page must
+        # carry both of them and say nothing is missing - no agent row, no notice.
+        subagent_body = session.evaluate(
+            """
+            const row = await window.__kc.until(() =>
+              [...document.querySelectorAll('button')].find((b) =>
+                (b.textContent || '').includes('Subagent window')));
+            row.click();
+            await window.__kc.until(
+              () => (document.body.innerText || '').includes('SUBAGENT-PARENT-END'),
+              20000,
+            );
+            return document.body.innerText;
+            """
+        )
+        check("the parent tail renders beside a long subagent", "SUBAGENT-PARENT-END" in subagent_body)
+        check(
+            "the parent start is on the same page",
+            "SUBAGENT-PARENT-START" in subagent_body,
+            subagent_body[:300],
+        )
+        check("no agent row leaks into the session transcript", "SUBAGENT-STEP" not in subagent_body)
+        check(
+            "the parent is not told its history is missing",
+            "Earlier history is not loaded." not in subagent_body,
+        )
         print(f"\nlogs: {tmp}")
         if not args.keep:
             shutil.rmtree(tmp, ignore_errors=True)

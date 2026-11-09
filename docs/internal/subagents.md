@@ -172,7 +172,7 @@ parent, its last reported note, and its live transcript - assistant text,
 thinking, each tool call with status and output, commands with exit codes, and
 approvals it is waiting on. The transcript keeps streaming while the agent runs
 and is backfilled from SQLite when you open an agent that finished before the
-page loaded.
+page loaded. Older pages arrive as you scroll back (there is no load button).
 
 The same data is available over HTTP: `GET /api/agents?project=<id>`,
 `GET /api/agents/:id`, and `POST /api/agents/:id/pause`, `/resume`, `/cancel`.

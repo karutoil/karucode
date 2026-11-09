@@ -26,6 +26,7 @@ const controlSession = {
   title: 'Control chat',
   workspace: '/data/control-workspace',
   project_id: null,
+  control: true,
   created_at: 0,
   updated_at: 2,
   message_count: 3,
@@ -35,6 +36,7 @@ const controlSession = {
 beforeEach(() => {
   vi.clearAllMocks();
   store.currentProjectId.value = 'p1';
+  store.currentSessionId.value = null;
   store.sessions.value = [];
   store.sessionsLoading.value = true;
 });
@@ -82,5 +84,56 @@ describe('refreshing a project session list', () => {
     expect(store.sessions.value.map((session) => session.id)).toEqual([projectSession.id]);
     // …and it is open, which is what the pills and the composer read.
     expect(store.currentSessionId.value).toBe('s-control');
+  });
+
+  it('moves the project onto a session opened from another project', async () => {
+    // `openSession` is also reached from a notification whose record has lost its
+    // project and from the palette. The rail, the file tree and the terminals are
+    // project-scoped, so the conversation must bring its project with it instead
+    // of being merged into the list of the project that happened to be open - the
+    // foreign row a project switch and back used to clear.
+    const other = { ...projectSession, id: 's-other', title: 'Other project', project_id: 'p2', workspace: '/p2' };
+    vi.mocked(api.getSession).mockResolvedValue({
+      session: {
+        id: 's-other',
+        title: 'Other project',
+        workspace: '/p2',
+        project_id: 'p2',
+        created_at: 0,
+        updated_at: 3,
+      },
+      messages: [],
+      runs: [],
+      agents: [],
+      approvals: [],
+      claims: [],
+      running: false,
+    } as never);
+    vi.mocked(api.listSessions).mockResolvedValue([other] as never);
+    store.sessions.value = [projectSession as never];
+    await actions.openSession('s-other');
+    expect(store.currentProjectId.value).toBe('p2');
+    // The session is open and its row is the only one: p1's row is gone with the
+    // project it belonged to.
+    expect(store.currentSessionId.value).toBe('s-other');
+    expect(store.sessions.value.map((session) => session.id)).toEqual(['s-other']);
+    await vi.waitFor(() => expect(api.listSessions).toHaveBeenCalledWith('p2'));
+    expect(store.sessions.value.map((session) => session.id)).toEqual(['s-other']);
+  });
+
+  it('keeps control chats out of the list even when the read is unscoped', async () => {
+    // With no project open the API answers with every session on the server,
+    // control chats included. The workbench rail draws whatever lands here, so
+    // the write - not the reader - has to hold the invariant.
+    store.currentProjectId.value = null;
+    const projectless = { ...projectSession, id: 's-projectless', project_id: null };
+    vi.mocked(api.listSessions).mockResolvedValue(
+      [projectSession, controlSession, projectless] as never,
+    );
+    await actions.refreshSessions();
+    expect(store.sessions.value.map((session) => session.id)).toEqual([
+      's-project',
+      's-projectless',
+    ]);
   });
 });

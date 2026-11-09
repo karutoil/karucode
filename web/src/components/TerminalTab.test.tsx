@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { useEffect, useRef } from 'preact/hooks';
 import type { Terminal } from '../api/types';
 import * as endpoints from '../api/endpoints';
@@ -549,5 +549,310 @@ describe('TerminalTab', () => {
     await waitFor(() => {
       expect(document.querySelector('.terminal-cwd')?.textContent).toBe('/work/other');
     });
+  });
+});
+
+describe('TerminalTab — chip context menu', () => {
+  beforeEach(() => {
+    terminalState.resetTerminalState();
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    terminalState.resetTerminalState();
+    store.resetToastTimers();
+    document.body.innerHTML = '';
+  });
+
+  /** The chip that carries this terminal's tab button. */
+  function chipOf(id = 't_one'): HTMLElement {
+    const chip = document.getElementById(`terminal-tab-${id}`)?.closest('.terminal-chip');
+    if (!(chip instanceof HTMLElement)) throw new Error(`missing chip for ${id}`);
+    return chip;
+  }
+
+  /**
+   * Was the native context menu suppressed? Measured with a raw event rather than
+   * `fireEvent`, so the assertion is about `preventDefault` and not about a
+   * render that has not happened yet.
+   */
+  function nativePrevented(element: HTMLElement): boolean {
+    return !element.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 40,
+      clientY: 60,
+    }));
+  }
+
+  it('answers a right-click on the chip with Rename and Close', async () => {
+    stubServer([terminal(), terminal({ id: 't_two', title: 'watcher', position: 2 })]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(2));
+
+    // `fireEvent` returns false when the event was cancelled: our menu replaces
+    // the browser's, so the browser's must not also appear.
+    expect(fireEvent.contextMenu(chipOf(), { clientX: 40, clientY: 60 })).toBe(false);
+
+    const menu = screen.getByRole('menu', { name: 'Terminal actions for karucode-1' });
+    expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent))
+      .toEqual(['Rename', 'Close']);
+    // Opening focuses the first item, and the menu is portalled onto the menu
+    // layer, where the strip's horizontal scroller cannot clip it.
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Rename' }));
+    expect(menu.closest('.menu-layer')?.parentElement).toBe(document.body);
+  });
+
+  it('keeps the chip’s own Rename and Close buttons while the menu is open', async () => {
+    // The menu is a second way in, never a replacement: a touch screen and a
+    // keyboard user have no right-click.
+    stubServer([terminal()]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+
+    fireEvent.contextMenu(chipOf());
+    expect(screen.getByRole('menu')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Rename karucode-1' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Close karucode-1' })).toBeTruthy();
+  });
+
+  it('returns focus to the tab when Escape closes the menu', async () => {
+    stubServer([terminal()]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+    const tab = document.getElementById('terminal-tab-t_one')!;
+
+    fireEvent.contextMenu(chipOf(), { clientX: 40, clientY: 60 });
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+
+    expect(screen.queryByRole('menu')).toBeNull();
+    // The chip's `div` is not focusable; the tab inside it is the element a
+    // keyboard user would have activated, so focus lands there.
+    expect(document.activeElement).toBe(tab);
+  });
+
+  it('closes the terminal from the menu, the same state action the button runs', async () => {
+    stubServer([terminal(), terminal({ id: 't_two', title: 'watcher', position: 2 })]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(2));
+
+    fireEvent.contextMenu(chipOf());
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Close' }));
+
+    // The same `terminalsState.closeTerminal` the Close button calls: one delete,
+    // the tab gone, and the selection moved off the shell that was closed.
+    await waitFor(() => expect(endpoints.deleteTerminal).toHaveBeenCalledWith('t_one'));
+    expect(endpoints.deleteTerminal).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('menu')).toBeNull();
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+    expect(terminalState.activeTerminal.value?.id).toBe('t_two');
+  });
+
+  it('routes the menu item through the same close handler as the chip button', async () => {
+    // Stubbing the state call keeps the chip mounted, so the two paths can be
+    // compared directly: the menu must not grow its own copy of the action.
+    const closeSpy = vi.spyOn(terminalState, 'closeTerminal').mockResolvedValue(undefined);
+    stubServer([terminal()]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close karucode-1' }));
+    fireEvent.contextMenu(chipOf());
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Close' }));
+
+    expect(closeSpy).toHaveBeenCalledTimes(2);
+    expect(closeSpy).toHaveBeenNthCalledWith(1, 't_one');
+    expect(closeSpy).toHaveBeenNthCalledWith(2, 't_one');
+  });
+
+  it('opens the chip’s own rename field from the menu', async () => {
+    stubServer([terminal()]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+
+    fireEvent.contextMenu(chipOf());
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }));
+
+    const input = await screen.findByLabelText('Rename karucode-1');
+    expect(screen.queryByRole('menu')).toBeNull();
+    // The chip's existing field, not a second rename path: it is inside the chip,
+    // and it commits through the same handler the Rename button reaches.
+    expect(chipOf().contains(input)).toBe(true);
+    fireEvent.input(input, { target: { value: 'build watcher' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() =>
+      expect(endpoints.renameTerminal).toHaveBeenCalledWith('t_one', 'build watcher'),
+    );
+  });
+
+  it('declines the right-click while the rename input is mounted', async () => {
+    stubServer([terminal()]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename karucode-1' }));
+    const input = await screen.findByLabelText('Rename karucode-1');
+    expect(input).toBeTruthy();
+
+    // The chip, not the field: `contextMenuProps` already leaves an input alone,
+    // and this is the guard the chip owes for the rest of its own surface. The
+    // native menu must survive — Cut/Copy/Paste over a selection is the field's
+    // affordance, and ours has nothing to add while it is mounted.
+    const chip = chipOf();
+    expect(nativePrevented(chip)).toBe(false);
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(fireEvent.contextMenu(chip, { clientX: 40, clientY: 60 })).toBe(true);
+    expect(screen.queryByRole('menu')).toBeNull();
+
+    // The guard follows the input's mount, not the chip: cancelling the rename
+    // gives the menu back.
+    fireEvent.keyDown(input, { key: 'Escape' });
+    await waitFor(() => expect(chipOf().querySelector('input')).toBeNull());
+    expect(fireEvent.contextMenu(chipOf(), { clientX: 40, clientY: 60 })).toBe(false);
+    expect(screen.getByRole('menu', { name: 'Terminal actions for karucode-1' })).toBeTruthy();
+  });
+});
+
+describe('TerminalTab — chip context menu', () => {
+  beforeEach(() => {
+    terminalState.resetTerminalState();
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    terminalState.resetTerminalState();
+    store.resetToastTimers();
+    document.body.innerHTML = '';
+  });
+
+  function chip(id = 't_one'): HTMLElement {
+    const element = document.getElementById(`terminal-tab-${id}`)?.closest('.terminal-chip');
+    if (!(element instanceof HTMLElement)) throw new Error(`missing chip ${id}`);
+    return element;
+  }
+
+  it('opens Rename and Close on right-click, suppressing the native menu', async () => {
+    stubServer([terminal(), terminal({ id: 't_two', title: 'watcher', position: 2 })]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(2));
+
+    // `fireEvent` returns false when the event was cancelled: ours replaces the
+    // browser's menu, so the browser's must not also appear.
+    expect(fireEvent.contextMenu(chip(), { clientX: 40, clientY: 60 })).toBe(false);
+
+    const menu = screen.getByRole('menu', { name: 'Terminal actions for karucode-1' });
+    expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent))
+      .toEqual(['Rename', 'Close']);
+    // Opening focuses the first item, and the menu is portalled onto the menu
+    // layer, where the strip's horizontal scroller cannot clip it.
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Rename' }));
+    expect(menu.closest('.menu-layer')?.parentElement).toBe(document.body);
+  });
+
+  it('keeps both chip buttons: the menu is a second way in, never the only one', async () => {
+    stubServer([terminal()]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+
+    fireEvent.contextMenu(chip());
+    expect(screen.getByRole('menu')).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+
+    expect(screen.getByRole('button', { name: 'Rename karucode-1' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Close karucode-1' })).toBeTruthy();
+  });
+
+  it('returns focus to the tab when Escape closes the menu', async () => {
+    stubServer([terminal()]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+    const tab = document.getElementById('terminal-tab-t_one')!;
+
+    fireEvent.contextMenu(chip(), { clientX: 40, clientY: 60 });
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+
+    expect(screen.queryByRole('menu')).toBeNull();
+    // The chip's `div` is not focusable; the tab inside it is the element a
+    // keyboard user would have activated, so focus lands there.
+    expect(document.activeElement).toBe(tab);
+  });
+
+  it('closes the terminal from the menu, the same action the chip button runs', async () => {
+    stubServer([terminal(), terminal({ id: 't_two', title: 'watcher', position: 2 })]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(2));
+
+    fireEvent.contextMenu(chip());
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Close' }));
+
+    // The same `terminalsState.closeTerminal` the button calls: one delete, the
+    // tab gone, the selection moved off the closed shell.
+    await waitFor(() => expect(endpoints.deleteTerminal).toHaveBeenCalledWith('t_one'));
+    expect(endpoints.deleteTerminal).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('menu')).toBeNull();
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+    expect(terminalState.activeTerminal.value?.id).toBe('t_two');
+  });
+
+  it('routes the menu item through the same close handler as the chip button', async () => {
+    // The menu must not grow its own copy of the action: stub the state call and
+    // show both paths land on it with the same argument. Stubbing also keeps the
+    // chip mounted, so the two interactions are comparable.
+    const closeSpy = vi.spyOn(terminalState, 'closeTerminal').mockResolvedValue(undefined);
+    stubServer([terminal()]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close karucode-1' }));
+    fireEvent.contextMenu(chip());
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Close' }));
+
+    expect(closeSpy).toHaveBeenCalledTimes(2);
+    expect(closeSpy).toHaveBeenNthCalledWith(1, 't_one');
+    expect(closeSpy).toHaveBeenNthCalledWith(2, 't_one');
+  });
+
+  it('opens the rename field from the menu, the same handler the chip button runs', async () => {
+    stubServer([terminal()]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+
+    fireEvent.contextMenu(chip());
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }));
+
+    const input = await screen.findByLabelText('Rename karucode-1');
+    expect(input).toBeTruthy();
+    expect(screen.queryByRole('menu')).toBeNull();
+    // The field is the chip's own: the menu did not mount a second rename path.
+    expect(chip().contains(input)).toBe(true);
+
+    fireEvent.input(input, { target: { value: 'build watcher' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(endpoints.renameTerminal).toHaveBeenCalledWith('t_one', 'build watcher'));
+  });
+
+  it('declines the right-click while the rename input is mounted', async () => {
+    stubServer([terminal()]);
+    render(<TerminalTab />);
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Rename karucode-1' }));
+    const input = await screen.findByLabelText('Rename karucode-1');
+    expect(input).toBeTruthy();
+
+    // A right-click on the chip (not on the field itself, which the primitive
+    // already leaves alone) must not open a menu, and must not swallow the
+    // browser's own: Cut/Copy/Paste over a selection is the field's affordance.
+    expect(fireEvent.contextMenu(chip(), { clientX: 40, clientY: 60 })).toBe(true);
+    expect(screen.queryByRole('menu')).toBeNull();
+    // And the field itself keeps the native menu for the same reason.
+    expect(fireEvent.contextMenu(input, { clientX: 40, clientY: 60 })).toBe(true);
+    expect(screen.queryByRole('menu')).toBeNull();
+
+    // Leaving the rename restores the menu: the guard follows the input's mount.
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(fireEvent.contextMenu(chip(), { clientX: 40, clientY: 60 })).toBe(false);
+    expect(screen.getByRole('menu', { name: 'Terminal actions for karucode-1' })).toBeTruthy();
   });
 });

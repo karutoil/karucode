@@ -353,19 +353,84 @@ export function MenuItem({
   );
 }
 
+/** How long a touch must rest before it means "menu" rather than "tap". */
+const LONG_PRESS_MS = 450;
+
+/** Travel that turns a resting finger into a scroll or a drag, cancelling the press.
+ *  A finger is never perfectly still, so this is not zero. */
+const LONG_PRESS_SLOP = 10;
+
+interface LongPress {
+  timer: number;
+  x: number;
+  y: number;
+}
+
+/** Press state lives on the element, not in the render closure: a row can re-render
+ *  (a streaming title, an unread count) between pointerdown and pointerup, and a
+ *  closure-scoped timer would be orphaned and would open a menu for a row the
+ *  reader has already left. */
+const presses = new WeakMap<HTMLElement, LongPress>();
+
+function cancelLongPress(el: HTMLElement): void {
+  const press = presses.get(el);
+  if (!press) return;
+  window.clearTimeout(press.timer);
+  presses.delete(el);
+}
+
 /**
- * Right-click wiring for a row. Kept separate from the controller so a surface
- * can add its own guard - a row that is mid-rename, a selection in progress -
- * before the native menu is suppressed.
+ * Drop the press events a browser synthesises after a touch ends, so a long-press
+ * that opened the menu does not also run the row's own click (open the session,
+ * switch the project). Scoped to events outside the menu: a reader who taps an
+ * item immediately after the menu appears must still get that item.
+ */
+function swallowSyntheticPress(menu: MenuController, el: HTMLElement): void {
+  const swallow = (event: Event): void => {
+    const target = event.target;
+    if (target instanceof Node && menu.menuRef.current?.contains(target)) return;
+    event.stopPropagation();
+    event.preventDefault();
+  };
+  for (const type of ['mousedown', 'mouseup', 'click'] as const) {
+    el.addEventListener(type, swallow, { capture: true, once: true });
+    // A browser that synthesises nothing must not leave the listener armed to eat
+    // the reader's next real press.
+    window.setTimeout(() => el.removeEventListener(type, swallow, true), LONG_PRESS_MS + 400);
+  }
+}
+
+/**
+ * Right-click wiring for a row, plus the touch equivalent.
+ *
+ * `contextmenu` is the desktop gesture. It never fires on iOS Safari, and only
+ * fires on Android after the browser's own long-press delay, so a menu wired to
+ * it alone is a desktop-only feature - which is what happened: every "copy what
+ * the row shows" affordance added in `00458e5` was unreachable on a phone. The
+ * primitive therefore owns the touch path too: a finger that rests for
+ * `LONG_PRESS_MS` without travelling opens the same menu at the same point.
+ *
+ * Kept separate from the controller so a surface can add its own guard - a row
+ * that is mid-rename, a selection in progress - before either gesture counts.
  */
 export function contextMenuProps(
   menu: MenuController,
   allow?: () => boolean,
-  /** Where focus returns on close. Defaults to the right-clicked element; a row
+  /** Where focus returns on close. Defaults to the pressed element; a row
    *  usually wants its kebab, which is the trigger a keyboard user would have
    *  used and the element the row's own menu restores focus to. */
   trigger?: () => HTMLElement | null,
-): { onContextMenu: (event: MouseEvent) => void } {
+): {
+  onContextMenu: (event: MouseEvent) => void;
+  onPointerDown: (event: PointerEvent) => void;
+  onPointerMove: (event: PointerEvent) => void;
+  onPointerUp: (event: PointerEvent) => void;
+  onPointerCancel: (event: PointerEvent) => void;
+} {
+  /** The press, as a point, minus anything that cannot open a menu. */
+  const anchorFor = (el: HTMLElement | null): HTMLElement | null =>
+    trigger?.() ?? el;
+
   return {
     onContextMenu: (event: MouseEvent) => {
       // Never steal right-click from a text field or an editable region: the
@@ -375,8 +440,49 @@ export function contextMenuProps(
         && target.closest('input, textarea, select, [contenteditable="true"], [role="menu"]')) return;
       if (allow && !allow()) return;
       event.preventDefault();
-      const anchor = trigger?.() ?? null;
-      menu.openAt(event.clientX, event.clientY, anchor ?? (event.currentTarget instanceof HTMLElement ? event.currentTarget : null));
+      const row = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+      menu.openAt(event.clientX, event.clientY, anchorFor(row));
+    },
+
+    onPointerDown: (event: PointerEvent) => {
+      // A mouse keeps the native right-click: a left-press that rests is a
+      // select-drag, not a menu gesture.
+      if (event.pointerType === 'mouse') return;
+      if (event.button !== 0) return;
+      const target = event.target;
+      if (target instanceof HTMLElement
+        && target.closest('input, textarea, select, [contenteditable="true"], [role="menu"]')) return;
+      const row = event.currentTarget;
+      if (!(row instanceof HTMLElement)) return;
+      cancelLongPress(row);
+      const press: LongPress = { x: event.clientX, y: event.clientY, timer: 0 };
+      press.timer = window.setTimeout(() => {
+        presses.delete(row);
+        if (allow && !allow()) return;
+        swallowSyntheticPress(menu, row);
+        menu.openAt(press.x, press.y, anchorFor(row));
+      }, LONG_PRESS_MS);
+      presses.set(row, press);
+    },
+
+    onPointerMove: (event: PointerEvent) => {
+      const row = event.currentTarget;
+      if (!(row instanceof HTMLElement)) return;
+      const press = presses.get(row);
+      if (!press) return;
+      // Past the slop this is a scroll or a drag, and a menu appearing mid-scroll
+      // is worse than no menu.
+      if (Math.abs(event.clientX - press.x) > LONG_PRESS_SLOP
+        || Math.abs(event.clientY - press.y) > LONG_PRESS_SLOP) cancelLongPress(row);
+    },
+
+    onPointerUp: (event: PointerEvent) => {
+      if (event.currentTarget instanceof HTMLElement) cancelLongPress(event.currentTarget);
+    },
+
+    onPointerCancel: (event: PointerEvent) => {
+      if (event.currentTarget instanceof HTMLElement) cancelLongPress(event.currentTarget);
     },
   };
 }
+

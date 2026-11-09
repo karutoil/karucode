@@ -2005,7 +2005,15 @@ export function SettingsSheet(): JSX.Element | null {
           ? reloadPlugin(name)
           : setPluginEnabled(name, action === 'enable');
     request
-      .then(() => setDiagnosticsKey((key) => key + 1))
+      .then(() => {
+        setDiagnosticsKey((key) => key + 1);
+        // The diagnostics row is not the only thing that changed: what a plugin
+        // *contributes* (its tabs, buttons, palette commands, hides) lives in
+        // `/api/config`, which this screen did not otherwise re-read. Without this,
+        // installing a plugin would leave its controls invisible until a page
+        // reload — the server was already serving them.
+        return actions.loadConfig();
+      })
       .catch((cause: unknown) => setPluginActionError(toErrorMessage(cause)))
       .finally(() => setPluginBusy(null));
   };

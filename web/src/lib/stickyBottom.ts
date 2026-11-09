@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { RefObject } from 'preact';
 import { prefersReducedMotion } from './dom';
 
@@ -321,7 +321,11 @@ export function useStickyBottom(options: StickyBottomOptions): StickyBottom {
   }, [endSettle]);
 
   // A different conversation always starts at the newest message, instantly.
-  useEffect(() => {
+  //
+  // A layout effect, because the windowed transcript renders the tail window
+  // before it knows where the viewport is: pinning before paint means the reader
+  // never sees the blank band above it for a frame.
+  useLayoutEffect(() => {
     if (sessionRef.current === sessionKey) return;
     const firstRender = sessionRef.current === undefined;
     sessionRef.current = sessionKey;

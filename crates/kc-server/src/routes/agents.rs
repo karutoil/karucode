@@ -16,7 +16,7 @@ use crate::routes::{message_before, query_str, query_usize, QueryMap, TRANSCRIPT
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use kc_core::store::AgentStatus;
+use kc_core::store::{AgentStatus, MessageScope};
 use serde_json::{json, Value};
 
 /// Default tail length of `GET /api/agents/:id` `?messages=`.
@@ -112,7 +112,7 @@ pub async fn get_agent(
         .store()
         .list_message_page(
             &agent.agent.session_id,
-            Some(&id),
+            MessageScope::Agent(&id),
             message_before(&query)?,
             limit,
             TRANSCRIPT_PAGE_BYTES,

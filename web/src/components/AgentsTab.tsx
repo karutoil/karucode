@@ -1,8 +1,11 @@
 import type { JSX } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { AgentAction, AgentRecord, AgentStatus, AgentSummary } from '../api/types';
 import { isAgentLive } from '../api/types';
+import { copyText } from '../lib/clipboard';
 import { formatDuration, jsonSummary, relativeTime, truncate } from '../lib/format';
+import { useHistoryLoader } from '../lib/historyLoader';
+import { contextMenuProps, Menu, MenuItem, useMenu } from '../lib/menu';
 import * as actions from '../state/actions';
 import {
   AGENT_ACTIVITY_LIMIT,
@@ -311,13 +314,21 @@ function AgentsEmpty({ filtered }: { filtered: boolean }): JSX.Element {
  * These are siblings of the card's own **Details** button, not children of it:
  * a native button inside another clickable surface is the nested-interactive
  * pattern that made Enter on Pause also open the drill-in.
+ *
+ * The request itself goes through `sendControl`, which the card's right-click
+ * menu calls too, so the two surfaces cannot drift into two code paths for one
+ * action.
  */
+function sendControl(agentId: string, action: AgentAction): void {
+  void actions.controlAgent(agentId, action);
+}
+
 function AgentControls({ agent }: { agent: AgentRow }): JSX.Element | null {
   const pending = store.agentControlPending.value[agent.id];
   if (!isAgentLive(agent.status)) return null;
   const paused = agent.status === 'paused';
   const run = (action: AgentAction) => () => {
-    void actions.controlAgent(agent.id, action);
+    sendControl(agent.id, action);
   };
   return (
     <div class="agent-controls">
@@ -356,8 +367,32 @@ function AgentCard({
   showSession: boolean;
   onOpen: () => void;
 }): JSX.Element {
+  const menu = useMenu();
+  const detailsRef = useRef<HTMLButtonElement>(null);
+  const pending = store.agentControlPending.value[agent.id];
+  const live = isAgentLive(agent.status);
+  const paused = agent.status === 'paused';
+  const name = agent.name || 'subagent';
+
+  const copyId = async (): Promise<void> => {
+    const copied = await copyText(agent.id);
+    store.pushToast(
+      copied ? 'Agent id copied.' : 'Could not copy the agent id.',
+      copied ? 'success' : 'error',
+    );
+  };
+
   return (
-    <article class="agent-card" data-status={agent.status}>
+    <article
+      class="agent-card"
+      data-status={agent.status}
+      // The handler is on the article, never inside a control: the card's own
+      // warning about nesting controls in a clickable surface is why Details,
+      // Pause and Stop are siblings of each other, and a `contextmenu` listener
+      // on the article is not a control. Focus returns to Details, the card's
+      // one named action, so Escape lands where Tab left off.
+      {...contextMenuProps(menu, () => true, () => detailsRef.current)}
+    >
       <header class="agent-head">
         <div class="agent-title-row">
           <span class="agent-icon" aria-hidden="true">
@@ -403,6 +438,7 @@ function AgentCard({
         <button
           type="button"
           class="agent-card-open"
+          ref={detailsRef}
           title={`Open details for ${agent.name || 'subagent'}`}
           aria-label={`Open details for ${agent.name || 'subagent'}`}
           onClick={onOpen}
@@ -413,6 +449,39 @@ function AgentCard({
       </div>
 
       <AgentControls agent={agent} />
+
+      {/* The card has no kebab, so the menu is a right-click surface only and
+        * always floats at the pointer. Every item calls the handler the visible
+        * control already calls — the menu is a second road to the same place, not
+        * a new one. A settled agent gets Details and the id only: Pause/Stop would
+        * be dead controls, exactly as `AgentControls` refuses to render them. */}
+      <Menu menu={menu} float label={`Agent actions for ${name}`}>
+        <MenuItem menu={menu} action={{ label: 'Details', onSelect: onOpen }} />
+        {live ? (
+          <>
+            <MenuItem
+              menu={menu}
+              action={{
+                label: paused ? 'Resume' : 'Pause',
+                // The visible buttons refuse a second request while one is in
+                // flight; the menu must not accept what they will not.
+                disabled: pending !== undefined,
+                onSelect: () => sendControl(agent.id, paused ? 'resume' : 'pause'),
+              }}
+            />
+            <MenuItem
+              menu={menu}
+              action={{
+                label: 'Stop',
+                danger: true,
+                disabled: pending !== undefined,
+                onSelect: () => sendControl(agent.id, 'cancel'),
+              }}
+            />
+          </>
+        ) : null}
+        <MenuItem menu={menu} action={{ label: 'Copy agent id', onSelect: () => void copyId() }} />
+      </Menu>
     </article>
   );
 }
@@ -432,8 +501,26 @@ function AgentDetail({
   const steps = items.filter((item) => !(item.kind === 'message' && item.role === 'user'));
   const trimmed = history ? history.truncated : items.length >= AGENT_ACTIVITY_LIMIT;
 
+  // The activity list scrolls inside the inspector's tab panel. Resolve that
+  // once the detail is mounted, then let the shared loader request older pages
+  // as the reader reaches the top of the list.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  const historySentinelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    panelRef.current = rootRef.current?.closest('.tab-panel') ?? null;
+  }, [agent.id]);
+  useHistoryLoader({
+    scroller: panelRef,
+    sentinel: historySentinelRef,
+    canLoad: history !== null && history.before !== null,
+    loading: history?.loading ?? false,
+    load: actions.loadOlderAgent,
+    version: history?.messages.length ?? 0,
+  });
+
   return (
-    <div class="agent-detail">
+    <div class="agent-detail" ref={rootRef}>
       <div class="agent-detail-top">
         <button type="button" class="icon-button inspector-mini" onClick={actions.closeAgentDetail}>
           <ChevronLeftIcon size={14} />
@@ -537,11 +624,20 @@ function AgentDetail({
               : `${steps.length}${trimmed ? '+' : ''} steps${running ? ' · live' : ''}`}
           </span>
         </div>
-        {history?.truncated ? <div>
-          <p>Earlier history is not loaded.</p>
-          {history.before !== null ? <button type="button" class="button button-small" disabled={history.loading} onClick={() => void actions.loadOlderAgent()}>{history.loading ? 'Loading…' : 'Load older history'}</button> : <p>Older history is unavailable from this server.</p>}
-          {history.error ? <p role="alert">{history.error}</p> : null}
-        </div> : null}
+        {history ? (
+          <div class="agent-history" ref={historySentinelRef}>
+            {history.before !== null ? (
+              <p class="agent-history-more" role="status" aria-live="polite">
+                {history.loading ? 'Loading earlier activity…' : 'Scroll up to load earlier activity'}
+              </p>
+            ) : (
+              <p class="agent-history-start">Beginning of the activity.</p>
+            )}
+            {history.error ? <p role="alert">{history.error}</p> : null}
+          </div>
+        ) : trimmed ? (
+          <p class="agent-history-more">Showing the newest {AGENT_ACTIVITY_LIMIT} steps.</p>
+        ) : null}
         {store.agentDetailError.value ? <p role="alert">{store.agentDetailError.value}</p> : null}
         {steps.length === 0 ? (
           <p class="agent-activity-empty">

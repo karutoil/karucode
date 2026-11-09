@@ -38,6 +38,7 @@ vi.mock('../../api/endpoints', () => ({
 vi.mock('../../state/actions', () => ({
   openSession: vi.fn(async (id: string) => { store.currentSessionId.value = id; return true; }),
   switchProject: vi.fn(async (id: string) => { store.currentProjectId.value = id; }),
+  refreshSessions: vi.fn(async () => {}),
   fillComposer: vi.fn(),
   setSessionModelSelection: vi.fn(async () => true),
   clearSessionModelSelection: vi.fn(async () => true),
@@ -66,6 +67,10 @@ beforeEach(() => {
   ];
   store.currentProjectId.value = 'p1';
   store.currentSessionId.value = null;
+  // The plane itself does not read `boot`, but its unmount hook only re-reads
+  // the project list once the workspace is ready; default to "not ready" so an
+  // automatic cleanup unmount between tests cannot fire that read.
+  store.boot.value = 'loading';
   store.chat.value = { sessionId: null, items: [], queuedSteers: [], queuedFollowUps: [] } as never;
   store.config.value = configWith([
     { id: 'default', name: 'Default', models: [{ id: 'gpt-4o-mini', name: 'GPT-4o mini' }] },
@@ -168,6 +173,19 @@ describe('opening conversations', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Refresh sessions' }));
     await waitFor(() => expect(getControlOverview).toHaveBeenCalledTimes(2));
     expect(screen.getByRole('alert').textContent).toContain('project is unavailable');
+  });
+
+  it('re-reads the open project’s session list when the plane closes', async () => {
+    // The workbench rail draws `store.sessions` unfiltered, and while the plane
+    // is up the reads were cross-project. Leaving it is the moment the ordinary
+    // rail comes back, so it must not inherit a stale or foreign row: the same
+    // read a project switch makes.
+    store.boot.value = 'ready';
+    const { unmount } = render(<ControlPlane />);
+    await screen.findByLabelText('Sessions across projects');
+    expect(actions.refreshSessions).not.toHaveBeenCalled();
+    unmount();
+    expect(actions.refreshSessions).toHaveBeenCalledTimes(1);
   });
 });
 

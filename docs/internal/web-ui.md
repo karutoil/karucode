@@ -7,7 +7,7 @@
 
 - **Slug:** `web-ui`
 - **Tags:** ui, web, frontend, workbench, panels, context, shortcuts, preact, plugins, buttons
-- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:RailPeek`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:ResultResizer`, `route:PATCH /api/projects/:id/preferences`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:notification-bell`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `route:POST /api/plugins/:name/ui/actions/:action`, `config:plugin_ui`, `config:ui`, `file:web/src/components/PluginSlot.tsx`, `file:web/src/components/uiContributions.ts`, `file:web/src/components/PluginControls.tsx`, `file:web/src/state/pluginUiPreferences.ts`, `file:web/src/components/PluginViews.tsx`, `file:web/src/components/viewPanelRegister.ts`, `file:web/src/styles/plugin-views.css`, `dir:plugins/demos`, `file:plugins/demos/README.md`, `file:scripts/verify_plugin_demos.py`, `cmd:python3 scripts/verify_plugin_demos.py`, `file:web/src/styles/plugin-slots.css`, `file:scripts/verify_plugin_ui.py`, `cmd:python3 scripts/verify_plugin_ui.py`, `fn:matchUiKeybinding`, `fn:applyUiPreferences`, `ui:keybinding`, `ui:plugin-controls`, `fn:registerPluginPanelRenderer`, `ui:PluginSlot`, `ui:plugin-slot-button`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/state/railPeek.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/components/SessionsRail.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`, `ui:GitManager`, `ui:GitChanges`, `ui:GitCommitBox`, `ui:GitBranchDialog`, `ui:GitHistory`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `file:web/src/components/git/GitManager.tsx`, `file:web/src/styles/git.css`, `ui:WorkbenchTaskMenu`, `ui:ContextDrawer`, `file:web/src/components/WorkbenchTaskMenu.tsx`, `file:web/src/components/ContextDrawer.tsx`, `file:web/src/state/workbench.ts`, `file:web/src/lib/approvalCopy.ts`, `file:web/src/styles/workbench.css`, `file:web/src/styles/workbench-navigation.css`, `file:scripts/verify_workbench_frontend.py`, `cmd:python3 scripts/verify_workbench_frontend.py`, `ui:ControlPlane`, `route:GET /api/control/overview`, `route:GET /api/control/sessions`, `file:web/src/state/controlPlane.ts`, `file:web/src/components/control-plane/ControlPlane.tsx`, `file:web/src/components/control-plane/ControlRail.tsx`, `file:web/src/components/control-plane/ControlOverview.tsx`, `file:web/src/components/control-plane/ControlSession.tsx`, `file:web/src/components/control-plane/controlModel.ts`, `file:web/src/styles/control-shared.css`, `file:web/src/styles/control-rail.css`, `file:web/src/styles/control-overview.css`, `file:web/src/styles/control-session.css`
+- **Applies to:** `ui:ProjectRail`, `ui:project-switcher`, `ui:mobile-sheet`, `ui:mobile-layout`, `ui:mobile-touch-target`, `ui:mobile-keyboard-inset`, `env:interactive-widget`, `route:GET /api/projects/:id/favicon`, `ui:SessionsRail`, `ui:RailPeek`, `ui:ChatView`, `ui:Composer`, `ui:TpsBadge`, `ui:ContextPill`, `ui:Inspector`, `ui:ResultResizer`, `route:PATCH /api/projects/:id/preferences`, `ui:SessionInfoTab`, `route:GET /api/sessions/:id/info`, `file:web/src/components/SessionInfoTab.tsx`, `file:web/src/lib/sessionInfo.ts`, `ui:SettingsSheet`, `ui:NotificationsSection`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:notification-bell`, `ui:CommandPalette`, `ui:FileViewer`, `ui:FilePreview`, `ui:RewindDialog`, `ui:plugin-panel`, `route:GET /api/workspace/tree`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `file:web/src/components/Dialog.tsx`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `event:session_rewound`, `route:GET /api/plugins/:name/panels/:panel`, `config:plugin_panels`, `route:POST /api/plugins/:name/ui/actions/:action`, `config:plugin_ui`, `config:ui`, `file:web/src/components/PluginSlot.tsx`, `file:web/src/components/uiContributions.ts`, `file:web/src/components/PluginControls.tsx`, `file:web/src/state/pluginUiPreferences.ts`, `file:web/src/components/PluginViews.tsx`, `file:web/src/components/viewPanelRegister.ts`, `file:web/src/styles/plugin-views.css`, `dir:plugins/demos`, `file:plugins/demos/README.md`, `file:scripts/verify_plugin_demos.py`, `cmd:python3 scripts/verify_plugin_demos.py`, `file:web/src/styles/plugin-slots.css`, `file:scripts/verify_plugin_ui.py`, `cmd:python3 scripts/verify_plugin_ui.py`, `fn:matchUiKeybinding`, `fn:applyUiPreferences`, `ui:keybinding`, `ui:plugin-controls`, `fn:registerPluginPanelRenderer`, `ui:PluginSlot`, `ui:plugin-slot-button`, `config:[notifications]`, `event:usage`, `event:notification`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `event:queued_messages`, `event:steer_applied`, `ui:AgentsTab`, `route:GET /api/agents`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `event:agent_spawned`, `event:agent_paused`, `event:agent_note`, `event:agent_message`, `event:agent_finished`, `tool:spawn_agent`, `tool:report_status`, `file:web/src/components/AgentsTab.tsx`, `file:web/src/state/agentConsole.ts`, `file:web/src/components/pluginPanels.ts`, `file:web/src/state/queues.test.ts`, `file:web/src/styles/composer.css`, `file:scripts/verify_queues.py`, `file:web/src/components/PluginPanelView.tsx`, `file:web/src/components/RewindDialog.tsx`, `file:web/src/components/TpsBadge.tsx`, `file:web/src/components/NotificationsSettings.tsx`, `file:web/src/styles/mobile.test.ts`, `file:web/src/state/notifier.ts`, `file:web/src/state/railPeek.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/components/SessionsRail.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`, `file:web/src/lib/tps.ts`, `file:web/src/state/promptTokens.ts`, `file:web/src/lib/dockHeight.ts`, `file:web/src/lib/viewportInset.ts`, `file:web/src/lib/menu.tsx`, `ui:context-menu`, `event:tool_call_finished`, `tool:read_file`, `config:model.supports_images`, `cmd:npm run dev`, `cmd:npm run build`, `file:web/dist`, `env:KARUCODE_WEB_DIR`, `ui:GitManager`, `ui:GitChanges`, `ui:GitCommitBox`, `ui:GitBranchDialog`, `ui:GitHistory`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `file:web/src/components/git/GitManager.tsx`, `file:web/src/styles/git.css`, `ui:WorkbenchTaskMenu`, `ui:ContextDrawer`, `file:web/src/components/WorkbenchTaskMenu.tsx`, `file:web/src/components/ContextDrawer.tsx`, `file:web/src/state/workbench.ts`, `file:web/src/lib/approvalCopy.ts`, `file:web/src/styles/workbench.css`, `file:web/src/styles/workbench-navigation.css`, `file:scripts/verify_workbench_frontend.py`, `cmd:python3 scripts/verify_workbench_frontend.py`, `ui:ControlPlane`, `route:GET /api/control/overview`, `route:GET /api/control/sessions`, `file:web/src/state/controlPlane.ts`, `file:web/src/components/control-plane/ControlPlane.tsx`, `file:web/src/components/control-plane/ControlRail.tsx`, `file:web/src/components/control-plane/ControlOverview.tsx`, `file:web/src/components/control-plane/ControlSession.tsx`, `file:web/src/components/control-plane/controlModel.ts`, `file:web/src/styles/control-shared.css`, `file:web/src/styles/control-rail.css`, `file:web/src/styles/control-overview.css`, `file:web/src/styles/control-session.css`, `file:web/src/lib/historyLoader.ts`, `file:web/src/lib/virtualWindow.ts`, `file:web/src/components/ChatTranscript.tsx`, `file:web/src/state/chat.ts`
 - **Source:** `web/src/app.tsx:1`
 
 ---
@@ -69,8 +69,11 @@
   empty state when the chat has delegated nothing. The inspector is a column
   from 1400px and stacks under the transcript below that; the rail hides behind
   the back button on a phone, and opening the plane moves focus into its rail.
-  The list refreshes every five seconds and **Project workspace** exits the
-  plane.
+  The list refreshes every five seconds; leaving the plane (a project tile in
+  the k. rail, or the sessions rail's project switcher) re-reads the open
+  project's session list, the same read a project switch makes, so the
+  workbench rail never inherits a row the plane was showing for another project
+  or a control chat.
   See `central-control` for the tools, dispatch and approval semantics. Its
   embedded conversation is a real `ChatView` with `mode="control-plane"`: that
   mode does not mount the project-scoped Inspector or Context drawer. Composer
@@ -80,7 +83,12 @@
   session search (`/`), available status filters and sessions grouped by last
   activity with running/failure indicators. Create a session with
   `Ctrl/Cmd+N`. On a phone it is a full-height sheet, headed by the project
-  switcher and including **Control plane** and **Settings**.
+  switcher and including **Control plane** and **Settings**. The rail holds the
+  open project's sessions and nothing else: a control chat is never listed
+  there, and opening a conversation that belongs to another project (a
+  notification, the palette) moves the workspace onto *that* project first, so
+  the rail, the file tree and the terminals all describe the session's own
+  project.
 * **Peeking at the collapsed rail**: `Ctrl/Cmd+B` gives the sessions rail zero
   width and mounts the compact project rail. Hovering a project tile shows *that
   project's* sessions as a fly-out beside it — same rows, same rename/delete
@@ -114,6 +122,21 @@
   Returned images stay visible above the output disclosure and open in the real
   lightbox; their bytes come from `tool_call_finished.images` live and stored
   `messages.images` after reload.
+* **Long transcripts**: opening a session, scrolling a history of thousands of
+  rows and keeping up with a live run are all bounded. The transcript is
+  **windowed**: only the rows around the viewport are mounted, with padding
+  standing in for the rest, so a fully loaded conversation does not mount
+  thousands of Markdown blocks at once (see `web/src/lib/virtualWindow.ts`).
+  Older history is not a button: when the reader reaches the line above the
+  oldest loaded row, the next page is fetched automatically and the scroll
+  position is moved by exactly the height the page added, so the row being
+  read stays put (`web/src/lib/historyLoader.ts`; the Agents tab uses the same
+  loader for one agent's activity). A silent refresh - a reconnect, a stream
+  resync, a run settling - keeps the pages already loaded and merges the
+  server's newer tail into them instead of throwing them away; a forced reload
+  after a rewind replaces them. Only the session's own rows are paged: a
+  subagent's transcript belongs to `GET /api/agents/:id`, so a long subagent
+  cannot consume the parent's page.
 * **Rewind**: every persisted user message and every assistant turn carries a
   **Rewind** button in its header (hover or keyboard focus reveals it). It
   opens a dialog that hides the conversation from that message onwards and
@@ -171,6 +194,27 @@
   entries. ArrowUp/ArrowDown and Home/End move through enabled items; Escape and
   Tab dismiss the menu, with Tab restoring the trigger rather than leaking focus
   into a disappeared menu.
+* **Menus and right-click** (`lib/menu.tsx`, DESIGN-SYSTEM §5B): every popup menu
+  in the product is the same box on the same layer with the same keyboard
+  contract, implemented once. Opening focuses the first *enabled* item, the
+  arrows and Home/End walk enabled items with exactly one item in the Tab order,
+  and Escape or Tab closes and returns focus to the trigger. A menu opened by a
+  **right-click** is portalled into `<body>` on the `.menu-layer` (z-index 90 —
+  above the app chrome, below the dialogs it can be opened from inside), measured
+  after mount and clamped to the viewport, and it closes on scroll or resize
+  because its anchor is a snapshot of where the pointer was. Rows that answer a
+  right-click offer the actions they already offer by a visible control: session
+  rows (both rails and the control plane's dashboard) offer Rename, Copy title and
+  Delete, git history rows offer Copy sha and Copy subject, a changed-file row
+  offers Copy path, file-tree rows offer Open and Copy path, notification rows
+  offer Open, Mark as read and Copy text, agent cards offer Details, Pause/Resume,
+  Stop and Copy agent id, and terminal chips offer Rename and Close. A right-click
+  is never the only path to an action — touch and the phone sheet have no
+  right-click — and it is never taken from a text field, an editable region, an
+  open menu, or a surface where the browser's own menu is the better one (the
+  transcript, the file viewer, a diff, the terminal). Where a row's text is
+  selectable the menu keeps a Copy item, so suppressing the native menu never
+  costs the ability to copy it.
 * **Results dock** (`Inspector`, owned by ChatView): **Files**, **Git**, **Session
   usage**, **Agents** and one tab per enabled **plugin panel**. File rows open the
   real viewer; Context's result links select these same tabs through
@@ -584,6 +628,45 @@ avoids iOS focus zoom. Running controls split deliberately rather than dropping 
 Stop or queue/steer. `viewport-fit=cover` plus the safe-area insets keeps the
 frame clear of the phone status bar and home indicator. Shortcut hint prose and
 decorative meters yield before visible actions and accessible labels.
+
+**The conversation owns the frame, never its content.** The Workbench's Results
+split is a row, so the conversation pane is a flex item in it; left on the
+default `min-width: auto` it took its *content* width and a single unbreakable
+token in a tool card widened the pane past the screen, putting Stop, Queue and
+Approvals off the right edge. `styles/workbench.css` floors it at `min-width: 0`
+outside the real desktop split, so on a phone the pane is exactly the viewport.
+It has to be pinned, not measured in `scrollWidth`: the shell is
+`overflow: hidden`, so the clipped strip never shows up as overflow, and the
+scroller was widened with it and so never scrolled either.
+
+**The keyboard does not cover the composer.** `index.html` asks for
+`interactive-widget=resizes-content` (Android resizes the layout viewport), and
+`lib/viewportInset.ts` publishes the covered strip as `--kb-inset` from
+`visualViewport` for engines that do not - iOS Safari paints the keyboard over
+the page. `styles/layout.css` subtracts it from the shell height, so the dock
+stays above the keyboard. A strip smaller than 15% of the layout is the browser
+toolbar collapsing, not a keyboard, and a pinch-zoomed page is not one either;
+both are ignored rather than shrinking the workspace.
+
+**Touch targets are finger-sized, on every pointer-coarse device.** The header
+controls are 26-31px boxes 4px apart and the dock's attach/Stop/Send were
+24-28px; `@media (pointer: coarse)` raises them to 40x40 (labelled pills to 32px
+tall) in `styles/workbench.css`, `styles/layout.css` and `styles/composer.css`.
+The workbench header's floor lives in `workbench.css` because that file both owns
+the 30px declaration and loads last. The transcript's row toggles keep their
+density: they are full-width rows, not thumb-sized buttons.
+
+### Menus on a phone
+
+Every row that offers a menu does so through `lib/menu.tsx`'s `contextMenuProps`.
+Right-click is the desktop gesture and `contextmenu` never fires on iOS Safari,
+so the primitive owns the touch path too: resting a finger for 450ms opens the
+same menu at the same point, travelling more than 10px turns it into a scroll
+and cancels, and the click a browser synthesises afterwards is swallowed so the
+row's own action does not also run. Surfaces still pass `allow` to decline while
+a row is mid-rename. Actions that exist *only* in such a menu - copying a
+commit, a path or an agent id - are therefore reachable without a mouse, and
+`Shift+F10` reaches them from the keyboard.
 
 ## Development loop
 

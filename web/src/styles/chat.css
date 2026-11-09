@@ -57,6 +57,48 @@
   min-width: 0;
 }
 
+/* ---------- history sentinel ---------- */
+
+/* The line above the oldest loaded row. It is a marker, not a control: pacing
+ * older pages is the scroll's job (see `lib/historyLoader.ts`), so there is
+ * nothing to press. It stays at the head of the transcript when it is out of
+ * view, which is what lets the loader notice the reader arriving. */
+.history-pagination {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 auto var(--space-8);
+  text-align: center;
+}
+
+.history-loading,
+.history-start {
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 660;
+  letter-spacing: 1.18px;
+  text-transform: uppercase;
+}
+
+.history-loading {
+  animation: history-breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes history-breathe {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .history-loading {
+    animation: none;
+  }
+}
+
 .transcript > :last-child {
   margin-bottom: 0;
 }

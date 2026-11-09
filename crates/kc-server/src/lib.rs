@@ -53,7 +53,7 @@
 // | `GET /api/models/catalog`, `/api/models/lookup` | models.dev metadata, cached |
 // | `GET`/`POST /api/projects` | list and create projects; `PATCH /api/projects/:id/preferences` stores the Workbench result width; `GET /api/projects/:id/favicon` serves the project's own `favicon.ico` (`204` when it has none) |
 // | `GET`/`POST /api/sessions` | list, create, load sessions |
-// | `GET /api/sessions/:id` | one session with its transcript (`?messages=N`, default 5000, max 50000) |
+// | `GET /api/sessions/:id` | one session with its own transcript (subagent rows excluded; `?messages=N`, default 5000, max 50000) |
 // | `GET /api/sessions/:id/info` | the session's counts and token totals: messages, turns, tool calls, working time, per-agent usage, window fill |
 // | `PATCH /api/sessions/:id`, `PATCH /api/sessions/:id/model` | rename, and pin or clear this session's model |
 // | `POST /api/sessions/:id/messages` | start a run (SSE progress arrives on `/api/events`); `?mode=steer` folds the message into the run in flight, `?mode=follow_up` starts one after it |
@@ -181,6 +181,13 @@
 // { "messages": [ ... ], "messages_limit": 5000, "messages_truncated": true,
 //   "messages_before": 4211 }
 // ```
+//
+// Only the session's **own** conversation is paged. Rows a subagent wrote carry
+// an `agent_id` and belong to that agent's transcript (`GET /api/agents/:id`),
+// so they never consume the parent's window or move its `messages_before`
+// cursor. `system` rows are runtime context and are left out too. Before this
+// the newest window was shared, and one long subagent could push every turn of
+// the parent conversation out of the page.
 //
 // The page is bounded by **stored payload bytes** (about 1 MiB), not by the row
 // count alone, so a handful of large tool results fills it before `?messages=`

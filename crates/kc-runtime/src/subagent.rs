@@ -183,7 +183,7 @@
 // thinking, each tool call with status and output, commands with exit codes, and
 // approvals it is waiting on. The transcript keeps streaming while the agent runs
 // and is backfilled from SQLite when you open an agent that finished before the
-// page loaded.
+// page loaded. Older pages arrive as you scroll back (there is no load button).
 //
 // The same data is available over HTTP: `GET /api/agents?project=<id>`,
 // `GET /api/agents/:id`, and `POST /api/agents/:id/pause`, `/resume`, `/cancel`.
@@ -249,7 +249,7 @@ use kc_core::error::Result;
 use kc_core::events::Event;
 use kc_core::ids::AgentId;
 use kc_core::message::Message;
-use kc_core::store::{AgentRecord, AgentStatus, NewMessage, RunStatus};
+use kc_core::store::{AgentRecord, AgentStatus, MessageScope, NewMessage, RunStatus};
 use kc_core::tool::{
     truncate_output, Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOutcome, ToolRegistry, ToolSpec,
 };
@@ -2402,7 +2402,7 @@ impl Tool for AgentHistoryTool {
             .store
             .list_message_page(
                 &ctx.approvals.session_id.0,
-                Some(agent_id),
+                MessageScope::Agent(agent_id),
                 before,
                 limit,
                 MAX_HISTORY_BYTES,

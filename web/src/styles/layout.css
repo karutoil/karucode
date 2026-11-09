@@ -7,7 +7,12 @@
 
 .app {
   display: flex;
-  height: 100dvh;
+  /* The shell is as tall as the *visible* area. `100dvh` is the layout viewport,
+   * which iOS does not shrink for the on-screen keyboard; `--kb-inset` (see
+   * `lib/viewportInset.ts`) is the strip the keyboard covers, so subtracting it
+   * keeps the docked composer reachable. It is unset — and therefore 0px — on
+   * every engine without the problem. */
+  height: calc(100dvh - var(--kb-inset, 0px));
   width: 100%;
   min-width: 0;
   overflow: hidden;
@@ -19,7 +24,7 @@
 
 .app-root {
   position: relative;
-  height: 100dvh;
+  height: calc(100dvh - var(--kb-inset, 0px));
   overflow: hidden;
   background: var(--bg);
 }
@@ -1027,7 +1032,7 @@
   flex: 1 1 auto;
   flex-direction: column;
   min-width: 0;
-  height: 100dvh;
+  height: calc(100dvh - var(--kb-inset, 0px));
   background-color: var(--bg);
   background-image: var(--stage-glow);
 }
@@ -1813,7 +1818,7 @@
   /* The rail is a sheet now, so the chat column takes the whole width. The one
    * thing it still has to surrender is the home indicator's band. */
   .chat-main {
-    height: 100dvh;
+    height: calc(100dvh - var(--kb-inset, 0px));
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
@@ -2219,5 +2224,40 @@
   .rail .shortcut,
   .rail .side-search .keycap {
     display: none;
+  }
+}
+/* ---------------------------------------------------------------- touch targets
+
+ * The header is a row of 26-31px controls separated by 4px, which is precise with
+ * a mouse and a coin-toss with a thumb: the sessions toggle, branch chip,
+ * notifications, command palette and Task actions all sat at 30x30 on a phone,
+ * 4px apart, in the corner a right-handed thumb reaches first.
+ *
+ * `pointer: coarse` rather than a width tier is the honest signal - a touch
+ * laptop with a 1440px window has the same problem, and a narrow desktop window
+ * driven by a mouse does not. The taller box fits inside the 52px phone header
+ * (6px above and below) and the wider one still leaves the session title its
+ * ellipsis at 320px.
+ *
+ * The transcript's row toggles (`.tool-row-head`, `.command-row-head`) are left
+ * alone deliberately: they are full-width rows, so their 29px height is not what
+ * a thumb aims at, and growing them would add ~7px per tool call to every scroll.
+ */
+@media (pointer: coarse) {
+  .main-head .head-btn {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  /* The context button is already wide (it carries the usage percentage); it only
+   * needed height, and a wider box there would take the title's room. */
+  .main-head .head-btn.context-header-btn {
+    min-width: 0;
+    padding: 0 var(--space-4);
+  }
+
+  .rail-tool,
+  .main-head .head-btn.head-icon {
+    min-height: 40px;
   }
 }

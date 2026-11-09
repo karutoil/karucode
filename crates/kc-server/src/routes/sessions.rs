@@ -13,7 +13,7 @@ use axum::Json;
 use kc_core::config::SessionModelSelection;
 use kc_core::events::Event;
 use kc_core::ids::SessionId;
-use kc_core::store::Session;
+use kc_core::store::{MessageScope, Session};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -306,7 +306,7 @@ pub async fn get_session(
     let page = store
         .list_message_page(
             &session.id,
-            None,
+            MessageScope::Session,
             message_before(&query)?,
             limit,
             TRANSCRIPT_PAGE_BYTES,

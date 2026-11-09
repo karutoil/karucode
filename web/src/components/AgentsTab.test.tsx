@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import type { AgentSummary, StoredMessage } from '../api/types';
 import { AgentsTab } from './AgentsTab';
 import { Inspector } from './Inspector';
@@ -7,7 +7,12 @@ import { emptyChatState, type AgentView } from '../state/chat';
 import * as actions from '../state/actions';
 import * as store from '../state/store';
 import { AGENT_STATUS_LABEL } from '../state/selectors';
+import { copyText } from '../lib/clipboard';
 import { jsonResponse, resetAppState } from '../test/fixtures';
+
+vi.mock('../lib/clipboard', () => ({
+  copyText: vi.fn(async () => true),
+}));
 
 const NOW = 1_700_000_000_000;
 
@@ -332,7 +337,7 @@ describe('AgentsTab', () => {
 describe('agent history pagination', () => {
   beforeEach(() => resetAppState());
   afterEach(() => { resetAppState(); vi.unstubAllGlobals(); });
-  it('loads an older page through the control and removes the incomplete notice', async () => {
+  it('loads an older page as soon as the reader reaches the top, without a button', async () => {
     const row = agent('a_runner');
     store.agentsAll.value = [row];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -342,10 +347,12 @@ describe('agent history pagination', () => {
     }));
     render(<AgentsTab />);
     fireEvent.click(await screen.findByRole('button', { name: /Open details for a_runner/ }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Load older history' }));
+    // The top marker is in view (jsdom has no layout), so the shared loader
+    // requests the older page on its own.
     expect(await screen.findByText('older output')).toBeTruthy();
     expect(screen.getByText('newer output')).toBeTruthy();
     expect(screen.queryByText('Earlier history is not loaded.')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Load older history' })).toBeNull();
   });
 });
 
@@ -419,5 +426,186 @@ describe('AgentsTab status vocabulary', () => {
     ];
     const { container } = render(<AgentsTab />);
     expect(container.querySelector('.agent-card .agent-live')?.textContent).toBe('timed_out');
+  });
+});
+
+/**
+ * The agent card's right-click menu.
+ *
+ * The card already shows everything the menu offers - Details, and Pause/Stop
+ * while the loop is alive - so the menu is a second road to the same handlers, not
+ * a new one. What it adds is the agent id on the clipboard. A settled card offers
+ * Details and the id only, because `AgentControls` refuses to render dead controls
+ * and the menu must not offer what those buttons would not.
+ */
+describe('the agent card menu', () => {
+  beforeEach(() => {
+    resetAppState();
+    store.currentProjectId.value = 'p_1';
+    stubFetch();
+    vi.mocked(copyText).mockClear();
+  });
+
+  afterEach(() => {
+    resetAppState();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** Right-click the card named `name` and return the menu it opened. */
+  function openMenuOn(root: ParentNode, name: string): HTMLElement {
+    const card = [...root.querySelectorAll('.agent-card')].find(
+      (node) => node.querySelector('.agent-name')?.textContent === name,
+    ) as HTMLElement | undefined;
+    expect(card, `card for "${name}"`).not.toBeUndefined();
+    // Suppressing the native menu is the point of offering our own.
+    expect(fireEvent.contextMenu(card!, { clientX: 200, clientY: 120 })).toBe(false);
+    return screen.getByRole('menu', { name: `Agent actions for ${name}` });
+  }
+
+  it('offers a live agent’s controls plus its id, and suppresses the native menu', () => {
+    store.agentsAll.value = [agent('a_live', { status: 'running', finished_at: null })];
+    const { container } = render(<AgentsTab />);
+
+    const menu = openMenuOn(container, 'a_live');
+    // The card is inside the inspector, which scrolls and clips: the float menu
+    // portals out to the body instead.
+    expect(menu.closest('.menu-layer')?.parentElement).toBe(document.body);
+    expect(
+      within(menu).getAllByRole('menuitem').map((item) => item.textContent),
+    ).toEqual(['Details', 'Pause', 'Stop', 'Copy agent id']);
+    // Stop keeps the danger ink the card's own Stop button carries.
+    expect(within(menu).getByRole('menuitem', { name: 'Stop' }).className).toContain(
+      'menu-item-danger',
+    );
+    // The menu took nothing away: both visible controls are still on the card.
+    expect(screen.getByRole('button', { name: 'Pause a_live' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Stop a_live' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Open details for a_live' })).not.toBeNull();
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Details' }));
+  });
+
+  it('offers Resume, not Pause, to a paused agent', () => {
+    store.agentsAll.value = [agent('a_paused', { status: 'paused', finished_at: null })];
+    const { container } = render(<AgentsTab />);
+
+    const menu = openMenuOn(container, 'a_paused');
+    const labels = within(menu).getAllByRole('menuitem').map((item) => item.textContent);
+    expect(labels).toEqual(['Details', 'Resume', 'Stop', 'Copy agent id']);
+    // The card shows the same word for the same state.
+    expect(screen.getByRole('button', { name: 'Resume a_paused' })).not.toBeNull();
+  });
+
+  it('offers a settled agent only its details and its id', () => {
+    store.agentsAll.value = [agent('a_done', { status: 'completed' })];
+    const { container } = render(<AgentsTab />);
+
+    const menu = openMenuOn(container, 'a_done');
+    expect(
+      within(menu).getAllByRole('menuitem').map((item) => item.textContent),
+    ).toEqual(['Details', 'Copy agent id']);
+    // Not merely hidden: the card renders no such control either.
+    expect(container.querySelector('.agent-controls')).toBeNull();
+  });
+
+  it('drills in through the card’s own Details handler', async () => {
+    store.agentsAll.value = [agent('a_runner', { status: 'running', finished_at: null })];
+    const open = vi.spyOn(actions, 'openAgentDetail').mockResolvedValue(undefined);
+    const { container } = render(<AgentsTab />);
+
+    fireEvent.click(within(openMenuOn(container, 'a_runner')).getByRole('menuitem', { name: 'Details' }));
+    expect(open).toHaveBeenCalledWith('a_runner');
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('pauses and stops through the same action the card’s buttons call', () => {
+    const control = vi.spyOn(actions, 'controlAgent').mockResolvedValue(undefined);
+    store.agentsAll.value = [agent('a_live', { status: 'running', finished_at: null })];
+    const { container } = render(<AgentsTab />);
+
+    fireEvent.click(within(openMenuOn(container, 'a_live')).getByRole('menuitem', { name: 'Pause' }));
+    expect(control).toHaveBeenLastCalledWith('a_live', 'pause');
+
+    fireEvent.click(within(openMenuOn(container, 'a_live')).getByRole('menuitem', { name: 'Stop' }));
+    expect(control).toHaveBeenLastCalledWith('a_live', 'cancel');
+    // The menu is not a second route into the drill-in.
+    expect(container.querySelector('.agent-detail')).toBeNull();
+  });
+
+  it('disables the controls in the menu while a request is in flight', () => {
+    // The buttons refuse a second request while one is pending; the menu must not
+    // accept what the buttons will not.
+    store.agentControlPending.value = { a_live: 'pause' };
+    store.agentsAll.value = [agent('a_live', { status: 'running', finished_at: null })];
+    const { container } = render(<AgentsTab />);
+
+    const menu = openMenuOn(container, 'a_live');
+    expect(
+      (within(menu).getByRole('menuitem', { name: 'Pause' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (within(menu).getByRole('menuitem', { name: 'Stop' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    // Reading and copying are unaffected by a pending control request.
+    expect(
+      (within(menu).getByRole('menuitem', { name: 'Details' }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(
+      (within(menu).getByRole('menuitem', { name: 'Copy agent id' }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it('copies the agent id and says so', async () => {
+    store.agentsAll.value = [agent('a_done', { status: 'completed' })];
+    const { container } = render(<AgentsTab />);
+
+    fireEvent.click(
+      within(openMenuOn(container, 'a_done')).getByRole('menuitem', { name: 'Copy agent id' }),
+    );
+    await waitFor(() => expect(copyText).toHaveBeenCalledWith('a_done'));
+    await waitFor(() =>
+      expect(store.toasts.value.map((toast) => toast.message)).toContain('Agent id copied.'),
+    );
+  });
+
+  it('reports a refused clipboard instead of claiming a copy', async () => {
+    vi.mocked(copyText).mockResolvedValueOnce(false);
+    store.agentsAll.value = [agent('a_done', { status: 'completed' })];
+    const { container } = render(<AgentsTab />);
+
+    fireEvent.click(
+      within(openMenuOn(container, 'a_done')).getByRole('menuitem', { name: 'Copy agent id' }),
+    );
+    await waitFor(() =>
+      expect(store.toasts.value.map((toast) => [toast.message, toast.tone])).toContainEqual([
+        'Could not copy the agent id.',
+        'error',
+      ]),
+    );
+  });
+
+  it('closes on Escape and gives focus back to the Details button', () => {
+    store.agentsAll.value = [agent('a_live', { status: 'running', finished_at: null })];
+    const { container } = render(<AgentsTab />);
+    const menu = openMenuOn(container, 'a_live');
+    const details = screen.getByRole('button', { name: 'Open details for a_live' });
+
+    fireEvent.keyDown(within(menu).getByRole('menuitem', { name: 'Stop' }), { key: 'Escape' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.activeElement).toBe(details);
+  });
+
+  it('leaves the native menu to a field inside the card', () => {
+    // The card holds no field today; this pins the guard the primitive supplies so
+    // a future one (a rename input, say) keeps Copy and spellcheck.
+    store.agentsAll.value = [agent('a_done', { status: 'completed' })];
+    const { container } = render(<AgentsTab />);
+    const card = container.querySelector('.agent-card') as HTMLElement;
+    const field = document.createElement('input');
+    card.appendChild(field);
+
+    expect(fireEvent.contextMenu(field)).toBe(true);
+    expect(screen.queryByRole('menu')).toBeNull();
+    field.remove();
   });
 });

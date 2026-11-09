@@ -332,6 +332,79 @@ export function stringArg(args: JsonValue, key: string): string {
   return '';
 }
 
+/** One transcript range: the rows, the cursor older than them, and whether older rows exist. */
+export interface TranscriptRows {
+  messages: StoredMessage[];
+  /** Exclusive cursor for the next older page; `null` when the start is loaded. */
+  before: number | null;
+  truncated: boolean;
+}
+
+/**
+ * Merge a freshly fetched newest page into the rows the reader already loaded.
+ *
+ * A silent refresh (a reconnect, a stream resync, a run settling) used to replace
+ * the store's rows with the server's newest page, so every page the reader had
+ * scrolled back to was thrown away and "Load older history" came back. The
+ * refreshed tail is always newer than the loaded range, so the union is simply
+ * both ranges. Two exceptions stay with the fetched page:
+ *
+ * * the ranges do not touch (`overlap` false) — after a rewind, or when a session
+ *   grew by more than one page while this tab was away. The union would jump
+ *   over a hole the reader cannot see, so the fresh tail is the honest answer;
+ * * the caller is forcing a reload (`openSession(..., { force: true })`), which
+ *   is how rewind and recovery ask for exactly what the server now has.
+ *
+ * The cursor is derived from the union rather than copied from either response:
+ * keeping a loaded older range while pointing the cursor above it would make the
+ * next page overlap what is already on screen.
+ */
+export function mergeTranscriptRows(
+  loaded: TranscriptRows | null,
+  tail: { messages: readonly StoredMessage[]; messages_before?: number | null },
+): TranscriptRows & { overlap: boolean } {
+  const incoming = tail.messages;
+  const incomingBefore = tail.messages_before ?? null;
+  if (!loaded || loaded.messages.length === 0) {
+    return { messages: [...incoming], before: incomingBefore, truncated: incomingBefore !== null, overlap: true };
+  }
+  if (incoming.length === 0) {
+    return { ...loaded, overlap: true };
+  }
+  const byId = new Map<number, StoredMessage>();
+  for (const message of loaded.messages) byId.set(message.id, message);
+  for (const message of incoming) byId.set(message.id, message);
+  const messages = [...byId.values()].sort((a, b) => a.id - b.id);
+  // The two ranges overlap when the older set already reaches into the newer
+  // one. A gap (oldest incoming newer than the newest loaded row) is a hole.
+  let oldestIncoming = Number.POSITIVE_INFINITY;
+  let newestIncoming = Number.NEGATIVE_INFINITY;
+  for (const message of incoming) {
+    if (message.id < oldestIncoming) oldestIncoming = message.id;
+    if (message.id > newestIncoming) newestIncoming = message.id;
+  }
+  let oldestLoaded = Number.POSITIVE_INFINITY;
+  let newestLoaded = Number.NEGATIVE_INFINITY;
+  for (const message of loaded.messages) {
+    if (message.id < oldestLoaded) oldestLoaded = message.id;
+    if (message.id > newestLoaded) newestLoaded = message.id;
+  }
+  const overlap = newestLoaded >= oldestIncoming && newestIncoming >= oldestLoaded;
+  if (!overlap) {
+    return { messages: [...incoming], before: incomingBefore, truncated: incomingBefore !== null, overlap: false };
+  }
+  // Both cursors are "older than this id". The union is complete only when the
+  // loaded range already reached the start; otherwise its oldest row is the next
+  // boundary.
+  const before =
+    loaded.before === null
+      ? null
+      : incomingBefore === null
+        ? null
+        : Math.min(loaded.before, incomingBefore);
+  return { messages, before, truncated: before !== null, overlap: true };
+}
+
 /** Builds the transcript for a freshly loaded session. */
 export function seedChatState(detail: SessionDetail, previous?: ChatState): ChatState {
   const messages = [...detail.messages].sort((a, b) => a.created_at - b.created_at || a.id - b.id);

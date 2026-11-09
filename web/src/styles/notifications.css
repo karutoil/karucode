@@ -194,6 +194,16 @@
   white-space: nowrap;
 }
 
+/* `text-overflow: ellipsis` does nothing on a flex container - the line is a row
+ * of spans - so a long "session · project · source" pair was cut mid-word at a
+ * phone width. The children are blockified flex items, so each one ellipsizes on
+ * its own and the cut lands on a character boundary with a visible `…`. */
+.notification-where > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .notification-sep {
   color: var(--faint);
 }

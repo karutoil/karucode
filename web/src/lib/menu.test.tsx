@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/preact';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen } from '@testing-library/preact';
 import type { JSX } from 'preact';
 import { contextMenuProps, Menu, MenuItem, useMenu } from './menu';
 import type { MenuAction } from './menu';
@@ -184,3 +184,160 @@ describe('the menu primitive', () => {
     expect(screen.queryByRole('menu')).toBeNull();
   });
 });
+
+/**
+ * The touch half of the same contract. `contextmenu` never fires on iOS Safari,
+ * so a menu wired to it alone is a desktop-only menu: that is exactly how the
+ * "copy what the row shows" rows shipped unreachable on a phone.
+ */
+describe('the menu primitive on touch', () => {
+  /** jsdom has no native `onpointer*` properties, so Preact registers CamelCase
+   *  names there while real Chromium uses the lowercase ones. */
+  function press(
+    target: HTMLElement,
+    type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel',
+    init: { clientX: number; clientY: number; pointerType?: 'mouse' | 'touch'; button?: number },
+  ): void {
+    const registered = `on${type}` in target
+      ? type
+      : type.replace(/^pointer(.)/, (_match, letter: string) => `Pointer${letter.toUpperCase()}`);
+    const event = new MouseEvent(registered, {
+      bubbles: true,
+      cancelable: true,
+      clientX: init.clientX,
+      clientY: init.clientY,
+      button: init.button ?? 0,
+    });
+    Object.defineProperty(event, 'pointerType', { value: init.pointerType ?? 'touch' });
+    Object.defineProperty(event, 'pointerId', { value: 1 });
+    target.dispatchEvent(event);
+  }
+
+  const rowOf = (): HTMLElement => screen.getByText('row body').parentElement as HTMLElement;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  it('opens the menu where the finger rested', () => {
+    render(<Harness float />);
+    press(rowOf(), 'pointerdown', { clientX: 88, clientY: 512 });
+    act(() => { vi.advanceTimersByTime(450); });
+
+    const layer = document.body.querySelector('.menu-layer') as HTMLElement;
+    expect(screen.getByRole('menu')).not.toBeNull();
+    expect(layer.style.top).toBe('512px');
+    expect(layer.style.left).toBe('88px');
+    // The same focus contract as a right-click: the menu is usable immediately.
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'First' }));
+  });
+
+  it('leaves a tap alone', () => {
+    render(<Harness float />);
+    press(rowOf(), 'pointerdown', { clientX: 10, clientY: 10 });
+    act(() => { vi.advanceTimersByTime(200); });
+    press(rowOf(), 'pointerup', { clientX: 10, clientY: 10 });
+    act(() => { vi.advanceTimersByTime(600); });
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('cancels when the finger travels, so a scroll never opens a menu', () => {
+    render(<Harness float />);
+    press(rowOf(), 'pointerdown', { clientX: 40, clientY: 700 });
+    press(rowOf(), 'pointermove', { clientX: 40, clientY: 640 });
+    act(() => { vi.advanceTimersByTime(600); });
+    expect(screen.queryByRole('menu')).toBeNull();
+
+    // ...and a new still press after the scroll still works.
+    press(rowOf(), 'pointerdown', { clientX: 40, clientY: 700 });
+    act(() => { vi.advanceTimersByTime(450); });
+    expect(screen.getByRole('menu')).not.toBeNull();
+  });
+
+  it('does not run the row action a resting finger also triggers', () => {
+    const onRowClick = vi.fn();
+    function Row(): JSX.Element {
+      const menu = useMenu();
+      return (
+        <div>
+          <Menu menu={menu} label="Row actions" float>
+            <MenuItem menu={menu} action={{ label: 'Copy path', onSelect: vi.fn() }} />
+          </Menu>
+          {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events */}
+          <div {...contextMenuProps(menu)} onClick={onRowClick}>
+            <span>pressable</span>
+          </div>
+        </div>
+      );
+    }
+    render(<Row />);
+    const row = screen.getByText('pressable').parentElement as HTMLElement;
+    press(row, 'pointerdown', { clientX: 30, clientY: 30 });
+    act(() => { vi.advanceTimersByTime(450); });
+    expect(screen.getByRole('menu')).not.toBeNull();
+
+    // The tap the browser synthesises after a touch ends must not also open the
+    // row's subject behind the menu that just appeared.
+    fireEvent.click(row);
+    expect(onRowClick).not.toHaveBeenCalled();
+  });
+
+  it('still runs an item the reader taps immediately after the menu appears', () => {
+    const onSelect = vi.fn();
+    function Row(): JSX.Element {
+      const menu = useMenu();
+      return (
+        <div>
+          <Menu menu={menu} label="Row actions" float>
+            <MenuItem menu={menu} action={{ label: 'Copy path', onSelect }} />
+          </Menu>
+          <div {...contextMenuProps(menu)}>
+            <span>pressable</span>
+          </div>
+        </div>
+      );
+    }
+    render(<Row />);
+    press(screen.getByText('pressable').parentElement as HTMLElement, 'pointerdown', {
+      clientX: 30, clientY: 30,
+    });
+    act(() => { vi.advanceTimersByTime(450); });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy path' }));
+    expect(onSelect).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a resting mouse, which is a select-drag rather than a menu', () => {
+    render(<Harness float />);
+    press(rowOf(), 'pointerdown', { clientX: 20, clientY: 20, pointerType: 'mouse' });
+    act(() => { vi.advanceTimersByTime(900); });
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('honours a surface that declines the gesture', () => {
+    function Guarded(): JSX.Element {
+      const menu = useMenu();
+      return (
+        <div>
+          <Menu menu={menu} label="Guarded" float>
+            <MenuItem menu={menu} action={{ label: 'Never', onSelect: vi.fn() }} />
+          </Menu>
+          <div {...contextMenuProps(menu, () => false)}>
+            <span>declined</span>
+          </div>
+        </div>
+      );
+    }
+    render(<Guarded />);
+    press(screen.getByText('declined').parentElement as HTMLElement, 'pointerdown', {
+      clientX: 12, clientY: 12,
+    });
+    act(() => { vi.advanceTimersByTime(450); });
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+});
+

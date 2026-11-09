@@ -4132,6 +4132,82 @@ async fn session_detail_pages_the_transcript_and_says_when_it_is_truncated() {
 }
 
 #[tokio::test]
+async fn session_detail_pages_the_parent_transcript_past_subagent_rows() {
+    let h = HarnessBuilder::new(vec![]).build().await;
+    let session = h.create_session(Some("subagent window")).await;
+    let store = support::store_of(&h);
+    let append = |role: &str, content: &str, agent: Option<&str>| {
+        let store = store.clone();
+        let session = session.clone();
+        let role = role.to_string();
+        let content = content.to_string();
+        let agent = agent.map(str::to_owned);
+        async move {
+            store
+                .append_message(&kc_core::store::NewMessage {
+                    session_id: session,
+                    run_id: None,
+                    agent_id: agent,
+                    role,
+                    content,
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                    name: None,
+                    images: vec![],
+                    reasoning_content: None,
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let first = append("user", "parent question", None).await;
+    append("assistant", "parent answer", None).await;
+    // A stored system row is runtime context, not transcript; it must not show
+    // up in the session page either.
+    append("system", "compaction summary", None).await;
+    // A long subagent writes thousands of rows under the same session id. They
+    // are the Agents tab's transcript, never part of the parent conversation, and
+    // must not consume its newest window.
+    for index in 0..40 {
+        append("assistant", &format!("agent step {index}"), Some("a_long")).await;
+    }
+    let last = append("user", "parent follow-up", None).await;
+
+    let tail = h
+        .get(&format!("/api/sessions/{session}?messages=2"))
+        .await
+        .json();
+    let rows = tail["messages"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["content"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["parent answer", "parent follow-up"],
+        "the newest page is the parent's rows, not the agent's: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| row["agent_id"].is_null()),
+        "a session page never carries an agent row: {rows:?}"
+    );
+    assert_eq!(tail["messages_truncated"], true);
+    let cursor = tail["messages_before"].as_i64().unwrap();
+    let older = h
+        .get(&format!(
+            "/api/sessions/{session}?messages=10&before={cursor}"
+        ))
+        .await
+        .json();
+    let older_rows = older["messages"].as_array().unwrap();
+    assert_eq!(older_rows.len(), 1, "{older_rows:?}");
+    assert_eq!(older_rows[0]["id"], first);
+    assert_eq!(older_rows[0]["content"], "parent question");
+    assert_eq!(older["messages_truncated"], false);
+    // The follow-up is still the newest parent row; the agent rows are paged by
+    // their own route.
+    assert_eq!(tail["messages"][1]["id"], last);
+}
+
+#[tokio::test]
 async fn session_transcript_byte_budget_returns_oversized_row_and_cursor() {
     let h = HarnessBuilder::new(vec![]).build().await;
     let session = h.create_session(Some("large page")).await;

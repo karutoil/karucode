@@ -26,10 +26,12 @@ import type {
 import { isNarrowViewport } from '../lib/dom';
 import {
   emptyChatState,
+  mergeTranscriptRows,
   normalizeQueuedMessage,
   seedChatState,
   type ChatState,
   type MessageItem,
+  type TranscriptRows,
 } from './chat';
 import * as agentConsole from './agentConsole';
 import { applyEventToChat, applyEventToSessions, markUserRun, sessionAgentFromRecord } from './eventReducer';
@@ -127,6 +129,61 @@ function isUnauthorized(error: unknown): boolean {
   return error instanceof ApiError && error.isUnauthorized;
 }
 
+/**
+ * The rows the workbench rail may hold: the open project's sessions, and nothing
+ * else.
+ *
+ * `sessions.value` is read unfiltered by the rail, the palette and the collapsed
+ * rail's fly-out, so its meaning has to be enforced where it is written rather
+ * than at each reader. Two kinds of row do not belong in it: a **control chat**
+ * (the plane's own list, project-less by design) and a session from **another
+ * project** (the client holds one project at a time; a foreign row makes the rail
+ * disagree with the workspace the file tools and terminals are pointed at). An
+ * unscoped `/api/sessions` read - what happens while no project is open - returns
+ * both, which is exactly how a plane conversation used to surface in the
+ * workbench list until the next project switch replaced it.
+ *
+ * A project-less *ordinary* session stays listed: it is not a control chat, and
+ * the server attaches those rows to a project on its next start. The one open is
+ * also kept by `doRefreshSessions`, which asks the global list before closing it.
+ */
+function projectSessionsOnly(list: SessionSummary[]): SessionSummary[] {
+  const project = store.currentProjectId.value;
+  return list.filter(
+    (session) =>
+      session.control !== true && (project === null || session.project_id === null || session.project_id === project),
+  );
+}
+
+/**
+ * Move the workspace onto the project an opened session belongs to.
+ *
+ * `openSession` is also reached without a project switch: a notification record
+ * that has lost its project, or an action that only holds a session id. The rail,
+ * the file tree and the terminals are project-scoped, so a session from another
+ * project must bring its project with it - otherwise the workspace shows one
+ * project's files beside another project's conversation, and the session has no
+ * row in the rail. Unlike `switchProject` this never selects a session (one is
+ * already open) and does not close anything: it moves the project, empties the
+ * list and reloads it, and the caller merges the open session's own row into it.
+ */
+function adoptProjectForSession(projectId: string): void {
+  if (store.currentProjectId.value === projectId) return;
+  // A project move invalidates every in-flight read of the old project, exactly
+  // as `switchProjectInternal` does. `sessionGeneration` is deliberately left
+  // alone: this runs inside a session read that is still committing.
+  projectGeneration += 1;
+  store.currentProjectId.value = projectId;
+  store.writeLastProjectId(projectId);
+  resetPluginPanelData();
+  store.sessions.value = [];
+  store.sessionsLoading.value = true;
+  store.sessionInfo.value = null;
+  store.sessionInfoFor.value = null;
+  store.sessionInfoError.value = null;
+  void doRefreshSessions();
+}
+
 function mergeSummary(summary: SessionSummary): void {
   const list = store.sessions.value;
   const index = list.findIndex((session) => session.id === summary.id);
@@ -141,10 +198,12 @@ function mergeSummary(summary: SessionSummary): void {
   // that list is "this project's sessions" and the workspace rail draws it
   // unfiltered, so inserting a project-less chat here made it appear as a project
   // row and then vanish at the next refresh (a second flicker of its own).
-  if (!list.some((session) => session.id === summary.id) && (summary.control || summary.project_id === null)) {
-    return;
-  }
+  if (index === -1 && (summary.control || summary.project_id === null)) return;
   if (index === -1) {
+    // Only this project's rows may be inserted. `openSession` moves the project
+    // first (see `adoptProjectForSession`); a summary that still names another
+    // project is stale relative to the store and is not this list's work.
+    if (summary.project_id !== store.currentProjectId.value) return;
     store.sessions.value = [summary, ...list];
     return;
   }
@@ -596,13 +655,16 @@ async function doRefreshSessions(): Promise<void> {
   try {
     const list = await api.listSessions(projectId);
     if (!isCurrent()) return;
-    store.sessions.value = list;
+    // Even an unscoped read (no open project) must not put a control chat or
+    // another project's session into the rail: see `projectSessionsOnly`.
+    const rows = projectSessionsOnly(list);
+    store.sessions.value = rows;
     store.sessionsLoading.value = false;
     // Agents belong to sessions: a deleted or renamed session changes both the
     // list and the labels the Agents view groups by.
     void refreshAgents();
     const current = store.currentSessionId.value;
-    if (current && !list.some((session) => session.id === current)) {
+    if (current && !rows.some((session) => session.id === current)) {
       // A project-less session (the control chat) is never in a project's list, so
       // refreshing that list must not close it. Ask the global list before
       // treating the open session as gone.
@@ -616,7 +678,7 @@ async function doRefreshSessions(): Promise<void> {
       }
       if (!isCurrent()) return;
       if (projectless) return;
-      const next = list[0] ?? null;
+      const next = rows[0] ?? null;
       if (next) void openSession(next.id);
       else clearSelection();
     }
@@ -684,7 +746,9 @@ export async function bootstrap(force = false): Promise<void> {
       store.currentProjectId.value = project?.id ?? null;
       store.writeLastProjectId(project?.id ?? null);
       const list = await api.listSessions(project?.id ?? null);
-      store.sessions.value = list;
+      // The same invariant as every other write: a boot with no project reads the
+      // unscoped list, which contains control chats and every project's rows.
+      store.sessions.value = projectSessionsOnly(list);
       store.sessionsLoading.value = false;
       await refreshAgents();
       store.authError.value = null;
@@ -774,6 +838,11 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
 
   const generation = (sessionGeneration += 1);
   const sessionChanged = store.currentSessionId.value !== id;
+  // Pages the reader already paged back to belong to this same session; a later
+  // silent refresh merges its newest tail into them instead of throwing them
+  // away (see `mergeTranscriptRows`). A forced read is the exception: it is how
+  // rewind and recovery ask for exactly what the server has now.
+  const previousHistory = store.sessionHistory.value?.id === id ? store.sessionHistory.value : null;
   if (store.sessionHistory.value?.id !== id) store.sessionHistory.value = null;
   else if (store.sessionHistory.value.loading) store.sessionHistory.value = { ...store.sessionHistory.value, loading: false };
   store.currentSessionId.value = id;
@@ -807,14 +876,40 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
   try {
     const detail = await api.getSession(id);
     if (generation !== sessionGeneration) return false;
-    store.sessionHistory.value = { id, messages: detail.messages, before: detail.messages_before ?? null, truncated: !!detail.messages_truncated, loading: false, error: null };
+    const rows: TranscriptRows = options.force || !previousHistory
+      ? {
+          messages: detail.messages,
+          before: detail.messages_before ?? null,
+          truncated: !!detail.messages_truncated,
+        }
+      : mergeTranscriptRows(previousHistory, detail);
+    store.sessionHistory.value = {
+      id,
+      messages: rows.messages,
+      before: rows.before,
+      truncated: rows.truncated,
+      loading: false,
+      error: null,
+    };
+    // The snapshot's runs, approvals and agents are still the server's; only the
+    // rows are widened to what this tab already had, so seeding from it keeps
+    // every loaded page and still persists the new tail.
+    const seededDetail: SessionDetail =
+      rows.messages === detail.messages
+        ? detail
+        : {
+            ...detail,
+            messages: rows.messages,
+            messages_truncated: rows.truncated,
+            messages_before: rows.before,
+          };
     if (options.preserveLive && detail.running && hasLiveAnswer(id)) {
       // Never delete an answer that is still streaming - but do not throw the
       // snapshot away either. It is the only thing that can restore a tool card,
       // an approval or a notice whose frame was one of the lost ones.
-      store.chat.value = mergeLiveAnswer(seedChatState(detail, store.chat.value), store.chat.value);
+      store.chat.value = mergeLiveAnswer(seedChatState(seededDetail, store.chat.value), store.chat.value);
     } else {
-      store.chat.value = seedChatState(detail, store.chat.value);
+      store.chat.value = seedChatState(seededDetail, store.chat.value);
       settled = !detail.running;
     }
     // The snapshot cannot carry `usage` (it is not persisted), so the context
@@ -826,9 +921,15 @@ export async function openSession(id: string, options: OpenSessionOptions = {}):
       if (remembered !== null) store.chat.value = { ...store.chat.value, lastPromptTokens: remembered };
     }
     seedAgentState(detail);
+    const summary = summaryFromDetail(detail);
+    // The workspace follows the conversation: a session opened from a
+    // notification record (or any caller holding only an id) may live in another
+    // project, and the rail, file tree and terminals are project-scoped. Move
+    // first, then merge, so the row lands in the list it belongs to.
+    if (summary.project_id) adoptProjectForSession(summary.project_id);
     // The session's own model pin is recorded by `mergeSummary` below, which
     // is the one place that sees the server's answer for a session.
-    mergeSummary(summaryFromDetail(detail));
+    mergeSummary(summary);
     store.chatLoading.value = false;
     store.chatError.value = null;
     applied = true;
@@ -1831,10 +1932,17 @@ export async function loadOlderSession(): Promise<void> {
     const current = store.sessionHistory.value;
     const byId = new Map(current.messages.map((message) => [message.id, message]));
     for (const message of detail.messages) byId.set(message.id, message);
-    detail.messages = [...byId.values()].sort((a, b) => a.id - b.id);
-    store.sessionHistory.value = { id: history.id, messages: detail.messages, before: detail.messages_before ?? null, truncated: !!detail.messages_truncated, loading: false, error: null };
+    // The cursor describes the union: a page can overlap rows this tab already
+    // holds (a retried page, a refresh that widened the window), and the next
+    // request must still ask for rows older than everything on screen.
+    const before = detail.messages_before ?? null;
+    const messages = [...byId.values()].sort((a, b) => a.id - b.id);
+    store.sessionHistory.value = { id: history.id, messages, before, truncated: before !== null, loading: false, error: null };
     const live = store.chat.value;
-    const seeded = seedChatState(detail, live);
+    const seeded = seedChatState(
+      { ...detail, messages, messages_before: before, messages_truncated: before !== null },
+      live,
+    );
     seeded.items = seeded.items.map((item) => {
       const current = live.items.find((entry) => entry.id === item.id);
       return current ?? item;

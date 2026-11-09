@@ -2,6 +2,8 @@ import type { JSX } from 'preact';
 import { lazy, Suspense } from 'preact/compat';
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import type { Terminal } from '../api/types';
+import { contextMenuProps, Menu, MenuItem, useMenu } from '../lib/menu';
+import type { TerminalSocketStatus } from '../state/terminalSocket';
 import * as terminalsState from '../state/terminals';
 import { AlertIcon, CloseIcon, EditIcon, PlusIcon, RefreshIcon, TerminalIcon } from './icons';
 
@@ -249,70 +251,19 @@ function TerminalStrip({
         aria-orientation="horizontal"
         onKeyDown={onKeyDown}
       >
-        {list.map((terminal) => {
-          const selected = terminal.id === activeId;
-          const status = statuses[terminal.id];
-          const renaming = renamingId === terminal.id;
-          return (
-            <div
-              key={terminal.id}
-              class={`terminal-chip${selected ? ' is-active' : ''}${renaming ? ' is-renaming' : ''}`}
-              data-status={status ?? 'idle'}
-            >
-              <button
-                type="button"
-                role="tab"
-                id={`terminal-tab-${terminal.id}`}
-                aria-selected={selected}
-                // Only the selected terminal has a mounted panel; pointing the
-                // other tabs at an id that does not exist makes the tablist
-                // describe controls the document never renders.
-                aria-controls={selected ? `terminal-panel-${terminal.id}` : undefined}
-                tabIndex={selected ? 0 : -1}
-                class="terminal-chip-select"
-                title={`${terminal.title} — ${terminal.cwd}`}
-                onClick={() => onSelect(terminal.id, 'pointer')}
-                onFocus={() => revealTab(terminal.id)}
-                onDblClick={() => setRenamingId(terminal.id)}
-              >
-                <span class="terminal-dot" aria-hidden="true" />
-                <span class="terminal-chip-label">{terminal.title}</span>
-                {terminal.running ? null : (
-                  <span class="terminal-chip-badge" title="The shell has exited">
-                    exited
-                  </span>
-                )}
-              </button>
-              {renaming ? (
-                <TerminalRenameInput
-                  terminal={terminal}
-                  onDone={() => setRenamingId(null)}
-                />
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    class="terminal-chip-action"
-                    aria-label={`Rename ${terminal.title}`}
-                    title="Rename"
-                    onClick={() => setRenamingId(terminal.id)}
-                  >
-                    <EditIcon size={11} />
-                  </button>
-                  <button
-                    type="button"
-                    class="terminal-chip-action"
-                    aria-label={`Close ${terminal.title}`}
-                    title="Close (ends the shell)"
-                    onClick={() => void terminalsState.closeTerminal(terminal.id)}
-                  >
-                    <CloseIcon size={11} />
-                  </button>
-                </>
-              )}
-            </div>
-          );
-        })}
+        {list.map((terminal) => (
+          <TerminalChip
+            key={terminal.id}
+            terminal={terminal}
+            selected={terminal.id === activeId}
+            status={statuses[terminal.id]}
+            renaming={renamingId === terminal.id}
+            onSelect={onSelect}
+            onStartRename={() => setRenamingId(terminal.id)}
+            onDoneRename={() => setRenamingId(null)}
+            revealTab={revealTab}
+          />
+        ))}
         <button
           type="button"
           class="terminal-new"
@@ -331,6 +282,118 @@ function TerminalStrip({
       <p class="terminal-count">
         {list.length}/{budget}
       </p>
+    </div>
+  );
+}
+
+/**
+ * One chip in the strip: the tab itself plus its two actions.
+ *
+ * It is its own component because a menu is per chip — it opens at *this* chip's
+ * pointer and returns focus to *this* tab, so one controller cannot serve the
+ * strip. The chip has no kebab and never grows one (a tab strip is already
+ * dense), so the menu is pointer-anchored only: `float`, portalled onto the menu
+ * layer above the strip's horizontal scroller, which would otherwise clip it.
+ *
+ * **Rename** and **Close** stay on the chip as buttons; the menu is a second way
+ * to reach them, not the only one. It also declines the right-click while this
+ * chip is mid-rename, so the field keeps the browser's own menu — its Cut, Copy
+ * and Paste are the affordance for a text selection, and ours has nothing to add.
+ */
+function TerminalChip({
+  terminal,
+  selected,
+  status,
+  renaming,
+  onSelect,
+  onStartRename,
+  onDoneRename,
+  revealTab,
+}: {
+  terminal: Terminal;
+  selected: boolean;
+  status: TerminalSocketStatus | undefined;
+  renaming: boolean;
+  onSelect: (id: string, origin: TerminalActivationOrigin) => void;
+  onStartRename: () => void;
+  onDoneRename: () => void;
+  revealTab: (id: string) => void;
+}): JSX.Element {
+  const menu = useMenu();
+  // Focus returns to the tab button: the chip's `div` is not focusable, and the
+  // tab is the element a keyboard user would have activated.
+  const selectRef = useRef<HTMLButtonElement>(null);
+
+  return (
+    <div
+      class={`terminal-chip${selected ? ' is-active' : ''}${renaming ? ' is-renaming' : ''}`}
+      data-status={status ?? 'idle'}
+      {...contextMenuProps(menu, () => !renaming, () => selectRef.current)}
+    >
+      <button
+        ref={selectRef}
+        type="button"
+        role="tab"
+        id={`terminal-tab-${terminal.id}`}
+        aria-selected={selected}
+        // Only the selected terminal has a mounted panel; pointing the
+        // other tabs at an id that does not exist makes the tablist
+        // describe controls the document never renders.
+        aria-controls={selected ? `terminal-panel-${terminal.id}` : undefined}
+        tabIndex={selected ? 0 : -1}
+        class="terminal-chip-select"
+        title={`${terminal.title} — ${terminal.cwd}`}
+        onClick={() => onSelect(terminal.id, 'pointer')}
+        onFocus={() => revealTab(terminal.id)}
+        onDblClick={onStartRename}
+      >
+        <span class="terminal-dot" aria-hidden="true" />
+        <span class="terminal-chip-label">{terminal.title}</span>
+        {terminal.running ? null : (
+          <span class="terminal-chip-badge" title="The shell has exited">
+            exited
+          </span>
+        )}
+      </button>
+      {renaming ? (
+        <TerminalRenameInput
+          terminal={terminal}
+          onDone={onDoneRename}
+        />
+      ) : (
+        <>
+          <button
+            type="button"
+            class="terminal-chip-action"
+            aria-label={`Rename ${terminal.title}`}
+            title="Rename"
+            onClick={onStartRename}
+          >
+            <EditIcon size={11} />
+          </button>
+          <button
+            type="button"
+            class="terminal-chip-action"
+            aria-label={`Close ${terminal.title}`}
+            title="Close (ends the shell)"
+            onClick={() => void terminalsState.closeTerminal(terminal.id)}
+          >
+            <CloseIcon size={11} />
+          </button>
+        </>
+      )}
+      <Menu menu={menu} float label={`Terminal actions for ${terminal.title}`}>
+        <MenuItem menu={menu} action={{ label: 'Rename', title: 'Rename', onSelect: onStartRename }} />
+        <MenuItem
+          menu={menu}
+          action={{
+            label: 'Close',
+            title: 'Close (ends the shell)',
+            danger: true,
+            onSelect: () => void terminalsState.closeTerminal(terminal.id),
+          }}
+        />
+      </Menu>
     </div>
   );
 }

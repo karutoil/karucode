@@ -225,6 +225,8 @@ function installFetch(
   /** POST paths the sheet sent to the plugin lifecycle routes, in order. */
   const pluginPosts: string[] = [];
   let pluginListCalls = 0;
+  /** What a plugin *contributes* lives in `/api/config`, so this counts re-reads. */
+  let configReads = 0;
   let plugins = options.plugins ?? [];
   let current = config;
   const testResult: ProviderTestResult = options.testResult ?? {
@@ -237,7 +239,10 @@ function installFetch(
     const url =
       typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     const method = (init?.method ?? 'GET').toUpperCase();
-    if (url === '/api/config' && method === 'GET') return jsonResponse(current);
+    if (url === '/api/config' && method === 'GET') {
+      configReads += 1;
+      return jsonResponse(current);
+    }
     if (url === '/api/config' && method === 'PATCH') {
       const body: ConfigPatch =
         typeof init?.body === 'string' ? (JSON.parse(init.body) as ConfigPatch) : {};
@@ -309,6 +314,7 @@ function installFetch(
     patches,
     pluginPosts,
     pluginListCalls: () => pluginListCalls,
+    configReads: () => configReads,
   };
 }
 
@@ -1411,6 +1417,25 @@ describe('SettingsSheet plugins', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Rescan plugins' }));
 
     await waitFor(() => expect(pluginPosts).toEqual(['/api/plugins/reload']));
+  });
+
+  it('re-reads the config after a lifecycle action, so new contributions appear', async () => {
+    // A plugin's tabs, buttons and hides are served by `/api/config`. Reloading a
+    // process tells the sheet nothing about them, so without a config re-read,
+    // installing a plugin leaves its controls invisible until a page reload.
+    const { configReads, pluginPosts } = installFetch(twoProfileConfig(), {
+      plugins: [pluginDiagnostics('wordy')],
+    });
+    renderSheet(twoProfileConfig());
+
+    await openTab('Plugins & MCP');
+    await screen.findByRole('button', { name: 'Rescan plugins' });
+    const before = configReads();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rescan plugins' }));
+
+    await waitFor(() => expect(pluginPosts).toEqual(['/api/plugins/reload']));
+    await waitFor(() => expect(configReads()).toBeGreaterThan(before));
   });
 
   it('disables a running plugin and enables a disabled one', async () => {

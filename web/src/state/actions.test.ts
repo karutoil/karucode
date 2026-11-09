@@ -436,6 +436,35 @@ describe('transcript pagination', () => {
     expect(store.sessionHistory.value?.before).toBeNull();
   });
 
+  it('keeps pages the reader loaded when a silent refresh returns a newer tail', async () => {
+    const base = detailFixture.messages[0]!;
+    const rows = (ids: number[]) => ids.map((id) => ({ ...base, id }));
+    let reads = 0;
+    stubFetch((url) => {
+      if (url.includes('before=')) {
+        return jsonResponse({ ...detailFixture, messages: rows([9]), messages_truncated: false, messages_before: null });
+      }
+      reads += 1;
+      return jsonResponse(
+        reads === 1
+          ? { ...detailFixture, messages: rows([10, 11]), messages_truncated: true, messages_before: 10 }
+          : { ...detailFixture, messages: rows([10, 11, 12]), messages_truncated: true, messages_before: 10 },
+      );
+    });
+    await actions.openSession(detailFixture.session.id, { force: true });
+    await actions.loadOlderSession();
+    expect(store.sessionHistory.value?.messages.map((m) => m.id)).toEqual([9, 10, 11]);
+    expect(store.sessionHistory.value?.before).toBeNull();
+
+    // A reconnect or resync refetches the tail. The rows the reader paged back
+    // to (id 9) must survive, and the union is complete, so the marker says so.
+    await actions.openSession(detailFixture.session.id, { silent: true });
+    expect(store.sessionHistory.value?.messages.map((m) => m.id)).toEqual([9, 10, 11, 12]);
+    expect(store.sessionHistory.value?.before).toBeNull();
+    expect(store.sessionHistory.value?.truncated).toBe(false);
+    expect(store.chat.value.items.some((item) => item.id === 'notice:history-truncated')).toBe(false);
+  });
+
   it('unblocks an older-page loader when a same-session refresh fails', async () => {
     const base = detailFixture.messages[0]!;
     const page = deferred<Response>();

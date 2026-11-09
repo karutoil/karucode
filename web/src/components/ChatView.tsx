@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import type { ChatItem } from '../state/chat';
 import { copyText } from '../lib/clipboard';
 import { useHeightVariable } from '../lib/dockHeight';
+import { useHistoryLoader } from '../lib/historyLoader';
 import { modKey } from '../lib/platform';
 import { useStickyBottom } from '../lib/stickyBottom';
 import type { TreeLoader } from '../lib/mentions';
@@ -468,6 +469,9 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
   // The terminal list is needed to decide whether the tab exists at all, so it
   // is fetched on mount rather than on first selection. It is one small GET.
   const [terminalMounted, setTerminalMounted] = useState(false);
+  // Marks the top of the loaded transcript: the history loader watches it and
+  // fetches the next older page when the reader reaches it.
+  const historySentinelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void terminalState.loadTerminals();
@@ -496,6 +500,20 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
     sessionKey: chat.sessionId,
     contentKey: `${chat.items.length}:${tailSize}`,
     sentMessageTick: store.sentMessageTick.value,
+  });
+
+  // Older pages arrive as the reader reaches the top, instead of behind a
+  // "Load older history" button. `version` is the row count so a page that
+  // actually loaded can be followed by another; an error leaves it unchanged
+  // and the loop stops.
+  const history = store.sessionHistory.value?.id === currentId ? store.sessionHistory.value : null;
+  useHistoryLoader({
+    scroller: scroller.scrollRef,
+    sentinel: historySentinelRef,
+    canLoad: history !== null && history.before !== null,
+    loading: history?.loading ?? false,
+    load: actions.loadOlderSession,
+    version: history?.messages.length ?? 0,
   });
 
   // The dock floats over the transcript, so the scroller reserves its real
@@ -561,10 +579,16 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
                   </div>
                 ) : null}
 
-                {!showLoading && store.sessionHistory.value?.id === currentId && store.sessionHistory.value.truncated ? (
-                  <div class="history-pagination">
-                    {store.sessionHistory.value.before !== null ? <button type="button" class="button button-small" disabled={store.sessionHistory.value.loading} onClick={() => void actions.loadOlderSession()}>{store.sessionHistory.value.loading ? 'Loading…' : 'Load older history'}</button> : <p>Older history is unavailable from this server.</p>}
-                    {store.sessionHistory.value.error ? <p role="alert">{store.sessionHistory.value.error}</p> : null}
+                {!showLoading && history !== null && history.messages.length > 0 ? (
+                  <div class="history-pagination" ref={historySentinelRef}>
+                    {history.before !== null ? (
+                      <p class="history-loading" role="status" aria-live="polite">
+                        {history.loading ? 'Loading earlier messages…' : 'Scroll up to load earlier messages'}
+                      </p>
+                    ) : (
+                      <p class="history-start">Beginning of the conversation</p>
+                    )}
+                    {history.error ? <p role="alert">{history.error}</p> : null}
                   </div>
                 ) : null}
                 {!showLoading && !store.chatError.value ? (
@@ -581,6 +605,8 @@ export function ChatView({ emptyContent, mentionProjects, mode = 'workspace' }: 
                         resolvingApprovals={store.resolvingApprovals.value}
                         onApprovalDecision={decideApproval}
                         onRewind={actions.openRewind}
+                        viewportRef={scroller.scrollRef}
+                        sessionKey={chat.sessionId}
                       />
                     </ErrorBoundary>
                   ) : chat.running ? (

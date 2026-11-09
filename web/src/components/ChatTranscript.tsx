@@ -1,6 +1,7 @@
 import type { JSX } from 'preact';
+import type { RefObject } from 'preact';
 import { memo } from 'preact/compat';
-import { useMemo, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type {
   ApprovalItem,
   ChatItem,
@@ -21,6 +22,7 @@ import {
   type TurnRow,
 } from '../state/transcriptLayout';
 import { clockTime, formatDuration } from '../lib/format';
+import { clampEstimate, prefixHeights, visibleRange } from '../lib/virtualWindow';
 import * as store from '../state/store';
 import { activeTheme, type ThemeGrouping, type ThemeThinking, type ThemeToolStyle } from '../theme';
 import { ApprovalCard } from './ApprovalCard';
@@ -38,6 +40,18 @@ export interface ChatTranscriptProps {
   onApprovalDecision: (approvalId: string, decision: 'allow_once' | 'allow_session' | 'deny') => void;
   /** Open the rewind dialog for one stored message. */
   onRewind?: (target: store.RewindTarget) => void;
+  /**
+   * The scroll container the transcript lives in. When present and laid out,
+   * only the rows around the viewport are mounted (see `lib/virtualWindow.ts`);
+   * without it — tests, embedded renderers — every entry is rendered as before.
+   */
+  viewportRef?: RefObject<HTMLElement>;
+  /**
+   * Which conversation the rows belong to. A change resets the window to the
+   * tail before the sticky-bottom pin moves the viewport, so a session opened
+   * with a long history never paints the previous session's scroll position.
+   */
+  sessionKey?: string | null;
 }
 
 /** The transcript view options, read once per render from the theme. */
@@ -441,13 +455,15 @@ const MemoAssistantTurn = memo(AssistantTurn, rowPropsEqual);
 /** A user message: avatar, author, time and the question in a raised bubble. */
 function UserRow({
   item,
+  entryKey,
   onRewind,
 }: {
   item: MessageItem;
+  entryKey: string;
   onRewind?: ChatTranscriptProps['onRewind'];
 }): JSX.Element {
   return (
-    <article class="msg msg-user" aria-label="Your message">
+    <article class="msg msg-user" aria-label="Your message" data-entry-key={entryKey}>
       <span class="msg-avatar" aria-hidden="true">
         Y
       </span>
@@ -628,6 +644,7 @@ function AssistantRow({
     <article
       class={`msg msg-assistant${streaming ? ' is-streaming' : ''}`}
       aria-label="karucode response"
+      data-entry-key={entry.key}
     >
       <span class="msg-avatar agent" aria-hidden="true">
         <SparkIcon size={12} />
@@ -675,11 +692,44 @@ const MemoAssistantRow = memo(AssistantRow, rowPropsEqual);
  * Off-screen rows additionally skip layout and paint - see `content-visibility`
  * on `.msg` in `styles/chat.css`.
  */
+/**
+ * A height guess for one entry, used only until the browser measures the row.
+ *
+ * It is deliberately generous: an overestimate leaves a little padding above
+ * the window that collapses on the first measurement, while an underestimate
+ * makes the scrollbar jump as rows are discovered. The estimate never wins over
+ * a measured height.
+ */
+function estimateEntryHeight(entry: Entry): number {
+  if (entry.kind === 'day') return 48;
+  if (entry.kind === 'user') return 96 + Math.ceil(entry.item.content.length / 96) * 18;
+  let height = 104;
+  for (const part of entry.parts) {
+    if (part.kind === 'message') {
+      height += 32 + Math.ceil((part.content.length + part.reasoning.length) / 96) * 18;
+    } else if (part.kind === 'tool' || part.kind === 'command') {
+      height += 46;
+    } else if (part.kind === 'approval') {
+      height += 148;
+    } else {
+      height += 40;
+    }
+  }
+  return clampEstimate(height);
+}
+
+/** Kept mounted above and below the viewport, so a wheel tick never reveals a hole. */
+const OVERSCAN_MIN_PX = 480;
+/** Viewport assumed for the first paint, before the real element is measured. */
+const FALLBACK_VIEWPORT_PX = 900;
+
 export function ChatTranscript({
   items,
   resolvingApprovals,
   onApprovalDecision,
   onRewind,
+  viewportRef,
+  sessionKey = null,
 }: ChatTranscriptProps): JSX.Element {
   const theme = activeTheme.value;
   // Frozen by identity: a new object here every render would make every row's
@@ -702,18 +752,160 @@ export function ChatTranscript({
     return next;
   }, [items]);
 
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  /** Last measured height per entry key; estimates fill the gaps. */
+  const measured = useRef(new Map<string, number>());
+  const [measuredTick, setMeasuredTick] = useState(0);
+  /**
+   * The viewport's scrollTop, or `null` until the first real reading. A null top
+   * draws the tail, which is where every session opens even though the element
+   * is only scrolled there after the sticky-bottom effect runs.
+   *
+   * Tagged with the conversation: a row list replaced under a new session must
+   * not reuse the previous session's scroll position while the pin lands.
+   */
+  const [windowReading, setWindowReading] = useState<{ key: string | null; top: number } | null>(null);
+  const windowTop = windowReading && windowReading.key === sessionKey ? windowReading.top : null;
+  /** The effect below is installed once; it must tag readings with the current session. */
+  const sessionKeyRef = useRef(sessionKey);
+  sessionKeyRef.current = sessionKey;
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
+  /**
+   * The last non-zero viewport height. A hidden chat panel (the Terminal tab is
+   * open) measures zero, and that is not a reason to mount a whole long history:
+   * the window keeps the height it had. Only a viewport that has never measured
+   * anything - jsdom, an embedded renderer - falls back to rendering every row.
+   */
+  const seenHeight = useRef(0);
+
+  useEffect(() => {
+    const element = viewportRef?.current;
+    if (!element) return;
+    let frame = 0;
+    const read = (): void => {
+      frame = 0;
+      setWindowReading({ key: sessionKeyRef.current, top: element.scrollTop });
+    };
+    const onScroll = (): void => {
+      if (frame !== 0) return;
+      frame = requestAnimationFrame(read);
+    };
+    const measure = (): void => {
+      const height = element.clientHeight;
+      if (height > 0) {
+        seenHeight.current = height;
+        setViewportHeight(height);
+      } else if (seenHeight.current === 0) {
+        setViewportHeight(0);
+      }
+      // A session that fits the viewport is both top and bottom; a long one
+      // starts at the tail and is only pinned to the bottom after this effect.
+      if (element.scrollTop > 0 || element.scrollHeight <= element.clientHeight + 1) {
+        setWindowReading({ key: sessionKeyRef.current, top: element.scrollTop });
+      }
+    };
+    element.addEventListener('scroll', onScroll, { passive: true });
+    measure();
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver === 'function') {
+      observer = new ResizeObserver(measure);
+      observer.observe(element);
+    }
+    return () => {
+      element.removeEventListener('scroll', onScroll);
+      observer?.disconnect();
+      if (frame !== 0) cancelAnimationFrame(frame);
+    };
+  }, [viewportRef]);
+
+  const estimates = useMemo(() => entries.map(estimateEntryHeight), [entries]);
+  const heights = useMemo(
+    () => entries.map((entry, index) => measured.current.get(entry.key) ?? estimates[index] ?? 0),
+    [entries, estimates, measuredTick],
+  );
+  const geometry = useMemo(() => prefixHeights(heights), [heights]);
+
+  // `viewportHeight === null` is the first paint (the scroll effect has not run
+  // yet); it still windows the tail so a long session never mounts every row.
+  // A measured zero (jsdom, or a hidden panel) renders everything, because a
+  // window without a viewport would hide most of the transcript for good.
+  const virtual = viewportRef !== undefined && viewportHeight !== null && viewportHeight > 0;
+  const pending = viewportRef !== undefined && viewportHeight === null;
+  const bandHeight = viewportHeight !== null && viewportHeight > 0 ? viewportHeight : FALLBACK_VIEWPORT_PX;
+  const bandTop = windowTop ?? geometry.total;
+  const overscan = Math.max(bandHeight, OVERSCAN_MIN_PX);
+  const firstVisible = visibleRange(geometry.offsets, bandTop, bandHeight, 0).start;
+  const range = virtual || pending
+    ? visibleRange(geometry.offsets, bandTop, bandHeight, overscan)
+    : { start: 0, end: entries.length };
+
+  // Measure the mounted rows after every commit that can have changed one.
+  //
+  // Only a row that intersects the viewport is measured: `content-visibility:
+  // auto` freezes an off-screen row's box at its `contain-intrinsic-size`, so an
+  // overscan row would report a made-up height and collapse the padding. Rows
+  // that had been visible keep the height they had while they were.
+  useLayoutEffect(() => {
+    if (!virtual) return;
+    const root = transcriptRef.current;
+    const element = viewportRef?.current;
+    if (!root || !element) return;
+    const viewportBox = element.getBoundingClientRect();
+    let changed = false;
+    let above = 0;
+    const rows = root.children;
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index] as HTMLElement;
+      const key = row.getAttribute('data-entry-key');
+      if (!key) continue;
+      const box = row.getBoundingClientRect();
+      if (box.bottom <= viewportBox.top || box.top >= viewportBox.bottom) continue;
+      const entryIndex = range.start + index;
+      const height = box.height;
+      const previous = measured.current.get(key);
+      if (previous !== undefined && Math.abs(previous - height) < 1) continue;
+      // A correction to a row above the viewport moves everything below it, so
+      // the viewport is moved by the same amount to keep the reader's row put.
+      if (entryIndex < firstVisible) above += height - (previous ?? estimates[entryIndex] ?? 0);
+      measured.current.set(key, height);
+      changed = true;
+    }
+    if (above !== 0 && Number.isFinite(above)) element.scrollTop += above;
+    if (changed) setMeasuredTick((tick) => tick + 1);
+  }, [virtual, range.start, range.end, firstVisible, estimates, measuredTick, viewportRef, windowTop]);
+
+  const topPadding = range.start > 0 ? geometry.offsets[range.start] ?? 0 : 0;
+  const bottomPadding =
+    range.end < entries.length ? Math.max(0, geometry.total - (geometry.offsets[range.end] ?? geometry.total)) : 0;
+  const visible = entries.slice(range.start, range.end);
+
   return (
-    <div class="transcript">
-      {entries.map((entry) => {
+    <div
+      class="transcript"
+      ref={transcriptRef}
+      style={
+        topPadding > 0 || bottomPadding > 0
+          ? { paddingTop: `${topPadding}px`, paddingBottom: `${bottomPadding}px` }
+          : undefined
+      }
+    >
+      {visible.map((entry) => {
         if (entry.kind === 'day') {
           return (
-            <p class="date-marker" key={entry.key}>
+            <p class="date-marker" key={entry.key} data-entry-key={entry.key}>
               {dayLabel(entry.at)}
             </p>
           );
         }
         if (entry.kind === 'user') {
-          return <MemoUserRow item={entry.item} key={entry.key} onRewind={onRewind} />;
+          return (
+            <MemoUserRow
+              item={entry.item}
+              entryKey={entry.key}
+              key={entry.key}
+              onRewind={onRewind}
+            />
+          );
         }
         return (
           <MemoAssistantRow

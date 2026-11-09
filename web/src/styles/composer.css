@@ -1365,3 +1365,50 @@
     animation: none;
   }
 }
+
+/* -------------------------------------------------------------- touch targets
+
+ * Every control in the dock was sized for a pointer that can hit a 24px box: the
+ * attach button was 24x24, Stop and Send 28x28, and the model / reasoning /
+ * usage / approvals pills 24-26px tall. On a phone those are the controls a
+ * thumb uses most, and Stop sits directly beside Queue - the two most consequential
+ * neighbours in the product.
+ *
+ * `pointer: coarse` so a desktop keeps its density. The dock is already the
+ * measured variable (`--composer-h`), so the extra height is reserved for the
+ * transcript automatically rather than overlapping the last message.
+ */
+@media (pointer: coarse) {
+  .compose-plus {
+    width: 40px;
+    height: 40px;
+  }
+
+  .compose-bottom .button-stop,
+  .button-send {
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
+    min-height: 40px;
+  }
+
+  .compose-bottom .button-queue {
+    min-height: 40px;
+  }
+
+  /* Labelled pills are already 66-107px wide, so height alone was the miss. 32 is
+   * enough to land a thumb on without turning the dock into a toolbar. */
+  .context-pill,
+  .compose-approvals,
+  .compose-bottom .model-switcher-button,
+  .queued-recall,
+  .queue-mode-option {
+    min-height: 32px;
+  }
+
+  .attachment-chip-remove {
+    width: 32px;
+    min-width: 32px;
+    height: 32px;
+  }
+}

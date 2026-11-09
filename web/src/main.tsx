@@ -2,6 +2,7 @@ import { render } from 'preact';
 import { App } from './app';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { initTheme } from './theme';
+import { initViewportInset } from './lib/viewportInset';
 // Draws the kc-todo plugin's inspector panel with a first-party component
 // instead of the generic JSON fallback; imported for its side effect.
 import './components/todoPanelRegister';
@@ -15,6 +16,10 @@ import './styles/index.css';
 // flashes the default palette. `styles/tokens.css` ships Ember as its fallback,
 // which is what `initTheme()` reapplies when nothing is stored.
 initTheme();
+
+// Publish the on-screen keyboard's height as `--kb-inset` so the fixed-height
+// shell can shorten by exactly that much (see `lib/viewportInset.ts`).
+initViewportInset();
 
 const root = document.getElementById('app');
 if (root) {

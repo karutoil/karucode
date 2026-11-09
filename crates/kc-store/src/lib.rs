@@ -2551,13 +2551,19 @@ impl Store for SqliteStore {
     async fn list_message_page(
         &self,
         session_id: &str,
-        agent_id: Option<&str>,
+        scope: MessageScope<'_>,
         before_id: Option<i64>,
         limit: usize,
         max_bytes: usize,
     ) -> Result<MessagePage> {
         let session_id = session_id.to_string();
-        let agent_id = agent_id.map(str::to_owned);
+        // SQL parameter: NULL means the session's own rows (`agent_id IS NULL`),
+        // a value means one agent's rows. This is the scope, never "no filter":
+        // the two transcripts share a table but are paged separately.
+        let agent_id = match scope {
+            MessageScope::Session => None,
+            MessageScope::Agent(id) => Some(id.to_owned()),
+        };
         self.read(move |conn| {
             // Read sizes first so an excluded oversized row is never materialized.
             // Both queries use the same read transaction for a consistent snapshot.
@@ -2569,7 +2575,10 @@ impl Store for SqliteStore {
                     + COALESCE(length(CAST(tool_call_id AS BLOB)),0) + COALESCE(length(CAST(name AS BLOB)),0)
                     + COALESCE(length(CAST(images AS BLOB)),0) + COALESCE(length(CAST(reasoning_content AS BLOB)),0)
                    FROM messages WHERE session_id = ?1 AND rewound_at IS NULL
-                    AND (?2 IS NULL OR agent_id = ?2) AND (?3 IS NULL OR id < ?3)
+                    AND CASE WHEN ?2 IS NULL
+                             THEN agent_id IS NULL AND role != 'system'
+                             ELSE agent_id = ?2 END
+                    AND (?3 IS NULL OR id < ?3)
                    ORDER BY id DESC LIMIT ?4"
             ).map_err(|e| db_err("message page sizes prepare", e))?;
             let mut rows = stmt.query(params![session_id, agent_id, before_id, limit_i64(limit.saturating_add(1))])
@@ -6452,16 +6461,19 @@ mod tests {
             .await
             .unwrap();
         let page = store
-            .list_message_page("s_1", None, None, 2, usize::MAX)
+            .list_message_page("s_1", MessageScope::Session, None, 2, usize::MAX)
             .await
             .unwrap();
+        // The agent row (second) is not part of the session transcript, so it does
+        // not consume the two-row window: both parent rows fit and nothing older
+        // is left over.
         assert_eq!(
             page.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
-            vec![second, third]
+            vec![first, third]
         );
-        assert!(page.has_more);
+        assert!(!page.has_more);
         let previous = store
-            .list_message_page("s_1", None, Some(second), 10, usize::MAX)
+            .list_message_page("s_1", MessageScope::Session, Some(third), 10, usize::MAX)
             .await
             .unwrap();
         assert_eq!(
@@ -6470,14 +6482,14 @@ mod tests {
         );
         assert!(!previous.has_more);
         let tiny = store
-            .list_message_page("s_1", None, None, 10, 1)
+            .list_message_page("s_1", MessageScope::Session, None, 10, 1)
             .await
             .unwrap();
         assert_eq!(tiny.messages[0].id, third);
         assert_eq!(tiny.messages.len(), 1);
         assert!(tiny.has_more);
         let filtered = store
-            .list_message_page("s_1", Some("a"), None, 10, usize::MAX)
+            .list_message_page("s_1", MessageScope::Agent("a"), None, 10, usize::MAX)
             .await
             .unwrap();
         assert_eq!(
@@ -6486,19 +6498,19 @@ mod tests {
         );
         assert!(!filtered.has_more);
         let empty = store
-            .list_message_page("s_1", None, None, 0, 100)
+            .list_message_page("s_1", MessageScope::Session, None, 0, 100)
             .await
             .unwrap();
         assert!(empty.messages.is_empty());
         assert!(empty.has_more);
         store.mark_messages_rewound("s_1", second).await.unwrap();
         let visible = store
-            .list_message_page("s_1", None, None, 10, usize::MAX)
+            .list_message_page("s_1", MessageScope::Session, None, 10, usize::MAX)
             .await
             .unwrap();
         assert_eq!(
             visible.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
-            vec![first, second]
+            vec![first]
         );
         assert!(!visible.has_more);
     }

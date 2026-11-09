@@ -1307,6 +1307,16 @@
 @media (max-width: 600px) {
   .settings-tabs {
     padding: 0 var(--space-5);
+    /* Five tabs do not fit a 320-430px sheet even at this density, and the strip
+     * scrolls rather than squashing its labels (the contract above). A scrollable
+     * strip with a hard cut edge reads as a truncated row - "Plugins & MCP" was
+     * simply absent at 320px with nothing to suggest it existed - so fade the cut
+     * edge. The gradient is a mask, not a paint: only its alpha is used, so it is
+     * theme-independent, and where the strip already fits it falls on empty
+     * padding and shows nothing. */
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - var(--space-7)), transparent);
+    mask-image: linear-gradient(to right, black calc(100% - var(--space-7)), transparent);
+    scroll-padding-inline: var(--space-5);
   }
 
   .settings-tab {

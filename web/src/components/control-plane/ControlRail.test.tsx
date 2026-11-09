@@ -491,7 +491,9 @@ describe('the row menu keeps the rail’s keyboard contract', () => {
     fireEvent.click(within(browser).getByRole('button', { name: 'Actions for Control chat' }));
     const menu = await within(browser).findByRole('menu');
     const items = within(menu).getAllByRole('menuitem');
-    expect(items.map((item) => item.textContent)).toEqual(['Rename', 'Delete…']);
+    // Copy title joins the kebab's two actions: a right-click menu that
+    // suppresses the native one must not lose the ability to copy the row's text.
+    expect(items.map((item) => item.textContent)).toEqual(['Rename', 'Copy title', 'Delete…']);
 
     const move = (key: string): void => {
       fireEvent.keyDown(document.activeElement ?? menu, { key });
@@ -501,12 +503,14 @@ describe('the row menu keeps the rail’s keyboard contract', () => {
     move('ArrowDown');
     expect(document.activeElement).toBe(items[1]);
     move('ArrowDown');
+    expect(document.activeElement).toBe(items[2]);
+    move('ArrowDown');
     expect(document.activeElement).toBe(items[0]);
     move('ArrowUp');
-    expect(document.activeElement).toBe(items[1]);
+    expect(document.activeElement).toBe(items[2]);
     move('Home');
     expect(document.activeElement).toBe(items[0]);
     move('End');
-    expect(document.activeElement).toBe(items[1]);
+    expect(document.activeElement).toBe(items[2]);
   });
 });

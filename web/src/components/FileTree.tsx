@@ -1,6 +1,9 @@
 import type { JSX } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { WorkspaceEntry } from '../api/types';
+import { contextMenuProps, Menu, MenuItem, useMenu } from '../lib/menu';
+import { copyText } from '../lib/clipboard';
+import * as store from '../state/store';
 import { ArrowRightIcon, ChevronRightIcon, FileCodeIcon, FileIcon, FolderIcon, FolderOpenIcon } from './icons';
 
 export interface FileTreeProps {
@@ -60,6 +63,163 @@ function flatten(
     }
   }
   return result;
+}
+
+/** Is this a path the operating system resolves from the root rather than from a cwd? */
+function isAbsoluteRoot(path: string): boolean {
+  return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path);
+}
+
+/**
+ * The absolute form of a tree entry's path, or `null` when it cannot be derived
+ * honestly from the props this tree was given.
+ *
+ * The server's listing is workspace-relative (`GET /api/workspace/tree` reports
+ * `path` through `Workspace::relative`), and `rootPath` is the project's own path,
+ * so the join is real — but only while the root is absolute. `WorkspaceTab` falls
+ * back to `'.'` when no project, health or config workspace is known, and joining
+ * onto that would hand the reader a path that resolves against nothing. Rather
+ * than invent one, the caller omits the item that would have shown it.
+ */
+function absolutePath(rootPath: string, path: string): string | null {
+  if (path === '') return null;
+  // Already absolute: the row's own spelling is the full path.
+  if (isAbsoluteRoot(path)) return path;
+  if (!isAbsoluteRoot(rootPath)) return null;
+  const root = rootPath.replace(/\/+$/, '');
+  const rest = path.replace(/^\.\/+/, '');
+  if (rest === '') return root === '' ? '/' : root;
+  return `${root}/${rest}`;
+}
+
+interface TreeRowProps {
+  node: FlatNode;
+  /** The workspace root the listing is relative to, as `FileTree` received it. */
+  rootPath: string;
+  expanded: boolean;
+  loading: boolean;
+  tabbable: boolean;
+  selected: boolean;
+  onActivate: (node: FlatNode) => void;
+  onFocusRow: (path: string) => void;
+}
+
+/**
+ * One tree row: the `treeitem` and its right-click menu.
+ *
+ * This is its own component because a menu is per row — it opens at *this* row's
+ * pointer and returns focus to *this* row, so one controller cannot serve the
+ * list. The row has no kebab (a tree of hundreds of rows would be hundreds of
+ * buttons), so the menu is pointer-anchored only: `float`, portalled onto the
+ * menu layer where no scroller in the inspector can clip it.
+ *
+ * Nothing here is the only path to an action. A file still opens on click and on
+ * Enter/Space, a directory still expands the same way, and the path is in the
+ * row's `title`. The menu adds the two things the row never had room for: opening
+ * without moving the pointer to it, and copying a path into a terminal command.
+ */
+function TreeRow({
+  node,
+  rootPath,
+  expanded,
+  loading,
+  tabbable,
+  selected,
+  onActivate,
+  onFocusRow,
+}: TreeRowProps): JSX.Element {
+  const { entry, depth } = node;
+  const isDir = entry.kind === 'dir';
+  const kind: FileKind = isDir ? 'folder' : fileKind(entry.name);
+  const menu = useMenu();
+  // Focus returns to the row itself: it is the focusable `treeitem` a keyboard
+  // user would have activated, and this menu has no kebab to return to.
+  const rowRef = useRef<HTMLLIElement>(null);
+  const absolute = absolutePath(rootPath, entry.path);
+  // One form or two. When the absolute path is not derivable the two items would
+  // copy the same string, so the second is dropped rather than duplicated.
+  const twoForms = absolute !== null && absolute !== entry.path;
+
+  const copyPath = async (): Promise<void> => {
+    const copied = await copyText(absolute ?? entry.path);
+    store.pushToast(copied ? 'Path copied.' : 'Could not copy the path.',
+      copied ? 'success' : 'error');
+  };
+
+  const copyRelativePath = async (): Promise<void> => {
+    const copied = await copyText(entry.path);
+    store.pushToast(copied ? 'Relative path copied.' : 'Could not copy the relative path.',
+      copied ? 'success' : 'error');
+  };
+
+  return (
+    <li
+      ref={rowRef}
+      role="treeitem"
+      aria-level={depth + 1}
+      aria-expanded={isDir ? expanded : undefined}
+      aria-selected={selected}
+      data-tree-path={entry.path}
+      tabIndex={tabbable ? 0 : -1}
+      class={`tree-row${isDir ? ' is-dir' : ' is-file'}${expanded ? ' is-open' : ''}${
+        selected ? ' is-selected' : ''
+      }`}
+      /* Indent per level, but capped.
+       *
+       * `depth * 18 + 8` is unbounded, and `MAX_TREE_DEPTH` is 32: a deeply
+       * nested file reached 584px of left padding inside a ~293px inspector,
+       * so its name was pushed off the row entirely and the row could not be
+       * hit. Past a few levels the cue stops being useful anyway — the eye
+       * reads depth from the disclosure twigs, not from a wider gutter. */
+      style={{ paddingLeft: `${Math.min(depth, 8) * 12 + 8}px` }}
+      title={entry.path}
+      onClick={() => {
+        onFocusRow(entry.path);
+        onActivate(node);
+      }}
+      onFocus={() => onFocusRow(entry.path)}
+      {...contextMenuProps(menu, undefined, () => rowRef.current)}
+    >
+      <span class={`tree-chevron${expanded ? ' is-open' : ''}`} aria-hidden="true">
+        {isDir ? <ChevronRightIcon size={12} /> : null}
+      </span>
+      <span class={`tree-icon kind-${kind}`} aria-hidden="true">
+        {iconFor(kind, expanded)}
+      </span>
+      <span class="tree-name">{entry.name}</span>
+      {loading ? <span class="tree-loading">loading…</span> : null}
+      {selected ? (
+        <span class="tree-open-hint" aria-hidden="true">
+          <ArrowRightIcon size={12} />
+        </span>
+      ) : null}
+      <Menu menu={menu} float label={`${isDir ? 'Folder' : 'File'} actions for ${entry.name}`}>
+        {/* A directory has no **Open**: expanding one is the row's own click and
+          * Enter, and "Open" would be a second word for the same thing. */}
+        {isDir ? null : (
+          <MenuItem menu={menu} action={{ label: 'Open', onSelect: () => onActivate(node) }} />
+        )}
+        <MenuItem
+          menu={menu}
+          action={{
+            label: 'Copy path',
+            title: absolute ?? entry.path,
+            onSelect: () => void copyPath(),
+          }}
+        />
+        {twoForms ? (
+          <MenuItem
+            menu={menu}
+            action={{
+              label: 'Copy relative path',
+              title: entry.path,
+              onSelect: () => void copyRelativePath(),
+            }}
+          />
+        ) : null}
+      </Menu>
+    </li>
+  );
 }
 
 /** Keyboard-operable tree (roving tabindex; Arrow keys, Home/End, Enter/Space). */
@@ -169,52 +329,18 @@ export function FileTree({
     >
       {visible.map((node) => {
         const isDir = node.entry.kind === 'dir';
-        const isOpen = isDir && expanded.has(node.entry.path);
-        const isLoading = isDir && loading.has(node.entry.path);
-        const tabbable = focusedPath === null ? node === visible[0] : focusedPath === node.entry.path;
-        const selected = focusedPath === node.entry.path;
-        const kind: FileKind = isDir ? 'folder' : fileKind(node.entry.name);
         return (
-          <li
+          <TreeRow
             key={`${node.entry.kind}:${node.entry.path}`}
-            role="treeitem"
-            aria-level={node.depth + 1}
-            aria-expanded={isDir ? isOpen : undefined}
-            aria-selected={selected}
-            data-tree-path={node.entry.path}
-            tabIndex={tabbable ? 0 : -1}
-            class={`tree-row${isDir ? ' is-dir' : ' is-file'}${isOpen ? ' is-open' : ''}${
-              selected ? ' is-selected' : ''
-            }`}
-            /* Indent per level, but capped.
-             *
-             * `depth * 18 + 8` is unbounded, and `MAX_TREE_DEPTH` is 32: a deeply
-             * nested file reached 584px of left padding inside a ~293px inspector,
-             * so its name was pushed off the row entirely and the row could not be
-             * hit. Past a few levels the cue stops being useful anyway — the eye
-             * reads depth from the disclosure twigs, not from a wider gutter. */
-            style={{ paddingLeft: `${Math.min(node.depth, 8) * 12 + 8}px` }}
-            title={node.entry.path}
-            onClick={() => {
-              setFocusedPath(node.entry.path);
-              activate(node);
-            }}
-            onFocus={() => setFocusedPath(node.entry.path)}
-          >
-            <span class={`tree-chevron${isOpen ? ' is-open' : ''}`} aria-hidden="true">
-              {isDir ? <ChevronRightIcon size={12} /> : null}
-            </span>
-            <span class={`tree-icon kind-${kind}`} aria-hidden="true">
-              {iconFor(kind, isOpen)}
-            </span>
-            <span class="tree-name">{node.entry.name}</span>
-            {isLoading ? <span class="tree-loading">loading…</span> : null}
-            {selected ? (
-              <span class="tree-open-hint" aria-hidden="true">
-                <ArrowRightIcon size={12} />
-              </span>
-            ) : null}
-          </li>
+            node={node}
+            rootPath={rootPath}
+            expanded={isDir && expanded.has(node.entry.path)}
+            loading={isDir && loading.has(node.entry.path)}
+            tabbable={focusedPath === null ? node === visible[0] : focusedPath === node.entry.path}
+            selected={focusedPath === node.entry.path}
+            onActivate={activate}
+            onFocusRow={setFocusedPath}
+          />
         );
       })}
     </ul>

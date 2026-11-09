@@ -146,6 +146,15 @@ export function ControlPlane(): JSX.Element {
       generation.current++;
       window.clearTimeout(retry);
       window.clearInterval(timer);
+      // Leaving the plane is a project-switch-shaped transition: the workbench
+      // rail is back on screen, and it draws `store.sessions` unfiltered. While
+      // the plane was up its own reads were cross-project and its conversations
+      // may have created or deleted work in the open project, so the ordinary
+      // list is re-read rather than trusted: that is the same read a project
+      // switch makes, and it is what a reader used to have to do by hand to make
+      // a stale or foreign row disappear. `refreshSessions` keeps an open control
+      // chat open (it asks the global list before treating it as gone).
+      if (store.boot.value === 'ready') void actions.refreshSessions();
     };
   }, []);
 
@@ -300,7 +309,7 @@ export function ControlPlane(): JSX.Element {
       if (selected === session.id) { setSelected(null); setError(null); }
       // The workspace store may still be pointing at the row that just vanished;
       // leaving it there would make the ordinary workspace open a dead session
-      // after **Project workspace**. `clearSelection` is the full teardown (id,
+      // when the plane closes. `clearSelection` is the full teardown (id,
       // transcript, remembered pin, last-session id), not a bare assignment.
       if (store.currentSessionId.value === session.id) actions.closeSession();
       await refresh();

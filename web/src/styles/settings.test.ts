@@ -24,6 +24,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const css = readFileSync(new URL('./settings.css', import.meta.url), 'utf8');
+const settingsCss = css;
 
 /** Declarations of one rule, matched by its full selector text. */
 function declarations(selector: string): Record<string, string> {
@@ -66,6 +67,20 @@ describe('settings sheet: the panel owns the scroll', () => {
     const tab = declarations('.settings-tab');
     expect(tab['flex']).toContain('0');
     expect(tab['flex']).toContain('max-content');
+  });
+
+  it('shows the phone strip it can scroll, with a faded cut edge', () => {
+    // Five tabs measure 369px against a 319px strip at a 320px viewport, so
+    // "Plugins & MCP" sits past the edge. Scrolling is the deliberate contract
+    // above; the fade is what tells the reader there is more, because a hard cut
+    // reads as a truncated row. It is a mask (alpha only), so it is
+    // theme-independent and invisible where the strip already fits.
+    const start = settingsCss.indexOf('@media (max-width: 600px) {');
+    const body = settingsCss.slice(start, settingsCss.indexOf('@media (prefers-reduced-motion', start));
+    expect(body).toMatch(/\.settings-tabs \{[^}]*mask-image: linear-gradient\(to right, black/);
+    expect(body).toMatch(/\.settings-tabs \{[^}]*scroll-padding-inline: var\(--space-5\)/);
+    // A mask that fades must not also stop the scroll.
+    expect(settingsCss).not.toMatch(/\.settings-tabs \{[^}]*overflow-x: hidden/);
   });
 
   it('makes a kept-alive panel inert while it is hidden', () => {

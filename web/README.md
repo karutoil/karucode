@@ -363,12 +363,14 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
    values. The settings sheet says so next to the button.
 8. **Approval timeout/404**: a 404 on decision marks the card expired; the server's
    `approval_resolved` event is still authoritative when it arrives.
-9. **History size**: there is no message pagination endpoint. `GET /api/sessions/:id`
-   returns the *newest* window (`messages_limit`, default 5 000) and sets
-   `messages_truncated`; when it is set the transcript opens with a notice —
-   "Showing the last N messages; earlier history is not loaded." — instead of
-   silently starting mid-conversation. Truncated command output is labelled from
-   the server's `truncated` flag.
+9. **History size**: `GET /api/sessions/:id` returns the newest page (5 000 rows
+   by default, about 1 MiB of stored payload) and sets `messages_truncated` with
+   `messages_before` as the exclusive cursor. The transcript loads older pages
+   automatically when the reader reaches the top (`src/lib/historyLoader.ts`),
+   keeps the pages it already loaded across a silent refresh, and mounts only the
+   rows around the viewport (`src/lib/virtualWindow.ts`). The session page carries
+   the session's own rows only; a subagent's transcript is `GET /api/agents/:id`.
+   Truncated command output is labelled from the server's `truncated` flag.
 10. **Plugin/MCP status** is read-only in the UI by design; no enable toggles are
     exposed even though `POST /api/plugins/:name/enable` exists.
 11. **Auth token**: stored in `localStorage` (`karucode.token`) and sent as a bearer

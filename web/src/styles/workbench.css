@@ -82,6 +82,25 @@
   min-height: 30px;
 }
 
+/* Touch: the same row of controls, at a size a thumb can actually hit. This
+ * selector is the one that owns the workbench header's height (it outranks the
+ * `.head-btn` tier in `layout.css` and this file loads last), so the coarse tier
+ * has to be restated here rather than in the header's own stylesheet - otherwise
+ * the 30px floor silently wins. `layout.css` keeps the same rule for the
+ * control-plane header, which is not `.is-workbench`. */
+@media (pointer: coarse) {
+  .chat-main.is-workbench .header-buttons > .head-btn {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  /* The context button is already wide; it only needed height. */
+  .chat-main.is-workbench .header-buttons > .head-btn.context-header-btn {
+    min-width: 0;
+    padding: 0 var(--space-4);
+  }
+}
+
 .chat-main.is-workbench .command-head-btn,
 .chat-main.is-workbench .command-head-btn.head-icon {
   display: inline-flex;
@@ -203,6 +222,24 @@
   display: flex;
   flex-direction: row;
   background: var(--bg);
+}
+
+/* The conversation is a flex item in a row, so its default `min-width: auto`
+ * made it as wide as its *content* — the widest unbreakable thing in the
+ * transcript — instead of as wide as the frame. Measured at a 390px viewport:
+ * `.chat-panel` 638px, which put Stop (right 619), Queue and Approvals outside
+ * the screen. It stayed invisible to every "docWidth <= innerWidth" check
+ * because `.app` is `overflow: hidden`, and unreachable because `.chat-scroll`
+ * was itself 638 wide and so never scrolled. `min-width: 0` keeps the pane
+ * inside its container and lets long tokens wrap (`overflow-wrap: anywhere` is
+ * inherited from the transcript).
+ *
+ * Only the wide split above may floor this at MIN_CONVERSATION_WIDTH (330px),
+ * and `ResultResizer` already clamps the Results width so the conversation
+ * cannot be dragged away. Every narrower tier, including the phone sheet, has
+ * to obey the viewport. */
+.chat-main.is-workbench .center-body.has-result > .chat-panel {
+  min-width: 0;
 }
 
 .chat-main.is-workbench .result-resizer {
