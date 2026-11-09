@@ -1159,6 +1159,26 @@ segment, limits.max_continues is {})",
         if let Some(state) = &spec.run_state {
             state.iterations.store(iterations, Ordering::Relaxed);
         }
+        // Persist the count as it advances, not only when the agent finishes:
+        // `agent_progress` is live-only, so a browser refresh (or a second tab)
+        // reads the row's initial `0` for the whole run. A failure is a warning
+        // - losing a progress number must not fail the work.
+        if spec.is_subagent {
+            if let Some(agent_id) = &spec.agent_id {
+                if let Err(e) = inner
+                    .deps
+                    .store
+                    .update_agent_iterations(&agent_id.0, iterations, crate::events::now_ms())
+                    .await
+                {
+                    tracing::warn!(
+                        agent = %agent_id.0,
+                        error = %e,
+                        "could not persist the subagent's iteration count"
+                    );
+                }
+            }
+        }
         ctx.emit(Event::IterationStarted {
             iteration: iterations,
         });
@@ -2677,6 +2697,13 @@ async fn consume(
     // *after* the one carrying `finish_reason`. The window is bounded so a
     // gateway that holds the SSE connection open cannot stall the turn.
     let mut usage_window: Option<Instant> = None;
+    // Some OpenAI-compatible gateways put the `usage` object on every streamed
+    // chunk, repeating (or growing) the call's running totals. It is the same
+    // call being reported, not a new one, so remember the newest block and
+    // publish it once when the attempt ends. Accounting each frame treated one
+    // call as hundreds: a 30-minute run wrote 70k usage rows, inflating the
+    // session's totals by ~100x and reporting a call count that never happened.
+    let mut latest_usage: Option<(u32, u32, Option<u32>)> = None;
 
     loop {
         let usage_deadline = async {
@@ -2756,30 +2783,10 @@ async fn consume(
                         accumulator.apply(index, id, name, arguments_delta);
                     }
                     Ok(ProviderChunk::Usage { input_tokens, output_tokens, cached_tokens }) => {
-                        // The prefix cache is the single biggest cost lever in a
-                        // long run, and the only way to know it still works is
-                        // to read it back from the provider on every call.
-                        if let Some(cached) = cached_tokens {
-                            let ratio = if input_tokens == 0 {
-                                0.0
-                            } else {
-                                f64::from(cached) * 100.0 / f64::from(input_tokens)
-                            };
-                            tracing::debug!(
-                                input_tokens,
-                                cached_tokens = cached,
-                                cache_hit_percent = format_args!("{ratio:.1}"),
-                                "prompt cache"
-                            );
-                        }
-                        ctx.emit(Event::Usage { input_tokens, output_tokens, cached_tokens });
-                        // Recorded as well as announced: the event is live-only,
-                        // so this row is what lets the session view answer "what
-                        // has this cost" after a reload. Awaited on purpose - a
-                        // detached write could land after a session delete and
-                        // spuriously resurrect nothing, and the store call is a
-                        // single local INSERT.
-                        ctx.record_usage(input_tokens, output_tokens, cached_tokens).await;
+                        // The same call may report its running totals in every
+                        // chunk, so keep only the newest block; the turn publishes
+                        // and accounts for it once, below.
+                        latest_usage = Some((input_tokens, output_tokens, cached_tokens));
                         // The usage block is the last thing the provider sends;
                         // do not wait out the rest of the window for it.
                         if usage_window.is_some() {
@@ -2895,6 +2902,37 @@ async fn consume(
             };
         }
         None => {}
+    }
+
+    // One event and one accounting row per provider call, whatever the
+    // endpoint's chunking. The event is live-only; the row is what lets the
+    // session view answer "what has this cost" after a reload, so it is awaited
+    // on purpose - a detached write could land after a session delete, and the
+    // store call is a single local INSERT.
+    if let Some((input_tokens, output_tokens, cached_tokens)) = latest_usage {
+        // The prefix cache is the single biggest cost lever in a long run, and
+        // the only way to know it still works is to read it back from the
+        // provider on every call.
+        if let Some(cached) = cached_tokens {
+            let ratio = if input_tokens == 0 {
+                0.0
+            } else {
+                f64::from(cached) * 100.0 / f64::from(input_tokens)
+            };
+            tracing::debug!(
+                input_tokens,
+                cached_tokens = cached,
+                cache_hit_percent = format_args!("{ratio:.1}"),
+                "prompt cache"
+            );
+        }
+        ctx.emit(Event::Usage {
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+        });
+        ctx.record_usage(input_tokens, output_tokens, cached_tokens)
+            .await;
     }
 
     let reasoning_out = if reasoning.is_empty() {

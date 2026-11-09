@@ -185,6 +185,10 @@
 // and is backfilled from SQLite when you open an agent that finished before the
 // page loaded. Older pages arrive as you scroll back (there is no load button).
 //
+// Each row's iteration count is persisted as the loop advances it, so reloading
+// the page, pressing refresh or opening a second tab shows the real number for a
+// running agent instead of `0`.
+//
 // The same data is available over HTTP: `GET /api/agents?project=<id>`,
 // `GET /api/agents/:id`, and `POST /api/agents/:id/pause`, `/resume`, `/cancel`.
 // All are documented in `docs/API.md`.

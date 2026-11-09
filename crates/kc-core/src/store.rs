@@ -1100,6 +1100,19 @@ pub trait Store: Send + Sync {
     async fn last_rewind_at(&self, session_id: &str) -> Result<Option<i64>>;
 
     async fn upsert_agent(&self, agent: &AgentRecord) -> Result<()>;
+    /// Advance one agent's persisted iteration counter.
+    ///
+    /// `agent_progress` is live-only, and the row used to carry its real count
+    /// only when the agent finished. A browser refresh, a second tab or
+    /// `GET /api/agents` therefore read `0` for the whole run. The counter is
+    /// monotonic, so the update never runs it backwards; `false` means the id is
+    /// unknown (which a settled-and-pruned agent legitimately is).
+    async fn update_agent_iterations(
+        &self,
+        id: &str,
+        iterations: u32,
+        updated_at: i64,
+    ) -> Result<bool>;
     /// Change only an agent's advisory note, progress and modification time.
     /// Returns false for an unknown id; lifecycle fields are deliberately untouched.
     async fn update_agent_note(

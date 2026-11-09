@@ -10,6 +10,20 @@ under **Changed**.
 
 ### Added
 
+- **HTML previews render as the page its author wrote.** The preview loaded its
+  document and then nothing else: inside a `sandbox`ed (opaque-origin) document the
+  CSP keyword `'self'` matches nothing, so every relative stylesheet, script and
+  image was refused, and `?project=<id>` scoped only the entry document because a
+  relative reference drops the query. The policy now names the request's own origin
+  (`http://host:port` and its https twin) and adds no remote source - the page is
+  still an opaque origin with `connect-src 'none'` that cannot reach the app, its
+  storage or the network - and a file in a named project is served from the new
+  path-scoped `GET /api/workspace/preview-project/<project>/<path>` so its assets
+  stay in the same project. Verified in Chromium: the page's own script runs, its
+  stylesheet applies and its relative image decodes; fonts and ES modules still
+  cannot load, because both need CORS and this route deliberately sends no
+  `Access-Control-Allow-Origin`.
+
 - **Panel views: a plugin's data drawn as a real view, without shipping UI.** A
   panel payload used to land on the generic JSON tree, which is honest and not much
   of a panel. The app now understands a small, closed vocabulary under `view` —
@@ -390,6 +404,20 @@ under **Changed**.
 
 ### Fixed
 
+- **Token totals are one row per provider call again, and a running subagent's
+  iteration count is real.** Two numbers in the session view were wrong for
+  reasons outside the view. A gateway that puts the `usage` object on every
+  streamed chunk had each chunk accounted as its own call: one 30-minute run wrote
+  ~70k rows, so the session's totals read roughly 100× the real spend and the call
+  count was one that never happened. The attempt now keeps only the newest `usage`
+  block and publishes and persists it once, when the call ends, so the documented
+  contract - one row per provider call (`GET /api/sessions/:id/info`) - holds
+  whatever the endpoint's chunking. Separately, `iterations` was live-only: the
+  agents row carried its count only once the agent finished, so a reload, a
+  refresh or a second tab showed `0` for every running subagent. The loop now
+  writes the count in place as it advances (`MAX`, so a stale write cannot run it
+  backwards), and a fetched row that lags the live progress frames can no longer
+  lower the number the page is already showing.
 - **The resident set no longer ratchets with use.** A server that had served a
   few long runs and six plugins sat at roughly twice the memory it does when it
   starts, and kept climbing (`105 MB → 153 MB` over an afternoon on the machine

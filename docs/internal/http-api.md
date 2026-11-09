@@ -7,7 +7,7 @@
 
 - **Slug:** `http-api`
 - **Tags:** api, http, rest, sse, curl, endpoints
-- **Applies to:** `route:GET /api/health`, `route:GET /api/config`, `route:PATCH /api/config`, `route:POST /api/provider/test`, `route:GET /api/models/catalog`, `route:GET /api/models/lookup`, `route:GET /api/stats`, `route:GET /api/projects`, `route:POST /api/projects`, `route:PATCH /api/projects/:id/preferences`, `route:GET /api/projects/:id/favicon`, `route:GET /api/sessions`, `route:POST /api/sessions`, `route:GET /api/sessions/:id`, `route:GET /api/sessions/:id/info`, `route:PATCH /api/sessions/:id`, `route:PATCH /api/sessions/:id/model`, `route:POST /api/sessions/:id/messages`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `route:POST /api/sessions/:id/cancel`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `route:GET /api/control/sessions`, `route:POST /api/control/sessions`, `route:GET /api/control/overview`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `route:GET /api/approvals`, `route:POST /api/approvals/:id`, `route:GET /api/workspace/tree`, `route:GET /api/workspace/file`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:POST /api/workspace/upload`, `route:POST /api/artifacts`, `route:GET /api/artifacts/:id`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `route:GET /api/mcp`, `config:plugin_panels`, `route:GET /api/events`, `header:X-Karucode-Event-Epoch`, `event:notification`, `event:queued_messages`, `event:session_rewound`, `event:karucode.transport`, `event:connection_cap`, `event:stream_overflow`, `event:text_replaced`, `field:expected_digest`, `config:[notifications]`, `header:X-Karucode-Client`, `env:KARUCODE_AUTH_TOKEN`, `doc:docs/API.md`
+- **Applies to:** `route:GET /api/health`, `route:GET /api/config`, `route:PATCH /api/config`, `route:POST /api/provider/test`, `route:GET /api/models/catalog`, `route:GET /api/models/lookup`, `route:GET /api/stats`, `route:GET /api/projects`, `route:POST /api/projects`, `route:PATCH /api/projects/:id/preferences`, `route:GET /api/projects/:id/favicon`, `route:GET /api/sessions`, `route:POST /api/sessions`, `route:GET /api/sessions/:id`, `route:GET /api/sessions/:id/info`, `route:PATCH /api/sessions/:id`, `route:PATCH /api/sessions/:id/model`, `route:POST /api/sessions/:id/messages`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `route:POST /api/sessions/:id/cancel`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `route:GET /api/control/sessions`, `route:POST /api/control/sessions`, `route:GET /api/control/overview`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `route:GET /api/approvals`, `route:POST /api/approvals/:id`, `route:GET /api/workspace/tree`, `route:GET /api/workspace/file`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:GET /api/workspace/preview-project/:project/*rest`, `route:POST /api/workspace/upload`, `route:POST /api/artifacts`, `route:GET /api/artifacts/:id`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `route:GET /api/mcp`, `config:plugin_panels`, `route:GET /api/events`, `header:X-Karucode-Event-Epoch`, `event:notification`, `event:queued_messages`, `event:session_rewound`, `event:karucode.transport`, `event:connection_cap`, `event:stream_overflow`, `event:text_replaced`, `field:expected_digest`, `config:[notifications]`, `header:X-Karucode-Client`, `env:KARUCODE_AUTH_TOKEN`, `doc:docs/API.md`
 - **Source:** `crates/kc-server/src/lib.rs:21`
 
 ---
@@ -84,12 +84,13 @@ edits. Successful saves return the successor `digest`.
 work budget. `truncated: true` and `limit: 2000` make a partial listing explicit;
 ignored build/VCS directories do not consume the useful entry budget.
 
-`/api/workspace/preview/<path>` treats workspace HTML as **untrusted**, permits
-its scripts only in an opaque sandbox, and allows only same-origin relative
-workspace assets plus inline `data:`/`blob:` resources. Remote images, scripts,
-styles, fonts, media, fetch/XHR/WebSocket and forms are blocked. Opening a preview
-is not authorization for network egress. Chat artifacts are stricter still: they
-cannot load workspace siblings.
+`/api/workspace/preview/<path>` and
+`/api/workspace/preview-project/<project>/<path>` treat workspace HTML as
+**untrusted**, permit its scripts only in an opaque sandbox, and allow only this
+server's own origin for its sibling assets (plus inline `data:`/`blob:`
+resources). Remote images, scripts, styles, fonts, media, fetch/XHR/WebSocket and
+forms are blocked. Opening a preview is not authorization for network egress.
+Chat artifacts are stricter still: they cannot load workspace siblings.
 
 Uploads without an explicit `project` use the session's recorded project or, for
 a control/project-less session, its recorded private workspace. They never fall
@@ -378,16 +379,27 @@ extension, not from that flag.
 
 ## Previewing an HTML file as a page
 
-`GET /api/workspace/preview/<path>[?project=<id>]` serves a workspace file
-from its own workspace path, so the web viewer can show an HTML page the way
-its author meant it: the page's `./style.css`, `../img/logo.png` and
-`./app.js` resolve against the directory the page lives in, and its inline
-scripts run.
+`GET /api/workspace/preview/<path>` serves a workspace file from its own
+workspace path, so the web viewer can show an HTML page the way its author
+meant it: the page's `./style.css`, `../img/logo.png` and `./app.js` resolve
+against the directory the page lives in, and its own scripts run.
 
 ```bash
 curl -s -D- -o /dev/null "localhost:8787/api/workspace/preview/docs/index.html"
 # content-type: text/html; charset=utf-8
 # content-security-policy: sandbox allow-scripts; default-src 'none'; …
+```
+
+A file that belongs to a *named* project is served from
+`GET /api/workspace/preview-project/<project>/<path>` instead, and that shape
+exists for the same reason the path does: a relative reference drops the query
+string, so `?project=<id>` would scope only the entry document and every
+stylesheet, script and image of the page would be resolved against the default
+project - `404` for each of them.
+
+```bash
+curl -s -D- -o /dev/null \
+  "localhost:8787/api/workspace/preview-project/p_ab12/docs/index.html"
 ```
 
 The path is in the URL rather than a query parameter for exactly that reason:
@@ -408,6 +420,18 @@ What makes it safe, and what to preserve if you change it:
   submit a form. Never add `allow-same-origin` to that policy or to the
   viewer's `<iframe sandbox>`: that pair hands the page the app's origin,
   where it could read the stored bearer token and call `/api`;
+* the asset directives name **this server's own origin** (taken from the
+  request's `Host`), not `'self'`. `'self'` matches nothing inside an opaque
+  origin, which is why every relative asset of every previewed page used to be
+  refused: the stylesheet never applied, the sibling script never ran and the
+  relative image never decoded (each request `ERR_BLOCKED_BY_RESPONSE`,
+  measured in Chromium). No remote origin is ever added, so the page still
+  cannot reach the network - `connect-src`, `frame-src`, `form-action` stay
+  `'none'`;
+* fonts and ES modules still cannot load: both are CORS-mode requests and this
+  route sends no `Access-Control-Allow-Origin`, because that header would let
+  any web page *read* workspace bytes. A classic `<script src>`, a stylesheet
+  and an image are not CORS-gated;
 * assets keep the stricter `sandbox; default-src 'none'` used by
   `/api/workspace/raw`;
 * the response widens `Cross-Origin-Resource-Policy` to `cross-origin` so the
@@ -416,8 +440,9 @@ What makes it safe, and what to preserve if you change it:
   never grants *read* access: with no `Access-Control-Allow-Origin`, a foreign
   page can at most render a workspace file, never read it;
 * a directory answers its `index.html` (`400` when there is none), a
-  non-UTF-8 document is `400`, and anything over 16 MiB is `413
-  payload_too_large`.
+  non-UTF-8 document is `400`, anything over 16 MiB is `413
+  payload_too_large`, and an unknown project on the `preview-project` route is
+  `404` rather than a fall-back to the default workspace.
 
 A deployment that sets `KARUCODE_AUTH_TOKEN` cannot use this preview: an
 `<iframe>` is a browser navigation and cannot send `Authorization`, and the
@@ -592,7 +617,12 @@ What each part answers:
   call (see `UsageTotals` below). `main` is the run's own model calls;
   `by_agent` is each subagent's; `total` is the session's whole spend and is
   exactly main plus every agent. This survives a reload, which the `usage`
-  event cannot: that event is live-only.
+  event cannot: that event is live-only. One *call* is one row whatever the
+  endpoint's chunking: a gateway that repeats (or grows) the `usage` object on
+  every streamed chunk is still reporting the same call, so the newest block is
+  what is published and persisted, once, when the attempt ends. Accounting each
+  frame instead wrote tens of thousands of rows per run and inflated the totals
+  by two orders of magnitude.
 * **context** - how full the window is. `used` is the **newest main-agent
   call's** prompt size (the fill), not a sum of every call (that is `usage`),
   and `window` is the resolved model's `context_window` or `null` when the

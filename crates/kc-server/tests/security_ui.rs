@@ -273,6 +273,12 @@ async fn workspace_preview_is_offline_except_for_relative_assets() {
         .unwrap();
     assert!(csp.contains("sandbox allow-scripts"));
     assert!(!csp.contains("allow-same-origin"));
+    // `'self'` is not enough for a page in an opaque origin: it matches nothing,
+    // so the sibling stylesheet, script and image of every preview were refused.
+    // The host source is what actually loads them, and it is still this server
+    // only. (Measured in Chromium - see `preview_content_security_policy`.)
+    let host = "http://127.0.0.1:8787";
+    assert!(csp.contains(host), "{csp}");
     for directive in [
         "img-src",
         "media-src",
@@ -284,9 +290,18 @@ async fn workspace_preview_is_offline_except_for_relative_assets() {
             .split(';')
             .find_map(|part| part.trim().starts_with(directive).then_some(part.trim()))
             .unwrap();
-        assert!(source.contains("'self'"), "{source}");
+        assert!(source.contains(host), "{source}");
         assert!(
             !source.split_whitespace().any(|source| source == "*"),
+            "{source}"
+        );
+        // No foreign origin sneaks in with the host source.
+        assert!(
+            !source
+                .split_whitespace()
+                .any(|source| source.starts_with("http://")
+                    && !source.starts_with(host)
+                    && !source.starts_with("https://127.0.0.1:8787")),
             "{source}"
         );
     }
@@ -297,6 +312,41 @@ async fn workspace_preview_is_offline_except_for_relative_assets() {
         assert_eq!(response.status, StatusCode::OK, "{}", response.text());
         assert!(!response.body.is_empty());
     }
+}
+
+/// A preview of a file in a *named* project has to keep that scope in the path:
+/// a relative `href="sibling.css"` drops the query string, so
+/// `?project=<id>` only ever scoped the entry document - its own assets resolved
+/// against the default project and came back `404`.
+#[tokio::test]
+async fn a_project_scoped_preview_tree_keeps_its_project_in_the_path() {
+    let h = HarnessBuilder::new(Vec::new()).build().await;
+    write(&h, "site/index.html", b"<!doctype html><h1>hi</h1>");
+    let projects = h.get("/api/projects").await;
+    assert_eq!(projects.status, StatusCode::OK, "{}", projects.text());
+    let body: serde_json::Value = serde_json::from_str(&projects.text()).expect("projects json");
+    let id = body["projects"][0]["id"].as_str().expect("project id");
+
+    let document = h
+        .get(&format!(
+            "/api/workspace/preview-project/{id}/site/index.html"
+        ))
+        .await;
+    assert_eq!(document.status, StatusCode::OK, "{}", document.text());
+    assert_eq!(document.body.as_ref(), b"<!doctype html><h1>hi</h1>");
+    // Same sandbox, same host source: the scope moved, the policy did not.
+    let csp = document.headers[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("sandbox allow-scripts;"));
+    assert!(csp.contains("http://127.0.0.1:8787"));
+
+    // An unknown project is refused rather than silently served from the default
+    // workspace, which would render a different project's bytes under this URL.
+    let unknown = h
+        .get("/api/workspace/preview-project/p_missing/site/index.html")
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
 }
 
 /// The shell is public, but it is still only the shell: `raw` needs the token

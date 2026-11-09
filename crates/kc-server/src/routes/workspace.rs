@@ -341,14 +341,22 @@ pub const MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
 /// page": no inline script, no sibling stylesheet, no relative image.
 ///
 /// This policy keeps the security property that matters - the document is an
-/// **opaque origin** - while letting the page be a page:
+/// **opaque origin** - while letting the page be a page. It is built per response
+/// ([`preview_content_security_policy`]) because the one directive that makes the
+/// difference cannot be written as a keyword:
 ///
 /// * `sandbox allow-scripts` (never `allow-same-origin`) is what makes the
 ///   origin opaque. Verified in Chromium: the frame's `parent`, `localStorage`
 ///   and `document.cookie` reads all throw `SecurityError`, `window.open`
 ///   returns `null`, and `top.location` cannot be navigated.
-/// * `script-src`/`style-src`/`img-src`/`font-src`/`media-src` allow `'self'`,
-///   so `./app.js`, `./style.css` and sibling images load from this workspace.
+/// * `script-src`/`style-src`/`img-src`/`font-src`/`media-src` name **this
+///   server's own origin**, so `./app.js`, `./style.css` and sibling images load
+///   from this workspace. `'self'` cannot do that job: the document runs in an
+///   opaque origin, where `'self'` matches nothing at all, which is why every
+///   relative asset of every previewed page was refused (measured in Chromium:
+///   the stylesheet never applied, the sibling script never ran, the relative
+///   image never decoded - each request `ERR_BLOCKED_BY_RESPONSE`). Naming the
+///   host is also the narrowest thing that works.
 ///   Remote sources are deliberately absent: an opaque origin does not stop an
 ///   `<img>` or stylesheet from transmitting DOM-derived data to another server.
 ///   `data:`/`blob:` remain available for generated inline resources.
@@ -363,13 +371,44 @@ pub const MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
 ///   viewer's own iframe may embed this response, and nothing else can. The
 ///   `sandbox` directive also makes [`crate::app::security_headers`] withhold
 ///   `X-Frame-Options: DENY`, which would otherwise block that frame.
-pub const PREVIEW_CONTENT_SECURITY_POLICY: &str = "sandbox allow-scripts; default-src 'none'; \
-     img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; \
-     style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; \
-     connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; \
-     object-src 'none'; form-action 'none'; base-uri 'self'; frame-ancestors 'self'";
+///
+/// Fonts and ES modules still cannot load: both are CORS-mode requests, and this
+/// route sends no `Access-Control-Allow-Origin` (granting one would let any web
+/// page *read* workspace bytes). A classic `<script src>`, a stylesheet and an
+/// image are not CORS-gated, and those are what a preview needs.
+pub fn preview_content_security_policy(asset_sources: Option<&str>) -> String {
+    let own = asset_sources.unwrap_or("'self'");
+    format!(
+        "sandbox allow-scripts; default-src 'none'; \
+         img-src {own} data: blob:; media-src {own} data: blob:; font-src {own} data:; \
+         style-src {own} 'unsafe-inline'; script-src {own} 'unsafe-inline' 'unsafe-eval' blob:; \
+         connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; \
+         object-src 'none'; form-action 'none'; base-uri 'self'; frame-ancestors 'self'"
+    )
+}
 
-/// `GET /api/workspace/preview/<path>[?project=<id>]`
+/// The origin(s) a previewed page may load its own siblings from, taken from the
+/// request's `Host`.
+///
+/// Both schemes are listed because the same node may be reached over plain
+/// `http` or behind a TLS terminator, and the browser matches the document's own
+/// scheme. A `Host` that is missing or contains anything but a host/port is
+/// refused: this string goes into a policy header, and the fallback (`'self'`,
+/// which matches nothing in an opaque origin) fails closed rather than widened.
+fn preview_asset_sources(headers: &HeaderMap) -> Option<String> {
+    let host = headers.get(header::HOST)?.to_str().ok()?.trim();
+    if host.is_empty()
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+    {
+        return None;
+    }
+    Some(format!("http://{host} https://{host}"))
+}
+
+/// `GET /api/workspace/preview/<path>[?project=<id>]` and
+/// `GET /api/workspace/preview-project/<project>/<path>`
 ///
 /// One workspace file served from its own workspace path, so a previewed page is
 /// a real document that can load its own siblings.
@@ -382,6 +421,13 @@ pub const PREVIEW_CONTENT_SECURITY_POLICY: &str = "sandbox allow-scripts; defaul
 /// `default-src 'self'` policy and then runs in an opaque origin where `'self'
 /// matches nothing, so *every* subresource and inline script is refused.
 ///
+/// The same reason is why there are two shapes. A *relative* URL drops the
+/// query, so a page opened with `?project=<id>` asked for its own siblings
+/// without that parameter and the preview tree resolved against the default
+/// project - a 404 for every stylesheet, script and image of a file in any other
+/// project. `preview-project/<id>/<path>` puts the scope in the path, where
+/// relative resolution keeps it.
+///
 /// This serves the whole preview *tree*, not just the entry document: the same
 /// route answers the page's `style.css`, its `pic.png` and its `app.js`, because
 /// those requests carry the same `/api/workspace/preview/...` prefix. That is
@@ -390,7 +436,7 @@ pub const PREVIEW_CONTENT_SECURITY_POLICY: &str = "sandbox allow-scripts; defaul
 /// The security shape differs by what is being served, and it is deliberately
 /// narrow in both cases:
 ///
-/// * a document (`text/html`) gets [`PREVIEW_CONTENT_SECURITY_POLICY`], which is
+/// * a document (`text/html`) gets [`preview_content_security_policy`], which is
 ///   an opaque origin with script but no foreign network or remote egress: only
 ///   its local preview siblings and inline data/blob resources are permitted;
 /// * every other asset keeps [`RAW_CONTENT_SECURITY_POLICY`], which is an opaque
@@ -403,10 +449,35 @@ pub async fn preview(
     State(state): State<AppState>,
     axum::extract::Path(rest): axum::extract::Path<String>,
     Query(query): Query<QueryMap>,
+    headers: HeaderMap,
+) -> ApiResult<axum::response::Response> {
+    let project = query_str(&query, "project");
+    preview_response(&state, project, &rest, &headers).await
+}
+
+/// `GET /api/workspace/preview-project/<project>/<path>`
+///
+/// The project-scoped shape of [`preview`]: see there for why the scope has to
+/// be in the path rather than the query. Everything else - the tree, the
+/// headers, the sandbox - is identical.
+pub async fn preview_project(
+    State(state): State<AppState>,
+    axum::extract::Path((project, rest)): axum::extract::Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<axum::response::Response> {
+    preview_response(&state, Some(&project), &rest, &headers).await
+}
+
+async fn preview_response(
+    state: &AppState,
+    project: Option<&str>,
+    rest: &str,
+    request_headers: &HeaderMap,
 ) -> ApiResult<axum::response::Response> {
     use axum::response::IntoResponse;
 
-    let workspace = state.workspace_for_project(query_str(&query, "project"))?;
+    let workspace = state.workspace_for_project(project)?;
+    let rest = rest.to_string();
     let (bytes, content_type) =
         tokio::task::spawn_blocking(move || preview_blocking(&workspace, &rest, MAX_PREVIEW_BYTES))
             .await
@@ -428,13 +499,16 @@ pub async fn preview(
         header::X_CONTENT_TYPE_OPTIONS,
         axum::http::HeaderValue::from_static("nosniff"),
     );
+    let asset_sources = preview_asset_sources(request_headers);
+    let policy = if is_document {
+        preview_content_security_policy(asset_sources.as_deref())
+    } else {
+        RAW_CONTENT_SECURITY_POLICY.to_string()
+    };
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        axum::http::HeaderValue::from_static(if is_document {
-            PREVIEW_CONTENT_SECURITY_POLICY
-        } else {
-            RAW_CONTENT_SECURITY_POLICY
-        }),
+        axum::http::HeaderValue::from_str(&policy)
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static(RAW_CONTENT_SECURITY_POLICY)),
     );
     // The app-wide `Cross-Origin-Resource-Policy: same-origin` (see
     // `app::security_headers`) would defeat this route entirely. A previewed page
@@ -1489,22 +1563,51 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    fn preview_policy(sources: Option<&str>) -> String {
+        preview_content_security_policy(sources)
+    }
+
     #[test]
     fn the_preview_policy_is_an_opaque_origin_with_script_but_no_network() {
         // The whole safety story for rendering a workspace page. `allow-scripts`
         // makes the page work; `allow-same-origin` must never appear beside it,
         // or the page would share the app's origin and could read its storage
         // and call `/api`.
-        assert!(PREVIEW_CONTENT_SECURITY_POLICY.contains("sandbox allow-scripts"));
-        assert!(!PREVIEW_CONTENT_SECURITY_POLICY.contains("allow-same-origin"));
-        assert!(PREVIEW_CONTENT_SECURITY_POLICY.contains("connect-src 'none'"));
-        assert!(PREVIEW_CONTENT_SECURITY_POLICY.contains("form-action 'none'"));
-        assert!(PREVIEW_CONTENT_SECURITY_POLICY.contains("object-src 'none'"));
+        let policy = preview_policy(Some("http://127.0.0.1:8787 https://127.0.0.1:8787"));
+        assert!(policy.contains("sandbox allow-scripts"));
+        assert!(!policy.contains("allow-same-origin"));
+        assert!(policy.contains("connect-src 'none'"));
+        assert!(policy.contains("form-action 'none'"));
+        assert!(policy.contains("object-src 'none'"));
         // The file viewer's own iframe must be allowed to embed it.
-        assert!(PREVIEW_CONTENT_SECURITY_POLICY.contains("frame-ancestors 'self'"));
+        assert!(policy.contains("frame-ancestors 'self'"));
+        // The page's own siblings load from this server and nowhere else.
+        assert!(policy.contains("script-src http://127.0.0.1:8787"));
+        assert!(!policy.contains("*"));
         // Assets keep the stricter no-script policy.
         assert!(RAW_CONTENT_SECURITY_POLICY.contains("sandbox"));
         assert!(!RAW_CONTENT_SECURITY_POLICY.contains("allow-scripts"));
+    }
+
+    #[test]
+    fn the_preview_policy_widens_only_to_a_host_it_can_vouch_for() {
+        use axum::http::HeaderValue;
+        let mut headers = HeaderMap::new();
+        assert_eq!(preview_asset_sources(&headers), None);
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8787"));
+        assert_eq!(
+            preview_asset_sources(&headers).as_deref(),
+            Some("http://127.0.0.1:8787 https://127.0.0.1:8787")
+        );
+        // A `Host` carrying anything a CSP source list could be confused by is
+        // refused, and the fallback fails closed.
+        for hostile in ["evil.example/", "a b", "x;script-src *", ""] {
+            headers.insert(header::HOST, HeaderValue::from_str(hostile).unwrap());
+            assert_eq!(preview_asset_sources(&headers), None, "{hostile}");
+        }
+        let fallback = preview_policy(preview_asset_sources(&HeaderMap::new()).as_deref());
+        assert!(fallback.contains("script-src 'self'"));
+        assert!(!fallback.contains("http://"));
     }
 
     #[test]

@@ -153,6 +153,10 @@ pub fn api_router() -> Router<AppState> {
         // `./style.css` and `../logo.png` against this URL's path, so the path
         // has to be the workspace path. See `workspace::preview`.
         .route("/workspace/preview/*rest", get(workspace::preview))
+        .route(
+            "/workspace/preview-project/:project/*rest",
+            get(workspace::preview_project),
+        )
         // Chat artifacts: the isolated document a transcript renders a fenced
         // block in. `POST` publishes the source (registered below with its own
         // body limit), `GET` serves it as a page with its own policy — see

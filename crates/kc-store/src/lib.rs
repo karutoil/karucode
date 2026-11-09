@@ -3302,6 +3302,32 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn update_agent_iterations(
+        &self,
+        id: &str,
+        iterations: u32,
+        updated_at: i64,
+    ) -> Result<bool> {
+        let id = id.to_string();
+        self.with(move |conn| {
+            let changed = conn
+                .execute(
+                    // `MAX` keeps the counter monotonic: a refresh can read this
+                    // row while the loop is between iterations, and a later stale
+                    // write must not undo a higher count. Only these two columns
+                    // are touched, so a lifecycle update racing this one cannot be
+                    // overwritten by it.
+                    "UPDATE agents
+                        SET iterations = MAX(iterations, ?2), updated_at = ?3
+                      WHERE id = ?1",
+                    params![id, i64::from(iterations), updated_at],
+                )
+                .map_err(|e| db_err("update_agent_iterations", e))?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
     async fn update_agent_note(
         &self,
         id: &str,
@@ -7128,6 +7154,62 @@ mod tests {
         assert_eq!(a2.status, "interrupted");
         assert!(a2.finished_at.is_some());
         assert_eq!(store.mark_interrupted_agents().await.expect("noop"), 0);
+    }
+
+    #[tokio::test]
+    async fn agent_iterations_advance_in_place_and_never_go_backwards() {
+        let db = TempDb::new("agent-iterations");
+        let store = db.open().await;
+        store
+            .create_session("s_1", "t", "/w", None)
+            .await
+            .expect("session");
+
+        let mut original = agent("a_1", "s_1", "running");
+        original.iterations = 0;
+        original.finished_at = None;
+        store.upsert_agent(&original).await.expect("insert");
+
+        let stamp = now_ms() + 60_000;
+        assert!(
+            store
+                .update_agent_iterations("a_1", 3, stamp)
+                .await
+                .expect("advance"),
+            "a known row is updated"
+        );
+        let row = store
+            .list_agents("s_1")
+            .await
+            .expect("list")
+            .pop()
+            .expect("row");
+        assert_eq!(row.iterations, 3);
+        assert_eq!(row.updated_at, stamp);
+        assert_eq!(row.status, "running", "progress must not settle the row");
+        assert!(row.finished_at.is_none());
+
+        // A stale write (an older fetch, a restart) must not lower a count the
+        // running loop has already reached.
+        assert!(store
+            .update_agent_iterations("a_1", 2, stamp)
+            .await
+            .expect("stale advance"));
+        let row = store
+            .list_agents("s_1")
+            .await
+            .expect("list")
+            .pop()
+            .expect("row");
+        assert_eq!(row.iterations, 3);
+
+        assert!(
+            !store
+                .update_agent_iterations("a_missing", 1, stamp)
+                .await
+                .expect("unknown"),
+            "an unknown id reports that nothing was updated"
+        );
     }
 
     #[tokio::test]

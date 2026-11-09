@@ -458,6 +458,111 @@ async fn every_provider_call_is_persisted_for_the_session_view() {
 }
 
 #[tokio::test]
+async fn a_stream_that_repeats_usage_is_accounted_once() {
+    // Some OpenAI-compatible gateways put the `usage` object on every streamed
+    // chunk, repeating (or growing) the call's running totals. Every frame is the
+    // same call, not a new one: accounting each of them wrote hundreds of rows per
+    // call and inflated a session's totals by ~100x. The newest block is the
+    // call's final accounting.
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![
+        ProviderChunk::Text("ok".into()),
+        ProviderChunk::Usage {
+            input_tokens: 10,
+            output_tokens: 1,
+            cached_tokens: Some(5),
+        },
+        ProviderChunk::Usage {
+            input_tokens: 28,
+            output_tokens: 2,
+            cached_tokens: Some(20),
+        },
+        ProviderChunk::Usage {
+            input_tokens: 31,
+            output_tokens: 3,
+            cached_tokens: Some(25),
+        },
+        ProviderChunk::Finish {
+            reason: "stop".into(),
+        },
+    ])])
+    .build()
+    .await;
+
+    let events = h.run_to_finish("hi").await;
+    assert_eq!(
+        count(&events, "usage"),
+        1,
+        "one usage frame per provider call: {:?}",
+        kinds(&events)
+    );
+
+    let rows = h.store.usage();
+    assert_eq!(rows.len(), 1, "one row per provider call: {rows:?}");
+    assert_eq!(rows[0].input_tokens, 31);
+    assert_eq!(rows[0].output_tokens, 3);
+    assert_eq!(
+        rows[0].cached_tokens,
+        Some(25),
+        "the newest block is the call's total"
+    );
+}
+
+#[tokio::test]
+async fn a_running_subagent_persists_its_iteration_count() {
+    // A refresh (or a second tab) reads the agents table, not the SSE stream. The
+    // row used to carry its real count only once the agent finished, so every
+    // running subagent read as `0` iterations. The child hangs mid-iteration so
+    // the row is observed while it is still live.
+    let mut h = HarnessBuilder::new(vec![
+        spawn_call("child work", None, false),
+        Script::Hang(vec![ProviderChunk::Text("child thinking".into())]),
+        Script::text("parent done"),
+    ])
+    .build()
+    .await;
+
+    h.submit("delegate").await;
+
+    // The count is persisted before the frame is published, so receiving it is
+    // proof the row a refresh would read is already up to date.
+    let child_id = loop {
+        if let Event::AgentProgress {
+            agent_id,
+            iterations,
+            ..
+        } = h.next_event().await.event
+        {
+            assert_eq!(iterations, 1);
+            break agent_id;
+        }
+    };
+
+    let row = h
+        .store
+        .agents()
+        .into_iter()
+        .find(|agent| agent.id == child_id)
+        .expect("the child's row");
+    assert_eq!(
+        row.iterations, 1,
+        "the stored row must show the iteration a refresh reads, not the initial 0"
+    );
+    assert_eq!(row.status, "running");
+
+    // Unwind the hung child so the test leaves no live loop behind.
+    assert!(h.runtime.cancel(h.session()));
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "cancelled");
+    let settled = h
+        .store
+        .agents()
+        .into_iter()
+        .find(|agent| agent.id == child_id)
+        .expect("the child's row");
+    assert_eq!(settled.iterations, 1, "the final write keeps the count too");
+}
+
+#[tokio::test]
 async fn a_degenerate_reasoning_loop_is_abandoned_and_retried() {
     // A reasoning model can repeat one short block in `reasoning_content` for
     // hundreds of thousands of tokens. That channel is streamed and discarded,

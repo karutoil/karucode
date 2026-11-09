@@ -938,6 +938,37 @@ The limit is **32 MiB** (`413 payload_too_large` above it), confinement and erro
 codes are the same as the read endpoint, and `X-Content-Type-Options: nosniff` is
 always sent so a workspace HTML file served here cannot be sniffed into a script.
 
+### Rendering an HTML file as a page
+
+`GET /api/workspace/preview/<path>` (default workspace) or
+`GET /api/workspace/preview-project/<project>/<path>` serves a workspace file from
+its own path, so a previewed page resolves `./style.css`, `../img/logo.png` and
+`./app.js` against its own directory and its scripts run:
+
+```bash
+curl -s -D- -o /dev/null "localhost:8787/api/workspace/preview-project/p_ab12/docs/index.html"
+# 200, content-type: text/html, content-disposition: inline
+# content-security-policy: sandbox allow-scripts; default-src 'none'; … ; connect-src 'none'
+# cross-origin-resource-policy: cross-origin
+```
+
+The scope is in the **path**, never a query parameter: a relative reference drops
+the query string, so `?project=<id>` would scope only the entry document and every
+asset of the page would resolve against the default workspace (`404` each). A
+directory answers its `index.html`.
+
+The response is an **opaque origin** (`sandbox allow-scripts`, never
+`allow-same-origin`): it cannot read this app's DOM, `localStorage` or cookies,
+cannot `fetch`/XHR/WebSocket, cannot open a popup, navigate the top frame or submit
+a form. Its asset directives name this server's own origin (from the request's
+`Host`) — `'self'` matches nothing in an opaque origin, which is why every relative
+asset used to be refused — and no remote origin is ever added. Fonts and ES modules
+do not load: both are CORS-mode requests and this route sends no
+`Access-Control-Allow-Origin`, because that header would let any web page *read*
+workspace bytes. With `KARUCODE_AUTH_TOKEN` set the preview cannot work at all (an
+`<iframe>` cannot present a bearer header); the viewer says so instead of showing a
+blank frame.
+
 ### Attaching a file
 
 `POST /api/workspace/upload?session=<id>&name=<file name>[&project=<id>]` takes

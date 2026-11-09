@@ -716,6 +716,22 @@ impl Store for FakeStore {
         Ok(())
     }
 
+    async fn update_agent_iterations(
+        &self,
+        id: &str,
+        iterations: u32,
+        updated_at: i64,
+    ) -> Result<bool> {
+        self.wait_at_gate("update_agent_iterations").await;
+        let mut db = self.db();
+        let Some(agent) = db.agents.iter_mut().find(|agent| agent.id == id) else {
+            return Ok(false);
+        };
+        agent.iterations = agent.iterations.max(iterations);
+        agent.updated_at = updated_at;
+        Ok(true)
+    }
+
     async fn update_agent_note(
         &self,
         id: &str,

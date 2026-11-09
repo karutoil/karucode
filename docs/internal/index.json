@@ -366,6 +366,7 @@
         "route:PUT /api/workspace/file",
         "route:GET /api/workspace/raw",
         "route:GET /api/workspace/preview/*rest",
+        "route:GET /api/workspace/preview-project/:project/*rest",
         "route:POST /api/workspace/upload",
         "route:POST /api/artifacts",
         "route:GET /api/artifacts/:id",
