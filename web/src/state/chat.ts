@@ -601,6 +601,24 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
     });
   }
 
+  // A run that stopped at a limit left no message of its own, so a reloaded
+  // transcript used to show only the word "Limit reached" with no reason. The
+  // run row carries the runtime's one-line explanation (the wall clock, a turn
+  // ceiling, the model's output limit, or the loop guard); put it back as the
+  // same notice the live run showed, under the same id, so the two do not stack.
+  const limitRuns = runs
+    .filter((run) => run.status === 'limit_reached' && (run.error ?? '').trim() !== '')
+    .slice(-3);
+  for (const run of limitRuns) {
+    items.push({
+      kind: 'notice',
+      id: `limit:${run.id}`,
+      at: run.finished_at ?? run.started_at,
+      level: 'warn',
+      message: run.error as string,
+    });
+  }
+
   // The snapshot cannot reproduce everything that is on screen: it only carries
   // *pending* approvals and nothing that was live-only. A refetch must not make a
   // card the user just approved (or a cancellation notice) disappear.

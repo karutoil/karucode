@@ -365,6 +365,49 @@ describe('applyEventToChat', () => {
     expect(current.items.filter((item) => item.kind === 'notice')).toHaveLength(1);
   });
 
+  it('says why a run stopped at a limit instead of blaming a configured one', () => {
+    // `limit_reached` used to mean one thing: an iteration budget the operator
+    // had configured. It now also covers the wall clock and the loop guard, which
+    // nobody configured - so the notice reads the runtime's own reason when it
+    // sends one.
+    const guard = applyEventToChat(
+      state(),
+      event(1, 'run_finished', {
+        status: 'limit_reached',
+        error:
+          'stopped: the last 4 turns produced no new information - every call returned an answer this run already had, or was refused as a repeat.',
+      }),
+    );
+    const notice = guard.items.find((item) => item.kind === 'notice');
+    expect(notice?.kind === 'notice' ? notice.message : '').toContain('no new information');
+    expect(notice?.kind === 'notice' ? notice.level : '').toBe('warn');
+    expect(
+      guard.items.some(
+        (item) =>
+          item.kind === 'notice' && item.message.includes('a configured limit'),
+      ),
+    ).toBe(false);
+
+    // The runtime streams the same sentence as a notice while the run ends, so
+    // the transcript must not show it twice.
+    const withNotice = applyEventToChat(
+      applyEventToChat(state(), {
+        ...event(3, 'notice', { level: 'warn', message: 'stopped: the loop guard fired.' }),
+      }),
+      event(4, 'run_finished', { status: 'limit_reached', error: 'stopped: the loop guard fired.' }),
+    );
+    expect(
+      withNotice.items.filter(
+        (item) => item.kind === 'notice' && item.message === 'stopped: the loop guard fired.',
+      ),
+    ).toHaveLength(1);
+
+    // An older server that sends no reason still gets a true sentence.
+    const bare = applyEventToChat(state(), event(2, 'run_finished', { status: 'limit_reached' }));
+    const fallback = bare.items.find((item) => item.kind === 'notice');
+    expect(fallback?.kind === 'notice' ? fallback.message : '').toContain('wall-clock ceiling');
+  });
+
   it('accumulates usage and ignores subagent deltas in the main transcript', () => {
     let current = applyEventToChat(state(), event(1, 'usage', { input_tokens: 10, output_tokens: 4 }));
     current = applyEventToChat(current, event(2, 'usage', { input_tokens: 5, output_tokens: 2 }));

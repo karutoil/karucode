@@ -738,6 +738,57 @@ describe('SettingsSheet controls', () => {
     expect(patches[0]?.subagents).not.toHaveProperty('max_continues');
   });
 
+  /**
+   * `max_iterations = 0` is the server's own default - "no turn ceiling" - so the
+   * form must accept it. It did not: the whole Limits grid was validated with a
+   * single `min = 1`, so opening the sheet on a saved `0` produced "Max iterations
+   * per run (0 = no ceiling) must be a positive integer" on a field whose label
+   * says 0 is the way to ask for no ceiling.
+   */
+  it('accepts 0 for the run turn ceiling, the documented no-ceiling default', async () => {
+    const config = twoProfileConfig();
+    config.limits = { ...config.limits, max_iterations: 0 };
+    const { patches } = installFetch(config);
+    renderSheet(config);
+
+    const field = (await settleOnTab(
+      'Agent',
+      'Max iterations per run (0 = no ceiling)',
+      config,
+    )) as HTMLInputElement;
+
+    // The browser's own spinner must not refuse it either.
+    expect(field.value).toBe('0');
+    expect(field.min).toBe('0');
+    expect(field.max).toBe('10000');
+    expect(screen.queryByText(/Max iterations per run .* must be/)).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.limits?.max_iterations).toBe(0);
+  });
+
+  it('rejects a run turn ceiling above the server bound, naming the field', async () => {
+    const config = twoProfileConfig();
+    const { patches } = installFetch(config);
+    renderSheet(config);
+
+    const field = (await settleOnTab(
+      'Agent',
+      'Max iterations per run (0 = no ceiling)',
+      config,
+    )) as HTMLInputElement;
+    fireEvent.input(field, { target: { value: '10001' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(
+      await screen.findByText(
+        'Max iterations per run (0 = no ceiling) must be 0 or between 1 and 10000.',
+      ),
+    ).not.toBeNull();
+    expect(patches).toHaveLength(0);
+  });
+
   it('rejects a subagent turn ceiling above the server bound', async () => {
     const config = twoProfileConfig();
     const { patches } = installFetch(config);

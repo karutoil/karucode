@@ -77,18 +77,49 @@ interface FormState {
   subagentWaitTimeout: string;
 }
 
-const LIMIT_FIELDS: { key: NumericLimitKey; label: string }[] = [
-  { key: 'max_iterations', label: 'Max iterations per run (0 = no ceiling)' },
-  { key: 'max_run_secs', label: 'Max run seconds (whole run)' },
-  { key: 'max_tool_output_bytes', label: 'Max tool output (bytes)' },
-  { key: 'max_command_output_bytes', label: 'Max command output (bytes)' },
-  { key: 'command_timeout_secs', label: 'Command timeout (s)' },
-  { key: 'max_command_timeout_secs', label: 'Max command timeout (s)' },
-  { key: 'max_file_read_bytes', label: 'Max file read (bytes)' },
-  { key: 'search_max_results', label: 'Search results' },
-  { key: 'context_max_chars', label: 'Context budget (chars, 0 = from the model)' },
-  { key: 'max_tool_calls_per_turn', label: 'Tool calls per turn' },
+/**
+ * Bounds for the `[limits]` numeric fields, mirroring `LIMITS_BOUNDS` in
+ * `crates/kc-server/src/settings.rs`.
+ *
+ * The bounds live beside the label rather than in one rule for the whole grid,
+ * because the fields disagree about `0` on purpose: `max_iterations = 0` and
+ * `context_max_chars = 0` are the documented "no ceiling" and "derive it from
+ * the model" spellings, and everything else needs a positive value. A single
+ * `min = 1` for the grid is what made a saved `max_iterations = 0` - the default
+ * the server hands back - fail this form's own validation with "must be a
+ * positive integer", on a field whose label says `0 = no ceiling`.
+ *
+ * Keep these in step with the server: a value this form accepts and the server
+ * refuses comes back as a 400 the user cannot act on.
+ */
+const LIMIT_FIELDS: { key: NumericLimitKey; label: string; min: number; max: number }[] = [
+  { key: 'max_iterations', label: 'Max iterations per run (0 = no ceiling)', min: 0, max: 10_000 },
+  { key: 'max_run_secs', label: 'Max run seconds (whole run)', min: 10, max: 604_800 },
+  { key: 'max_tool_output_bytes', label: 'Max tool output (bytes)', min: 256, max: 1_000_000 },
+  {
+    key: 'max_command_output_bytes',
+    label: 'Max command output (bytes)',
+    min: 256,
+    max: 1_000_000,
+  },
+  { key: 'command_timeout_secs', label: 'Command timeout (s)', min: 1, max: 3_600 },
+  { key: 'max_command_timeout_secs', label: 'Max command timeout (s)', min: 1, max: 3_600 },
+  { key: 'max_file_read_bytes', label: 'Max file read (bytes)', min: 1, max: 5_000_000 },
+  {
+    key: 'search_max_results',
+    label: 'Search results',
+    min: 1,
+    max: 2_000,
+  },
+  {
+    key: 'context_max_chars',
+    label: 'Context budget (chars, 0 = from the model)',
+    min: 0,
+    max: 4_000_000,
+  },
+  { key: 'max_tool_calls_per_turn', label: 'Tool calls per turn', min: 1, max: 256 },
 ];
+
 
 const APPROVAL_MODES: { value: ApprovalMode; label: string; description: string }[] = [
   {
@@ -192,14 +223,13 @@ function validate(form: FormState): Record<string, string> {
   }
 
   for (const field of LIMIT_FIELDS) {
-    // `context_max_chars: 0` is meaningful: derive the budget from the model's
-    // own context window. Every other limit needs a positive value.
-    const min = field.key === 'context_max_chars' ? 0 : 1;
-    if (!integerAtLeast(form.limits[field.key], min, 100_000_000)) {
+    if (!integerAtLeast(form.limits[field.key], field.min, field.max)) {
+      // Name the zero rule only for the fields that have one, so the message
+      // matches the label the user is looking at.
       errors[`limits.${field.key}`] =
-        min === 0
-          ? `${field.label} must be 0 or a positive integer.`
-          : `${field.label} must be a positive integer.`;
+        field.min === 0
+          ? `${field.label} must be 0 or between ${field.min + 1} and ${field.max}.`
+          : `${field.label} must be between ${field.min} and ${field.max}.`;
     }
   }
   if (
@@ -2828,7 +2858,10 @@ export function SettingsSheet(): JSX.Element | null {
                             id={`limit-${field.key}`}
                             class="input mono"
                             type="number"
-                            min="1"
+                            // From the field's own rule: a browser spinner that
+                            // refuses 0 would block the documented "no ceiling".
+                            min={String(field.min)}
+                            max={String(field.max)}
                             step="1"
                             value={form.limits[field.key]}
                             disabled={disabled}

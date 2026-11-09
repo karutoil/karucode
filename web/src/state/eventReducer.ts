@@ -623,13 +623,22 @@ export function applyEventToChat(state: ChatState, event: KarucodeEvent): ChatSt
       } else if (status === 'interrupted') {
         next = appendInterrupted(next, event.run_id, at);
       } else if (status === 'limit_reached') {
-        next = appendNotice(
-          next,
-          `limit:${event.run_id}`,
-          'warn',
-          'The run stopped because it reached a configured limit.',
-          at,
+        // The runtime names the reason - the wall clock, an operator's turn
+        // ceiling, the model's output limit, or the loop guard that stops a run
+        // whose turns keep returning answers it already has. It also streams that
+        // same sentence as a notice while the run ends, so when the transcript
+        // already carries it, do not say it twice. Fall back to the three things
+        // a run can stop on rather than "a configured limit": a loop guard is not
+        // something anyone configured.
+        const reason =
+          event.error ??
+          'The run stopped at a limit: the wall-clock ceiling, an operator-set turn limit, or the loop guard.';
+        const alreadySaid = next.items.some(
+          (item) => item.kind === 'notice' && item.message === reason,
         );
+        if (!alreadySaid) {
+          next = appendNotice(next, `limit:${event.run_id}`, 'warn', reason, at);
+        }
       }
       return {
         ...next,

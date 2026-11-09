@@ -235,6 +235,23 @@ under **Changed**.
   The system prompt tells the model it has no turn limit, so it does not stop
   early to save one.
 
+  The sheet had to learn the same rule. Its Limits grid validated every field with
+  one `min = 1`, so a saved `max_iterations = 0` — the value the server hands back
+  and the label calls "no ceiling" — opened with *"Max iterations per run (0 = no
+  ceiling) must be a positive integer"* under it and refused to save. Each field
+  now carries its own bounds, mirroring `LIMITS_BOUNDS` in the server, the number
+  input advertises them (`min`, `max`) so a browser spinner cannot refuse `0`
+  either, and a value the server would reject is named with the field's real range
+  instead of a second 400 the user cannot act on.
+
+  A run that stops at a limit now says why. `limit_reached` used to mean one
+  thing — an iteration budget, "reached a configured limit" — and it now also
+  covers the wall clock and the loop guard, which nobody configured. The runtime
+  puts its own one-line reason on the finished run (and on the run row), the
+  transcript shows that sentence as the notice exactly once, and a reload rebuilds
+  it from the row, so *why* a run stopped survives a refresh instead of leaving
+  only the word "Limit reached".
+
 - **The working steps start open, and where they start is a setting.** The fold
   covered one finished turn, and every run of calls inside it had to be opened
   again by hand, so **Show the working** stopped one level short of the calls
@@ -361,6 +378,24 @@ under **Changed**.
 
 ### Fixed
 
+- **Paging back through a huge session shows the page it just loaded.** A page of
+  a long conversation is a window of stored bytes (5000 rows or 1 MiB of text), so
+  one page can be tens of thousands of pixels tall. When the reader was at the very
+  top — with only the *Scroll up to load earlier messages* line on screen — the
+  loader prepended the page below that line and then moved the view down by the
+  page's height to "keep the line being read in place". That carried them a whole
+  page into history, so the rows that had just arrived were never seen: dragging a
+  24 MB session to the top loaded one page per gesture and showed none of them.
+  Inside the rows the anchor is still the row being read (the scroll moves by
+  exactly the height the page added); at the top the view now moves only far enough
+  to put the first row of the new page at the top of the viewport, so each
+  scroll-to-top gesture reveals one page from its beginning, with the band above
+  the line as the room to scroll into for the next one
+  (`web/src/lib/historyLoader.ts`, anchored on the new `content` element - the
+  transcript, or an agent's step list - which is also why an opened session still
+  lands on its newest content). `scripts/verify_transcript_pagination.py` now
+  checks the scroll position after every page arrives, not just that the marker's
+  text is somewhere in the document.
 - **Collapsing the Results dock no longer shrinks the conversation.** The narrow
   70ch reading measure is a *split* rule — side by side, Conversation is the narrow
   half — but it was applied to the whole centre pane as well, so hiding the dock

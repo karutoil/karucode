@@ -122,7 +122,12 @@
   not add a second nested scrollbar.
   Tool failures open to their explanation;
   running work, pending approvals, errors, interruptions and notices remain
-  discoverable rather than disappearing into a fold. Full activity remains an
+  discoverable rather than disappearing into a fold. A run that stops at a
+  limit says why: the runtime's own sentence ("stopped: the last 4 turns
+  produced no new information…", the wall clock, a turn ceiling, the model's
+  output limit) is the notice, shown once rather than twice, and it is rebuilt
+  from the run row on reload so the reason survives a refresh.
+  Full activity remains an
   explicit **Grouping → None** option; **Cards** remains the alternate presentation
   in Settings → General → Transcript or Theme Studio, which also offers
   **Working steps → Folded** for the terse view where a finished turn sits behind
@@ -139,11 +144,25 @@
   **windowed**: only the rows around the viewport are mounted, with padding
   standing in for the rest, so a fully loaded conversation does not mount
   thousands of Markdown blocks at once (see `web/src/lib/virtualWindow.ts`).
+  Opening a session lands on its **newest** content without a gesture: the
+  viewport is pinned to the tail before the first paint, even when the newest
+  page is taller than the screen.
   Older history is not a button: when the reader reaches the line above the
-  oldest loaded row, the next page is fetched automatically and the scroll
-  position is moved by exactly the height the page added, so the row being
-  read stays put (`web/src/lib/historyLoader.ts`; the Agents tab uses the same
-  loader for one agent's activity). A silent refresh - a reconnect, a stream
+  oldest loaded row, the next page is fetched automatically
+  (`web/src/lib/historyLoader.ts`). A page is a **window of stored bytes**
+  (5000 rows or 1 MiB of text), so on a long session one page can be tens of
+  thousands of pixels tall, and what the view does with it depends on what the
+  reader was looking at. Inside the rows, the page lands above the line of
+  sight and the scroll moves by exactly the height it added, so the row being
+  read stays put. At the very top, where only the *Scroll up to load earlier
+  messages* line is on screen, the page arrives **below** that line: the view
+  moves just far enough to put the first row of the new page at the top of the
+  viewport, because adding the page's height there carries the reader a whole
+  page into history and the rows that just arrived are never seen. So each
+  scroll-to-top gesture reveals one page from its first row, and the band above
+  the line is the room to scroll into for the next one. The Agents tab uses the
+  same loader for one agent's activity, anchored on its step list.
+  A silent refresh - a reconnect, a stream
   resync, a run settling - keeps the pages already loaded and merges the
   server's newer tail into them instead of throwing them away; a forced reload
   after a rewind replaces them. Only the session's own rows are paged: a

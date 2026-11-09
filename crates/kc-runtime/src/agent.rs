@@ -1057,12 +1057,16 @@ is {})",
                 )
             };
             ctx.notice("warn", message.clone());
-            let error = if spec.is_subagent {
-                Some(message)
-            } else {
-                None
-            };
-            return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
+            // The message goes on the outcome whether or not this is a
+            // subagent: a top-level run that ends `limit_reached` has a reason
+            // (the wall clock, an operator's turn ceiling, the loop guard) and the
+            // UI and the notification say it instead of "a configured limit".
+            return LoopOutcome::new(
+                RunStatus::LimitReached,
+                Some(message),
+                last_text,
+                iterations,
+            );
         }
         if Instant::now() >= spec.deadline {
             let message = if spec.is_subagent {
@@ -1077,12 +1081,16 @@ is {})",
                 )
             };
             ctx.notice("warn", message.clone());
-            let error = if spec.is_subagent {
-                Some(message)
-            } else {
-                None
-            };
-            return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
+            // The message goes on the outcome whether or not this is a
+            // subagent: a top-level run that ends `limit_reached` has a reason
+            // (the wall clock, an operator's turn ceiling, the loop guard) and the
+            // UI and the notification say it instead of "a configured limit".
+            return LoopOutcome::new(
+                RunStatus::LimitReached,
+                Some(message),
+                last_text,
+                iterations,
+            );
         }
 
         // --- steering ---------------------------------------------------------
@@ -1516,12 +1524,12 @@ is {})",
                     )
                 };
                 ctx.notice("warn", message.clone());
-                let error = if spec.is_subagent {
-                    Some(message)
-                } else {
-                    None
-                };
-                return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
+                return LoopOutcome::new(
+                    RunStatus::LimitReached,
+                    Some(message),
+                    last_text,
+                    iterations,
+                );
             }
             StreamEnd::Failed { message, .. } => {
                 if spec.cancel.is_cancelled() {
@@ -1562,12 +1570,15 @@ is {})",
                 // Do not report a truncated answer as a success: the turn ended
                 // because the model ran out of output budget, not because it
                 // finished answering.
-                let error = if spec.is_subagent {
-                    Some(TOKEN_LIMIT_NOTICE.to_string())
-                } else {
-                    None
-                };
-                return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
+                // Same rule as every other limit: say why on the outcome. The
+                // answer is incomplete because the model's output budget ran out,
+                // which is a fact the user needs rather than a silence.
+                return LoopOutcome::new(
+                    RunStatus::LimitReached,
+                    Some(TOKEN_LIMIT_NOTICE.to_string()),
+                    last_text,
+                    iterations,
+                );
             }
             return LoopOutcome::new(RunStatus::Completed, None, last_text, iterations);
         }
@@ -1829,12 +1840,15 @@ is {})",
                 "stopped: the last {no_news} turns produced no new information - every call returned an answer this run already had, or was refused as a repeat. Re-issuing them cannot produce anything new: say what is blocked, or take a different step."
             );
             ctx.notice("warn", message.clone());
-            let error = if spec.is_subagent {
-                Some(message)
-            } else {
-                None
-            };
-            return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
+            // The reason goes on the outcome for a top-level run too, so the
+            // transcript, the notification and the run row all say "the loop
+            // guard stopped this" instead of "a configured limit".
+            return LoopOutcome::new(
+                RunStatus::LimitReached,
+                Some(message),
+                last_text,
+                iterations,
+            );
         }
 
         if spec.cancel.is_cancelled() {

@@ -168,6 +168,54 @@ describe('seedChatState', () => {
     );
     expect(refetched.agents[0]?.iterations).toBe(9);
   });
+
+  it('explains a reloaded run that stopped at a limit, from the run row', () => {
+    // A run that ends `limit_reached` produces no message of its own, so a
+    // reloaded transcript showed the status word and nothing else. The reason the
+    // runtime recorded goes back in as the same notice the live run drew.
+    const reason =
+      'stopped: the last 4 turns produced no new information - every call returned an answer this run already had, or was refused as a repeat.';
+    const current = seedChatState({
+      ...detailFixture,
+      runs: [
+        ...detailFixture.runs,
+        {
+          id: 'r_limit',
+          session_id: detailFixture.session.id,
+          status: 'limit_reached',
+          model: 'gpt-4o-mini',
+          prompt: 'keep asking the same question',
+          error: reason,
+          started_at: 1_710_000_000_000,
+          finished_at: 1_710_000_002_000,
+        },
+      ],
+    });
+
+    const notice = current.items.find((item) => item.id === 'limit:r_limit');
+    expect(notice?.kind).toBe('notice');
+    expect(notice?.kind === 'notice' ? notice.level : '').toBe('warn');
+    expect(notice?.kind === 'notice' ? notice.message : '').toBe(reason);
+
+    // A limit run with no recorded reason stays quiet rather than inventing one.
+    const bare = seedChatState({
+      ...detailFixture,
+      runs: [
+        ...detailFixture.runs,
+        {
+          id: 'r_limit_bare',
+          session_id: detailFixture.session.id,
+          status: 'limit_reached',
+          model: 'gpt-4o-mini',
+          prompt: 'stop',
+          error: null,
+          started_at: 1_710_000_000_000,
+          finished_at: 1_710_000_001_000,
+        },
+      ],
+    });
+    expect(bare.items.some((item) => item.id === 'limit:r_limit_bare')).toBe(false);
+  });
 });
 
 describe('mergeTranscriptRows', () => {
