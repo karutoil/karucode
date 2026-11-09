@@ -57,11 +57,12 @@ workspace built for a long session, not for a dashboard demo.
 
 ## What it does
 
-* **Long-horizon runs.** The iteration budget belongs to a *segment*: when it
-  runs out mid-task the runtime refreshes it and keeps going in the same session,
-  run and transcript. The ceiling is about
-  `(max_continues + 1) × max_iterations` turns — 10,200 with the defaults — or a
-  24 h wall clock, whichever comes first.
+* **Long-horizon runs that are not interrupted.** A run is one loop: `max_iterations`
+  defaults to `0` (no turn ceiling), so a migration or a failing-suite hunt is not
+  cut off by a counter, and nothing is injected into the transcript to "resume"
+  it. A run ends when the work is done, when you cancel it, at the 24 h wall
+  clock, or when the loop guard catches it re-asking questions it already has the
+  answers to.
 * **Real tools, real side effects.** Read, search, write and edit files; run
   shell commands with streamed output in their own process group; inspect git;
   spawn subagents. Every tool result is bounded with an explicit truncation
@@ -198,8 +199,7 @@ The keys that matter most:
 | `KARUCODE_MODEL` | `gpt-4o-mini` | model id |
 | `KARUCODE_APPROVAL_MODE` | `ask` | `ask`, `ask_commands`, `auto`, `read_only` |
 | `KARUCODE_ALLOW_COMMANDS` | empty | command prefixes never prompted for |
-| `KARUCODE_MAX_ITERATIONS` | `200` | model turns per *segment* |
-| `KARUCODE_MAX_CONTINUES` | `50` | budget refreshes per run |
+| `KARUCODE_MAX_ITERATIONS` | `0` | model turns per run (`0` = no ceiling) |
 | `KARUCODE_MAX_RUN_SECS` | `86400` | hard wall clock for a whole run |
 | `KARUCODE_COMMAND_TIMEOUT_SECS` | `120` | default shell timeout |
 | `KARUCODE_MAX_TOOL_OUTPUT_BYTES` | `24000` | tool result bytes kept for the model |
@@ -215,23 +215,23 @@ every key with its default and rationale.
 
 ### Long-horizon runs
 
-A run is not allowed to die because it used its first budget of model turns.
-`max_iterations` belongs to a segment; when a segment ends mid-task the runtime
-emits a notice, appends a `[runtime checkpoint]` turn so the transcript explains
-the jump, resets the counter and continues in the same run:
+A run is one loop. `max_iterations` counts model turns for the whole run and
+defaults to `0`, which means **no ceiling** — a long task is not interrupted by a
+counter, and nothing is injected into the transcript to "resume" it:
 
 ```toml
 [limits]
-max_iterations = 200   # model turns per segment
+max_iterations = 0     # model turns per run; 0 = no ceiling (the default)
 max_run_secs = 86400   # hard wall clock for the whole run (24h)
-auto_continue = true   # refresh the budget instead of stopping
-max_continues = 50     # how many refreshes one run may chain
 ```
 
-`auto_continue = false` (or `max_continues = 0`) restores a one-shot budget; the
-run then stops with status `limit_reached`. A budget that runs out is never a
-reason to re-send the prompt — the work is in the transcript, and the checkpoint
-tells the model to continue rather than restart.
+What ends a run instead: the model finishing its work, you cancelling it, the wall
+clock, an operator-set `max_iterations` (a plain stop with status `limit_reached`),
+or the **loop guard** — four turns in a row that only return answers the run
+already has stop it and say why. A single identical read-only call is refused
+before that, and a stream that repeats one short block forever is abandoned and
+re-issued. Subagents follow the same rules with `subagents.max_iterations`
+(`0` by default) and `subagents.timeout_secs`.
 
 ### Loopback, the `Host` allowlist and reverse proxies
 

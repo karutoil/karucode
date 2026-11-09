@@ -1,3 +1,4 @@
+import { dropWorkspaceImages } from '../lib/workspaceImages';
 import type {
   AgentSummary,
   ApprovalRecord,
@@ -73,8 +74,6 @@ export const configFixture: Config = {
   limits: {
     max_iterations: 32,
     max_run_secs: 1800,
-    auto_continue: true,
-    max_continues: 50,
     max_tool_output_bytes: 24000,
     max_command_output_bytes: 32000,
     command_timeout_secs: 120,
@@ -93,7 +92,6 @@ export const configFixture: Config = {
   subagents: {
     max_concurrent: 3,
     max_iterations: 16,
-    max_continues: 0,
     allow_recursive: false,
     max_depth: 1,
     timeout_secs: 900,
@@ -154,6 +152,7 @@ export function storedMessage(partial: Partial<StoredMessage> & { id: number; ro
     tool_calls: partial.tool_calls ?? null,
     tool_call_id: partial.tool_call_id ?? null,
     name: partial.name ?? null,
+    reasoning_content: partial.reasoning_content ?? null,
     created_at: partial.created_at ?? NOW - 60_000,
   };
 }
@@ -305,6 +304,9 @@ export function resetAppState(): void {
   setAuthToken(null);
   store.writeLastSessionId(null);
   resetPromptTokens();
+  // Cached workspace image blobs are module state as well: a test that resolved one
+  // must not hand the next test a URL from a torn-down document.
+  dropWorkspaceImages();
   store.boot.value = 'loading';
   store.bootError.value = null;
   store.health.value = null;
@@ -313,6 +315,10 @@ export function resetAppState(): void {
   store.sessions.value = [];
   store.sessionsLoading.value = true;
   store.currentSessionId.value = null;
+  // The draft is client-only state too: a test that started one must not hand
+  // "New session" to the next test, nor a half-consumed handoff to the composer.
+  store.draftSession.value = null;
+  store.draftToSession.value = null;
   // The open session's model pin lives outside every list, so it has to be
   // cleared here too - otherwise a test would inherit the previous one's pin.
   store.openSessionModel.value = null;

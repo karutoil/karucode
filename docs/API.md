@@ -65,16 +65,15 @@ directory. `provider_configured` is computed from the effective model (below).
                     "cost_output": 1.5, "catalog_provider": "openai" } ],
       "request_timeout_secs": 300, "api_key_set": true } ],
   "active": { "provider": "gateway", "model": "coder" },
-  "limits": { "max_iterations": 200, "max_run_secs": 86400,
-              "auto_continue": true, "max_continues": 50,
+  "limits": { "max_iterations": 0, "max_run_secs": 86400,
               "max_tool_output_bytes": 24000, "max_command_output_bytes": 32000,
               "command_timeout_secs": 120, "max_command_timeout_secs": 600,
               "max_file_read_bytes": 200000, "search_max_results": 200,
               "context_max_chars": 240000, "max_tool_calls_per_turn": 32 },
   "approvals": { "mode": "ask", "allow_commands": [], "auto_approve_paths": [],
                  "timeout_secs": 300 },
-  "subagents": { "max_concurrent": 3, "max_iterations": 200,
-                 "max_continues": 60, "allow_recursive": false,
+  "subagents": { "max_concurrent": 3, "max_iterations": 0,
+                 "allow_recursive": false,
                  "max_depth": 1, "timeout_secs": 14400,
                  "allow_background": true, "max_background": 8,
                  "wait_timeout_secs": 600 },
@@ -138,13 +137,15 @@ misspelt key cannot silently do nothing. A numeric tunable outside its documente
 range is the same `400`, naming the field, the range and the value it was given -
 nothing is silently clamped.
 
-**`[subagents]` and zero.** Three values in this section are meaningful at `0`, and
-they do not agree with each other: `max_concurrent` and `max_background` mean *no
-ceiling* (`0..=1024`, with `0` granting every spawn a slot immediately), while
-`max_depth` means *no delegation* (`0..=255`, the field being a `u8`) and
-`max_continues = 0` restores the one-shot budget. `max_iterations` is `1..=10000`
-and `wait_timeout_secs` is `1..=3600`. A `max_depth` above `255` fails JSON
-deserialisation rather than being truncated to a smaller number.
+**`[limits]` and `[subagents]` at zero.** `limits.max_iterations` and
+`subagents.max_iterations` are `0..=10000`, and `0` means **no turn ceiling** -
+the default, so a long task is not interrupted by a counter. In `[subagents]`
+three more values are meaningful at `0`, and they do not agree with each other:
+`max_concurrent` and `max_background` mean *no ceiling* (`0..=1024`, with `0`
+granting every spawn a slot immediately), while `max_depth` means *no delegation*
+(`0..=255`, the field being a `u8`). `wait_timeout_secs` is `1..=3600`. A
+`max_depth` above `255` fails JSON deserialisation rather than being truncated to
+a smaller number.
 
 **Admin gate.** When `KARUCODE_ADMIN_TOKEN` is set, a patch that changes
 `approvals`, `model.base_url`, `model.api_key`, `providers`, `active_provider` or

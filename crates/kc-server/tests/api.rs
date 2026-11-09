@@ -59,9 +59,9 @@ async fn health_and_config_roundtrip() {
     );
     assert_eq!(body["model"]["model"], "test-model");
     assert_eq!(body["model"]["api_key_set"], false);
-    assert_eq!(body["limits"]["max_iterations"], 200);
-    assert_eq!(body["limits"]["auto_continue"], true);
-    assert_eq!(body["limits"]["max_continues"], 50);
+    // No turn ceiling by default: a long task is not interrupted by a counter.
+    assert_eq!(body["limits"]["max_iterations"], 0);
+    assert_eq!(body["limits"]["max_run_secs"], 86_400);
     assert_eq!(body["approvals"]["mode"], "ask");
     assert_eq!(body["subagents"]["max_concurrent"], 3);
     assert!(body["plugins"].as_array().unwrap().is_empty());
@@ -2614,7 +2614,7 @@ async fn settings_patch_validates_persists_and_hides_the_key() {
         json!({ "model": { "provider": "" } }),
         json!({ "approvals": { "mode": "sometimes" } }),
         json!({ "subagents": { "max_concurrent": 1_025 } }),
-        json!({ "limits": { "max_iterations": 0 } }),
+        json!({ "limits": { "max_iterations": 10_001 } }),
         json!({ "model": { "typo_field": true } }),
     ];
     for patch in cases {
@@ -3520,7 +3520,7 @@ async fn a_bearer_token_disables_the_host_restriction() {
 async fn out_of_range_settings_are_rejected_with_the_bounds() {
     let h = HarnessBuilder::new(Vec::new()).build().await;
 
-    let cases: [(&str, Value); 16] = [
+    let cases: [(&str, Value); 14] = [
         (
             "limits.max_file_read_bytes",
             json!({ "limits": { "max_file_read_bytes": 4_000_000_000u64 } }),
@@ -3542,10 +3542,6 @@ async fn out_of_range_settings_are_rejected_with_the_bounds() {
         (
             "limits.max_iterations",
             json!({ "limits": { "max_iterations": 10_001 } }),
-        ),
-        (
-            "limits.max_continues",
-            json!({ "limits": { "max_continues": 1_001 } }),
         ),
         (
             "limits.max_run_secs",
@@ -3574,10 +3570,6 @@ async fn out_of_range_settings_are_rejected_with_the_bounds() {
         (
             "subagents.max_iterations",
             json!({ "subagents": { "max_iterations": 10_001 } }),
-        ),
-        (
-            "subagents.max_continues",
-            json!({ "subagents": { "max_continues": 1_001 } }),
         ),
         (
             "subagents.max_background",
@@ -3626,7 +3618,7 @@ async fn out_of_range_settings_are_rejected_with_the_bounds() {
     // Rejections are no-ops: the OOM-enabling value never took effect.
     let config = h.get("/api/config").await.json();
     assert_eq!(config["limits"]["max_file_read_bytes"], 200_000);
-    assert_eq!(config["limits"]["max_iterations"], 200);
+    assert_eq!(config["limits"]["max_iterations"], 0);
     assert_eq!(config["subagents"]["max_depth"], 1);
 
     // The bounds themselves are inclusive.
@@ -3642,8 +3634,6 @@ async fn out_of_range_settings_are_rejected_with_the_bounds() {
                     "context_max_chars": 0,
                     "max_iterations": 10_000,
                     "max_run_secs": 604_800,
-                    "auto_continue": false,
-                    "max_continues": 1_000,
                     "command_timeout_secs": 3_600,
                     "max_command_timeout_secs": 3_600,
                     "search_max_results": 2_000,
@@ -3895,7 +3885,7 @@ async fn a_corrupt_persisted_row_cannot_prevent_startup() {
         config.model.base_url, configured_base_url,
         "the file/env base_url must stay in force"
     );
-    assert_eq!(config.limits.max_iterations, 200, "invalid row ignored");
+    assert_eq!(config.limits.max_iterations, 0, "invalid row ignored");
     assert_eq!(config.limits.search_max_results, 7, "valid row applied");
     // (The skip is logged at WARN with the key; `apply_rows_resilient`'s unit
     // test covers the policy itself, this covers the startup path.)

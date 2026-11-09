@@ -28,6 +28,7 @@ import type {
   ThemeMono,
   ThemeThinking,
   ThemeToolStyle,
+  ThemeWorking,
 } from '../theme';
 import { SettingsAdvanced } from './SettingsAdvanced';
 import { Dialog } from './Dialog';
@@ -48,8 +49,8 @@ const DENSITY_LABELS: Record<ThemeDensity, string> = {
   spacious: 'Spacious',
 };
 
-/** Every limit the sheet edits as a number (`auto_continue` is a toggle). */
-type NumericLimitKey = Exclude<keyof Limits, 'auto_continue'>;
+/** Every limit the sheet edits, as a number in the form. */
+type NumericLimitKey = keyof Limits;
 
 interface FormState {
   /** Whether a temperature is sent at all; when off, the field is not sent. */
@@ -66,10 +67,8 @@ interface FormState {
   autoApprovePaths: string[];
   approvalTimeout: string;
   limits: Record<NumericLimitKey, string>;
-  autoContinue: boolean;
   subagentConcurrent: string;
   subagentIterations: string;
-  subagentContinues: string;
   allowRecursive: boolean;
   subagentMaxDepth: string;
   subagentTimeout: string;
@@ -79,9 +78,8 @@ interface FormState {
 }
 
 const LIMIT_FIELDS: { key: NumericLimitKey; label: string }[] = [
-  { key: 'max_iterations', label: 'Max iterations per segment' },
+  { key: 'max_iterations', label: 'Max iterations per run (0 = no ceiling)' },
   { key: 'max_run_secs', label: 'Max run seconds (whole run)' },
-  { key: 'max_continues', label: 'Auto-continues per run' },
   { key: 'max_tool_output_bytes', label: 'Max tool output (bytes)' },
   { key: 'max_command_output_bytes', label: 'Max command output (bytes)' },
   { key: 'command_timeout_secs', label: 'Command timeout (s)' },
@@ -131,10 +129,8 @@ function formFromConfig(config: Config): FormState {
     limits: Object.fromEntries(
       LIMIT_FIELDS.map((field) => [field.key, String(config.limits[field.key])]),
     ) as Record<NumericLimitKey, string>,
-    autoContinue: config.limits.auto_continue,
     subagentConcurrent: String(config.subagents.max_concurrent),
     subagentIterations: String(config.subagents.max_iterations),
-    subagentContinues: String(config.subagents.max_continues),
     allowRecursive: config.subagents.allow_recursive,
     subagentMaxDepth: String(config.subagents.max_depth),
     subagentTimeout: String(config.subagents.timeout_secs),
@@ -225,11 +221,8 @@ function validate(form: FormState): Record<string, string> {
   ) {
     errors.subagentConcurrent = 'Concurrency must be 0 (no ceiling) or 1–1024.';
   }
-  if (!integerAtLeast(form.subagentIterations, 1, 10_000)) {
-    errors.subagentIterations = 'Iterations must be 1–10000.';
-  }
-  if (!integerAtLeast(form.subagentContinues, 0, 1_000)) {
-    errors.subagentContinues = 'Auto-continues must be 0–1000.';
+  if (!integerAtLeast(form.subagentIterations, 0, 10_000)) {
+    errors.subagentIterations = 'Iterations must be 0 (no ceiling) or 1–10000.';
   }
   if (
     !integerAtLeast(
@@ -264,7 +257,6 @@ function buildPatch(form: FormState): ConfigPatch {
   for (const field of LIMIT_FIELDS) {
     limits[field.key] = Number(form.limits[field.key]);
   }
-  limits.auto_continue = form.autoContinue;
   return {
     // Connection details live on provider profiles now; only the sampling
     // tunables (which are install-wide) stay in the flat model section.
@@ -289,7 +281,6 @@ function buildPatch(form: FormState): ConfigPatch {
     subagents: {
       max_concurrent: Number(form.subagentConcurrent),
       max_iterations: Number(form.subagentIterations),
-      max_continues: Number(form.subagentContinues),
       allow_recursive: form.allowRecursive,
       max_depth: Number(form.subagentMaxDepth),
       timeout_secs: Number(form.subagentTimeout),
@@ -1942,7 +1933,6 @@ const FIELD_LOCATIONS: Record<string, FieldLocation> = {
   // are both inside its Advanced fold.
   subagentConcurrent: { tab: 'agent', advanced: 'agent', anchor: 'subagent-concurrent' },
   subagentIterations: { tab: 'agent', advanced: 'agent', anchor: 'subagent-iterations' },
-  subagentContinues: { tab: 'agent', advanced: 'agent', anchor: 'subagent-continues' },
   subagentMaxDepth: { tab: 'agent', advanced: 'agent', anchor: 'subagent-max-depth' },
   subagentTimeout: { tab: 'agent', advanced: 'agent', anchor: 'subagent-timeout' },
   subagentMaxBackground: { tab: 'agent', advanced: 'agent', anchor: 'subagent-max-background' },
@@ -2366,6 +2356,22 @@ export function SettingsSheet(): JSX.Element | null {
                         ))}
                       </select>
                     </Field>
+                    <Field id="settings-working" label="Working steps">
+                      <select
+                        id="settings-working"
+                        class="input"
+                        value={THEME.activeTheme.value.working}
+                        onChange={(event) =>
+                          THEME.setWorking(event.currentTarget.value as ThemeWorking)
+                        }
+                      >
+                        {THEME.THEME_WORKING_CHOICES.map(({ value, label }) => (
+                          <option value={value} key={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
                     <Field id="settings-thinking" label="Reasoning blocks">
                       <select
                         id="settings-thinking"
@@ -2673,15 +2679,15 @@ export function SettingsSheet(): JSX.Element | null {
                       </Field>
                       <Field
                         id="subagent-iterations"
-                        label="Turns per segment"
+                        label="Turns per subagent (0 = no ceiling)"
                         error={errors.subagentIterations}
-                        hint="A checkpoint, not a finish line: the subagent refreshes it below."
+                        hint="0 by default: a delegated task runs until it is done or its timeout is up."
                       >
                         <input
                           id="subagent-iterations"
                           class="input mono"
                           type="number"
-                          min="1"
+                          min="0"
                           max="10000"
                           step="1"
                           value={form.subagentIterations}
@@ -2692,30 +2698,6 @@ export function SettingsSheet(): JSX.Element | null {
                             errors.subagentIterations
                               ? 'subagent-iterations-error'
                               : 'subagent-iterations-hint'
-                          }
-                        />
-                      </Field>
-                      <Field
-                        id="subagent-continues"
-                        label="Auto-continues"
-                        error={errors.subagentContinues}
-                        hint="How many times one subagent may refresh its budget. 0 = stop at the segment."
-                      >
-                        <input
-                          id="subagent-continues"
-                          class="input mono"
-                          type="number"
-                          min="0"
-                          max="1000"
-                          step="1"
-                          value={form.subagentContinues}
-                          disabled={disabled}
-                          onInput={(event) => update({ subagentContinues: event.currentTarget.value })}
-                          aria-invalid={errors.subagentContinues ? 'true' : undefined}
-                          aria-describedby={
-                            errors.subagentContinues
-                              ? 'subagent-continues-error'
-                              : 'subagent-continues-hint'
                           }
                         />
                       </Field>
@@ -2835,15 +2817,6 @@ export function SettingsSheet(): JSX.Element | null {
                       <span class="settings-section-note">Resource and context bounds</span>
                     </div>
                     <div class="field-grid field-grid-compact">
-                      <div class="field field-toggle field-wide">
-                        <Toggle
-                          label="Auto-continue long runs"
-                          description="When a segment's iteration budget runs out, refresh it and keep working in the same session instead of ending the run."
-                          checked={form.autoContinue}
-                          disabled={disabled}
-                          onChange={(checked) => update({ autoContinue: checked })}
-                        />
-                      </div>
                       {LIMIT_FIELDS.map((field) => (
                         <Field
                           key={field.key}

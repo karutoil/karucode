@@ -516,32 +516,21 @@ const MAX_SELECTION_MODEL_CHARS: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Limits {
-    /// Model round-trips allowed in one *segment* of a run.
+    /// Model round-trips allowed in one run. `0` - the default - means no
+    /// ceiling: a run is then bounded by `max_run_secs`, by the user cancelling
+    /// it, and by the loop guards in the runtime (a turn that repeats a refused
+    /// call, or that re-issues calls with no workspace change between them,
+    /// stops the run itself).
     ///
-    /// A segment is a checkpoint, not a finish line: when it is exhausted the
-    /// run continues automatically (see [`Limits::auto_continue`]) unless the
-    /// wall-clock ceiling or `max_continues` says otherwise. The effective
-    /// ceiling for one run is therefore roughly
-    /// `(max_continues + 1) * max_iterations` model round-trips.
+    /// A non-zero value is a blunt backstop for an install that wants one: when
+    /// it runs out the run ends `limit_reached` and says so. It is never a
+    /// checkpoint - there is no refresh, no continuation turn and no gap in the
+    /// transcript, because a long task is one long task.
     #[serde(default = "d_iterations")]
     pub max_iterations: u32,
-    /// Hard wall-clock ceiling for the whole run, across every segment.
+    /// Hard wall-clock ceiling for the run.
     #[serde(default = "d_run_secs")]
     pub max_run_secs: u64,
-    /// Keep going when a segment's iteration budget runs out instead of ending
-    /// the run with `limit_reached`.
-    ///
-    /// Long-horizon work (migrations, refactors, debugging a failing suite) does
-    /// not fit in one budget, and silently stopping after a few dozen turns is
-    /// the one failure mode an agent harness must not have. With this on, the
-    /// runtime emits a notice, resets the iteration counter and continues in the
-    /// same session, run and transcript.
-    #[serde(default = "d_true")]
-    pub auto_continue: bool,
-    /// How many times `max_iterations` may be refreshed in one run. `0` restores
-    /// the old one-shot behaviour; the run then stops at `max_iterations`.
-    #[serde(default = "d_continues")]
-    pub max_continues: u32,
     /// Bytes of a single tool result kept for the model (rest is truncated).
     #[serde(default = "d_tool_output")]
     pub max_tool_output_bytes: usize,
@@ -618,13 +607,13 @@ pub struct Limits {
 }
 
 fn d_iterations() -> u32 {
-    200
+    0
 }
 fn d_run_secs() -> u64 {
     86_400
 }
-fn d_continues() -> u32 {
-    50
+fn d_true() -> bool {
+    true
 }
 fn d_tool_output() -> usize {
     24_000
@@ -668,8 +657,6 @@ impl Default for Limits {
         Self {
             max_iterations: d_iterations(),
             max_run_secs: d_run_secs(),
-            auto_continue: d_true(),
-            max_continues: d_continues(),
             max_tool_output_bytes: d_tool_output(),
             max_command_output_bytes: d_cmd_output(),
             command_timeout_secs: d_cmd_timeout(),
@@ -771,22 +758,15 @@ pub struct SubagentConfig {
     /// a whim bills for 200 loops.
     #[serde(default = "d_sub_concurrency")]
     pub max_concurrent: usize,
-    /// Model round-trips allowed in one *segment* of a subagent.
+    /// Model round-trips allowed for one subagent. `0` - the default - means no
+    /// ceiling: the child is bounded by `timeout_secs` and by the same loop
+    /// guards as a top-level run, because a delegated task is a whole piece of
+    /// work and a counter is the wrong thing to end it on.
     ///
-    /// A delegated task is a whole piece of work, not a single answer, so the
-    /// same rule applies here as to a top-level run: the segment is a checkpoint,
-    /// not a finish line. See [`SubagentConfig::max_continues`].
+    /// A non-zero value stops the child at that many turns; it reports what it
+    /// had, and the parent sees a failed tool result rather than a silent hang.
     #[serde(default = "d_sub_iterations")]
     pub max_iterations: u32,
-    /// How many times a subagent may refresh its iteration budget before it must
-    /// report back. `0` restores the old one-shot behaviour: the subagent stops
-    /// dead at `max_iterations`.
-    ///
-    /// The effective ceiling is `(max_continues + 1) * max_iterations` model
-    /// turns, minus whatever `timeout_secs` cuts short. A subagent is also
-    /// stopped by `limits.auto_continue = false`, the install-wide off switch.
-    #[serde(default = "d_sub_continues")]
-    pub max_continues: u32,
     #[serde(default)]
     pub allow_recursive: bool,
     /// How many generations of subagents may nest below the top-level run.
@@ -839,10 +819,7 @@ fn d_sub_concurrency() -> usize {
     3
 }
 fn d_sub_iterations() -> u32 {
-    200
-}
-fn d_sub_continues() -> u32 {
-    60
+    0
 }
 fn d_sub_depth() -> u8 {
     1
@@ -862,7 +839,6 @@ impl Default for SubagentConfig {
         Self {
             max_concurrent: d_sub_concurrency(),
             max_iterations: d_sub_iterations(),
-            max_continues: d_sub_continues(),
             allow_recursive: false,
             max_depth: d_sub_depth(),
             timeout_secs: d_sub_timeout(),
@@ -1258,9 +1234,6 @@ pub struct PluginConfig {
     pub settings: BTreeMap<String, serde_json::Value>,
 }
 
-fn d_true() -> bool {
-    true
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpServerConfig {
@@ -1858,12 +1831,6 @@ impl Config {
         if let Some(v) = env_parse("KARUCODE_MAX_RUN_SECS") {
             cfg.limits.max_run_secs = v;
         }
-        if let Some(v) = env_bool("KARUCODE_AUTO_CONTINUE")? {
-            cfg.limits.auto_continue = v;
-        }
-        if let Some(v) = env_parse("KARUCODE_MAX_CONTINUES") {
-            cfg.limits.max_continues = v;
-        }
         if let Some(v) = env_parse("KARUCODE_MAX_TOOL_OUTPUT_BYTES") {
             cfg.limits.max_tool_output_bytes = v;
         }
@@ -1903,9 +1870,6 @@ impl Config {
         }
         if let Some(v) = env_parse("KARUCODE_SUBAGENT_MAX_ITERATIONS") {
             cfg.subagents.max_iterations = v;
-        }
-        if let Some(v) = env_parse("KARUCODE_SUBAGENT_MAX_CONTINUES") {
-            cfg.subagents.max_continues = v;
         }
         if let Some(v) = env_parse("KARUCODE_SUBAGENT_TIMEOUT_SECS") {
             cfg.subagents.timeout_secs = v;
@@ -2373,10 +2337,10 @@ mod tests {
     #[test]
     fn defaults_are_sane() {
         let l = Limits::default();
-        assert!(l.max_iterations >= 8);
-        // Long-horizon defaults: a run may chain many segments inside one day.
-        assert!(l.auto_continue);
-        assert!(l.max_continues >= 1);
+        // Long horizon means no turn counter by default: the wall clock and the
+        // runtime's loop guards are what bound a run, not a number of turns that
+        // a real task would have to stop in the middle of.
+        assert_eq!(l.max_iterations, 0, "no per-run turn ceiling by default");
         assert!(l.max_run_secs >= 3600);
         assert!(l.max_tool_calls_per_turn >= 8);
         assert!(l.command_timeout_secs > 0);
@@ -2387,18 +2351,10 @@ mod tests {
         let s = SubagentConfig::default();
         assert!(!s.allow_recursive);
         assert!(s.max_concurrent >= 1);
-        assert!(
-            s.max_iterations >= 32,
-            "a subagent must outlive one small edit"
-        );
-        // A delegated task that takes hours must not die at its first budget:
-        // the segment is a checkpoint, and the wall clock is the real bound.
-        assert!(s.max_continues >= 1, "subagents continue like a run does");
+        // A delegated task is a whole piece of work, so the same rule holds:
+        // `timeout_secs` ends it, not a count of turns.
+        assert_eq!(s.max_iterations, 0, "no per-subagent turn ceiling by default");
         assert!(s.timeout_secs >= 3600);
-        assert!(
-            u64::from(s.max_iterations) * u64::from(s.max_continues + 1) >= 1_000,
-            "a long-horizon subagent must be able to reach four figures of turns"
-        );
     }
 
     #[test]
@@ -3410,7 +3366,6 @@ retry_max_stream_restarts = 0
             "KARUCODE_TERMINALS",
             "KARUCODE_ALLOW_TEMP_DIR",
             "KARUCODE_MODEL_SUPPORTS_IMAGES",
-            "KARUCODE_AUTO_CONTINUE",
             "KARUCODE_ALLOW_RECURSIVE_SUBAGENTS",
             "KARUCODE_SUBAGENT_ALLOW_BACKGROUND",
         ] {

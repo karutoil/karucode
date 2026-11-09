@@ -10,6 +10,43 @@ under **Changed**.
 
 ### Added
 
+- **"New session" no longer creates an empty session.** The rail button,
+  `Ctrl/Cmd+N`, the palette row, a starter prompt and the collapsed rail's fly-out
+  all open a **draft** instead: an empty conversation the client holds, with the
+  composer usable and the model / reasoning pills mounted, and *nothing* written to
+  the server. The first message is what creates the session
+  (`POST /api/sessions`, carrying the model pin chosen in the composer, so the
+  first turn already runs on the model the pills showed) and is sent into it — the
+  server titles the untitled session from that message, so the rail never collects
+  rows nobody ever typed into. Opening another session or switching project
+  discards the draft; a second press keeps the one you have rather than throwing
+  away what is already typed; a failed create is reported and the draft, text and
+  attachment chips included, stays put so sending again is the whole retry. The
+  one exception is a file large enough to be *uploaded*: it lives under
+  `.karucode/attachments/<session>/`, so attaching one creates the session it
+  needs. `web/src/state/draftSession.test.ts` pins "the button writes nothing" and
+  "the first message writes exactly one session".
+- **Files open as tabs beside the conversation, not only as a modal.** A file still
+  opens in the viewer dialog, and both the explorer's row menu (**Open in a tab**)
+  and the viewer's own **Open in tab** button now put the same document in the
+  workspace strip next to Conversation, Source control and Terminal; **Open in
+  dialog** puts it back. Each tab keeps its read, its scroll position and an
+  unsaved draft while you visit another tab, closing it selects the tab that took
+  its place, and a tab with unsaved edits asks before it goes (the strip's ✕ goes
+  through the same confirmation as the dialog's close). **Delete**/**Backspace**
+  closes the selected tab. File tabs belong to the project, so switching projects
+  closes them, and a link inside a rendered preview opens its own tab rather than
+  replacing the page being read.
+- **GitHub's Markdown, and images that actually load.** Tables, strikethrough,
+  fenced code and bare-URL autolinks were already there; task lists (`- [ ]`,
+  rendered as read-only checkboxes) and footnotes with in-page references now are
+  too, added as markdown-it plugins with the sanitiser widened for exactly one
+  element (a disabled checkbox) and a footnote reference no longer opening in a new
+  tab. An image in a reply that points into the workspace is fetched with the
+  session's credentials and shown from a `blob:` URL, shared per file so a
+  scroll-windowed transcript does not re-download it on every pass; an `https:`
+  image becomes a link, because the app's policy allows no remote image and a broken
+  glyph only reads as a broken app; a reference that escapes the workspace says so.
 - **HTML previews render as the page its author wrote.** The preview loaded its
   document and then nothing else: inside a `sandbox`ed (opaque-origin) document the
   CSP keyword `'self'` matches nothing, so every relative stylesheet, script and
@@ -166,6 +203,64 @@ under **Changed**.
 
 ### Changed
 
+- **A run is one loop: no segments, no `[runtime checkpoint]` turn.** The
+  iteration budget used to belong to a *segment* — 200 model turns — and when a
+  segment ran out mid-task the runtime wrote a synthetic `user` turn
+  (`[runtime checkpoint] Iteration budget refreshed (segment 2/51)…`), pushed it
+  into history and carried on. That turn was billed on every later request in the
+  session, sat in the transcript as if you had said it, and could read to a model
+  as a new instruction — a restart instead of a continuation. `limits.max_iterations`
+  now counts turns for the whole run and defaults to **`0`, which means no
+  ceiling**: a long task is not interrupted by a counter and nothing is appended to
+  the conversation to resume it. `limits.auto_continue` and
+  `limits.max_continues` (and `subagents.max_continues`) are gone; a stale
+  `config.toml` that still has them loads fine, because unknown keys are ignored,
+  and their stored settings rows are simply no longer read.
+
+  What ends a run instead: the model finishing its work, you cancelling it, the
+  `max_run_secs` wall clock (24 h), an operator-set `max_iterations` (a plain
+  `limit_reached` stop), or the new **loop guard**. The guard counts turns that
+  produced *no new information*: every call in them returned an answer the run
+  already had, or was refused as a repeat. Four of those in a row stop the run
+  with `limit_reached` and a notice saying so, which is what catches a model
+  cycling through three questions with the same three answers — a shape the
+  per-call repeat rule (which refuses one identical read) never saw. One new
+  answer, or any write, resets the count, so fix→test→fix, a growing log tail and
+  a file that changed stay legal. Subagents follow the same rules:
+  `subagents.max_iterations` also defaults to `0`, and `timeout_secs` is what ends
+  one.
+
+  Settings loses the **Auto-continue long runs** toggle and the **Auto-continues**
+  fields; **Max iterations** and **Turns per subagent** now say `0 = no ceiling`.
+  The system prompt tells the model it has no turn limit, so it does not stop
+  early to save one.
+
+- **The working steps start open, and where they start is a setting.** The fold
+  covered one finished turn, and every run of calls inside it had to be opened
+  again by hand, so **Show the working** stopped one level short of the calls
+  themselves. A fourth transcript option — **Working steps** (`working`) — now
+  sits beside Tool calls, Grouping and Reasoning in Settings → General →
+  Transcript and in the Theme Studio: `open` (the built-in default) shows a
+  finished turn's narration, its runs of calls and the calls inside them, with the
+  summary line on top as **Hide the working**; `folded` keeps the terse view where
+  the work is one **Show the working** line. Where the state lives did not change:
+  it is per row — one turn, one run of calls — so expanding one never moves
+  another, and switching the option repaints only the rows nobody clicked.
+  Stored themes and imported files from before the option keep the folded look
+  they were written with; only the built-ins start open.
+- **Throughput is measured per block, where you are already looking.** The
+  `↓ <tokens> <rate> t/s` badge sat on the assistant turn's header, so the one live
+  readout a long run has was scrolled out of view as soon as the turn grew past a
+  screen. It now rides the block that is producing text: a streaming **Thought**
+  header, the streaming message's own prose (after its caret), and the header of
+  every running tool or command card — in both the card and the one-line row style,
+  and inside a folded group's open body. Each badge counts the characters of the
+  block it sits on (`chars / 4`, the same estimate as before; the tooltip names
+  what it counted — prose, reasoning, or a call's output), so a running
+  `cargo test` reports the rate its own output is arriving at rather than the
+  turn's frozen model total. None of them outlive what they describe: a badge is
+  mounted only while its block streams or runs, exactly like the turn-level one,
+  and the **Working** chip still speaks for the whole turn.
 - **The unread badge, the project counters, the title total and the notification
   centre are derived from one list.** `store.notifications` is the single source
   (`web/src/state/store.ts`); `store.unread`, `store.unreadByProject` and
@@ -263,6 +358,18 @@ under **Changed**.
   contradiction, so the Agent tab no longer carries it. The plugin note stays: it
   is about plugin *permissions* being declarations rather than an enforced sandbox,
   which is still true and unrelated to the unit.
+
+### Fixed
+
+- **Collapsing the Results dock no longer shrinks the conversation.** The narrow
+  70ch reading measure is a *split* rule — side by side, Conversation is the narrow
+  half — but it was applied to the whole centre pane as well, so hiding the dock
+  took the transcript and the composer from 820px to 638px at a 1920px viewport (a
+  434px empty gutter either side of the text): the opposite of what asking for the
+  freed space means. The measure now lives inside the wide container query, and
+  every tier that is not a real split — the collapsed dock, the ≤1100px overlay and
+  the phone sheet — keeps the app's own content measure, which is also the width of
+  the composer box the transcript has to line up with.
 
 ### Added
 
@@ -404,6 +511,45 @@ under **Changed**.
 
 ### Fixed
 
+- **A turn's thinking survives a reload.** The model's reasoning was streamed to
+  the transcript and then dropped: the provider-stream loop forwarded each
+  `reasoning_content` delta to the browser but never accumulated it, so
+  `Message::assistant_with_reasoning` was always handed `None` and no stored
+  assistant row ever carried `reasoning_content` — although the schema (v11),
+  `GET /api/sessions/:id` and `docs/API.md` all describe it as stored with the turn
+  and sent back on later requests. Switching sessions or reloading the page
+  therefore erased every **Thought** block. The stream now keeps the reasoning
+  (a cancelled, timed-out or failed attempt keeps what it had already streamed,
+  alongside its partial text), and the web client restores it: `seedChatState` and
+  the Agents tab's `activityFromMessages` read `reasoning_content` instead of
+  hard-coding an empty string, and a turn that only thought and then called a tool
+  — no prose at all — is drawn as a thinking block above the tool row rather than
+  vanishing from the turn.
+- **A busy workspace stays responsive: a streaming answer no longer costs more to
+  draw the longer it gets, and open tabs no longer starve the browser.** Three
+  separate costs were measured in the shipped bundle while four sessions and their
+  subagents were running. First, `Markdown` re-parsed the *whole* message on every
+  token delta: a 120 KiB answer cost ~50 ms per render, so the tab sat at 14–20 fps
+  and every click - a project switch above all - queued behind a render. A live
+  message is now drawn in two halves (`web/src/lib/streamingMarkdown.ts`): the
+  blocks that have finished, parsed once and re-parsed only when the boundary
+  moves, and the block still being written, re-parsed per delta and highlighted
+  only once it closes. The same transcript now runs at 58–59 fps with no long
+  tasks, and the finished message renders once, fully, when it settles. The
+  reasoning block follows the same rule: a live thought renders its newest 6 000
+  characters instead of re-laying out the whole thing per token, and it stops
+  pulling the scroller back to the bottom once you have scrolled up to read.
+  Second, every tab opened its own `/api/events` stream. Six tabs pinned all six
+  of the browser's HTTP/1.1 connections to the origin, so the seventh could not
+  boot at all - *Could not reach karucode · The server did not answer within 30s*
+  on `/api/health` - while `curl` to the same server answered in 1.6 ms. One tab
+  now holds the stream under a Web Lock and relays every frame to its siblings
+  over a BroadcastChannel (`web/src/api/sharedStream.ts`); with ten tabs open a
+  new one boots immediately and health checks answer in single-digit
+  milliseconds. Third, the whole project's agent list - several megabytes on a
+  project with history - was re-read on every session-list refresh, including
+  every `run_started`/`run_finished`. It is now re-read when a session is added,
+  removed or renamed, on a project switch, and when the Agents tab asks for it.
 - **Token totals are one row per provider call again, and a running subagent's
   iteration count is real.** Two numbers in the session view were wrong for
   reasons outside the view. A gateway that puts the `usage` object on every

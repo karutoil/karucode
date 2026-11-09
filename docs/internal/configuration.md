@@ -7,7 +7,7 @@
 
 - **Slug:** `configuration`
 - **Tags:** config, settings, configuration, toml, env
-- **Applies to:** `env:KARUCODE_MALLOC_ARENA_MAX`, `env:KARUCODE_MALLOC_TRIM_SECS`, `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_AUTO_CONTINUE`, `env:KARUCODE_MAX_CONTINUES`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_MAX_CONTINUES`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_concurrent`, `config:subagents.max_iterations`, `config:subagents.max_continues`, `config:subagents.max_depth`, `config:subagents.timeout_secs`, `config:[notifications]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `config:notifications.enabled`, `config:notifications.min_run_secs`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`
+- **Applies to:** `env:KARUCODE_MALLOC_ARENA_MAX`, `env:KARUCODE_MALLOC_TRIM_SECS`, `file:~/.config/karucode/config.toml`, `env:KARUCODE_CONFIG`, `env:KARUCODE_ALLOW_TEMP_DIR`, `env:KARUCODE_LOCK_SETTINGS`, `env:KARUCODE_ADMIN_TOKEN`, `env:KARUCODE_PROJECT_ROOTS`, `env:KARUCODE_MAX_ITERATIONS`, `env:KARUCODE_MAX_RUN_SECS`, `env:KARUCODE_CONTEXT_MAX_CHARS`, `env:KARUCODE_MAX_IMAGE_READ_BYTES`, `env:KARUCODE_MODEL_SUPPORTS_IMAGES`, `env:KARUCODE_PLUGINS_WATCH`, `env:KARUCODE_PLUGINS_WATCH_SECS`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `env:KARUCODE_SUBAGENT_MAX_BACKGROUND`, `env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_MAX_ITERATIONS`, `env:KARUCODE_SUBAGENT_TIMEOUT_SECS`, `env:KARUCODE_SUBAGENT_CONCURRENCY`, `env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`, `config:[model]`, `config:[limits]`, `config:[approvals]`, `config:[subagents]`, `config:subagents.allow_background`, `config:subagents.max_background`, `config:subagents.wait_timeout_secs`, `config:subagents.max_concurrent`, `config:subagents.max_iterations`, `config:subagents.max_depth`, `config:subagents.timeout_secs`, `config:[notifications]`, `config:[[plugins]]`, `config:[[mcp_servers]]`, `config:plugins_watch`, `config:plugins_watch_secs`, `config:admin_token`, `config:project_roots`, `config:allow_temp_dir`, `config:model.supports_images`, `config:limits.max_image_read_bytes`, `config:notifications.enabled`, `config:notifications.min_run_secs`, `header:X-Karucode-Admin-Token`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/stats`, `cmd:--config`, `cmd:--data-dir`, `ui:Settings`
 - **Source:** `crates/kc-server/src/settings.rs:14`
 
 ---
@@ -145,34 +145,42 @@ nothing is written, so the running configuration cannot be half-updated.
 
 ## Long-horizon runs
 
-A run is not allowed to die just because it used up its first budget of model
-turns. The iteration budget belongs to a *segment*, and when a segment ends
-mid-task the runtime refreshes it and keeps going in the same session, run and
-transcript - it emits a notice, appends a `[runtime checkpoint]` user turn so
-the transcript explains the jump, and resets the counter.
+A run is one loop, not a chain of budgets. It ends when the model stops
+calling tools, when you cancel it, when the wall clock expires, when an
+operator-set turn ceiling trips, or when the loop guard catches it repeating
+itself - and that is the whole list. There is no segment, no refresh and no
+`[runtime checkpoint]` turn: a synthetic message to "resume" a run would be
+re-billed on every later request, could read to the model as a new
+instruction, and tells it nothing the system prompt has not already said.
 
 ```toml
 [limits]
-max_iterations = 200   # model turns per segment
+max_iterations = 0     # model turns per run; 0 = no ceiling (the default)
 max_run_secs = 86400   # hard wall clock for the whole run (24h)
-auto_continue = true   # refresh the budget instead of stopping
-max_continues = 50     # how many refreshes one run may chain
 ```
 
-The effective ceiling for one run is about
-`(max_continues + 1) * max_iterations` model turns, or `max_run_secs`,
-whichever comes first. Set `auto_continue = false` (or `max_continues = 0`) to
-restore one-shot budgets; the run then stops with status `limit_reached`.
+**`max_iterations = 0` means no turn ceiling**, which is the default: a long
+migration, refactor or failing-suite hunt is not interrupted by a counter. What
+keeps a run in control instead:
+
+* `max_run_secs` - the wall clock, 24h unless you lower it;
+* the loop guard - a turn whose calls only return answers the run already has,
+  four turns in a row, stops the run with `limit_reached` and says why (see
+  `docs/internal/configuration.md`); the per-call rule refuses an identical
+  read-only call before that;
+* the degenerate-repetition detector, which abandons a stream that repeats one
+  short block forever;
+* `max_tool_calls_per_turn`, which bounds one turn's batch;
+* you, cancelling.
+
+A non-zero `max_iterations` is a blunt backstop for an install that wants one;
+the run then ends `limit_reached` with a notice, and nothing is appended to the
+transcript to explain it. Subagents run under the same rules with their own
+numbers: `subagents.max_iterations` (0 = no ceiling) and
+`subagents.timeout_secs`.
 
 Environment: `KARUCODE_MAX_ITERATIONS`, `KARUCODE_MAX_RUN_SECS`,
-`KARUCODE_AUTO_CONTINUE` (`1/0`, `true/false`, `yes/no`, `on/off`),
-`KARUCODE_MAX_CONTINUES`, `KARUCODE_CONTEXT_MAX_CHARS`.
-
-A budget that runs out is never a reason to re-send the prompt: the work is
-still in the transcript, and the checkpoint tells the model to continue rather
-than restart. Subagents follow the same rule with their own numbers:
-`subagents.max_iterations` per segment, refreshed up to
-`subagents.max_continues` times, inside `subagents.timeout_secs`.
+`KARUCODE_CONTEXT_MAX_CHARS`.
 
 ```toml
 [subagents]
@@ -180,8 +188,7 @@ max_concurrent = 3      # subagent loops running at once (0 = no ceiling)
 max_background = 8      # live detached agents per session (0 = no ceiling)
 allow_background = true # permitted to spawn with `background = true`
 wait_timeout_secs = 600 # default bound on `wait_for_agents`
-max_iterations = 200    # model turns per subagent segment
-max_continues = 60      # about 12,200 turns before it must report back
+max_iterations = 0      # model turns per subagent; 0 = no ceiling
 timeout_secs = 14400    # 4h wall clock for one delegated task
 ```
 
@@ -201,13 +208,13 @@ makes cost the only limit - a model that fans out two hundred ways bills for
 two hundred loops. `max_depth` is the other kind of zero: `0` forbids
 delegation outright, and the field holds at most 255 generations.
 
-`max_continues = 0` restores the one-shot budget (the subagent stops at
-`max_iterations`), and `limits.auto_continue = false` switches continuation off
-for runs and subagents alike. Environment:
+`max_iterations = 0` means no turn ceiling for a subagent either; a delegated
+task that takes hours is ended by `timeout_secs`, not by a count of turns.
+Environment:
 `KARUCODE_SUBAGENT_CONCURRENCY`, `KARUCODE_SUBAGENT_MAX_BACKGROUND`,
 `KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`,
-`KARUCODE_SUBAGENT_MAX_ITERATIONS`, `KARUCODE_SUBAGENT_MAX_CONTINUES`,
-`KARUCODE_SUBAGENT_TIMEOUT_SECS`, `KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`.
+`KARUCODE_SUBAGENT_MAX_ITERATIONS`, `KARUCODE_SUBAGENT_TIMEOUT_SECS`,
+`KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`.
 
 `limits.context_max_chars` decides how much conversation is sent to the model.
 Leave it at `0` (the default) and the budget is **derived from the resolved

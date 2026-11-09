@@ -141,16 +141,14 @@ supports_images = false
 #   tool_call = true
 
 [limits]
-# Model turns in one segment of a run. A segment is a checkpoint, not a
-# finish line: when it runs out the run continues automatically (below).
-max_iterations = 200
-# Hard wall-clock ceiling for the whole run, across every segment (24h).
+# Model turns in one run. 0 = no ceiling, which is the default: a long task is
+# not interrupted by a counter, and nothing is appended to the transcript to
+# "resume" it. A non-zero value is a hard stop (the run ends limit_reached).
+# What keeps a runaway in control is the wall clock below plus the loop guard,
+# which stops a run whose turns only return answers it already has.
+max_iterations = 0
+# Hard wall-clock ceiling for the whole run (24h).
 max_run_secs = 86400
-# Keep going when a segment's iteration budget runs out instead of ending the
-# run after a few dozen turns. Set false to restore one-shot budgets.
-auto_continue = true
-# How many times max_iterations may be refreshed in one run (0 = never).
-max_continues = 50
 max_tool_output_bytes = 24000
 max_command_output_bytes = 32000
 command_timeout_secs = 120
@@ -196,18 +194,14 @@ max_concurrent = 3
 # `allow_background = false` is the switch that turns background work off.
 max_background = 8
 allow_background = true
-# Model turns in one segment of a subagent. Like a run, a subagent treats this as
-# a checkpoint: a delegated coding task is a whole piece of work, not one answer.
-max_iterations = 200
-# How many times a subagent may refresh its segment before reporting back
-# (0 = stop dead at max_iterations). The effective ceiling is
-# (max_continues + 1) * max_iterations turns, bounded by timeout_secs.
-max_continues = 60
+# Model turns for one subagent. 0 = no ceiling (the default): a delegated coding
+# task is a whole piece of work, so `timeout_secs` below is what ends it.
+max_iterations = 0
 allow_recursive = false
 # Generations of subagents that may nest below a run. 0 = no delegation at all;
 # the field holds at most 255.
 max_depth = 1
-# Wall clock for one delegated task, across every segment (4h).
+# Wall clock for one delegated task (4h).
 timeout_secs = 14400
 
 # Tell a human when something happened: a run settled, an approval is waiting, a

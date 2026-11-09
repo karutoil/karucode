@@ -6,8 +6,8 @@
 //! * a fresh message history (system prompt marked `is_subagent`, task as the
 //!   user turn) persisted with the agent id so it never pollutes the parent
 //!   conversation;
-//! * iterations bounded by `settings.subagents.max_iterations` per segment and
-//!   refreshed up to `settings.subagents.max_continues` times, with wall clock by
+//! * turns bounded by `settings.subagents.max_iterations` (0 = no ceiling), with
+//!   wall clock by
 //!   `timeout_secs` (plus a hard backstop on top of the in-loop deadline);
 //! * a tool set that excludes `spawn_agent` unless recursion is explicitly
 //!   enabled *and* the depth budget allows it;
@@ -21,7 +21,7 @@
 // @kc-title: Delegate work to subagents
 // @kc-summary: How spawn_agent, spawn_agents and the control tools work - blocking and background, sequential and parallel - and the limits they run under.
 // @kc-tags: subagents, delegation, agents, parallel, background, spawn_agent, spawn_agents, send_message, long-running
-// @kc-applies-to: tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, config:[subagents], config:subagents.max_concurrent, config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_iterations, config:subagents.max_continues, config:subagents.timeout_secs, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_MAX_CONTINUES, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, route:GET /api/sessions/:id, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, event:agent_spawned, event:agent_progress, event:agent_paused, event:agent_message, event:agent_note, event:agent_finished, ui:AgentsTab
+// @kc-applies-to: tool:spawn_agent, tool:spawn_agents, tool:send_message, tool:wait_for_agents, tool:list_subagents, tool:agent_history, tool:pause_agents, tool:resume_agents, tool:kill_agents, tool:report_status, config:[subagents], config:subagents.max_concurrent, config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_iterations, config:subagents.timeout_secs, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, route:GET /api/sessions/:id, route:GET /api/agents, route:GET /api/agents/:id, route:POST /api/agents/:id/pause, route:POST /api/agents/:id/resume, route:POST /api/agents/:id/cancel, event:agent_spawned, event:agent_progress, event:agent_paused, event:agent_message, event:agent_note, event:agent_finished, ui:AgentsTab
 //
 // The model can call `spawn_agent` with a self-contained task and a list of
 // `owned_paths`. A subagent is a **nested, bounded agent loop**: it gets a fresh
@@ -106,8 +106,7 @@
 // max_background = 8       # live background agents per session; 0 = no ceiling
 // allow_background = true  # KARUCODE_SUBAGENT_ALLOW_BACKGROUND
 // wait_timeout_secs = 600  # default bound on wait_for_agents
-// max_iterations = 200     # turns per segment; KARUCODE_SUBAGENT_MAX_ITERATIONS
-// max_continues = 60       # segment refreshes;   KARUCODE_SUBAGENT_MAX_CONTINUES
+// max_iterations = 0       # turns per subagent;  KARUCODE_SUBAGENT_MAX_ITERATIONS
 // allow_recursive = false  # KARUCODE_ALLOW_RECURSIVE_SUBAGENTS
 // max_depth = 1            # 0 = no delegation; at most 255
 // timeout_secs = 14400     # 4h wall clock;      KARUCODE_SUBAGENT_TIMEOUT_SECS
@@ -137,25 +136,30 @@
 // setting makes, and it is why the defaults are small.
 //
 // Zero does not mean the same thing for every field in this section:
-// `max_depth = 0` forbids delegation outright and `max_continues = 0` restores the
-// one-shot budget, so read each field's own rule rather than one rule for all.
+// `max_depth = 0` forbids delegation outright and `max_iterations = 0` means no
+// turn ceiling, so read each field's own rule rather than one rule for all.
 //
 // # A subagent runs as long as the task needs
 //
-// A delegated task is a whole piece of work, so a subagent uses the same
-// checkpoint rule as a top-level run: when a segment's `max_iterations` is used
-// up, the runtime appends a `[runtime checkpoint]` turn and keeps going, in the
-// same transcript, up to `max_continues` refreshes. The effective ceiling is
-// about `(max_continues + 1) * max_iterations` model turns (12,200 with the
-// defaults), or `timeout_secs`, whichever comes first - whichever way a long
-// task ends, it ends because time ran out, not because a counter did.
+// A delegated task is a whole piece of work, so a subagent is not interrupted by
+// a counter: `max_iterations` defaults to `0`, meaning no turn ceiling, and the
+// child keeps working in its own transcript until it reports back. Nothing is
+// injected into that transcript to "resume" it - there is no segment boundary,
+// no checkpoint turn and no refresh message.
 //
-// Set `max_continues = 0` to restore the old one-shot behaviour: the subagent
-// stops dead at `max_iterations` and reports what it has. `limits.auto_continue
-// = false` is the install-wide off switch and wins over this section.
+// What ends a subagent instead:
 //
-// The subagent is told its real budget in its system prompt (segment size,
-// refreshes, wall clock), so it plans against the numbers it actually gets.
+// * `timeout_secs` - the wall clock for one delegated task (4h by default);
+// * the loop guard - four turns in a row that only return answers the child
+//   already has stop it, and its summary says it was looping;
+// * the same per-call rule and repetition detector a run gets;
+// * the parent cancelling it, or `cancel`/`kill_agents`.
+//
+// A non-zero `max_iterations` is a hard stop: the child reports what it has and
+// the parent sees a failed tool result rather than a silent hang.
+//
+// The subagent is told its real budget in its system prompt (turn ceiling if any,
+// wall clock), so it plans against the numbers it actually gets.
 //
 // # What it inherits and what it does not
 //
@@ -4016,7 +4020,6 @@ mod tests {
         kc_core::config::SubagentConfig {
             max_concurrent,
             max_iterations: 6,
-            max_continues: 0,
             allow_recursive: true,
             max_depth: 3,
             timeout_secs: 10,

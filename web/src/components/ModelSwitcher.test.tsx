@@ -48,9 +48,7 @@ function twoProfileConfig(): Config {
     limits: {
       max_iterations: 32,
       max_run_secs: 1800,
-      auto_continue: true,
-      max_continues: 50,
-      max_tool_output_bytes: 24000,
+          max_tool_output_bytes: 24000,
       max_command_output_bytes: 32000,
       command_timeout_secs: 120,
       max_command_timeout_secs: 600,
@@ -63,8 +61,7 @@ function twoProfileConfig(): Config {
     subagents: {
       max_concurrent: 3,
       max_iterations: 16,
-      max_continues: 0,
-      allow_recursive: false,
+        allow_recursive: false,
       max_depth: 1,
       timeout_secs: 900,
       allow_background: true,
@@ -426,6 +423,30 @@ describe('ModelSwitcher stability (the pills never blink out)', () => {
     const button = screen.getByRole('button', { name: /Model for this session/ });
     expect(button.getAttribute('title')).toBe('No model configured yet');
     expect(button.textContent).toContain('—');
+  });
+
+  it('lets a draft choose its model without a session to PATCH', async () => {
+    // "New session" creates nothing until the first message, so there is no id to
+    // write a pin to. The pills stay mounted and the choice is held in the draft,
+    // where `sendChatMessage` picks it up for the create request.
+    const fetchMock = vi.fn(async () => {
+      throw new Error('a draft pin must not reach the server');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    store.draftSession.value = { id: 5, projectId: null, model: null };
+
+    render(<ModelSwitcher />);
+    const button = screen.getByRole('button', { name: /Model for this session: Model B on Gateway/i });
+    expect(screen.queryByText(/this session/)).toBeNull();
+
+    fireEvent.click(button);
+    fireEvent.click(screen.getByRole('option', { name: /Model A/ }));
+
+    await waitFor(() => expect(store.draftSession.value?.model).toEqual({ provider: 'gateway', model: 'model-a' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Model for this session: Model A/i })).not.toBeNull(),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

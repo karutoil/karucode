@@ -698,6 +698,79 @@ async fn reasoning_that_enumerates_providers_is_not_called_a_loop() {
 }
 
 #[tokio::test]
+async fn the_turns_reasoning_is_persisted_with_the_assistant_row() {
+    // The reported bug: a reloaded session showed no thinking block. The stream
+    // forwarded reasoning only to the live client and never stored it, even
+    // though the schema, `StoredMessage::reasoning_content` and the API contract
+    // all expect the turn to carry its analysis. It has to be accumulated across
+    // deltas, not just emitted.
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![
+        ProviderChunk::Reasoning("weigh the two options. ".into()),
+        ProviderChunk::Reasoning("the second is cheaper.".into()),
+        ProviderChunk::Text("Use the second.".into()),
+        ProviderChunk::Finish {
+            reason: "stop".into(),
+        },
+    ])])
+    .build()
+    .await;
+
+    let events = h.run_to_finish("which option?").await;
+    assert_eq!(finished_status(&events), "completed");
+    let messages = h.session_messages().await;
+    let assistant = messages
+        .iter()
+        .find(|m| m.role == "assistant" && m.content == "Use the second.")
+        .expect("assistant row");
+    assert_eq!(
+        assistant.reasoning_content.as_deref(),
+        Some("weigh the two options. the second is cheaper.")
+    );
+    // The live view is unchanged: the deltas still go out as they arrive.
+    assert!(events.iter().any(|e| matches!(
+        &e.event,
+        Event::ReasoningDelta { delta } if delta == "weigh the two options. "
+    )));
+}
+
+#[tokio::test]
+async fn a_tool_calling_turn_keeps_its_reasoning_with_no_prose() {
+    // A reasoning model that thinks and then acts streams no text at all; the
+    // stored row is reasoning + tool calls, and that row is what puts the
+    // thinking block above the tool card after a reload.
+    let mut h = HarnessBuilder::new(vec![
+        Script::Chunks(vec![
+            ProviderChunk::Reasoning("read the directory first".into()),
+            ProviderChunk::ToolCallDelta {
+                index: 0,
+                id: Some("call_1".into()),
+                name: Some("list_dir".into()),
+                arguments_delta: Some("{\"path\":\".\"}".into()),
+            },
+            ProviderChunk::Finish {
+                reason: "tool_calls".into(),
+            },
+        ]),
+        Script::text("done"),
+    ])
+    .build()
+    .await;
+
+    let events = h.run_to_finish("look around").await;
+    assert_eq!(finished_status(&events), "completed");
+    let messages = h.session_messages().await;
+    let acting = messages
+        .iter()
+        .find(|m| m.role == "assistant" && !m.tool_calls.is_empty())
+        .expect("tool-calling assistant row");
+    assert_eq!(acting.content, "");
+    assert_eq!(
+        acting.reasoning_content.as_deref(),
+        Some("read the directory first")
+    );
+}
+
+#[tokio::test]
 async fn an_enumeration_in_the_answer_is_not_trimmed() {
     // The same list in the answer text, where cutting it would silently delete the
     // part of the reply the user asked for.
@@ -2686,10 +2759,10 @@ async fn cancelling_mid_stream_marks_the_run_cancelled() {
 
 #[tokio::test]
 async fn iteration_limit_stops_the_run_with_limit_reached() {
+    // An operator-set ceiling still works, and it is a plain stop: the run ends
+    // `limit_reached` and nothing is appended to the transcript to explain it.
     let limits = Limits {
         max_iterations: 2,
-        // One-shot budget: the pre-long-horizon behaviour, kept as an option.
-        auto_continue: false,
         ..Default::default()
     };
     let mut h = HarnessBuilder::new(vec![
@@ -2722,52 +2795,97 @@ async fn iteration_limit_stops_the_run_with_limit_reached() {
 }
 
 #[tokio::test]
-async fn iteration_budget_is_a_checkpoint_not_a_finish_line() {
-    // Three segments of two turns: the run must survive two checkpoints and
-    // finish on the model's own terms instead of dying at the first budget.
+async fn a_run_keeps_going_past_a_hundred_turns_without_a_continuation_turn() {
+    // There is no segment any more: `max_iterations = 0` means the run is not
+    // counting turns at all, so a long job runs to its own ending. Nothing is
+    // injected into the conversation to "resume" it - a synthetic user turn would
+    // be re-billed on every later request and could read to the model as a new
+    // instruction, which is exactly what a long-horizon run must not have.
     let limits = Limits {
-        max_iterations: 2,
-        max_continues: 2,
-        auto_continue: true,
+        max_iterations: 0,
         ..Default::default()
     };
-    let mut h = HarnessBuilder::new(vec![
-        Script::call(&[("call_1", "echo", "{}")]),
-        Script::call(&[("call_2", "echo", "{}")]),
-        Script::call(&[("call_3", "echo", "{}")]),
-        Script::call(&[("call_4", "echo", "{}")]),
-        Script::call(&[("call_5", "echo", "{}")]),
-        Script::text("finished the long job"),
-    ])
+    // Every turn asks something different, which is what a real long run looks
+    // like: the point is that 40 turns in, nothing has interrupted it.
+    let mut scripts: Vec<Script> = (0..40)
+        .map(|i| {
+            Script::call(&[(
+                Box::leak(format!("call_{i}").into_boxed_str()),
+                "echo",
+                Box::leak(format!("{{\"text\":\"turn {i}\"}}").into_boxed_str()),
+            )])
+        })
+        .collect();
+    scripts.push(Script::text("finished the long job"));
+    let mut h = HarnessBuilder::new(scripts)
+        .tool(EchoTool::boxed("echo"))
+        .settings(FakeSettings::default().with_limits(limits))
+        .build()
+        .await;
+
+    let events = h.run_to_finish("a job that outlives any budget").await;
+    assert_eq!(finished_status(&events), "completed");
+    assert_eq!(count(&events, "iteration_started"), 41, "40 tool turns + the answer");
+    assert_eq!(h.factory.requests().len(), 41, "every script was used");
+
+    let messages = h.session_messages().await;
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.role == "user" && m.content.contains("runtime checkpoint")),
+        "no continuation turn may be injected: {:?}",
+        messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+    );
+    // One user turn in, one final answer out - nothing else was added.
+    assert_eq!(
+        messages.iter().filter(|m| m.role == "user").count(),
+        1,
+        "the run wrote no user turns of its own"
+    );
+    assert_eq!(h.store.runs()[0].status, "completed");
+}
+
+#[tokio::test]
+async fn a_run_that_repeats_itself_stops_instead_of_burning_turns() {
+    // The replacement for the segment counter: with no turn budget, a model that
+    // re-issues the same calls and receives the same answers forever is caught by
+    // evidence - four identical turns in a row. A write in between is progress,
+    // so it resets (covered by the fix→test→fix tests elsewhere).
+    let limits = Limits {
+        max_iterations: 0,
+        ..Default::default()
+    };
+    let identical = || Script::call(&[("call_same", "echo", "{\"text\":\"same\"}")]);
+    // Enough copies that the guard, not the script list, has to be what ends it.
+    let mut scripts = vec![identical(); 12];
+    scripts.push(Script::text("never reached"));
+    let mut h = HarnessBuilder::new(scripts)
     .tool(EchoTool::boxed("echo"))
     .settings(FakeSettings::default().with_limits(limits))
     .build()
     .await;
 
-    let events = h
-        .run_to_finish("a job that needs more than one budget")
-        .await;
-    assert_eq!(finished_status(&events), "completed");
-    assert_eq!(count(&events, "iteration_started"), 6);
-    assert_eq!(h.factory.requests().len(), 6, "every script was used");
-    let checkpoints = events
-        .iter()
-        .filter(|e| {
-            matches!(&e.event, Event::Notice { message, .. }
-                if message.contains("continuing automatically"))
-        })
-        .count();
-    assert_eq!(checkpoints, 2, "one notice per refreshed segment");
-
-    // The checkpoint is persisted, so the next run's transcript explains the
-    // jump instead of hiding it.
-    let messages = h.session_messages().await;
-    let nudges = messages
-        .iter()
-        .filter(|m| m.role == "user" && m.content.contains("[runtime checkpoint]"))
-        .count();
-    assert_eq!(nudges, 2);
-    assert_eq!(h.store.runs()[0].status, "completed");
+    let events = h.run_to_finish("a question already answered").await;
+    assert_eq!(
+        finished_status(&events),
+        "limit_reached",
+        "the loop guard must end the run: {:?}",
+        kinds(&events)
+    );
+    let stopped = events.iter().any(|e| {
+        matches!(&e.event, Event::Notice { message, .. }
+            if message.contains("no new information"))
+    });
+    assert!(stopped, "the stop must say why: {:?}", kinds(&events));
+    assert!(
+        h.factory.requests().len() < 12,
+        "the guard must end the run, not the script list: {}",
+        h.factory.requests().len()
+    );
 }
 
 #[tokio::test]
@@ -2835,6 +2953,37 @@ async fn provider_error_chunk_keeps_the_partial_assistant_text() {
         .expect("partial text");
     assert_eq!(assistant.content, "half an answer");
     assert!(assistant.tool_calls.is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_turn_keeps_the_reasoning_it_had_already_streamed() {
+    // The reader watched the thought arrive; a failure must not erase it from the
+    // transcript, which is what a reload would show. A thought-only failure has no
+    // prose at all, so the row is reasoning and nothing else.
+    let mut h = HarnessBuilder::new(vec![Script::Chunks(vec![
+        ProviderChunk::Reasoning("check the headers before the body".into()),
+        ProviderChunk::Error {
+            message: "stream broke before any text".into(),
+            retryable: true,
+        },
+    ])])
+    .model(restarts(0))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("fail after thinking").await;
+    assert_eq!(finished_status(&events), "failed");
+
+    let messages = h.session_messages().await;
+    let assistant = messages
+        .iter()
+        .find(|m| m.role == "assistant")
+        .expect("partial thought");
+    assert_eq!(assistant.content, "");
+    assert_eq!(
+        assistant.reasoning_content.as_deref(),
+        Some("check the headers before the body")
+    );
 }
 
 /// Model config with a small restart budget and a millisecond backoff, so a
@@ -4000,15 +4149,16 @@ async fn subagent_failure_is_isolated_from_the_parent_run() {
 }
 
 #[tokio::test]
-async fn a_subagent_outlives_its_first_segment_instead_of_dying_at_the_budget() {
+async fn a_subagent_runs_until_it_is_done_instead_of_dying_at_a_budget() {
     // The reported bug: a delegated coding task burned a batch of tool calls per
     // turn, hit `subagents.max_iterations` in a couple of minutes and came back
-    // as `failed` while the work was still in flight. A segment is a checkpoint
-    // for a subagent exactly as it is for a run.
+    // as `failed` while the work was still in flight. A subagent is bound by its
+    // wall clock and its loop guards now, not by a turn counter with a refresh
+    // ritual around it.
     let subagents = SubagentConfig {
         max_concurrent: 1,
-        max_iterations: 2,
-        max_continues: 2,
+        // No turn ceiling: the default, and the point of the test.
+        max_iterations: 0,
         allow_recursive: false,
         max_depth: 1,
         timeout_secs: 60,
@@ -4018,7 +4168,7 @@ async fn a_subagent_outlives_its_first_segment_instead_of_dying_at_the_budget() 
     };
     let mut h = HarnessBuilder::new(vec![
         spawn_call("a long job", None, false),
-        // Three segments of two turns, then the child's own final answer.
+        // Three turns, then the child's own final answer.
         Script::call(&[("c1", "echo", "{}")]),
         Script::call(&[("c2", "echo", "{}")]),
         Script::call(&[("c3", "echo", "{}")]),
@@ -4041,21 +4191,22 @@ async fn a_subagent_outlives_its_first_segment_instead_of_dying_at_the_budget() 
     let agent = &agents[0];
     assert_eq!(
         agent.status, "completed",
-        "the child must survive its checkpoints: {:?}",
+        "the child must outlive its turn ceiling: {:?}",
         agent.error
     );
     assert_eq!(agent.iterations, 6, "one iteration per model round-trip");
     assert!(agent.summary.contains("child finished the long job"));
     assert!(agent.error.is_none(), "{:?}", agent.error);
 
-    // Every checkpoint is persisted on the child transcript, so the transcript
-    // explains the jump instead of hiding it.
+    // Nothing was injected into the child's transcript to carry it across a
+    // boundary: it just kept working.
     let child_messages = h.store.messages_for_agent(&agent.id);
-    let checkpoints = child_messages
-        .iter()
-        .filter(|m| m.role == "user" && m.content.contains("[runtime checkpoint]"))
-        .count();
-    assert_eq!(checkpoints, 2, "one per refreshed segment");
+    assert!(
+        !child_messages
+            .iter()
+            .any(|m| m.role == "user" && m.content.contains("runtime checkpoint")),
+        "a subagent must not be handed a synthetic user turn"
+    );
 
     // The child was told its own budget, not the run's.
     let child_request = h
@@ -4065,9 +4216,7 @@ async fn a_subagent_outlives_its_first_segment_instead_of_dying_at_the_budget() 
         .find(|r| r.messages[0].content.contains("You are a focused subagent"))
         .expect("a child request");
     assert!(
-        child_request.messages[0]
-            .content
-            .contains("2 model turns per segment"),
+        child_request.messages[0].content.contains("no turn limit"),
         "{}",
         child_request.messages[0].content
     );
@@ -4089,7 +4238,6 @@ async fn a_subagent_without_continuation_still_stops_at_its_budget() {
     let subagents = SubagentConfig {
         max_concurrent: 1,
         max_iterations: 2,
-        max_continues: 0,
         allow_recursive: false,
         max_depth: 1,
         timeout_secs: 60,
@@ -4119,7 +4267,10 @@ async fn a_subagent_without_continuation_still_stops_at_its_budget() {
         error.contains("settings.subagents.max_iterations"),
         "{error}"
     );
-    assert!(error.contains("max_continues"), "{error}");
+    assert!(
+        !error.contains("max_continues"),
+        "there is no continuation to mention: {error}"
+    );
     assert_eq!(
         h.factory.requests().len(),
         4,
@@ -4169,7 +4320,6 @@ async fn recursion_is_allowed_when_enabled_and_depth_allows() {
     let subagents = SubagentConfig {
         max_concurrent: 2,
         max_iterations: 4,
-        max_continues: 0,
         allow_recursive: true,
         max_depth: 2,
         timeout_secs: 30,
@@ -4205,7 +4355,6 @@ async fn subagent_depth_limit_stops_further_nesting() {
     let subagents = SubagentConfig {
         max_concurrent: 2,
         max_iterations: 4,
-        max_continues: 0,
         allow_recursive: true,
         max_depth: 1,
         timeout_secs: 30,
@@ -4370,7 +4519,6 @@ async fn subagent_timeout_marks_the_agent_failed_but_not_the_parent() {
     let subagents = SubagentConfig {
         max_concurrent: 1,
         max_iterations: 8,
-        max_continues: 0,
         allow_recursive: false,
         max_depth: 1,
         timeout_secs: 1,
@@ -4570,7 +4718,6 @@ async fn subagent_timeout_cancels_inflight_tool_before_dropping_the_loop() {
     let subagents = SubagentConfig {
         max_concurrent: 1,
         max_iterations: 8,
-        max_continues: 0,
         allow_recursive: false,
         max_depth: 1,
         // Two seconds, not one: this asserts that a timed-out child's tool
@@ -7234,7 +7381,6 @@ fn fan_out_settings() -> SubagentConfig {
     SubagentConfig {
         max_concurrent: 4,
         max_iterations: 6,
-        max_continues: 0,
         allow_recursive: true,
         max_depth: 3,
         timeout_secs: 30,

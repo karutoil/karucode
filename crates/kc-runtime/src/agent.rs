@@ -46,7 +46,8 @@
 // the trimmed final answer is known, the runtime emits `text_replaced` with that
 // whole content; a client replaces its live text atomically instead of appending
 // the correction. The replacement equals the persisted assistant text. Reasoning
-// loops instead use the bounded restart path because reasoning is not persisted.
+// has no such replacement event, so a reasoning loop abandons the attempt and
+// uses the bounded restart path instead: the partial thought is never persisted.
 // Provider configuration and retry classifications are covered by
 // `provider-profiles`; the SSE transport is described by `http-api`.
 
@@ -908,17 +909,19 @@ async fn run_loop_inner(
 ) -> LoopOutcome {
     let ctx = spec.emit_ctx(&inner);
     let mut history = std::mem::take(&mut spec.history);
-    // `iterations` counts every model round-trip in the loop; `segment_iterations`
-    // only the current budget window. The loop stops on the segment budget only
-    // when it may not continue (`auto_continue` off, `max_continues` reached) or
-    // when the wall clock is gone. A subagent follows the same rule with its own
-    // numbers - a delegated task that needs hours must not die at its first
-    // segment while the run that spawned it keeps going.
+    // `iterations` counts every model round-trip in the loop. There is no
+    // segment and no refresh: a run is bounded by the wall clock, by an optional
+    // turn ceiling an operator set, and by the loop guards below - never by a
+    // counter that starts a fresh turn to say it started a fresh turn.
     let mut iterations = 0u32;
-    let mut segment_iterations = 0u32;
-    let mut continues = 0u32;
-    let max_segments = spec.budget.max_continues.saturating_add(1);
     let mut last_text = String::new();
+    // Answers this run has already seen, and how many turns in a row have taught
+    // the model nothing new. With no turn budget to end a runaway, this streak is
+    // what ends one: a model that keeps asking questions it already has the
+    // answers to is looping, however its calls are shaped (see `NO_NEWS_TURNS`).
+    let mut answers_seen: std::collections::HashSet<[u8; 32]> =
+        std::collections::HashSet::new();
+    let mut no_news: u32 = 0;
     // Identical calls seen in this run: the hash of the result each returned, how
     // many mutating calls had happened when that result was produced, and how many
     // times the call has since been refused. A model stuck in a loop re-issues the
@@ -1037,63 +1040,29 @@ async fn run_loop_inner(
             });
         }
 
-        if segment_iterations >= spec.budget.max_iterations {
+        if spec.budget.max_iterations > 0 && iterations >= spec.budget.max_iterations {
+            // A ceiling an operator asked for, not a checkpoint: there is no
+            // refresh and no continuation turn, because a run is one long run.
+            // The default is no ceiling at all; see `limits.max_iterations`.
             let message = if spec.is_subagent {
                 format!(
-                    "subagent stopped after {iterations} iterations (settings.subagents.max_iterations \
-is {} per segment, settings.subagents.max_continues is {})",
-                    spec.budget.max_iterations, spec.budget.max_continues
+                    "subagent stopped after {iterations} turns (settings.subagents.max_iterations \
+is {})",
+                    spec.budget.max_iterations
                 )
             } else {
                 format!(
-                    "stopped after {iterations} iterations (limits.max_iterations is {} per \
-segment, limits.max_continues is {})",
-                    spec.budget.max_iterations, spec.budget.max_continues
+                    "stopped after {iterations} turns (limits.max_iterations is {})",
+                    spec.budget.max_iterations
                 )
             };
-            // A budget that runs out mid-task is a checkpoint, not a finish
-            // line: the previous turn asked for tools, so the work is still in
-            // flight. Refresh the window and keep the same session, run and
-            // transcript, bounded by `max_continues` and the wall clock.
-            let can_continue = spec.budget.auto_continue
-                && continues < spec.budget.max_continues
-                && Instant::now() < spec.deadline
-                && !spec.cancel.is_cancelled();
-            if can_continue {
-                continues += 1;
-                segment_iterations = 0;
-                let note = continuation_nudge(continues, max_segments, &spec);
-                let message = Message::user(note);
-                // Persist the checkpoint so the next run's transcript shows why
-                // the conversation jumped, instead of a silent gap.
-                if let Err(e) = persist(
-                    &inner,
-                    &spec.session_id,
-                    &spec.run_id,
-                    spec.agent_id.as_ref(),
-                    &message,
-                )
-                .await
-                {
-                    ctx.error("store", format!("could not persist the checkpoint: {e}"));
-                }
-                history.push(message);
-                ctx.notice(
-                    "info",
-                    format!(
-                        "iteration budget refreshed after {iterations} iterations - continuing automatically (segment {}/{max_segments}, limits.auto_continue)",
-                        continues + 1
-                    ),
-                );
+            ctx.notice("warn", message.clone());
+            let error = if spec.is_subagent {
+                Some(message)
             } else {
-                ctx.notice("warn", message.clone());
-                let error = if spec.is_subagent {
-                    Some(message)
-                } else {
-                    None
-                };
-                return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
-            }
+                None
+            };
+            return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
         }
         if Instant::now() >= spec.deadline {
             let message = if spec.is_subagent {
@@ -1155,7 +1124,6 @@ segment, limits.max_continues is {})",
         }
 
         iterations += 1;
-        segment_iterations += 1;
         if let Some(state) = &spec.run_state {
             state.iterations.store(iterations, Ordering::Relaxed);
         }
@@ -1526,15 +1494,15 @@ segment, limits.max_continues is {})",
                 }
             }
             StreamEnd::Cancelled => {
-                if !text.is_empty() {
-                    persist_assistant_text(&inner, &spec, &ctx, &text).await;
+                if !text.is_empty() || reasoning.is_some() {
+                    persist_assistant_text(&inner, &spec, &ctx, &text, reasoning.as_deref()).await;
                 }
                 ctx.notice("info", "run cancelled");
                 return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
             }
             StreamEnd::TimedOut => {
-                if !text.is_empty() {
-                    persist_assistant_text(&inner, &spec, &ctx, &text).await;
+                if !text.is_empty() || reasoning.is_some() {
+                    persist_assistant_text(&inner, &spec, &ctx, &text, reasoning.as_deref()).await;
                 }
                 let message = if spec.is_subagent {
                     format!(
@@ -1557,14 +1525,15 @@ segment, limits.max_continues is {})",
             }
             StreamEnd::Failed { message, .. } => {
                 if spec.cancel.is_cancelled() {
-                    if !text.is_empty() {
-                        persist_assistant_text(&inner, &spec, &ctx, &text).await;
+                    if !text.is_empty() || reasoning.is_some() {
+                        persist_assistant_text(&inner, &spec, &ctx, &text, reasoning.as_deref())
+                            .await;
                     }
                     ctx.notice("info", "run cancelled");
                     return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
                 }
-                if !text.is_empty() {
-                    persist_assistant_text(&inner, &spec, &ctx, &text).await;
+                if !text.is_empty() || reasoning.is_some() {
+                    persist_assistant_text(&inner, &spec, &ctx, &text, reasoning.as_deref()).await;
                 }
                 ctx.error("provider", message.clone());
                 return LoopOutcome::new(RunStatus::Failed, Some(message), last_text, iterations);
@@ -1604,6 +1573,9 @@ segment, limits.max_continues is {})",
         }
 
         // --- tools ------------------------------------------------------------
+        // Where this turn's results start in `history`, so the loop guard below
+        // can digest exactly what this turn produced.
+        let turn_start = history.len();
         let per_turn = spec.limits.max_tool_calls_per_turn.max(1);
         let skipped_by_cap = calls.len().saturating_sub(per_turn);
         // A turn is bounded in *bytes*, not only in call count: 32 parallel
@@ -1828,6 +1800,43 @@ segment, limits.max_continues is {})",
             }
         }
 
+        // --- did this turn teach the run anything? ---------------------------
+        // The replacement for the segment counter. Every call this turn made is
+        // looked up against what the run has already been told: a call whose
+        // answer is identical to an earlier answer of the same call, or that was
+        // refused as a repeat, produced no new information. Four turns of that in
+        // a row is a loop - the model is re-asking questions it has the answers
+        // to, and paying for every one - so the run stops instead of grinding.
+        // One new answer, or a write (which changes what the calls return),
+        // resets the streak.
+        let mut fresh = false;
+        for message in &history[turn_start..] {
+            let Some(id) = message.tool_call_id.as_deref() else {
+                continue;
+            };
+            let Some(call) = calls.iter().find(|call| call.id == id) else {
+                continue;
+            };
+            fresh |= answers_seen.insert(answered_key(call, message));
+        }
+        if fresh {
+            no_news = 0;
+        } else {
+            no_news += 1;
+        }
+        if no_news >= NO_NEWS_TURNS {
+            let message = format!(
+                "stopped: the last {no_news} turns produced no new information - every call returned an answer this run already had, or was refused as a repeat. Re-issuing them cannot produce anything new: say what is blocked, or take a different step."
+            );
+            ctx.notice("warn", message.clone());
+            let error = if spec.is_subagent {
+                Some(message)
+            } else {
+                None
+            };
+            return LoopOutcome::new(RunStatus::LimitReached, error, last_text, iterations);
+        }
+
         if spec.cancel.is_cancelled() {
             ctx.notice("info", "run cancelled");
             return LoopOutcome::new(RunStatus::Cancelled, None, last_text, iterations);
@@ -1853,32 +1862,51 @@ segment, limits.max_continues is {})",
     }
 }
 
-/// The synthetic user turn that carries a run across an iteration-budget
-/// boundary. It is persisted, so the transcript explains the jump, and it tells
-/// the model exactly what to do next instead of leaving it to guess.
-fn continuation_nudge(continues: u32, max_segments: u32, spec: &LoopSpec) -> String {
-    let remaining = spec
-        .deadline
-        .saturating_duration_since(Instant::now())
-        .as_secs();
-    format!(
-        "[runtime checkpoint] Iteration budget refreshed (segment {}/{max_segments}). \
-This is not a new request: the task is still in progress and you have {remaining}s of \
-wall clock left. Continue exactly where you stopped. Do not repeat work you already \
-did, do not re-read files whose contents you already know, and do not restate your plan. \
-If the remaining work is large, keep a short plan in a file so a later segment can pick \
-it up. Stop only when the task is complete, verified, or genuinely blocked.",
-        continues + 1
-    )
+/// What one call answered, as a key the loop guard can compare.
+///
+/// The runtime has no turn budget to lean on any more, so "is this run still
+/// making progress?" has to be answered from evidence. This key is that
+/// evidence: the call, and the answer it got. A pair already seen in this run
+/// taught the model nothing the second time - and a refusal of a call it has
+/// already made taught it nothing either, which is why a `[blocked: ...]` note is
+/// normalised (its text carries a count that grows on every refusal).
+fn answered_key(call: &ToolCall, message: &Message) -> [u8; 32] {
+    let body = if message.content.starts_with("[blocked:") {
+        "[blocked]"
+    } else {
+        message.content.as_str()
+    };
+    repeat_fingerprint(&[&call.name, &call.arguments, body])
 }
 
+/// Turns in a row that may teach the model nothing before the run stops.
+///
+/// Four, so the per-call rule gets to do its job first: the third identical
+/// answer is already refused (`REPEAT_NOTE_AFTER`), and this is what happens when
+/// the model ignores that and keeps asking. It is a count of *no new
+/// information*, not of identical turns, so a model cycling through three
+/// questions with the same three answers is caught too - and a write, or one
+/// answer it had not seen, resets it.
+const NO_NEWS_TURNS: u32 = 4;
+
+/// Store what a turn had produced when it stopped early.
+///
+/// A cancelled, timed-out or failed attempt has already streamed its prose and
+/// its reasoning to the reader, so both are persisted: the transcript after a
+/// reload must match what was on screen. Kept apart from the normal path because
+/// these turns have no tool calls.
 async fn persist_assistant_text(
     inner: &Arc<RuntimeInner>,
     spec: &LoopSpec,
     ctx: &EmitCtx,
     text: &str,
+    reasoning: Option<&str>,
 ) {
-    let message = Message::assistant(text.to_string(), Vec::new());
+    let message = Message::assistant_with_reasoning(
+        text.to_string(),
+        reasoning.map(str::to_string),
+        Vec::new(),
+    );
     if let Err(e) = persist(
         inner,
         &spec.session_id,
@@ -2672,15 +2700,19 @@ async fn consume(
     Option<String>,
 ) {
     let mut text = String::new();
-    let reasoning = String::new();
+    // Reasoning is kept, not just forwarded: the turn is persisted with it
+    // (`Message::assistant_with_reasoning`), so a reloaded transcript can show
+    // the thinking block again and the model's next request carries the same
+    // turn back. Dropping it here is what made every thought vanish on reload.
+    let mut reasoning = String::new();
     let mut accumulator = kc_core::provider::ToolCallAccumulator::default();
     let mut end = StreamEnd::Complete;
     let mut finish_reason: Option<String> = None;
     // Rolling tails of both channels, so a stream that degenerates into
     // repeating one short block can be caught while it happens. A reasoning
     // model can loop in `reasoning_content` for hundreds of thousands of tokens
-    // without ever writing a word of content, and that channel is discarded, so
-    // nothing downstream can notice: it has to be caught here.
+    // without ever writing a word of content, and that channel is persisted
+    // verbatim, so nothing downstream can notice: it has to be caught here.
     let mut text_detector = TextRepetitionDetector::default();
     let mut reason_tail = RepeatTail::default();
     let mut degenerate: Option<Degenerate> = None;
@@ -2756,11 +2788,12 @@ async fn consume(
                         if !delta.is_empty() {
                             content_seen = true;
                             ctx.emit(Event::ReasoningDelta { delta: delta.clone() });
+                            reasoning.push_str(&delta);
                             if let Some(loop_hit) = reason_tail.push(&delta, REPEATS_REASONING) {
-                                // Reasoning is streamed and then discarded, so
-                                // there is nothing to save here - only a turn to
-                                // abandon. Re-issuing the identical request is
-                                // the cheapest escape: the loop is a sampling
+                                // The whole attempt is abandoned rather than
+                                // trimmed, so nothing about it is persisted.
+                                // Re-issuing the identical request is the
+                                // cheapest escape: the loop is a sampling
                                 // accident, and the alternative is burning the
                                 // whole output budget on it.
                                 degenerate = Some(Degenerate::Reasoning(loop_hit.block.into()));
@@ -2977,9 +3010,10 @@ enum Degenerate {
 pub(crate) struct RepeatSpec {
     /// How many copies of the block, back to back, make a loop.
     ///
-    /// Different per channel on purpose: reasoning is discarded, so cutting it is
-    /// free and 8 copies is enough to be sure; answer text is content, so the bar
-    /// is higher (a table or a list may repeat a line several times).
+    /// Different per channel on purpose: a caught reasoning loop abandons the
+    /// whole attempt, so cutting it early is free and 8 copies is enough to be
+    /// sure; answer text is content, so the bar is higher (a table or a list may
+    /// repeat a line several times).
     pub(crate) repeats: usize,
     /// The longest block that may repeat. A cycle longer than this is a document
     /// structure - a quoted paragraph, a table row - not a stuck model, and the
@@ -2998,7 +3032,7 @@ pub(crate) struct RepeatSpec {
 pub(crate) const REASONING_REPEATS: usize = 8;
 pub(crate) const TEXT_REPEATS: usize = 10;
 
-/// Reasoning is discarded, so a caught loop is free: cut early.
+/// A caught reasoning loop abandons the attempt, so it is free: cut early.
 pub(crate) const REPEATS_REASONING: RepeatSpec = RepeatSpec {
     repeats: REASONING_REPEATS,
     max_period: 512,
@@ -3748,8 +3782,6 @@ mod current_runtime_regressions {
         let (gate, handle) = crate::tests_support::GateTool::pair("hold_first_turn");
         let limits = Limits {
             max_iterations: 1,
-            max_continues: 0,
-            auto_continue: true,
             ..Limits::default()
         };
         let mut h = HarnessBuilder::new(vec![

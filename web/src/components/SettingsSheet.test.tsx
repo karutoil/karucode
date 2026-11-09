@@ -28,6 +28,7 @@ import {
   THEME_STORAGE_KEY,
   THEME_THINKING_CHOICES,
   THEME_TOOL_STYLE_CHOICES,
+  THEME_WORKING_CHOICES,
   isDarkColor,
   resolvePalette,
 } from '../theme';
@@ -497,11 +498,8 @@ describe('SettingsSheet providers', () => {
     expect(patch?.model?.model).toBeUndefined();
     expect(patch?.model?.api_key).toBeUndefined();
     expect(patch?.limits?.max_iterations).toBe(32);
-    expect(patch?.limits?.auto_continue).toBe(true);
-    expect(patch?.limits?.max_continues).toBe(50);
     expect(patch?.approvals?.mode).toBe('ask');
     expect(patch?.subagents?.max_concurrent).toBe(3);
-    expect(patch?.subagents?.max_continues).toBe(0);
   });
 
   it('adds a picked models.dev model with prefilled metadata', async () => {
@@ -720,42 +718,39 @@ describe('SettingsSheet controls', () => {
     vi.unstubAllGlobals();
   });
 
-  it('lets a subagent outlive its first segment and saves both numbers', async () => {
+  it('saves the subagent turn ceiling and offers no-ceiling as the default', async () => {
     const config = twoProfileConfig();
     const { patches } = installFetch(config);
     renderSheet(config);
 
-    // A delegated task that needs hours is bounded by segments x refreshes, so
-    // both numbers have to be reachable from the settings screen.
+    // There is no continuation to tune any more: a subagent is bounded by one
+    // number (turns, 0 = no ceiling) and its wall clock.
     await settleOnTab('Agent', 'Max concurrent', config);
     await openAdvanced();
-    // The mock config had the one-shot budget; make it a long-horizon one.
     const panel = visiblePanel();
-    const continues = within(panel).getByLabelText('Auto-continues');
-    fireEvent.input(continues, { target: { value: '60' } });
-    expect((continues as HTMLInputElement).value).toBe('60');
+    const turns = within(panel).getByLabelText('Turns per subagent (0 = no ceiling)') as HTMLInputElement;
+    expect(turns.min).toBe('0');
 
-    fireEvent.input(within(panel).getByLabelText('Turns per segment'), { target: { value: '200' } });
-
+    fireEvent.input(turns, { target: { value: '200' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0]?.subagents?.max_iterations).toBe(200);
-    expect(patches[0]?.subagents?.max_continues).toBe(60);
+    expect(patches[0]?.subagents).not.toHaveProperty('max_continues');
   });
 
-  it('rejects an auto-continues value above the server bound', async () => {
+  it('rejects a subagent turn ceiling above the server bound', async () => {
     const config = twoProfileConfig();
     const { patches } = installFetch(config);
     renderSheet(config);
 
     await settleOnTab('Agent', 'Max concurrent', config);
     await openAdvanced();
-    const field = screen.getByLabelText('Auto-continues') as HTMLInputElement;
-    fireEvent.input(field, { target: { value: '1001' } });
-    expect(field.value).toBe('1001');
+    const field = screen.getByLabelText('Turns per subagent (0 = no ceiling)') as HTMLInputElement;
+    fireEvent.input(field, { target: { value: '10001' } });
+    expect(field.value).toBe('10001');
 
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
-    expect(await screen.findByText('Auto-continues must be 0–1000.')).not.toBeNull();
+    expect(await screen.findByText('Iterations must be 0 (no ceiling) or 1–10000.')).not.toBeNull();
     expect(patches).toHaveLength(0);
   });
 
@@ -1102,34 +1097,40 @@ describe('SettingsSheet appearance controls', () => {
   it.each(
     THEME_TOOL_STYLE_CHOICES.flatMap((toolStyle) =>
       THEME_GROUPING_CHOICES.flatMap((grouping) =>
-        THEME_THINKING_CHOICES.map((thinking) => [
-          `${toolStyle.value}/${grouping.value}/${thinking.value}`,
-          toolStyle.value,
-          grouping.value,
-          thinking.value,
-        ] as const),
+        THEME_WORKING_CHOICES.flatMap((working) =>
+          THEME_THINKING_CHOICES.map((thinking) => [
+            `${toolStyle.value}/${grouping.value}/${working.value}/${thinking.value}`,
+            toolStyle.value,
+            grouping.value,
+            working.value,
+            thinking.value,
+          ] as const),
+        ),
       ),
     ),
   )(
     'applies the %s transcript combination',
-    async (_label, toolStyle, grouping, thinking) => {
+    async (_label, toolStyle, grouping, working, thinking) => {
       const { patches } = installFetch(twoProfileConfig());
       renderSheet(twoProfileConfig());
       await settleOnTab('General', 'Theme', twoProfileConfig());
 
       fireEvent.change(screen.getByLabelText('Tool calls'), { target: { value: toolStyle } });
       fireEvent.change(screen.getByLabelText('Grouping'), { target: { value: grouping } });
+      fireEvent.change(screen.getByLabelText('Working steps'), { target: { value: working } });
       fireEvent.change(screen.getByLabelText('Reasoning blocks'), { target: { value: thinking } });
 
       expect(document.documentElement.dataset.toolStyle).toBe(toolStyle);
       expect(document.documentElement.dataset.grouping).toBe(grouping);
+      expect(document.documentElement.dataset.working).toBe(working);
       expect(document.documentElement.dataset.thinking).toBe(thinking);
-      expect(persistedDraft()).toMatchObject({ toolStyle, grouping, thinking });
+      expect(persistedDraft()).toMatchObject({ toolStyle, grouping, working, thinking });
       expect(patches).toHaveLength(0);
 
       THEME.initTheme();
       expect(document.documentElement.dataset.toolStyle).toBe(toolStyle);
       expect(document.documentElement.dataset.grouping).toBe(grouping);
+      expect(document.documentElement.dataset.working).toBe(working);
       expect(document.documentElement.dataset.thinking).toBe(thinking);
     },
   );
@@ -1145,6 +1146,7 @@ describe('SettingsSheet appearance controls', () => {
       );
     expect(valuesOf('Tool calls')).toEqual(THEME_TOOL_STYLE_CHOICES.map((c) => c.value));
     expect(valuesOf('Grouping')).toEqual(THEME_GROUPING_CHOICES.map((c) => c.value));
+    expect(valuesOf('Working steps')).toEqual(THEME_WORKING_CHOICES.map((c) => c.value));
     expect(valuesOf('Reasoning blocks')).toEqual(THEME_THINKING_CHOICES.map((c) => c.value));
     expect(valuesOf('Density')).toEqual([...THEME_DENSITIES]);
     expect(valuesOf('Colour mode')).toEqual([...THEME_MODES]);
@@ -1328,11 +1330,13 @@ describe('SettingsSheet tabs', () => {
     const { patches } = installFetch(config);
     renderSheet(config);
 
-    // Subagents' auto-continues is validated but only exists inside the Agent
+    // A subagent's turn ceiling is validated but only exists inside the Agent
     // tab's Advanced block, so a rejected value there has to travel to it.
     await settleOnTab('Agent', 'Max concurrent', config);
     await openAdvanced();
-    fireEvent.input(screen.getByLabelText('Auto-continues'), { target: { value: '1001' } });
+    fireEvent.input(screen.getByLabelText('Turns per subagent (0 = no ceiling)'), {
+      target: { value: '10001' },
+    });
     // Start the save from a different tab, which is the real situation: the
     // footer is shared, so a user can press Save from anywhere.
     await openTab('General');
@@ -1344,7 +1348,7 @@ describe('SettingsSheet tabs', () => {
     // … and the sheet has moved to the field, with its disclosure open.
     expect(screen.getByRole('tab', { name: 'Agent' }).getAttribute('aria-selected')).toBe('true');
     expect(advancedOf('agent').open).toBe(true);
-    expect(await screen.findByText('Auto-continues must be 0–1000.')).not.toBeNull();
+    expect(await screen.findByText('Iterations must be 0 (no ceiling) or 1–10000.')).not.toBeNull();
     expect(patches).toHaveLength(0);
   });
 

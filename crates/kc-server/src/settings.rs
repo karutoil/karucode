@@ -15,7 +15,7 @@
 // @kc-title: Change karucode's configuration
 // @kc-summary: The four config layers, which settings apply live, and how secrets and invalid values are handled.
 // @kc-tags: config, settings, configuration, toml, env
-// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_AUTO_CONTINUE, env:KARUCODE_MAX_CONTINUES, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_MAX_CONTINUES, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_continues, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:notifications.enabled, config:notifications.min_run_secs, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings
+// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:notifications.enabled, config:notifications.min_run_secs, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings
 //
 // # Where the settings come from
 //
@@ -150,34 +150,42 @@
 //
 // # Long-horizon runs
 //
-// A run is not allowed to die just because it used up its first budget of model
-// turns. The iteration budget belongs to a *segment*, and when a segment ends
-// mid-task the runtime refreshes it and keeps going in the same session, run and
-// transcript - it emits a notice, appends a `[runtime checkpoint]` user turn so
-// the transcript explains the jump, and resets the counter.
+// A run is one loop, not a chain of budgets. It ends when the model stops
+// calling tools, when you cancel it, when the wall clock expires, when an
+// operator-set turn ceiling trips, or when the loop guard catches it repeating
+// itself - and that is the whole list. There is no segment, no refresh and no
+// `[runtime checkpoint]` turn: a synthetic message to "resume" a run would be
+// re-billed on every later request, could read to the model as a new
+// instruction, and tells it nothing the system prompt has not already said.
 //
 // ```toml
 // [limits]
-// max_iterations = 200   # model turns per segment
+// max_iterations = 0     # model turns per run; 0 = no ceiling (the default)
 // max_run_secs = 86400   # hard wall clock for the whole run (24h)
-// auto_continue = true   # refresh the budget instead of stopping
-// max_continues = 50     # how many refreshes one run may chain
 // ```
 //
-// The effective ceiling for one run is about
-// `(max_continues + 1) * max_iterations` model turns, or `max_run_secs`,
-// whichever comes first. Set `auto_continue = false` (or `max_continues = 0`) to
-// restore one-shot budgets; the run then stops with status `limit_reached`.
+// **`max_iterations = 0` means no turn ceiling**, which is the default: a long
+// migration, refactor or failing-suite hunt is not interrupted by a counter. What
+// keeps a run in control instead:
+//
+// * `max_run_secs` - the wall clock, 24h unless you lower it;
+// * the loop guard - a turn whose calls only return answers the run already has,
+//   four turns in a row, stops the run with `limit_reached` and says why (see
+//   `docs/internal/configuration.md`); the per-call rule refuses an identical
+//   read-only call before that;
+// * the degenerate-repetition detector, which abandons a stream that repeats one
+//   short block forever;
+// * `max_tool_calls_per_turn`, which bounds one turn's batch;
+// * you, cancelling.
+//
+// A non-zero `max_iterations` is a blunt backstop for an install that wants one;
+// the run then ends `limit_reached` with a notice, and nothing is appended to the
+// transcript to explain it. Subagents run under the same rules with their own
+// numbers: `subagents.max_iterations` (0 = no ceiling) and
+// `subagents.timeout_secs`.
 //
 // Environment: `KARUCODE_MAX_ITERATIONS`, `KARUCODE_MAX_RUN_SECS`,
-// `KARUCODE_AUTO_CONTINUE` (`1/0`, `true/false`, `yes/no`, `on/off`),
-// `KARUCODE_MAX_CONTINUES`, `KARUCODE_CONTEXT_MAX_CHARS`.
-//
-// A budget that runs out is never a reason to re-send the prompt: the work is
-// still in the transcript, and the checkpoint tells the model to continue rather
-// than restart. Subagents follow the same rule with their own numbers:
-// `subagents.max_iterations` per segment, refreshed up to
-// `subagents.max_continues` times, inside `subagents.timeout_secs`.
+// `KARUCODE_CONTEXT_MAX_CHARS`.
 //
 // ```toml
 // [subagents]
@@ -185,8 +193,7 @@
 // max_background = 8      # live detached agents per session (0 = no ceiling)
 // allow_background = true # permitted to spawn with `background = true`
 // wait_timeout_secs = 600 # default bound on `wait_for_agents`
-// max_iterations = 200    # model turns per subagent segment
-// max_continues = 60      # about 12,200 turns before it must report back
+// max_iterations = 0      # model turns per subagent; 0 = no ceiling
 // timeout_secs = 14400    # 4h wall clock for one delegated task
 // ```
 //
@@ -206,13 +213,13 @@
 // two hundred loops. `max_depth` is the other kind of zero: `0` forbids
 // delegation outright, and the field holds at most 255 generations.
 //
-// `max_continues = 0` restores the one-shot budget (the subagent stops at
-// `max_iterations`), and `limits.auto_continue = false` switches continuation off
-// for runs and subagents alike. Environment:
+// `max_iterations = 0` means no turn ceiling for a subagent either; a delegated
+// task that takes hours is ended by `timeout_secs`, not by a count of turns.
+// Environment:
 // `KARUCODE_SUBAGENT_CONCURRENCY`, `KARUCODE_SUBAGENT_MAX_BACKGROUND`,
 // `KARUCODE_SUBAGENT_ALLOW_BACKGROUND`, `KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS`,
-// `KARUCODE_SUBAGENT_MAX_ITERATIONS`, `KARUCODE_SUBAGENT_MAX_CONTINUES`,
-// `KARUCODE_SUBAGENT_TIMEOUT_SECS`, `KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`.
+// `KARUCODE_SUBAGENT_MAX_ITERATIONS`, `KARUCODE_SUBAGENT_TIMEOUT_SECS`,
+// `KARUCODE_ALLOW_RECURSIVE_SUBAGENTS`.
 //
 // `limits.context_max_chars` decides how much conversation is sent to the model.
 // Leave it at `0` (the default) and the budget is **derived from the resolved
@@ -352,8 +359,6 @@ mod keys {
 
     pub const LIMITS_MAX_ITERATIONS: &str = "limits.max_iterations";
     pub const LIMITS_MAX_RUN_SECS: &str = "limits.max_run_secs";
-    pub const LIMITS_AUTO_CONTINUE: &str = "limits.auto_continue";
-    pub const LIMITS_MAX_CONTINUES: &str = "limits.max_continues";
     pub const LIMITS_MAX_TOOL_OUTPUT_BYTES: &str = "limits.max_tool_output_bytes";
     pub const LIMITS_MAX_COMMAND_OUTPUT_BYTES: &str = "limits.max_command_output_bytes";
     pub const LIMITS_COMMAND_TIMEOUT_SECS: &str = "limits.command_timeout_secs";
@@ -371,7 +376,6 @@ mod keys {
 
     pub const SUBAGENTS_MAX_CONCURRENT: &str = "subagents.max_concurrent";
     pub const SUBAGENTS_MAX_ITERATIONS: &str = "subagents.max_iterations";
-    pub const SUBAGENTS_MAX_CONTINUES: &str = "subagents.max_continues";
     pub const SUBAGENTS_ALLOW_RECURSIVE: &str = "subagents.allow_recursive";
     pub const SUBAGENTS_MAX_DEPTH: &str = "subagents.max_depth";
     pub const SUBAGENTS_TIMEOUT_SECS: &str = "subagents.timeout_secs";
@@ -436,8 +440,6 @@ pub struct ModelPatch {
 pub struct LimitsPatch {
     pub max_iterations: Option<u32>,
     pub max_run_secs: Option<u64>,
-    pub auto_continue: Option<bool>,
-    pub max_continues: Option<u32>,
     pub max_tool_output_bytes: Option<usize>,
     pub max_command_output_bytes: Option<usize>,
     pub command_timeout_secs: Option<u64>,
@@ -463,7 +465,6 @@ pub struct ApprovalsPatch {
 pub struct SubagentsPatch {
     pub max_concurrent: Option<usize>,
     pub max_iterations: Option<u32>,
-    pub max_continues: Option<u32>,
     pub allow_recursive: Option<bool>,
     pub max_depth: Option<u8>,
     pub timeout_secs: Option<u64>,
@@ -1314,12 +1315,6 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         if let Some(v) = limits.max_run_secs {
             config.limits.max_run_secs = v;
         }
-        if let Some(v) = limits.auto_continue {
-            config.limits.auto_continue = v;
-        }
-        if let Some(v) = limits.max_continues {
-            config.limits.max_continues = v;
-        }
         if let Some(v) = limits.max_tool_output_bytes {
             config.limits.max_tool_output_bytes = v;
         }
@@ -1375,9 +1370,6 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         }
         if let Some(v) = subagents.max_iterations {
             config.subagents.max_iterations = v;
-        }
-        if let Some(v) = subagents.max_continues {
-            config.subagents.max_continues = v;
         }
         if let Some(v) = subagents.allow_recursive {
             config.subagents.allow_recursive = v;
@@ -1993,9 +1985,10 @@ const LIMITS_BOUNDS: &[(&str, u64, u64)] = &[
     // 0 = derive the budget from the resolved model's context window; any
     // non-zero value is an explicit ceiling for the install.
     ("limits.context_max_chars", 0, 4_000_000),
-    ("limits.max_iterations", 1, 10_000),
+    // 0 = no turn ceiling: the run is bounded by the wall clock and by the
+    // loop guard, which is the long-horizon default.
+    ("limits.max_iterations", 0, 10_000),
     ("limits.max_run_secs", 10, 604_800),
-    ("limits.max_continues", 0, 1_000),
     ("limits.command_timeout_secs", 1, 3_600),
     ("limits.max_command_timeout_secs", 1, 3_600),
     ("limits.search_max_results", 1, 2_000),
@@ -2008,8 +2001,8 @@ const SUBAGENT_BOUNDS: &[(&str, u64, u64)] = &[
     // review sweep - and what stops a runaway is the cost of 64 provider streams,
     // not a number in this table.
     ("subagents.max_concurrent", 0, 1024),
-    ("subagents.max_iterations", 1, 10_000),
-    ("subagents.max_continues", 0, 1_000),
+    // 0 = no turn ceiling for a delegated task; `timeout_secs` ends it.
+    ("subagents.max_iterations", 0, 10_000),
     // `0` forbids delegation; the field is a `u8`, so 255 is its own ceiling and
     // is "no practical limit" for nesting.
     ("subagents.max_depth", 0, u8::MAX as u64),
@@ -2029,7 +2022,7 @@ fn check_bounds(name: &str, value: u64, min: u64, max: u64) -> Result<()> {
 }
 
 fn validate_limits(limits: &Limits) -> Result<()> {
-    let values: [(&str, u64); 12] = [
+    let values: [(&str, u64); 11] = [
         (
             "limits.max_file_read_bytes",
             limits.max_file_read_bytes as u64,
@@ -2049,7 +2042,6 @@ fn validate_limits(limits: &Limits) -> Result<()> {
         ("limits.context_max_chars", limits.context_max_chars as u64),
         ("limits.max_iterations", u64::from(limits.max_iterations)),
         ("limits.max_run_secs", limits.max_run_secs),
-        ("limits.max_continues", u64::from(limits.max_continues)),
         ("limits.command_timeout_secs", limits.command_timeout_secs),
         (
             "limits.max_command_timeout_secs",
@@ -2086,18 +2078,14 @@ fn validate_subagents(subagents: &SubagentConfig) -> Result<()> {
     // Three values are meaningful at zero, and they do not agree with each other
     // on purpose: `max_concurrent = 0` and `max_background = 0` are *no ceiling*
     // (the widest setting there is), `max_depth = 0` is the narrowest (delegation
-    // is forbidden), and `max_continues = 0` is the one-shot budget. A single
+    // is forbidden), and `max_iterations = 0` is no turn ceiling. A single
     // "zero means X" rule across the section would be wrong in one direction or
     // the other, so each field documents its own.
-    let values: [(&str, u64); 6] = [
+    let values: [(&str, u64); 5] = [
         ("subagents.max_concurrent", subagents.max_concurrent as u64),
         (
             "subagents.max_iterations",
             u64::from(subagents.max_iterations),
-        ),
-        (
-            "subagents.max_continues",
-            u64::from(subagents.max_continues),
         ),
         ("subagents.max_depth", u64::from(subagents.max_depth)),
         ("subagents.max_background", subagents.max_background as u64),
@@ -2225,8 +2213,6 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
         limits.max_iterations.to_string(),
     );
     rows.insert(keys::LIMITS_MAX_RUN_SECS, limits.max_run_secs.to_string());
-    rows.insert(keys::LIMITS_AUTO_CONTINUE, limits.auto_continue.to_string());
-    rows.insert(keys::LIMITS_MAX_CONTINUES, limits.max_continues.to_string());
     rows.insert(
         keys::LIMITS_MAX_TOOL_OUTPUT_BYTES,
         limits.max_tool_output_bytes.to_string(),
@@ -2287,10 +2273,6 @@ fn rows_for(config: &Config) -> BTreeMap<&'static str, String> {
     rows.insert(
         keys::SUBAGENTS_MAX_ITERATIONS,
         subagents.max_iterations.to_string(),
-    );
-    rows.insert(
-        keys::SUBAGENTS_MAX_CONTINUES,
-        subagents.max_continues.to_string(),
     );
     rows.insert(
         keys::SUBAGENTS_ALLOW_RECURSIVE,
@@ -2477,16 +2459,6 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
                 config.limits.max_run_secs = v;
             }
         }
-        keys::LIMITS_AUTO_CONTINUE => {
-            if let Some(v) = parse_bool(key, value) {
-                config.limits.auto_continue = v;
-            }
-        }
-        keys::LIMITS_MAX_CONTINUES => {
-            if let Some(v) = parse_value(key, value) {
-                config.limits.max_continues = v;
-            }
-        }
         keys::LIMITS_MAX_TOOL_OUTPUT_BYTES => {
             if let Some(v) = parse_value(key, value) {
                 config.limits.max_tool_output_bytes = v;
@@ -2564,11 +2536,6 @@ fn apply_row(config: &mut Config, key: &str, value: &str) {
         keys::SUBAGENTS_MAX_ITERATIONS => {
             if let Some(v) = parse_value(key, value) {
                 config.subagents.max_iterations = v;
-            }
-        }
-        keys::SUBAGENTS_MAX_CONTINUES => {
-            if let Some(v) = parse_value(key, value) {
-                config.subagents.max_continues = v;
             }
         }
         keys::SUBAGENTS_ALLOW_RECURSIVE => {
@@ -2850,9 +2817,9 @@ mod tests {
             // 0 is the "derive it from the model" sentinel, so only the high end
             // is out of range.
             ("limits.context_max_chars", 4_000_001, 4_000_001),
-            ("limits.max_iterations", 0, 10_001),
+            // 0 is "no turn ceiling", so only the high end is out of range.
+            ("limits.max_iterations", 10_001, 10_001),
             ("limits.max_run_secs", 9, 604_801),
-            ("limits.max_continues", 1_001, 1_001),
             ("limits.command_timeout_secs", 0, 3_601),
             ("limits.max_command_timeout_secs", 0, 3_601),
             ("limits.search_max_results", 0, 2_001),
@@ -2879,9 +2846,7 @@ mod tests {
     fn subagent_bounds_are_enforced_and_depth_zero_is_allowed() {
         let cases: Vec<(&str, u64)> = vec![
             ("subagents.max_concurrent", 1_025),
-            ("subagents.max_iterations", 0),
             ("subagents.max_iterations", 10_001),
-            ("subagents.max_continues", 1_001),
             ("subagents.max_background", 1_025),
             ("subagents.timeout_secs", 0),
             ("subagents.timeout_secs", 604_801),
@@ -2891,7 +2856,6 @@ mod tests {
             match field {
                 "subagents.max_concurrent" => cfg.subagents.max_concurrent = value as usize,
                 "subagents.max_iterations" => cfg.subagents.max_iterations = value as u32,
-                "subagents.max_continues" => cfg.subagents.max_continues = value as u32,
                 "subagents.max_background" => cfg.subagents.max_background = value as usize,
                 "subagents.timeout_secs" => cfg.subagents.timeout_secs = value,
                 _ => cfg.subagents.max_depth = value as u8,
@@ -2912,12 +2876,12 @@ mod tests {
         cfg.subagents.max_depth = 0;
         assert!(validate_settings(&cfg).is_ok(), "max_depth = 0 is valid");
 
-        // `max_continues = 0` is the documented one-shot budget, not an error.
+        // `max_iterations = 0` is the long-horizon default, not an error.
         let mut cfg = Config::default();
-        cfg.subagents.max_continues = 0;
+        cfg.subagents.max_iterations = 0;
         assert!(
             validate_settings(&cfg).is_ok(),
-            "max_continues = 0 restores the one-shot behaviour"
+            "max_iterations = 0 means no turn ceiling"
         );
     }
 
@@ -3054,7 +3018,6 @@ mod tests {
             "limits.context_max_chars" => cfg.limits.context_max_chars = value as usize,
             "limits.max_iterations" => cfg.limits.max_iterations = value as u32,
             "limits.max_run_secs" => cfg.limits.max_run_secs = value,
-            "limits.max_continues" => cfg.limits.max_continues = value as u32,
             "limits.command_timeout_secs" => cfg.limits.command_timeout_secs = value,
             "limits.max_command_timeout_secs" => cfg.limits.max_command_timeout_secs = value,
             "limits.search_max_results" => cfg.limits.search_max_results = value as usize,

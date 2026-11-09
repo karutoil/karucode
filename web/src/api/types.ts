@@ -211,10 +211,9 @@ export interface PublicModelConfig {
 }
 
 export interface Limits {
+  /** Model turns for one run. `0` - the default - means no ceiling. */
   max_iterations: number;
   max_run_secs: number;
-  auto_continue: boolean;
-  max_continues: number;
   max_tool_output_bytes: number;
   max_command_output_bytes: number;
   command_timeout_secs: number;
@@ -237,8 +236,8 @@ export interface ApprovalPolicy {
 export interface SubagentConfig {
   /** Subagent loops allowed to run at once, across the whole install. */
   max_concurrent: number;
+  /** Model turns for one subagent. `0` - the default - means no ceiling. */
   max_iterations: number;
-  max_continues: number;
   allow_recursive: boolean;
   max_depth: number;
   timeout_secs: number;
@@ -571,6 +570,13 @@ export interface StoredMessage {
   name: string | null;
   /** Images the tool returned for a vision model (base64, no `data:` prefix). */
   images?: ImageAttachment[] | null;
+  /**
+   * The model's reasoning for this turn, when the endpoint streams analysis
+   * separately from the answer (`reasoning_content`). The server stores it with
+   * the assistant row, so a reloaded transcript can still show the thinking
+   * block; absent on older rows and on models that do not think out loud.
+   */
+  reasoning_content?: string | null;
   /**
    * When set, a rewind hid this message. The server already filters hidden rows
    * out of every read, so this is only present on a row a caller fetched by id.

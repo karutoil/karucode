@@ -74,20 +74,16 @@ use std::path::Path;
 /// The budget the loop this prompt belongs to actually runs under.
 ///
 /// It is passed explicitly instead of being derived from [`Limits`] because a
-/// subagent does not run on the top-level numbers: it has its own segment size,
-/// its own continuation count and its own wall clock. Telling a subagent it has
-/// the run's budget makes it plan against a limit it will never be given - and
-/// telling it the wrong number is worse than telling it nothing.
+/// subagent does not run on the top-level numbers: it has its own wall clock and
+/// its own optional turn ceiling. Telling a subagent it has the run's budget
+/// makes it plan against a limit it will never be given - and telling it the
+/// wrong number is worse than telling it nothing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Budget {
-    /// Model turns per segment (a checkpoint, not a finish line).
+    /// Model turns for the whole loop. `0` = no ceiling.
     pub max_iterations: u32,
-    /// How many times the segment may be refreshed. `0` = no continuation.
-    pub max_continues: u32,
-    /// Wall clock for the whole loop, across every segment.
+    /// Wall clock for the whole loop.
     pub wall_secs: u64,
-    /// Install-wide switch (`limits.auto_continue`).
-    pub auto_continue: bool,
     /// Wording only: this budget belongs to a subagent.
     pub subagent: bool,
 }
@@ -96,31 +92,20 @@ impl Budget {
     /// The budget of a top-level run.
     pub fn for_run(limits: &Limits) -> Self {
         Self {
-            max_iterations: limits.max_iterations.max(1),
-            max_continues: limits.max_continues,
+            max_iterations: limits.max_iterations,
             wall_secs: limits.max_run_secs.max(1),
-            auto_continue: limits.auto_continue,
             subagent: false,
         }
     }
 
     /// The budget of one subagent loop, which the runtime cuts short at
-    /// `subagents.timeout_secs` and at `subagents.max_continues` refreshes.
-    pub fn for_subagent(limits: &Limits, subagents: &SubagentConfig) -> Self {
+    /// `subagents.timeout_secs`.
+    pub fn for_subagent(_limits: &Limits, subagents: &SubagentConfig) -> Self {
         Self {
-            max_iterations: subagents.max_iterations.max(1),
-            max_continues: subagents.max_continues,
+            max_iterations: subagents.max_iterations,
             wall_secs: subagents.timeout_secs.max(1),
-            // The install-wide switch still wins: `auto_continue = false` means
-            // no loop continues, subagent or not.
-            auto_continue: limits.auto_continue,
             subagent: true,
         }
-    }
-
-    /// Total model turns this budget allows.
-    pub fn total_turns(&self) -> u64 {
-        u64::from(self.max_iterations) * u64::from(self.max_continues.saturating_add(1))
     }
 }
 
@@ -264,22 +249,20 @@ network access, so inline (data:) any image or font it needs. A Mermaid fence ne
 the fence. Details: `karucode_docs` topic `artifacts`.
 ";
 
-    let budget_line = if budget.auto_continue && budget.max_continues > 0 {
+    let budget_line = if budget.max_iterations == 0 {
         format!(
-            "Budget: {iters} model turns per segment, refreshed up to {continues} times \
-             (about {total} turns in one run), inside a {run_secs}s wall clock. The budget is \
-             refreshed automatically, so do not stop early to save it: keep working until the \
-             task is done and verified, or until you are genuinely blocked and say why.",
-            iters = budget.max_iterations,
-            continues = budget.max_continues,
-            total = budget.total_turns(),
+            "Budget: no turn limit - work until the task is done and verified, or until you are \
+             genuinely blocked and say why - inside a {run_secs}s wall clock. Long work is \
+             expected here: do not stop early to save turns, do not re-read files whose \
+             contents you already know, and if the remaining work is large keep a short plan \
+             in a file so a fresh turn can pick it up.",
             run_secs = budget.wall_secs,
         )
     } else {
         format!(
-            "Budget: at most {iters} model turns and {run_secs}s for this run, with no \
-             automatic continuation. Use them on the task itself, and report what is left \
-             undone when the budget runs out.",
+            "Budget: at most {iters} model turns and {run_secs}s for this run, and no \
+             continuation: when the turns run out the run ends. Use them on the task itself, \
+             and report what is left undone rather than stopping early.",
             iters = budget.max_iterations,
             run_secs = budget.wall_secs,
         )
@@ -761,13 +744,11 @@ mod tests {
     fn a_subagent_is_told_its_own_budget_not_the_runs() {
         let limits = Limits {
             max_iterations: 7,
-            max_continues: 3,
             max_run_secs: 99,
             ..Default::default()
         };
         let subagents = SubagentConfig {
             max_iterations: 11,
-            max_continues: 5,
             timeout_secs: 4_242,
             ..Default::default()
         };
@@ -778,22 +759,33 @@ mod tests {
             &Budget::for_subagent(&limits, &subagents),
             &[],
         );
-        assert!(p.contains("11 model turns per segment"), "{p}");
-        assert!(p.contains("refreshed up to 5 times"), "{p}");
-        assert!(p.contains("4242s wall clock"), "{p}");
+        assert!(p.contains("at most 11 model turns"), "{p}");
+        assert!(p.contains("4242s"), "{p}");
         assert!(!p.contains("7 model turns"), "top-level budget leaked: {p}");
     }
 
     #[test]
-    fn the_install_wide_switch_turns_off_a_subagent_budget_too() {
-        let limits = Limits {
-            auto_continue: false,
-            ..Default::default()
-        };
-        let budget = Budget::for_subagent(&limits, &SubagentConfig::default());
-        assert!(!budget.auto_continue);
+    fn an_uncapped_budget_is_described_as_long_horizon_work() {
+        // The default: no turn counter at all. The prompt must say so, because a
+        // model that believes a counter exists stops early to save it - the one
+        // failure mode this harness must not have.
+        let budget = Budget::for_run(&Limits::default());
+        assert_eq!(budget.max_iterations, 0);
         let p = system_prompt("/w", &[], "auto", &budget, &[]);
-        assert!(p.contains("no automatic continuation"), "{p}");
+        assert!(p.contains("no turn limit"), "{p}");
+        assert!(p.contains("86400s wall clock"), "{p}");
+        assert!(!p.contains("model turns and"), "{p}");
+    }
+
+    #[test]
+    fn a_capped_budget_says_the_run_ends_rather_than_continuing() {
+        let budget = Budget::for_run(&Limits {
+            max_iterations: 12,
+            ..Default::default()
+        });
+        let p = system_prompt("/w", &[], "auto", &budget, &[]);
+        assert!(p.contains("at most 12 model turns"), "{p}");
+        assert!(p.contains("no continuation"), "{p}");
     }
 
     #[test]
