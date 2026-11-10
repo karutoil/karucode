@@ -6,6 +6,12 @@
   padding: 0;
 }
 
+/* The containing block for the project dropdown: it hangs under this row so it
+ * spans the column's width without the switcher needing a wrapper of its own. */
+.rail .project-switcher-desktop .project-switcher-head {
+  position: relative;
+}
+
 .rail .project-switcher.project-switcher-desktop {
   display: flex;
   gap: var(--space-2);
@@ -80,12 +86,43 @@
   text-align: center;
 }
 
+/* The project dropdown, out of flow and under the trigger.
+ *
+ * It used to be an in-flow disclosure: opening it pushed **Control plane**,
+ * **New session**, the search field and the whole session list down the rail, so
+ * reading the project list scrolled the information under it. A dropdown hovers
+ * over what it covers; the rail behind it keeps its geometry. It opens on hover
+ * (and still on click/Enter for the keyboard and for touch), and closes when the
+ * pointer leaves both the trigger and the panel. */
 .rail .workbench-projects-disclosure {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  left: 0;
+  z-index: 20;
   padding: var(--space-2);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: 0 var(--space-2) var(--space-6) var(--shadow-lg);
+  animation: projects-dropdown-in 120ms ease-out;
+}
+
+@keyframes projects-dropdown-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* The options menu is anchored to its kebab inside the same row, so it must paint
+ * over the open dropdown when both are up (the keyboard can open both). */
+.rail .project-switcher-desktop .project-switcher-menu {
+  z-index: 30;
 }
 
 .rail .workbench-projects-disclosure .project-switcher-list {
@@ -172,5 +209,9 @@
 @media (prefers-reduced-motion: reduce) {
   .workbench-project-disclosure > svg {
     transition: none;
+  }
+
+  .rail .workbench-projects-disclosure {
+    animation: none;
   }
 }

@@ -263,6 +263,46 @@ describe('agents card: a native details action, not a card-wide button', () => {
   });
 });
 
+describe('project dropdown: a floating menu, not an in-flow disclosure', () => {
+  it('anchors the panel under the trigger, out of the document flow', () => {
+    // In flow it pushed Control plane, New session, the search and the session
+    // list down the rail every time the pointer crossed the project title.
+    const panel = declarations(workbenchNavigation, '.rail .workbench-projects-disclosure');
+    expect(panel['position']).toBe('absolute');
+    expect(panel['top']).toBe('calc(100% + var(--space-2))');
+    expect(panel['left']).toBe('0');
+    expect(panel['right']).toBe('0');
+  });
+
+  it('takes the switcher row as its containing block', () => {
+    const head = declarations(
+      workbenchNavigation,
+      '.rail .project-switcher-desktop .project-switcher-head',
+    );
+    expect(head['position']).toBe('relative');
+  });
+
+  it('keeps the panel above the rail and its own menu above the panel', () => {
+    // The options menu hangs off the kebab in the same row, directly over the
+    // open panel; the keyboard can have both up at once.
+    expect(
+      declarations(workbenchNavigation, '.rail .workbench-projects-disclosure')['z-index'],
+    ).toBe('20');
+    expect(
+      declarations(workbenchNavigation, '.rail .project-switcher-desktop .project-switcher-menu')[
+        'z-index'
+      ],
+    ).toBe('30');
+  });
+
+  it('respects a reduced-motion preference', () => {
+    const reduced = workbenchNavigation.slice(
+      workbenchNavigation.indexOf('@media (prefers-reduced-motion: reduce)'),
+    );
+    expect(reduced).toMatch(/\.rail \.workbench-projects-disclosure \{\s*\n\s*animation: none;/);
+  });
+});
+
 /* ---------------------------------------------------------------- matrix */
 
 const DENSITIES = Object.keys(DENSITY_SCALES) as ThemeDensity[];

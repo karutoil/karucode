@@ -1,7 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/preact';
 import type { SessionSummary } from '../api/types';
-import { SessionList, SessionsRail, sessionGroup, type SessionListProps } from './SessionsRail';
+import {
+  PROJECTS_HOVER_CLOSE_MS,
+  PROJECTS_HOVER_OPEN_MS,
+  SessionList,
+  SessionsRail,
+  sessionGroup,
+  type SessionListProps,
+} from './SessionsRail';
 import { Dialog } from './Dialog';
 import { secondSummaryFixture, summaryFixture, NOW } from '../test/fixtures';
 import { sessionStatusView } from '../state/selectors';
@@ -694,6 +701,72 @@ describe('SessionsRail desktop project navigation', () => {
     expect(screen.getByLabelText('Available projects')).not.toBeNull();
 
     fireEvent.mouseDown(screen.getByRole('button', { name: 'Outside' }));
+    expect(screen.queryByLabelText('Available projects')).toBeNull();
+  });
+
+  it('opens the project dropdown on hover, without taking focus', async () => {
+    // The dropdown is a menu you glance at, not a mode you enter: resting on the
+    // trigger opens it for the eyes only, and it must not pull the caret out of
+    // whatever the reader was typing into.
+    render(<SessionsRail />);
+    const disclosure = screen.getByRole('button', { name: 'Projects: KaruCode' });
+    const focusedBefore = document.activeElement;
+
+    fireEvent.mouseEnter(disclosure);
+    // Crossing the trigger must not flash the list: it waits for intent.
+    expect(screen.queryByLabelText('Available projects')).toBeNull();
+    await vi.waitFor(() =>
+      expect(screen.queryByLabelText('Available projects')).not.toBeNull(),
+    );
+    expect(disclosure.getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement).toBe(focusedBefore);
+  });
+
+  it('closes a hovered dropdown when the pointer leaves, and stays open on the way in', async () => {
+    render(<SessionsRail />);
+    const disclosure = screen.getByRole('button', { name: 'Projects: KaruCode' });
+    fireEvent.mouseEnter(disclosure);
+    await vi.waitFor(() =>
+      expect(screen.queryByLabelText('Available projects')).not.toBeNull(),
+    );
+    const panel = screen.getByLabelText('Available projects');
+
+    // Crossing the gap between the trigger and the panel is not leaving.
+    fireEvent.mouseLeave(disclosure);
+    fireEvent.mouseEnter(panel);
+    await new Promise((resolve) => setTimeout(resolve, PROJECTS_HOVER_CLOSE_MS + 120));
+    expect(screen.queryByLabelText('Available projects')).not.toBeNull();
+
+    // Walking away is.
+    fireEvent.mouseLeave(panel);
+    await vi.waitFor(() =>
+      expect(screen.queryByLabelText('Available projects')).toBeNull(),
+    );
+  });
+
+  it('lets a click close a hover-opened dropdown without it reopening under the pointer', async () => {
+    render(<SessionsRail />);
+    const disclosure = screen.getByRole('button', { name: 'Projects: KaruCode' });
+    fireEvent.mouseEnter(disclosure);
+    await vi.waitFor(() =>
+      expect(screen.queryByLabelText('Available projects')).not.toBeNull(),
+    );
+
+    fireEvent.click(disclosure);
+    expect(screen.queryByLabelText('Available projects')).toBeNull();
+    // The pointer has not moved, so nothing should re-open it.
+    await new Promise((resolve) => setTimeout(resolve, PROJECTS_HOVER_OPEN_MS + 120));
+    expect(screen.queryByLabelText('Available projects')).toBeNull();
+  });
+
+  it('closes the dropdown when Tab moves focus out of it', () => {
+    // The rail's next controls sit behind the floating panel; tabbing out of a
+    // list that is still covering them would hide where focus went.
+    render(<SessionsRail />);
+    fireEvent.click(screen.getByRole('button', { name: 'Projects: KaruCode' }));
+    const panel = screen.getByLabelText('Available projects');
+
+    fireEvent.keyDown(panel, { key: 'Tab' });
     expect(screen.queryByLabelText('Available projects')).toBeNull();
   });
 });

@@ -218,6 +218,13 @@ Agents tab).
   tiles retain session peeking. The expanded ordinary Workbench puts project
   selection and management in the task rail. There is no App-level duplicate
   Inspector.
+- **Project dropdown:** the task rail's project title is a dropdown, not a
+  disclosure: resting on it opens the project list over the rail (click,
+  Enter or Space opens it too and moves focus into it), and Escape, Tab, an
+  outside press or leaving with the pointer closes it. It is `position: absolute`
+  under its own row, so the rail below it — Control plane, New session, search,
+  the session list — keeps its geometry instead of being pushed down. The phone
+  sheet keeps the list in flow, because there is no hover there.
 - **Workspace composition:** `ChatView` owns `SessionHeader`, Conversation and its
   Composer, the full Source control and Terminal views (Terminal only when enabled),
   the one Results Inspector, and the sibling Context drawer. The main header includes

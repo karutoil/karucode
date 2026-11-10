@@ -113,9 +113,15 @@ deliberately outside the parent form's dirty state.
   mode does not mount the project-scoped Inspector or Context drawer. Composer
   still shows reported Usage telemetry, but without a Usage callback it is
   read-only, not a link to a project drawer.
-* **Sessions rail**: the current project's disclosure and management actions,
+* **Sessions rail**: the current project's dropdown and management actions,
   session search (`/`), available status filters and sessions grouped by last
-  activity with running/failure indicators. **New session** (`Ctrl/Cmd+N`, the
+  activity with running/failure indicators. The project name is a real
+  dropdown: resting on it opens the list of projects over the rail, clicking
+  it (or Enter/Space) opens the same list and moves focus into it, and it
+  closes on Escape, on an outside press, or when the pointer leaves the
+  trigger and the list. It floats — the rail under it keeps its geometry —
+  and a project row switches the whole workspace onto that project.
+  **New session** (`Ctrl/Cmd+N`, the
   rail button, the palette row, a starter prompt) starts a **draft** — see
   **Starting a conversation** below; nothing is written until the first
   message, so an abandoned press leaves no empty session behind. On a phone it

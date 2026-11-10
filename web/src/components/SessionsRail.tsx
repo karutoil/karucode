@@ -476,6 +476,14 @@ interface ProjectSwitcherProps {
   desktop?: boolean;
 }
 
+/** Hover intent for the desktop project dropdown: crossing the trigger on the way
+ *  to the composer must not flash a list, but the pause before opening should be
+ *  short enough to read as "it wants to open". */
+export const PROJECTS_HOVER_OPEN_MS = 120;
+/** The pointer crossing the gap between the trigger and the panel takes a beat;
+ *  the panel waits this long before it treats the exit as leaving. */
+export const PROJECTS_HOVER_CLOSE_MS = 200;
+
 function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element {
   const projects = store.projects.value;
   const activeId = store.currentProjectId.value;
@@ -487,8 +495,26 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
   const rootRef = useRef<HTMLDivElement>(null);
   const disclosureRef = useRef<HTMLButtonElement>(null);
   const disclosureId = useId();
+  /** Hover timers for the desktop dropdown, plus whether the pointer is what
+   *  opened it — a hover must never move focus. */
+  const hoverOpenTimer = useRef<number | null>(null);
+  const hoverCloseTimer = useRef<number | null>(null);
+  const openedByHover = useRef(false);
+
+  const clearHoverTimers = (): void => {
+    if (hoverOpenTimer.current !== null) {
+      window.clearTimeout(hoverOpenTimer.current);
+      hoverOpenTimer.current = null;
+    }
+    if (hoverCloseTimer.current !== null) {
+      window.clearTimeout(hoverCloseTimer.current);
+      hoverCloseTimer.current = null;
+    }
+  };
 
   const closeProjects = (restoreFocus = true): void => {
+    clearHoverTimers();
+    openedByHover.current = false;
     setProjectsOpen(false);
     if (restoreFocus) {
       window.setTimeout(() => {
@@ -496,6 +522,56 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
       }, 0);
     }
   };
+
+  /** The click and keyboard path: Enter/Space on the trigger lands here too. */
+  const toggleProjects = (): void => {
+    if (projectsOpen) {
+      closeProjects(false);
+      return;
+    }
+    clearHoverTimers();
+    openedByHover.current = false;
+    setProjectsOpen(true);
+  };
+
+  /** Resting on the trigger opens the dropdown (the way a menu bar does). */
+  const hoverOpenProjects = (): void => {
+    if (!desktop) return;
+    clearHoverTimers();
+    if (projectsOpen) return;
+    hoverOpenTimer.current = window.setTimeout(() => {
+      hoverOpenTimer.current = null;
+      openedByHover.current = true;
+      setProjectsOpen(true);
+    }, PROJECTS_HOVER_OPEN_MS);
+  };
+
+  /** The pointer is back inside (the panel): cancel a pending close. */
+  const holdProjects = (): void => {
+    if (hoverCloseTimer.current !== null) {
+      window.clearTimeout(hoverCloseTimer.current);
+      hoverCloseTimer.current = null;
+    }
+  };
+
+  /** Leaving the trigger or the panel closes it, after the grace period. */
+  const hoverCloseProjects = (): void => {
+    if (!desktop) return;
+    if (hoverOpenTimer.current !== null) {
+      // Left before it opened: never open at all.
+      window.clearTimeout(hoverOpenTimer.current);
+      hoverOpenTimer.current = null;
+    }
+    if (!projectsOpen) return;
+    holdProjects();
+    hoverCloseTimer.current = window.setTimeout(() => {
+      hoverCloseTimer.current = null;
+      openedByHover.current = false;
+      setProjectsOpen(false);
+    }, PROJECTS_HOVER_CLOSE_MS);
+  };
+
+  useEffect(() => clearHoverTimers, []);
 
   useEffect(() => {
     if (!desktop || !projectsOpen) return;
@@ -521,6 +597,12 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
 
   useEffect(() => {
     if (!desktop || !projectsOpen) return;
+    // A hover opens the list for the eyes only. Moving focus under a resting
+    // pointer would pull the caret out of whatever the reader was typing in.
+    if (openedByHover.current) {
+      openedByHover.current = false;
+      return;
+    }
     const active = rootRef.current?.querySelector<HTMLButtonElement>(
       '.project-switcher-item[aria-current="true"]',
     );
@@ -546,6 +628,51 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
 
   const activeUnread = activeProject ? unreadByProject[activeProject.id] ?? 0 : 0;
 
+  /** The project rows, shared by the desktop dropdown (which floats over the rail)
+   *  and the phone sheet (where the list is part of the sheet). */
+  const projectList = (
+    <>
+      <ul class="project-switcher-list">
+        {projects.map((item) => {
+          const active = item.id === activeId;
+          const unread = unreadByProject[item.id] ?? 0;
+          const unreadNote = unread > 0 ? `, ${unreadLabel(unread)}` : '';
+          return (
+            <li key={item.id}>
+              <button
+                type="button"
+                class={`project-switcher-item${active ? ' is-active' : ''}`}
+                aria-label={`Switch to ${item.name} (${item.path})${unreadNote}`}
+                aria-current={active ? 'true' : undefined}
+                title={`${item.path}${
+                  item.session_count > 0
+                    ? `\n${item.session_count} ${item.session_count === 1 ? 'session' : 'sessions'}`
+                    : ''
+                }${unread > 0 ? `\n${unreadLabel(unread)}` : ''}`}
+                onClick={() => {
+                  controlPlaneOpen.value = false;
+                  if (desktop) closeProjects();
+                  if (!active) void actions.switchProject(item.id);
+                }}
+              >
+                <ProjectGlyph project={item} />
+                <span class="project-switcher-name">{item.name}</span>
+                {unread > 0 ? (
+                  <span class="workbench-project-unread" aria-hidden="true">
+                    {unread > 99 ? '99+' : unread}
+                  </span>
+                ) : null}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {desktop && projects.length === 0 ? (
+        <p class="workbench-projects-empty">No projects yet. Use + to add one.</p>
+      ) : null}
+    </>
+  );
+
   return (
     <div
       ref={rootRef}
@@ -563,7 +690,9 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
             aria-expanded={projectsOpen}
             aria-controls={disclosureId}
             title={activeProject?.path ?? 'Choose a project'}
-            onClick={() => (projectsOpen ? closeProjects(false) : setProjectsOpen(true))}
+            onClick={toggleProjects}
+            onMouseEnter={hoverOpenProjects}
+            onMouseLeave={hoverCloseProjects}
           >
             {activeProject ? <ProjectGlyph project={activeProject} /> : null}
             <span class="workbench-project-copy">
@@ -643,55 +772,33 @@ function ProjectSwitcher({ desktop = false }: ProjectSwitcherProps): JSX.Element
             </button>
           ) : null}
         </div>
+
+        {/* The dropdown lives inside the trigger's row so that row is its
+         * containing block: it hangs under the trigger, out of flow, and the rail
+         * below keeps its geometry instead of being pushed down. */}
+        {desktop && projectsOpen ? (
+          <div
+            id={disclosureId}
+            class="workbench-projects-disclosure"
+            aria-label="Available projects"
+            data-escape-local
+            onMouseEnter={holdProjects}
+            onMouseLeave={hoverCloseProjects}
+            // Tabbing out must take the overlay with it: the rail's next control
+            // (Control plane, New session) sits behind this panel, and leaving
+            // focus in a list that covers it would hide where the reader landed.
+            onKeyDown={(event) => {
+              if (event.key === 'Tab') closeProjects(false);
+            }}
+          >
+            {projectList}
+          </div>
+        ) : null}
       </div>
 
-      {!desktop || projectsOpen ? (
-        <div
-          id={desktop ? disclosureId : undefined}
-          class={desktop ? 'workbench-projects-disclosure' : undefined}
-          aria-label={desktop ? 'Available projects' : undefined}
-          data-escape-local={desktop ? true : undefined}
-        >
-          <ul class="project-switcher-list">
-            {projects.map((item) => {
-              const active = item.id === activeId;
-              const unread = unreadByProject[item.id] ?? 0;
-              const unreadNote = unread > 0 ? `, ${unreadLabel(unread)}` : '';
-              return (
-                <li key={item.id}>
-                  <button
-                    type="button"
-                    class={`project-switcher-item${active ? ' is-active' : ''}`}
-                    aria-label={`Switch to ${item.name} (${item.path})${unreadNote}`}
-                    aria-current={active ? 'true' : undefined}
-                    title={`${item.path}${
-                      item.session_count > 0
-                        ? `\n${item.session_count} ${item.session_count === 1 ? 'session' : 'sessions'}`
-                        : ''
-                    }${unread > 0 ? `\n${unreadLabel(unread)}` : ''}`}
-                    onClick={() => {
-                      controlPlaneOpen.value = false;
-                      if (desktop) closeProjects();
-                      if (!active) void actions.switchProject(item.id);
-                    }}
-                  >
-                    <ProjectGlyph project={item} />
-                    <span class="project-switcher-name">{item.name}</span>
-                    {unread > 0 ? (
-                      <span class="workbench-project-unread" aria-hidden="true">
-                        {unread > 99 ? '99+' : unread}
-                      </span>
-                    ) : null}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-          {desktop && projects.length === 0 ? (
-            <p class="workbench-projects-empty">No projects yet. Use + to add one.</p>
-          ) : null}
-        </div>
-      ) : null}
+      {/* A phone keeps the list in the sheet: there is no trigger to hover, and the
+       * sheet is the only place projects exist there. */}
+      {!desktop ? <div>{projectList}</div> : null}
 
       {desktop ? (
         <button
