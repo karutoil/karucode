@@ -75,7 +75,7 @@ Two things to know before you do:
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/karutoil/karucode/main/packaging/install.sh
 sudo sh install.sh --workspace /srv/karucode/workspace
-sudo sh install.sh --version 0.1.0 --port 8787
+sudo sh install.sh --version 107 --port 8787
 sh install.sh --no-systemd --prefix "$HOME/.local"      # binary only, no root
 ```
 
@@ -242,7 +242,7 @@ Environment=PATH=/home/you/.local/bin:/home/you/.cargo/bin:/home/you/.nvm/versio
 ### Manually
 
 ```bash
-VERSION=0.1.0
+VERSION=107
 TARGET=x86_64-unknown-linux-gnu
 NAME="karucode-${VERSION}-${TARGET}"
 BASE="https://github.com/karutoil/karucode/releases/download/v${VERSION}"
@@ -466,19 +466,43 @@ the systemd unit against the same volume.
 
 ## Upgrade
 
+karucode versions itself by **commit count**: every commit on `main` is a release,
+build 107 is the 107th commit, and the tag is `v107`. `karucode --version` prints
+the build, the commit and its date, and it is the number to compare with a release.
+
 ```bash
 # 1. Back up first: there is no automatic pre-migration snapshot.
 sudo -u karucode sqlite3 /var/lib/karucode/karucode.db \
   "VACUUM INTO '/var/backups/karucode/pre-upgrade-$(date +%F-%H%M).db'"
 
-# 2. Install the new release. Same command as the first install: it verifies the
-#    checksum, replaces the binary, rewrites the unit and the drop-in, and
-#    restarts the service onto the new binary.
-sudo sh install.sh --version 0.2.0 --workspace /srv/karucode/workspace
+# 2. Either let the running install update itself from the release manifest:
+karucode update --check          # 0 up to date, 3 a newer build exists
+sudo karucode update --apply --data-dir /var/lib/karucode --restart
+
+# ... or install a release explicitly. Same command as the first install: it
+#    verifies the checksum, replaces the binary, rewrites the unit and the
+#    drop-in, and restarts the service onto the new binary.
+sudo sh install.sh --version 107 --workspace /srv/karucode/workspace
 
 # 3. Watch it come up.
 journalctl -u karucode -n 50
 ```
+
+`karucode update` is the lighter of the two: it does **not** rewrite the unit or
+the drop-in, it replaces the binary and (with `--restart`) restarts the unit. The
+server checks for a newer build on startup and every six hours by default and
+says so in **Settings → Updates**; when the service account cannot write
+`/usr/local/bin/karucode` - the normal case, because the installer runs as root -
+the server stages and verifies the download and that panel prints exactly the
+`sudo` command to run. The previous binary is kept as `karucode.old`.
+
+```bash
+# Off, or pointed at a mirror you control:
+KARUCODE_UPDATE_CHECK=0
+KARUCODE_UPDATE_MANIFEST_URL=https://mirror.example.com/karucode/updates.json
+```
+
+A container is updated by rebuilding the image, not by any of this.
 
 ### Updating a service that runs your own build
 

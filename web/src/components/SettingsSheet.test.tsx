@@ -1307,7 +1307,7 @@ describe('SettingsSheet tabs', () => {
     vi.unstubAllGlobals();
   });
 
-  it('splits the sheet into six labelled tabs, one panel at a time', async () => {
+  it('splits the sheet into seven labelled tabs, one panel at a time', async () => {
     installFetch(twoProfileConfig());
     renderSheet(twoProfileConfig());
 
@@ -1319,6 +1319,7 @@ describe('SettingsSheet tabs', () => {
       'Access',
       'Notifications',
       'Plugins & MCP',
+      'Updates',
     ]);
     // Exactly one tab is selected and reachable; the rest are one Tab away.
     expect(tabs.map((tab) => tab.getAttribute('aria-selected'))).toEqual([
@@ -1328,13 +1329,14 @@ describe('SettingsSheet tabs', () => {
       'false',
       'false',
       'false',
+      'false',
     ]);
-    expect(tabs.map((tab) => tab.tabIndex)).toEqual([0, -1, -1, -1, -1, -1]);
+    expect(tabs.map((tab) => tab.tabIndex)).toEqual([0, -1, -1, -1, -1, -1, -1]);
 
     // The first tab is the one that opens, and it is the only visible panel.
     expect(tabs[0]?.getAttribute('aria-controls')).toBe('settings-panel-general');
     const panels = document.querySelectorAll('.settings-panels > .tab-panel');
-    expect(panels).toHaveLength(6);
+    expect(panels).toHaveLength(7);
     expect(panels[0]?.hasAttribute('hidden')).toBe(false);
     expect([...panels].slice(1).every((panel) => panel.hasAttribute('hidden'))).toBe(true);
 

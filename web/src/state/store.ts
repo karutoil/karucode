@@ -19,6 +19,7 @@ import type {
   SessionModelSelection,
   SessionSummary,
   Toast,
+  UpdateStatus,
 } from '../api/types';
 import { isAgentLive } from '../api/types';
 import { applyUiPreferences, parsePluginUi, type ParsedPluginUi, type UiContribution } from '../components/uiContributions';
@@ -156,6 +157,24 @@ export const boot = signal<BootState>('loading');
 export const bootError = signal<string | null>(null);
 export const health = signal<Health | null>(null);
 export const config = signal<Config | null>(null);
+
+/**
+ * The newest `GET /api/update` answer, or `null` before the first read.
+ *
+ * Boot fetches it after the first paint (it reaches the network), the Updates tab
+ * refreshes it, and the rail uses it to say "a newer build exists" without
+ * opening Settings. `update_available` is the only field anything outside the
+ * Updates tab reads.
+ */
+export const updateStatus = signal<UpdateStatus | null>(null);
+
+/**
+ * The tab the next `openSettings()` should land on, cleared when the sheet opens.
+ *
+ * A string rather than the sheet's `SettingsTab` union: the store must not import
+ * a component, and an unknown value simply falls back to General.
+ */
+export const settingsInitialTab = signal<string | null>(null);
 export const authError = signal<string | null>(null);
 
 /**

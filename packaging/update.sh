@@ -1195,6 +1195,18 @@ if [ "$CHECK" -eq 1 ]; then
         exit 0
     fi
     behind="$(git_ rev-list --count "HEAD..${upstream}" 2>/dev/null || printf '0')"
+    # The version is the commit count (see the `versioning` topic), so "3 commits
+    # behind" is exactly "build 107 -> 110". Printing both answers the question an
+    # operator actually asks without building anything.
+    _running_build=""
+    if [ -x "$installed_bin" ]; then
+        _running_build="$("$installed_bin" --version 2>/dev/null | awk 'NR==1 {print $2}')"
+    fi
+    _upstream_build="$(git_ rev-list --count "$upstream" 2>/dev/null || true)"
+    if [ -n "$_running_build" ] && [ -n "$_upstream_build" ]; then
+        info "running build ${_running_build}; ${upstream} is build ${_upstream_build} (the version is the commit count)"
+    fi
+    unset _running_build _upstream_build
     if [ "$behind" = "0" ]; then
         info "up to date with ${upstream}"
         exit 0

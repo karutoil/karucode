@@ -8,7 +8,12 @@ All responses are JSON unless noted. Errors use:
 
 Codes: `bad_request`, `not_found`, `permission_denied`, `unauthorized`, `config`,
 `provider`, `tool`, `store`, `plugin`, `timeout`, `path_escape`,
-`payload_too_large`, `internal`.
+`payload_too_large`, `update`, `internal`.
+
+`update` (a `502`) means the release source failed - an unreachable manifest, a
+malformed one, a checksum mismatch. A refusal (already up to date, no artifact for
+this platform, a binary this process may not write) is `409 bad_request` with the
+message naming what to do instead; see **Version and updates** below.
 
 ## Auth and CSRF
 
@@ -89,13 +94,21 @@ POST /api/onboarding/complete   {skipped?}
 
 `GET /api/health`
 ```json
-{ "status": "ok", "version": "0.1.0", "uptime_secs": 12,
+{ "status": "ok", "version": "107", "build": 107,
+  "commit": "abf0a4216839", "commit_date": "2026-11-09T21:35:10-05:00",
+  "dirty": false, "uptime_secs": 12,
   "workspace": "/home/me/project",
   "projects": [ { "id": "p_ab12", "name": "project", "path": "/home/me/project",
                   "created_at": 1710000000000, "updated_at": 1710000000000,
                   "session_count": 2 } ],
   "auth_required": false, "provider_configured": true, "db": "ok" }
 ```
+`version` is the **build number**, which is the git commit count (`"107"`, not a
+semver string), and `build` is the same number as an integer - compare that one.
+`commit`, `commit_date` and `dirty` describe the build; a `dirty` binary reports
+`true` when tracked files were modified at build time. The `versioning` topic
+explains why, and `karucode --version` prints the same numbers.
+
 `status` is `"ok"` when the database probe passes and `"degraded"` otherwise
 (the endpoint still returns 200 so a supervisor can see the reason). When the
 store fails, `projects` is `[]` and a `db_error` field carries the message, so a
@@ -1297,6 +1310,72 @@ plugin that fails to answer → `502 plugin`.
 `GET /api/mcp` → `{ "servers": [ { "name": "fs", "transport": "stdio",
   "status": "connected|failed|disconnected", "tools": ["mcp__fs__read"],
   "error": null } ] }`
+
+## Version and updates
+
+The version is the git commit count, so an update is a higher `build` number; see
+the `versioning` and `updates` topics for the operator's view and
+`crates/kc-server/src/update.rs` for the implementation.
+
+`GET /api/update` — cached; it never contacts the release host.
+```json
+{
+  "current": { "version": "107", "build": 107, "commit": "abf0a4216839",
+               "commit_date": "2026-11-09T21:35:10-05:00", "dirty": false,
+               "channel": "stable", "target": "x86_64-unknown-linux-gnu" },
+  "install": { "kind": "managed|source|container", "path": "/usr/local/bin/karucode",
+               "writable": false, "detail": "…is not writable by this process…" },
+  "check": { "enabled": true, "manifest_url": "https://…/updates.json",
+             "interval_secs": 21600, "checked_at": 1710000000000, "error": null },
+  "latest": { "build": 108, "version": "108", "commit": "9c1de77a0b3c",
+              "commit_date": "…", "released_at": "…", "notes": "…",
+              "url": "https://…/releases/tag/v108",
+              "artifact": { "url": "https://…/karucode-108-x86_64-unknown-linux-gnu",
+                            "sha256": "…64 hex…", "size": 18432120, "tarball": "…" },
+              "has_target_for_this_build": true },
+  "update_available": true, "phase": "idle|checking|downloading|applying",
+  "staged": null,
+  "last_applied": { "from": "106", "to": "107", "path": "/usr/local/bin/karucode",
+                    "applied_at": 1710000000000 },
+  "restart": { "supervised": true,
+               "apply_command": "sudo /usr/local/bin/karucode update --apply --data-dir /var/lib/karucode" }
+}
+```
+`install.kind` is decided from the running binary: `source` (under a `target/`
+directory - update with `packaging/update.sh`), `container` (`/.dockerenv` -
+rebuild the image), or `managed`. `writable` is a real probe of the install
+directory, not a permission-bit guess: it answers whether this process can replace
+its own binary. `phase` is the state of an operation in flight; `latest`, `staged`
+and `last_applied` are `null` until they happen.
+
+`POST /api/update/check` — the manual form of the background check. Returns the
+same document. `409 bad_request` when `updates.check` is off (the message says so),
+`502 update` when the release host fails, in which case `check.error` also carries
+the reason. Touches no files.
+
+`POST /api/update/apply` — body `{"restart": false}` (both fields optional).
+Stages the download if needed (checksum, size, and the artifact's own
+`--version`), then copies it beside the installed binary and renames it into place,
+keeping `<name>.old`.
+
+```json
+{ "update": { …the GET document… },
+  "result": { "installed": true, "restart_required": true, "restart_requested": false,
+              "from": "107", "to": "108", "path": "/usr/local/bin/karucode",
+              "needs_privilege": false, "command": null,
+              "message": "installed; restart the service to run the new build" } }
+```
+
+Errors: `409 bad_request` when there is nothing newer, the release has no artifact
+for this platform, this is a build tree or a container, or this process cannot
+write the binary (the message contains the exact `sudo … update --apply` command);
+`403 permission_denied` when an admin token is configured and
+`X-Karucode-Admin-Token` is missing or wrong; `502 update` when the download or the
+manifest fails; `500 internal` on a local file error. `{"restart": true}` is
+refused (`409`) unless the process is supervised (systemd's `INVOCATION_ID`, or
+`KARUCODE_SUPERVISED=1`), because nothing would start it again - when accepted, the
+response is flushed and then the server shuts down so its unit starts the new
+binary.
 
 ## Event stream
 

@@ -17,6 +17,7 @@ pub mod projects;
 pub mod rewind;
 pub mod sessions;
 pub mod terminals;
+pub mod update;
 pub mod workspace;
 
 use crate::app::api_not_found;
@@ -91,10 +92,7 @@ pub fn api_router() -> Router<AppState> {
             axum::routing::patch(auth::rename_passkey).delete(auth::delete_passkey),
         )
         .route("/auth/sessions", get(auth::list_sessions))
-        .route(
-            "/auth/sessions/revoke-all",
-            post(auth::revoke_all_sessions),
-        )
+        .route("/auth/sessions/revoke-all", post(auth::revoke_all_sessions))
         .route(
             "/auth/sessions/:id",
             axum::routing::delete(auth::revoke_session),
@@ -232,6 +230,12 @@ pub fn api_router() -> Router<AppState> {
             post(plugins::run_ui_action),
         )
         .route("/mcp", get(plugins::list_mcp))
+        // Update checking and installing. `GET` is a cached read; the two `POST`s
+        // reach the network, and `apply` replaces the running binary (it needs the
+        // admin credential when one is configured). See `crate::update`.
+        .route("/update", get(update::status))
+        .route("/update/check", post(update::check))
+        .route("/update/apply", post(update::apply))
         .route("/events", get(events::stream))
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(axum::middleware::from_fn(|request, next| {

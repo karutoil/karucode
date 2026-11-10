@@ -15,7 +15,7 @@
 // @kc-title: Change karucode's configuration
 // @kc-summary: The four config layers, which settings apply live, and how secrets and invalid values are handled.
 // @kc-tags: config, settings, configuration, toml, env
-// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_PARALLEL_TOOL_CALLS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:limits.parallel_tool_calls, config:notifications.enabled, config:notifications.min_run_secs, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings
+// @kc-applies-to: env:KARUCODE_MALLOC_ARENA_MAX, env:KARUCODE_MALLOC_TRIM_SECS, file:~/.config/karucode/config.toml, env:KARUCODE_CONFIG, env:KARUCODE_ALLOW_TEMP_DIR, env:KARUCODE_LOCK_SETTINGS, env:KARUCODE_ADMIN_TOKEN, env:KARUCODE_PROJECT_ROOTS, env:KARUCODE_MAX_ITERATIONS, env:KARUCODE_MAX_RUN_SECS, env:KARUCODE_CONTEXT_MAX_CHARS, env:KARUCODE_PARALLEL_TOOL_CALLS, env:KARUCODE_MAX_IMAGE_READ_BYTES, env:KARUCODE_MODEL_SUPPORTS_IMAGES, env:KARUCODE_PLUGINS_WATCH, env:KARUCODE_PLUGINS_WATCH_SECS, env:KARUCODE_NOTIFICATIONS, env:KARUCODE_NOTIFICATIONS_EVENTS, env:KARUCODE_NOTIFICATIONS_PLUGIN, env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS, env:KARUCODE_NOTIFICATIONS_SAY_BODY, env:KARUCODE_SUBAGENT_ALLOW_BACKGROUND, env:KARUCODE_SUBAGENT_MAX_BACKGROUND, env:KARUCODE_SUBAGENT_WAIT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_MAX_ITERATIONS, env:KARUCODE_SUBAGENT_TIMEOUT_SECS, env:KARUCODE_SUBAGENT_CONCURRENCY, env:KARUCODE_ALLOW_RECURSIVE_SUBAGENTS, config:[model], config:[limits], config:[approvals], config:[subagents], config:subagents.allow_background, config:subagents.max_background, config:subagents.wait_timeout_secs, config:subagents.max_concurrent, config:subagents.max_iterations, config:subagents.max_depth, config:subagents.timeout_secs, config:[notifications], config:[[plugins]], config:[[mcp_servers]], config:plugins_watch, config:plugins_watch_secs, config:admin_token, config:project_roots, config:allow_temp_dir, config:model.supports_images, config:limits.max_image_read_bytes, config:limits.parallel_tool_calls, config:notifications.enabled, config:notifications.min_run_secs, config:[access], config:access.enabled, config:access.public_url, config:access.session_days, config:access.tunnel, config:access.trusted_proxies, env:KARUCODE_ACCESS_ENABLED, env:KARUCODE_PUBLIC_URL, env:KARUCODE_SESSION_DAYS, env:KARUCODE_TUNNEL, env:KARUCODE_TRUSTED_PROXIES, header:X-Karucode-Admin-Token, route:GET /api/config, route:PATCH /api/config, route:GET /api/stats, cmd:--config, cmd:--data-dir, ui:Settings, config:[updates], config:updates.check, config:updates.check_secs, config:updates.manifest_url, config:updates.auto_apply, env:KARUCODE_UPDATE_CHECK, env:KARUCODE_UPDATE_CHECK_SECS, env:KARUCODE_UPDATE_MANIFEST_URL, env:KARUCODE_UPDATE_AUTO_APPLY, route:GET /api/update, route:POST /api/update/check, route:POST /api/update/apply, ui:Settings > Updates
 //
 // # Where the settings come from
 //
@@ -60,6 +60,28 @@
 // reload replaces processes; `POST /api/plugins/reload` does the same thing on
 // demand, and `POST /api/plugins/:name/reload` refreshes one plugin. Bind
 // address, port, data directory and auth token still need a restart.
+//
+// # Update checking
+//
+// `[updates]` decides whether the server looks for a newer build and whether
+// finding one installs it. The version is the commit count, so an "update" is a
+// higher `build` number, not a semver bump:
+//
+// ```toml
+// [updates]
+// check = true                 # one request on startup and every check_secs
+// check_secs = 21600           # 6 hours; clamped to 300..=604800
+// manifest_url = "https://github.com/karutoil/karucode/releases/latest/download/updates.json"
+// auto_apply = false           # never replace the binary without a click
+// ```
+//
+// Environment: `KARUCODE_UPDATE_CHECK`, `KARUCODE_UPDATE_CHECK_SECS`,
+// `KARUCODE_UPDATE_MANIFEST_URL`, `KARUCODE_UPDATE_AUTO_APPLY`. `check` and
+// `check_secs` apply on the next tick of the checker, with no restart; a blank
+// `manifest_url` while checking is on is refused with `400` because every check
+// would fail. `manifest_url` and `auto_apply` need the admin credential (below):
+// the manifest names the binary that will replace this one. The `updates` topic
+// has the manifest format, the privileged apply and the CLI.
 //
 // # The admin gate
 //
@@ -607,6 +629,19 @@ pub struct NotificationsPatch {
     pub say_body: Option<bool>,
 }
 
+/// `[updates]` section of `PATCH /api/config`.
+///
+/// The interval is clamped server-side (`300..=604800`), so a browser that sends
+/// `0` gets the minimum back rather than a 400 it cannot act on.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatesPatch {
+    pub check: Option<bool>,
+    pub check_secs: Option<u64>,
+    pub manifest_url: Option<String>,
+    pub auto_apply: Option<bool>,
+}
+
 /// One provider profile to create or update. Fields left out keep their current
 /// value, so the settings screen can save just the model list.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -673,6 +708,7 @@ pub struct ConfigPatch {
     pub titles: Option<TitlesPatch>,
     pub notifications: Option<NotificationsPatch>,
     pub access: Option<AccessPatch>,
+    pub updates: Option<UpdatesPatch>,
 }
 
 impl ConfigPatch {
@@ -721,6 +757,17 @@ impl ConfigPatch {
         if self.access.is_some() {
             fields.push("access");
         }
+        // `[updates]` decides where replacement binaries come from. Repointing
+        // `manifest_url` at a host an attacker controls is remote code execution
+        // with a version number, and `auto_apply` turns it into an unattended one.
+        if let Some(updates) = &self.updates {
+            if updates.manifest_url.is_some() {
+                fields.push("updates.manifest_url");
+            }
+            if updates.auto_apply.is_some() {
+                fields.push("updates.auto_apply");
+            }
+        }
         fields
     }
 }
@@ -765,16 +812,36 @@ pub fn authorize_patch(
     if fields.is_empty() {
         return Ok(fields);
     }
-    let Some(expected) = config.admin_token.as_deref().filter(|t| !t.is_empty()) else {
+    authorize_admin(
+        config,
+        presented,
+        &format!("changing {}", fields.join(", ")),
+    )?;
+    Ok(fields)
+}
+
+/// Enforce the admin credential for one privileged action.
+///
+/// The same rule `PATCH /api/config` uses for its security fields, available to
+/// the actions that are not settings but are just as consequential - installing an
+/// update replaces the running binary. `admin_token = None` leaves the gate off,
+/// which is the single-operator default; with one configured, the
+/// `X-Karucode-Admin-Token` header must match. `what` names the action in the
+/// refusal, never the value.
+pub fn authorize_admin(config: &Config, presented: Option<&str>, what: &str) -> Result<()> {
+    let Some(expected) = config
+        .admin_token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+    else {
         // No admin token configured: the gate is off. Startup already warned.
-        return Ok(fields);
+        return Ok(());
     };
     let presented = presented.map(str::trim).unwrap_or_default();
     if presented.is_empty() {
         return Err(Error::PermissionDenied(format!(
-            "changing {} requires the admin credential: send `X-Karucode-Admin-Token` \
-             (KARUCODE_ADMIN_TOKEN)",
-            fields.join(", ")
+            "{what} requires the admin credential: send `X-Karucode-Admin-Token` \
+             (KARUCODE_ADMIN_TOKEN)"
         )));
     }
     if !constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
@@ -782,7 +849,7 @@ pub fn authorize_patch(
             "the admin credential is not valid for this change".into(),
         ));
     }
-    Ok(fields)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,6 +1083,7 @@ impl SettingsHandle {
             // is loading" and "my edit will never load".
             "plugins_watch": cfg.plugins_watch,
             "plugins_watch_secs": cfg.plugins_watch_secs,
+            "updates": public_updates(&cfg.updates),
             // The browser terminal. `shell` is resolved so the UI can say what
             // would actually be spawned, and `enabled` is what hides the tab: a
             // deployment that must not offer a shell sets KARUCODE_TERMINALS=0.
@@ -1073,6 +1141,24 @@ pub fn public_notifications(
             .iter()
             .map(|kind| kind.as_str())
             .collect::<Vec<_>>(),
+    })
+}
+
+/// The `updates` slice of `GET /api/config`.
+///
+/// Split out for the same reason as [`public_notifications`]: one place to read the
+/// field names from, and a test that can assert the wire shape without a database.
+/// The range bounds are included so the settings screen validates with the numbers
+/// the server enforces instead of a copy that drifts.
+pub fn public_updates(updates: &kc_core::config::UpdatesConfig) -> serde_json::Value {
+    serde_json::json!({
+        "check": updates.check,
+        "check_secs": updates.interval(),
+        "manifest_url": updates.manifest_url,
+        "auto_apply": updates.auto_apply,
+        "min_check_secs": kc_core::config::MIN_UPDATE_CHECK_SECS,
+        "max_check_secs": kc_core::config::MAX_UPDATE_CHECK_SECS,
+        "default_manifest_url": kc_core::config::DEFAULT_UPDATE_MANIFEST_URL,
     })
 }
 
@@ -1612,6 +1698,23 @@ fn apply_patch(config: &mut Config, patch: &ConfigPatch) -> Result<()> {
         }
     }
 
+    if let Some(updates) = &patch.updates {
+        let target = &mut config.updates;
+        if let Some(v) = updates.check {
+            target.check = v;
+        }
+        if let Some(v) = updates.check_secs {
+            target.check_secs = v;
+        }
+        if let Some(url) = &updates.manifest_url {
+            target.manifest_url = url.trim().to_string();
+        }
+        if let Some(v) = updates.auto_apply {
+            target.auto_apply = v;
+        }
+        target.check_secs = target.interval();
+    }
+
     // Repair a missing selection (first profile added, active profile deleted)
     // and mirror the active connection into the flat section. An explicit but
     // wrong selection is an error, not something to silently rewrite.
@@ -1668,7 +1771,25 @@ pub fn validate_settings(config: &Config) -> Result<()> {
     validate_titles(&config.titles)?;
     validate_notifications(&config.notifications)?;
     validate_terminals(&config.terminals)?;
+    validate_updates(&config.updates)?;
     validate_access(&config.access)
+}
+
+/// Validate `[updates]`.
+///
+/// The interval is clamped rather than rejected (the core type documents the range
+/// as a promise), but a blank manifest URL while checking is on would make every
+/// check fail at runtime with a message about a key, so it is a `400` here that
+/// names the field instead.
+fn validate_updates(updates: &kc_core::config::UpdatesConfig) -> Result<()> {
+    if updates.check && updates.manifest().is_none() {
+        return Err(Error::BadRequest(
+            "updates.manifest_url may not be blank while updates.check is on; set the URL of the \
+             release manifest, or turn checking off"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Validate `[access]`.

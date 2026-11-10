@@ -322,3 +322,27 @@ trusted_proxies = []                     # IPs/CIDRs whose X-Forwarded-* are bel
                                          # (e.g. ["10.0.0.0/8", "172.17.0.1"]).
                                          # Loopback is always trusted; `cloudflare`
                                          # adds Cloudflare's published ranges.
+
+# --- updates ---------------------------------------------------------------
+# karucode has no release trains: every commit on `main` is a release and the
+# version is the commit count, so an update is simply a higher build number.
+# A release publishes `updates.json` beside its artifacts, and this section
+# decides whether the server looks at it.
+#
+# Environment overrides: KARUCODE_UPDATE_CHECK, KARUCODE_UPDATE_CHECK_SECS,
+# KARUCODE_UPDATE_MANIFEST_URL, KARUCODE_UPDATE_AUTO_APPLY.
+#
+# Checking is one small GET and touches nothing. Installing replaces the binary
+# this process is running from and needs write access to it - a systemd install
+# usually does not have that, so the download is staged and verified and a human
+# runs `sudo karucode update --apply --data-dir <dir>`. Settings -> Updates shows
+# that exact command. A container install is updated by rebuilding the image.
+[updates]
+check = true                             # look for a newer build (default)
+check_secs = 21600                       # 6 hours; clamped to 300 .. 604800
+manifest_url = "https://github.com/karutoil/karucode/releases/latest/download/updates.json"
+                                         # point this at a mirror you control to
+                                         # choose who supplies your binaries
+auto_apply = false                       # install automatically when a newer
+                                         # build is found AND this process may
+                                         # write its own binary (off: never)

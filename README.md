@@ -159,6 +159,34 @@ service is enabled at boot and started, and the installer waits until
 `/api/health` answers before it reports success. `--dry-run` prints every action
 without changing anything.
 
+### Versions and updates
+
+There are no semantic releases. **Every commit on `main` is a release and the
+version is the commit count**, so build 107 is the 107th commit:
+
+```bash
+$ karucode --version
+karucode 107 (abf0a4216839, 2026-11-09T21:35:10-05:00)
+```
+
+A release is tagged `v<build>` and ships the tarball, the raw binary, a
+`SHA256SUMS` and an `updates.json` manifest. A binary installed by
+`packaging/install.sh` updates itself from that manifest:
+
+```bash
+karucode update --check        # 0 up to date, 3 a newer build exists
+sudo karucode update --apply --data-dir /var/lib/karucode --restart
+```
+
+The server checks on startup and every six hours by default (`[updates] check`,
+`check_secs`) and raises a notification when a newer build exists; **Settings ->
+Updates** shows the running build, the release notes and the install button, or
+the exact `sudo` command when the service account cannot write
+`/usr/local/bin/karucode`. The download is verified against the manifest's
+SHA-256 and then executed once with `--version` before it is installed, and the
+old binary is kept as `karucode.old`. Point `updates.manifest_url` at a mirror you
+control, and set `KARUCODE_UPDATE_CHECK=0` for an air-gapped host.
+
 Once the service is running a binary you built yourself, upgrades are
 `sudo sh packaging/update.sh`: it pulls, builds, snapshots the database and hands
 the result to the installer, reading your unit so the workspace, user and port

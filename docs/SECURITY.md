@@ -237,6 +237,41 @@ machine, run it under your own account and keep the data directory private.
 contents the agent reads, and command output. Use a gateway you trust, ideally on
 a network path you control.
 
+## Updating is a trusted-publisher decision
+
+An update replaces the running binary, so the update manifest is as sensitive as
+the provider endpoint: whoever serves `updates.json` decides what runs on the
+machine.
+
+* **The default is a check, not an install.** `[updates] check = true` fetches one
+  small document on startup and every six hours; `auto_apply = false` means
+  finding a newer build raises a notification (*Settings → Updates*), not an
+  install. `KARUCODE_UPDATE_CHECK=0` makes no request at all.
+* **Installing needs write access to the binary.** A systemd install runs as the
+  account that ran `install.sh` and the binary is usually root-owned in
+  `/usr/local/bin`, so the server can stage and verify a download but not replace
+  it: a human runs `sudo karucode update --apply --data-dir <dir>`. `auto_apply`
+  can never cross that boundary - it only installs when this process owns the
+  binary, and it stages (rather than installs) otherwise.
+* **A download is verified before it is executed, and executed before it is
+  installed.** The manifest's SHA-256 and size are checked while streaming, then
+  the artifact is run once with `--version` (cleared environment, 30 s limit) and
+  must report the build the manifest promised. The verified bytes are copied next
+  to the installed binary, compared byte for byte, and renamed into place; the
+  previous binary stays as `<name>.old`.
+* **Repointing the manifest needs the admin credential.** A `PATCH /api/config`
+  that changes `updates.manifest_url` or `updates.auto_apply` requires
+  `X-Karucode-Admin-Token` when one is configured, and so does
+  `POST /api/update/apply`. Use a mirror you control (the normal air-gapped
+  setup) and leave checking off if you would rather update only by hand.
+* **A container is never updated in place.** The image is the unit of deployment;
+  `/api/update/apply` refuses with that message.
+
+The checksum proves the bytes are intact; it does not make the publisher
+trustworthy. The same is true of `packaging/install.sh` and
+`packaging/update.sh`, which verify a release tarball against the published
+`SHA256SUMS` before installing it.
+
 ## Remote access recipe
 
 If you must reach karucode from another machine:

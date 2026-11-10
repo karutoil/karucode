@@ -183,8 +183,10 @@ impl Metrics {
         out.push_str("# HELP karucode_build_info Build metadata; the value is always 1.\n");
         out.push_str("# TYPE karucode_build_info gauge\n");
         out.push_str(&format!(
-            "karucode_build_info{{version=\"{}\"}} 1\n",
-            crate::VERSION
+            "karucode_build_info{{version=\"{}\",build=\"{}\",commit=\"{}\"}} 1\n",
+            crate::VERSION,
+            crate::version::BUILD,
+            crate::version::COMMIT
         ));
         out
     }

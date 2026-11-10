@@ -7,7 +7,7 @@
 
 - **Slug:** `http-api`
 - **Tags:** api, http, rest, sse, curl, endpoints
-- **Applies to:** `route:GET /api/health`, `route:GET /api/config`, `route:PATCH /api/config`, `route:POST /api/provider/test`, `route:GET /api/models/catalog`, `route:GET /api/models/lookup`, `route:GET /api/stats`, `route:GET /api/projects`, `route:POST /api/projects`, `route:PATCH /api/projects/:id/preferences`, `route:GET /api/projects/:id/favicon`, `route:GET /api/sessions`, `route:POST /api/sessions`, `route:GET /api/sessions/:id`, `route:GET /api/sessions/:id/info`, `route:PATCH /api/sessions/:id`, `route:PATCH /api/sessions/:id/model`, `route:POST /api/sessions/:id/messages`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `route:POST /api/sessions/:id/cancel`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `route:GET /api/control/sessions`, `route:POST /api/control/sessions`, `route:GET /api/control/overview`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `route:GET /api/approvals`, `route:POST /api/approvals/:id`, `route:GET /api/workspace/tree`, `route:GET /api/workspace/file`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:GET /api/workspace/preview-project/:project/*rest`, `route:POST /api/workspace/upload`, `route:POST /api/artifacts`, `route:GET /api/artifacts/:id`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `route:GET /api/mcp`, `config:plugin_panels`, `route:GET /api/events`, `header:X-Karucode-Event-Epoch`, `event:notification`, `event:queued_messages`, `event:session_rewound`, `event:karucode.transport`, `event:connection_cap`, `event:stream_overflow`, `event:text_replaced`, `field:expected_digest`, `config:[notifications]`, `header:X-Karucode-Client`, `header:Cookie`, `env:KARUCODE_AUTH_TOKEN`, `route:GET /api/auth/status`, `route:POST /api/auth/login`, `route:POST /api/auth/logout`, `route:GET /api/auth/me`, `route:POST /api/auth/password`, `route:DELETE /api/auth/password`, `route:GET /api/auth/passkeys`, `route:POST /api/auth/passkeys`, `route:POST /api/auth/passkeys/options`, `route:PATCH /api/auth/passkeys/:id`, `route:DELETE /api/auth/passkeys/:id`, `route:POST /api/auth/passkey/options`, `route:POST /api/auth/passkey/login`, `route:GET /api/auth/sessions`, `route:DELETE /api/auth/sessions/:id`, `route:POST /api/auth/sessions/revoke-all`, `route:GET /api/onboarding`, `route:POST /api/onboarding/complete`, `config:[access]`, `config:access.enabled`, `doc:docs/API.md`
+- **Applies to:** `route:GET /api/health`, `route:GET /api/config`, `route:PATCH /api/config`, `route:POST /api/provider/test`, `route:GET /api/models/catalog`, `route:GET /api/models/lookup`, `route:GET /api/stats`, `route:GET /api/projects`, `route:POST /api/projects`, `route:PATCH /api/projects/:id/preferences`, `route:GET /api/projects/:id/favicon`, `route:GET /api/sessions`, `route:POST /api/sessions`, `route:GET /api/sessions/:id`, `route:GET /api/sessions/:id/info`, `route:PATCH /api/sessions/:id`, `route:PATCH /api/sessions/:id/model`, `route:POST /api/sessions/:id/messages`, `route:GET /api/sessions/:id/queues`, `route:DELETE /api/sessions/:id/queues/:queued_id`, `route:POST /api/sessions/:id/cancel`, `route:GET /api/sessions/:id/rewind`, `route:POST /api/sessions/:id/rewind`, `route:GET /api/control/sessions`, `route:POST /api/control/sessions`, `route:GET /api/control/overview`, `route:GET /api/agents`, `route:GET /api/agents/:id`, `route:POST /api/agents/:id/pause`, `route:POST /api/agents/:id/resume`, `route:POST /api/agents/:id/cancel`, `route:GET /api/approvals`, `route:POST /api/approvals/:id`, `route:GET /api/workspace/tree`, `route:GET /api/workspace/file`, `route:PUT /api/workspace/file`, `route:GET /api/workspace/raw`, `route:GET /api/workspace/preview/*rest`, `route:GET /api/workspace/preview-project/:project/*rest`, `route:POST /api/workspace/upload`, `route:POST /api/artifacts`, `route:GET /api/artifacts/:id`, `route:GET /api/git/status`, `route:GET /api/git/diff`, `route:GET /api/git/branches`, `route:POST /api/git/branches`, `route:POST /api/git/branches/delete`, `route:POST /api/git/checkout`, `route:GET /api/git/log`, `route:GET /api/git/commits/:sha`, `route:POST /api/git/stage`, `route:POST /api/git/unstage`, `route:POST /api/git/discard`, `route:POST /api/git/commit`, `route:GET /api/git/stash`, `route:POST /api/git/stash`, `route:GET /api/plugins`, `route:POST /api/plugins/reload`, `route:POST /api/plugins/:name/reload`, `route:POST /api/plugins/:name/enable`, `route:GET /api/plugins/:name/panels/:panel`, `route:GET /api/mcp`, `route:GET /api/update`, `route:POST /api/update/check`, `route:POST /api/update/apply`, `header:X-Karucode-Admin-Token`, `config:[updates]`, `config:plugin_panels`, `route:GET /api/events`, `header:X-Karucode-Event-Epoch`, `event:notification`, `event:queued_messages`, `event:session_rewound`, `event:karucode.transport`, `event:connection_cap`, `event:stream_overflow`, `event:text_replaced`, `field:expected_digest`, `config:[notifications]`, `header:X-Karucode-Client`, `header:Cookie`, `env:KARUCODE_AUTH_TOKEN`, `route:GET /api/auth/status`, `route:POST /api/auth/login`, `route:POST /api/auth/logout`, `route:GET /api/auth/me`, `route:POST /api/auth/password`, `route:DELETE /api/auth/password`, `route:GET /api/auth/passkeys`, `route:POST /api/auth/passkeys`, `route:POST /api/auth/passkeys/options`, `route:PATCH /api/auth/passkeys/:id`, `route:DELETE /api/auth/passkeys/:id`, `route:POST /api/auth/passkey/options`, `route:POST /api/auth/passkey/login`, `route:GET /api/auth/sessions`, `route:DELETE /api/auth/sessions/:id`, `route:POST /api/auth/sessions/revoke-all`, `route:GET /api/onboarding`, `route:POST /api/onboarding/complete`, `config:[access]`, `config:access.enabled`, `doc:docs/API.md`
 - **Source:** `crates/kc-server/src/lib.rs:21`
 
 ---
@@ -77,7 +77,34 @@ curl -s -X POST localhost:8787/api/sessions/abc/messages \
 | `GET /api/plugins/:name/panels/:panel` | one plugin panel's payload for the inspector |
 | `POST /api/plugins/:name/ui/actions/:action` | run one UI action a plugin contributed (a button or palette command a person activated) |
 | `GET /api/mcp` | MCP server status and discovered tools |
+| `GET /api/update` | the running build, how this install can be updated, the last check and any staged artifact (cached; no network) |
+| `POST /api/update/check` | ask the release manifest now |
+| `POST /api/update/apply` | stage if needed, then install the newer build (`X-Karucode-Admin-Token` when configured; `{"restart": true}` restarts a supervised process) |
 | `GET /api/events` | the SSE event stream for the open session |
+
+## Versions and updates
+
+`GET /api/health` reports `version` (the build number as a string) plus `build`,
+`commit`, `commit_date` and `dirty`; the version is the git commit count, so
+`build` is the integer to compare. See the `versioning` topic.
+
+The update routes are the HTTP face of `karucode update`:
+
+```bash
+curl -s localhost:8787/api/update | jq '.current.build, .install.kind, .update_available'
+curl -s -X POST localhost:8787/api/update/check -H 'X-Karucode-Client: web' | jq '.latest'
+curl -s -X POST localhost:8787/api/update/apply \
+  -H 'X-Karucode-Client: web' -H 'Content-Type: application/json' \
+  -d '{"restart": false}' | jq '.result'
+```
+
+`apply` answers `409 bad_request` when there is nothing to do or this process
+may not write its binary (the message names the `sudo … update --apply` command
+that can), `502 update` when the release source fails, and `500 internal` on a
+local file problem. `GET /api/config` reports `[updates]` under `updates`, and
+changing `updates.manifest_url` or `updates.auto_apply` needs the admin
+credential because the manifest decides which binary runs. The `updates` topic
+has the whole procedure.
 
 ## Workspace reads, saves and previews
 

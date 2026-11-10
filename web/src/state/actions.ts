@@ -28,6 +28,8 @@ import type {
   SessionDetail,
   SessionModelSelection,
   SessionSummary,
+  UpdateApplyResponse,
+  UpdateStatus,
 } from '../api/types';
 import { isNarrowViewport } from '../lib/dom';
 import {
@@ -1061,6 +1063,10 @@ export async function bootstrap(force = false): Promise<void> {
       store.health.value = health;
       store.config.value = config;
       store.projects.value = projectList.projects;
+      // Not awaited: this reaches the release host, and a slow or unreachable one
+      // must not delay the first paint. The rail and Settings → Updates fill in
+      // when it lands, and an older server answers 404 and is simply ignored.
+      void refreshUpdateStatus();
       store.projectsLoading.value = false;
       // Per-project icons are fetched in the background: the rail draws initials
       // first and swaps in a favicon when one arrives, so this never delays boot.
@@ -2723,8 +2729,52 @@ export function isOpenableUiUrl(url: string): boolean {
   return lower.startsWith('https://') || lower.startsWith('http://');
 }
 
-export function openSettings(): void {
+export function openSettings(tab?: string): void {
+  store.settingsInitialTab.value = tab ?? null;
   replaceOverlay('settings');
+}
+
+/**
+ * Refresh `GET /api/update` into the store.
+ *
+ * Best-effort by design: an older server has no `/api/update` (a `404`), and a
+ * release host being unreachable is not a reason to show an error anywhere but
+ * inside Settings → Updates. The caller gets `null` and draws nothing.
+ */
+export async function refreshUpdateStatus(): Promise<UpdateStatus | null> {
+  try {
+    const status = await api.getUpdate();
+    store.updateStatus.value = status;
+    return status;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `POST /api/update/check`: ask the release host now.
+ *
+ * Unlike the boot read this one *throws* on failure: the person clicked a button,
+ * and a check that silently did nothing is the bug this exists to avoid. The
+ * server also records the reason in the status, so the panel shows both.
+ */
+export async function runUpdateCheck(): Promise<UpdateStatus> {
+  const status = await api.checkForUpdate();
+  store.updateStatus.value = status;
+  return status;
+}
+
+/**
+ * `POST /api/update/apply`: stage if needed, then install.
+ *
+ * The response carries the new status, so the panel and the rail update from one
+ * round trip. A refusal (source tree, not writable, `403` without the admin token)
+ * is thrown as an `ApiError` with the server's message.
+ */
+export async function installUpdate(restart = false): Promise<UpdateApplyResponse> {
+  const response = await api.applyUpdate({ restart });
+  store.updateStatus.value = response.update;
+  return response;
 }
 
 export function closeSettings(): void {

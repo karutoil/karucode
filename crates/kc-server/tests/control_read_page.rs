@@ -71,11 +71,7 @@ fn seen_from(h: &support::Harness, from: usize) -> String {
 
 /// The newest request the scripted model was given, joined per message.
 fn last_prompt(h: &support::Harness) -> String {
-    h.factory
-        .prompts()
-        .pop()
-        .unwrap_or_default()
-        .join("\n")
+    h.factory.prompts().pop().unwrap_or_default().join("\n")
 }
 
 #[tokio::test]
@@ -115,7 +111,9 @@ async fn a_cut_message_names_the_offset_that_returns_the_rest() {
     ));
     h.factory.push(text("Page one."));
     assert_eq!(
-        h.post(&send, json!({"content": "Read that session"})).await.status,
+        h.post(&send, json!({"content": "Read that session"}))
+            .await
+            .status,
         StatusCode::ACCEPTED
     );
     h.wait_until_idle(&central).await;
@@ -140,7 +138,9 @@ async fn a_cut_message_names_the_offset_that_returns_the_rest() {
     ));
     h.factory.push(text("Page two."));
     assert_eq!(
-        h.post(&send, json!({"content": "Read the rest of it"})).await.status,
+        h.post(&send, json!({"content": "Read the rest of it"}))
+            .await
+            .status,
         StatusCode::ACCEPTED
     );
     h.wait_until_idle(&central).await;

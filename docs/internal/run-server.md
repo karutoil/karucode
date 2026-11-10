@@ -7,7 +7,7 @@
 
 - **Slug:** `run-server`
 - **Tags:** install, build, run, cli, startup, server
-- **Applies to:** `cmd:karucode`, `cmd:--workspace`, `cmd:--port`, `cmd:--host`, `cmd:--data-dir`, `cmd:--config`, `cmd:--help`, `env:KARUCODE_HOST`, `env:KARUCODE_PORT`, `env:KARUCODE_WORKSPACE`, `env:KARUCODE_DATA_DIR`, `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_LOG`, `env:KARUCODE_WEB_DIR`, `env:KARUCODE_ALLOWED_HOSTS`, `env:KARUCODE_SKIP_WEB_BUILD`, `env:KARUCODE_WEB_DIST`, `env:KARUCODE_NPM`, `cmd:npm run build`, `cmd:npm ci`, `route:GET /api/health`, `file:web/dist`, `file:crates/kc-server/build.rs`
+- **Applies to:** `cmd:karucode`, `cmd:--workspace`, `cmd:--port`, `cmd:--host`, `cmd:--data-dir`, `cmd:--config`, `cmd:--help`, `cmd:--version`, `cmd:karucode update`, `cmd:karucode update --check`, `cmd:karucode update --stage`, `cmd:karucode update --apply`, `cmd:karucode update --apply --restart`, `env:KARUCODE_HOST`, `env:KARUCODE_PORT`, `env:KARUCODE_WORKSPACE`, `env:KARUCODE_DATA_DIR`, `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_LOG`, `env:KARUCODE_WEB_DIR`, `env:KARUCODE_ALLOWED_HOSTS`, `env:KARUCODE_SKIP_WEB_BUILD`, `env:KARUCODE_WEB_DIST`, `env:KARUCODE_NPM`, `cmd:npm run build`, `cmd:npm ci`, `route:GET /api/health`, `file:web/dist`, `file:crates/kc-server/build.rs`
 - **Source:** `crates/kc-server/src/bootstrap.rs:8`
 
 ---
@@ -57,6 +57,17 @@ of the embedded snapshot.
 | `--no-open` | - | accepted for compatibility; the server never opens a browser |
 | `-h`, `--version` | - | usage and version, handled before touching the filesystem |
 
+`karucode --version` prints the **build number**, which is the git commit count,
+with the commit and its date:
+
+```text
+$ karucode --version
+karucode 107 (abf0a4216839, 2026-11-09T21:35:10-05:00)
+```
+
+That is the version to quote in a bug report and the number to compare with a
+release; the `versioning` topic explains why there is no semver here.
+
 Every flag has an environment equivalent (`KARUCODE_HOST`, `KARUCODE_PORT`,
 `KARUCODE_WORKSPACE`, `KARUCODE_DATA_DIR`, `KARUCODE_CONFIG`); flags win for the
 process they start. `KARUCODE_LOG` sets the tracing filter
@@ -73,6 +84,22 @@ exits non-zero on drift so a plugin's CI can guard it.
 
 Neither subcommand starts the server, reads the config file or touches the
 data directory, and an existing file is never overwritten without `--force`.
+
+`karucode update` is the third subcommand and the one that keeps an installed
+binary current:
+
+```bash
+karucode update --check     # 0 up to date, 3 a newer build exists, 1 error
+karucode update --stage     # download + checksum + run it once to prove the build
+sudo karucode update --apply --data-dir /var/lib/karucode   # install it
+sudo karucode update --apply --data-dir /var/lib/karucode --restart
+```
+
+The default is `--check`, so `karucode update` alone never downloads 20 MiB.
+`--apply` needs write access to the installed binary; the server's own
+**Settings → Updates** panel stages an update and prints exactly this command
+when the service account cannot write its binary. The `updates` topic has the
+manifest format, the `[updates]` settings and the exit codes.
 
 ## Startup order
 

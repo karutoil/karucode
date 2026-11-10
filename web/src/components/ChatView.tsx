@@ -132,7 +132,7 @@ function ProviderBanner(): JSX.Element | null {
       <div class="banner-body">
         <strong>No model provider configured.</strong> Set a base URL and model before sending a message.
       </div>
-      <button type="button" class="button button-small" onClick={actions.openSettings}>
+      <button type="button" class="button button-small" onClick={() => actions.openSettings()}>
         Open settings
       </button>
     </div>

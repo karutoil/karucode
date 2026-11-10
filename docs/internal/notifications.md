@@ -7,7 +7,7 @@
 
 - **Slug:** `notifications`
 - **Tags:** notifications, sounds, alerts, approvals, unread, plugin notify, desktop
-- **Applies to:** `config:[notifications]`, `config:notifications.enabled`, `config:notifications.run_finished`, `config:notifications.needs_input`, `config:notifications.error`, `config:notifications.info`, `config:notifications.plugin`, `config:notifications.min_run_secs`, `config:notifications.say_body`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/events`, `event:notification`, `method:notify`, `hook:on_notify`, `ui:SettingsSheet`, `ui:SessionsRail`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:ProjectRail`, `file:web/src/state/notifier.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`
+- **Applies to:** `config:[notifications]`, `config:notifications.enabled`, `config:notifications.run_finished`, `config:notifications.needs_input`, `config:notifications.error`, `config:notifications.info`, `config:notifications.plugin`, `config:notifications.min_run_secs`, `config:notifications.say_body`, `env:KARUCODE_NOTIFICATIONS`, `env:KARUCODE_NOTIFICATIONS_EVENTS`, `env:KARUCODE_NOTIFICATIONS_PLUGIN`, `env:KARUCODE_NOTIFICATIONS_MIN_RUN_SECS`, `env:KARUCODE_NOTIFICATIONS_SAY_BODY`, `route:GET /api/config`, `route:PATCH /api/config`, `route:GET /api/events`, `event:notification`, `method:notify`, `route:GET /api/update`, `ui:Settings > Updates`, `hook:on_notify`, `ui:SettingsSheet`, `ui:SessionsRail`, `ui:ToastRegion`, `ui:NotificationCenter`, `ui:ProjectRail`, `file:web/src/state/notifier.ts`, `file:web/src/state/notifications.test.ts`, `file:web/src/components/NotificationCenter.tsx`, `file:web/src/lib/notifySound.ts`, `file:web/src/lib/notifyDesktop.ts`
 - **Source:** `crates/kc-core/src/notify.rs:24`
 
 ---
@@ -34,10 +34,17 @@ tool loop, so the signal is about states a human cares about.
 | the run failed, or a restart interrupted it | `error` | low buzz |
 | a subagent failed | `error` | low buzz |
 | a plugin raised one | whatever it chose (`info` by default) | one tick for `info` |
+| a newer karucode build is available | `info` | one tick for `info` |
 | **you** cancelled the run | *nothing* | — |
 
 A cancellation you asked for needs no ping: you pressed Escape. A cancellation
 nobody asked for (a shutdown) still notifies.
+
+The update notice is raised once per build by the background update check, with
+id `update:<build>`, so a check every six hours does not repeat it. It obeys the
+same `enabled` / `info` switches as everything else (the server decides before
+emitting), and it never installs anything: it says a newer build exists and
+points at **Settings → Updates**. See the `updates` topic.
 
 ## Four ways to turn it off
 

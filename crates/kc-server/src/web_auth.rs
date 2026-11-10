@@ -298,11 +298,7 @@ impl WebAuth {
 
     /// Browser-facing passkey list.
     pub fn passkeys(&self) -> Vec<PasskeyView> {
-        self.read()
-            .passkeys
-            .iter()
-            .map(PasskeyView::from)
-            .collect()
+        self.read().passkeys.iter().map(PasskeyView::from).collect()
     }
 
     pub fn passkey_count(&self) -> usize {
@@ -361,7 +357,11 @@ impl WebAuth {
     }
 
     /// Register a verified credential as a passkey.
-    pub async fn add_passkey(&self, credential: RegisteredCredential, name: &str) -> Result<PasskeyView> {
+    pub async fn add_passkey(
+        &self,
+        credential: RegisteredCredential,
+        name: &str,
+    ) -> Result<PasskeyView> {
         let name = sanitize_passkey_name(name);
         let _guard = self.write_lock.lock().await;
         let passkey = Passkey {
@@ -1136,7 +1136,10 @@ mod tests {
 
     #[test]
     fn the_relying_party_id_comes_from_the_origin_host() {
-        assert_eq!(rp_id_for(&["https://karucode.example.com".into()]), "karucode.example.com");
+        assert_eq!(
+            rp_id_for(&["https://karucode.example.com".into()]),
+            "karucode.example.com"
+        );
         assert_eq!(rp_id_for(&["http://127.0.0.1:8787".into()]), "127.0.0.1");
         assert_eq!(rp_id_for(&[]), "localhost");
     }

@@ -355,6 +355,92 @@ describe('SessionsRail shell', () => {
     expect(heading?.lastElementChild?.className).toBe('side-head-actions');
   });
 
+  it('offers the newer build beside the version, and says restart once it is installed', () => {
+    store.health.value = {
+      status: 'ok',
+      version: '107',
+      build: 107,
+      commit: 'abf0a42',
+      commit_date: '2026-05-30T18:04:11+00:00',
+      dirty: false,
+      uptime_secs: 12,
+      workspace: '/home/me/karucode',
+      projects: [],
+      auth_required: false,
+      provider_configured: true,
+      db: 'ok',
+    };
+    const update = {
+      current: {
+        version: '107',
+        build: 107,
+        commit: 'abf0a42',
+        commit_date: '2026-05-30T18:04:11+00:00',
+        dirty: false,
+        channel: 'stable',
+        target: 'x86_64-unknown-linux-gnu',
+      },
+      install: {
+        kind: 'managed' as const,
+        path: '/usr/local/bin/karucode',
+        writable: false,
+        detail: 'not writable',
+      },
+      check: {
+        enabled: true,
+        manifest_url: 'https://example.com/updates.json',
+        interval_secs: 21600,
+        checked_at: NOW,
+        error: null,
+      },
+      latest: {
+        build: 108,
+        version: '108',
+        commit: '9c1de77',
+        commit_date: '2026-05-31T09:12:40+00:00',
+        released_at: null,
+        notes: null,
+        url: null,
+        artifact: null,
+        has_target_for_this_build: true,
+      },
+      update_available: true,
+      phase: 'idle' as const,
+      staged: null,
+      last_applied: null,
+      restart: { supervised: true, apply_command: 'sudo karucode update --apply' },
+    };
+    store.updateStatus.value = update;
+    const first = render(<SessionsRail />);
+    expect(screen.getByText('v107')).toBeTruthy();
+    const badge = screen.getByRole('button', { name: 'Update available: build 108' });
+    fireEvent.click(badge);
+    // The chip is a door into the panel that can do something about it.
+    expect(store.settingsOpen.value).toBe(true);
+    expect(store.settingsInitialTab.value).toBe('updates');
+    first.unmount();
+
+    // The same build on disk is a restart, not another install.
+    store.updateStatus.value = {
+      ...update,
+      last_applied: {
+        from: '107',
+        to: '108',
+        path: '/usr/local/bin/karucode',
+        applied_at: NOW,
+      },
+    };
+    render(<SessionsRail />);
+    expect(screen.getByRole('button', { name: 'Restart to run build 108' })).toBeTruthy();
+
+    // This describe seeds the store itself rather than calling resetAppState, so
+    // the badge and the opened sheet are cleared here or they leak into the test
+    // that asserts the footer's exact text.
+    store.updateStatus.value = null;
+    store.settingsInitialTab.value = null;
+    store.settingsOpen.value = false;
+  });
+
   it('puts the version in the footer strip and the provider beside Settings', () => {
     store.health.value = {
       status: 'ok',

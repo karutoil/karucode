@@ -59,7 +59,14 @@ fn health_body(facts: HealthFacts) -> Value {
 
     let mut body = json!({
         "status": if degraded { "degraded" } else { "ok" },
+        // The version is the commit count (see `crate::version`): `version` keeps
+        // its documented type (a string) so existing clients are unaffected, and
+        // `build` is the same number a client can compare.
         "version": crate::VERSION,
+        "build": crate::version::BUILD,
+        "commit": crate::version::COMMIT,
+        "commit_date": crate::version::COMMIT_DATE,
+        "dirty": crate::version::DIRTY,
         "uptime_secs": facts.uptime_secs,
         "workspace": facts.workspace,
         "projects": projects,
@@ -109,6 +116,10 @@ mod tests {
         for key in [
             "status",
             "version",
+            "build",
+            "commit",
+            "commit_date",
+            "dirty",
             "uptime_secs",
             "workspace",
             "projects",

@@ -7,7 +7,7 @@
 // @kc-title: Run it as a systemd service
 // @kc-summary: Install the binary and a hardened unit, keep it enabled across reboots, and upgrade or roll back without losing the paths it needs.
 // @kc-tags: install, deploy, systemd, service, upgrade, reboot, production
-// @kc-applies-to: file:packaging/install.sh, file:packaging/update.sh, file:packaging/karucode.service, cmd:install.sh, cmd:install.sh --workspace, cmd:install.sh --dry-run, cmd:install.sh --binary, cmd:install.sh --tarball, cmd:install.sh --no-systemd, cmd:install.sh --allow-jit, cmd:install.sh --port, cmd:install.sh --service-user, cmd:install.sh --service-group, cmd:update.sh, cmd:update.sh --check, cmd:update.sh --dry-run, cmd:update.sh --no-pull, cmd:update.sh --ref, cmd:update.sh --build-only, cmd:update.sh --skip-build, cmd:update.sh --allow-dirty, cmd:update.sh --no-backup, cmd:update.sh --force, cmd:update.sh --stage-only, cmd:update.sh --from-stage, cmd:update.sh --no-stage, cmd:update.sh --stage-dir, cmd:update.sh --detach, cmd:update.sh --no-detach, cmd:update.sh --follow, env:SUDO_USER, env:LOGNAME, path:/etc/systemd/system/karucode.service, path:/etc/systemd/system/karucode.service.d/10-install.conf, path:/etc/systemd/system/karucode.service.d/20-local.conf, path:/etc/karucode/karucode.env, path:/var/lib/karucode, path:/usr/local/bin/karucode, cmd:systemctl enable --now karucode, cmd:systemctl restart karucode, cmd:journalctl -u karucode
+// @kc-applies-to: file:packaging/install.sh, file:packaging/update.sh, file:packaging/karucode.service, cmd:install.sh, cmd:install.sh --workspace, cmd:install.sh --dry-run, cmd:install.sh --binary, cmd:install.sh --tarball, cmd:install.sh --no-systemd, cmd:install.sh --allow-jit, cmd:install.sh --port, cmd:install.sh --service-user, cmd:install.sh --service-group, cmd:update.sh, cmd:update.sh --check, cmd:update.sh --dry-run, cmd:update.sh --no-pull, cmd:update.sh --ref, cmd:update.sh --build-only, cmd:update.sh --skip-build, cmd:update.sh --allow-dirty, cmd:update.sh --no-backup, cmd:update.sh --force, cmd:update.sh --stage-only, cmd:update.sh --from-stage, cmd:update.sh --no-stage, cmd:update.sh --stage-dir, cmd:update.sh --detach, cmd:update.sh --no-detach, cmd:update.sh --follow, env:SUDO_USER, env:LOGNAME, path:/etc/systemd/system/karucode.service, path:/etc/systemd/system/karucode.service.d/10-install.conf, path:/etc/systemd/system/karucode.service.d/20-local.conf, path:/etc/karucode/karucode.env, path:/var/lib/karucode, path:/usr/local/bin/karucode, cmd:systemctl enable --now karucode, cmd:systemctl restart karucode, cmd:journalctl -u karucode, cmd:karucode --version, cmd:karucode update --apply, cmd:karucode update --check, route:GET /api/update, ui:Settings > Updates
 //
 // # Install
 //
@@ -142,10 +142,51 @@
 // untouched.
 //
 // ```bash
-// sudo sh packaging/install.sh --version 0.2.0 --workspace /srv/karucode/workspace
+// sudo sh packaging/install.sh --version 107 --workspace /srv/karucode/workspace
 // sudo cp -p /usr/local/bin/karucode.old /usr/local/bin/karucode   # roll back
 // sudo systemctl restart karucode
 // ```
+//
+// `--version` is a release to fetch, and a release is a build number: every
+// commit on `main` is released as `v<commit count>` (build 107 is the 107th
+// commit). There is no semver to bump - `karucode --version` and the tarball name
+// both carry the same integer.
+//
+// # Updating an installed release
+//
+// A binary installed by `install.sh` updates itself from the release manifest
+// (`updates.json`, published beside every tarball):
+//
+// ```bash
+// karucode update --check        # 0 up to date, 3 a newer build exists, 1 error
+// sudo karucode update --apply --data-dir /var/lib/karucode
+// sudo karucode update --apply --data-dir /var/lib/karucode --restart
+// ```
+//
+// The service account usually cannot write `/usr/local/bin/karucode`, so the
+// server stages and *verifies* the download (checksum, size, and the artifact's
+// own `--version`) and **Settings → Updates** prints exactly the command above;
+// `--apply` is the only step that needs root, and it keeps the old binary as
+// `karucode.old`. `--restart` runs `systemctl restart karucode` afterwards
+// (`KARUCODE_SERVICE` names another unit); without it the new build is installed
+// and the running process keeps serving the old one until you restart.
+//
+// The server checks the manifest on startup and every six hours by default and
+// raises a notification when a newer build exists. `[updates]` decides that:
+//
+// ```toml
+// [updates]
+// check = true                 # KARUCODE_UPDATE_CHECK=0 turns it off entirely
+// check_secs = 21600           # 300..=604800
+// manifest_url = "https://github.com/karutoil/karucode/releases/latest/download/updates.json"
+// auto_apply = false           # never install without a click
+// ```
+//
+// Point `manifest_url` at a mirror you control if you do not want to fetch from
+// GitHub; the manifest is the trust anchor for what gets installed. `[updates]`
+// is in the `configuration` topic and the whole procedure - the manifest format,
+// the staging directory, the privilege boundary - is the `updates` topic. A
+// container install refuses all of this: rebuild the image.
 //
 // # Updating from your own build
 //

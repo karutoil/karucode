@@ -218,7 +218,8 @@ fn client_reads_https(
 
 /// The `Set-Cookie` value for a new session.
 fn session_cookie(token: &str, max_age_secs: u64, secure: bool) -> String {
-    let mut cookie = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age_secs}");
+    let mut cookie =
+        format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age_secs}");
     if secure {
         cookie.push_str("; Secure");
     }
@@ -237,9 +238,7 @@ fn clear_cookie(secure: bool) -> String {
 fn with_cookie(mut response: Response, cookie: String) -> Response {
     match HeaderValue::from_str(&cookie) {
         Ok(value) => {
-            response
-                .headers_mut()
-                .append(header::SET_COOKIE, value);
+            response.headers_mut().append(header::SET_COOKIE, value);
             response
         }
         Err(_) => response,
@@ -266,7 +265,11 @@ pub fn session_cookie_from(headers: &HeaderMap) -> Option<String> {
 }
 
 /// The request's own origin, from the `Origin` header or `scheme://host`.
-fn request_origin(state: &AppState, headers: &HeaderMap, peer: Option<std::net::IpAddr>) -> Option<String> {
+fn request_origin(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<std::net::IpAddr>,
+) -> Option<String> {
     let access = state.access();
     let https = client_reads_https(state, &access, headers, peer);
     let host = request_host(state, headers, peer)?;
@@ -289,7 +292,11 @@ fn request_origin(state: &AppState, headers: &HeaderMap, peer: Option<std::net::
 }
 
 /// The `host[:port]` this request arrived for.
-fn request_host(state: &AppState, headers: &HeaderMap, peer: Option<std::net::IpAddr>) -> Option<String> {
+fn request_host(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<std::net::IpAddr>,
+) -> Option<String> {
     if let Some(value) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
@@ -318,7 +325,11 @@ fn strip_port(host: &str) -> String {
 }
 
 /// Every origin acceptable for a WebAuthn ceremony on this request.
-fn ceremony_origins(state: &AppState, headers: &HeaderMap, peer: Option<std::net::IpAddr>) -> Vec<String> {
+fn ceremony_origins(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<std::net::IpAddr>,
+) -> Vec<String> {
     let mut origins = Vec::new();
     if let Some(origin) = request_origin(state, headers, peer) {
         origins.push(origin);
@@ -327,7 +338,10 @@ fn ceremony_origins(state: &AppState, headers: &HeaderMap, peer: Option<std::net
     // registered through the tunnel is used through the tunnel, and the browser
     // may be opened on either name.
     if let Some(public) = state.access().expected_origin() {
-        if !origins.iter().any(|origin| origin.eq_ignore_ascii_case(&public)) {
+        if !origins
+            .iter()
+            .any(|origin| origin.eq_ignore_ascii_case(&public))
+        {
             origins.push(public);
         }
     }
@@ -473,7 +487,10 @@ async fn sign_in_response(
         "session_days": access.session_lifetime_days(),
     }))
     .into_response();
-    Ok(with_cookie(response, session_cookie(&token, lifetime, secure)))
+    Ok(with_cookie(
+        response,
+        session_cookie(&token, lifetime, secure),
+    ))
 }
 
 /// `POST /api/auth/logout` - sign this browser out.
@@ -486,7 +503,10 @@ pub async fn logout(
     if let Some(token) = session_cookie_from(&headers) {
         let _ = state.web_auth().revoke_session(&token).await;
     }
-    Ok(with_cookie(Json(json!({"ok": true})).into_response(), clear_cookie(secure)))
+    Ok(with_cookie(
+        Json(json!({"ok": true})).into_response(),
+        clear_cookie(secure),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -579,7 +599,14 @@ pub async fn passkey_login(
         .record_assertion_use(&passkey.id, passkey.counter)
         .await;
     state.web_auth().clear_failures(&key);
-    sign_in_response(&state, &headers, peer, SessionMethod::Passkey, &passkey.name).await
+    sign_in_response(
+        &state,
+        &headers,
+        peer,
+        SessionMethod::Passkey,
+        &passkey.name,
+    )
+    .await
 }
 
 fn login_error(state: &AppState, key: &str, error: LoginError) -> ApiError {
@@ -643,16 +670,18 @@ pub async fn set_password(
             ));
         }
     }
-    web_auth.set_password(&body.password).await.map_err(|error| {
-        ApiError::bad_request(state.redact(&error.to_string()))
-    })?;
+    web_auth
+        .set_password(&body.password)
+        .await
+        .map_err(|error| ApiError::bad_request(state.redact(&error.to_string())))?;
     // Creating the first credential turns sign-in on: someone who sets a password
     // wants a password. The value is reported so the UI can say so.
     let enabled_now = ensure_access_enabled(&state).await?;
     tracing::info!(enabled_now, "web-UI password set");
     let peer = peer_addr(&connect);
     // Sign this browser in so the change cannot lock the person out.
-    let mut response = sign_in_response(&state, &headers, peer, SessionMethod::Password, "password").await?;
+    let mut response =
+        sign_in_response(&state, &headers, peer, SessionMethod::Password, "password").await?;
     let payload = json!({
         "ok": true,
         "enabled": true,
@@ -853,7 +882,10 @@ pub async fn delete_passkey(
 // ---------------------------------------------------------------------------
 
 /// `GET /api/auth/sessions` - the browsers that are signed in.
-pub async fn list_sessions(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
     let current = session_cookie_from(&headers).and_then(|token| state.web_auth().session(&token));
     let current_id = current.map(|session| session.token_hash.chars().take(12).collect::<String>());
     Ok(Json(json!({

@@ -59,7 +59,9 @@ impl Ceremony {
             cross_origin: bool,
         }
         let data: ClientData = serde_json::from_slice(raw).map_err(|_| {
-            WebAuthnError::Malformed("clientDataJSON is not the JSON object the browser sends".into())
+            WebAuthnError::Malformed(
+                "clientDataJSON is not the JSON object the browser sends".into(),
+            )
         })?;
         if data.kind != expected_type {
             return Err(WebAuthnError::Mismatch(format!(
@@ -217,12 +219,10 @@ pub fn verify_registration(
 
     let attestation = decode_b64(&input.attestation_object)?;
     let value: ciborium::value::Value = ciborium::de::from_reader(attestation.as_slice())
-        .map_err(|_| {
-            WebAuthnError::Malformed("attestationObject is not valid CBOR".into())
-        })?;
-    let map = value.as_map().ok_or_else(|| {
-        WebAuthnError::Malformed("attestationObject is not a CBOR map".into())
-    })?;
+        .map_err(|_| WebAuthnError::Malformed("attestationObject is not valid CBOR".into()))?;
+    let map = value
+        .as_map()
+        .ok_or_else(|| WebAuthnError::Malformed("attestationObject is not a CBOR map".into()))?;
     let auth_data = map
         .iter()
         .find(|(key, _)| key.as_text() == Some("authData"))
@@ -260,9 +260,7 @@ pub fn verify_registration(
     // Prove the stored key can verify at all, so a broken public key is a
     // registration error rather than a permanent sign-in failure.
     VerifyingKey::from_sec1_bytes(&public_key).map_err(|_| {
-        WebAuthnError::Unsupported(
-            "the credential public key is not a valid P-256 point".into(),
-        )
+        WebAuthnError::Unsupported("the credential public key is not a valid P-256 point".into())
     })?;
 
     Ok(RegisteredCredential {
@@ -290,9 +288,8 @@ pub fn verify_assertion(
     let parsed = parse_authenticator_data(&auth_data, &ceremony.rp_id)?;
 
     let signature_bytes = decode_b64(&input.signature)?;
-    let signature = Signature::from_der(&signature_bytes).map_err(|_| {
-        WebAuthnError::Malformed("the signature is not DER-encoded ECDSA".into())
-    })?;
+    let signature = Signature::from_der(&signature_bytes)
+        .map_err(|_| WebAuthnError::Malformed("the signature is not DER-encoded ECDSA".into()))?;
     let key = VerifyingKey::from_sec1_bytes(stored_public_key).map_err(|_| {
         WebAuthnError::Unsupported(
             "the stored credential key is not a valid P-256 point; register the passkey again"
@@ -495,7 +492,12 @@ mod tests {
         .into_bytes()
     }
 
-    fn auth_data(rp_id: &str, flags: u8, counter: u32, attested: Option<(&[u8], Vec<u8>)>) -> Vec<u8> {
+    fn auth_data(
+        rp_id: &str,
+        flags: u8,
+        counter: u32,
+        attested: Option<(&[u8], Vec<u8>)>,
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&Sha256::digest(rp_id.as_bytes()));
         out.push(flags);
@@ -515,8 +517,14 @@ mod tests {
             (1.into(), 2.into()),
             (3.into(), (-7i64).into()),
             ((-1i64).into(), 1.into()),
-            ((-2i64).into(), ciborium::value::Value::Bytes(point.x().unwrap().to_vec())),
-            ((-3i64).into(), ciborium::value::Value::Bytes(point.y().unwrap().to_vec())),
+            (
+                (-2i64).into(),
+                ciborium::value::Value::Bytes(point.x().unwrap().to_vec()),
+            ),
+            (
+                (-3i64).into(),
+                ciborium::value::Value::Bytes(point.y().unwrap().to_vec()),
+            ),
         ]);
         let mut out = Vec::new();
         ciborium::ser::into_writer(&map, &mut out).unwrap();
@@ -595,9 +603,13 @@ mod tests {
     fn a_well_formed_registration_is_accepted() {
         let fixture = fixture();
         let challenge = new_challenge();
-        let registered = verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
-            .expect("a valid registration should verify");
-        assert_eq!(registered.credential_id, encode_b64url(&fixture.credential_id));
+        let registered =
+            verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
+                .expect("a valid registration should verify");
+        assert_eq!(
+            registered.credential_id,
+            encode_b64url(&fixture.credential_id)
+        );
         assert_eq!(registered.public_key.len(), 65);
         assert_eq!(registered.public_key[0], 4);
         assert!(registered.user_verified);
@@ -688,18 +700,15 @@ mod tests {
             RP_ID,
             FLAG_USER_PRESENT | FLAG_ATTESTED_CREDENTIAL_DATA,
             0,
-            Some((
-                b"id",
-                {
-                    let map = ciborium::value::Value::Map(vec![
-                        (1.into(), 3.into()),  // kty: RSA
-                        (3.into(), (-257i64).into()), // alg: RS256
-                    ]);
-                    let mut out = Vec::new();
-                    ciborium::ser::into_writer(&map, &mut out).unwrap();
-                    out
-                },
-            )),
+            Some((b"id", {
+                let map = ciborium::value::Value::Map(vec![
+                    (1.into(), 3.into()),         // kty: RSA
+                    (3.into(), (-257i64).into()), // alg: RS256
+                ]);
+                let mut out = Vec::new();
+                ciborium::ser::into_writer(&map, &mut out).unwrap();
+                out
+            })),
         );
         let input = RegistrationInput {
             credential_id: encode_b64url(b"id"),
@@ -748,8 +757,9 @@ mod tests {
     fn a_valid_assertion_verifies_and_returns_the_counter() {
         let fixture = fixture();
         let challenge = new_challenge();
-        let registered = verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
-            .unwrap();
+        let registered =
+            verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
+                .unwrap();
         let counter = verify_assertion(
             &assertion(&fixture, &challenge, 7),
             &registered.public_key,
@@ -764,8 +774,9 @@ mod tests {
     fn an_assertion_signed_by_another_key_is_refused() {
         let fixture = fixture();
         let challenge = new_challenge();
-        let registered = verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
-            .unwrap();
+        let registered =
+            verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
+                .unwrap();
         let attacker = fixture_with(0x43);
         let error = verify_assertion(
             &assertion(&attacker, &challenge, 1),
@@ -781,21 +792,17 @@ mod tests {
     fn an_assertion_with_a_tampered_authenticator_data_is_refused() {
         let fixture = fixture();
         let challenge = new_challenge();
-        let registered = verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
-            .unwrap();
+        let registered =
+            verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
+                .unwrap();
         let mut input = assertion(&fixture, &challenge, 1);
         // Flip a bit in the flags byte (user-present off) so the signature no
         // longer matches the data it covers.
         let mut data = decode_b64(&input.authenticator_data).unwrap();
         data[32] = 0;
         input.authenticator_data = encode_b64url(&data);
-        let error = verify_assertion(
-            &input,
-            &registered.public_key,
-            0,
-            &ceremony(&challenge),
-        )
-        .unwrap_err();
+        let error =
+            verify_assertion(&input, &registered.public_key, 0, &ceremony(&challenge)).unwrap_err();
         assert!(matches!(error, WebAuthnError::Mismatch(_)), "{error}");
     }
 
@@ -803,8 +810,9 @@ mod tests {
     fn a_replayed_assertion_with_a_stale_counter_is_refused() {
         let fixture = fixture();
         let challenge = new_challenge();
-        let registered = verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
-            .unwrap();
+        let registered =
+            verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
+                .unwrap();
         // First use at counter 5.
         verify_assertion(
             &assertion(&fixture, &challenge, 5),
@@ -828,8 +836,9 @@ mod tests {
     fn an_authenticator_that_always_reports_zero_is_accepted() {
         let fixture = fixture();
         let challenge = new_challenge();
-        let registered = verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
-            .unwrap();
+        let registered =
+            verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
+                .unwrap();
         for _ in 0..3 {
             verify_assertion(
                 &assertion(&fixture, &challenge, 0),
@@ -845,17 +854,14 @@ mod tests {
     fn an_assertion_for_the_wrong_ceremony_type_is_refused() {
         let fixture = fixture();
         let challenge = new_challenge();
-        let registered = verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
-            .unwrap();
+        let registered =
+            verify_registration(&registration(&fixture, &challenge), &ceremony(&challenge))
+                .unwrap();
         let mut input = assertion(&fixture, &challenge, 1);
-        input.client_data_json = encode_b64url(&client_data(
-            "webauthn.create",
-            &challenge,
-            ORIGIN,
-            false,
-        ));
-        let error = verify_assertion(&input, &registered.public_key, 0, &ceremony(&challenge))
-            .unwrap_err();
+        input.client_data_json =
+            encode_b64url(&client_data("webauthn.create", &challenge, ORIGIN, false));
+        let error =
+            verify_assertion(&input, &registered.public_key, 0, &ceremony(&challenge)).unwrap_err();
         assert!(error.to_string().contains("webauthn.get"), "{error}");
     }
 

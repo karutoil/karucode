@@ -1,14 +1,45 @@
 # Changelog
 
 All notable changes to karucode are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the major
-version is `0`, a minor bump may contain breaking changes; they are called out
-under **Changed**.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+karucode does **not** use semantic versioning. Every commit on `main` is a
+release and the version is the git commit count, so build 107 is the 107th commit
+and a release is tagged `v107`. `karucode --version` prints it. An entry that
+matters to an operator says which behaviour changed, not which number.
 
 ## [Unreleased]
 
 ### Added
+
+- **A version that is the commit count, and an update system to go with it.**
+  `crates/kc-server/build.rs` stamps `git rev-list --count HEAD` (plus the commit,
+  its date, a dirty marker, the channel and the target triple) into the binary, so
+  `karucode --version` prints `karucode 107 (abf0a42, …)` and `GET /api/health`
+  reports `version`/`build`/`commit`/`commit_date`/`dirty`; `/metrics` carries the
+  same labels. There is no semver to bump and no release train - every commit on
+  `main` is published as `v<build>`, with a tarball, the raw binary, `SHA256SUMS`
+  and an `updates.json` manifest written by `scripts/release_manifest.py`.
+  A released install updates itself: `karucode update --check` (exit 3 when a
+  newer build exists), `--stage` (download, verify the SHA-256 and size, then run
+  the artifact once with `--version` to prove it is the promised build) and
+  `--apply` (atomic rename, previous binary kept as `karucode.old`, `--restart`
+  restarts the systemd unit). The server checks on startup and every six hours
+  (`[updates] check`, `check_secs`, `manifest_url`, `auto_apply`; env
+  `KARUCODE_UPDATE_*`), raises an informational notification when a newer build
+  exists, and serves it all at `GET /api/update`, `POST /api/update/check` and
+  `POST /api/update/apply`. **Settings -> Updates** shows the running build, the
+  release notes and an install button - or, because the service account usually
+  cannot write `/usr/local/bin/karucode`, the exact `sudo` command that can. A
+  source checkout is still updated with `packaging/update.sh` and a container by
+  rebuilding its image; the server refuses both rather than pretending.
+- **The release job now publishes on every push to `main`.** It builds with a
+  full history (a shallow clone would stamp every build as build 1), asserts that
+  `--version` matches the commit count, and uploads the tarball, the raw binary,
+  `updates.json`, `SHA256SUMS`, `install.sh` and the unit. A pushed `v<build>` tag
+  is accepted only when it names that commit's build. A new CI job proves the
+  version stamp from a full-history checkout, and the manifest writer has its own
+  test suite.
 
 - **A first-run setup wizard, and a real sign-in screen instead of a pasted
   token.** A fresh install now opens six steps - welcome, model provider (base

@@ -1645,6 +1645,97 @@ impl NotificationsConfig {
     }
 }
 
+/// Automatic update checking and (optionally) installing, for a binary install
+/// that came from a release.
+///
+/// karucode has no release trains: every commit on `main` is a release, the
+/// version is the commit count, and a release publishes a small `updates.json`
+/// manifest beside its artifacts. This section decides whether the running server
+/// looks at that manifest, how often, and whether finding a newer build is enough
+/// of a reason to install it.
+///
+/// ```toml
+/// [updates]
+/// check = true                 # look for newer builds (default true)
+/// check_secs = 21600           # 6 hours, clamped to 300..=604800
+/// manifest_url = "https://github.com/karutoil/karucode/releases/latest/download/updates.json"
+/// auto_apply = false           # never replace the binary without a click
+/// ```
+///
+/// **Checking is network traffic, applying is a file replacement.** A check is one
+/// conditional GET of a few hundred bytes and touches nothing on disk. `auto_apply`
+/// is off by default because installing ends in-flight runs when the service
+/// restarts, and because a service account usually cannot write the binary it is
+/// running from - the update is then staged and verified, and a privileged
+/// `karucode update --apply` finishes it. See the `updates` topic.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UpdatesConfig {
+    /// Look for a newer build on startup and on a timer.
+    #[serde(default = "d_true")]
+    pub check: bool,
+    /// How often a check runs, in seconds. Clamped to
+    /// [`MIN_UPDATE_CHECK_SECS`]`..=`[`MAX_UPDATE_CHECK_SECS`].
+    #[serde(default = "d_update_check_secs")]
+    pub check_secs: u64,
+    /// Where the release manifest lives. Must be `https` in practice; `http://` is
+    /// accepted so an air-gapped mirror on the local network works.
+    #[serde(default = "default_update_manifest_url")]
+    pub manifest_url: String,
+    /// Install a newer build automatically when a check finds one.
+    ///
+    /// Off by default. Even when on, it only replaces the binary when the running
+    /// process may write it; otherwise the download is staged and the update
+    /// waits for a privileged apply.
+    #[serde(default)]
+    pub auto_apply: bool,
+}
+
+/// Default manifest: the newest GitHub release's `updates.json` asset.
+pub const DEFAULT_UPDATE_MANIFEST_URL: &str =
+    "https://github.com/karutoil/karucode/releases/latest/download/updates.json";
+
+/// Fastest automatic re-check. A check is one HTTP request, but a service that
+/// polls GitHub every 30 seconds is indistinguishable from abuse, and no release
+/// channel is that fast.
+pub const MIN_UPDATE_CHECK_SECS: u64 = 300;
+
+/// Slowest automatic re-check: a week. Past that the setting is a typo, and a
+/// manual **Check now** is the honest way to ask.
+pub const MAX_UPDATE_CHECK_SECS: u64 = 7 * 24 * 60 * 60;
+
+fn d_update_check_secs() -> u64 {
+    6 * 60 * 60
+}
+
+fn default_update_manifest_url() -> String {
+    DEFAULT_UPDATE_MANIFEST_URL.to_string()
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self {
+            check: true,
+            check_secs: d_update_check_secs(),
+            manifest_url: default_update_manifest_url(),
+            auto_apply: false,
+        }
+    }
+}
+
+impl UpdatesConfig {
+    /// The check interval, clamped to the documented range.
+    pub fn interval(&self) -> u64 {
+        self.check_secs
+            .clamp(MIN_UPDATE_CHECK_SECS, MAX_UPDATE_CHECK_SECS)
+    }
+
+    /// The manifest URL, or `None` when it is blank.
+    pub fn manifest(&self) -> Option<&str> {
+        let url = self.manifest_url.trim();
+        (!url.is_empty()).then_some(url)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginConfig {
     pub name: String,
@@ -1734,6 +1825,10 @@ pub struct ConfigFile {
     /// tunnel/proxy trust list. See [`AccessConfig`].
     #[serde(default)]
     pub access: Option<AccessConfig>,
+    /// `[updates]`: look for a newer build, and whether to install it. See
+    /// [`UpdatesConfig`].
+    #[serde(default)]
+    pub updates: Option<UpdatesConfig>,
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
     /// Re-read the plugin sources in the background and apply adds, removals and
@@ -1805,6 +1900,10 @@ pub struct Config {
     pub terminals: TerminalConfig,
     /// How the web UI is reached and who may use it (see [`AccessConfig`]).
     pub access: AccessConfig,
+    /// Automatic update checking (see [`UpdatesConfig`]). On by default: a check
+    /// is one small request, and a self-hosted service that never looks is a
+    /// service that silently runs a build from a year ago.
+    pub updates: UpdatesConfig,
     pub plugins: Vec<PluginConfig>,
     /// Poll the plugin sources and apply changes without a restart. Off by
     /// default: a reload replaces processes, and an operator who edits a plugin's
@@ -1851,6 +1950,7 @@ impl Default for Config {
             notifications: NotificationsConfig::default(),
             terminals: TerminalConfig::default(),
             access: AccessConfig::default(),
+            updates: UpdatesConfig::default(),
             plugins: Vec::new(),
             plugins_watch: false,
             plugins_watch_secs: DEFAULT_PLUGINS_WATCH_SECS,
@@ -2059,6 +2159,9 @@ impl Config {
         if let Some(v) = file.access {
             cfg.access = v;
         }
+        if let Some(v) = file.updates {
+            cfg.updates = v;
+        }
         if !file.plugins.is_empty() {
             cfg.plugins = file.plugins;
         }
@@ -2182,6 +2285,23 @@ impl Config {
         }
         if let Some(v) = env_parse("KARUCODE_TERMINAL_IDLE_SECS") {
             cfg.terminals.idle_timeout_secs = v;
+        }
+        // Update checking. `KARUCODE_UPDATE_CHECK=0` is the switch an air-gapped
+        // deployment needs: with it off the server makes no request to the
+        // manifest at all, rather than checking and discarding the answer.
+        if let Some(v) = env_bool("KARUCODE_UPDATE_CHECK")? {
+            cfg.updates.check = v;
+        }
+        if let Some(v) = env_parse("KARUCODE_UPDATE_CHECK_SECS") {
+            cfg.updates.check_secs = v;
+        }
+        if let Some(v) = env_str("KARUCODE_UPDATE_MANIFEST_URL") {
+            cfg.updates.manifest_url = v;
+        }
+        // Never implied by a default: installing replaces the running binary and
+        // restarts the service, so it takes an explicit yes.
+        if let Some(v) = env_bool("KARUCODE_UPDATE_AUTO_APPLY")? {
+            cfg.updates.auto_apply = v;
         }
         // Web-UI access: the sign-in switch, the public address, the session
         // lifetime and the proxy/tunnel trust list. Credentials themselves have no
@@ -2401,6 +2521,17 @@ impl Config {
         cfg.plugins_watch_secs = cfg
             .plugins_watch_secs
             .clamp(MIN_PLUGINS_WATCH_SECS, MAX_PLUGINS_WATCH_SECS);
+        // The same reasoning as the watcher interval: the range is a promise the
+        // documentation makes, so accept the number and keep the promise.
+        cfg.updates.check_secs = cfg.updates.interval();
+        if cfg.updates.check && cfg.updates.manifest().is_none() {
+            return Err(Error::Config(
+                "updates.manifest_url may not be blank while updates.check is on; set the URL of \
+                 the release manifest (or KARUCODE_UPDATE_MANIFEST_URL), or turn checking off with \
+                 updates.check = false"
+                    .into(),
+            ));
+        }
         Ok(cfg)
     }
 
@@ -2862,6 +2993,86 @@ mod tests {
         assert_eq!(access.session_days, 7);
         assert_eq!(access.tunnel, TunnelKind::Cloudflare);
         assert_eq!(access.trusted_proxies, vec!["10.0.0.0/8".to_string()]);
+    }
+
+    #[test]
+    fn update_checking_is_on_by_default_and_never_installs_by_itself() {
+        let updates = UpdatesConfig::default();
+        assert!(updates.check, "a check is one small request and is on");
+        assert!(!updates.auto_apply, "installing is never a default");
+        assert_eq!(updates.interval(), 6 * 60 * 60);
+        assert_eq!(
+            updates.manifest(),
+            Some(DEFAULT_UPDATE_MANIFEST_URL),
+            "the default manifest is the newest GitHub release's asset"
+        );
+    }
+
+    #[test]
+    fn the_update_interval_is_clamped_to_the_documented_range() {
+        for (written, expected) in [
+            (0, MIN_UPDATE_CHECK_SECS),
+            (1, MIN_UPDATE_CHECK_SECS),
+            (86_400, 86_400),
+            (u64::MAX, MAX_UPDATE_CHECK_SECS),
+        ] {
+            let updates = UpdatesConfig {
+                check_secs: written,
+                ..UpdatesConfig::default()
+            };
+            assert_eq!(updates.interval(), expected, "check_secs = {written}");
+        }
+    }
+
+    #[test]
+    fn the_updates_section_round_trips_through_toml() {
+        let file: ConfigFile = toml::from_str(
+            r#"
+            [updates]
+            check = false
+            check_secs = 3600
+            manifest_url = "https://mirror.example.com/karucode/updates.json"
+            auto_apply = true
+            "#,
+        )
+        .unwrap();
+        let updates = file.updates.expect("[updates] should parse");
+        assert!(!updates.check);
+        assert_eq!(updates.interval(), 3600);
+        assert_eq!(
+            updates.manifest(),
+            Some("https://mirror.example.com/karucode/updates.json")
+        );
+        assert!(updates.auto_apply);
+    }
+
+    #[test]
+    fn a_blank_manifest_url_is_refused_while_checking_is_on() {
+        let file: ConfigFile = toml::from_str(
+            r#"
+            [updates]
+            manifest_url = "   "
+            "#,
+        )
+        .unwrap();
+        let error = Config::from_parts(file, None).expect_err("a blank manifest is a typo");
+        assert!(
+            format!("{error}").contains("updates.manifest_url"),
+            "the error must name the key: {error}"
+        );
+
+        // With checking off, a blank URL is simply unused rather than an error:
+        // that is the air-gapped spelling.
+        let file: ConfigFile = toml::from_str(
+            r#"
+            [updates]
+            check = false
+            manifest_url = ""
+            "#,
+        )
+        .unwrap();
+        let config = Config::from_parts(file, None).expect("checking off needs no URL");
+        assert!(!config.updates.check);
     }
 
     #[test]

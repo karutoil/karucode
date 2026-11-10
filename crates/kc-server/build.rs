@@ -21,6 +21,12 @@
 //!
 //! Set `KARUCODE_SKIP_WEB_BUILD=1` to opt out entirely (Rust-only iteration on a
 //! crate that does not touch the frontend, or a build host without Node).
+//!
+//! It also stamps the **build number**: `git rev-list --count HEAD`, the version
+//! karucode actually reports. There are no releases with invented version
+//! numbers - every commit is the release, and the Nth commit is build N. See
+//! `src/version.rs` for why, and for the environment overrides a git-less build
+//! (a release tarball, a Docker build context) uses instead.
 
 use std::env;
 use std::fs;
@@ -33,6 +39,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KARUCODE_SKIP_WEB_BUILD");
     println!("cargo:rerun-if-env-changed=KARUCODE_WEB_DIST");
     println!("cargo:rerun-if-env-changed=KARUCODE_NPM");
+    stamp_version();
 
     // Without the embed feature the binary only ever serves KARUCODE_WEB_DIR, so
     // bundling the frontend here would be wasted work.
@@ -127,6 +134,121 @@ fn web_dir() -> Option<PathBuf> {
     let root = manifest.parent()?.parent()?;
     let web = root.join("web");
     web.is_dir().then_some(web)
+}
+
+/// Stamp the build number, commit, date, dirty flag, channel and target into the
+/// binary as compile-time environment variables.
+///
+/// The build number is the count of commits reachable from `HEAD`. It is the
+/// version karucode reports: the project does not cut semantic releases, so a
+/// hand-maintained version in `Cargo.toml` would be a number nobody bumps and a
+/// comparison that means nothing. "Which commit am I running" is the only version
+/// question an operator actually asks, and `git rev-list --count` answers it
+/// monotonically for every build in the same history.
+///
+/// A build with no `.git` (a release tarball, a Docker build context, a vendored
+/// copy) must not silently report build `0`, so the values can be supplied:
+///
+/// * `KARUCODE_BUILD_NUMBER` - the commit count,
+/// * `KARUCODE_COMMIT` - the short sha,
+/// * `KARUCODE_COMMIT_DATE` - an RFC 3339 timestamp,
+/// * `KARUCODE_CHANNEL` - `stable` (default) or a named pre-release channel.
+///
+/// With neither git nor the overrides the binary reports build `0` and says so;
+/// the updater refuses to compare against it rather than treating it as ancient.
+fn stamp_version() {
+    let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    for name in [
+        "KARUCODE_BUILD_NUMBER",
+        "KARUCODE_COMMIT",
+        "KARUCODE_COMMIT_DATE",
+        "KARUCODE_CHANNEL",
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+    // A commit or a checkout moves one of these; watching them is what makes a
+    // plain `cargo build` after `git pull` report the new build number instead of
+    // the number from the last time the script happened to run. Cargo rescans a
+    // watched directory, so `.git/refs` catches branch tips and tags too.
+    let git_dir = git_dir(&root);
+    if let Some(dir) = &git_dir {
+        for input in [dir.join("HEAD"), dir.join("logs/HEAD"), dir.join("refs")] {
+            if input.exists() {
+                println!("cargo:rerun-if-changed={}", input.display());
+            }
+        }
+    }
+
+    let build = env_override("KARUCODE_BUILD_NUMBER")
+        .or_else(|| git(&root, &["rev-list", "--count", "HEAD"]))
+        .map(|value| value.trim().to_string())
+        .filter(|value| value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty())
+        .unwrap_or_else(|| "0".to_string());
+    let commit = env_override("KARUCODE_COMMIT")
+        .or_else(|| git(&root, &["rev-parse", "--short=12", "HEAD"]))
+        .unwrap_or_else(|| "unknown".to_string());
+    let commit_date = env_override("KARUCODE_COMMIT_DATE")
+        .or_else(|| git(&root, &["log", "-1", "--format=%cI", "HEAD"]))
+        .unwrap_or_else(|| "unknown".to_string());
+    let dirty = if env_override("KARUCODE_COMMIT").is_some() {
+        // A stamped build (CI) describes its commit, not the working tree it was
+        // assembled in.
+        "false".to_string()
+    } else {
+        let dirty = git(&root, &["status", "--porcelain", "--untracked-files=no"])
+            .map(|out| !out.trim().is_empty())
+            .unwrap_or(false);
+        dirty.to_string()
+    };
+    let channel = env_override("KARUCODE_CHANNEL").unwrap_or_else(|| "stable".to_string());
+    let target = env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
+
+    println!("cargo:rustc-env=KARUCODE_VERSION={build}");
+    println!("cargo:rustc-env=KARUCODE_BUILD={build}");
+    println!("cargo:rustc-env=KARUCODE_COMMIT={commit}");
+    println!("cargo:rustc-env=KARUCODE_COMMIT_DATE={commit_date}");
+    println!("cargo:rustc-env=KARUCODE_DIRTY={dirty}");
+    println!("cargo:rustc-env=KARUCODE_CHANNEL={channel}");
+    println!("cargo:rustc-env=KARUCODE_TARGET={target}");
+}
+
+/// An override that is present and not blank. A blank variable is treated as
+/// absent: `KARUCODE_BUILD_NUMBER=` in a CI step must not produce an empty
+/// version string.
+fn env_override(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// The absolute git directory for `root`, when this really is a checkout.
+fn git_dir(root: &Path) -> Option<PathBuf> {
+    let dir = git(root, &["rev-parse", "--absolute-git-dir"])?;
+    let dir = PathBuf::from(dir.trim());
+    dir.is_dir().then_some(dir)
+}
+
+/// Run one git command in the repository. `None` on any failure (no git binary,
+/// no repository, a command that exits non-zero) - never a build error, because
+/// a source build without git is still a build.
+fn git(root: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 fn watched_inputs(web: &Path) -> Vec<PathBuf> {

@@ -137,7 +137,11 @@ impl ProxyTrust {
     /// is still validated against the same allowlist by the caller. A client
     /// cannot set this header cross-origin without a preflight this server never
     /// approves.
-    pub fn forwarded_authority(&self, peer: Option<IpAddr>, headers: &HeaderMap) -> Option<Authority> {
+    pub fn forwarded_authority(
+        &self,
+        peer: Option<IpAddr>,
+        headers: &HeaderMap,
+    ) -> Option<Authority> {
         if !self.enabled || !self.peer_is_trusted(peer) {
             return None;
         }
@@ -251,7 +255,10 @@ mod tests {
         // the leading bogus value.
         let info = trust.client(
             Some(ip("10.0.0.2")),
-            &headers(&[("x-forwarded-for", "1.2.3.4, 198.51.100.7, 10.0.0.1, 10.0.0.2")]),
+            &headers(&[(
+                "x-forwarded-for",
+                "1.2.3.4, 198.51.100.7, 10.0.0.1, 10.0.0.2",
+            )]),
         );
         assert_eq!(
             info.ip,
@@ -275,7 +282,7 @@ mod tests {
         let trust = ProxyTrust::from_access(&access(TunnelKind::Custom, &[])).unwrap();
         let info = trust.client(
             Some(ip("127.0.0.1")),
-            &headers(&[("x-forwarded-for", "198.51.100.7, unknown, ") ]),
+            &headers(&[("x-forwarded-for", "198.51.100.7, unknown, ")]),
         );
         assert_eq!(info.ip, Some(ip("198.51.100.7")));
     }
@@ -301,7 +308,9 @@ mod tests {
     fn a_forwarded_host_is_only_read_from_a_trusted_peer() {
         let trust = ProxyTrust::from_access(&access(TunnelKind::Custom, &[])).unwrap();
         let forwarded = headers(&[("x-forwarded-host", "karucode.example.com")]);
-        assert!(trust.forwarded_authority(Some(ip("203.0.113.9")), &forwarded).is_none());
+        assert!(trust
+            .forwarded_authority(Some(ip("203.0.113.9")), &forwarded)
+            .is_none());
         let authority = trust
             .forwarded_authority(Some(ip("127.0.0.1")), &forwarded)
             .expect("a trusted peer's X-Forwarded-Host is readable");

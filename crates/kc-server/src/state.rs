@@ -449,6 +449,8 @@ pub struct AppStateInner {
     pub web_auth: Arc<WebAuth>,
     /// The trusted-proxy policy, rebuilt when `[access]` changes.
     pub proxy: RwLock<CachedProxy>,
+    /// Update checking, staging and installing (`[updates]`).
+    pub updates: Arc<crate::update::Updater>,
 }
 
 /// The trusted-proxy policy plus the `[access]` fingerprint it was built from.
@@ -472,6 +474,17 @@ impl AppState {
         let web_auth = deps.web_auth;
         let trust = crate::proxy::ProxyTrust::from_access(&deps.settings.snapshot().access)
             .unwrap_or_else(|_| crate::proxy::ProxyTrust::disabled());
+        // The updater lives beside the database: `<data_dir>/updates` is where a
+        // download waits, and the data directory is the one path the service
+        // account is guaranteed to own.
+        let data_dir = deps
+            .db_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let update_settings: Arc<dyn crate::update::UpdateSettings> =
+            Arc::clone(&deps.settings) as Arc<dyn crate::update::UpdateSettings>;
+        let updates = crate::update::Updater::new(update_settings, data_dir);
         Self {
             inner: Arc::new(AppStateInner {
                 settings: deps.settings,
@@ -496,8 +509,14 @@ impl AppState {
                     fingerprint: String::new(),
                     trust,
                 }),
+                updates,
             }),
         }
+    }
+
+    /// The update subsystem (check, stage, apply).
+    pub fn updates(&self) -> &Arc<crate::update::Updater> {
+        &self.inner.updates
     }
 
     pub fn settings(&self) -> &Arc<SettingsHandle> {

@@ -115,7 +115,17 @@ export const configFixture: Config = {
     kinds: ['run_finished', 'needs_input', 'error', 'info'],
   },
   settings_locked: false,
-  version: '0.1.0',
+  // The version is the commit count, not a semver string.
+  version: '107',
+  updates: {
+    check: true,
+    check_secs: 21600,
+    manifest_url: 'https://github.com/karutoil/karucode/releases/latest/download/updates.json',
+    auto_apply: false,
+    min_check_secs: 300,
+    max_check_secs: 604800,
+    default_manifest_url: 'https://github.com/karutoil/karucode/releases/latest/download/updates.json',
+  },
 };
 
 export const summaryFixture: SessionSummary = {
@@ -312,6 +322,10 @@ export function resetAppState(): void {
   store.bootError.value = null;
   store.health.value = null;
   store.config.value = null;
+  // The update status is fetched once per page load, so a test that left one
+  // behind would make the next one think an update was already known.
+  store.updateStatus.value = null;
+  store.settingsInitialTab.value = null;
   store.authError.value = null;
   // The sign-in and setup state is module state too: a test that signed in or
   // finished the wizard must not hand the next one a half-filled form.

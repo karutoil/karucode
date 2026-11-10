@@ -147,6 +147,8 @@ pub const REQUIRED_SLUGS: &[&str] = &[
     "system-prompt",
     "themes",
     "tool-call-errors",
+    "updates",
+    "versioning",
     "web-auth",
     "web-ui",
 ];

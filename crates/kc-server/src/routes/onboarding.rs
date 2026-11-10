@@ -36,8 +36,11 @@ pub async fn get(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     // the shipped base URL are not a decision the user made. A keyless local
     // gateway therefore sees the wizard once - which is the point of the wizard -
     // and never again after it is finished.
-    let provider_configured =
-        config.model.api_key.is_some() || config.providers.iter().any(|profile| profile.api_key.is_some());
+    let provider_configured = config.model.api_key.is_some()
+        || config
+            .providers
+            .iter()
+            .any(|profile| profile.api_key.is_some());
     let sessions = state.store().list_sessions().await.unwrap_or_default();
     let has_sessions = !sessions.is_empty();
     let needed = !completed && !provider_configured && !has_sessions;
@@ -64,10 +67,7 @@ pub struct CompleteBody {
 }
 
 /// `POST /api/onboarding/complete` - record that the wizard is done (or skipped).
-pub async fn complete(
-    State(state): State<AppState>,
-    body: Bytes,
-) -> ApiResult<Json<Value>> {
+pub async fn complete(State(state): State<AppState>, body: Bytes) -> ApiResult<Json<Value>> {
     let body: CompleteBody = crate::routes::parse_body(&body)?;
     state
         .web_auth()

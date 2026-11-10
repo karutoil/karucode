@@ -32,6 +32,7 @@ import type {
 } from '../theme';
 import { SettingsAdvanced } from './SettingsAdvanced';
 import { AccessSettings } from './AccessSettings';
+import { UpdateSettings } from './UpdateSettings';
 import { Dialog } from './Dialog';
 import {
   NotificationsDeliverySection,
@@ -1932,7 +1933,8 @@ export type SettingsTab =
   | 'agent'
   | 'access'
   | 'notifications'
-  | 'plugins';
+  | 'plugins'
+  | 'updates';
 
 const SETTINGS_TABS: readonly TabItem<SettingsTab>[] = [
   { id: 'general', label: 'General' },
@@ -1941,6 +1943,7 @@ const SETTINGS_TABS: readonly TabItem<SettingsTab>[] = [
   { id: 'access', label: 'Access' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'plugins', label: 'Plugins & MCP' },
+  { id: 'updates', label: 'Updates' },
 ];
 
 /** The collapsible "Advanced" block of each tab that has one. */
@@ -2063,6 +2066,14 @@ export function SettingsSheet(): JSX.Element | null {
     let cancelled = false;
     setErrors({});
     setSaveError(null);
+    // A caller that opened the sheet *for* a tab (the rail's update badge says
+    // "Settings → Updates") gets that tab. An unknown value falls back to
+    // General rather than leaving the sheet on a tab that does not exist.
+    const requested = store.settingsInitialTab.value;
+    if (requested && SETTINGS_TABS.some((item) => item.id === requested)) {
+      setTab(requested as SettingsTab);
+    }
+    store.settingsInitialTab.value = null;
     // Render from the config already in the store immediately; the fetch below
     // refreshes it (and reports server-side problems) without a blank sheet.
     const cached = store.config.value;
@@ -3074,6 +3085,11 @@ export function SettingsSheet(): JSX.Element | null {
                     enforced sandbox, so install only what you would run yourself.
                   </p>
                 </section>
+              </TabPanel>
+              <TabPanel idPrefix="settings" id="updates" active={tab === 'updates'} persist>
+                {/* Self-contained: it reads /api/update and patches `[updates]`
+                    itself, so it never touches this sheet's form or Save button. */}
+                <UpdateSettings disabled={disabled} />
               </TabPanel>
             </div>
 

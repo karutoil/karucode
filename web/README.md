@@ -337,7 +337,8 @@ Agents tab).
   says so instead of rendering a broken glyph.
 - Settings: provider fields, write-only API key with clear, provider test, approval
   mode/allowlists/timeouts, limits, subagent controls, read-only plugin/MCP status,
-  lock notice and the shell-sandbox security note.
+  the running build with an update check/install panel, lock notice and the
+  shell-sandbox security note.
 - SSE: one fetch stream, bearer header, exponential backoff + jitter, per-connection
   seq dedupe, session refetch after reconnect, unknown events ignored.
 - States: boot skeleton, empty/no-session, provider missing, disconnected, 401 token
@@ -417,8 +418,11 @@ UI had to make a choice beyond the literal contract. They are worth reconciling 
     the token entry screen.
 12. **Settings lock**: `settings_locked` disables the form, and a 403 from PATCH is
     surfaced as a locked notice rather than a generic failure.
-13. **Settings tabs**: the sheet is five tabs (General / Models / Agent /
-    Notifications / Plugins & MCP) over one shared form and one shared Save.
+13. **Settings tabs**: the sheet is seven tabs (General / Models / Agent /
+    Access / Notifications / Plugins & MCP / Updates) over one shared form and
+    one shared Save. Access, Notifications and Updates own their own sections and
+    PATCH their own settings; Updates also reads `GET /api/update` for the running
+    build and the newest release.
     Panels are mounted together and merely `hidden` — a panel that unmounted
     would discard what was typed, and the Models tab owns local state (key
     drafts, the add-provider form). Because the Save is shared, a rejected field

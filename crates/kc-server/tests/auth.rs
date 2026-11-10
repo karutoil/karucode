@@ -71,7 +71,13 @@ async fn setting_a_password_turns_sign_in_on_and_the_cookie_authenticates() {
 
     // ...and the cookie the password POST handed back works.
     let allowed = h
-        .send_with(Method::GET, "/api/config", None, &[("cookie", &cookie)], true)
+        .send_with(
+            Method::GET,
+            "/api/config",
+            None,
+            &[("cookie", &cookie)],
+            true,
+        )
         .await;
     assert_eq!(allowed.status, StatusCode::OK, "{}", allowed.text());
     assert_eq!(allowed.json()["access"]["enabled"], json!(true));
@@ -85,18 +91,30 @@ async fn setting_a_password_turns_sign_in_on_and_the_cookie_authenticates() {
 #[tokio::test]
 async fn signing_in_again_with_the_password_issues_a_new_cookie() {
     let h = harness().await;
-    h.post("/api/auth/password", json!({ "password": "correct horse battery" }))
-        .await;
+    h.post(
+        "/api/auth/password",
+        json!({ "password": "correct horse battery" }),
+    )
+    .await;
     let response = h
-        .post("/api/auth/login", json!({ "password": "correct horse battery" }))
+        .post(
+            "/api/auth/login",
+            json!({ "password": "correct horse battery" }),
+        )
         .await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.text());
     assert_eq!(response.json()["method"], json!("password"));
     let cookie = cookie_of(&response);
     assert_eq!(
-        h.send_with(Method::GET, "/api/health", None, &[("cookie", &cookie)], true)
-            .await
-            .status,
+        h.send_with(
+            Method::GET,
+            "/api/health",
+            None,
+            &[("cookie", &cookie)],
+            true
+        )
+        .await
+        .status,
         StatusCode::OK
     );
 }
@@ -104,10 +122,16 @@ async fn signing_in_again_with_the_password_issues_a_new_cookie() {
 #[tokio::test]
 async fn a_wrong_password_is_refused_and_never_names_the_real_one() {
     let h = harness().await;
-    h.post("/api/auth/password", json!({ "password": "correct horse battery" }))
-        .await;
+    h.post(
+        "/api/auth/password",
+        json!({ "password": "correct horse battery" }),
+    )
+    .await;
     let response = h
-        .post("/api/auth/login", json!({ "password": "wrong horse battery" }))
+        .post(
+            "/api/auth/login",
+            json!({ "password": "wrong horse battery" }),
+        )
         .await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
     assert_eq!(response.error_code(), "unauthorized");
@@ -120,8 +144,11 @@ async fn a_wrong_password_is_refused_and_never_names_the_real_one() {
 #[tokio::test]
 async fn repeated_failures_lock_the_client_out() {
     let h = harness().await;
-    h.post("/api/auth/password", json!({ "password": "correct horse battery" }))
-        .await;
+    h.post(
+        "/api/auth/password",
+        json!({ "password": "correct horse battery" }),
+    )
+    .await;
     let mut last = StatusCode::UNAUTHORIZED;
     for _ in 0..12 {
         last = h
@@ -140,7 +167,10 @@ async fn repeated_failures_lock_the_client_out() {
     // Even the right password is refused while the lockout stands: otherwise the
     // limit only slows an attacker down without stopping the guess.
     let correct = h
-        .post("/api/auth/login", json!({ "password": "correct horse battery" }))
+        .post(
+            "/api/auth/login",
+            json!({ "password": "correct horse battery" }),
+        )
         .await;
     assert_eq!(correct.status, StatusCode::TOO_MANY_REQUESTS);
 }
@@ -186,30 +216,46 @@ async fn the_bearer_token_still_works_alongside_a_password() {
         )
         .await;
     assert_eq!(with_token.status, StatusCode::OK);
-    assert_eq!(h.get("/api/auth/status").await.json()["token_required"], json!(true));
+    assert_eq!(
+        h.get("/api/auth/status").await.json()["token_required"],
+        json!(true)
+    );
 }
 
 #[tokio::test]
 async fn signing_out_invalidates_the_cookie() {
     let h = harness().await;
     let response = h
-        .post("/api/auth/password", json!({ "password": "correct horse battery" }))
+        .post(
+            "/api/auth/password",
+            json!({ "password": "correct horse battery" }),
+        )
         .await;
     let cookie = cookie_of(&response);
-    let out = h
-        .post("/api/auth/logout", json!({}))
-        .await;
+    let out = h.post("/api/auth/logout", json!({})).await;
     let _ = out;
     // The logout above ran without the cookie (the harness cannot carry one on a
     // fresh POST body), so sign out explicitly with it.
     let out = h
-        .send_with(Method::POST, "/api/auth/logout", Some(json!({})), &[("cookie", &cookie)], true)
+        .send_with(
+            Method::POST,
+            "/api/auth/logout",
+            Some(json!({})),
+            &[("cookie", &cookie)],
+            true,
+        )
         .await;
     assert_eq!(out.status, StatusCode::OK, "{}", out.text());
     assert_eq!(
-        h.send_with(Method::GET, "/api/health", None, &[("cookie", &cookie)], true)
-            .await
-            .status,
+        h.send_with(
+            Method::GET,
+            "/api/health",
+            None,
+            &[("cookie", &cookie)],
+            true
+        )
+        .await
+        .status,
         StatusCode::UNAUTHORIZED,
         "a signed-out cookie must stop working"
     );
@@ -219,7 +265,10 @@ async fn signing_out_invalidates_the_cookie() {
 async fn a_password_change_requires_the_current_one_and_signs_browsers_out() {
     let h = harness().await;
     let response = h
-        .post("/api/auth/password", json!({ "password": "correct horse battery" }))
+        .post(
+            "/api/auth/password",
+            json!({ "password": "correct horse battery" }),
+        )
         .await;
     let cookie = cookie_of(&response);
 
@@ -249,14 +298,23 @@ async fn a_password_change_requires_the_current_one_and_signs_browsers_out() {
     assert_eq!(with.status, StatusCode::OK, "{}", with.text());
     // The old cookie is dead: a password change is what you do after a leak.
     assert_eq!(
-        h.send_with(Method::GET, "/api/health", None, &[("cookie", &cookie)], true)
-            .await
-            .status,
+        h.send_with(
+            Method::GET,
+            "/api/health",
+            None,
+            &[("cookie", &cookie)],
+            true
+        )
+        .await
+        .status,
         StatusCode::UNAUTHORIZED
     );
     // The new password is the live one.
     let login = h
-        .post("/api/auth/login", json!({ "password": "a-new-long-password" }))
+        .post(
+            "/api/auth/login",
+            json!({ "password": "a-new-long-password" }),
+        )
         .await;
     assert_eq!(login.status, StatusCode::OK, "{}", login.text());
 }
@@ -265,7 +323,10 @@ async fn a_password_change_requires_the_current_one_and_signs_browsers_out() {
 async fn removing_the_last_credential_turns_sign_in_off() {
     let h = harness().await;
     let response = h
-        .post("/api/auth/password", json!({ "password": "correct horse battery" }))
+        .post(
+            "/api/auth/password",
+            json!({ "password": "correct horse battery" }),
+        )
         .await;
     let cookie = cookie_of(&response);
     let removed = h
@@ -287,11 +348,21 @@ async fn removing_the_last_credential_turns_sign_in_off() {
 #[tokio::test]
 async fn enabling_access_with_no_credential_is_refused() {
     let h = harness().await;
-    let response = h.patch("/api/config", json!({ "access": { "enabled": true } })).await;
-    assert_eq!(response.status, StatusCode::BAD_REQUEST, "{}", response.text());
+    let response = h
+        .patch("/api/config", json!({ "access": { "enabled": true } }))
+        .await;
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        response.text()
+    );
     let message = response.error_message();
     assert!(message.contains("lock you out"), "{message}");
-    assert_eq!(h.get("/api/config").await.json()["access"]["enabled"], json!(false));
+    assert_eq!(
+        h.get("/api/config").await.json()["access"]["enabled"],
+        json!(false)
+    );
 }
 
 #[tokio::test]
@@ -370,7 +441,12 @@ async fn the_configured_public_url_is_accepted_by_the_host_guard() {
             true,
         )
         .await;
-    assert_eq!(rejected.status, StatusCode::FORBIDDEN, "{}", rejected.text());
+    assert_eq!(
+        rejected.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        rejected.text()
+    );
 
     h.patch(
         "/api/config",
@@ -420,7 +496,10 @@ async fn the_public_url_targets_the_session_cookie_at_that_origin() {
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
 
     let created = h
-        .post("/api/auth/password", json!({ "password": "correct horse battery" }))
+        .post(
+            "/api/auth/password",
+            json!({ "password": "correct horse battery" }),
+        )
         .await;
     let cookie = cookie_of(&created);
     // Setting the public URL now marks the cookie `Secure`, because the browser
@@ -468,7 +547,10 @@ async fn the_public_url_targets_the_session_cookie_at_that_origin() {
     // drops a Secure cookie on a plain-http origin, so claiming it here would
     // sign the operator out on their own machine.
     let local = h
-        .post("/api/auth/login", json!({ "password": "correct horse battery" }))
+        .post(
+            "/api/auth/login",
+            json!({ "password": "correct horse battery" }),
+        )
         .await;
     let local_cookie = local
         .headers
@@ -485,20 +567,38 @@ async fn the_public_url_targets_the_session_cookie_at_that_origin() {
 async fn sessions_are_listed_and_can_be_revoked_one_by_one() {
     let h = harness().await;
     let created = h
-        .post("/api/auth/password", json!({ "password": "correct horse battery" }))
+        .post(
+            "/api/auth/password",
+            json!({ "password": "correct horse battery" }),
+        )
         .await;
     let first = cookie_of(&created);
     let second_login = h
-        .post("/api/auth/login", json!({ "password": "correct horse battery" }))
+        .post(
+            "/api/auth/login",
+            json!({ "password": "correct horse battery" }),
+        )
         .await;
     let second = cookie_of(&second_login);
 
     let list = h
-        .send_with(Method::GET, "/api/auth/sessions", None, &[("cookie", &first)], true)
+        .send_with(
+            Method::GET,
+            "/api/auth/sessions",
+            None,
+            &[("cookie", &first)],
+            true,
+        )
         .await;
     assert_eq!(list.status, StatusCode::OK, "{}", list.text());
-    let sessions = list.json()["sessions"].as_array().cloned().unwrap_or_default();
-    assert!(sessions.len() >= 2, "expected two sessions, got {sessions:?}");
+    let sessions = list.json()["sessions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        sessions.len() >= 2,
+        "expected two sessions, got {sessions:?}"
+    );
     // The ids are short, non-reversible handles - never the cookie itself.
     let ids: Vec<String> = sessions
         .iter()
@@ -506,7 +606,10 @@ async fn sessions_are_listed_and_can_be_revoked_one_by_one() {
         .collect();
     assert!(ids.iter().all(|id| id.len() == 12 && !id.contains(&first)));
 
-    let current = list.json()["current"].as_str().unwrap_or_default().to_string();
+    let current = list.json()["current"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let other = ids
         .iter()
         .find(|id| **id != current)
@@ -525,10 +628,22 @@ async fn sessions_are_listed_and_can_be_revoked_one_by_one() {
     assert_eq!(revoked.json()["removed"], json!(true));
     // One of the two cookies still works and the other does not.
     let first_ok = h
-        .send_with(Method::GET, "/api/auth/me", None, &[("cookie", &first)], true)
+        .send_with(
+            Method::GET,
+            "/api/auth/me",
+            None,
+            &[("cookie", &first)],
+            true,
+        )
         .await;
     let second_ok = h
-        .send_with(Method::GET, "/api/auth/me", None, &[("cookie", &second)], true)
+        .send_with(
+            Method::GET,
+            "/api/auth/me",
+            None,
+            &[("cookie", &second)],
+            true,
+        )
         .await;
     assert_ne!(first_ok.status.is_success(), second_ok.status.is_success());
 }
@@ -537,7 +652,10 @@ async fn sessions_are_listed_and_can_be_revoked_one_by_one() {
 async fn revoking_every_session_signs_this_browser_out_too() {
     let h = harness().await;
     let created = h
-        .post("/api/auth/password", json!({ "password": "correct horse battery" }))
+        .post(
+            "/api/auth/password",
+            json!({ "password": "correct horse battery" }),
+        )
         .await;
     let cookie = cookie_of(&created);
     let response = h
@@ -551,9 +669,15 @@ async fn revoking_every_session_signs_this_browser_out_too() {
         .await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.text());
     assert_eq!(
-        h.send_with(Method::GET, "/api/health", None, &[("cookie", &cookie)], true)
-            .await
-            .status,
+        h.send_with(
+            Method::GET,
+            "/api/health",
+            None,
+            &[("cookie", &cookie)],
+            true
+        )
+        .await
+        .status,
         StatusCode::UNAUTHORIZED
     );
 }
@@ -588,7 +712,10 @@ async fn passkey_sign_in_is_refused_when_no_passkey_is_registered() {
 async fn a_passkey_challenge_cannot_be_replayed() {
     let h = harness().await;
     let options = h.post("/api/auth/passkey/options", json!({})).await.json();
-    let challenge_id = options["challenge_id"].as_str().unwrap_or_default().to_string();
+    let challenge_id = options["challenge_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let first = h
         .post(
             "/api/auth/passkey/login",
@@ -637,7 +764,9 @@ async fn onboarding_is_needed_on_a_fresh_install_and_remembered_after_completion
     assert_eq!(body["completed"], json!(false));
     assert_eq!(body["has_credential"], json!(false));
 
-    let done = h.post("/api/onboarding/complete", json!({ "skipped": true })).await;
+    let done = h
+        .post("/api/onboarding/complete", json!({ "skipped": true }))
+        .await;
     assert_eq!(done.status, StatusCode::OK, "{}", done.text());
     assert_eq!(done.json()["skipped"], json!(true));
 
@@ -677,8 +806,11 @@ async fn onboarding_reports_the_access_state_the_wizard_has_to_show() {
 #[tokio::test]
 async fn a_signed_out_browser_still_gets_the_shell_and_the_sign_in_route() {
     let h = harness().await;
-    h.post("/api/auth/password", json!({ "password": "correct horse battery" }))
-        .await;
+    h.post(
+        "/api/auth/password",
+        json!({ "password": "correct horse battery" }),
+    )
+    .await;
     // The SPA shell has no credential on it and is served anyway - otherwise the
     // sign-in screen could never render.
     let shell = h.get("/").await;
@@ -686,12 +818,18 @@ async fn a_signed_out_browser_still_gets_the_shell_and_the_sign_in_route() {
     // And the status route is public.
     assert_eq!(h.get("/api/auth/status").await.status, StatusCode::OK);
     // Everything else is not.
-    assert_eq!(h.get("/api/sessions").await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        h.get("/api/sessions").await.status,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]
 async fn the_settings_lock_still_wins_over_an_access_patch() {
-    let h = HarnessBuilder::new(Vec::new()).lock_settings().build().await;
+    let h = HarnessBuilder::new(Vec::new())
+        .lock_settings()
+        .build()
+        .await;
     let response = h
         .patch("/api/config", json!({ "access": { "session_days": 7 } }))
         .await;
@@ -710,8 +848,11 @@ async fn an_unknown_access_field_is_rejected_rather_than_ignored() {
 #[tokio::test]
 async fn the_login_screen_body_never_contains_a_hash() {
     let h = harness().await;
-    h.post("/api/auth/password", json!({ "password": "correct horse battery" }))
-        .await;
+    h.post(
+        "/api/auth/password",
+        json!({ "password": "correct horse battery" }),
+    )
+    .await;
     let status = h.get("/api/auth/status").await;
     let body: Value = status.json();
     let text = serde_json::to_string(&body).unwrap();
@@ -719,13 +860,24 @@ async fn the_login_screen_body_never_contains_a_hash() {
     assert!(!text.contains("correct horse battery"), "{text}");
     // Even a signed-in request never returns key material.
     let login = h
-        .post("/api/auth/login", json!({ "password": "correct horse battery" }))
+        .post(
+            "/api/auth/login",
+            json!({ "password": "correct horse battery" }),
+        )
         .await;
     let cookie = cookie_of(&login);
     let me = h
-        .send_with(Method::GET, "/api/auth/me", None, &[("cookie", &cookie)], true)
+        .send_with(
+            Method::GET,
+            "/api/auth/me",
+            None,
+            &[("cookie", &cookie)],
+            true,
+        )
         .await;
     assert_eq!(me.json()["signed_in"], json!(true));
     assert_eq!(me.json()["principal"], json!("password"));
-    assert!(!serde_json::to_string(&me.json()).unwrap().contains("argon2"));
+    assert!(!serde_json::to_string(&me.json())
+        .unwrap()
+        .contains("argon2"));
 }

@@ -939,6 +939,14 @@ export function SessionsRail(): JSX.Element {
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>('all');
   useFocusTrap(railRef, isNarrow && isSheetOpen, actions.closeSheets);
   const unread = store.unread.value;
+  // A newer build exists. The rail says so next to the version because that is
+  // where the version is; opening it lands on Settings → Updates. Once that build
+  // is on disk (and this process is still running the old one) the same chip
+  // becomes a restart reminder, because an install offered again would re-download
+  // what is already there.
+  const updateState = store.updateStatus.value;
+  const latestBuild = updateState?.update_available ? (updateState.latest?.build ?? null) : null;
+  const installedBuild = latestBuild !== null && updateState?.last_applied?.to === String(latestBuild);
 
   const filterCounts = useMemo<Record<SessionFilter, number>>(() => {
     const counts: Record<SessionFilter, number> = { all: sessions.length, needs: 0, running: 0, changes: 0 };
@@ -1171,7 +1179,29 @@ export function SessionsRail(): JSX.Element {
           <div class="online-row">
             <span class={`online-ind status-${connectionTone()}`} aria-hidden="true" />
             <span>{store.connectionLabel.value}</span>
-            <span class="right">{store.health.value ? `v${store.health.value.version}` : 'local'}</span>
+            <span class="right">
+              {store.health.value ? `v${store.health.value.version}` : 'local'}
+              {latestBuild !== null ? (
+                <button
+                  type="button"
+                  class="update-dot"
+                  title={
+                    installedBuild
+                      ? `Build ${latestBuild} is installed — restart karucode to run it`
+                      : `Build ${latestBuild} is available — open Settings → Updates`
+                  }
+                  aria-label={
+                    installedBuild
+                      ? `Restart to run build ${latestBuild}`
+                      : `Update available: build ${latestBuild}`
+                  }
+                  onClick={() => actions.openSettings('updates')}
+                >
+                  {installedBuild ? '↻' : '↑'}
+                  {latestBuild}
+                </button>
+              ) : null}
+            </span>
           </div>
           <div class="settings-row">
             <button

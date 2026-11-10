@@ -7,7 +7,7 @@
 
 - **Slug:** `security`
 - **Tags:** security, auth, csrf, sandbox, remote, trust
-- **Applies to:** `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_ALLOWED_HOSTS`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `header:X-Karucode-Client`, `header:Authorization`, `header:Cookie`, `config:auth_token`, `config:allow_temp_dir`, `config:[access]`, `config:access.public_url`, `config:access.tunnel`, `config:access.trusted_proxies`, `doc:docs/SECURITY.md`, `concept:approvals`, `concept:workspace containment`, `concept:sign-in`
+- **Applies to:** `env:KARUCODE_AUTH_TOKEN`, `env:KARUCODE_ALLOWED_HOSTS`, `env:KARUCODE_PUBLIC_URL`, `env:KARUCODE_TUNNEL`, `env:KARUCODE_TRUSTED_PROXIES`, `header:X-Karucode-Client`, `header:Authorization`, `header:Cookie`, `config:auth_token`, `config:allow_temp_dir`, `config:[access]`, `config:access.public_url`, `config:access.tunnel`, `config:access.trusted_proxies`, `config:[updates]`, `config:updates.manifest_url`, `config:updates.auto_apply`, `env:KARUCODE_UPDATE_MANIFEST_URL`, `env:KARUCODE_UPDATE_AUTO_APPLY`, `route:GET /api/update`, `route:POST /api/update/apply`, `header:X-Karucode-Admin-Token`, `doc:docs/SECURITY.md`, `concept:approvals`, `concept:workspace containment`, `concept:sign-in`, `concept:update manifest`
 - **Source:** `crates/kc-server/src/app.rs:16`
 
 ---
@@ -104,6 +104,31 @@ rules exist to stop a *model* wandering out of its project - `~/.ssh`,
 `/etc`, another repository - not to contain code that can already fork a
 shell. Keeping the temp dir usable is what lets builds, screenshots and
 downloads work without an approval prompt per scratch file.
+
+## The update manifest is a trust anchor
+
+An update replaces the running binary, so whoever controls the manifest URL
+controls what runs on the machine. Three things bound that:
+
+* **Checking is automatic, installing is not.** A check is one GET of
+  `updates.json`; `auto_apply` is off by default, and even with it on a service
+  account that cannot write `/usr/local/bin/karucode` still needs a privileged
+  `karucode update --apply`. A container install refuses entirely.
+* **The server never trusts the download on its own.** The artifact is verified
+  against the manifest's SHA-256 and size while streaming, then **executed once
+  with `--version`** (cleared environment, 30 s limit) and required to report the
+  build the manifest promised before it is copied anywhere. The copy is compared
+  byte for byte and the swap is an atomic rename that keeps `karucode.old`.
+* **Repointing the manifest is an admin-gated change.** `PATCH /api/config`
+  touching `updates.manifest_url` or `updates.auto_apply` needs
+  `X-Karucode-Admin-Token`, exactly like the approval mode or the provider
+  endpoint, and `POST /api/update/apply` needs it too.
+
+The checksum proves the bytes arrived intact; it does not make the publisher
+trustworthy. Point `updates.manifest_url` at a mirror you control (an air-gapped
+host is the normal reason) and leave `check = false` if you would rather update
+only by hand. `packaging/update.sh` and `packaging/install.sh` verify a release
+tarball the same way, against the published `SHA256SUMS`.
 
 ## What is NOT protected - read this
 

@@ -298,7 +298,7 @@ function AgentsEmpty({ filtered }: { filtered: boolean }): JSX.Element {
         Nothing has been delegated in this project. When a session calls <code>spawn_agent</code>, the
         agent appears here — including agents running in a session you are not looking at.
       </p>
-      <button type="button" class="button button-small" onClick={actions.openSettings}>
+      <button type="button" class="button button-small" onClick={() => actions.openSettings()}>
         Subagent settings
       </button>
     </div>

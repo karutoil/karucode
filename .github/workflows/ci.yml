@@ -127,6 +127,11 @@ jobs:
       # real script's --dry-run output rather than from a copy of the logic.
       - name: install.sh tests
         run: python3 tests/test_install_defaults.py
+      # The release manifest is what every installed binary downloads and runs, so
+      # the producer is tested like the coolant it is: checksums, target discovery
+      # and the "nothing to publish" case.
+      - name: release manifest tests
+        run: python3 tests/test_release_manifest.py
 
   docs:
     name: docs gate
@@ -157,6 +162,37 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  # The version is the commit count, so it is only right when the build can see
+  # the whole history. `actions/checkout` fetches one commit by default, which
+  # would stamp every CI build as build 1 and make the updater's "is this newer"
+  # question meaningless. This job proves both halves: a full-history checkout and
+  # a binary that reports the number the repository says.
+  version:
+    name: version stamp
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: --version is the commit count
+        run: |
+          set -eu
+          expected="$(git rev-list --count HEAD)"
+          # `--no-default-features` skips the frontend bundle: this job needs the
+          # CLI, not the UI, and npm would add a minute for nothing.
+          printed="$(cargo run --quiet --locked -p kc-server --no-default-features -- --version)"
+          echo "printed:  ${printed}"
+          echo "expected: karucode ${expected} (...)"
+          case "${printed}" in
+            "karucode ${expected} "*) ;;
+            *)
+              echo "::error::--version printed '${printed}' but HEAD is commit ${expected}; a build with a shallow history reports the wrong version"
+              exit 1
+              ;;
+          esac
 
   # End-to-end against the deterministic mock provider: no network, no API key,
   # no cost. This is the regression gate for the harness itself.
@@ -196,20 +232,53 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --workspace
 
+  # Every commit on `main` is a release. The version is the commit count, so there
+  # is no version to bump, no changelog to write first and no tag to remember: the
+  # merge is the release. A hand-pushed `v<build>` tag is also accepted, provided it
+  # names the build that commit really is.
+  #
+  # The job publishes, next to the tarball and the raw binaries:
+  #
+  #   updates.json    the manifest every installed server polls (see the `updates`
+  #                   topic and crates/kc-server/src/update.rs)
+  #   SHA256SUMS      what packaging/install.sh and the staged apply verify against
+  #   install.sh      so the tarball can be installed without a checkout
+  #
+  # Every gate that can fail a normal run also gates a release. The e2e job is
+  # deliberately excluded: it boots the real binary, which makes it the slowest job
+  # by far, and it already ran on the same commit in this workflow.
   release:
-    name: release artifacts
-    if: startsWith(github.ref, 'refs/tags/v')
-    # Every gate that can fail a normal run must also gate a release. The e2e
-    # job is deliberately excluded: it boots the binary as a real server, which
-    # makes it the slowest job by far, and it is already required on the commit
-    # the tag points at. Everything that can silently ship a broken or
-    # unaudited artifact is listed here.
-    needs: [fmt, tracked, clippy, test, test-release, readme, packaging, docs, web, audit, msrv]
+    name: release build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [fmt, tracked, clippy, test, test-release, readme, packaging, docs, web, audit, msrv, version]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The commit count *is* the version: a shallow clone would release build 1.
+          fetch-depth: 0
+      - id: version
+        name: decide the build number
+        run: |
+          set -eu
+          build="$(git rev-list --count HEAD)"
+          commit="$(git rev-parse --short=12 HEAD)"
+          date="$(git log -1 --format=%cI HEAD)"
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "date=${date}" >> "$GITHUB_OUTPUT"
+          echo "Releasing build ${build} (${commit})"
+          # A pushed tag is a deliberate re-release: it must name this commit's
+          # build, or the tag and the binary would disagree.
+          if [ "${GITHUB_REF}" != "${GITHUB_REF#refs/tags/v}" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "${tag}" != "${build}" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match this commit's build number ${build}; tag v${build} or drop the tag"
+              exit 1
+            fi
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
@@ -217,34 +286,74 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - uses: Swatinem/rust-cache@v2
-      # The artifact is named from the tag, but the binary reports
-      # CARGO_PKG_VERSION. They must agree or `karucode --version` contradicts
-      # the tarball it came in and update.sh's "already up to date" logic lies.
-      - name: tag matches the workspace version
+      - name: build
+        env:
+          KARUCODE_BUILD_NUMBER: ${{ steps.version.outputs.build }}
+          KARUCODE_COMMIT: ${{ steps.version.outputs.commit }}
+          KARUCODE_COMMIT_DATE: ${{ steps.version.outputs.date }}
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          manifest=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          if [ "$tag" != "$manifest" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match [workspace.package] version ${manifest}; bump Cargo.toml or retag"
-            exit 1
-          fi
-      - run: cd web && npm ci && npm run build
-      - run: cargo build --release --locked -p kc-server -p example-hello
+          set -eu
+          cd web && npm ci && npm run build && cd ..
+          cargo build --release --locked -p kc-server -p example-hello
+          # The stamped number is the whole point: a binary that reports
+          # something else would be released under a version it does not have.
+          printed="$(./target/release/karucode --version)"
+          echo "${printed}"
+          case "${printed}" in
+            "karucode ${{ steps.version.outputs.build }} "*) ;;
+            *) echo "::error::the release binary reports '${printed}'"; exit 1 ;;
+          esac
       - name: package
         run: |
           set -eu
-          version="${GITHUB_REF_NAME#v}"
+          build="${{ steps.version.outputs.build }}"
           target="x86_64-unknown-linux-gnu"
-          name="karucode-${version}-${target}"
-          mkdir -p "dist/${name}"
-          cp target/release/karucode "dist/${name}/"
-          cp target/release/example-hello "dist/${name}/" || true
-          cp README.md LICENSE config.example.toml "dist/${name}/"
-          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
-          cd dist && sha256sum "${name}.tar.gz" > SHA256SUMS
+          name="karucode-${build}-${target}"
+          mkdir -p dist
+          # The raw binaries are what the self-updater downloads: no archive to
+          # extract, one checksum to verify, and `updates.json` points at them.
+          cp target/release/karucode "dist/${name}"
+          cp target/release/example-hello "dist/example-hello-${build}-${target}"
+          # The archive is what packaging/install.sh installs, with the installer
+          # and unit beside the binary so a host with no checkout can use it.
+          stage="dist/pkg/${name}"
+          mkdir -p "${stage}"
+          cp target/release/karucode "${stage}/"
+          cp target/release/example-hello "${stage}/"
+          cp README.md LICENSE config.example.toml "${stage}/"
+          cp packaging/install.sh packaging/karucode.service "${stage}/"
+          tar -C dist/pkg -czf "dist/${name}.tar.gz" "${name}"
+          rm -rf dist/pkg
+          python3 scripts/release_manifest.py \
+            --dist dist \
+            --build "${build}" \
+            --commit "${{ steps.version.outputs.commit }}" \
+            --commit-date "${{ steps.version.outputs.date }}" \
+            --base-url "https://github.com/${{ github.repository }}/releases/download/v${build}" \
+            --release-url "${{ github.server_url }}/${{ github.repository }}/releases/tag/v${build}" \
+            --notes "$(git log -1 --pretty=%B)" \
+            --out dist/updates.json \
+            --sha256sums dist/SHA256SUMS
+          ls -l dist
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.version.outputs.build }}
+          name: karucode ${{ steps.version.outputs.build }}
+          body: |
+            Build ${{ steps.version.outputs.build }} — commit `${{ steps.version.outputs.commit }}`.
+
+            ```bash
+            # install or upgrade a service
+            curl -fsSLO https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.build }}/karucode-${{ steps.version.outputs.build }}-x86_64-unknown-linux-gnu.tar.gz
+            sudo sh packaging/install.sh --tarball karucode-${{ steps.version.outputs.build }}-x86_64-unknown-linux-gnu.tar.gz
+
+            # or let a running install do it
+            karucode update --apply
+            ```
           files: |
-            dist/*.tar.gz
+            dist/karucode-*.tar.gz
+            dist/karucode-*-x86_64-unknown-linux-gnu
+            dist/example-hello-*
+            dist/updates.json
             dist/SHA256SUMS
           generate_release_notes: true

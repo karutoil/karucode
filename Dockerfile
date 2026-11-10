@@ -98,8 +98,28 @@ COPY --from=web /src/web/dist ./web/dist
 
 ENV KARUCODE_WEB_DIST=/src/web/dist
 
+# The version is the git commit count, and a Docker build context has no `.git`,
+# so pass it in. Without these the binary reports build 0 and the updater refuses
+# to compare it with a release (which is honest: an image built from an unknown
+# tree cannot be ordered against one). Example:
+#
+#     docker build \
+#       --build-arg KARUCODE_BUILD_NUMBER="$(git rev-list --count HEAD)" \
+#       --build-arg KARUCODE_COMMIT="$(git rev-parse --short=12 HEAD)" \
+#       --build-arg KARUCODE_COMMIT_DATE="$(git log -1 --format=%cI)" \
+#       -t karucode:latest .
+#
+# A container is updated by rebuilding the image, not by the self-updater.
+ARG KARUCODE_BUILD_NUMBER=0
+ARG KARUCODE_COMMIT=unknown
+ARG KARUCODE_COMMIT_DATE=unknown
+ENV KARUCODE_BUILD_NUMBER=${KARUCODE_BUILD_NUMBER} \
+    KARUCODE_COMMIT=${KARUCODE_COMMIT} \
+    KARUCODE_COMMIT_DATE=${KARUCODE_COMMIT_DATE}
+
 RUN cargo build --release --locked -p kc-server \
-    && install -D -m 0755 target/release/karucode /out/karucode
+    && install -D -m 0755 target/release/karucode /out/karucode \
+    && /out/karucode --version
 
 # -----------------------------------------------------------------------------
 # Stage 3: runtime.

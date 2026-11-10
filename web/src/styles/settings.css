@@ -1358,3 +1358,181 @@
     transition: none;
   }
 }
+/* --- Updates tab --------------------------------------------------------- */
+
+/* The running build: the number is the thing an operator reads out loud, so it is
+ * the only large type in the section. */
+.update-current {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.update-build {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+}
+
+.update-build-number {
+  font-family: var(--font-mono);
+  font-size: var(--fs-title);
+  color: var(--text);
+}
+
+.update-build-meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  color: var(--muted);
+}
+
+.update-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-5);
+  margin: 0;
+}
+
+.update-facts dt {
+  font-size: var(--fs-tiny);
+  letter-spacing: var(--tracking-kicker);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.update-facts dd {
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The "a newer build exists" card. It is the only place in the sheet with a
+ * border of its own: an available update is a call to action, not a setting. */
+.update-available {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-6);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+}
+
+.update-available-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+}
+
+.update-badge {
+  font-size: var(--fs-label);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.update-notes {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: var(--space-4);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.update-link {
+  color: var(--accent);
+  font-size: var(--fs-small);
+  width: fit-content;
+}
+
+.update-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  flex-wrap: wrap;
+}
+
+.update-restart {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--fs-small);
+  color: var(--text-secondary);
+}
+
+.update-command {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.update-command code {
+  display: block;
+  width: 100%;
+  padding: var(--space-4);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.update-interval {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.update-interval .input {
+  width: 96px;
+}
+
+/* Errors and confirmations share a shape: one line, stated plainly, no icon. */
+.update-error,
+.update-notice {
+  margin: 0;
+  font-size: var(--fs-small);
+}
+
+.update-error {
+  color: var(--danger);
+}
+
+.update-notice {
+  color: var(--text-secondary);
+}
+
+/* The rail's "a newer build exists" chip, beside the version it is newer than. */
+.update-dot {
+  margin-left: var(--space-3);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--fs-tiny);
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.update-dot:hover,
+.update-dot:focus-visible {
+  border-color: var(--accent);
+  color: var(--text);
+}

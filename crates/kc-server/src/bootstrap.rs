@@ -9,7 +9,7 @@
 // @kc-title: Build, run and stop the server
 // @kc-summary: Build the UI and the binary, start it against a workspace, and know what each CLI flag and startup failure means.
 // @kc-tags: install, build, run, cli, startup, server
-// @kc-applies-to: cmd:karucode, cmd:--workspace, cmd:--port, cmd:--host, cmd:--data-dir, cmd:--config, cmd:--help, env:KARUCODE_HOST, env:KARUCODE_PORT, env:KARUCODE_WORKSPACE, env:KARUCODE_DATA_DIR, env:KARUCODE_AUTH_TOKEN, env:KARUCODE_LOG, env:KARUCODE_WEB_DIR, env:KARUCODE_ALLOWED_HOSTS, env:KARUCODE_SKIP_WEB_BUILD, env:KARUCODE_WEB_DIST, env:KARUCODE_NPM, cmd:npm run build, cmd:npm ci, route:GET /api/health, file:web/dist, file:crates/kc-server/build.rs
+// @kc-applies-to: cmd:karucode, cmd:--workspace, cmd:--port, cmd:--host, cmd:--data-dir, cmd:--config, cmd:--help, cmd:--version, cmd:karucode update, cmd:karucode update --check, cmd:karucode update --stage, cmd:karucode update --apply, cmd:karucode update --apply --restart, env:KARUCODE_HOST, env:KARUCODE_PORT, env:KARUCODE_WORKSPACE, env:KARUCODE_DATA_DIR, env:KARUCODE_AUTH_TOKEN, env:KARUCODE_LOG, env:KARUCODE_WEB_DIR, env:KARUCODE_ALLOWED_HOSTS, env:KARUCODE_SKIP_WEB_BUILD, env:KARUCODE_WEB_DIST, env:KARUCODE_NPM, cmd:npm run build, cmd:npm ci, route:GET /api/health, file:web/dist, file:crates/kc-server/build.rs
 //
 // # Build and run
 //
@@ -56,6 +56,17 @@
 // | `--no-open` | - | accepted for compatibility; the server never opens a browser |
 // | `-h`, `--version` | - | usage and version, handled before touching the filesystem |
 //
+// `karucode --version` prints the **build number**, which is the git commit count,
+// with the commit and its date:
+//
+// ```text
+// $ karucode --version
+// karucode 107 (abf0a4216839, 2026-11-09T21:35:10-05:00)
+// ```
+//
+// That is the version to quote in a bug report and the number to compare with a
+// release; the `versioning` topic explains why there is no semver here.
+//
 // Every flag has an environment equivalent (`KARUCODE_HOST`, `KARUCODE_PORT`,
 // `KARUCODE_WORKSPACE`, `KARUCODE_DATA_DIR`, `KARUCODE_CONFIG`); flags win for the
 // process they start. `KARUCODE_LOG` sets the tracing filter
@@ -72,6 +83,22 @@
 //
 // Neither subcommand starts the server, reads the config file or touches the
 // data directory, and an existing file is never overwritten without `--force`.
+//
+// `karucode update` is the third subcommand and the one that keeps an installed
+// binary current:
+//
+// ```bash
+// karucode update --check     # 0 up to date, 3 a newer build exists, 1 error
+// karucode update --stage     # download + checksum + run it once to prove the build
+// sudo karucode update --apply --data-dir /var/lib/karucode   # install it
+// sudo karucode update --apply --data-dir /var/lib/karucode --restart
+// ```
+//
+// The default is `--check`, so `karucode update` alone never downloads 20 MiB.
+// `--apply` needs write access to the installed binary; the server's own
+// **Settings → Updates** panel stages an update and prints exactly this command
+// when the service account cannot write its binary. The `updates` topic has the
+// manifest format, the `[updates]` settings and the exit codes.
 //
 // # Startup order
 //
@@ -191,6 +218,8 @@ pub enum CliAction {
     PluginInit(crate::scaffold::PluginInitArgs),
     /// `karucode plugin sdk <dir> [--check]`
     PluginSdk(crate::scaffold::PluginSdkArgs),
+    /// `karucode update [--check|--stage|--apply]`
+    Update(crate::update::UpdateOptions),
 }
 
 impl Cli {
@@ -213,6 +242,9 @@ Commands:
   plugin init <dir>        Scaffold a plugin project; the SDK is vendored, so it
                            depends on nothing from karucode
   plugin sdk <dir>         Refresh a plugin's vendored SDK (--check exits 1 on drift)
+  update                   Check for a newer build (--check), download and verify it
+                           (--stage), or install it (--apply, which needs write
+                           access to the binary; --restart restarts the service)
 
 Environment: KARUCODE_CONFIG, KARUCODE_HOST, KARUCODE_PORT, KARUCODE_WORKSPACE,
 KARUCODE_DATA_DIR, KARUCODE_AUTH_TOKEN, KARUCODE_LOCK_SETTINGS, KARUCODE_LOG,
@@ -243,6 +275,13 @@ comma-separated list; entries are host, host:port or *.example.com."
             .unwrap_or(false)
         {
             return parse_plugin(&args[1..]);
+        }
+        if args
+            .first()
+            .map(|a| a.to_string_lossy() == "update")
+            .unwrap_or(false)
+        {
+            return parse_update(&args[1..]);
         }
         let mut cli = Cli::default();
         let mut i = 0usize;
@@ -450,6 +489,95 @@ fn parse_plugin_sdk(words: &[String]) -> anyhow::Result<(PathBuf, bool)> {
     Ok((dir, check))
 }
 
+/// `karucode update [--check|--stage|--apply] [--manifest URL] [--data-dir DIR]
+/// [--config FILE] [--restart]`.
+///
+/// `check` is the default, because it is the only one that changes nothing:
+/// `karucode update` in a cron job that has no flags should not download 20 MiB,
+/// and it certainly should not replace the running binary.
+fn parse_update(args: &[OsString]) -> anyhow::Result<CliAction> {
+    use crate::update::{UpdateAction, UpdateOptions};
+    let words: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
+    let mut options = UpdateOptions {
+        action: UpdateAction::Check,
+        manifest: None,
+        data_dir: None,
+        config: None,
+        restart: false,
+    };
+    let mut chosen: Option<UpdateAction> = None;
+    let mut i = 0usize;
+    while i < words.len() {
+        let (flag, inline) = split_flag(&words[i]);
+        match flag.as_str() {
+            "-h" | "--help" => return Ok(CliAction::Help),
+            "--check" => set_update_action(&mut chosen, UpdateAction::Check, &flag)?,
+            "--stage" => set_update_action(&mut chosen, UpdateAction::Stage, &flag)?,
+            "--apply" => set_update_action(&mut chosen, UpdateAction::Apply, &flag)?,
+            "--restart" => {
+                if inline.is_some() {
+                    bail!("`--restart` does not take a value");
+                }
+                options.restart = true;
+            }
+            "--manifest" => {
+                options.manifest = Some(take_value("--manifest", inline, &words, &mut i)?)
+            }
+            "--data-dir" => {
+                options.data_dir = Some(PathBuf::from(take_value(
+                    "--data-dir",
+                    inline,
+                    &words,
+                    &mut i,
+                )?))
+            }
+            "--config" => {
+                options.config = Some(PathBuf::from(take_value(
+                    "--config",
+                    inline,
+                    &words,
+                    &mut i,
+                )?))
+            }
+            other if other.starts_with('-') => {
+                bail!("unknown option `{other}`\n\n{}", Cli::usage())
+            }
+            "check" => set_update_action(&mut chosen, UpdateAction::Check, "check")?,
+            "stage" => set_update_action(&mut chosen, UpdateAction::Stage, "stage")?,
+            "apply" => set_update_action(&mut chosen, UpdateAction::Apply, "apply")?,
+            other => bail!(
+                "`karucode update` takes no argument `{other}`; expected check, stage or apply\n\n{}",
+                Cli::usage()
+            ),
+        }
+        i += 1;
+    }
+    if let Some(action) = chosen {
+        options.action = action;
+    }
+    if options.restart && options.action != UpdateAction::Apply {
+        bail!("`--restart` only applies to `karucode update --apply`");
+    }
+    Ok(CliAction::Update(options))
+}
+
+fn set_update_action(
+    chosen: &mut Option<crate::update::UpdateAction>,
+    action: crate::update::UpdateAction,
+    spelling: &str,
+) -> anyhow::Result<()> {
+    if let Some(existing) = chosen {
+        if *existing != action {
+            bail!("`karucode update` runs one step at a time; `{spelling}` conflicts with another");
+        }
+    }
+    *chosen = Some(action);
+    Ok(())
+}
+
 /// Load config, apply CLI overrides, validate, then start the server.
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     // `Config::load` resolves the config path from the environment, so the CLI
@@ -621,6 +749,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     // stream the runtime publishes on, so a plugin notification is
     // indistinguishable from a runtime one downstream.
     crate::plugin_notifications::spawn(state.clone(), plugin_notices);
+
+    // Update checks. The task re-reads `[updates]` every tick, so turning checking
+    // off (or changing the interval) in the settings sheet takes effect without a
+    // restart; with `updates.check = false` it never sends a request. It also raises
+    // the "a newer build is available" notification.
+    crate::update::spawn(state.clone());
 
     // Hot plugin reloads (`plugins_watch = true`): one `read_dir` plus a `stat`
     // per plugin command, on a timer. Off by default — a reload replaces
@@ -823,6 +957,13 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     drop(runtime);
     drop(settings);
     drop(store);
+
+    // An update was installed and asked for a restart: exit non-zero so the unit's
+    // `Restart=on-failure` starts the binary that was just put in place. The
+    // message is what the journal shows at the switch.
+    if let Some(build) = crate::update::restart_build() {
+        return Err(anyhow!("restarting to run build {build}"));
+    }
 
     if serve_result.is_ok() {
         tracing::info!("karucode stopped");

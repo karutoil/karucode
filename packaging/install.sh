@@ -7,7 +7,7 @@
 #   sudo sh install.sh                          # latest release, /usr/local
 #   sudo sh install.sh                          # then add a project in the web UI
 #   sudo sh install.sh --workspace /srv/app     # ...or name the first one here
-#   sudo sh install.sh --version 0.1.0
+#   sudo sh install.sh --version 107
 #   sh install.sh --prefix "$HOME/.local" --no-systemd   # binary only, no root
 #
 # Nothing is piped from the network into a shell: the artifact is downloaded to a

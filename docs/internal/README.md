@@ -42,7 +42,9 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`terminals`](terminals.md) | A real shell in the browser that survives a reload, another browser and a cleared cache - and the honest limit of what survives a restart. | `crates/kc-server/src/terminals.rs:1` |
 | [`themes`](themes.md) | Built-in palettes, live colour and density editing, fonts and custom CSS, the transcript view options (cards or rows, grouped calls, working steps folded or open), saved in the browser and shareable as a theme JSON file. | `web/src/theme/engine.ts:1` |
 | [`tool-call-errors`](tool-call-errors.md) | A call that fails because of how it was written comes back with a working version of itself, so the next attempt is correct instead of another guess. | `crates/kc-core/src/tool.rs:1` |
+| [`updates`](updates.md) | A released install checks `updates.json` for a newer build, stages and verifies the download, and installs it with one command or one click. | `crates/kc-server/src/update.rs:10` |
+| [`versioning`](versioning.md) | The version is the git commit count — build 107 is the 107th commit — reported by `--version`, `/api/health` and the web UI. | `crates/kc-server/src/version.rs:7` |
 | [`web-auth`](web-auth.md) | Put a password or a passkey in front of the web UI, choose the address it answers to, and understand what each sign-in method costs. | `crates/kc-server/src/routes/auth.rs:14` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-29 topic(s).
+31 topic(s).
