@@ -1096,18 +1096,37 @@ pub fn truncate_output(text: &str, max_bytes: usize) -> (String, bool) {
 /// [`truncate_output`] with the caller's own "what to do next" sentence.
 ///
 /// `advice` must name a real next call or the key that governs the bound; it is
-/// reserved out of the byte budget like the rest of the marker.
+/// reserved out of the byte budget like the rest of the marker. A budget too
+/// small for the whole sentence does not drop it: the compact markers keep the
+/// advice's first clause, or the key name it ends with, whichever fits - and a
+/// smaller marker is preferred to a richer one that would lose those words,
+/// because "raise the limit" is a next step where an operator's sentence is the
+/// only one the model can pass on for *this* tool.
 pub fn truncate_output_with_advice(text: &str, max_bytes: usize, advice: &str) -> (String, bool) {
     if text.len() <= max_bytes {
         return (text.to_string(), false);
     }
-    // Richest first. Each attempt renders its own marker from the geometry that
-    // attempt actually produces, so the byte and line numbers in the text always
-    // describe the splice the reader is looking at.
+    // The marker explains a cut; it must not become most of what is left. A tiny
+    // budget gets the compact marker so the content - and the tail, where a
+    // command's error usually is - keeps the room.
+    let marker_budget = (max_bytes / 2).max(80);
+    // Each attempt renders its own marker from the geometry that attempt actually
+    // produces, so the byte and line numbers in the text always describe the
+    // splice the reader is looking at. Attempts are compared rather than taken
+    // first-fit: keeping the caller's advice is worth a shorter geometry, and a
+    // later attempt that keeps more of it wins.
+    let mut best: Option<((Advice, u8), String)> = None;
     for detail in [Detail::Full, Detail::Short, Detail::Minimal] {
-        if let Some(out) = assemble_cut(text, max_bytes, advice, detail) {
-            return (out, true);
+        let Some(candidate) = assemble_cut(text, max_bytes, advice, detail, marker_budget) else {
+            continue;
+        };
+        let rank = (candidate.advice, detail.richness());
+        if best.as_ref().is_none_or(|(best_rank, _)| rank > *best_rank) {
+            best = Some((rank, candidate.text));
         }
+    }
+    if let Some((_, out)) = best {
+        return (out, true);
     }
     // No marker fits: a valid prefix is all a budget this small can carry, and
     // the caller still reports `cut`. This is the only remaining silent case and
@@ -1127,6 +1146,39 @@ enum Detail {
     Minimal,
 }
 
+impl Detail {
+    /// How much geometry this detail reports, compared when two attempts both
+    /// keep the same amount of the caller's advice.
+    fn richness(self) -> u8 {
+        match self {
+            Detail::Full => 2,
+            Detail::Short => 1,
+            Detail::Minimal => 0,
+        }
+    }
+}
+
+/// How much of the caller's own sentence a marker carried.
+///
+/// Ordered by what a reader can do with it: the whole sentence names the call
+/// that continues *this* result, a shortened form still says what the tool needs
+/// and how to shorten it, and the key name alone only tells an operator what to
+/// change. A marker that kept less advice is only preferred when nothing else
+/// fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Advice {
+    None,
+    Key,
+    Short,
+    Whole,
+}
+
+/// One candidate result and what of the advice it kept.
+struct Candidate {
+    text: String,
+    advice: Advice,
+}
+
 /// One candidate result: pick a seam that leaves room for a marker of `detail`,
 /// render that marker, and accept it when the whole thing fits the budget.
 ///
@@ -1135,37 +1187,42 @@ enum Detail {
 /// actually rendered until it settles. Every step is a pure function of
 /// `(text, max_bytes, advice)`, which keeps a cut result byte-identical between
 /// runs: provider prefix caching depends on that.
-fn assemble_cut(text: &str, max_bytes: usize, advice: &str, detail: Detail) -> Option<String> {
+fn assemble_cut(
+    text: &str,
+    max_bytes: usize,
+    advice: &str,
+    detail: Detail,
+    marker_budget: usize,
+) -> Option<Candidate> {
     let mut reserve = match detail {
         Detail::Full => 480,
         Detail::Short => 160,
         Detail::Minimal => 64,
     };
-    // The marker explains a cut; it must not become most of what is left. A tiny
-    // budget gets the compact marker so the content - and the tail, where a
-    // command's error usually is - keeps the room.
-    let marker_share = (max_bytes / 2).max(80);
     for _ in 0..4 {
         let (head_end, tail_start, cut) = cut_at(text, max_bytes.saturating_sub(reserve));
-        let marker = render_marker(&cut, advice, detail);
-        if marker.len() > marker_share {
+        let marker = render_marker(&cut, advice, detail, marker_budget);
+        if marker.text.len() > marker_budget {
             return None;
         }
-        let total = head_end + marker.len() + (text.len() - tail_start);
+        let total = head_end + marker.text.len() + (text.len() - tail_start);
         if total <= max_bytes {
-            return Some(format!(
-                "{}{}{}",
-                &text[..head_end],
-                marker,
-                &text[tail_start..]
-            ));
+            return Some(Candidate {
+                text: format!(
+                    "{}{}{}",
+                    &text[..head_end],
+                    marker.text,
+                    &text[tail_start..]
+                ),
+                advice: marker.advice,
+            });
         }
-        if marker.len() <= reserve {
+        if marker.text.len() <= reserve {
             // Shrinking the estimate cannot help any more; this detail is too
             // verbose for the budget.
             return None;
         }
-        reserve = marker.len();
+        reserve = marker.text.len();
     }
     None
 }
@@ -1256,44 +1313,154 @@ fn marker_overlapping(text: &str, head_end: usize, tail_start: usize) -> Option<
     None
 }
 
-/// The marker text for one cut at one level of detail.
-fn render_marker(cut: &Cut, advice: &str, detail: Detail) -> String {
+/// The marker text for one cut at one level of detail, and how much of the
+/// caller's advice it kept.
+///
+/// The `Full` arms are long enough to carry the whole sentence. The compact arms
+/// have to earn their room: they keep the geometry and then the longest form of
+/// the advice that still fits `marker_budget`, so a small budget shortens the
+/// caller's sentence instead of throwing it away.
+fn render_marker(cut: &Cut, advice: &str, detail: Detail, marker_budget: usize) -> Candidate {
     let total = cut.total_bytes;
     let dropped = cut.dropped_bytes;
+    let whole = |text: String| Candidate {
+        text,
+        advice: Advice::Whole,
+    };
     match detail {
         Detail::Full if cut.line_aligned => {
             let first = cut.first_dropped_line.unwrap_or(0);
             let last = first + cut.dropped_lines.saturating_sub(1);
-            format!(
+            whole(format!(
                 "\n\n[truncated: {total}-byte, {}-line result; result lines {first}-{last} \
                  ({dropped} bytes, {} lines) omitted from the middle; kept the first {} and the last \
                  {} bytes as whole lines. {advice}]\n\n",
                 cut.total_lines, cut.dropped_lines, cut.head_bytes, cut.tail_bytes
-            )
+            ))
         }
-        Detail::Full => format!(
+        Detail::Full => whole(format!(
             "\n\n[truncated: {total}-byte, {}-line result; {dropped} bytes omitted from the middle \
              (the cut falls inside a line); kept the first {} and the last {} bytes. {advice}]\n\n",
             cut.total_lines, cut.head_bytes, cut.tail_bytes
-        ),
+        )),
         Detail::Short if cut.line_aligned => {
             let first = cut.first_dropped_line.unwrap_or(0);
             let last = first + cut.dropped_lines.saturating_sub(1);
-            format!(
-                "\n\n[truncated: lines {first}-{last} ({dropped} bytes) omitted from the middle of \
-                 this {total}-byte result; raise {TOOL_OUTPUT_LIMIT_KEY} or narrow the \
-                 request]\n\n"
+            compact_marker(
+                &format!(
+                    "[truncated: lines {first}-{last} ({dropped} bytes) omitted from the middle of \
+                     this {total}-byte result;"
+                ),
+                advice,
+                marker_budget,
             )
         }
-        Detail::Short => format!(
-            "\n\n[truncated: {dropped} of {total} bytes omitted from the middle; raise \
-             {TOOL_OUTPUT_LIMIT_KEY} or narrow the request]\n\n"
+        Detail::Short => compact_marker(
+            &format!("[truncated: {dropped} of {total} bytes omitted from the middle;"),
+            advice,
+            marker_budget,
         ),
-        Detail::Minimal => format!(
-            "\n\n[truncated: {dropped} of {total} bytes omitted; raise {TOOL_OUTPUT_LIMIT_KEY}]\n\n"
+        Detail::Minimal => compact_marker(
+            &format!("[truncated: {dropped} of {total} bytes omitted;"),
+            advice,
+            marker_budget,
         ),
     }
 }
+
+/// A compact marker: fixed geometry, then as much of the caller's advice as
+/// `marker_budget` leaves room for.
+///
+/// The closing bracket and the blank lines around it are counted here because the
+/// whole marker - not just its prose - is what has to fit. When not even the key
+/// name fits, the marker goes out with its geometry alone; `assemble_cut` then
+/// rejects it if even that is over budget and a smaller detail is tried.
+fn compact_marker(prefix: &str, advice: &str, marker_budget: usize) -> Candidate {
+    for (form, kept) in advice_forms(advice) {
+        let text = format!("\n\n{prefix} {form}]\n\n");
+        if text.len() <= marker_budget {
+            return Candidate { text, advice: kept };
+        }
+    }
+    // Nothing of the advice fits: drop the separator that introduced it rather
+    // than leave a marker that trails off in a semicolon.
+    Candidate {
+        text: format!("\n\n{}]\n\n", prefix.trim_end_matches(';')),
+        advice: Advice::None,
+    }
+}
+
+/// The caller's advice at decreasing lengths, most of it first: the whole
+/// sentence, its first clause, the sentence without its parenthetical aside, and
+/// finally the key name it names last.
+///
+/// Shortening is what keeps the sentence rather than losing it: at a budget where
+/// the whole clause does not fit, "re-run it as `cmd > out.txt 2>&1`" still tells
+/// the model what this tool needs, and the key name alone is the smallest part an
+/// operator can act on.
+fn advice_forms(advice: &str) -> Vec<(String, Advice)> {
+    let whole = advice.trim().trim_end_matches(['.', ';']).trim_end();
+    let mut forms: Vec<(String, Advice)> = Vec::new();
+    for form in [
+        Some((whole.to_string(), Advice::Whole)),
+        first_clause(whole).map(|clause| (clause, Advice::Short)),
+        without_aside(whole).map(|bare| (bare, Advice::Short)),
+        Some((format!("raise {TOOL_OUTPUT_LIMIT_KEY}"), Advice::Key)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if form.0.is_empty() || forms.iter().any(|kept| kept.0 == form.0) {
+            continue;
+        }
+        forms.push(form);
+    }
+    forms
+}
+
+/// The sentence up to its first comma or semicolon that is outside parentheses
+/// and backticks, when that leaves a clause long enough to act on.
+fn first_clause(sentence: &str) -> Option<String> {
+    let mut depth = 0i32;
+    let mut in_code = false;
+    for (i, ch) in sentence.char_indices() {
+        match ch {
+            '`' => in_code = !in_code,
+            '(' if !in_code => depth += 1,
+            ')' if !in_code => depth = (depth - 1).max(0),
+            ',' | ';' if !in_code && depth == 0 => {
+                let clause = sentence[..i].trim_end();
+                return (clause.chars().count() >= MIN_ADVICE_CLAUSE_CHARS)
+                    .then(|| clause.to_string());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The sentence with its first parenthesised aside removed: "re-issue the call
+/// with a narrower request (a smaller max_results, ...) or raise ..." keeps both
+/// ends and drops the examples, which is exactly the part a tight budget can do
+/// without.
+fn without_aside(sentence: &str) -> Option<String> {
+    let open = sentence.find('(')?;
+    let close = open + sentence[open..].find(')')?;
+    let mut bare = String::with_capacity(sentence.len());
+    bare.push_str(sentence[..open].trim_end());
+    let tail = sentence[close + 1..].trim_start();
+    if !tail.is_empty() {
+        if !bare.is_empty() {
+            bare.push(' ');
+        }
+        bare.push_str(tail);
+    }
+    (bare.chars().count() >= MIN_ADVICE_CLAUSE_CHARS).then_some(bare)
+}
+
+/// A shortened clause below this is a fragment ("and", "or read") rather than an
+/// instruction, so it is not offered as a form.
+const MIN_ADVICE_CLAUSE_CHARS: usize = 12;
 
 /// Largest char boundary `<= idx`.
 fn floor_char(text: &str, idx: usize) -> usize {
@@ -1463,6 +1630,139 @@ mod tests {
             !out.contains("re-issue the call with a narrower request"),
             "the caller's advice replaces the generic sentence: {out}"
         );
+    }
+
+    /// The caller's sentence is the only part of a marker that tells the model
+    /// what *this* tool needs, so a budget too small for all of it must shorten
+    /// it rather than put the generic sentence back.
+    #[test]
+    fn a_compact_marker_keeps_the_callers_own_words() {
+        let text = numbered(500);
+        let advice = "re-run it as `cmd > /tmp/out.txt 2>&1`, then read_file it with offset=";
+
+        // Room for the whole sentence: it survives verbatim.
+        let (out, cut) = truncate_output_with_advice(&text, 400, advice);
+        assert!(cut);
+        assert!(out.len() <= 400, "{} bytes:\n{out}", out.len());
+        assert!(
+            out.contains(advice),
+            "the caller's sentence was dropped:\n{out}"
+        );
+
+        // A budget with room for the first clause only: the clause - the part
+        // that names the next call - survives, with the generic sentence still
+        // gone.
+        let (out, cut) = truncate_output_with_advice(&text, 180, advice);
+        assert!(cut);
+        assert!(out.len() <= 180, "{} bytes:\n{out}", out.len());
+        assert!(
+            !out.contains(advice),
+            "the whole sentence cannot fit 180 bytes:\n{out}"
+        );
+        assert!(
+            out.contains("cmd > /tmp/out.txt 2>&1"),
+            "the shortened advice must keep the call the caller named:\n{out}"
+        );
+        assert!(
+            !out.contains("re-issue the call with a narrower request"),
+            "the generic sentence must not come back:\n{out}"
+        );
+    }
+
+    /// A marker is carved out of the budget it reports, so it may never push the
+    /// result past that budget - and it may only give up the caller's words when
+    /// none of their shortened forms fits.
+    #[test]
+    fn a_compact_marker_never_outgrows_the_budget_it_is_carved_from() {
+        let payloads = [numbered(500), format!("head-{}-TAIL", "x".repeat(4_000))];
+        let advices = [
+            TOOL_OUTPUT_LIMIT_ADVICE,
+            "re-run it as `cmd > /tmp/out.txt 2>&1`, then read_file it with offset=",
+        ];
+        for text in &payloads {
+            for advice in advices {
+                for budget in [120usize, 160, 200, 260, 320, 400, 600, 900, 1_400, 2_400] {
+                    let (out, cut) = truncate_output_with_advice(text, budget, advice);
+                    assert!(cut);
+                    assert!(
+                        out.len() <= budget,
+                        "a {budget}-byte budget produced {} bytes:\n{out}",
+                        out.len()
+                    );
+                    let Some(start) = out.find("[truncated:") else {
+                        assert!(
+                            budget < 120,
+                            "a {budget}-byte budget carried no marker:\n{out}"
+                        );
+                        continue;
+                    };
+                    let rest = &out[start..];
+                    let end = rest
+                        .find(']')
+                        .unwrap_or_else(|| panic!("unclosed marker at {budget} bytes:\n{out}"));
+                    let marker = &rest[..=end];
+                    // The marker's share of the budget is the same one the cut
+                    // carves it out of; the blank lines on both sides are part of
+                    // it, as they are for `assemble_cut`.
+                    let share = (budget / 2).max(80);
+                    let marker_len = marker.len() + 4;
+                    assert!(
+                        marker_len <= share,
+                        "the marker outgrew its {share}-byte share of a {budget}-byte budget \
+                         ({marker_len} bytes):\n{marker}"
+                    );
+                    assert!(
+                        !marker.contains(" ]") && !marker.contains(";]"),
+                        "a shortened marker must not trail off in punctuation:\n{marker}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same guarantee at the function that decides it: a compact marker is
+    /// the longest form of the advice that fits the room it is given, and never
+    /// one byte more - so a caller's sentence is only shortened when shortening
+    /// it is what makes it fit.
+    #[test]
+    fn a_compact_marker_uses_the_longest_advice_form_that_fits() {
+        let prefix = "[truncated: 900 of 1000 bytes omitted from the middle;";
+        let advice = "re-run it as `cmd > /tmp/out.txt 2>&1`, then read_file it with offset=";
+        let forms = advice_forms(advice);
+        assert_eq!(
+            forms.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>(),
+            vec![
+                advice,
+                "re-run it as `cmd > /tmp/out.txt 2>&1`",
+                "raise limits.max_tool_output_bytes",
+            ],
+            "the forms are the whole sentence, its first clause, then the key"
+        );
+
+        for budget in 60usize..=400 {
+            let marker = compact_marker(prefix, advice, budget);
+            assert!(
+                marker.text.len() <= budget,
+                "a {budget}-byte marker budget produced {} bytes:\n{}",
+                marker.text.len(),
+                marker.text
+            );
+            // The length a marker with each form would have, so the check is
+            // "this one fits and that one does not", not a guess.
+            let with = |form: &str| format!("\n\n{prefix} {form}]\n\n").len();
+            let longest = forms.iter().find(|(form, _)| with(form) <= budget);
+            match longest {
+                Some((form, kept)) => {
+                    assert!(
+                        marker.text.contains(form.as_str()),
+                        "`{form}` fits a {budget}-byte marker but was not used:\n{}",
+                        marker.text
+                    );
+                    assert_eq!(marker.advice, *kept);
+                }
+                None => assert_eq!(marker.advice, Advice::None),
+            }
+        }
     }
 
     #[test]

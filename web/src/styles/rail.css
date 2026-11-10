@@ -585,28 +585,6 @@
   outline-offset: var(--focus-ring-offset);
 }
 
-.project-switcher-initials {
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
-  border: 1px solid var(--rail-glyph-line);
-  border-radius: var(--radius-sm);
-  background: var(--surface-hover);
-  color: var(--text-secondary);
-  font-size: var(--fs-micro);
-  font-weight: 660;
-  letter-spacing: -0.2px;
-  text-transform: uppercase;
-}
-
-.project-switcher-item.is-active .project-switcher-initials {
-  border-color: color-mix(in srgb, var(--btn-accent-bg-hover) 47%, var(--gold-send));
-  background: var(--btn-accent-bg-hover);
-  color: var(--accent-on-tint);
-}
-
 .project-switcher-name {
   overflow: hidden;
   text-overflow: ellipsis;

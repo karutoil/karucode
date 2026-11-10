@@ -80,7 +80,9 @@ command capture): "raise the limit" without a key name is a dead end for a
 model that cannot edit the operator's config. A payload with no newline near
 the seam (minified output, one long record) is reported in bytes instead of
 pretending to line numbers. Unusually tiny budgets get the most compact marker
-that fits, and one too small for any marker keeps a UTF-8-safe prefix. Cutting
+that fits - and one with room for neither the recovery nor the key name still
+reports what was dropped - while a budget too small for any marker keeps a
+UTF-8-safe prefix. Cutting
 is deterministic for a given `(text, budget)`, and a *second* cut of an
 already-cut body does not stack a second marker: the old one sits at the seam
 and is dropped with it (the tail the first cut kept survives).
@@ -99,6 +101,20 @@ header repeats the recovery (`cmd > out.txt 2>&1`, then `read_file` on it).
 Capture is first bounded per stream by `max_command_output_bytes`; long command
 lines in the result header are previewed at 512 characters (metadata still has
 the command).
+
+What is left after a tool's own render is cut once more by the runtime, at
+`limits.max_tool_output_bytes` or at what is left of the turn's share, and that
+final cut names the recovery *of that tool* rather than a generic "narrow the
+request": `read_file` continues with `offset=`/`limit=`, `run_command` is re-run
+as `cmd > out.txt 2>&1` and paged from `out.txt`, and a plugin or MCP tool is
+asked for narrower arguments of its own. Each tool's own description carries the
+same step, because that is where an agent looks once it is already inside a
+tool. A budget too small to fit the full marker does not fall back to
+`limits.max_tool_output_bytes` alone: the compact marker reports the dropped
+bytes and then keeps as much of that same tool-specific sentence as fits - the
+whole of it, its first clause, or the key name by itself - so the recovery step
+survives every budget with room for it, and the compact marker never grows past
+the share of the budget it is carved out of.
 
 ## Gotchas
 

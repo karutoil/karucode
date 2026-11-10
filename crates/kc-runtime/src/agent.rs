@@ -107,8 +107,8 @@ use kc_core::prompt::Budget;
 use kc_core::provider::{ChatRequest, ProviderChunk, ProviderStream};
 use kc_core::store::{NewMessage, RunStatus};
 use kc_core::tool::{
-    truncate_output, ApprovalGate, ApprovalHandle, Tool, ToolCtx, ToolOrigin, ToolOutcome,
-    ToolRegistry,
+    truncate_output_with_advice, ApprovalGate, ApprovalHandle, Tool, ToolCtx, ToolOrigin,
+    ToolOutcome, ToolRegistry, TOOL_OUTPUT_LIMIT_ADVICE,
 };
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -928,8 +928,7 @@ async fn run_loop_inner(
     // the model nothing new. With no turn budget to end a runaway, this streak is
     // what ends one: a model that keeps asking questions it already has the
     // answers to is looping, however its calls are shaped (see `NO_NEWS_TURNS`).
-    let mut answers_seen: std::collections::HashSet<[u8; 32]> =
-        std::collections::HashSet::new();
+    let mut answers_seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     let mut no_news: u32 = 0;
     // Identical calls seen in this run: the hash of the result each returned, how
     // many mutating calls had happened when that result was produced, and how many
@@ -1274,7 +1273,16 @@ is {})",
         // --- request, and at most one forced retry of it -----------------------
         // The window is built from `base` on every attempt, so a retry never
         // inherits anything from the attempt it replaces.
-        let mut limits = spec.context_limits();
+        //
+        // The catalogue goes in the same body as the messages, so it comes out of
+        // the same window: `reserving` is what makes "this request fits the model"
+        // true of the whole request rather than of the conversation alone. Done
+        // here, once, for a parent and a subagent alike - a child runs this same
+        // loop (see `LoopSpec`), and reserving at its spec as well would charge
+        // the catalogue twice and shrink a child's window by a third.
+        let mut limits = spec
+            .context_limits()
+            .reserving(context::tool_payload_chars(&tool_specs));
         let turn = 'request: loop {
             let messages = context::fit_with_notes_and_limits(
                 base.clone(),
@@ -2570,6 +2578,36 @@ fn announced_arguments(call: &ToolCall) -> serde_json::Value {
         .unwrap_or_else(|| serde_json::Value::String(call.arguments.clone()))
 }
 
+/// What a result cut by the per-call output budget tells the model to do next.
+///
+/// The generic sentence (`re-issue the call with a narrower request`) is written
+/// for a tool that can narrow itself. Three of them cannot say it truthfully:
+/// `read_file` continues with `offset=`/`limit=` (not with a smaller "request"),
+/// `run_command`'s output is already gone - the only recovery is to redirect it to
+/// a file and page that - and a plugin or MCP tool's arguments belong to another
+/// process, so all the runtime knows is that they are the tool's own. Naming the
+/// real call is the difference between an incomplete answer and a next step.
+fn tool_cut_advice(tool: Option<&Arc<dyn Tool>>) -> &'static str {
+    let Some(tool) = tool else {
+        return TOOL_OUTPUT_LIMIT_ADVICE;
+    };
+    let spec = tool.spec();
+    match (&spec.origin, spec.name.as_str()) {
+        (ToolOrigin::Builtin, "read_file") => {
+            "re-issue read_file with a later `offset=` or a smaller `limit=`, or raise \
+             limits.max_tool_output_bytes"
+        }
+        (ToolOrigin::Builtin, "run_command") => {
+            "re-run it as `cmd > out.txt 2>&1` and read `out.txt` with read_file \
+             `offset=`/`limit=`, or raise limits.max_tool_output_bytes"
+        }
+        (ToolOrigin::Plugin { .. } | ToolOrigin::Mcp { .. }, _) => {
+            "narrow the tool's own arguments, or raise limits.max_tool_output_bytes"
+        }
+        _ => TOOL_OUTPUT_LIMIT_ADVICE,
+    }
+}
+
 /// Execute a single tool call: emit start/finish, invoke, truncate.
 ///
 /// `remaining` is what is left of the turn's byte budget; a result larger than
@@ -2700,9 +2738,19 @@ async fn run_one_tool(
                 {
                     denied
                 } else {
+                    // The token the *tool* observes is a child of this loop's
+                    // token, not the token itself. A stop still reaches the tool:
+                    // tokio cancels a child when its parent is cancelled, so a
+                    // person pressing stop behaves exactly as before. What the
+                    // child buys is the deadline path below - it can fire this
+                    // token without firing the loop's own, which `run_loop` reads
+                    // to decide the terminal state. Cancelling the loop's token
+                    // there would report a run that simply ran out of time as
+                    // `cancelled`, i.e. as a stop nobody pressed.
+                    let tool_cancel = spec.cancel.child_token();
                     let tool_ctx = ToolCtx {
                         workspace: Arc::clone(&spec.workspace),
-                        cancel: spec.cancel.clone(),
+                        cancel: tool_cancel.clone(),
                         approvals: kc_core::tool::ApprovalHandle::new(
                             Arc::clone(&spec.gate),
                             spec.session_id.clone(),
@@ -2761,6 +2809,27 @@ async fn run_one_tool(
                             }
                         }
                         _ = tokio::time::sleep_until(spec.deadline) => {
+                            // A deadline is a stop too, so it unwinds like one
+                            // instead of dropping the future mid-flight: the tool
+                            // is told to stop, gets the same grace, and can kill
+                            // its process group or close what it opened. Without
+                            // this, a child that ran out of wall clock dropped a
+                            // live tool with no cancellation at all - the one
+                            // hole left in the stop story.
+                            //
+                            // The result is synthesised rather than taken from
+                            // the tool even when it answers inside the grace: it
+                            // only answers *because* its stop fired, so what it
+                            // would report is an abort ("cancelled by the
+                            // runtime"), and a reader has to be able to tell "the
+                            // run ran out of time" from "a person pressed stop".
+                            // `ToolCtx.cancel` is a child token precisely so this
+                            // does not cancel the loop: the run still ends
+                            // `limit_reached` (a child: `failed`, "timed out
+                            // after Ns"), never `cancelled`.
+                            tool_cancel.cancel();
+                            let _ =
+                                tokio::time::timeout(TOOL_CANCEL_GRACE, &mut invoke).await;
                             kc_core::tool::ToolOutcome::err(format!(
                                 "tool `{}` did not finish before the run deadline",
                                 call.name
@@ -2804,7 +2873,13 @@ async fn run_one_tool(
         }
     };
 
-    let (output, cut) = truncate_output(&outcome.content, max_bytes);
+    // The cut is the runtime's, not the tool's: a tool that rendered against its
+    // own budget (read_file, list_dir, glob, search_files) already ended with a
+    // continuation, and this catches what is left over. The advice has to match
+    // the tool, because "re-issue the call with a narrower request" is not a next
+    // step for a command whose output is already gone.
+    let (output, cut) =
+        truncate_output_with_advice(&outcome.content, max_bytes, tool_cut_advice(tool.as_ref()));
     let truncated = cut || outcome.truncated;
     let duration_ms = started.elapsed().as_millis() as u64;
 
@@ -2921,13 +2996,15 @@ fn ceiling_label(value: usize) -> String {
 /// holding the stream open cannot stall the turn.
 const USAGE_WINDOW: Duration = Duration::from_secs(3);
 
-/// How long a tool gets to unwind after the run is cancelled.
+/// How long a tool gets to unwind after the run is cancelled or runs out of
+/// wall clock.
 /// A tool that honours the cancel token (every built-in, and the shell tool's
 /// process-group kill) needs a moment to stop and report what it observed.
 /// Dropping its future the instant the token fires would lose that report, so
-/// the loop waits this long before synthesising a "cancelled" result. A tool
-/// that ignores the token entirely is cut off here rather than blocking the
-/// session forever. Matches the subagent supervisor's grace period.
+/// the loop waits this long before synthesising a "cancelled" or "did not
+/// finish before the run deadline" result. A tool that ignores the token
+/// entirely is cut off here rather than blocking the session forever. Matches
+/// the subagent supervisor's grace period.
 const TOOL_CANCEL_GRACE: Duration = Duration::from_millis(500);
 
 /// How long the `before_prompt` hook may take before the run continues without
@@ -4478,11 +4555,12 @@ mod stop_semantics_tests {
 
         fn class(&self) -> kc_core::tool::ToolClass {
             if !self.armed.swap(true, Ordering::SeqCst) {
-                if let (Some(runtime), Some(run)) =
-                    (self.runtime.get(), self.runtime.get().and_then(|r| {
-                        r.active_runs().into_iter().next()
-                    }))
-                {
+                if let (Some(runtime), Some(run)) = (
+                    self.runtime.get(),
+                    self.runtime
+                        .get()
+                        .and_then(|r| r.active_runs().into_iter().next()),
+                ) {
                     runtime.cancel(&run.session_id);
                 }
             }
@@ -4512,7 +4590,12 @@ mod stop_semantics_tests {
         // before its first provider call never takes the hanging script, and the
         // follow-up run inherits it - waiting out a stream that never ends
         // instead of answering. One recorded request proves it is spoken for.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while h.factory.requests().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the first run never asked the provider for a turn"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
@@ -4528,8 +4611,7 @@ mod stop_semantics_tests {
 
         let runtime = Arc::clone(&h.runtime);
         let session = h.session().to_string();
-        let waiting =
-            tokio::spawn(async move { runtime.submit(&session, "second".into()).await });
+        let waiting = tokio::spawn(async move { runtime.submit(&session, "second".into()).await });
         // Long enough for the submit to reach the wait, short enough that the
         // gate is still holding the run.
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -4631,7 +4713,90 @@ mod stop_semantics_tests {
     fn kinds_for(events: &[kc_core::events::EventEnvelope]) -> Vec<String> {
         events
             .iter()
-            .map(|event| format!("{:?}", event.event).split_whitespace().next().unwrap_or("?").to_string())
+            .map(|event| {
+                format!("{:?}", event.event)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("?")
+                    .to_string()
+            })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod cut_advice_tests {
+    use super::*;
+    use kc_core::tool::{ToolCallRequest, ToolCtx, ToolSpec};
+
+    /// A tool that exists only to hand [`tool_cut_advice`] a spec.
+    struct Spec(ToolSpec);
+
+    #[async_trait::async_trait]
+    impl Tool for Spec {
+        fn spec(&self) -> ToolSpec {
+            self.0.clone()
+        }
+
+        async fn invoke(&self, _request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+            ToolOutcome::ok("")
+        }
+    }
+
+    fn advice(name: &str, origin: ToolOrigin) -> String {
+        let tool: Arc<dyn Tool> = Arc::new(Spec(ToolSpec {
+            name: name.to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({ "type": "object" }),
+            origin,
+        }));
+        tool_cut_advice(Some(&tool)).to_string()
+    }
+
+    #[test]
+    fn each_kind_of_tool_gets_a_recovery_it_can_actually_perform() {
+        // A built-in that pages: its own arguments are the way on.
+        let read = advice("read_file", ToolOrigin::Builtin);
+        assert!(read.contains("read_file"), "{read}");
+        assert!(read.contains("offset="), "{read}");
+        assert!(read.contains("limit="), "{read}");
+
+        // A command cannot be paged: the output has to be captured to a file.
+        let command = advice("run_command", ToolOrigin::Builtin);
+        assert!(command.contains("cmd > out.txt 2>&1"), "{command}");
+        assert!(command.contains("read_file"), "{command}");
+        assert!(
+            !command.contains("re-issue the call"),
+            "re-issuing a command would run it again: {command}"
+        );
+
+        // Another process owns the arguments, so the advice can only point at them.
+        let plugin = advice(
+            "deploy",
+            ToolOrigin::Plugin {
+                name: "deployer".into(),
+            },
+        );
+        assert!(plugin.contains("the tool's own arguments"), "{plugin}");
+        let mcp = advice(
+            "mcp__fs__read",
+            ToolOrigin::Mcp {
+                server: "fs".into(),
+            },
+        );
+        assert!(mcp.contains("the tool's own arguments"), "{mcp}");
+
+        // Everything else keeps the generic sentence, and every variant names the
+        // key, which is the only thing an operator can change.
+        let other = advice("list_dir", ToolOrigin::Builtin);
+        assert_eq!(other, kc_core::tool::TOOL_OUTPUT_LIMIT_ADVICE);
+        let unknown = tool_cut_advice(None);
+        assert_eq!(unknown, kc_core::tool::TOOL_OUTPUT_LIMIT_ADVICE);
+        for sentence in [read, command, plugin, mcp, unknown.to_string()] {
+            assert!(
+                sentence.contains(kc_core::tool::TOOL_OUTPUT_LIMIT_KEY),
+                "a cut must name the bound it hit: {sentence}"
+            );
+        }
     }
 }

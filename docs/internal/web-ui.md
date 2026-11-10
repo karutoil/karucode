@@ -419,7 +419,17 @@ deliberately outside the parent form's dirty state.
   preview (with a
   *Preview*/*Source* toggle), images and PDFs render from
   `GET /api/workspace/raw`, and every complete text file can be edited and
-  saved. An HTML file is previewed as a **real page**, loaded from
+  saved. The panel has exactly **one** bar above the document - the view toggle
+  on the left (it stands down while the editor is open, which is the source
+  view), **Edit** (or **Save**/**Cancel**), **Open in tab**/**Open in dialog**,
+  **Copy path** and reload on the right, quiet rather than four bordered chips -
+  and the file's own facts (path, language, size, line count, `editing`,
+  `unsaved changes`) in the status bar at the bottom. A file tab has
+  no title row of its own: the strip's tab and the session breadcrumb already
+  name the file, so the path lives in that status bar and closing is the tab's
+  ✕ (or **Delete**/**Backspace**). The dialog keeps its title bar, which is why
+  its status bar carries no path. An HTML file is previewed as a **real page**,
+  loaded from
   `GET /api/workspace/preview[‑project]/<path>` in an `<iframe
   sandbox="allow-scripts">` (never `srcdoc`): that gives it a base URL inside the
   workspace, so its own `./style.css`, `../img/logo.png` and `./app.js` load, and
@@ -448,8 +458,9 @@ deliberately outside the parent form's dirty state.
   own **Open in tab** button put the same document in the workspace strip beside
   the conversation instead of the modal; **Open in dialog** puts it back. A tab
   keeps its read, its scroll position and an unsaved draft while you visit
-  another tab or the conversation, and closing it - the strip's ✕, the panel's
-  close button, or **Delete**/**Backspace** on the selected tab - either drops it
+  another tab or the conversation, and closing it - the strip's ✕ or
+  **Delete**/**Backspace** on the selected tab, the panel having no close button
+  of its own - either drops it
   (selection moves to the tab that took its place) or, with unsaved edits, asks
   first. Moving a file between the dialog and a tab is refused while it has
   unsaved edits, since the other host would reload it from disk. A link inside a

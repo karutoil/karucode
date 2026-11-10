@@ -120,11 +120,13 @@ describe('file tabs in the workspace strip', () => {
     const tab = workspaceTab(/guide\.md/);
     expect(tab.getAttribute('aria-selected')).toBe('true');
     expect(tab.getAttribute('title')).toBe('docs/guide.md');
-    // The panel really renders the file, in the centre pane, with the path shown.
+    // The panel really renders the file, in the centre pane, with its path in the
+    // status bar (the strip's own tab names it, so the panel has no header of its
+    // own for it).
     const panel = document.getElementById('workspace-panel-file:docs%2Fguide.md');
     expect(panel).not.toBeNull();
     expect(panel?.hidden).toBe(false);
-    expect(panel?.querySelector('.file-view-path')?.textContent).toBe('docs/guide.md');
+    expect(panel?.querySelector('.file-status-path')?.textContent).toBe('docs/guide.md');
     await waitFor(() =>
       expect(panel?.querySelector('.markdown h1')?.textContent).toBe('Guide'),
     );
@@ -134,6 +136,47 @@ describe('file tabs in the workspace strip', () => {
     const reopened = await screen.findByRole('dialog');
     await waitFor(() => expect(within(reopened).getByTestId('file-preview-markdown')).toBeTruthy());
     expect(within(reopened).getByRole('heading', { name: 'Guide' })).toBeTruthy();
+  });
+
+  it('puts one quiet bar over a file tab instead of a stacked grey header', async () => {
+    // What this replaced: a tab stacked a path header (`.file-view-head`, with a
+    // second close button), a metadata toolbar (language badge, size, three
+    // bordered chips) and a Preview/Source band - about 140px of grey above a
+    // document whose name the strip's own tab and the session breadcrumb already
+    // carry. One bar now holds the view toggle and the actions, and the file's
+    // own facts live in the status bar at the bottom.
+    installFetch({ 'docs/guide.md': '# Guide\n\nbody' });
+    renderWorkbench();
+
+    act(() => workspaceTabs.openFileTab('docs/guide.md'));
+    const panel = await waitFor(() => {
+      const element = document.getElementById('workspace-panel-file:docs%2Fguide.md');
+      expect(element).not.toBeNull();
+      return element as HTMLElement;
+    });
+    await waitFor(() => expect(panel.querySelector('.markdown h1')?.textContent).toBe('Guide'));
+
+    // No path header, and no second band under the toolbar.
+    expect(panel.querySelector('.file-view-head')).toBeNull();
+    expect(panel.querySelector('.file-tabbar')).toBeNull();
+    expect(panel.querySelector('.file-view-path')).toBeNull();
+    const bars = panel.querySelectorAll('.file-toolbar');
+    expect(bars).toHaveLength(1);
+    const bar = bars[0] as HTMLElement;
+    // The one bar is the view toggle plus the actions.
+    expect(bar.querySelector('.file-view-tabs')).not.toBeNull();
+    expect(within(bar).getByRole('button', { name: /open in dialog/i })).toBeTruthy();
+    expect(within(bar).getByRole('button', { name: /copy path/i })).toBeTruthy();
+    expect(within(bar).getByRole('button', { name: /^edit$/i })).toBeTruthy();
+    // Closing belongs to the strip's tab, not to a second button inside the panel.
+    expect(within(panel).queryByRole('button', { name: /^close /i })).toBeNull();
+
+    // The facts the header used to repeat are stated once, in the status bar.
+    const status = panel.querySelector('.file-statusbar')?.textContent ?? '';
+    expect(status).toContain('docs/guide.md');
+    expect(status).toContain('markdown');
+    expect(status).toContain('13 B');
+    expect(status).toContain('3 lines');
   });
 
   it('keeps a file tab mounted - and does not refetch it - while the reader visits the conversation', async () => {

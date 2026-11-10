@@ -111,7 +111,14 @@ refused.
   `progress`. Pass `session_id` for one session, or narrow the whole server by
   `project_id` and `status`. This is how the chat audits delegated work.
 - `control_read_session` (read-only): the newest messages of one session,
-  bounded and truncated, for auditing.
+  bounded and truncated, for auditing. `limit` chooses how many messages come
+  back; `message_id` + `offset` reads *inside* one. A message longer than 4,000
+  characters ends with a marker naming those two (`… [truncated at 4000
+  characters; call control_read_session again with message_id=… offset=…]`), so
+  the part that was cut is reachable instead of merely announced. Every message
+  carries its `message_id`, and `next_offset` says where a cut one continues.
+  `offset` without `message_id` is refused: an offset alone has nothing to
+  index into.
 - `control_send_message` (mutating): `mode=send` starts a run, `mode=steer`
   folds text into the run in flight, `mode=follow_up` queues the next turn. It
   refuses the control chat itself.

@@ -366,39 +366,6 @@
   line-height: 1.5;
 }
 
-.api-key-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-}
-
-.api-key-row .input {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.api-key-row .chip {
-  flex: 0 0 auto;
-}
-
-.clear-key-row {
-  flex-direction: row;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-}
-
-.clear-key-row .field-hint {
-  flex: 1 1 100%;
-}
-
-.test-connection {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-5);
-}
-
 .test-result {
   display: flex;
   flex-wrap: wrap;
@@ -1242,14 +1209,6 @@
   padding-top: var(--space-9);
 }
 
-.settings-advanced-help {
-  margin: 0;
-  padding: 0 0 var(--space-2);
-  color: var(--muted);
-  font-size: var(--fs-tiny);
-  line-height: 1.55;
-}
-
 /* A section inside a disclosure is the last thing in the panel, so it does not
  * need the divider it draws when it follows another section. */
 .settings-advanced-body .settings-section:last-of-type {
@@ -1336,10 +1295,6 @@
 
   .diagnostics-grid {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .api-key-row {
-    flex-wrap: wrap;
   }
 
   .settings-footer {

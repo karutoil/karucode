@@ -601,6 +601,23 @@ export function seedChatState(detail: SessionDetail, previous?: ChatState): Chat
     });
   }
 
+  // A cancelled run keeps the prose and tool cards it produced before the stop,
+  // and the live transcript says why they end there: one "Run cancelled." notice
+  // per run. Nothing in the stored messages carries that statement, so a reload
+  // rebuilt the partial turn with no word that it had been stopped. The same
+  // notice, under the same id and in the same words - a run row is only settled
+  // here, so a run still in flight never gets one.
+  const cancelledRuns = runs.filter((run) => run.status === 'cancelled');
+  for (const run of cancelledRuns) {
+    items.push({
+      kind: 'notice',
+      id: `cancelled:${run.id}`,
+      at: run.finished_at ?? run.started_at,
+      level: 'info',
+      message: 'Run cancelled.',
+    });
+  }
+
   // A run that stopped at a limit left no message of its own, so a reloaded
   // transcript used to show only the word "Limit reached" with no reason. The
   // run row carries the runtime's one-line explanation (the wall clock, a turn

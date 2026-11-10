@@ -1117,6 +1117,34 @@ describe('Composer', () => {
       fireEvent.keyDown(textarea, { key: 'Escape' });
       expect(props.onStop).toHaveBeenCalledTimes(1);
     });
+
+    it('stops accepting queue input while a stop is in flight, and says so', async () => {
+      const { props, container, textarea } = renderRunning({ stopping: true });
+      fireEvent.input(textarea, { target: { value: 'wait for the stop' } });
+
+      // Queueing during a stop is what the server refuses with a 409: a steer has
+      // no run to fold into and a follow-up has no turn to wait for yet.
+      const queue = screen.getByRole('button', { name: /steer the running turn/i }) as HTMLButtonElement;
+      expect(queue.disabled).toBe(true);
+      fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(props.onQueue).not.toHaveBeenCalled();
+      // The stop is a pause, not a discard: the draft is still there to send once
+      // the run has actually ended.
+      expect(textarea.value).toBe('wait for the stop');
+
+      // Assistive tech has to hear the wait: the button only changes its label and
+      // disables itself, which is silent on its own.
+      const stop = screen.getByRole('button', { name: /Stopping/ }) as HTMLButtonElement;
+      expect(stop.disabled).toBe(true);
+      expect(stop.getAttribute('aria-busy')).toBe('true');
+      await waitFor(() => {
+        const live = container.querySelector('.sr-only[aria-live]') as HTMLElement;
+        expect(live.textContent).toContain('Stopping');
+      });
+    });
   });
 
   describe('queued messages', () => {

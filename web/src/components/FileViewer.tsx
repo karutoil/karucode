@@ -15,7 +15,6 @@ import { FilePreview } from './FilePreview';
 import { Tabs, type TabItem } from './Tabs';
 import {
   CheckIcon,
-  CloseIcon,
   CopyIcon,
   EditIcon,
   EyeIcon,
@@ -292,8 +291,11 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
   // preview renderer, so offering "Preview" there was a dead tab: clicking it left
   // `.file-code` as the pane and rendered nothing (`hasSourceView('code')` is
   // true, but `hasRichPreview('code')` is not). `previewable` is the right
-  // question - the same one the body below asks before drawing a preview.
-  const showTabs = previewable && capability !== null && hasSourceView(capability.render);
+  // question - the same one the body below asks before drawing a preview. Editing
+  // is the other: it forces the editor, so the toggle would be a control that
+  // cannot change anything. It comes back, on the saved content, when the editor
+  // closes.
+  const showTabs = !editing && previewable && capability !== null && hasSourceView(capability.render);
   const viewTabs = useMemo<TabItem<ViewMode>[]>(() => {
     const items: TabItem<ViewMode>[] = [];
     if (previewable) items.push({ id: 'preview', label: 'Preview', icon: <EyeIcon size={13} /> });
@@ -328,40 +330,39 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
     else actions.openFileViewer(path);
   };
 
+  // The panel's own chrome is one quiet bar: the view toggle, then the actions.
+  // A file tab used to stack three grey rows above the document - a path header,
+  // a metadata toolbar and the view tabs - and the path header said what the
+  // strip's own tab and the session breadcrumb already said. The facts that are
+  // worth knowing (path, language, size, line count) belong in the status bar at
+  // the bottom, where an editor keeps them and where nothing repeats.
+  const flags: string[] = [];
+  if (file?.truncated) flags.push('truncated by server');
+  if (capability?.render === 'binary') flags.push('binary');
+
+  const kindWord =
+    capability?.render === 'image'
+      ? 'Image'
+      : capability?.render === 'pdf'
+        ? 'PDF'
+        : capability?.render === 'binary'
+          ? 'Binary'
+          : null;
+  const lineWord = `${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`;
+
   const body = (
     <div class={`file-viewer${host === 'tab' ? ' file-viewer-tabbed' : ''}`} onKeyDown={onKeyDown}>
-      {host === 'tab' ? (
-        <div class="file-view-head">
-          <span class="file-view-path" title={path}>
-            {path}
-          </span>
-          {dirty ? <span class="badge badge-warn">unsaved</span> : null}
-          <button
-            type="button"
-            class="icon-button"
-            aria-label={`Close ${path}`}
-            title="Close this tab"
-            onClick={close}
-          >
-            <CloseIcon size={13} />
-          </button>
-        </div>
-      ) : null}
-
       <div class="file-toolbar">
-        <div class="file-meta">
-          {file ? (
-            <>
-              <span class="badge badge-muted">{languageLabel(file.language)}</span>
-              <span class="file-size">{formatBytes(file.size)}</span>
-              {dirty ? <span class="badge badge-warn">unsaved</span> : null}
-              {file.truncated ? <span class="badge badge-warn">truncated by server</span> : null}
-              {file.binary ? <span class="badge badge-warn">binary</span> : null}
-            </>
-          ) : (
-            <span class="muted small">Reading file…</span>
-          )}
-        </div>
+        {tabs}
+        {flags.length > 0 ? (
+          <div class="file-flags">
+            {flags.map((flag) => (
+              <span key={flag} class="badge badge-warn">
+                {flag}
+              </span>
+            ))}
+          </div>
+        ) : null}
         <div class="file-toolbar-actions">
           {editing ? (
             <>
@@ -404,7 +405,7 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
           )}
           <button
             type="button"
-            class="button button-small file-open-in"
+            class="file-action"
             aria-disabled={dirty}
             title={switchTitle}
             onClick={switchHost}
@@ -414,7 +415,8 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
           </button>
           <button
             type="button"
-            class="button button-small"
+            class="file-action"
+            title="Copy this file's workspace path"
             onClick={() => {
               void copyText(path).then((ok) => {
                 setCopied(ok);
@@ -442,8 +444,6 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
           </button>
         </div>
       </div>
-
-      {tabs ? <div class="file-tabbar">{tabs}</div> : null}
 
       {state === 'loading' ? (
         <div class="file-loading" aria-busy="true" aria-label="Loading file">
@@ -601,17 +601,35 @@ function FileViewerPanel({ path, projectId, host, onClose }: FileViewerPanelProp
         )
       ) : null}
 
+      {/* The document's own facts, where an editor keeps them: the path (only in a
+          tab - the dialog's title bar already names it), the language, the size and
+          the line count. Nothing here repeats the toolbar above the file. */}
       <div class="file-statusbar" aria-live="polite">
-        <span>
-          {capability?.render === 'image'
-            ? 'Image'
-            : capability?.render === 'pdf'
-              ? 'PDF'
-              : capability?.render === 'binary'
-                ? 'Binary'
-                : `${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`}
-          {editing ? ' · editing' : ''}
-          {dirty ? ' · unsaved changes' : ''}
+        <span class="file-status">
+          {host === 'tab' ? (
+            <>
+              <span class="file-status-path" title={path}>
+                {path}
+              </span>
+              <span class="file-status-sep" aria-hidden="true">
+                ·
+              </span>
+            </>
+          ) : null}
+          <span class="file-status-facts">
+            {file === null || capability === null ? (
+              state === 'error' ? 'Could not read this file' : 'Reading file…'
+            ) : (
+              <>
+                {kindWord ?? languageLabel(file.language)}
+                {' · '}
+                <span class="file-size">{formatBytes(file.size)}</span>
+                {kindWord === null ? <>{` · ${lineWord}`}</> : null}
+                {editing ? ' · editing' : ''}
+                {dirty ? ' · unsaved changes' : ''}
+              </>
+            )}
+          </span>
         </span>
         {/* A separate element so the reason reads as a sentence, not as a
             suffix glued onto the line count. */}

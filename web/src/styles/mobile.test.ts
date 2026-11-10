@@ -9,7 +9,8 @@
  * CSS viewport) the frame used to spend 66px on the header, 44px on the tab strip
  * and 57px on a bottom toolbar - 167px, 17.5% of the screen, before a single
  * message - and the project rail held 56 of 440px of width to show two glyphs.
- * `main-head + workspace-tabbar` is now 90px and the transcript is full width.
+ * The tab strip now shares `main-head` with the breadcrumb, so the phone frame is
+ * a single header and the transcript is full width.
  *
  * These are cheap to break by accident: a `padding` shorthand in a media query, a
  * re-added toolbar, a `--rail-w` that goes back to 56px. Each one silently costs
@@ -97,12 +98,11 @@ describe('phone shell: the frame leaves the conversation alone', () => {
     expect(body).toMatch(/\.chat-main \{[\s\S]*?padding-bottom: env\(safe-area-inset-bottom/);
   });
 
-  it('compacts the header and the tab strip on a phone', () => {
+  it('compacts the header on a phone', () => {
     const body = tier(layoutCss, 640);
-    // 66 + 44 is the desktop frame; on a 956px screen it was 11.5% of the height
-    // spent on chrome before the first message.
+    // 66px is the desktop header; on a 956px screen it was spent on chrome before
+    // the first message.
     expect(body).toMatch(/--header-h: 52px/);
-    expect(body).toMatch(/--tabs-h: 38px/);
   });
 
   it('keeps the session title while dropping secondary breadcrumb chrome', () => {
@@ -331,11 +331,10 @@ function matchingBrace(css: string, open: number): number {
 
 interface Frame {
   header: number;
-  tabs: number;
 }
 
 /**
- * Resolve `--header-h` / `--tabs-h` for `<html data-density="…">` at `width`.
+ * Resolve `--header-h` for `<html data-density="…">` at `width`.
  *
  * Comments are stripped first (they contain examples like
  * `.main-head{height:66px}`), then rules are read with their media context. A
@@ -385,7 +384,7 @@ function frameAt(density: 'compact' | 'comfortable' | 'spacious', width: number)
           if (densities.some((value) => value !== density)) continue;
           const specificity = 1 + densities.length;
           for (const declaration of body.split(';')) {
-            const match = /^\s*(--header-h|--tabs-h):\s*(\d+)px\s*$/.exec(declaration);
+            const match = /^\s*(--header-h):\s*(\d+)px\s*$/.exec(declaration);
             if (!match?.[1] || !match[2]) continue;
             const current = winner.get(match[1]);
             if (
@@ -406,15 +405,13 @@ function frameAt(density: 'compact' | 'comfortable' | 'spacious', width: number)
   visit(tokensCss, true);
   visit(layoutCss, true);
   const header = winner.get('--header-h');
-  const tabs = winner.get('--tabs-h');
   expect(header, '--header-h resolves').toBeDefined();
-  expect(tabs, '--tabs-h resolves').toBeDefined();
-  return { header: header!.value, tabs: tabs!.value };
+  return { header: header!.value };
 }
 
 describe('the phone frame is resolved per density, not by accident', () => {
-  it('keeps the comfortable frame at 52 + 38', () => {
-    expect(frameAt('comfortable', PHONE_WIDTH)).toEqual({ header: 52, tabs: 38 });
+  it('keeps the comfortable header at 52px', () => {
+    expect(frameAt('comfortable', PHONE_WIDTH)).toEqual({ header: 52 });
   });
 
   it('makes compact shorter than comfortable, never taller', () => {
@@ -422,32 +419,27 @@ describe('the phone frame is resolved per density, not by accident', () => {
     const compact = frameAt('compact', PHONE_WIDTH);
 
     // Before the tier restated the density, `:root[data-density='compact']` won
-    // on specificity with 54 + 36: a "compact" header 2px taller than the
+    // on specificity with a 54px header: a "compact" header 2px taller than the
     // comfortable one it exists to shrink.
     expect(compact.header).toBeLessThan(comfortable.header);
-    expect(compact.tabs).toBeLessThan(comfortable.tabs);
-    expect(compact.header + compact.tabs).toBeLessThan(comfortable.header + comfortable.tabs);
   });
 
   it('gives spacious no extra chrome on a phone', () => {
     const comfortable = frameAt('comfortable', PHONE_WIDTH);
     const spacious = frameAt('spacious', PHONE_WIDTH);
 
-    // The accidental frame was 76 + 51 = 127px, 13% of a 956px screen. Spacious
-    // still opens the transcript up through the spacing scale; the chrome stays
-    // in the phone's budget.
-    expect(spacious.header + spacious.tabs).toBeLessThanOrEqual(
-      comfortable.header + comfortable.tabs,
-    );
-    expect(spacious.header + spacious.tabs).not.toBe(127);
+    // The accidental header was 76px, 8% of a 956px screen. Spacious still opens
+    // the transcript up through the spacing scale; the chrome stays in the
+    // phone's budget.
+    expect(spacious.header).toBeLessThanOrEqual(comfortable.header);
   });
 
   it('still lets density size the frame on a desktop', () => {
     // The tier fix must not flatten the token layer: the same cascade at 1280px
     // resolves the published 66 / 54 / 76 header scale.
-    expect(frameAt('comfortable', 1280)).toEqual({ header: 66, tabs: 44 });
-    expect(frameAt('compact', 1280)).toEqual({ header: 54, tabs: 36 });
-    expect(frameAt('spacious', 1280)).toEqual({ header: 76, tabs: 51 });
+    expect(frameAt('comfortable', 1280)).toEqual({ header: 66 });
+    expect(frameAt('compact', 1280)).toEqual({ header: 54 });
+    expect(frameAt('spacious', 1280)).toEqual({ header: 76 });
   });
 });
 

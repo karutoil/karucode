@@ -78,6 +78,38 @@ describe('file viewer preview surface', () => {
   });
 });
 
+describe('file viewer chrome', () => {
+  /* The file panel used to stack three grey rows above the document - a path
+   * header (`.file-view-head`), a metadata toolbar and a Preview/Source band -
+   * over a tab whose own label and the session breadcrumb already named the file.
+   * One bar is the whole contract now, so it is pinned here: the rules that drew
+   * the other two must not come back, and the one bar must stay transparent
+   * rather than painting another `--surface-menu` band across the page. */
+  it('draws no path header and no second bar for the view tabs', () => {
+    expect(css).not.toContain('.file-view-head');
+    expect(css).not.toContain('.file-view-path');
+    expect(css).not.toContain('.file-tabbar');
+  });
+
+  it('keeps the one bar a rule without a fill of its own', () => {
+    const bar = declarations('.file-toolbar');
+    expect(bar['background']).toBeUndefined();
+    expect(bar['border-bottom']).toContain('var(--line)');
+    // The actions own the right-hand end, so the toggle stays on the left.
+    expect(declarations('.file-toolbar-actions')['margin-left']).toBe('auto');
+  });
+
+  it('paints the bar and status bar text in readable ink, not decoration', () => {
+    // §4: `--faint` is decoration only (3:1 floor); this bar's words - the
+    // secondary actions, the path, the language, the line count - are read.
+    for (const selector of ['.file-action', '.file-statusbar', '.file-status-path']) {
+      const rule = declarations(selector);
+      expect(rule['color'] ?? '', `${selector} does not use --faint`).not.toContain('var(--faint)');
+    }
+    expect(declarations('.file-statusbar')['color']).toBe('var(--muted)');
+  });
+});
+
 describe('rewind dialog scroll bounds', () => {
   /* `.dialog` is `max-height: calc(100dvh - 48px)` (the whole `100dvh` on a
    * phone) with `overflow: hidden`, and `.rewind-body` carries a quote, a count,

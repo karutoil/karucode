@@ -7,8 +7,7 @@
  * Scope note: when the panel is drawn by the shell, `PluginPanelView` already
  * provides its own `.inspector-section.plugin-panel` wrapper, header, refresh
  * button and footer. This file therefore styles only the *contents* — the
- * summary, the tree, the audit — and uses `.todo-tab` only as an optional
- * wrapper the renderer may add. Every colour comes from a theme token, so the
+ * summary, the tree, the audit. Every colour comes from a theme token, so the
  * tab follows the Theme studio live.
  *
  * The status ramp is deliberately four tones rather than seven: seven distinct
@@ -16,13 +15,6 @@
  * precise meaning. The tone answers one question — does this need me? — and the
  * label answers "what is it".
  */
-
-.todo-tab {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-  min-width: 0;
-}
 
 /* ---------- summary strip --------------------------------------------- */
 

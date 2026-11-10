@@ -350,7 +350,6 @@
   --sidebar-w: var(--workbench-sidebar-w);
   --inspector-w: 342px;
   --header-h: 66px; /* .main-head{height:66px;min-height:66px} */
-  --tabs-h: 44px; /* .workspace-tabs{height:44px;min-height:44px} */
   --content-max: 820px; /* .thread-inner{max-width:820px} */
   /* ---- legacy alias names ---------------------------------------------- *
    * Components reach for these names, so they are kept as aliases over the real
@@ -389,12 +388,10 @@
  * vertical rhythm scale their own padding with these selectors. */
 :root[data-density='compact'] {
   --header-h: 54px;
-  --tabs-h: 36px;
 }
 
 :root[data-density='spacious'] {
   --header-h: 76px;
-  --tabs-h: 51px;
 }
 
 /* Static Workbench structure. These are geometry tokens, not a second palette. */

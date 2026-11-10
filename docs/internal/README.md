@@ -28,7 +28,7 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`missions`](missions.md) | Group explicitly started project-local sessions across projects in durable missions. | `crates/kc-server/src/routes/missions.rs:3` |
 | [`notifications`](notifications.md) | karucode pings you when a run settles, parks on an approval or fails — with a sound per kind, desktop notifications, an unread badge, and four independent ways to turn it off. | `crates/kc-core/src/notify.rs:24` |
 | [`plugins`](plugins.md) | Build an out-of-process plugin that adds tools, hooks, inspector panels and UI controls (buttons, palette commands, keyboard shortcuts, hides), register it, and debug it when it fails to start. | `crates/kc-plugin-sdk/src/lib.rs:49` |
-| [`project-instructions`](project-instructions.md) | How karucode finds a workspace's instructions file, which name wins, how much of it reaches the system prompt, and why it cannot override your request. | `crates/kc-core/src/prompt.rs:3` |
+| [`project-instructions`](project-instructions.md) | How karucode finds a workspace's instructions file, which name wins, how much of it reaches the system prompt, and why it cannot override your request. | `crates/kc-core/src/prompt.rs:95` |
 | [`projects`](projects.md) | How projects map to directories, how sessions are confined to one, and what happens when a project's directory moves or is deleted. | `crates/kc-server/src/state.rs:6` |
 | [`prompt-cache`](prompt-cache.md) | Why a long run can re-bill its whole context every turn, what karucode does to keep the cached prefix stable, and how to read the hit rate. | `crates/kc-runtime/src/context.rs:89` |
 | [`provider-profiles`](provider-profiles.md) | Point karucode at any OpenAI-compatible endpoint, by environment or as named profiles, and choose the active model. | `crates/kc-provider/src/lib.rs:8` |
@@ -38,10 +38,11 @@ cargo run -p kc-docs -- --check   # what CI runs
 | [`security`](security.md) | What karucode protects by default, what it explicitly does not, and the recipe for safe remote access. | `crates/kc-server/src/app.rs:16` |
 | [`session-titles`](session-titles.md) | Sessions are titled from their first message; with `[titles]` on (the default) a model writes a short, plain-language title instead, using the session's own model or a cheaper one you pick. | `crates/kc-server/src/titles.rs:1` |
 | [`subagents`](subagents.md) | How spawn_agent, spawn_agents and the control tools work - blocking and background, sequential and parallel - and the limits they run under. | `crates/kc-runtime/src/subagent.rs:20` |
+| [`system-prompt`](system-prompt.md) | The rules in the system prompt that keep a run from bloating: read the narrow window, continue a cut result from the offset it names, never repeat a call, and stop when the work is done. | `crates/kc-core/src/prompt.rs:3` |
 | [`terminals`](terminals.md) | A real shell in the browser that survives a reload, another browser and a cleared cache - and the honest limit of what survives a restart. | `crates/kc-server/src/terminals.rs:1` |
 | [`themes`](themes.md) | Built-in palettes, live colour and density editing, fonts and custom CSS, the transcript view options (cards or rows, grouped calls, working steps folded or open), saved in the browser and shareable as a theme JSON file. | `web/src/theme/engine.ts:1` |
 | [`tool-call-errors`](tool-call-errors.md) | A call that fails because of how it was written comes back with a working version of itself, so the next attempt is correct instead of another guess. | `crates/kc-core/src/tool.rs:1` |
 | [`web-auth`](web-auth.md) | Put a password or a passkey in front of the web UI, choose the address it answers to, and understand what each sign-in method costs. | `crates/kc-server/src/routes/auth.rs:14` |
 | [`web-ui`](web-ui.md) | Panels, keyboard shortcuts, plugin-contributed controls and the dev loop for the Preact frontend that ships inside the binary. | `web/src/app.tsx:1` |
 
-28 topic(s).
+29 topic(s).

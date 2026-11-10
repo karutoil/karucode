@@ -1,5 +1,5 @@
 {
-  "count": 28,
+  "count": 29,
   "generated_by": "cargo run -p kc-docs -- --write",
   "topics": [
     {
@@ -628,7 +628,7 @@
       ],
       "path": "project-instructions.md",
       "slug": "project-instructions",
-      "source": "crates/kc-core/src/prompt.rs:3",
+      "source": "crates/kc-core/src/prompt.rs:95",
       "summary": "How karucode finds a workspace's instructions file, which name wins, how much of it reaches the system prompt, and why it cannot override your request.",
       "tags": [
         "agents.md",
@@ -963,6 +963,34 @@
         "long-running"
       ],
       "title": "Delegate work to subagents"
+    },
+    {
+      "applies_to": [
+        "concept:system prompt",
+        "tool:read_file",
+        "tool:search_files",
+        "tool:karucode_docs",
+        "tool:spawn_agent",
+        "config:limits.max_tool_output_bytes",
+        "config:limits.max_command_output_bytes",
+        "config:limits.max_iterations",
+        "config:limits.max_run_secs",
+        "config:subagents.timeout_secs"
+      ],
+      "path": "system-prompt.md",
+      "slug": "system-prompt",
+      "source": "crates/kc-core/src/prompt.rs:3",
+      "summary": "The rules in the system prompt that keep a run from bloating: read the narrow window, continue a cut result from the offset it names, never repeat a call, and stop when the work is done.",
+      "tags": [
+        "system prompt",
+        "tool output",
+        "truncation",
+        "loop guard",
+        "tokens",
+        "budget",
+        "rules"
+      ],
+      "title": "What the agent is told about reading, tool output and stopping"
     },
     {
       "applies_to": [

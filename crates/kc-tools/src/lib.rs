@@ -78,7 +78,9 @@
 // model that cannot edit the operator's config. A payload with no newline near
 // the seam (minified output, one long record) is reported in bytes instead of
 // pretending to line numbers. Unusually tiny budgets get the most compact marker
-// that fits, and one too small for any marker keeps a UTF-8-safe prefix. Cutting
+// that fits - and one with room for neither the recovery nor the key name still
+// reports what was dropped - while a budget too small for any marker keeps a
+// UTF-8-safe prefix. Cutting
 // is deterministic for a given `(text, budget)`, and a *second* cut of an
 // already-cut body does not stack a second marker: the old one sits at the seam
 // and is dropped with it (the tail the first cut kept survives).
@@ -97,6 +99,20 @@
 // Capture is first bounded per stream by `max_command_output_bytes`; long command
 // lines in the result header are previewed at 512 characters (metadata still has
 // the command).
+//
+// What is left after a tool's own render is cut once more by the runtime, at
+// `limits.max_tool_output_bytes` or at what is left of the turn's share, and that
+// final cut names the recovery *of that tool* rather than a generic "narrow the
+// request": `read_file` continues with `offset=`/`limit=`, `run_command` is re-run
+// as `cmd > out.txt 2>&1` and paged from `out.txt`, and a plugin or MCP tool is
+// asked for narrower arguments of its own. Each tool's own description carries the
+// same step, because that is where an agent looks once it is already inside a
+// tool. A budget too small to fit the full marker does not fall back to
+// `limits.max_tool_output_bytes` alone: the compact marker reports the dropped
+// bytes and then keeps as much of that same tool-specific sentence as fits - the
+// whole of it, its first clause, or the key name by itself - so the recovery step
+// survives every budget with room for it, and the compact marker never grows past
+// the share of the budget it is carved out of.
 //
 // # Gotchas
 //
@@ -624,7 +640,9 @@ impl Tool for ReadFile {
              the other reads still return. An image (PNG/JPEG/GIF/WebP) passed as `path` is \
              attached for a model that accepts image input; on a text-only model it is refused \
              with an explanation, as are binary files and image formats vision APIs do not \
-             accept. Output is capped by the configured tool-output limit.",
+             accept. Output is capped by the configured tool-output limit. A page that is cut \
+             ends with `[next N lines omitted; continue with offset=X]`: pass that offset (or \
+             another `ranges` window) instead of reading the file again from the start.",
             json!({
                 "type": "object",
                 "properties": {
@@ -887,8 +905,8 @@ impl Tool for ListDir {
             "list_dir",
             "List a directory inside the workspace. Respects .gitignore rules, skips .git and \
              node_modules, lists directories first (with a trailing '/') and files with their size. \
-             Capped at 500 entries; the walk stops at the cap, so a truncated listing says the \
-             total is a lower bound (`500+`).",
+             Capped at 500 entries: a truncated walk reports the total as a lower bound \
+             (`500+`), so narrow `path` rather than assuming the rest.",
             json!({
                 "type": "object",
                 "properties": {
@@ -942,7 +960,9 @@ impl Tool for SearchFiles {
              `path:line: text` matches; `context` adds the `N` lines either side of each match as \
              `path:line- text`, `files_only` returns just the distinct paths that matched, and \
              `max_matches_per_file` stops one noisy file from spending the whole result cap. \
-             Results are bounded by the configured search limit.",
+             Results are bounded by the configured search limit. Narrow before you widen: a \
+             `glob` and `max_matches_per_file` keep a result readable, and `files_only` answers \
+             where without the lines.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1097,7 +1117,9 @@ impl Tool for Glob {
              is matched against each entry's file name, its path relative to `path` and its \
              workspace-relative path, so `*.rs`, `src/**/*.rs` and `crates/*/src/lib.rs` all work. \
              Directories are listed with a trailing `/`. Bounded at 200 paths, and a truncated \
-             result says the walk stopped at the cap. Read-only, no approval.",
+             result says the walk stopped at the cap. A truncated walk reports the total as a \
+             lower bound; narrow `path` or `pattern` rather than assuming the rest. Read-only, no \
+             approval.",
             json!({
                 "type": "object",
                 "properties": {

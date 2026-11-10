@@ -412,65 +412,74 @@ body
   min-height: 0;
 }
 
-/* The workspace-tab host has no dialog header, so the path gets its own line and
- * a close button. The dialog keeps the path in its title bar instead. */
-.file-view-head {
+/* One bar for the whole panel: the view toggle on the left, the actions on the
+ * right, and nothing above it. A file tab used to stack a path header, this
+ * toolbar and a separate Preview/Source row - ~140px of grey chrome over a
+ * document whose name the strip's own tab already carries. The bar is
+ * transparent rather than `--surface-menu` so it reads as part of the page
+ * instead of as a band across it; only the hairline separates it. */
+.file-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  flex: 0 0 auto;
+  padding: var(--space-3) var(--space-6);
+  border-bottom: 1px solid var(--line);
+}
+
+.file-flags {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 0 0 auto;
+}
+
+.file-toolbar-actions {
   display: flex;
   align-items: center;
   gap: var(--space-4);
   flex: 0 0 auto;
-  padding: var(--space-3) var(--space-6);
-  border-bottom: 1px solid var(--line);
-  background: var(--surface-menu);
+  /* The actions own the right-hand end; the toggle and any warning badge keep
+   * the left, however many of them there are. */
+  margin-left: auto;
 }
 
-.file-view-path {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-user);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
+/* A toolbar action that is a word, not a button: secondary actions (move this
+ * file to the other host, copy its path) do not need a bordered chip each, and
+ * four chips beside the view toggle is what made this bar look like a toolbar in
+ * the first place. */
+.file-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: var(--fs-small);
   white-space: nowrap;
-  text-overflow: ellipsis;
+  transition: color var(--transition-fast);
+}
+
+.file-action:hover {
+  color: var(--text);
+}
+
+.file-action:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Refused, not removed: the action stays where the reader expects it and says
+ * why it will not run. */
+.file-action[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* The centre pane a file tab controls. The viewer owns the column layout inside
  * it, so the panel only has to stop the page from scrolling behind it. */
 .file-workspace {
   overflow: hidden;
-}
-
-.file-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-5);
-  flex: 0 0 auto;
-  padding: var(--space-5) var(--space-7);
-  border-bottom: 1px solid var(--line);
-  background: var(--surface-menu);
-}
-
-.file-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  flex-wrap: wrap;
-  min-width: 0;
-}
-
-.file-size {
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-}
-
-.file-toolbar-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  flex: 0 0 auto;
 }
 
 .file-loading {
@@ -550,23 +559,17 @@ body
 
 /* ---------- file viewer: view tabs, preview, editor --------------------- */
 
-.file-tabbar {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: 0 0 auto;
-  padding: var(--space-3) var(--space-7);
-  border-bottom: 1px solid var(--line);
-  background: var(--surface-preview);
-}
-
+/* The Preview/Source control sits in `.file-toolbar`; it is the only segment in
+ * the panel's single bar, so it carries no band of its own. Its new style over
+ * `--surface-preview` (not `--surface-menu`) keeps the active half from reading
+ * as a second grey header. */
 .file-view-tabs {
   display: inline-flex;
   gap: var(--space-1);
   padding: var(--space-1);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: var(--surface-menu);
+  background: var(--surface-preview);
 }
 
 .file-view-tab {
@@ -738,18 +741,52 @@ body
   margin: var(--space-5) var(--space-7) 0;
 }
 
+/* The status bar tells the reader which document this is, how big it is and
+ * whether the buffer is unsaved, so its ink is `--muted` (readable text, §4),
+ * never `--faint` (decoration only, 3:1). */
 .file-statusbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-6);
   flex: 0 0 auto;
-  padding: var(--space-3) var(--space-7);
+  padding: var(--space-3) var(--space-6);
   border-top: 1px solid var(--line);
-  background: var(--surface-menu);
-  color: var(--faint);
+  color: var(--muted);
   font-family: var(--font-mono);
   font-size: var(--fs-tiny);
+}
+
+/* The left half is one quiet sentence - `path · language · size · lines` - so it
+ * has to shrink before it can push the hint off the end. The path is the part
+ * that truncates: the numbers after it are short and worth keeping whole. The
+ * separator is its own flex item rather than a `' · '` text node, which a flex
+ * row trims to a bare `·` glued onto both neighbours. */
+.file-status {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.file-status-path {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-status-sep,
+.file-status-facts {
+  flex: 0 0 auto;
+}
+
+/* The size changes when the buffer is saved; tabular digits keep the sentence
+ * after it from shifting sideways. */
+.file-size {
+  font-variant-numeric: tabular-nums;
 }
 
 .file-statusbar-hint {
@@ -989,6 +1026,23 @@ body
 
   .dialog-file {
     height: 100dvh;
+  }
+
+  /* The file panel's single bar carries a toggle and four actions. On a phone
+   * that is wider than the screen, so it wraps instead of running off the edge;
+   * the secondary words get a real tap target while it does. */
+  .file-toolbar {
+    flex-wrap: wrap;
+    padding: var(--space-3) var(--space-5);
+  }
+
+  .file-toolbar-actions {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .file-action {
+    min-height: 32px;
   }
 }
 

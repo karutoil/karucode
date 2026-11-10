@@ -746,13 +746,30 @@ export function Composer({
     return () => window.clearTimeout(timer);
   }, [focusTick]);
 
+  // A stop changes the stop button's label and disables it, which a screen reader
+  // does not announce on its own - and the queue controls going quiet looks like a
+  // bug unless the wait is audible. Say it once in the live region; the composer
+  // itself does not re-render into a spinner.
+  useEffect(() => {
+    if (stopping) setAnnouncement('Stopping…');
+    // `setAnnouncement` writes the scoped form, not component state, so this
+    // effect depends only on the stop flag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stopping]);
+
   const canType = disabledReason === null;
   const attachmentReady = canSendAttachments(attachments);
   const hasContent = draft.trim() !== '' || attachments.some((attachment) => attachment.status === 'ready');
   // While a run is in flight the same box sends into the queue instead of
   // starting one, because starting one is exactly what the API refuses with a
   // 409. `canQueue` is therefore the "running" half of `canSend`.
-  const canQueue = canType && running && !sending && attachmentReady && hasContent && onQueue !== undefined;
+  //
+  // `stopping` gates queueing too, and for the same reason: a stop is in flight,
+  // so a steer has no run to fold into and a follow-up has no turn to wait for
+  // yet - the server answers 409 and the toast is noise. The box stays usable
+  // (the draft is kept) and the controls come back when the stop lands.
+  const canQueue =
+    canType && running && !stopping && !sending && attachmentReady && hasContent && onQueue !== undefined;
   const canSend = canType && !running && !sending && attachmentReady && hasContent;
 
   const clearComposer = (
@@ -1102,7 +1119,8 @@ export function Composer({
                 class="button button-stop"
                 onClick={onStop}
                 disabled={stopping}
-                aria-label="Stop run (Escape)"
+                aria-busy={stopping}
+                aria-label={stopping ? 'Stopping… (Escape)' : 'Stop run (Escape)'}
                 title={stopping ? 'Stopping…' : 'Stop (Escape)'}
               >
                 <StopIcon size={13} />

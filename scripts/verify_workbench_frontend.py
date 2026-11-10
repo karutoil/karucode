@@ -497,6 +497,72 @@ def main() -> int:
         """)
         wait_for_text("Workbench fixture")
         check("file viewer uses the real file route", evaluate("return !!document.querySelector('[role=\"dialog\"]')?.textContent.includes('README.md');"))
+
+        # The file viewer is one bar over the document, not a stack of grey
+        # headers: it used to draw a path header, a metadata toolbar and a
+        # separate Preview/Source band (about 140px of chrome) over a document
+        # whose name the session breadcrumb already carried. jsdom cannot measure
+        # this, so it is measured here, in the real browser.
+        dialog_chrome = evaluate("""
+        const dialog=document.querySelector('[role="dialog"]');
+        const bar=dialog?.querySelector('.file-toolbar');
+        const status=dialog?.querySelector('.file-statusbar');
+        if(!dialog||!bar||!status)return null;
+        return {bars:dialog.querySelectorAll('.file-toolbar').length,
+          pathHeader:!!dialog.querySelector('.file-view-head'),
+          tabbar:!!dialog.querySelector('.file-tabbar'),
+          height:Math.round(bar.getBoundingClientRect().height),
+          background:getComputedStyle(bar).backgroundColor,
+          hasPath:!!dialog.querySelector('.file-status-path'),
+          status:status.innerText.replace(/\\s+/g,' ').trim()};
+        """)
+        (out / "file-chrome.json").write_text(json.dumps(dialog_chrome, indent=2))
+        check("the file viewer draws one bar over the document, not three stacked bands",
+              isinstance(dialog_chrome, dict) and dialog_chrome["bars"] == 1
+              and dialog_chrome["pathHeader"] is False and dialog_chrome["tabbar"] is False)
+        check("the file viewer's one bar is compact and paints no band of its own",
+              isinstance(dialog_chrome, dict) and dialog_chrome["height"] <= 48
+              and dialog_chrome["background"] == "rgba(0, 0, 0, 0)")
+        check("the file viewer states its facts once, in the status bar",
+              isinstance(dialog_chrome, dict) and "markdown" in dialog_chrome["status"]
+              and "lines" in dialog_chrome["status"]
+              # The dialog's title bar already names the file.
+              and dialog_chrome["hasPath"] is False)
+
+        # The same document in the workspace strip: the tab already names it and
+        # closes it, so the panel has no title row of its own and no close button.
+        click_button("Open in tab")
+        until = time.time() + 12
+        while time.time() < until and not evaluate("return !!document.querySelector('.file-workspace .file-toolbar');"):
+            time.sleep(0.1)
+        tab_chrome = evaluate("""
+        const panel=document.querySelector('.file-workspace');
+        const bar=panel?.querySelector('.file-toolbar');
+        const status=panel?.querySelector('.file-statusbar');
+        if(!panel||!bar||!status)return null;
+        return {bars:panel.querySelectorAll('.file-toolbar').length,
+          pathHeader:!!panel.querySelector('.file-view-head'),
+          tabbar:!!panel.querySelector('.file-tabbar'),
+          height:Math.round(bar.getBoundingClientRect().height),
+          closeButton:!!panel.querySelector('[aria-label^="Close "]'),
+          path:panel.querySelector('.file-status-path')?.textContent ?? null,
+          status:status.innerText.replace(/\\s+/g,' ').trim()};
+        """)
+        (out / "file-tab-chrome.json").write_text(json.dumps(tab_chrome, indent=2))
+        check("a file tab has one bar and no path header of its own",
+              isinstance(tab_chrome, dict) and tab_chrome["bars"] == 1
+              and tab_chrome["pathHeader"] is False and tab_chrome["tabbar"] is False
+              and tab_chrome["height"] <= 48 and tab_chrome["closeButton"] is False)
+        check("a file tab names the document in its status bar, and the strip owns closing",
+              isinstance(tab_chrome, dict) and tab_chrome["path"] == "README.md"
+              and "README.md" in tab_chrome["status"]
+              and evaluate("""
+              const tab=[...document.querySelectorAll('.workspace-tabs [role="tab"]')]
+                .find(el=>(el.textContent||'').trim()==='README.md');
+              return !!tab && !!document.querySelector('.workspace-tabs .tab-close');
+              """))
+        session.screenshot(out / "workbench-file-tab.png")
+
         click_button("Source", ".file-view-tabs button")
         evaluate("const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Edit');if(b)b.click();return true;")
         evaluate(r"""

@@ -187,6 +187,45 @@ struct ReadArgs {
     session_id: String,
     #[serde(default)]
     limit: Option<u32>,
+    /// Read this one message - whole, or from `offset` - instead of the newest
+    /// `limit` of them. This is how a marker that cut a message is followed: the
+    /// marker names the id and the offset its continuation starts at.
+    #[serde(default)]
+    message_id: Option<i64>,
+    /// 0-based character offset into `message_id`'s content.
+    #[serde(default)]
+    offset: Option<u64>,
+}
+
+/// The marker a message cut at [`MESSAGE_PREVIEW_CHARS`] ends with.
+///
+/// It has to name the call that continues it. `limit` only chooses *how many*
+/// messages a read returns, so a model told to "read the rest" without an id and
+/// an offset has no way to reach the part it was told exists - which is exactly
+/// the dead end a silent `… [truncated]` used to leave.
+fn preview_marker(message_id: i64, next: usize) -> String {
+    format!(
+        "\n… [truncated at {MESSAGE_PREVIEW_CHARS} characters; call control_read_session again \
+         with message_id={message_id} offset={next}]"
+    )
+}
+
+/// The marker for a message the *whole read's* budget cut short.
+fn budget_marker(message_id: i64, next: usize) -> String {
+    format!(
+        "\n… [cut at the {READ_BUDGET_CHARS}-character budget for one read; call \
+         control_read_session again with limit=N for fewer messages, or message_id={message_id} \
+         offset={next} for the rest of this one]"
+    )
+}
+
+/// `content` from `offset`, at most `cap` characters, plus the offset that
+/// continues it (`None` when this slice reached the end of the message).
+fn preview(content: &str, offset: usize, cap: usize) -> (String, Option<usize>) {
+    let total = content.chars().count();
+    let body: String = content.chars().skip(offset).take(cap).collect();
+    let consumed = offset + body.chars().count();
+    (body, (consumed < total).then_some(consumed))
 }
 
 pub struct ReadSession(pub AppState);
@@ -196,10 +235,12 @@ impl Tool for ReadSession {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "control_read_session".into(),
-            description: "Read the newest messages of one session so you can audit what it is doing, with the session's own status and latest run. Read-only and bounded; long messages and transcripts are truncated with a marker.".into(),
+            description: "Read the newest messages of one session so you can audit what it is doing, with the session's own status and latest run. Read-only and bounded: a long message is cut at 4000 characters and the marker names the call that continues it, so pass that `message_id` and `offset` to read the rest of that one message. `limit` says how many messages to return; it is not how you read deeper into one.".into(),
             parameters: json!({"type":"object","properties":{
                 "session_id":{"type":"string"},
-                "limit":{"type":"integer","minimum":1,"maximum":100,"description":"How many newest messages (default 30)"}
+                "limit":{"type":"integer","minimum":1,"maximum":100,"description":"How many newest messages (default 30)"},
+                "message_id":{"type":"integer","description":"Read this message instead of the newest `limit`, continuing from `offset`. The marker on a cut message names both."},
+                "offset":{"type":"integer","minimum":0,"description":"0-based character offset into `message_id`'s content (default 0)"}
             },"required":["session_id"],"additionalProperties":false}),
             origin: Default::default(),
         }
@@ -218,12 +259,94 @@ impl Tool for ReadSession {
         if check_text(&args.session_id, "session_id", 128).is_err() {
             return ToolOutcome::err("session_id must be non-empty and at most 128 bytes");
         }
+        if args.message_id.is_none() && args.offset.is_some() {
+            return ToolOutcome::err(
+                "`offset` continues one message, so it needs `message_id` too: a marker that cut \
+                 a message names both, and a read with `limit` only returns whole messages from \
+                 the start.",
+            );
+        }
         let limit = args.limit.unwrap_or(30).clamp(1, 100);
         let session = match self.0.store().get_session(&args.session_id).await {
             Ok(Some(session)) => session,
             Ok(None) => return ToolOutcome::err("no such session"),
             Err(e) => return ToolOutcome::err(e.to_string()),
         };
+        let runs = self
+            .0
+            .store()
+            .list_runs(&session.id, 3)
+            .await
+            .unwrap_or_default();
+        // One message, from an offset: the continuation a cut marker asked for.
+        // `list_messages_after` with `id - 1` is a single-row lookup by id, so this
+        // does not walk the transcript to find it.
+        if let Some(message_id) = args.message_id {
+            if message_id < 1 {
+                return ToolOutcome::err(format!(
+                    "message_id {message_id} is not a message id; read the newest messages with \
+                     `limit` and use the `message_id` each one carries"
+                ));
+            }
+            let found = match self
+                .0
+                .store()
+                .list_messages_after(&session.id, message_id - 1, 1)
+                .await
+            {
+                Ok(found) => found,
+                Err(e) => return ToolOutcome::err(e.to_string()),
+            };
+            let message = match found.into_iter().next().filter(|m| m.id == message_id) {
+                Some(message) => message,
+                None => {
+                    return ToolOutcome::err(format!(
+                        "no message {message_id} in session {}; read the newest messages with \
+                         `limit` and use the `message_id` each one carries",
+                        session.id
+                    ))
+                }
+            };
+            let offset = args
+                .offset
+                .map(|offset| usize::try_from(offset).unwrap_or(usize::MAX))
+                .unwrap_or(0);
+            let total = message.content.chars().count();
+            if offset > total {
+                return ToolOutcome::err(format!(
+                    "offset {offset} is past the end of message {message_id} ({total} \
+                     characters); pass offset=0 for the whole message"
+                ));
+            }
+            let (mut content, next) = preview(&message.content, offset, MESSAGE_PREVIEW_CHARS);
+            if let Some(next) = next {
+                content.push_str(&preview_marker(message_id, next));
+            }
+            return ToolOutcome::ok(
+                json!({
+                    "session": {
+                        "id": session.id,
+                        "title": session.title,
+                        "project_id": session.project_id,
+                        "workspace": session.workspace,
+                        "updated_at": session.updated_at,
+                    },
+                    "running": self.0.runtime().has_active_run(&session.id),
+                    "runs": runs.iter().map(|run| json!({"id":run.id,"status":run.status,"error":run.error})).collect::<Vec<_>>(),
+                    "message": {
+                        "message_id": message.id,
+                        "role": message.role,
+                        "name": message.name,
+                        "content": content,
+                        "offset": offset,
+                        "total_chars": total,
+                        "next_offset": next,
+                        "tool_calls": message.tool_calls.iter().map(|call| call.name.clone()).collect::<Vec<_>>(),
+                    },
+                })
+                .to_string(),
+            );
+        }
         let messages = match self
             .0
             .store()
@@ -240,34 +363,33 @@ impl Tool for ReadSession {
             .take(limit as usize)
             .rev()
             .collect();
-        let runs = self
-            .0
-            .store()
-            .list_runs(&session.id, 3)
-            .await
-            .unwrap_or_default();
         let mut budget = READ_BUDGET_CHARS;
+        let mut omitted = 0;
         let mut rendered = Vec::new();
         for message in messages {
             if budget == 0 {
-                break;
+                // Older messages than the budget allows; counted, never silent.
+                omitted += 1;
+                continue;
             }
-            let mut content: String = message
-                .content
-                .chars()
-                .take(MESSAGE_PREVIEW_CHARS)
-                .collect();
-            if content.chars().count() < message.content.chars().count() {
-                content.push_str("\n… [truncated]");
+            let (mut content, mut next) = preview(&message.content, 0, MESSAGE_PREVIEW_CHARS);
+            if let Some(preview_next) = next {
+                content.push_str(&preview_marker(message.id, preview_next));
             }
             if content.chars().count() > budget {
-                content = content.chars().take(budget).collect::<String>();
-                content.push_str("\n… [budget reached]");
+                let (short, cut_at) = preview(&message.content, 0, budget);
+                content = short;
+                next = cut_at;
+                if let Some(cut_at) = cut_at {
+                    content.push_str(&budget_marker(message.id, cut_at));
+                }
             }
             budget = budget.saturating_sub(content.chars().count());
             rendered.push(json!({
+                "message_id": message.id,
                 "role": message.role,
                 "content": content,
+                "next_offset": next,
                 "tool_calls": message.tool_calls.iter().map(|call| call.name.clone()).collect::<Vec<_>>(),
                 "name": message.name,
             }));
@@ -284,6 +406,7 @@ impl Tool for ReadSession {
                 "running": self.0.runtime().has_active_run(&session.id),
                 "runs": runs.iter().map(|run| json!({"id":run.id,"status":run.status,"error":run.error})).collect::<Vec<_>>(),
                 "messages_truncated": truncated,
+                "messages_omitted": omitted,
                 "messages": rendered,
             })
             .to_string(),
@@ -1032,4 +1155,55 @@ pub fn tools(state: AppState) -> Vec<Arc<dyn Tool>> {
         Arc::new(CancelRun(state.clone())),
         Arc::new(RenameSession(state)),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The marker's offsets have to line up exactly: a marker that names a
+    /// character the first page already returned is a loop, and one that skips a
+    /// character loses text nobody can ask for again.
+    #[test]
+    fn a_cut_marker_names_the_offset_that_returns_the_omitted_text() {
+        let body = format!("{}{}", "a".repeat(MESSAGE_PREVIEW_CHARS), "TAIL-SENTINEL");
+        let (head, next) = preview(&body, 0, MESSAGE_PREVIEW_CHARS);
+        let next = next.expect("a message longer than the preview must be cut");
+        assert_eq!(head.chars().count(), MESSAGE_PREVIEW_CHARS);
+        assert_eq!(
+            next, MESSAGE_PREVIEW_CHARS,
+            "the cut is reported in characters"
+        );
+
+        let marker = preview_marker(7, next);
+        assert!(marker.contains("message_id=7"), "{marker}");
+        assert!(marker.contains(&format!("offset={next}")), "{marker}");
+
+        // Walk the marker's own instruction: the pieces have to reassemble into
+        // the message, with nothing lost and nothing repeated.
+        let (rest, done) = preview(&body, next, MESSAGE_PREVIEW_CHARS);
+        assert_eq!(format!("{head}{rest}"), body);
+        assert!(rest.ends_with("TAIL-SENTINEL"), "{rest}");
+        assert!(done.is_none(), "the message ended inside that page");
+    }
+
+    #[test]
+    fn a_short_message_is_returned_whole_and_asks_for_nothing() {
+        let (body, next) = preview("short", 0, MESSAGE_PREVIEW_CHARS);
+        assert_eq!(body, "short");
+        assert!(next.is_none());
+    }
+
+    /// The read budget covers the whole page of messages, so the message it cuts
+    /// short has to name its own continuation rather than the next `limit`.
+    #[test]
+    fn the_budget_marker_names_both_ways_to_continue() {
+        let marker = budget_marker(11, 400);
+        assert!(marker.contains("message_id=11"), "{marker}");
+        assert!(marker.contains("offset=400"), "{marker}");
+        assert!(
+            marker.contains("limit=N"),
+            "fewer messages is the other way out: {marker}"
+        );
+    }
 }

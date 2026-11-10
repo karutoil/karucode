@@ -324,6 +324,46 @@ async fn call(tool: &dyn Tool, ctx: &ToolCtx, args: serde_json::Value) -> ToolOu
 
 // ---------------------------------------------------------------- file ops ---
 
+/// The recovery step has to live in the tool's own description: that is where an
+/// agent looks when it is already inside the tool, and it has to be *after* the
+/// first sentence, because the first sentence is all the system prompt shows.
+#[test]
+fn tool_descriptions_teach_the_recovery_after_the_first_sentence() {
+    let cases: [(&str, String, &str); 4] = [
+        (
+            "read_file",
+            ReadFile.spec().description,
+            "continue with offset=X",
+        ),
+        (
+            "search_files",
+            SearchFiles.spec().description,
+            "Narrow before you widen",
+        ),
+        ("list_dir", ListDir.spec().description, "narrow `path`"),
+        (
+            "glob",
+            Glob.spec().description,
+            "narrow `path` or `pattern`",
+        ),
+    ];
+    for (name, description, needle) in cases {
+        let first_sentence_end = description
+            .find(". ")
+            .map(|index| index + 2)
+            .unwrap_or(description.len());
+        assert!(
+            description[first_sentence_end..].contains(needle),
+            "{name}'s description must teach the recovery step after the first sentence: \
+             {description}"
+        );
+        assert!(
+            !description[..first_sentence_end].contains(needle),
+            "{name}'s recovery step must not eat the line the prompt shows: {description}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn read_file_returns_header_and_numbered_lines() {
     let env = env("read-happy");
@@ -2009,6 +2049,66 @@ async fn run_command_respects_a_pre_cancelled_token() {
             .iter()
             .any(|e| matches!(e, Event::CommandStarted { .. })),
         "a cancelled run must not start a process"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_running_command_kills_its_process_group() {
+    // The pre-cancelled case proves a stop *before* the spawn starts nothing; this
+    // one proves a stop *during* the run reaches the whole group. The shell starts a
+    // background child that would write a file a second later: if the group outlived
+    // the stop, that file appears after the call has already returned.
+    let env = env("cmd-cancel-live");
+    // Non-vacuity: prove the marker file would be visible where the assertion looks
+    // if the child lived long enough to write it.
+    let proof = call(
+        &RunCommand,
+        &env.ctx,
+        json!({"command": "echo alive > survived.txt"}),
+    )
+    .await;
+    assert!(proof.ok, "{}", proof.content);
+    assert!(
+        env.tmp.exists("survived.txt"),
+        "the fixture writes into the workspace"
+    );
+    std::fs::remove_file(env.tmp.path().join("survived.txt")).unwrap();
+    let ctx = env.ctx.clone();
+    let token = ctx.cancel.clone();
+    let running = tokio::spawn(async move {
+        call(
+            &RunCommand,
+            &ctx,
+            json!({"command": "(sleep 1; echo alive > survived.txt) & sleep 30"}),
+        )
+        .await
+    });
+
+    // Let the shell start and its background child arm.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(env.tmp.path().exists(), "the fixture workspace exists");
+    token.cancel();
+
+    let out = tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .expect("a cancelled command must not keep the run waiting")
+        .expect("the call task joins");
+    assert!(
+        !out.ok,
+        "a cancelled command is a failed result: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("cancel"),
+        "the result says it was cancelled: {}",
+        out.content
+    );
+
+    // Past the moment the child needed: an alive group would have written the file.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert!(
+        !env.tmp.exists("survived.txt"),
+        "the command's process group outlived the stop"
     );
 }
 

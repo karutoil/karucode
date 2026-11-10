@@ -72,16 +72,6 @@ describe('accent fill: a primary action is readable in every theme', () => {
     expect(block).toContain('var(--accent-fill)');
   });
 
-  it('keeps text accents on the role meant for text', () => {
-    // The model pill is small mono type on an accent *tint*. `--accent-text` is
-    // the AA-safe ink against the canvas; a tint lifts the ground under it, where
-    // the pair measured 3.62:1 in Daybreak. `--accent-on-tint` is the same accent
-    // mixed toward primary text for exactly that case, so it is the stricter of
-    // the two answers and the one this pill must use.
-    const pill = declarations(chat, '.model-pill');
-    expect(pill['color']).toBe('var(--accent-on-tint)');
-  });
-
   it('defines one ink for accent-on-tint and uses it wherever a tint is painted', () => {
     expect(tokens).toMatch(/--accent-on-tint:\s*color-mix\(in srgb, var\(--accent-fill\)/);
     // A bare `--accent` on `--accent-bg` was the 3.62:1 chip the audit measured.

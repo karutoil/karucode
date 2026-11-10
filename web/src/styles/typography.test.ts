@@ -155,18 +155,16 @@ describe('ordinary shell metadata is tiny, not micro', () => {
   // The scale reserves `--fs-micro` for "uppercase kickers and badges only"
   // (tokens.css §3.3). Six shell rules were using it for lowercase metadata a
   // reader scans — the project path, the context meter's label, the provider
-  // name, the tab strip's status note, the transcript footer and the empty rail
-  // — so the quietest text in the chrome sat on the 10px floor instead of the
-  // 11px metadata step. Kickers (`.head-activity`, `.session-group-label`),
-  // badges (`.badge`, `.session-unread`, `.tab-count`) and keycaps stay micro.
+  // name and the empty rail — so the quietest text in the chrome sat on the 10px
+  // floor instead of the 11px metadata step. Kickers (`.head-activity`,
+  // `.session-group-label`), badges (`.badge`, `.session-unread`, `.tab-count`)
+  // and keycaps stay micro.
   const rail = read('rail.css');
 
   it.each([
     ['layout.css', layout, '.path-hint'],
     ['layout.css', layout, '.side-meter-top'],
     ['layout.css', layout, '.settings-row .provider'],
-    ['layout.css', layout, '.tab-note'],
-    ['layout.css', layout, '.transcript-foot'],
     ['rail.css', rail, '.project-rail-empty'],
   ])('%s %s uses --fs-tiny', (_file, css, selector) => {
     expect(rule(css, selector)).toMatch(/font-size:\s*var\(--fs-tiny\)/);

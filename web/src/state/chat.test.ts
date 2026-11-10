@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ImageAttachment, SessionDetail, StoredMessage, ToolCall } from '../api/types';
-import { detailFixture, omitFields, queuedFixture, storedMessage, wireAgentSummary } from '../test/fixtures';
+import type { ImageAttachment, RunRecord, RunStatus, SessionDetail, StoredMessage, ToolCall } from '../api/types';
+import { NOW, detailFixture, omitFields, queuedFixture, storedMessage, wireAgentSummary } from '../test/fixtures';
 import { mergeTranscriptRows, seedChatState } from './chat';
 
 const shot: ImageAttachment = {
@@ -26,6 +26,26 @@ const call: ToolCall = { id: 'call_1', name: 'read_file', arguments: '{"path":"s
 
 function assistantTurn(): StoredMessage {
   return storedMessage({ id: 1, role: 'assistant', tool_calls: [call] });
+}
+
+/** A settled (or still running) run row as the session snapshot carries it. */
+function runRow(
+  status: RunStatus,
+  id: string,
+  startedAt: number,
+  finishedAt: number | null,
+  error: string | null = null,
+): RunRecord {
+  return {
+    id,
+    session_id: detailFixture.session.id,
+    status,
+    model: 'gpt-4o-mini',
+    prompt: 'run until something stops it',
+    error,
+    started_at: startedAt,
+    finished_at: finishedAt,
+  };
 }
 
 describe('seedChatState', () => {
@@ -167,6 +187,71 @@ describe('seedChatState', () => {
       live,
     );
     expect(refetched.agents[0]?.iterations).toBe(9);
+  });
+
+  it('says a reloaded run was cancelled, in the words the live transcript used', () => {
+    // The stop is not in the stored messages: the run keeps whatever prose and
+    // tool cards it produced, and the live transcript ends them with
+    // "Run cancelled." A reload rebuilt the same partial turn and said nothing
+    // about why it stopped, so the notice is rebuilt from the settled run row.
+    const state = seedChatState({
+      ...sessionWith([
+        storedMessage({ id: 1, role: 'user', content: 'run the whole suite', run_id: 'r_cancel' }),
+        storedMessage({ id: 2, role: 'assistant', content: 'Starting with the parser.', run_id: 'r_cancel' }),
+      ]),
+      runs: [runRow('cancelled', 'r_cancel', NOW - 60_000, NOW - 50_000)],
+    });
+
+    const notice = state.items.find((item) => item.id === 'cancelled:r_cancel');
+    expect(notice?.kind).toBe('notice');
+    expect(notice?.kind === 'notice' ? notice.level : '').toBe('info');
+    expect(notice?.kind === 'notice' ? notice.message : '').toBe('Run cancelled.');
+    // The partial answer is still there, above the notice that explains it.
+    const answer = state.items.find((item) => item.kind === 'message' && item.role === 'assistant');
+    expect(answer?.kind === 'message' ? answer.content : '').toBe('Starting with the parser.');
+    expect(state.items.indexOf(notice!)).toBeGreaterThan(state.items.indexOf(answer!));
+  });
+
+  it('keeps the live wording for a cancellation even when the row carries an error', () => {
+    // Live shows one sentence per cancellation whatever the row says, so a reload
+    // must not invent a second kind of message for the same event.
+    const state = seedChatState({
+      ...detailFixture,
+      runs: [runRow('cancelled', 'r_cancel_err', NOW - 60_000, NOW - 50_000, 'stop requested by user')],
+    });
+
+    const notice = state.items.find((item) => item.id === 'cancelled:r_cancel_err');
+    expect(notice?.kind === 'notice' ? notice.message : '').toBe('Run cancelled.');
+    expect(state.items.some((item) => item.kind === 'notice' && item.message.includes('stop requested'))).toBe(false);
+  });
+
+  it('explains a reloaded run the server restarted, in the live shape', () => {
+    const state = seedChatState({
+      ...detailFixture,
+      runs: [runRow('interrupted', 'r_interrupted', NOW - 60_000, NOW - 50_000)],
+    });
+
+    const notice = state.items.find((item) => item.id === 'interrupted:r_interrupted');
+    expect(notice?.kind).toBe('interrupted');
+    expect(notice?.kind === 'interrupted' ? notice.message : '').toBe(
+      'This run was interrupted — the server restarted while it was working.',
+    );
+  });
+
+  it('says nothing extra about a run that finished or is still running', () => {
+    // Only the three stopped statuses carry a notice; a completed run is its own
+    // explanation, and a running one has no ending to describe yet.
+    for (const status of ['completed', 'running'] as RunStatus[]) {
+      const state = seedChatState({
+        ...detailFixture,
+        running: status === 'running',
+        runs: [runRow(status, `r_${status}`, NOW - 60_000, status === 'running' ? null : NOW - 50_000)],
+      });
+      expect(
+        state.items.filter((item) => item.kind === 'notice' || item.kind === 'interrupted'),
+        `a ${status} run must not add a stop notice`,
+      ).toEqual([]);
+    }
   });
 
   it('explains a reloaded run that stopped at a limit, from the run row', () => {

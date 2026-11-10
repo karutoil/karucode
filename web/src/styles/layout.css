@@ -1,6 +1,6 @@
 /* Application frame: project rail · session sidebar · main column · inspector.
  *
- * Every size comes from a `--*-w` / `--header-h` / `--tabs-h` token so the Theme
+ * Every size comes from a `--*-w` / `--header-h` token so the Theme
  * Studio's density switch moves the whole shell together, and every colour comes
  * from a token so a theme repaints it.
  */
@@ -648,32 +648,6 @@
   color: var(--warning);
 }
 
-/* The mock's `.s-turns`: the turn count, right-aligned and dimmed. */
-.session-turns {
-  margin-left: auto;
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  color: var(--muted);
-}
-
-/* The mock's `.s-glyphs`: up to three tool symbols at 10px, quiet by default. */
-.session-glyphs {
-  display: flex;
-  gap: var(--space-1);
-  flex: 0 0 auto;
-  margin-top: calc(-1 * var(--hairline));
-}
-
-.session-glyphs svg {
-  width: 10px;
-  height: 10px;
-  color: var(--faint);
-}
-
-.session-row.is-active .session-glyphs svg {
-  color: var(--muted);
-}
-
 .session-menu-wrap {
   position: absolute;
   top: var(--space-1);
@@ -1244,28 +1218,6 @@
   border-color: transparent;
 }
 
-/* The mock hands the Share slot to an accent button; ours copies the
-   conversation, which is the equivalent real action. */
-.head-btn.accent-head {
-  border-color: var(--accent-line);
-  background: var(--accent-bg);
-  color: var(--accent-on-tint);
-  font-family: var(--font-ui);
-}
-
-.head-btn.accent-head:hover:not(:disabled) {
-  border-color: var(--accent-line);
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  color: var(--accent-fill);
-}
-
-.head-btn.accent-head:disabled {
-  border-color: var(--line);
-  background: transparent;
-  color: var(--faint);
-  opacity: 1;
-}
-
 /* The session-list toggle is the mock's `mobile-menu-btn`: hidden on desktop,
    shown once the rail becomes a sheet — or whenever the rail is collapsed, so
    Ctrl+B never leaves the rail unreachable by pointer. */
@@ -1307,32 +1259,7 @@
   pointer-events: none;
 }
 
-.theme-header-btn svg {
-  color: var(--accent);
-}
-
-/* The mock's theme button label uses the brighter `--text-2`, not the header's
-   grey, so the active theme name reads as a value rather than a control. */
-.theme-header-btn {
-  color: var(--text-secondary);
-}
-
-.theme-header-btn:hover:not(:disabled) {
-  border-color: var(--accent-line);
-}
-
 /* ---------- workspace tabs ---------- */
-
-.workspace-tabbar {
-  display: flex;
-  align-items: stretch;
-  flex: 0 0 auto;
-  height: var(--tabs-h);
-  min-height: var(--tabs-h);
-  padding: 0 var(--space-9); /* Mock reference: .workspace-tabs{padding:0 26px;gap:26px} */
-  border-bottom: 1px solid var(--line-soft);
-  gap: var(--space-9);
-}
 
 .workspace-tabs {
   /* The *label*, not the tab box, is what the eye lines up with the breadcrumb:
@@ -1482,32 +1409,6 @@
   outline-offset: calc(-1 * var(--focus-ring-offset));
 }
 
-/* The mock's `.c-tabs-meta`: what the model is doing, right-aligned in mono. */
-.tab-note {
-  display: flex;
-  align-items: center;
-  align-self: center;
-  gap: var(--space-3);
-  margin: 0 0 0 auto;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  line-height: 1.3;
-  white-space: nowrap;
-}
-
-/* Idle/ready marker is the mock's circle-check, not a status dot. */
-.tab-note svg {
-  width: 12px;
-  height: 12px;
-  color: var(--accent);
-}
-
-.tab-note .status-dot {
-  width: 6px;
-  height: 6px;
-}
-
 /* ---------- centre pane ---------- */
 
 .center-body {
@@ -1538,18 +1439,12 @@
 }
 
 /* The Changes view. The tabpanel itself is the scroll host — it is the element
- * that receives focus for the tab — so the view's own `.secondary-panel`
- * (inspector.css, mock-exact `overflow-y:auto` + padding) contributes only its
- * padding here: one scrollbar, one padding owner, keyboard scrolling works. */
+ * that receives focus for the tab — so one scrollbar and one padding owner,
+ * which keeps keyboard scrolling working. */
 .workspace-view {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 0;
-}
-
-.workspace-view > .secondary-panel {
-  flex: 0 0 auto;
-  overflow: visible;
 }
 
 .workspace-view:focus-visible {
@@ -1658,18 +1553,6 @@
   }
 }
 
-.transcript-foot {
-  margin-top: var(--space-9);
-  padding-top: var(--space-6);
-  border-top: 1px solid var(--line-soft);
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .sheet-backdrop {
   display: none;
 }
@@ -1733,10 +1616,6 @@
     display: none;
   }
 
-  .workspace-tabbar {
-    padding: 0 var(--space-7);
-  }
-
   .chat-inner {
     padding-right: var(--space-7);
     padding-left: var(--space-7);
@@ -1751,15 +1630,7 @@
 }
 
 @media (max-width: 1100px) {
-  .tab-note,
   .head-activity {
-    display: none;
-  }
-
-  /* At 1024px the rail and inspector leave too little header for secondary
-   * button labels. Keep the theme and branch glyphs, with their full accessible
-   * names and tooltips, so the session title never collapses to zero width. */
-  .head-btn.theme-header-btn .theme-header-name {
     display: none;
   }
 
@@ -1889,22 +1760,8 @@
     display: inline-flex;
   }
 
-  .head-btn.accent-head {
-    width: 31px;
-    padding: 0;
-  }
-
-  .head-btn.accent-head .head-btn-label {
-    display: none;
-  }
-
   .header-buttons {
     gap: var(--space-3);
-  }
-
-  .workspace-tabbar {
-    gap: var(--space-7);
-    padding: 0 var(--space-6);
   }
 
   .workspace-tabs {
@@ -1926,35 +1783,32 @@
   }
 }
 
-/* A 52 + 38px frame keeps the conversation in view on the phone. The breadcrumb
+/* A 52px header keeps the conversation in view on the phone. The breadcrumb
  * is now one line, so the title remains the header's primary label on every
  * viewport. */
 @media (max-width: 640px) {
-  /* The phone frame is a space budget, not a density knob.
+  /* The phone header is a space budget, not a density knob.
    *
    * The density rules in `tokens.css` are `:root[data-density='…']` (0,2,0), so
    * the bare `:root` here (0,1,0) lost to them and the tier inherited whatever
-   * density said: `compact` produced a 54 + 36 = 90px frame — 2px *taller* than
-   * the 52 + 38 comfortable frame it exists to shrink — and `spacious` produced
-   * 76 + 51 = 127px, 13% of a 956px screen spent on chrome before a message.
-   * Restating the tier per density makes it a decision. `layout.css` loads after
-   * `tokens.css` (see `index.css`), so at equal specificity this rule wins; the
-   * phone frame shrinks for compact and stays put for spacious, which still gets
-   * its extra room inside the conversation from the spacing scale. */
+   * density said: `compact` produced a 54px header — 2px *taller* than the 52px
+   * comfortable header it exists to shrink — and `spacious` produced 76px, 8% of
+   * a 956px screen spent on chrome before a message. Restating the tier per
+   * density makes it a decision. `layout.css` loads after `tokens.css` (see
+   * `index.css`), so at equal specificity this rule wins; the phone header
+   * shrinks for compact and stays put for spacious, which still gets its extra
+   * room inside the conversation from the spacing scale. */
   :root,
   :root[data-density='comfortable'] {
     --header-h: 52px;
-    --tabs-h: 38px;
   }
 
   :root[data-density='compact'] {
     --header-h: 50px;
-    --tabs-h: 34px;
   }
 
   :root[data-density='spacious'] {
     --header-h: 52px;
-    --tabs-h: 38px;
   }
 
   .main-head {
@@ -1970,8 +1824,7 @@
     height: 30px;
   }
 
-  .head-btn.head-icon,
-  .head-btn.accent-head {
+  .head-btn.head-icon {
     width: 30px;
   }
 
@@ -1989,10 +1842,6 @@
 
   .main-title {
     margin-top: 0;
-  }
-
-  .workspace-tabbar {
-    padding: 0 var(--space-5);
   }
 }
 

@@ -517,7 +517,6 @@
     gap: var(--space-2);
   }
 
-  .chat-main.is-workbench .context-header-button,
   .chat-main.is-workbench .context-header-btn {
     min-width: 30px;
     padding: var(--space-2);

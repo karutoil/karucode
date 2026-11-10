@@ -283,13 +283,15 @@ describe('FileViewer', () => {
 
     await waitFor(() => expect(screen.queryByRole('button', { name: /saving/i })).toBeNull());
     expect((document.querySelector('textarea') as HTMLTextAreaElement).value).toBe(newer);
-    expect(screen.getByText('unsaved', { exact: true })).toBeTruthy();
+    // The status bar is the one place that says the buffer on screen is unsaved:
+    // the toolbar above the file carries actions, not facts about the file.
+    const status = document.querySelector('.file-statusbar')?.textContent ?? '';
+    expect(status).toContain('editing');
+    expect(status).toContain('unsaved changes');
     expect(document.querySelector('.file-size')?.textContent).toBe(
       `${new TextEncoder().encode(saved).length} B`,
     );
-    expect(document.querySelector('.file-statusbar')?.textContent).toContain('editing');
-    expect(document.querySelector('.file-statusbar')?.textContent).toContain('unsaved changes');
-    expect(document.querySelector('.file-statusbar')?.textContent).not.toContain('Saved just now');
+    expect(status).not.toContain('Saved just now');
     expect(store.toasts.value.at(-1)?.message).toBe('Saved docs/guide.md; newer edits remain unsaved.');
 
     // The first response is the saved base, not a reason to discard or overwrite
@@ -532,6 +534,24 @@ describe('FileViewer', () => {
     expect(screen.queryByRole('tab', { name: /source/i })).toBeNull();
     // The status bar still says what is on screen.
     expect(container.querySelector('.file-statusbar')?.textContent).toContain('2 lines');
+  });
+
+  it('hides the dead Preview toggle while the editor is open, and brings it back', async () => {
+    // Editing forces the source pane, so a Preview tab during editing is a button
+    // that cannot change what is on screen - the same class of dead control as a
+    // Preview tab on a file with no preview renderer.
+    installFetch({ content: '# Title\n\nbody', size: 15, language: 'markdown' });
+    store.fileViewerPath.value = 'docs/guide.md';
+    render(<FileViewer />);
+    await waitFor(() => expect(screen.getByRole('tab', { name: /preview/i })).toBeTruthy());
+
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }));
+    await waitFor(() => expect(document.querySelector('textarea')).not.toBeNull());
+    expect(screen.queryByRole('tablist', { name: /file view/i })).toBeNull();
+    expect(screen.queryByRole('tab', { name: /preview/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+    await waitFor(() => expect(screen.getByRole('tab', { name: /preview/i })).toBeTruthy());
   });
 
   it('makes the file-view tabs keyboard-operable, with one tab-in-tablist', async () => {

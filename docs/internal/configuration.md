@@ -203,7 +203,11 @@ keeps a run in control instead:
 * the loop guard - a turn whose calls only return answers the run already has,
   four turns in a row, stops the run with `limit_reached` and says why (see
   `docs/internal/configuration.md`); the per-call rule refuses an identical
-  read-only call before that;
+  read-only call before that. A turn spent only *waiting* is never counted:
+  `terminal_read` on a terminal that is still running, `wait_for_agents` and
+  `list_subagents` all answer identically until the thing they watch changes,
+  so an unchanged answer is the expected outcome and polling is not a loop. A
+  wait mixed with a repeated call still counts;
 * the degenerate-repetition detector, which abandons a stream that repeats one
   short block forever;
 * `max_tool_calls_per_turn`, which bounds one turn's batch;

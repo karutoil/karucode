@@ -24,7 +24,10 @@ use kc_core::message::{Role, ToolCall};
 use kc_core::paths::Workspace;
 use kc_core::provider::ProviderChunk;
 use kc_core::store::{AgentRecord, ApprovalRecord, RunStatus, Store};
-use kc_core::tool::{ApprovalGate, ToolClass, ToolOrigin, ToolOutcome, ToolRegistry};
+use kc_core::tool::{
+    ApprovalGate, Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOrigin, ToolOutcome, ToolRegistry,
+    ToolSpec,
+};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -2379,6 +2382,61 @@ async fn large_tool_output_is_truncated_to_the_configured_budget() {
 }
 
 #[tokio::test]
+async fn a_cut_result_names_the_recovery_of_its_own_tool() {
+    // The generic marker ("re-issue the call with a narrower request") is a dead
+    // end for both of these: `read_file` continues at an `offset`, and a finished
+    // command cannot narrow anything - its output is already gone.
+    let limits = Limits {
+        // Room for the full marker: the shortest marker levels report the drop in
+        // bytes only, and are covered by `kc-core`'s own tests.
+        max_tool_output_bytes: 2_000,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[
+            ("call_read", "read_file", "{\"bytes\":40000}"),
+            ("call_cmd", "run_command", "{\"bytes\":40000}"),
+        ]),
+        Script::text("done"),
+    ])
+    .tool(BigOutputTool::boxed("read_file"))
+    .tool(BigOutputTool::boxed("run_command"))
+    .settings(FakeSettings::default().with_limits(limits))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("big results").await;
+    let finished = tool_finished(&events);
+    let output = |call: &str| {
+        finished
+            .iter()
+            .find(|(id, ..)| id == call)
+            .map(|(_, _, output, _)| output.clone())
+            .unwrap_or_else(|| panic!("no result for {call}: {finished:?}"))
+    };
+
+    let read = output("call_read");
+    assert!(
+        read.contains("re-issue read_file with a later `offset=`"),
+        "a cut read names the offset: {read}"
+    );
+    assert!(
+        !read.contains("re-issue the call with a narrower request"),
+        "the generic sentence is not a next step for read_file: {read}"
+    );
+
+    let command = output("call_cmd");
+    assert!(
+        command.contains("re-run it as `cmd > out.txt 2>&1`"),
+        "a cut command names the redirect: {command}"
+    );
+    assert!(
+        command.contains("limits.max_tool_output_bytes"),
+        "the bound is still named, so the operator can be told: {command}"
+    );
+}
+
+#[tokio::test]
 async fn tool_calls_beyond_the_per_turn_cap_are_skipped_with_a_notice() {
     let limits = Limits {
         max_tool_calls_per_turn: 1,
@@ -3062,6 +3120,115 @@ async fn cancelling_mid_stream_marks_the_run_cancelled() {
     assert!(!h.runtime.cancel("s_unknown_session"));
 }
 
+/// A call the sequential path reaches *after* a stop must not run.
+///
+/// The assistant message already carries both calls, so the transcript owes each
+/// one a `tool` result - but paying for the second call after the user pressed
+/// stop is exactly what a stop is meant to prevent. The answer it gets instead is
+/// `[skipped: run cancelled]`.
+#[tokio::test]
+async fn a_call_reached_after_a_stop_is_skipped_instead_of_run() {
+    let tool = SlowCancelTool::new("slow");
+    let started = tool.started();
+    let limits = Limits {
+        // One call at a time, in order: the second call is only reached after the
+        // first returns, which is what makes "after the stop" testable.
+        parallel_tool_calls: false,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_slow", "slow", "{}"), ("call_echo", "echo", "{}")]),
+        Script::text("never reached"),
+    ])
+    .tool(Arc::new(tool))
+    .tool(EchoTool::boxed("echo"))
+    .settings(FakeSettings::default().with_limits(limits))
+    .build()
+    .await;
+
+    h.submit("two calls, then stop").await;
+    for _ in 0..600 {
+        if started.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        started.load(Ordering::SeqCst) > 0,
+        "the first call has to be in flight before the stop"
+    );
+    assert!(h.runtime.cancel(h.session()), "the stop finds the run");
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "cancelled");
+
+    let messages = h.session_messages().await;
+    let skipped = messages
+        .iter()
+        .find(|m| m.role == "tool" && m.name.as_deref() == Some("echo"))
+        .unwrap_or_else(|| panic!("the unstarted call still needs a result: {messages:?}"));
+    assert_eq!(skipped.content, "[skipped: run cancelled]");
+}
+
+/// A stop that arrives after the run has settled is not a second stop.
+#[tokio::test]
+async fn a_second_stop_reports_nothing_to_stop_and_changes_nothing() {
+    let tool = SlowCancelTool::new("slow");
+    let started = tool.started();
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "slow", "{}")]),
+        Script::text("never reached"),
+    ])
+    .tool(Arc::new(tool))
+    .build()
+    .await;
+
+    h.submit("wait, then stop").await;
+    for _ in 0..600 {
+        if started.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        h.runtime.cancel(h.session()),
+        "the first stop finds the run"
+    );
+    let events = h.collect_until_finished().await;
+    assert_eq!(finished_status(&events), "cancelled");
+    let idle = h.wait_idle().await;
+    assert!(
+        idle.is_empty(),
+        "the run is gone before the second stop: {idle:?}"
+    );
+
+    let runs_before = h.store.runs().len();
+    let messages_before = h.session_messages().await.len();
+    assert!(
+        !h.runtime.cancel(h.session()),
+        "a stop with nothing in flight must report that it stopped nothing"
+    );
+    assert_eq!(
+        count(&events, "run_cancelled"),
+        1,
+        "the run is cancelled once"
+    );
+    assert_eq!(
+        h.store.runs().len(),
+        runs_before,
+        "no run is added or re-run"
+    );
+    assert_eq!(
+        h.store.runs()[0].status,
+        "cancelled",
+        "the settled outcome is left alone"
+    );
+    assert_eq!(
+        h.session_messages().await.len(),
+        messages_before,
+        "a no-op stop writes nothing to the transcript"
+    );
+}
+
 #[tokio::test]
 async fn iteration_limit_stops_the_run_with_limit_reached() {
     // An operator-set ceiling still works, and it is a plain stop: the run ends
@@ -3130,7 +3297,11 @@ async fn a_run_keeps_going_past_a_hundred_turns_without_a_continuation_turn() {
 
     let events = h.run_to_finish("a job that outlives any budget").await;
     assert_eq!(finished_status(&events), "completed");
-    assert_eq!(count(&events, "iteration_started"), 41, "40 tool turns + the answer");
+    assert_eq!(
+        count(&events, "iteration_started"),
+        41,
+        "40 tool turns + the answer"
+    );
     assert_eq!(h.factory.requests().len(), 41, "every script was used");
 
     let messages = h.session_messages().await;
@@ -3169,10 +3340,10 @@ async fn a_run_that_repeats_itself_stops_instead_of_burning_turns() {
     let mut scripts = vec![identical(); 12];
     scripts.push(Script::text("never reached"));
     let mut h = HarnessBuilder::new(scripts)
-    .tool(EchoTool::boxed("echo"))
-    .settings(FakeSettings::default().with_limits(limits))
-    .build()
-    .await;
+        .tool(EchoTool::boxed("echo"))
+        .settings(FakeSettings::default().with_limits(limits))
+        .build()
+        .await;
 
     let events = h.run_to_finish("a question already answered").await;
     assert_eq!(
@@ -3190,6 +3361,297 @@ async fn a_run_that_repeats_itself_stops_instead_of_burning_turns() {
         h.factory.requests().len() < 12,
         "the guard must end the run, not the script list: {}",
         h.factory.requests().len()
+    );
+}
+
+/// The live terminal a run polls: one tool that always answers the same
+/// still-running snapshot, exactly as `plugin__background-terminals__terminal_read`
+/// did for the run this guard killed.
+///
+/// Deliberately a *plugin* tool of class `External`: that is what the real one is,
+/// and it is also the case the per-call repeat rule leaves alone (it only blocks
+/// read-only calls), so the no-news guard is the only thing that can stop this run.
+struct RunningTerminalTool {
+    invocations: Arc<AtomicUsize>,
+}
+
+impl RunningTerminalTool {
+    fn boxed() -> Arc<dyn Tool> {
+        Arc::new(Self {
+            invocations: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for RunningTerminalTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "plugin__background-terminals__terminal_read".into(),
+            description: "Read retained output from a running terminal.".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            origin: ToolOrigin::Plugin {
+                name: "background-terminals".into(),
+            },
+        }
+    }
+
+    fn class(&self) -> ToolClass {
+        ToolClass::External
+    }
+
+    async fn invoke(&self, _request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        // Byte-identical every time: the terminal has printed nothing new yet.
+        ToolOutcome::ok(r#"{"cursor":0,"output":"","status":"running"}"#)
+    }
+}
+
+/// Polling something that is still running is a wait, not a loop.
+///
+/// This is the run a real session lost: it started a test suite in a background
+/// terminal and polled it. Every poll returned the identical `status: running`
+/// answer, so the no-news guard counted four turns of "no new information" and
+/// ended the run `limit_reached` while the suite it was waiting for was still
+/// compiling. A poll's unchanged answer is the *expected* outcome - the only way
+/// to notice a change is to ask again - so those turns must not earn a strike.
+///
+/// The run must survive more polls than the guard allows and still produce its
+/// final answer.
+#[tokio::test]
+async fn polling_a_running_terminal_is_a_wait_not_a_loop() {
+    // Five polls is one more than the guard's four no-news turns: without the
+    // exemption the run is over before the sixth request, and the text answer
+    // below is never reached.
+    let polls = 5;
+    let mut scripts = (0..polls)
+        .map(|_| {
+            Script::call(&[(
+                "call_poll",
+                "plugin__background-terminals__terminal_read",
+                "{}",
+            )])
+        })
+        .collect::<Vec<_>>();
+    scripts.push(Script::text("the suite passed"));
+
+    let mut h = HarnessBuilder::new(scripts)
+        .tool(RunningTerminalTool::boxed())
+        .build()
+        .await;
+
+    let events = h.run_to_finish("run the suite and watch it").await;
+
+    assert_eq!(
+        finished_status(&events),
+        "completed",
+        "a run that only waited must not be stopped as a loop: {:?}",
+        kinds(&events)
+    );
+    assert_eq!(
+        h.factory.requests().len(),
+        polls + 1,
+        "every poll must reach the model, then the answer: {:?}",
+        kinds(&events)
+    );
+    assert_eq!(
+        h.store.runs()[0].status,
+        "completed",
+        "the run row must agree with the terminal frame"
+    );
+}
+
+/// A plugin tool whose declaration is the size a real MCP server's schema is.
+struct FatCatalogueTool;
+
+#[async_trait::async_trait]
+impl Tool for FatCatalogueTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "plugin__fat__fat_tool".into(),
+            description: "d".repeat(17_000),
+            parameters: serde_json::json!({ "type": "object" }),
+            origin: ToolOrigin::Plugin { name: "fat".into() },
+        }
+    }
+
+    fn class(&self) -> ToolClass {
+        ToolClass::ReadOnly
+    }
+
+    async fn invoke(&self, _request: ToolCallRequest, _ctx: ToolCtx) -> ToolOutcome {
+        ToolOutcome::ok("ok")
+    }
+}
+
+/// The tool catalogue is part of the request body, so it must come out of the
+/// same window as the messages.
+///
+/// A real install carried ~40 KB of JSON schema beside the conversation and two
+/// runs died with `prompt is too long` while the window "fitted" its own
+/// character budget. `ContextLimits::reserving` is the arithmetic; this is the
+/// proof the loop actually applies it: 45,000 characters of tool results that
+/// fit a 60,000-character window on their own must be compacted further once a
+/// ~24,000-character catalogue shares that window.
+#[tokio::test]
+async fn a_large_tool_catalogue_is_charged_against_the_context_budget() {
+    let budget = 60_000usize;
+    let limits = Limits {
+        context_max_chars: budget,
+        // Keep the per-call cap out of the way: the point is the *window*, not
+        // the per-result ceiling.
+        max_tool_output_bytes: 40_000,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        Script::call(&[("call_1", "big", "{\"bytes\":15000}")]),
+        Script::call(&[("call_2", "big", "{\"bytes\":15000}")]),
+        Script::call(&[("call_3", "big", "{\"bytes\":15000}")]),
+        Script::text("done"),
+    ])
+    .tool(Arc::new(FatCatalogueTool))
+    .tool(BigOutputTool::boxed("big"))
+    .settings(FakeSettings::default().with_limits(limits))
+    .build()
+    .await;
+
+    let events = h.run_to_finish("look at three big things").await;
+    assert_eq!(
+        finished_status(&events),
+        "completed",
+        "the run must still answer: {:?}",
+        kinds(&events)
+    );
+
+    let requests = h.factory.requests();
+    let request = requests.last().expect("the run's last request");
+    let payload = crate::context::tool_payload_chars(&request.tools);
+    assert!(
+        payload > budget / 4 && payload < budget / 2,
+        "fixture: a {payload}-character catalogue against a {budget} window must be \
+         big enough to matter and small enough to be reservable"
+    );
+    let messages: usize = request
+        .messages
+        .iter()
+        .map(crate::context::message_chars)
+        .sum();
+    assert!(
+        messages + payload <= budget,
+        "the request is {messages} chars of messages + {payload} chars of tool catalogue \
+         against a {budget}-char window"
+    );
+}
+
+/// A subagent's request carries its own catalogue, and it is bounded the same
+/// way.
+///
+/// A child does not get a separate request builder: it runs the same loop
+/// (`subagent.rs` spawns `crate::agent::run_loop`), so the reservation applied
+/// there covers it. This proves that rather than arguing it - the child is given
+/// the same three big results and the same fat catalogue, and *every* request the
+/// run made, parent or child, must fit its window.
+#[tokio::test]
+async fn a_subagents_request_is_charged_for_the_tool_catalogue_too() {
+    let budget = 60_000usize;
+    let limits = Limits {
+        context_max_chars: budget,
+        max_tool_output_bytes: 40_000,
+        ..Default::default()
+    };
+    let subagents = SubagentConfig {
+        max_concurrent: 1,
+        allow_recursive: false,
+        max_depth: 1,
+        allow_background: false,
+        ..Default::default()
+    };
+    let mut h = HarnessBuilder::new(vec![
+        spawn_call("read three big things", None, false),
+        Script::call(&[("call_1", "big", "{\"bytes\":15000}")]),
+        Script::call(&[("call_2", "big", "{\"bytes\":15000}")]),
+        Script::call(&[("call_3", "big", "{\"bytes\":15000}")]),
+        Script::text("child done"),
+        Script::text("parent done"),
+    ])
+    .tool(Arc::new(FatCatalogueTool))
+    .tool(BigOutputTool::boxed("big"))
+    .settings(
+        FakeSettings::default()
+            .with_limits(limits)
+            .with_subagents(subagents),
+    )
+    .build()
+    .await;
+
+    let events = h.run_to_finish("delegate the reading").await;
+    assert_eq!(
+        finished_status(&events),
+        "completed",
+        "the child must still finish: {:?}",
+        kinds(&events)
+    );
+    assert_eq!(count(&events, "agent_spawned"), 1);
+
+    let requests = h.factory.requests();
+    assert!(
+        requests.len() > 4,
+        "the child's own turns must be in the list: {}",
+        requests.len()
+    );
+    let mut largest = 0usize;
+    for (index, request) in requests.iter().enumerate() {
+        let payload = crate::context::tool_payload_chars(&request.tools);
+        let messages: usize = request
+            .messages
+            .iter()
+            .map(crate::context::message_chars)
+            .sum();
+        largest = largest.max(messages);
+        assert!(
+            messages + payload <= budget,
+            "request {index} is {messages} chars of messages + {payload} chars of \
+             tool catalogue against a {budget}-char window"
+        );
+    }
+    assert!(
+        largest > budget / 2,
+        "fixture: a request must actually fill the window, largest was {largest}"
+    );
+}
+
+/// A wait mixed with a re-asked question is still a loop.
+///
+/// The exemption above is for a turn made *only* of waits. Alternating a poll
+/// with a repeated read-only call must still stop the run: otherwise any model
+/// could dodge the guard by interleaving one terminal read.
+#[tokio::test]
+async fn a_wait_mixed_with_a_repeated_read_is_still_stopped() {
+    let mut scripts = Vec::new();
+    for _ in 0..12 {
+        scripts.push(Script::call(&[
+            (
+                "call_poll",
+                "plugin__background-terminals__terminal_read",
+                "{}",
+            ),
+            ("call_read", "echo", "{\"text\":\"same\"}"),
+        ]));
+    }
+    scripts.push(Script::text("never reached"));
+
+    let mut h = HarnessBuilder::new(scripts)
+        .tool(RunningTerminalTool::boxed())
+        .tool(EchoTool::boxed("echo"))
+        .build()
+        .await;
+
+    let events = h.run_to_finish("watch and re-read").await;
+    assert_eq!(
+        finished_status(&events),
+        "limit_reached",
+        "a wait cannot launder a re-asked question: {:?}",
+        kinds(&events)
     );
 }
 
@@ -4424,6 +4886,58 @@ async fn subagent_success_is_recorded_and_returns_its_summary() {
 }
 
 #[tokio::test]
+async fn a_cut_subagent_report_names_the_bound_that_cut_it() {
+    // A child's report is capped by `MAX_SUMMARY_BYTES`, not by the tool-output
+    // budget: a marker that named `limits.max_tool_output_bytes` would send the
+    // parent to a key that changes nothing here.
+    // Not a repeated character: the degenerate-repetition detector would abandon
+    // that stream, and the fixture would never reach the cut it is about.
+    let mut long = String::new();
+    for line in 0..1_200 {
+        long.push_str(&format!("finding {line}: something the child observed\n"));
+    }
+    long.push_str("TAIL-OF-THE-REPORT");
+    let mut h = HarnessBuilder::new(vec![
+        spawn_call("summarise everything", None, false),
+        Script::text(&long),
+        Script::text("parent finished"),
+    ])
+    .build()
+    .await;
+
+    let events = h.run_to_finish("delegate the summary").await;
+    assert_eq!(finished_status(&events), "completed");
+
+    let agent_summary = h.store.agents()[0].summary.clone();
+    assert!(
+        agent_summary.contains("the report is capped at 8 000 bytes"),
+        "a cut report says what actually cut it: {agent_summary}"
+    );
+    assert!(
+        agent_summary.contains("agent_history"),
+        "and names the call that reads the rest of the child: {agent_summary}"
+    );
+    assert!(
+        !agent_summary.contains("limits.max_tool_output_bytes"),
+        "raising the tool-output budget would not make this report longer: {agent_summary}"
+    );
+
+    // The parent sees the same report as the spawn_agent tool result.
+    let parent_messages = h.session_messages().await;
+    let tool_message = parent_messages
+        .iter()
+        .find(|m| m.role == "tool" && m.agent_id.is_none())
+        .expect("parent tool message");
+    assert!(
+        tool_message
+            .content
+            .contains("the report is capped at 8 000 bytes"),
+        "the parent is told how to read on: {}",
+        tool_message.content
+    );
+}
+
+#[tokio::test]
 async fn subagent_failure_is_isolated_from_the_parent_run() {
     let mut h = HarnessBuilder::new(vec![
         spawn_call("do something impossible", None, false),
@@ -5080,6 +5594,71 @@ async fn subagent_timeout_cancels_inflight_tool_before_dropping_the_loop() {
         h.session_messages().await.last().unwrap().content,
         "parent recovered"
     );
+}
+
+/// The same stop story for the *other* half of it, without a poll-order race:
+/// a run that runs out of wall clock while a tool is still working must cut that
+/// tool the way a person's stop does - cancellation it can observe, then the
+/// grace period - and the result row must still say the deadline.
+///
+/// The subagent test above has two timers stamped microseconds apart, so which
+/// one fires first is decided by the tokio timer wheel. This one has a single
+/// timer: a top-level run whose `limits.max_run_secs` expires under a tool that
+/// is still in flight, which is the deadline arm itself.
+#[tokio::test]
+async fn a_run_deadline_cancels_the_inflight_tool_instead_of_dropping_it() {
+    let limits = Limits {
+        max_run_secs: 2,
+        ..Default::default()
+    };
+    let slow = Arc::new(SlowCancelTool::new("slow"));
+    let started = slow.started();
+    let cancelled = slow.cancelled();
+    let finished = slow.finished();
+    let mut h = HarnessBuilder::new(vec![Script::call(&[("call_slow", "slow", "{}")])])
+        .tool(slow)
+        .settings(FakeSettings::default().with_limits(limits))
+        .build()
+        .await;
+
+    let events = tokio::time::timeout(Duration::from_secs(20), h.run_to_finish("go"))
+        .await
+        .expect("a tool still running at the deadline must not hang the run");
+
+    assert_eq!(started.load(Ordering::SeqCst), 1, "the tool ran");
+    assert!(
+        cancelled.load(Ordering::SeqCst),
+        "the tool must observe the deadline's cancellation during the grace period \
+         instead of having its future dropped mid-flight"
+    );
+    assert!(
+        !finished.load(Ordering::SeqCst),
+        "the tool must not finish on its own"
+    );
+
+    // A run that ran out of time is `limit_reached`, not `cancelled`: nobody
+    // pressed stop. That holds only because the tool is handed a *child* token -
+    // firing the run's own token here would report a wall-clock limit as a
+    // cancellation.
+    assert_eq!(finished_status(&events), "limit_reached");
+
+    let rows: Vec<String> = h
+        .session_messages()
+        .await
+        .into_iter()
+        .filter(|message| message.role == "tool")
+        .map(|message| message.content)
+        .collect();
+    assert_eq!(rows.len(), 1, "the call still gets a result row: {rows:?}");
+    assert!(
+        rows[0].contains("did not finish before the run deadline"),
+        "the persisted row says the run ran out of time: {rows:?}"
+    );
+    assert!(
+        !rows[0].to_lowercase().contains("cancel"),
+        "the deadline row must not read as a cancellation: {rows:?}"
+    );
+    assert!(h.wait_idle().await.is_empty(), "the run is gone");
 }
 
 #[tokio::test]

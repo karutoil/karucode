@@ -1496,6 +1496,31 @@ refuses, `ask`/`ask_commands` ask with the exact action, `auto` permits.
   atomic: after a crash or a failed submission, inspect the returned session
   rather than generating a new request key.
 
+`control_read_session` takes `session_id`, `limit` and, for paging, `message_id`
+and `offset`:
+
+* `limit` (default 30, 1-100) is how many of the newest messages come back. It is
+  **not** how you read deeper into one message: an overlong message is cut, not
+  dropped from the window.
+* A message longer than 4,000 characters ends with
+  `[… call control_read_session again with message_id=N offset=M]`, and every
+  `messages[]` row carries the same `next_offset` (`null` when that message ended
+  inside the window). The whole read is also capped at 24,000 characters; a
+  message the budget cut ends with a marker naming both `limit=N` for fewer
+  messages and its own `message_id`/`offset`, and `messages_omitted` counts the
+  older messages that did not fit at all.
+* Passing `message_id` reads that one message instead of the newest `limit` -
+  whole, or from `offset` - and returns `message` instead of `messages`, with
+  `message_id`, `role`, `name`, `content`, `offset`, `total_chars`,
+  `next_offset` and the names of its `tool_calls`.
+* `offset` is a **0-based character** offset into `message_id`'s content,
+  characters rather than bytes.
+* Refusals, each naming the call that works: `offset` without `message_id`
+  (`offset` continues one message, so it needs the id the marker came with); a
+  `message_id` that is not a positive id or does not exist in that session; and an
+  `offset` past the end of the message. The way back is always the `limit` read,
+  which hands out the real ids.
+
 Deleting a control chat removes its transcript, runs and agent rows and keeps its
 directory; the other chats are unaffected and dispatch request identities stay
 reserved. This mechanism does not change missions.

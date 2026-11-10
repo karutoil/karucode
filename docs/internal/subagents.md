@@ -140,7 +140,10 @@ What ends a subagent instead:
 
 * `timeout_secs` - the wall clock for one delegated task (4h by default);
 * the loop guard - four turns in a row that only return answers the child
-  already has stop it, and its summary says it was looping;
+  already has stop it, and its summary says it was looping; a turn of nothing
+  but waits (`terminal_read` on a running terminal, `wait_for_agents`,
+  `list_subagents`) does not count, so a child watching a build is not stopped
+  for waiting;
 * the same per-call rule and repetition detector a run gets;
 * the parent cancelling it, or `cancel`/`kill_agents`.
 
@@ -193,6 +196,17 @@ parent run. A timeout, a provider error and a cancelled task all come back with
 an explanatory message. A *background* agent has no such result to carry the
 failure, so it notifies and leaves it in its row and its summary.
 
+A wall clock that runs out is a stop, not an abandonment. When the deadline
+lands while a tool is still in flight, the runtime fires the cancellation that
+tool can observe, gives it the same grace a person's stop gets (half a second)
+so it can kill its process group or close what it opened, and only then drops
+it and writes the result row. That row says the run deadline - it never reads
+as "cancelled" - so a transcript read afterwards can tell "the run ran out of
+time" from "somebody pressed stop". The child still ends `failed` with a
+`timed out after Ns` message and its `agent_finished` event says the same
+thing; a top-level run that hits `limits.max_run_secs` goes through the same
+path and ends `limit_reached`, never `cancelled`.
+
 Cancellation is also safe while a spawn is still preparing its persisted task.
 If that preparation future is dropped after creating the running row but before
 the child loop exists, a preparation guard records the agent as `cancelled`,
@@ -230,6 +244,10 @@ row or concurrency slot is left behind.
   separate subagents instead of widening one.
 * `report_status` is a claim, not a measurement. Nothing verifies a progress
   number, so treat it as a hint about what to look at.
+* A child's report reaches the parent cut at 8,000 bytes, and the cut marker
+  says what continues it: the rest of the child is in its transcript, which
+  `agent_history` returns (page older messages with `before`). Asking the child
+  to repeat a report that was only cut in transit costs a whole extra run.
 
 Full reference: `docs/internal/subagents.md` (this page) and the
 `subagents` topic; `GET /api/sessions/:id` returns the session's `agents`

@@ -151,7 +151,10 @@
 //
 // * `timeout_secs` - the wall clock for one delegated task (4h by default);
 // * the loop guard - four turns in a row that only return answers the child
-//   already has stop it, and its summary says it was looping;
+//   already has stop it, and its summary says it was looping; a turn of nothing
+//   but waits (`terminal_read` on a running terminal, `wait_for_agents`,
+//   `list_subagents`) does not count, so a child watching a build is not stopped
+//   for waiting;
 // * the same per-call rule and repetition detector a run gets;
 // * the parent cancelling it, or `cancel`/`kill_agents`.
 //
@@ -204,6 +207,17 @@
 // an explanatory message. A *background* agent has no such result to carry the
 // failure, so it notifies and leaves it in its row and its summary.
 //
+// A wall clock that runs out is a stop, not an abandonment. When the deadline
+// lands while a tool is still in flight, the runtime fires the cancellation that
+// tool can observe, gives it the same grace a person's stop gets (half a second)
+// so it can kill its process group or close what it opened, and only then drops
+// it and writes the result row. That row says the run deadline - it never reads
+// as "cancelled" - so a transcript read afterwards can tell "the run ran out of
+// time" from "somebody pressed stop". The child still ends `failed` with a
+// `timed out after Ns` message and its `agent_finished` event says the same
+// thing; a top-level run that hits `limits.max_run_secs` goes through the same
+// path and ends `limit_reached`, never `cancelled`.
+//
 // Cancellation is also safe while a spawn is still preparing its persisted task.
 // If that preparation future is dropped after creating the running row but before
 // the child loop exists, a preparation guard records the agent as `cancelled`,
@@ -241,6 +255,10 @@
 //   separate subagents instead of widening one.
 // * `report_status` is a claim, not a measurement. Nothing verifies a progress
 //   number, so treat it as a hint about what to look at.
+// * A child's report reaches the parent cut at 8,000 bytes, and the cut marker
+//   says what continues it: the rest of the child is in its transcript, which
+//   `agent_history` returns (page older messages with `before`). Asking the child
+//   to repeat a report that was only cut in transit costs a whole extra run.
 //
 // Full reference: `docs/internal/subagents.md` (this page) and the
 // `subagents` topic; `GET /api/sessions/:id` returns the session's `agents`
@@ -259,7 +277,8 @@ use kc_core::ids::AgentId;
 use kc_core::message::Message;
 use kc_core::store::{AgentRecord, AgentStatus, MessageScope, NewMessage, RunStatus};
 use kc_core::tool::{
-    truncate_output, Tool, ToolCallRequest, ToolClass, ToolCtx, ToolOutcome, ToolRegistry, ToolSpec,
+    truncate_output, truncate_output_with_advice, Tool, ToolCallRequest, ToolClass, ToolCtx,
+    ToolOutcome, ToolRegistry, ToolSpec,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -343,6 +362,15 @@ pub(crate) const RUN_END_CHILD_GRACE: Duration = Duration::from_millis(1_000);
 /// Upper bound for a subagent summary returned to the parent and stored on the
 /// agent record.
 pub const MAX_SUMMARY_BYTES: usize = 8_000;
+
+/// What a cut report tells the parent instead of the generic advice.
+///
+/// [`truncate_output`]'s own marker names `limits.max_tool_output_bytes`, which is
+/// *not* the bound that cut a report: a parent that raised it would still get
+/// 8,000 bytes back. The bound is [`MAX_SUMMARY_BYTES`] and the call that reads
+/// the rest of the child is `agent_history`, so that is what the marker says.
+const SUMMARY_CUT_ADVICE: &str =
+    "the report is capped at 8 000 bytes; read the rest of the child with `agent_history`";
 
 /// Upper bound on `agent_history` output, so auditing one agent cannot eat a
 /// parent's context in a single call.
@@ -1034,7 +1062,8 @@ async fn spawn_batch(
                 content.push_str(&format!("\n- warning: {warning}"));
             }
         }
-        let (content, cut) = truncate_output(&content, MAX_SUMMARY_BYTES);
+        let (content, cut) =
+            truncate_output_with_advice(&content, MAX_SUMMARY_BYTES, SUMMARY_CUT_ADVICE);
         return Ok(ToolOutcome {
             ok: true,
             content,
@@ -1110,7 +1139,8 @@ async fn spawn_batch(
             content.push_str(&format!("- {refusal}\n"));
         }
     }
-    let (content, cut) = truncate_output(&content, MAX_SUMMARY_BYTES);
+    let (content, cut) =
+        truncate_output_with_advice(&content, MAX_SUMMARY_BYTES, SUMMARY_CUT_ADVICE);
     let _ = batch;
     Ok(ToolOutcome {
         ok: ok && refusals.is_empty(),
@@ -1428,6 +1458,11 @@ async fn start_child(
         is_subagent: true,
         budget: kc_core::prompt::Budget::for_subagent(&limits, &cfg),
         deadline: Instant::now() + Duration::from_secs(cfg.timeout_secs.max(1)),
+        // The child's own window. Its request also carries a tool catalogue (a
+        // child registry, so not necessarily the parent's), and that is taken off
+        // this budget in the one place every request is built - `run_loop_inner` -
+        // rather than here: reserving it in both places would charge the child
+        // twice for the same JSON and leave it a third less room to work in.
         context_max_chars: limits.context_chars_for(&model),
         model,
         limits,
@@ -1578,7 +1613,8 @@ async fn run_child_loop(
     // child completed remains in the parent workspace.
     drop(worktree);
 
-    let (summary_raw, _) = truncate_output(&outcome.text, MAX_SUMMARY_BYTES);
+    let (summary_raw, _) =
+        truncate_output_with_advice(&outcome.text, MAX_SUMMARY_BYTES, SUMMARY_CUT_ADVICE);
     let summary = if summary_raw.trim().is_empty() {
         outcome.error.clone().unwrap_or_default()
     } else {
@@ -2192,7 +2228,8 @@ impl Tool for WaitForAgentsTool {
                 still_running.join(", ")
             ));
         }
-        let (content, cut) = truncate_output(&content, MAX_SUMMARY_BYTES);
+        let (content, cut) =
+            truncate_output_with_advice(&content, MAX_SUMMARY_BYTES, SUMMARY_CUT_ADVICE);
         ToolOutcome {
             ok: still_running.is_empty(),
             content,
@@ -2330,7 +2367,8 @@ impl Tool for ListSubagentsTool {
             }
         }
 
-        let (content, cut) = truncate_output(&content, MAX_SUMMARY_BYTES);
+        let (content, cut) =
+            truncate_output_with_advice(&content, MAX_SUMMARY_BYTES, SUMMARY_CUT_ADVICE);
         ToolOutcome {
             ok: true,
             content,

@@ -52,7 +52,6 @@ describe('frame metrics are declared once, in tokens.css', () => {
     ['--inspector-w', '342px'],
     ['--content-max', '820px'],
     ['--header-h', '66px'],
-    ['--tabs-h', '44px'],
   ])('%s is %s', (property, value) => {
     expect(tokens).toMatch(new RegExp(`${property}:\\s*${value}`));
   });
@@ -68,12 +67,6 @@ describe('the layout consumes the frame metrics rather than re-typing them', () 
     const body = rule(layout, '.main-head');
     expect(body).toContain('height: var(--header-h)');
     expect(body).toContain('min-height: var(--header-h)');
-  });
-
-  it('.workspace-tabbar takes its height from --tabs-h', () => {
-    const body = rule(layout, '.workspace-tabbar');
-    expect(body).toMatch(/height:\s*var\(--tabs-h\)/);
-    expect(body).toMatch(/min-height:\s*var\(--tabs-h\)/);
   });
 
   it('.chat-inner caps its measure with --content-max', () => {

@@ -566,16 +566,6 @@ input.mono {
   color: var(--success);
 }
 
-.badge-danger {
-  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
-  color: var(--danger);
-}
-
-.badge-muted {
-  color: var(--muted);
-}
-
 .chip {
   display: inline-flex;
   align-items: center;
@@ -597,21 +587,6 @@ input.mono {
 .chip-ok {
   border-color: color-mix(in srgb, var(--success) 35%, transparent);
   color: var(--success);
-}
-
-.chip-warn {
-  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
-  color: var(--warn);
-}
-
-.chip-danger {
-  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
-  color: var(--danger);
-}
-
-.chip-running {
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
-  color: var(--accent-fill);
 }
 
 .chip-muted {

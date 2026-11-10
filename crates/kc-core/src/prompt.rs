@@ -1,5 +1,97 @@
 //! Coding-oriented system prompt, provider agnostic.
 
+// @kc-doc: system-prompt
+// @kc-title: What the agent is told about reading, tool output and stopping
+// @kc-summary: The rules in the system prompt that keep a run from bloating: read the narrow window, continue a cut result from the offset it names, never repeat a call, and stop when the work is done.
+// @kc-tags: system prompt, tool output, truncation, loop guard, tokens, budget, rules
+// @kc-applies-to: concept:system prompt, tool:read_file, tool:search_files, tool:karucode_docs, tool:spawn_agent, config:limits.max_tool_output_bytes, config:limits.max_command_output_bytes, config:limits.max_iterations, config:limits.max_run_secs, config:subagents.timeout_secs
+//
+// The system prompt is **message[0] of every request in every run**, so it is the
+// one text billed on every turn of every session. It therefore carries rules, not
+// a manual: what to read, how to continue a result that was cut, and when to stop.
+// This topic is what it actually says - so you can predict what your agent will do
+// and know which knob to turn when it does not.
+//
+// # The rules, in the order the prompt gives them
+//
+// 1. **Search before reading, and read the narrowest window.** `search_files` (or
+//    `glob`) finds the file and the line; `read_file` takes `offset=`/`limit=` or
+//    several `ranges=`/`paths=` in one call. Before an edit the agent reads the
+//    region it is about to change. A whole file is read only when the question is
+//    actually about the whole file.
+// 2. **Continue a cut result from the call it names.** See below; the prompt names
+//    the marker and forbids re-reading "to see the rest".
+// 3. **Never repeat a call.** A repeat buys nothing and the runtime refuses it.
+// 4. **Batch independent calls into one turn** instead of one per turn.
+// 5. **Quote the lines that matter, not the output.** A subagent's report is its
+//    findings, and it is cut at 8,000 bytes.
+// 6. **Run the project's own checks** after changing code, and do not claim a
+//    change works without a command that showed it.
+// 7. **Stop for real.** Done: say what changed, what was verified, what remains,
+//    and call no more tools. Blocked: say what is blocked and what would unblock
+//    it, instead of re-issuing calls that did not help.
+//
+// # How a cut result is continued
+//
+// Every cut result says what was dropped and which call continues it, and the
+// prompt tells the agent to do exactly that:
+//
+// * `read_file` ends a page with `[next N lines omitted; continue with offset=X]`;
+// * `karucode_docs` ends a long topic with the `{"action":"read","offset":N}` that
+//   reads the next page;
+// * any other result cut by the output budget carries a
+//   `[truncated: ... re-issue the call with a narrower request (offset=/limit=,
+//   a smaller max_results, a narrower path, glob or pattern) or raise
+//   limits.max_tool_output_bytes]` marker naming the bound it hit.
+//
+// Raising the bound is an operator decision: `limits.max_tool_output_bytes`
+// (24,000 by default) is the per-result ceiling, and `limits.max_command_output_bytes`
+// (32,000) is what a command streams, so a long build log is cut there and not by
+// the first key.
+//
+// # Why a repeat is refused, and what ends a spinning run
+//
+// The third identical answer raises a warning; the fourth identical read-only call,
+// with nothing written by this run in between, comes back `[blocked: ...]` instead
+// of being executed. Above that sits the loop guard: four turns in a row that teach
+// the model nothing end the run as `limit_reached` and say why. A *wait*-shaped call
+// (`wait_for_agents`, `terminal_read`, `list_subagents`) is exempt, because its
+// unchanged answer is the expected outcome, not a loop.
+//
+// # Budget wording
+//
+// The prompt states the budget the loop really runs under, and nothing else:
+// `limits.max_iterations` defaults to **0, no ceiling** - a run is bounded by the
+// `limits.max_run_secs` wall clock (86,400 by default), by the loop guards above,
+// and by the user cancelling. A subagent is told *its own* numbers
+// (`subagents.timeout_secs`, 14,400 by default) rather than the run's, because
+// planning against a limit it will never be given is worse than no number.
+//
+// # What is bounded inside the prompt
+//
+// * A project's instructions file: 8,000 characters, cut with a note that says so
+//   (see `project-instructions`).
+// * Text a plugin adds for the run (the control-chat and mission paragraphs):
+//   4,000 characters total, cut with a note that says so. This is the one place
+//   where user data (`mission.title`, `mission.description`) reaches message[0],
+//   and message[0] is never shortened by compaction - so it is cut here.
+// * One line per tool: its first sentence, at most 200 characters. A plugin writes
+//   its own description in another process, so a description with no sentence break
+//   is cut with `…` rather than pasted whole.
+//
+// # Gotchas
+//
+// * Adding a line here is a recurring cost: it is re-sent, and re-billed, on every
+//   model call of every run. Change it as prose a model can act on, and keep it
+//   short. A test pins the assembled prompt's size with a fixed builtin tool set
+//   (a ceiling, not a byte count): raising it is a deliberate diff, not a drift.
+// * The prompt is deterministic for the same inputs - no timestamps, no map
+//   iteration order, plugin names sorted and deduped - so the provider's prefix
+//   cache keeps hitting across turns. Editing this file costs one cache miss per
+//   install, not one per turn.
+// * Do not describe a limit here that the code does not enforce. A model that
+//   believes a turn counter exists stops early to save it.
+
 // @kc-doc: project-instructions
 // @kc-title: Follow a project's own AGENTS.md instructions
 // @kc-summary: How karucode finds a workspace's instructions file, which name wins, how much of it reaches the system prompt, and why it cannot override your request.
@@ -180,14 +272,18 @@ pub fn system_prompt_with_instructions(
         let can_delegate = tools.iter().any(|t| t.name == "spawn_agent");
         if can_delegate {
             "You are a subagent inside karucode. Do the task you were given, then report back \
-             concisely. You may delegate a self-contained part of it with `spawn_agent` and \
-             collect the result with `wait_for_agents`, and you may message another agent or your \
-             parent with `send_message` when you are blocked, need a decision, or have something \
-             they are waiting on."
+             concisely: the findings, what you changed and verified and what is left - not a \
+             transcript of your turns, and it is cut at 8,000 bytes. You may delegate a \
+             self-contained part of it with `spawn_agent` and collect the result with \
+             `wait_for_agents`, and you may message another agent or your parent with \
+             `send_message` when you are blocked, need a decision, or have something they are \
+             waiting on."
         } else {
             "You are a focused subagent inside karucode. Complete the single task you were given, \
-             then report back concisely. Do not expand scope, do not spawn more agents. If you are \
-             blocked on something only your parent can answer, say so in your report."
+             then report back concisely: the findings, what you changed and verified and what is \
+             left - not a transcript of your turns, and it is cut at 8,000 bytes. Do not expand \
+             scope, do not spawn more agents. If you are blocked on something only your parent can \
+             answer, say so in your report."
         }
     } else {
         "You are karucode, a coding agent running in a self-hosted harness. You work directly in the user's workspace until the task is actually done."
@@ -202,10 +298,24 @@ pub fn system_prompt_with_instructions(
     let extra_block = if extra.is_empty() {
         String::new()
     } else {
-        format!(
-            "\nAdditional context provided by plugins:\n{}\n",
-            extra.join("\n")
-        )
+        // The runtime pushes a fixed control-chat paragraph and a mission
+        // paragraph that interpolates a mission's title and description - user
+        // data. This block is the only unbounded insertion point left in the
+        // request, and it lands in message[0], which compaction never shortens
+        // (`shrink_bodies` leaves `Role::System` alone by design). Without a
+        // cap, a long mission description is an unbounded request on every turn
+        // with no recovery; so it is cut here and the block says it was cut.
+        let joined = extra.join("\n");
+        let (body, cut) = cut_chars(&joined, EXTRA_MAX_CHARS);
+        let note = if cut {
+            format!(
+                "\n[cut: the plugin context is capped at {EXTRA_MAX_CHARS} characters; the rest of \
+                 what was supplied is not included.]"
+            )
+        } else {
+            String::new()
+        };
+        format!("\nAdditional context provided by plugins:\n{body}{note}\n")
     };
 
     // Empty when the workspace has no instructions file, so the prompt is then
@@ -292,12 +402,13 @@ Workspace root: {workspace_root}
 Approval policy: {approval_mode}
 {instructions_block}
 How to work:
-1. Inspect before you change: read the relevant files, list directories, and search the project. Never guess a file's contents or a symbol's name.
-2. Before editing an existing file, read the region you are about to change. Keep edits small and local; preserve unrelated code and formatting.
-3. Prefer ripgrep-backed `search_files` over reading many files. Read the narrowest range that answers the question.
-4. Run the project's own checks (build, tests, linters) after changing code when they exist. Do not claim a change works without observing a successful command.
-5. Tool output is bounded. If a result says it was truncated, narrow the request instead of assuming the rest.
-6. Stop when the task is complete or genuinely blocked. Then summarise what changed, what you verified, and what remains.
+1. Search before you read, and read the narrowest window: `search_files` or `glob` finds the file and the line; `read_file` takes `offset=`/`limit=` or `ranges=` - never a whole file unless the whole file is the question. Read the region you are about to edit. Never guess a file's contents or a symbol's name.
+2. A cut result names the exact call that continues it - `[next N lines omitted; continue with offset=X]`, the `offset`+`limit` a long `karucode_docs` topic ends with, or a marker naming a smaller `max_results`, a narrower `path`/`glob`/`pattern`, or `limits.max_tool_output_bytes`. Do that instead of guessing, and never re-read the whole thing "to see the rest".
+3. Do not repeat a call you already made: an unchanged read-only answer comes back `[blocked: ...]`, the loop guard ends a run whose turns stop teaching anything, so a repeat costs a turn and can end the run. If an answer cannot change, ask a different question.
+4. Batch independent calls into one turn (several `paths`/`ranges` in one `read_file`; one `search_files` with a `glob`) rather than one call per turn.
+5. Quote the lines that matter, not the output: do not paste large tool output into your reply or into a subagent report. A report is findings, not a transcript, and it is cut at 8,000 bytes.
+6. Run the project's own checks (build, tests, linters) after changing code. Do not claim a change works without observing a successful command.
+7. Stop for real: done, say what changed, what you verified and what remains, and call no more tools; blocked, say what is blocked and what would unblock it instead of re-issuing calls that did not help.
 
 Rules:
 - Shell commands run as the server user with the server's permissions. There is no OS sandbox: avoid destructive or irreversible commands, and never pipe secrets to the network.
@@ -366,11 +477,16 @@ fn plugin_block(tools: &[ToolSpec]) -> String {
 /// list is one line per tool, whatever a plugin puts in its description. This
 /// fixes the old literal-`". "` cut, which could run into another paragraph when
 /// the first sentence ended before a newline.
+///
+/// The result is then capped at [`TOOL_DESCRIPTION_MAX_CHARS`]: "one line per
+/// tool" means one *bounded* line, and a description is written by another
+/// process (a plugin or an MCP server), so a single unpunctuated sentence could
+/// otherwise be kilobytes long in a message that is re-sent on every call.
 fn first_sentence(text: &str) -> String {
     let mut chars = text.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
         match c {
-            '\n' | '\r' => return text[..i].trim().to_string(),
+            '\n' | '\r' => return cap_chars(text[..i].trim(), TOOL_DESCRIPTION_MAX_CHARS),
             '.' => {
                 // `.` is ASCII, so the sentence ends one byte past it.
                 let stops = match chars.peek() {
@@ -378,13 +494,31 @@ fn first_sentence(text: &str) -> String {
                     Some((_, next)) => next.is_whitespace(),
                 };
                 if stops {
-                    return text[..i + 1].trim().to_string();
+                    return cap_chars(text[..i + 1].trim(), TOOL_DESCRIPTION_MAX_CHARS);
                 }
             }
             _ => {}
         }
     }
-    text.trim().to_string()
+    cap_chars(text.trim(), TOOL_DESCRIPTION_MAX_CHARS)
+}
+
+/// Longest one tool's line in the prompt may be, description included.
+///
+/// 200 characters is well past any honest first sentence and far below what a
+/// generated or careless description can reach. The cap is a character bound, so
+/// a description in a non-ASCII script is not cut mid-character.
+pub const TOOL_DESCRIPTION_MAX_CHARS: usize = 200;
+
+/// Cut `text` to at most `max` characters, marking the cut with `…`.
+///
+/// Unlike [`cut_chars`] this is for a line that is *presented*, so a cut is
+/// visible: silent truncation in a prompt reads as a complete description.
+fn cap_chars(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…", text[..end].trim_end()),
+        None => text.to_string(),
+    }
 }
 
 /// The files checked, in order, for a workspace's own instructions. The first
@@ -399,6 +533,18 @@ pub const INSTRUCTIONS_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md", ".karucode/i
 /// `limits.max_tool_output_bytes` is 24,000). It is a character bound, not a byte
 /// bound, so a file of non-ASCII text is not cut in the middle of a character.
 pub const INSTRUCTIONS_MAX_CHARS: usize = 8_000;
+
+/// Characters of run-specific context (the `extra` paragraphs) that may enter
+/// the system prompt.
+///
+/// The runtime adds a fixed control-chat paragraph and, in a coordinator
+/// session, a mission paragraph that interpolates a mission's title and
+/// description - user data. This is the only insertion point in the request
+/// whose content a user controls, and it sits in message[0], which compaction
+/// never shortens. 4,000 characters is a little over a page: enough for both
+/// paragraphs, far below a provider's window, and the block says when it was
+/// cut instead of silently dropping the remainder.
+pub const EXTRA_MAX_CHARS: usize = 4_000;
 
 /// Hard cap on the bytes read off disk: four bytes per character is the largest
 /// UTF-8 encoding, so this always covers [`INSTRUCTIONS_MAX_CHARS`] characters.
@@ -701,6 +847,213 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_line_is_capped_even_when_its_description_never_ends_a_sentence() {
+        // A plugin writes its own description in another process. "One line per
+        // tool" bounded the *number* of lines, not their length: a description
+        // with no full stop used to reach the prompt whole.
+        let long = "no full stop in this description ".repeat(40);
+        assert!(long.chars().count() > TOOL_DESCRIPTION_MAX_CHARS * 4);
+
+        let one = first_sentence(&long);
+        assert_eq!(one.chars().count(), TOOL_DESCRIPTION_MAX_CHARS + 1);
+        assert!(one.ends_with('…'), "a cut description must show it was cut");
+
+        // A character bound: multi-byte text is cut on a boundary and marked the
+        // same way, so a non-ASCII description cannot panic the prompt builder.
+        let wide = first_sentence(&"é".repeat(TOOL_DESCRIPTION_MAX_CHARS * 2));
+        assert_eq!(wide.chars().count(), TOOL_DESCRIPTION_MAX_CHARS + 1);
+        assert!(wide.starts_with('é') && wide.ends_with('…'), "{wide}");
+
+        let tools = vec![ToolSpec {
+            name: "plugin__x__y".into(),
+            description: long,
+            parameters: serde_json::json!({}),
+            origin: ToolOrigin::Plugin { name: "x".into() },
+        }];
+        let p = system_prompt(
+            "/w",
+            &tools,
+            "auto",
+            &Budget::for_run(&Limits::default()),
+            &[],
+        );
+        let list = p
+            .split("Available tools:\n")
+            .nth(1)
+            .expect("the prompt lists its tools")
+            .trim_end();
+        assert!(!list.contains('\n'), "still one line per tool: {list}");
+        // `- `plugin__x__y`: ` + description + ` (plugin:x)`
+        assert!(
+            list.chars().count() < TOOL_DESCRIPTION_MAX_CHARS + 60,
+            "an unbounded description reached the list: {} chars",
+            list.chars().count()
+        );
+    }
+
+    #[test]
+    fn the_extra_context_block_is_bounded_and_says_it_was_cut() {
+        // This block is where run-specific, caller-supplied text enters message[0]
+        // (the control-chat paragraph, and a mission's title and description - user
+        // data). The system prompt is never shortened by compaction, so an
+        // unbounded block would be an unbounded request on every turn with no
+        // recovery. It is cut where it is built, and it says so.
+        let budget = Budget::for_run(&Limits::default());
+
+        let small = vec!["You are the persistent central control chat.".to_string()];
+        let under = system_prompt("/w", &[], "auto", &budget, &small);
+        assert!(under.contains("You are the persistent central control chat."));
+        assert!(
+            !under.contains("[cut:"),
+            "an under-cap block was cut: {under}"
+        );
+
+        let base = system_prompt("/w", &[], "auto", &budget, &[]);
+        let huge = vec!["é".repeat(EXTRA_MAX_CHARS * 3)];
+        let over = system_prompt("/w", &[], "auto", &budget, &huge);
+        assert_eq!(over.matches("[cut:").count(), 1, "{over}");
+        assert!(over.contains(&format!("capped at {EXTRA_MAX_CHARS} characters")));
+        // Exactly the cap survives - a character bound, cut on a boundary...
+        assert_eq!(over.matches('é').count(), EXTRA_MAX_CHARS);
+        // ...and the whole block costs the cap plus its wrapper and marker.
+        let grew = over.chars().count() - base.chars().count();
+        assert!(
+            grew > EXTRA_MAX_CHARS && grew < EXTRA_MAX_CHARS + 400,
+            "the extra block is not bounded by its cap: grew {grew} chars"
+        );
+    }
+
+    #[test]
+    fn the_rules_say_how_to_resume_a_cut_result_and_when_to_stop() {
+        // The three asks this text exists for: read narrow, follow the
+        // continuation a cut result names, and stop for real. A rule that says
+        // only "tool output is bounded" leaves a model with nothing to do.
+        let p = system_prompt("/w", &[], "ask", &Budget::for_run(&Limits::default()), &[]);
+        for needle in [
+            "narrowest window",
+            "continue with offset=X",
+            "offset=",
+            "never re-read the whole thing",
+            "[blocked: ...]",
+            "loop guard",
+            "not a transcript",
+            "8,000 bytes",
+            "Stop for real",
+            "call no more tools",
+        ] {
+            assert!(
+                p.contains(needle),
+                "the rules no longer say {needle:?}: {p}"
+            );
+        }
+        // A cut can also be lifted deliberately, so the real key is named.
+        assert!(p.contains("limits.max_tool_output_bytes"), "{p}");
+    }
+
+    /// A fixed, representative builtin tool set for the size ceiling below.
+    ///
+    /// The descriptions are stand-ins, so the number this pins cannot move when
+    /// `kc-tools` reword one of them: what is measured here is the prompt
+    /// builder - the rules, the block plumbing and the per-tool line - which is
+    /// what grows by accident. `karucode_docs` is deliberately absent, because
+    /// its block carries the whole topic index and so its length follows the
+    /// number of doc topics rather than anything in this file.
+    fn builtin_tool_set() -> Vec<ToolSpec> {
+        let specs = [
+            (
+                "read_file",
+                "Read one file, several files, or several windows of one file.",
+            ),
+            (
+                "write_file",
+                "Create or overwrite a file with the given content.",
+            ),
+            ("edit_file", "Replace an exact string in an existing file."),
+            ("list_dir", "List a directory inside the workspace."),
+            ("glob", "Find files and directories by name with a glob."),
+            (
+                "search_files",
+                "Search file contents with ripgrep or a built-in walker.",
+            ),
+            ("run_command", "Run a shell command in the workspace."),
+            ("git_status", "Show branch and working-tree status."),
+            ("git_diff", "Show the staged or unstaged diff."),
+            ("git_log", "Show recent commit history."),
+            ("spawn_agent", "Spawn one focused subagent."),
+            ("spawn_agents", "Spawn several subagents that run at once."),
+            ("send_message", "Deliver a message to another agent."),
+            ("wait_for_agents", "Wait until background subagents finish."),
+            (
+                "list_subagents",
+                "List the live subagents this run can see.",
+            ),
+            ("kill_agents", "Stop subagents and everything they started."),
+            ("pause_agents", "Pause subagents."),
+            ("resume_agents", "Resume paused subagents."),
+            ("report_status", "Say what you are doing and how far along."),
+            ("agent_history", "Read one agent's transcript."),
+        ];
+        specs
+            .iter()
+            .map(|(name, description)| ToolSpec {
+                name: (*name).into(),
+                description: (*description).into(),
+                parameters: serde_json::json!({}),
+                origin: ToolOrigin::Builtin,
+            })
+            .collect()
+    }
+
+    /// Ceiling for the assembled prompt with [`builtin_tool_set`].
+    ///
+    /// The prompt is message[0] of every request, so every character here is
+    /// re-sent and re-billed on every model call of every run. This is a ceiling
+    /// rather than an exact byte count on purpose: wording may change, but it may
+    /// not quietly grow. It measured 4,987 characters when the ceiling was set,
+    /// so the headroom is a little under 5% - a rule that needs more than that is
+    /// a decision to make deliberately, in a diff that says why.
+    const PROMPT_MAX_CHARS: usize = 5_200;
+
+    #[test]
+    fn the_prompt_stays_under_its_size_ceiling() {
+        let tools = builtin_tool_set();
+        let prompt = system_prompt_with_roots(
+            "/home/someone/a-longer-project-name",
+            &[std::path::PathBuf::from("/tmp")],
+            &tools,
+            "auto",
+            &Budget::for_run(&Limits::default()),
+            &[],
+        );
+        let chars = prompt.chars().count();
+        assert!(
+            chars <= PROMPT_MAX_CHARS,
+            "the system prompt is {chars} characters (ceiling {PROMPT_MAX_CHARS}); it is re-sent \
+             on every model call, so cut a rule or raise the ceiling on purpose:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn the_prompt_is_byte_identical_for_the_same_inputs() {
+        // The provider caches the request *prefix*, and the system prompt is its
+        // first message: any per-call variation (a timestamp, a HashSet's order)
+        // would cost a full cache miss on every turn.
+        let tools = builtin_tool_set();
+        let budget = Budget::for_run(&Limits::default());
+        let build = || {
+            system_prompt_with_roots(
+                "/ws",
+                &[std::path::PathBuf::from("/tmp")],
+                &tools,
+                "auto",
+                &budget,
+                &["run context".to_string()],
+            )
+        };
+        assert_eq!(build().as_bytes(), build().as_bytes());
+    }
+
+    #[test]
     fn subagent_prompt_forbids_recursion_only_when_it_cannot_delegate() {
         let budget = Budget::for_subagent(&Limits::default(), &SubagentConfig::default());
         let p = system_prompt("/w", &[], "auto", &budget, &[]);
@@ -720,6 +1073,17 @@ mod tests {
         let allowing = system_prompt("/w", &[spawn], "auto", &budget, &[]);
         assert!(allowing.contains("You may delegate"), "{allowing}");
         assert!(!allowing.contains("do not spawn more agents"), "{allowing}");
+
+        // "Report back concisely" is not actionable on its own; both variants say
+        // what a report *is* (findings, not the transcript) and the real cap, so a
+        // child does not spend its last turns pasting tool output at its parent.
+        for prompt in [&p, &allowing] {
+            assert!(
+                prompt.contains("not a transcript of your turns"),
+                "{prompt}"
+            );
+            assert!(prompt.contains("8,000 bytes"), "{prompt}");
+        }
     }
 
     #[test]

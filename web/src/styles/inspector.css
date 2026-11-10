@@ -449,13 +449,6 @@
   white-space: nowrap;
 }
 
-.tree-size {
-  flex: 0 0 auto;
-  padding-left: var(--space-4);
-  color: var(--faint);
-  font-size: var(--fs-tiny);
-}
-
 .tree-loading {
   flex: 0 0 auto;
   padding-left: var(--space-3);
@@ -471,8 +464,7 @@
   color: var(--icon-folder);
 }
 
-.tree-loading-skeleton,
-.git-loading {
+.tree-loading-skeleton {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
@@ -480,10 +472,6 @@
 
 .skeleton-tree-row {
   height: 24px;
-}
-
-.skeleton-git-row {
-  height: 34px;
 }
 
 /* ---------- quick preview (last opened file) -------------------------- */
@@ -551,15 +539,6 @@
   line-height: 1.65;
 }
 
-.preview-path {
-  padding: var(--space-5) var(--space-6);
-  color: var(--text-kicker);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-}
-
 .preview-foot {
   display: flex;
   align-items: center;
@@ -576,144 +555,10 @@
   font-family: var(--font-mono);
 }
 
-/* ---------- changes view chrome (mock: `.secondary-panel`) -------------
- * This is the full-width main-area panel; the inspector tab reuses only the
- * `.panel-action-btn` / `.panel-kicker` pieces. */
-
-.secondary-panel {
-  flex: 1 1 auto;
-  min-height: 0;
-  padding: 28px max(28px, calc((100% - 790px) / 2));
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.panel-kicker {
-  margin: 0 0 var(--space-4);
-  color: var(--text-kicker-panel);
-  font-size: var(--fs-micro);
-  font-weight: 700;
-  letter-spacing: 1.2px;
-  text-transform: uppercase;
-}
-
-.panel-title {
-  margin: 0;
-  color: var(--text);
-  font-size: var(--fs-hero);
-  font-weight: 700;
-  letter-spacing: -0.8px;
-  line-height: 1.25;
-}
-
-.panel-desc {
-  margin: var(--space-3) 0 0;
-  color: var(--text-empty-copy);
-  font-size: var(--fs-label);
-  line-height: 1.7;
-}
-
-.panel-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--space-5);
-  margin: 24px 0 var(--space-6);
-}
-
 /* `.panel-action-btn` is declared once, in settings.css: the settings sheet and
  * both Changes variants share it. */
 
-.panel-change-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-
-.panel-change-file {
-  border: 1px solid var(--line-card);
-  border-radius: var(--radius);
-  /* Pane -> card (§3.1). */
-  background: var(--surface);
-  overflow: hidden;
-}
-
-.panel-file-title {
-  display: flex;
-  align-items: center;
-  gap: var(--space-5);
-  width: 100%;
-  min-width: 0;
-  padding: var(--space-6);
-  border: 0;
-  border-bottom: 1px solid transparent;
-  background: transparent;
-  color: var(--text-user);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  text-align: left;
-}
-
-.panel-change-file.is-open .panel-file-title {
-  border-bottom-color: var(--line-card);
-}
-
-.panel-file-title:hover {
-  background: var(--surface-raised);
-}
-
-.panel-file-title > svg {
-  flex: 0 0 auto;
-  color: inherit;
-}
-
-.panel-file-path {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.panel-file-title .change-status {
-  flex-direction: row;
-  align-items: center;
-  gap: var(--space-3);
-}
-
-.panel-file-title .change-status-label {
-  font-family: var(--font-mono);
-}
-
-.panel-file-chevron {
-  display: inline-grid;
-  place-items: center;
-  flex: 0 0 auto;
-  color: var(--text-date);
-  transition: transform var(--transition-fast);
-}
-
-.panel-file-chevron.is-open {
-  transform: rotate(180deg);
-}
-
-.panel-file-diff .diff {
-  max-height: 460px;
-  overflow: auto;
-}
-
-.panel-file-diff .inline-error {
-  margin: var(--space-6);
-}
-
-/* ---------- git changes ------------------------------------------------ */
-
-.change-summary {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-4);
-}
+/* ---------- metric tiles ------------------------------------------------ */
 
 .metric {
   min-width: 0;
@@ -748,212 +593,6 @@
   color: var(--meta-text);
   font-size: var(--fs-tiny);
   line-height: 1.4;
-}
-
-.git-group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.git-group-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  margin: 0;
-  padding: var(--space-1) var(--space-1) var(--space-3);
-  color: var(--text-kicker);
-  font-size: var(--fs-micro);
-  font-weight: 720;
-  letter-spacing: 0.9px;
-  text-transform: uppercase;
-}
-
-.git-count {
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  font-weight: 500;
-  letter-spacing: 0;
-}
-
-.git-files {
-  display: flex;
-  flex-direction: column;
-  margin: 0;
-  list-style: none;
-}
-
-/* The mock's `.change-row`: a borderless row separated by hairlines, not a card. */
-.change-list {
-  display: flex;
-  flex-direction: column;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.change-row {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-4);
-  width: 100%;
-  min-width: 0;
-  padding: var(--space-6) var(--space-2);
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
-  text-align: left;
-  transition: background-color var(--transition-fast);
-}
-
-.change-row:hover {
-  background: var(--surface-raised);
-}
-
-.change-row:focus-visible {
-  position: relative;
-  z-index: 1;
-  outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: -2px;
-}
-
-.change-row.is-active {
-  background: var(--row-selected-bg);
-}
-
-.change-row.is-active .change-name {
-  color: var(--accent-on-tint);
-}
-
-.file-logo {
-  display: inline-grid;
-  place-items: center;
-  flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-raised) 55%, var(--line-card));
-  color: var(--icon-rust);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-}
-
-.change-desc {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.change-name {
-  overflow: hidden;
-  color: var(--text-user);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.change-dir {
-  overflow: hidden;
-  color: var(--text-subtle);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.change-status {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: var(--space-1);
-  flex: 0 0 auto;
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  line-height: 1.4;
-}
-
-.change-status .git-status {
-  font-size: var(--fs-tiny);
-  font-weight: 600;
-}
-
-.change-status-label {
-  color: var(--text-kicker);
-  font-size: var(--fs-tiny);
-  text-transform: lowercase;
-}
-
-.git-status {
-  flex: 0 0 auto;
-  width: 16px;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  text-align: center;
-}
-
-.git-status.status-ok {
-  color: var(--success);
-}
-
-.git-status.status-warn {
-  color: var(--warn);
-}
-
-.git-status.status-danger {
-  color: var(--danger);
-}
-
-.git-diff {
-  margin-top: var(--space-2);
-  border: 1px solid var(--line-card);
-  border-radius: var(--radius);
-  background: var(--surface-preview);
-  overflow: hidden;
-}
-
-.git-diff-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--line-card);
-  /* Header strip inside the diff card: nested one step up. */
-  background: var(--surface-raised);
-}
-
-.git-diff-path {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-user);
-  font-family: var(--font-mono);
-  font-size: var(--fs-tiny);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.git-diff .diff {
-  max-height: 430px;
-  overflow: auto;
-}
-
-.skeleton-diff {
-  height: 150px;
-}
-
-/* ---------- commands --------------------------------------------------- */
-
-.command-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
 }
 
 /* ---------- agents ----------------------------------------------------- */
@@ -1709,14 +1348,6 @@
 }
 
 /* ---------- narrow tweaks --------------------------------------------- */
-
-@media (max-width: 640px) {
-  /* The mock has no narrow rule for the centre panel; keep the title readable
-   * instead of letting 28px gutters squeeze it. */
-  .secondary-panel {
-    padding: 20px var(--space-6) var(--space-9);
-  }
-}
 
 @media (max-width: 460px) {
   .inspector-top {
