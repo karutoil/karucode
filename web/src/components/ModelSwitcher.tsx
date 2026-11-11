@@ -128,6 +128,11 @@ function useRovingOptions(
   }, [open, activeKey, signature, listbox]);
 
   const onKeyDown = (event: KeyboardEvent): void => {
+    // The phone sheet holds a reasoning group beside the model list. Arrow keys
+    // belong to whatever the focus is on: walking the model list from an effort
+    // button would move the roving tab stop behind the control being used.
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.getAttribute('role') !== 'option') return;
     const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
     if (step === 0 && event.key !== 'Home' && event.key !== 'End') return;
     const options = keys.filter((key) => {
@@ -147,6 +152,37 @@ function useRovingOptions(
   };
 
   return { activeKey, onKeyDown };
+}
+
+/**
+ * Write a reasoning effort for the session's current model, with the guards the
+ * picker has to apply before it writes anything.
+ *
+ * Shared by the wide composer's own reasoning pill and by the phone's combined
+ * sheet, so both refuse the same three cases for the same reasons: a pin that is
+ * still in flight (a second PATCH would race the first), a session already on
+ * the endpoint default (`null` is stored as "no preference", so there is nothing
+ * to clear), and a dangling pin whose profile or model no longer exists (the
+ * server would reject the effort for a model it cannot resolve).
+ *
+ * Resolves `true` when a request was actually made.
+ */
+async function applyReasoningEffort(value: string): Promise<boolean> {
+  const sessionId = store.currentSessionId.value;
+  if (sessionId !== null && store.sessionModelMutationPending.value === sessionId) return false;
+  const { providerId, modelId, pinned, effort } = effectiveSelection();
+  const config = store.config.value;
+  const provider = providerId ? (config?.providers.find((profile) => profile.id === providerId) ?? null) : null;
+  const entry = provider?.models.find((model) => model.id === modelId);
+  const dangling = Boolean(pinned && (!provider || (provider.models.length > 0 && !entry)));
+  const nextEffort = value === 'default' ? null : value;
+  if (nextEffort === effort) return false;
+  if (nextEffort === null && !pinned) return false;
+  if (dangling || !providerId || !modelId) return false;
+  // The state owner's per-session generation rejects a late answer after a
+  // session/project change; this component never applies that answer locally.
+  await actions.setSessionModelSelection(providerId, modelId, nextEffort);
+  return true;
 }
 
 /** Per-session model picker; opens upward from the composer. */
@@ -200,6 +236,19 @@ export function ModelSwitcher(): JSX.Element | null {
       : 'No model configured yet';
   const pinSuffix = dangling ? ' · unavailable' : pinned ? ' · this session' : '';
 
+  // A phone has room for one control in this row, so the model and the reasoning
+  // effort share one pill and one sheet: the effort is a line under the model
+  // name (where a desktop shows the provider) and its choices are a group at the
+  // bottom of the model list. Two 24px pills with truncated labels - "Claud…",
+  // "Def…" - told the reader nothing and gave them two targets to hit.
+  const phone = store.phoneViewport.value;
+  const reasoningAvailable = entry?.reasoning !== false;
+  const currentEffort =
+    REASONING_OPTIONS.find((option) => option.value === (effort ?? 'default')) ?? REASONING_OPTIONS[0]!;
+  const accessibleName = phone
+    ? `Model and reasoning for this session: ${label} on ${providerLabel}, reasoning ${currentEffort.label}. Open the picker`
+    : `Model for this session: ${label} on ${providerLabel}. Switch model`;
+
   const closeAndRestoreFocus = (): void => {
     setOpen(false);
     trigger.current?.focus();
@@ -216,6 +265,12 @@ export function ModelSwitcher(): JSX.Element | null {
     } finally {
       setPendingTarget(null);
     }
+  };
+
+  const chooseEffort = async (value: string): Promise<void> => {
+    if (mutationPending || dangling) return;
+    closeAndRestoreFocus();
+    await applyReasoningEffort(value);
   };
 
   const followDefault = async (): Promise<void> => {
@@ -240,15 +295,23 @@ export function ModelSwitcher(): JSX.Element | null {
         aria-expanded={open}
         disabled={mutationPending}
         title={title}
-        aria-label={`Model for this session: ${label} on ${providerLabel}. Switch model`}
+        aria-label={accessibleName}
       >
         <span class="model-switcher-text">
-          <CpuIcon size={13} />
-          <span class="model-switcher-model">{label}</span>
+          <span class="model-switcher-line">
+            <CpuIcon size={13} />
+            <span class="model-switcher-model">{label}</span>
+          </span>
           <span class="model-switcher-provider">
             {providerLabel}
             {pinSuffix}
           </span>
+          {phone && reasoningAvailable ? (
+            <span class="model-switcher-effort" title={`Reasoning effort: ${currentEffort.description}`}>
+              <SparkIcon size={10} />
+              {currentEffort.label}
+            </span>
+          ) : null}
         </span>
         <ChevronDownIcon size={12} class="down" />
       </button>
@@ -258,7 +321,11 @@ export function ModelSwitcher(): JSX.Element | null {
           ref={listbox}
           class="model-switcher-menu dropup"
           role="listbox"
-          aria-label="Choose a model for this session"
+          aria-label={
+            phone
+              ? 'Choose a model and reasoning effort for this session'
+              : 'Choose a model for this session'
+          }
           onKeyDown={roving.onKeyDown}
         >
           {config.providers.map((profile) => (
@@ -312,6 +379,41 @@ export function ModelSwitcher(): JSX.Element | null {
               })}
             </div>
           ))}
+          {phone && reasoningAvailable ? (
+            // The same choices the standalone pill offers, in the same order, on
+            // the sheet the model list already opened. `aria-pressed` rather than
+            // `role="option"`: this is a group of toggles, not a second listbox,
+            // so the model list's arrow-key walk never moves the reader's focus.
+            <div
+              class="model-switcher-group model-switcher-reasoning"
+              role="group"
+              aria-label="Reasoning effort for this session"
+            >
+              <p class="model-switcher-group-title">
+                Reasoning
+                {dangling ? <span class="model-switcher-warn">unavailable</span> : null}
+              </p>
+              <div class="reasoning-choices">
+                {REASONING_OPTIONS.map((option) => {
+                  const active = option.value === (effort ?? 'default');
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      class="reasoning-choice"
+                      aria-pressed={active}
+                      data-active={active ? 'true' : 'false'}
+                      disabled={mutationPending || dangling}
+                      title={option.description}
+                      onClick={() => void chooseEffort(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
           <div class="model-switcher-footer">
             {pinned ? (
               <button
@@ -357,8 +459,14 @@ export function ReasoningSelector(): JSX.Element | null {
   usePopover(open, () => setOpen(false), root, trigger);
 
   // Same gate as the model picker: a session (or a draft) is open, so the picker
-  // is there.
-  if (!config || (sessionId === null && store.draftSession.value === null) || config.providers.length === 0) {
+  // is there. On a phone the model pill *is* the reasoning picker (its sheet
+  // carries the same options), because two pills do not fit in that row.
+  if (
+    store.phoneViewport.value ||
+    !config ||
+    (sessionId === null && store.draftSession.value === null) ||
+    config.providers.length === 0
+  ) {
     return null;
   }
 
@@ -382,13 +490,7 @@ export function ReasoningSelector(): JSX.Element | null {
   const choose = async (value: string): Promise<void> => {
     if (mutationPending) return;
     closeAndRestoreFocus();
-    const nextEffort = value === 'default' ? null : value;
-    if (nextEffort === effort) return;
-    if (nextEffort === null && !pinned) return;
-    if (dangling || !providerId || !modelId) return;
-    // The state owner's per-session generation rejects a late answer after a
-    // session/project change; this component never applies that answer locally.
-    await actions.setSessionModelSelection(providerId, modelId, nextEffort);
+    await applyReasoningEffort(value);
   };
 
   return (

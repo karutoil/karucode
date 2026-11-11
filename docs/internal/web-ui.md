@@ -273,9 +273,13 @@ deliberately outside the parent form's dirty state.
   input grows with the draft to its responsive cap, and the transcript reserves
   the dock's measured height (`--composer-h`), so the last message and **Jump to
   latest** stay clear of the controls. The gutter either side is not a hit target,
-  so a wheel or drag there still scrolls the transcript. On a running phone the
-  model controls and Stop keep one row while Usage and the explicit queue/steer
-  controls keep another; neither Stop nor the pending-work controls disappear.
+  so a wheel or drag there still scrolls the transcript. On a phone the dock is
+  one control row - attach, a single **model + reasoning** pill, Usage and Send -
+  and its popovers open *above* the dock against the viewport, because a 24px
+  bubble inside a clipped 336px row was a picker nobody could see; on a running
+  phone the configuration row keeps the pill and Stop while Usage and the explicit
+  queue/steer controls keep a second row, so neither Stop nor the pending-work
+  controls disappear.
 * **Auto-follow**: while you are at the newest message the transcript keeps up
   with everything that lands - streamed text, Markdown that renders late, tool
   cards, command output, approval cards - however much arrives at once. Scroll
@@ -875,10 +879,35 @@ a run is not the first effect of dismissing those controls.
 
 The composer remains opaque and measured above the transcript. Its input uses a
 viewport-aware cap and re-grows after resize; at the ≤640px tier its 16px text
-avoids iOS focus zoom. Running controls split deliberately rather than dropping Usage,
-Stop or queue/steer. `viewport-fit=cover` plus the safe-area insets keeps the
+avoids iOS focus zoom. `viewport-fit=cover` plus the safe-area insets keeps the
 frame clear of the phone status bar and home indicator. Shortcut hint prose and
 decorative meters yield before visible actions and accessible labels.
+
+**The phone dock is one row, not two squeezed pills.** Model and reasoning are
+one control there: the pill names the model with the effort on a quiet second
+line, and tapping it opens a sheet that carries the model list *and* the effort
+choices. Two 24px pills capped at 108px/92px rendered as "Claud…" and "Def…" in
+a 336px row - two mystery buttons, in the corner a thumb reaches first. The
+standalone reasoning pill is hidden below 640px, not merely narrowed, so the
+decision does not exist twice; from 641px up both pills come back with room for
+their real names.
+
+**A popover opens where the thumb is, above the dock.** The dock's control
+cluster clips its children so a long model name cannot push Send out of the
+row, and a menu positioned inside it was clipped with them: the picker opened
+(the button said `aria-expanded="true"`) and nothing appeared. Below 800px the
+menus are `position: fixed`, anchored to the dock's own measured top edge
+(`--composer-h`) with a capped height and their own scrolling; on a phone they
+span the screen's gutters above the dock. That replaces a `bottom: calc(100% +
+6px)` measured against the *viewport*, which put the list at `top: -268px` on
+an 844px screen.
+
+**Results sits above the veil, not under it.** An open sheet is dimmed by
+`.sheet-backdrop` (z-index 35, a sibling of `.app`). The Results sheet carried
+z-index 24 from its docked-overlay placement, so expanding Results on a phone
+painted a dark, blurred scrim over the panel itself - legible only through the
+veil and easy to mistake for a focus bug. `styles/workbench.css` lifts the open
+sheet to 41 below 1024px; the docked desktop overlay keeps its own stacking.
 
 **The conversation owns the frame, never its content.** The Workbench's Results
 split is a row, so the conversation pane is a flex item in it; left on the

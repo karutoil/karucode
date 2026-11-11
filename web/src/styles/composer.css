@@ -510,7 +510,7 @@
 }
 
 /* The mock's `.pill-btn` glyphs are 11px. */
-.compose-bottom .model-switcher-text > svg {
+.compose-bottom .model-switcher-line > svg {
   width: 11px;
   height: 11px;
 }
@@ -539,12 +539,9 @@
   text-overflow: ellipsis;
 }
 
-/* On a phone the composer cannot give the reasoning pill room for the word and
- * the effort, so the word steps aside: "Default" beside the spark glyph is
- * readable, "Rea…" is not, and the accessible name keeps the whole sentence. */
-@media (max-width: 560px) {
-  .compose-bottom .reasoning-prefix { display: none; }
-}
+/* There is no `.reasoning-prefix` rule for a phone: the standalone pill is gone
+ * below 640px, where the effort is a line on the model pill and its choices are
+ * a group in the model sheet (see `ModelSwitcher`). */
 
 /* `.pill-divider`: 1×16 `--line-soft`, `margin:0 3px`, between the two pills. */
 .compose-bottom .reasoning-selector {
@@ -1155,31 +1152,51 @@
     margin-left: 0;
   }
 
-  /* Once the row wraps to two lines, a box-anchored menu would cover its own
-   * trigger, so it goes back to hugging the pill. */
-  .compose-bottom .model-switcher {
-    position: relative;
-  }
-
+  /* The cluster clips its pills (`.compose-bar-left` keeps them in their lane),
+   * and an absolutely positioned menu inside it was clipped with them: the
+   * picker opened, the button said `aria-expanded="true"`, and nothing appeared.
+   * A fixed menu is measured against the viewport, so it clears that clip and can
+   * be anchored above the dock's top edge - `--composer-h` is exactly that edge
+   * (`lib/dockHeight.ts`) - whatever height the draft has grown the dock to.
+   *
+   * The `min()`/`42dvh` pair is the guard for a dock that fills the screen (a
+   * landscape phone with a long draft and a queued panel): the menu stops 56dvh
+   * up and is at most 42dvh tall, so it is never parked off the top edge the way
+   * a raw `--composer-h` anchor could be. */
   .compose-bottom .model-switcher-menu.dropup,
   .compose-bottom .reasoning-selector .model-switcher-menu.dropup {
+    position: fixed;
+    top: auto;
     right: auto;
-    bottom: calc(100% + 6px);
-    left: 0;
-    width: min(250px, calc(100vw - 32px));
+    bottom: min(calc(var(--composer-h, 96px) + var(--space-3)), 56dvh);
+    left: var(--space-6);
+    width: min(300px, calc(100vw - var(--space-9)));
+    max-height: 42dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 
+  /* Reasoning is the right-hand pill, so its menu opens under it. */
+  .compose-bottom .reasoning-selector .model-switcher-menu.dropup {
+    right: var(--space-6);
+    left: auto;
+  }
+
+  /* Room for the real label, not for a 145px stub. Below the phone tier the row
+   * still holds two pills and 800px is enough for "Claude Sonnet 4.5" beside a
+   * readable effort; the 24px `min-width` floor and the ellipsis are what keep
+   * two long names from overlapping, so the cap only needs to be generous. */
   .compose-bottom .model-switcher-button {
-    max-width: min(145px, 100%);
+    max-width: min(220px, 100%);
     overflow: hidden;
   }
 
   .compose-bottom .reasoning-selector .model-switcher-button {
-    max-width: min(124px, 100%);
+    max-width: min(190px, 100%);
   }
 
   .compose-bottom .model-switcher-model {
-    max-width: 104px;
+    max-width: 175px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1290,24 +1307,94 @@
     display: none;
   }
 
-  /* Squeeze the pills before the row wraps: the pill is `padding + chevron +
-   * label`, so the label cap alone is not enough. */
-  .compose-bottom .model-switcher-button {
-    max-width: min(108px, 100%);
+  /* ---------- the phone control row -------------------------------------
+   *
+   * One pill carries the model *and* the reasoning effort here: the effort is a
+   * quiet second line under the model name and its choices live at the bottom of
+   * the same sheet (`ModelSwitcher`). Two pills in a 336px row were capped at
+   * 108px and 92px and rendered as "Claud…" and "Def…" - two mystery buttons
+   * with 24px targets in the corner a thumb reaches first.
+   *
+   * The row is attach, model (flex), Usage, Send, so the one label that
+   * matters gets the room the second pill used to hold. */
+  .compose-bottom {
+    padding: var(--space-2) var(--space-3) var(--space-3);
+    gap: var(--space-2);
+    /* No second line here: with one pill there is nothing to wrap, and a wrapped
+     * row put Send alone on its own line at 320px (measured: 52px of dock for a
+     * 28px button). The pill ellipsises instead; it has a 24px floor. */
+    flex-wrap: nowrap;
   }
 
-  .compose-bottom .reasoning-selector .model-switcher-button {
-    max-width: min(92px, 100%);
+  /* The pill chain has to stretch, not hug: this is the only control in the
+   * middle of the row now. */
+  .composer-session-pins,
+  .composer-session-pins .composer-controls {
+    flex: 1 1 auto;
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+
+  .compose-bottom .model-switcher {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .compose-bottom .model-switcher-button {
+    /* Two lines: the model's name, then the effort. `height: auto` because the
+     * base rule pins the desk pill to 24px, which would clip the second line. */
+    width: 100%;
+    max-width: none;
+    height: auto;
+    min-height: 40px;
+    justify-content: flex-start;
+    padding: var(--space-1) var(--space-3);
+  }
+
+  /* Stacked, not inline: at 320px the model name needs the whole pill width, so
+   * the effort takes the line the provider leaves behind. */
+  .compose-bottom .model-switcher-text {
+    flex: 1 1 auto;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+  }
+
+  .compose-bottom .model-switcher-line {
+    max-width: 100%;
+    gap: var(--space-2);
+  }
+
+  /* Under the name, not flush with the glyph: the effort belongs to the model. */
+  .compose-bottom .model-switcher-effort {
+    max-width: 100%;
+    padding-left: calc(11px + var(--space-2));
   }
 
   .compose-bottom .model-switcher-model {
-    max-width: 60px;
+    max-width: none;
+    font-size: var(--fs-tiny);
   }
 
-  /* 11px type in the same 44px cap truncated the label to "R…": the type has a
-   * floor, so the cap gets the room instead (§3.3). */
-  .compose-bottom .reasoning-selector .model-switcher-model {
-    max-width: 54px;
+  .compose-bottom .model-switcher-button .down {
+    flex: 0 0 auto;
+    margin-left: auto;
+  }
+
+  /* The standalone reasoning pill is the sheet's group now, not a control of its
+   * own: hidden here so a tap target cannot exist twice for one decision. */
+  .compose-bottom .reasoning-selector {
+    display: none;
+  }
+
+  /* The sheet is the width of the screen here: a 300px card in a 390px window
+   * leaves a strip of dimmed transcript for no gain in reach. */
+  .compose-bottom .model-switcher-menu.dropup,
+  .compose-bottom .reasoning-selector .model-switcher-menu.dropup {
+    right: var(--space-3);
+    left: var(--space-3);
+    width: auto;
   }
 
   /* The decorative meter yields before the Usage label or the real percentage.
@@ -1327,14 +1414,6 @@
     flex: 0 1 0;
     min-width: 0;
     width: 0;
-  }
-
-  .compose-bottom .model-switcher {
-    max-width: 96px;
-  }
-
-  .compose-bottom .reasoning-selector {
-    max-width: 86px;
   }
 
   /* `flex-shrink: 0` on the buttons: the 28px send square must never be squeezed. */
@@ -1404,6 +1483,12 @@
   .queued-recall,
   .queue-mode-option {
     min-height: 32px;
+  }
+
+  /* The model pill carries two lines on a phone (model, then effort) and it is
+   * the one control that changes what answers you, so it takes the full target. */
+  .compose-bottom .model-switcher-button {
+    min-height: 40px;
   }
 
   .attachment-chip-remove {

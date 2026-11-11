@@ -737,11 +737,9 @@ export function Composer({
 
   useEffect(() => {
     if (focusTick === 0) return;
-    const narrow =
-      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-        ? window.matchMedia('(max-width: 1023px)').matches
-        : false;
-    if (narrow) return;
+    // Narrow layouts are sheets and phones: moving focus there would pop the
+    // on-screen keyboard over the conversation the reader just switched to.
+    if (store.narrowViewport.value) return;
     const timer = window.setTimeout(() => textarea.current?.focus(), 30);
     return () => window.clearTimeout(timer);
   }, [focusTick]);
@@ -843,11 +841,10 @@ export function Composer({
 
   // Phones get a short placeholder: at 16px (the iOS no-zoom size) the desktop
   // sentence wraps to two lines in a 390px column, and an empty dock would then
-  // stand two lines tall before the user has typed anything.
-  const narrowViewport =
-    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      ? window.matchMedia('(max-width: 640px)').matches
-      : false;
+  // stand two lines tall before the user has typed anything. Read from the store
+  // rather than `matchMedia` here: this is decided during render, and a phone
+  // held sideways (or a window narrowed after load) has to re-decide.
+  const narrowViewport = store.phoneViewport.value;
 
   const placeholder = !canType
     ? (disabledReason ?? 'The composer is unavailable.')

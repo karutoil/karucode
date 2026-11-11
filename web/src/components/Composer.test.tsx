@@ -54,28 +54,39 @@ function binaryFile(name: string, bytes: readonly number[] = [0, 1, 2]): File {
 describe('Composer', () => {
   it('uses a one-line placeholder on a phone so the empty dock stays one line', () => {
     // At 16px (the iOS no-zoom size) the desktop sentence wraps to two lines in a
-    // ~390px column, which made an empty composer stand two lines tall.
-    const matchMedia = window.matchMedia;
+    // ~390px column, which made an empty composer stand two lines tall. The tier
+    // is the store's `phoneViewport`, not a `matchMedia` read during render, so
+    // the same composer re-decides when a window narrows or a phone rotates.
+    act(() => {
+      store.phoneViewport.value = true;
+    });
     try {
-      window.matchMedia = ((query: string) => ({
-        matches: query.includes('640px'),
-        media: query,
-        onchange: null,
-        addListener: () => undefined,
-        removeListener: () => undefined,
-        addEventListener: () => undefined,
-        removeEventListener: () => undefined,
-        dispatchEvent: () => false,
-      })) as typeof window.matchMedia;
-
       const { textarea } = renderComposer();
       expect(textarea.getAttribute('placeholder')).toBe('Ask karucode anything…');
       // The draft itself can still be long; only the hint is shortened.
       fireEvent.input(textarea, { target: { value: 'Explain the build' } });
       expect(textarea.value).toBe('Explain the build');
     } finally {
-      window.matchMedia = matchMedia;
+      act(() => {
+        store.phoneViewport.value = false;
+      });
     }
+  });
+
+  it('re-decides the placeholder when the viewport crosses the phone tier', () => {
+    // A desktop window dragged narrow (and a rotated phone) used to keep the
+    // sentence it rendered at mount; the store signal makes the tier live.
+    const { textarea } = renderComposer();
+    expect(textarea.getAttribute('placeholder')).toBe(
+      'Ask karucode anything, or describe a change...',
+    );
+    act(() => {
+      store.phoneViewport.value = true;
+    });
+    expect(textarea.getAttribute('placeholder')).toBe('Ask karucode anything…');
+    act(() => {
+      store.phoneViewport.value = false;
+    });
   });
 
   it('keeps the full placeholder on a desktop viewport', () => {

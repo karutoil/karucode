@@ -395,6 +395,59 @@ def main() -> int:
               and hidden_on_phone
               and phone["scrollWidth"] <= phone["width"] + 1, phone)
         session.screenshot(out / "06-phone.png")
+
+        # ------------------------------- the phone Results sheet is above the veil
+        # Expanding Results on a phone painted it *under* `.sheet-backdrop`
+        # (z-index 35): the docked overlay's own z-index 24 leaked into the sheet
+        # presentation, so the panel sat beneath a dark, blurred veil. The panel
+        # was only legible through the scrim, which reads as a focus bug. This
+        # opens the real sheet the phone way (Context -> a result link) and asks
+        # the browser where a tap in the middle of it would land.
+        evaluate("document.querySelector('.context-header-btn')?.click(); return true;")
+        wait_js("return !!document.querySelector('.context-drawer');", 5)
+        evaluate(
+            "const tab=[...document.querySelectorAll('.context-drawer .tab')]"
+            ".find(t=>t.textContent.trim()==='Now');"
+            "if(tab) tab.click(); return !!tab;"
+        )
+        wait_js("return !!document.querySelector('.context-result-link');", 5)
+        evaluate(
+            "const link=[...document.querySelectorAll('.context-result-link')]"
+            ".find(b=>b.textContent.trim()==='Session usage');"
+            "if(link) link.click(); return !!link;"
+        )
+        check("the phone Results sheet opens", wait_js(
+            "const el=document.querySelector('#workbench-results');"
+            "return !!el && el.classList.contains('is-open');", 5))
+        # The sheet slides in (170ms). Measure it where it lands, not mid-transition.
+        wait_js(
+            "const b=document.querySelector('#workbench-results').getBoundingClientRect();"
+            "return b.left >= -1 && b.right <= innerWidth + 1;", 5)
+        stacking = evaluate("""
+        const sheet = document.querySelector('#workbench-results');
+        const veil = document.querySelector('.sheet-backdrop');
+        const sheetStyle = getComputedStyle(sheet);
+        const veilStyle = veil ? getComputedStyle(veil) : null;
+        const box = sheet.getBoundingClientRect();
+        const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+        return {
+          sheetZ: Number(sheetStyle.zIndex),
+          veilZ: veilStyle ? Number(veilStyle.zIndex) : null,
+          veilBlur: veilStyle ? veilStyle.backdropFilter : null,
+          aboveVeil: veilStyle ? Number(sheetStyle.zIndex) > Number(veilStyle.zIndex) : true,
+          hitInside: !!hit && (hit === sheet || sheet.contains(hit)),
+          box: {x: Math.round(box.x), y: Math.round(box.y), w: Math.round(box.width)},
+        };
+        """)
+        check("the phone Results sheet paints above the sheet veil",
+              stacking.get("veilZ") is not None
+              and stacking.get("aboveVeil") is True
+              and stacking.get("hitInside") is True, stacking)
+        session.screenshot(out / "06b-phone-results-sheet.png")
+        press_escape()
+        check("Escape closes the phone Results sheet", wait_js(
+            "const el=document.querySelector('#workbench-results');"
+            "return !!el && !el.classList.contains('is-open');", 5))
         session._send("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 1000, "deviceScaleFactor": 1, "mobile": False})
         time.sleep(0.4)
 

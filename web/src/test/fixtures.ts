@@ -358,6 +358,11 @@ export function resetAppState(): void {
   store.chatError.value = null;
   store.connection.value = { api: 'unknown', stream: 'idle', lastError: null, checkedAt: null };
   store.railCollapsed.value = false;
+  // The phone tier decides the composer's placeholder and whether model and
+  // reasoning share one pill; a test that switched it must not leak a phone
+  // layout into the next one.
+  store.phoneViewport.value = false;
+  store.narrowViewport.value = false;
   store.inspectorCollapsed.value = false;
   store.inspectorMode.value = 'docked';
   store.mobileSheet.value = null;

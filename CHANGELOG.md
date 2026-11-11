@@ -10,6 +10,46 @@ matters to an operator says which behaviour changed, not which number.
 
 ## [Unreleased]
 
+### Changed
+
+- **A phone's composer is one control row, and one pill carries model and
+  reasoning.** The row held attach, a 108px model pill, a 92px reasoning pill,
+  Usage and Send in 336px, so both pills ellipsised to "Claud…" and "Def…" - two
+  mystery buttons with 24px targets where a thumb lands first. Below 640px the
+  model pill now names the model with the effort on a quiet second line and opens
+  a sheet that carries the model list *and* the reasoning choices (`aria-pressed`
+  toggles, not a second listbox, so the model list keeps its arrow keys); the
+  standalone reasoning pill is not rendered at all, so one decision has one
+  target. The pill takes the middle of the row and `flex-wrap: nowrap` keeps Send
+  on it at 320px, where the two-line pill still fits "Claude Sonnet 4.5" whole.
+  From 641px up both pills come back with room for their real names (the 800px
+  caps went from 145/124px to 220/190px). The phone tier is a `store.phoneViewport`
+  signal fed by `matchMedia`, not a `matchMedia` read during render, so a rotated
+  phone or a narrowed window re-decides instead of keeping the layout it mounted
+  with. Verified in Chromium at 320/390/700/1023 by `scripts/verify_control_plane.py`
+  (45 checks) and in the new `ModelSwitcher` phone tests.
+
+### Fixed
+
+- **The model and reasoning pickers appear where you tapped, above the dock.**
+  Below 800px the menu became `position: fixed` to escape the pill row's
+  `overflow: hidden` clip, but kept `bottom: calc(100% + 6px)` - and `100%` of a
+  fixed element is the *viewport*, so on an 844px phone the list was laid out at
+  `top: -268px`: open, announced by `aria-expanded="true"`, and invisible. (Above
+  640px the same menu was simply clipped by the pill row.) The menus are now
+  anchored to the dock's measured top edge (`--composer-h`), capped at 42dvh with
+  their own scrolling, and span the screen's gutters on a phone. The phone sheet
+  also stops opening underneath the dock it belongs to: the old fixed 64px offset
+  is gone.
+- **Expanding Results on a phone no longer covers it with a black blur.** The
+  Results sheet carried `z-index: 24` from its docked-overlay placement while
+  `.sheet-backdrop` - a sibling of `.app`, painting the dark blurred veil - is 35,
+  so the open panel sat *under* the scrim. It was only legible through the veil
+  and read as a focus bug rather than a stacking one. `styles/workbench.css` lifts
+  the open sheet to 41 below 1024px; the docked desktop overlay keeps its own
+  stacking. `scripts/verify_results_popout.py` now opens the real phone sheet and
+  asserts that a tap in its centre lands inside it (30 checks).
+
 ### Added
 
 - **Application API keys: a scoped, expiring bearer credential for one

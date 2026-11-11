@@ -634,21 +634,63 @@ def main() -> int:
             metrics['scroll'] <= metrics['client'] + 1,
             overflow,
         )
-        # A control that exists but is unreadable is the failure this check is
-        # for: at 390 px the reasoning pill had 86 px for a 98 px label and
-        # ellipsised to "Rea…". The word now steps aside and the effort shows.
-        prefix = js(
-            "const p=document.querySelector('.compose-bottom .reasoning-prefix');"
-            "const label=document.querySelector('.compose-bottom .reasoning-selector .model-switcher-model');"
-            "return JSON.stringify({display: p ? getComputedStyle(p).display : 'missing',"
-            " fits: label ? label.scrollWidth <= label.clientWidth + 1 : null,"
-            " text: label ? label.innerText.trim() : null});"
+        # One control, not two squeezed pills: at 390 px the model pill names the
+        # model and carries the effort, and the reasoning choices live at the
+        # bottom of the same sheet. A control that exists but ellipsises to
+        # "Rea…" is the failure this check is for, and so is a picker that opens
+        # off-screen (the menu used to resolve `bottom: 100%` against the
+        # viewport, so it rendered at `top: -268px`).
+        js(
+            "const t=document.querySelector('.compose-bottom .model-switcher-button');"
+            "if(t) t.click();"
+            "return true;"
         )
-        pill = json.loads(prefix)
+        wait("return !!document.querySelector('.compose-bottom .model-switcher-menu');")
+        sheet = js(
+            "const trigger=document.querySelector('.compose-bottom .model-switcher-button');"
+            "const effort=document.querySelector('.compose-bottom .model-switcher-effort');"
+            "const separate=document.querySelector('.compose-bottom .reasoning-selector');"
+            "const menu=document.querySelector('.compose-bottom .model-switcher-menu');"
+            "const box=menu?menu.getBoundingClientRect():null;"
+            "const group=document.querySelector('.model-switcher-reasoning');"
+            "const data={"
+            " hasTrigger: !!trigger,"
+            " label: trigger ? trigger.innerText.replace(/\\n/g,' / ') : null,"
+            " effort: effort ? effort.innerText.trim() : null,"
+            " separate: separate ? getComputedStyle(separate).display : 'absent',"
+            " group: !!group,"
+            " choices: group ? [...group.querySelectorAll('.reasoning-choice')].map(b=>b.innerText.trim()) : [],"
+            " menu: box ? {top: Math.round(box.top), bottom: Math.round(box.bottom), left: Math.round(box.left), right: Math.round(box.right)} : null,"
+            " viewport: {width: innerWidth, height: innerHeight}"
+            "};"
+            # Dismiss the sheet the way tapping the transcript does, so the next
+            # check starts from the same place this one did.
+            "document.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true}));"
+            "return JSON.stringify(data);"
+        )
+        summary = json.loads(sheet)
+        menu = summary.get('menu') or {}
+        viewport_box = summary.get('viewport') or {}
         check(
-            'the reasoning pill is readable on a phone',
-            pill['display'] == 'none' and pill['fits'] is True and pill['text'] not in (None, ''),
-            prefix,
+            'the phone composer names model and reasoning in one control',
+            summary.get('hasTrigger') is True
+            and summary.get('effort') not in (None, '')
+            and summary.get('separate') in ('none', 'absent')
+            and summary.get('group') is True,
+            sheet,
+        )
+        check(
+            'the phone picker opens above the dock, inside the screen',
+            menu.get('top', -1) >= 0
+            and menu.get('bottom', 10**6) <= viewport_box.get('height', 0)
+            and menu.get('left', -1) >= 0
+            and menu.get('right', 10**6) <= viewport_box.get('width', 0),
+            sheet,
+        )
+        check(
+            'the phone sheet offers every reasoning effort',
+            summary.get('choices') == ['Default', 'Off', 'Minimal', 'Low', 'Medium', 'High', 'Max'],
+            sheet,
         )
 
         # 1024x768 is the tight laptop case: the intro's own "start in this

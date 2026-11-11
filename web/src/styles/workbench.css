@@ -582,6 +582,18 @@
     transform: none;
     visibility: visible;
   }
+
+  /* The Results sheet sits *above* the veil that dims the page behind it, not
+   * under it. `.sheet-backdrop` is a sibling of `.app` at z-index 35, while the
+   * inspector's overlay placement in this file is z-index 24; both live in the
+   * root stacking context, so an expanded Results panel on a phone was painted
+   * with a dark, blurred scrim over its own contents - legible only through the
+   * veil, and looking like a focus bug rather than a stacking one. 41 is above
+   * the veil and below Context's 60. */
+  .inspector.is-open,
+  .chat-main.is-workbench .center-body.has-result > .inspector.is-open {
+    z-index: 41;
+  }
 }
 
 @media (max-width: 640px) {

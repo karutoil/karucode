@@ -134,16 +134,24 @@ describe('composer dock: the box stays compact', () => {
     const narrow = /@media \(max-width: 800px\) \{([\s\S]*?)\n\}/.exec(composerCss);
     expect(narrow, 'the 800px tier exists').toBeTruthy();
     expect(narrow![1]).toMatch(/\.composer-controls \{[^}]*flex-wrap: nowrap/);
-    // The button's cap may never exceed its actual wrapper: otherwise adjacent
-    // model/reasoning targets overlap once flex gives the wrapper less width.
-    expect(narrow![1]).toContain('max-width: min(145px, 100%)');
+    // Two pills still fit here, so their caps stay - wide enough for the real
+    // names, since the 24px floor is what prevents an overlap, not the cap.
+    expect(narrow![1]).toContain('max-width: min(220px, 100%)');
+    expect(narrow![1]).toContain('max-width: min(190px, 100%)');
 
     const phone = /@media \(max-width: 640px\) \{([\s\S]*?)\n\}/.exec(composerCss);
     expect(phone, 'the phone tier exists').toBeTruthy();
     const body = phone![1] ?? '';
-    // The label caps alone leave the pill too wide: `padding + chevron + label`.
-    expect(body).toContain('max-width: min(108px, 100%)');
-    expect(body).toContain('max-width: min(92px, 100%)');
+    // The phone has one pill, not two: the row gives the model the width the
+    // reasoning pill used to hold, and the effort lives in the same sheet.
+    expect(body).toMatch(/\.compose-bottom \.reasoning-selector \{\s*\n\s*display: none/);
+    expect(body).toMatch(/\.composer-session-pins,[\s\S]*?flex: 1 1 auto/);
+    // One line, always: the pill shrinks, Send never leaves the row.
+    expect(body).toMatch(/\.compose-bottom \{[^}]*flex-wrap: nowrap/);
+    expect(body).toMatch(/\.compose-bottom \.model-switcher-button \{[\s\S]*?max-width: none/);
+    // The old caps are what turned both labels into "Claud…" and "Def…".
+    expect(body).not.toContain('max-width: min(108px, 100%)');
+    expect(body).not.toContain('max-width: min(92px, 100%)');
     // Hints can yield, but the status-to-Settings entry may not disappear.
     expect(body).toMatch(/\.composer-hint \{\s*\n\s*display: none/);
     expect(body).not.toMatch(/\.compose-approvals\s*\{[^}]*display:\s*none/);
@@ -290,5 +298,39 @@ describe('context window pill', () => {
       .join('\n');
     expect(phone).toMatch(/\.compose-bottom \.composer-spacer \{[^}]*flex: 0 1 0/);
     expect(phone).toMatch(/\.compose-bottom \.button-send,\s*\n\s*\.compose-bottom \.button-stop \{[^}]*flex: 0 0 auto/);
+  });
+});
+
+describe('composer pickers: the menu appears where the thumb is', () => {
+  it('anchors the composer menus above the dock instead of to a viewport 100%', () => {
+    // The bug: below 800px the menu became `position: fixed` (to escape the
+    // clipped pill row) while `bottom: calc(100% + 6px)` stayed. `100%` of a
+    // fixed element is the *viewport*, so on an 844px phone the list sat at
+    // top: -268px - open, announced by `aria-expanded`, and invisible. Anchoring
+    // to the measured dock (`--composer-h`) is the one value that is right at
+    // every draft height and every width.
+    const narrow = /@media \(max-width: 800px\) \{([\s\S]*?)\n\}/.exec(composerCss);
+    const body = narrow?.[1] ?? '';
+    expect(body).toMatch(/\.compose-bottom \.model-switcher-menu\.dropup,[\s\S]*?position: fixed/);
+    expect(body).toContain('bottom: min(calc(var(--composer-h, 96px) + var(--space-3)), 56dvh)');
+    expect(body).toContain('max-height: 42dvh');
+    expect(body).not.toContain('bottom: calc(100% + 6px)');
+    // The reasoning menu is the right-hand control: it opens under it, and both
+    // stay inside the screen width.
+    expect(body).toMatch(
+      /\.compose-bottom \.reasoning-selector \.model-switcher-menu\.dropup \{[\s\S]*?right: var\(--space-6\)/,
+    );
+    expect(body).toContain('width: min(300px, calc(100vw - var(--space-9)))');
+  });
+
+  it('keeps the phone sheet inside the screen and scrollable', () => {
+    // The safe area and the viewport edges are what a sheet has to respect, not
+    // a 64px guess above the bottom (which sat under the dock it belongs to).
+    expect(layoutCss).toMatch(
+      /\.model-switcher-menu \{\s*\n\s*position: fixed;[\s\S]*?right: var\(--space-3\);[\s\S]*?left: var\(--space-3\);/,
+    );
+    expect(layoutCss).toMatch(/\.model-switcher-menu \{[\s\S]*?max-height: min\(70dvh, 480px\)/);
+    expect(layoutCss).toMatch(/\.model-switcher-menu \{[\s\S]*?overscroll-behavior: contain/);
+    expect(layoutCss).not.toContain('left: calc(var(--rail-w) + 8px)');
   });
 });

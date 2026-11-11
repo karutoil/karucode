@@ -511,3 +511,29 @@ describe('the branch chip keeps a long repository name in its box', () => {
     expect(source).toContain('title={`On branch ${branch} — open Changes`}');
   });
 });
+
+describe('phone results sheet: above the veil, not behind it', () => {
+  it('stacks the open Results sheet over the backdrop that dims the page', () => {
+    // `.sheet-backdrop` is a sibling of `.app` at z-index 35. The inspector's
+    // overlay placement (container <= 1100px) is z-index 24, which put an
+    // expanded Results panel *under* a dark, blurred scrim: the panel was only
+    // legible through the veil, and the whole surface read as a focus bug.
+    expect(layoutCss).toMatch(/\.sheet-backdrop \{[\s\S]*?z-index: 35;/);
+    const sheet = workbenchCss.slice(workbenchCss.indexOf('@media (max-width: 1023px)'));
+    expect(sheet).toMatch(
+      /\.inspector\.is-open,\s*\n\s*\.chat-main\.is-workbench \.center-body\.has-result > \.inspector\.is-open \{\s*\n\s*z-index: 41;/,
+    );
+    // Above the veil (35). The number matters, not the token: a sheet below the
+    // backdrop is a sheet nobody can read.
+    expect(layoutCss).toMatch(/\.sheet-backdrop \{[\s\S]*?z-index: 35;/);
+    const lifted = Number(/z-index: 41;/.exec(sheet)?.[0].replace(/\D/g, ''));
+    expect(lifted).toBeGreaterThan(35);
+  });
+
+  it('does not lift the docked desktop overlay, which has no veil under it', () => {
+    // The same selector outside the phone tier would be a z-index fight with the
+    // split layout: the overlay is a sibling of the conversation, not a sheet.
+    const wide = workbenchCss.slice(0, workbenchCss.indexOf('@media (max-width: 1023px)'));
+    expect(wide).not.toMatch(/z-index: 41/);
+  });
+});

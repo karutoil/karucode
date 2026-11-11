@@ -1936,7 +1936,33 @@
   white-space: nowrap;
 }
 
+/* The model pill's first line: the glyph and the name. On a phone the effort
+ * sits under this line instead of beside it, which is what gives the name the
+ * pill's whole width on a 320px screen (the row is one line at every width: the
+ * effort is an attribute of the model, not a second control). */
+.model-switcher-line {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
 .model-switcher-provider {
+  max-width: 190px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The phone pill's second line: the reasoning effort that will be sent with the
+ * model. It takes the provider's place there (`model-switcher-provider` is
+ * hidden below 640px), and its choices live in the same sheet. */
+.model-switcher-effort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
   max-width: 190px;
   overflow: hidden;
   color: var(--muted);
@@ -2081,6 +2107,58 @@
   border-top: 1px solid var(--line);
 }
 
+/* ---------- reasoning choices inside the phone sheet ---------- */
+
+/* The effort's home when the phone has one pill instead of two. Rendered by
+ * `ModelSwitcher` only at the phone tier; the wide composer keeps its own pill.
+ * A group of pressed-state buttons, not a second listbox: the model list owns
+ * arrow-key traversal, and two roving lists in one menu fight over the keys. */
+.model-switcher-reasoning .model-switcher-group-title {
+  margin-bottom: var(--space-3);
+}
+
+.reasoning-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-2);
+}
+
+.reasoning-choice {
+  flex: 1 1 auto;
+  min-width: 64px;
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: var(--fs-tiny);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.reasoning-choice:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+}
+
+.reasoning-choice[data-active='true'] {
+  border-color: var(--accent);
+  background: var(--accent-surface);
+  color: var(--accent-on-tint);
+}
+
+.reasoning-choice:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.reasoning-choice:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: 0;
+}
+
 @media (max-width: 1023px) {
   .model-switcher-button {
     max-width: 200px;
@@ -2106,17 +2184,23 @@
     max-width: 118px;
   }
 
+  /* A menu opened from a phone is a sheet, not a bubble: it has to sit inside the
+   * thumb's reach and it must never be clipped by the control that opened it.
+   * The old rule anchored it 64px above the viewport bottom - underneath the dock
+   * it belongs to - and the composer's own `bottom: calc(100% + 6px)` then
+   * measured `100%` against the *viewport* (a fixed element's containing block),
+   * which parked the whole list at `top: -268px`: open, announced by the button,
+   * and invisible. */
   .model-switcher-menu {
     position: fixed;
     top: auto;
-    right: 8px;
-    /* The rail is not on screen at this width (`--rail-w` is 0 there); the `+8px`
-     * is the menu's own gutter. Reserving `--rail-w` kept it honest while the
-     * rail still existed. */
-    bottom: calc(64px + env(safe-area-inset-bottom, 0px));
-    left: calc(var(--rail-w) + 8px);
+    right: var(--space-3);
+    bottom: calc(env(safe-area-inset-bottom, 0px) + var(--space-3));
+    left: var(--space-3);
     width: auto;
-    max-height: min(380px, 60dvh);
+    max-height: min(70dvh, 480px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 
   /* Keyboard shortcuts are not a thing on a phone: the `Ctrl N` on the new-session

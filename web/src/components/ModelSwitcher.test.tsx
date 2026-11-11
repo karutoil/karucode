@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { ModelControls, ModelSwitcher, REASONING_OPTIONS, ReasoningSelector } from './ModelSwitcher';
 import type { Config, SessionModelSelection, SessionSummary } from '../api/types';
 import { jsonResponse, resetAppState, summaryFixture } from '../test/fixtures';
@@ -452,6 +452,89 @@ describe('ModelSwitcher stability (the pills never blink out)', () => {
       expect(screen.getByRole('button', { name: /Model for this session: Model A/i })).not.toBeNull(),
     );
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The phone tier: one pill carries the model and the effort, and the effort's
+ * choices are a group in the model sheet.
+ *
+ * The alternative - two pills at 108px/92px caps - rendered as "Claud…" and
+ * "Def…" on a 390px screen, and the second sheet had nowhere to open: it was
+ * clipped by the pill row it lived in. These tests pin the shape that replaces
+ * them, not the geometry (that is `styles/composer.test.ts` and the browser).
+ */
+describe('ModelSwitcher on a phone', () => {
+  beforeEach(() => {
+    resetAppState();
+    store.config.value = twoProfileConfig();
+    store.phoneViewport.value = true;
+  });
+
+  afterEach(() => {
+    store.phoneViewport.value = false;
+    resetAppState();
+    vi.unstubAllGlobals();
+  });
+
+  it('shows the model and the reasoning effort in one control', () => {
+    openSession({ provider: 'gateway', model: 'model-a', reasoning_effort: 'high' });
+    render(<ModelControls />);
+
+    const trigger = screen.getByRole('button', {
+      name: /Model and reasoning for this session: Model A on Gateway, reasoning High/i,
+    });
+    // Both facts are on the button, not just in its accessible name.
+    expect(trigger.textContent).toContain('Model A');
+    expect(trigger.textContent).toContain('High');
+    // There is no second pill to hit, and no second sheet to open.
+    expect(screen.queryByRole('button', { name: /Reasoning effort:/ })).toBeNull();
+  });
+
+  it('offers the same efforts, in the same order, inside the model sheet', async () => {
+    const { calls } = installModelFetch();
+    openSession({ provider: 'gateway', model: 'model-a' });
+    render(<ModelSwitcher />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Model and reasoning for this session/ }));
+    const group = screen.getByRole('group', { name: 'Reasoning effort for this session' });
+    expect(within(group).getAllByRole('button').map((button) => button.textContent)).toEqual(
+      REASONING_OPTIONS.map((option) => option.label),
+    );
+    // The current value is a pressed toggle, not a listbox selection: the model
+    // list owns arrow-key traversal and must keep it.
+    expect(within(group).getByRole('button', { name: 'Default' }).getAttribute('aria-pressed')).toBe('true');
+
+    fireEvent.click(within(group).getByRole('button', { name: 'Minimal' }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]?.body).toEqual({
+      provider: 'gateway',
+      model: 'model-a',
+      reasoning_effort: 'minimal',
+    });
+    // Choosing closes the sheet, so the pill can show the new value.
+    await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
+  });
+
+  it('keeps the group out of a model that cannot reason', () => {
+    openSession({ provider: 'local', model: 'tiny' });
+    render(<ModelSwitcher />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Model and reasoning for this session/ }));
+    expect(screen.queryByRole('group', { name: 'Reasoning effort for this session' })).toBeNull();
+    expect(screen.getAllByRole('option')).toHaveLength(3);
+  });
+
+  it('returns to two pills when the viewport leaves the phone tier', () => {
+    openSession({ provider: 'gateway', model: 'model-a' });
+    render(<ModelControls />);
+    expect(screen.queryByRole('button', { name: /Reasoning effort:/ })).toBeNull();
+
+    act(() => {
+      store.phoneViewport.value = false;
+    });
+    expect(screen.getByRole('button', { name: /Model for this session:/ })).not.toBeNull();
+    expect(screen.getByRole('button', { name: /Reasoning effort:/ })).not.toBeNull();
   });
 });
 

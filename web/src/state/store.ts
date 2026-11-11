@@ -307,6 +307,23 @@ export const narrowViewport = signal<boolean>(
     : false,
 );
 
+/**
+ * The phone tier (`max-width: 640px`), kept live by `app.tsx`.
+ *
+ * `narrowViewport` is the sheet/rail breakpoint at 1023px; a phone needs its own
+ * answer because two composer decisions are made in the component, not in CSS:
+ * the one-line placeholder and whether the model and reasoning controls are one
+ * pill with one sheet or two separate pills. Reading `matchMedia` during render
+ * (the old shape) made both decisions once, at the width the composer happened
+ * to mount at, so rotating a phone or narrowing a desktop window left the
+ * desktop sentence and the desktop pills in place.
+ */
+export const phoneViewport = signal<boolean>(
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia('(max-width: 640px)').matches
+    : false,
+);
+
 export const railCollapsed = signal(readBool(RAIL_KEY, false));
 export const inspectorCollapsed = signal(readBool(INSPECTOR_KEY, false));
 export const inspectorMode = signal<InspectorMode>(readInspectorMode());
